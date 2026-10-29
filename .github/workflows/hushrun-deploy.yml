@@ -1,0 +1,401 @@
+# The reusable deploy workflow: the recipes' structure in one versioned place, so that a fix
+# reaches every repository as a version bump. A repository calls it from one
+# short workflow per stage, pinned by commit; `hushrun adopt` writes them:
+#
+#   jobs:
+#     deploy:
+#       uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@<commit>
+#       with:
+#         stage: staging
+#         version: 0.2.0
+#         build: docker build -t "$REF" . && docker push "$REF"
+#         deploy: gcloud run deploy api --image "$REF" --region us-central1
+#
+# The repository's URL comes from the organization's HUSHRUN_REPOSITORY_BASE variable, or the
+# repository's HUSHRUN_REPOSITORY_URL, else from the evaluated hushrun.yaml: callers pass
+# them from their own settings. Cloud credentials come through workload identity
+# federation, so no job needs a secret. Jobs sign events keylessly with `signing: sigstore`, as
+# the repository's CI, or with HUSHRUN_SIGNING_KEY, from `signing-environment` or passed
+# by the caller, which counts only when the key is a registered machine's. Everything this
+# workflow runs is in this file, so pinning it by commit pins all of it: hushrun itself is
+# installed by exact version and checked against its published SHA-256.
+#
+# Callers use it from the public repository, github.com/hushrun/hushrun.
+name: hushrun deploy
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: The stage to deploy, as hushrun.yaml names it.
+        type: string
+        required: true
+      repository-base:
+        description: >-
+          The organization's base URL, under which each repository's is <base>/<repository id>,
+          from settings outside the repository: the caller's vars.HUSHRUN_REPOSITORY_BASE
+          [default the HUSHRUN_REPOSITORY_BASE variable].
+        type: string
+        default: ""
+      repository-url:
+        description: >-
+          The repository's own URL on hushrun, instead of one under the base: the caller's
+          vars.HUSHRUN_REPOSITORY_URL [default the HUSHRUN_REPOSITORY_URL variable].
+        type: string
+        default: ""
+      version:
+        description: The hushrun release to install, such as 0.2.0.
+        type: string
+        required: true
+      deploy:
+        description: The deploy command. $REF is the image to deploy, pinned by digest.
+        type: string
+        required: true
+      build:
+        description: >-
+          The build command, when the plan builds. $REF is where to push the image, and hushrun
+          attests what the push left there.
+        type: string
+        default: 'echo "set the build input of hushrun-deploy.yml to build $REF"; exit 1'
+      image:
+        description: The artifact of hushrun.yaml that build and deploy work on.
+        type: string
+        default: image
+      scope:
+        description: The scope to deploy, for a repository with several [default its only one].
+        type: string
+        default: ""
+      force-full:
+        description: Build and run every check, whatever the evidence.
+        type: boolean
+        default: false
+      isolated:
+        description: Run the plan's checks in their pinned images with Docker, as agents run them with hushrun run --isolated, so CI's evidence and theirs come from the same image.
+        type: boolean
+        default: false
+      runs-on:
+        description: The runner of every job.
+        type: string
+        default: ubuntu-latest
+      toolchain:
+        description: The toolchain the checks need, set up before they run (go, node, python, java or none).
+        type: string
+        default: none
+      toolchain-version:
+        description: Its version [default go.mod, .nvmrc, .python-version, or 21 for java].
+        type: string
+        default: ""
+      setup:
+        description: Commands every job runs after its credentials, such as `gcloud auth configure-docker`.
+        type: string
+        default: ""
+      signing-environment:
+        description: The environment of the jobs that sign events, whose rules guard them; it holds HUSHRUN_SIGNING_KEY when they sign with a key.
+        type: string
+        default: ""
+      signing:
+        description: How jobs sign events, key or sigstore; empty means with HUSHRUN_SIGNING_KEY. With sigstore they sign keylessly as this repository's CI, which the server names by the repository's id; a key counts only as a registered machine's.
+        type: string
+        default: ""
+      deploy-environment:
+        description: The environment of the deploy job.
+        type: string
+        default: ""
+      gcp-workload-identity-provider:
+        description: The GCP workload identity provider, projects/N/locations/global/workloadIdentityPools/P/providers/R.
+        type: string
+        default: ""
+      gcp-service-account:
+        description: The GCP service account it impersonates, when not direct workload identity.
+        type: string
+        default: ""
+      aws-role-to-assume:
+        description: The AWS role CI assumes through GitHub's OIDC provider.
+        type: string
+        default: ""
+      aws-region:
+        description: The AWS region.
+        type: string
+        default: us-east-1
+      azure-client-id:
+        description: The Azure client id of CI's federated credential.
+        type: string
+        default: ""
+      azure-tenant-id:
+        description: The Azure tenant id.
+        type: string
+        default: ""
+      azure-subscription-id:
+        description: The Azure subscription id.
+        type: string
+        default: ""
+    secrets:
+      HUSHRUN_SIGNING_KEY:
+        description: The stage's signing key, when jobs sign with a key and signing-environment doesn't hold it.
+        required: false
+    outputs:
+      mode:
+        description: The plan's mode for the stage.
+        value: ${{ jobs.plan.outputs.mode }}
+      ref:
+        description: The image deployed, pinned by digest.
+        value: ${{ jobs.deploy.outputs.ref }}
+
+env:
+  HUSHRUN_REPOSITORY_URL: ${{ inputs.repository-url || vars.HUSHRUN_REPOSITORY_URL }}
+  HUSHRUN_REPOSITORY_BASE: ${{ inputs.repository-base || vars.HUSHRUN_REPOSITORY_BASE }}
+  STAGE: ${{ inputs.stage }}
+  SCOPE: ${{ inputs.scope }}
+  HUSHRUN_VERSION: ${{ inputs.version }}
+
+jobs:
+  plan:
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.signing-environment }}
+    permissions: { contents: read, actions: read, id-token: write }
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      checks: ${{ steps.plan.outputs.checks }}
+      deployment_checks: ${{ steps.plan.outputs.deployment_checks }}
+      json: ${{ steps.plan.outputs.json }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install hushrun
+        shell: bash
+        run: &install |
+          set -euo pipefail
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64)   target=x86_64-unknown-linux-musl ;;
+            Linux-ARM64) target=aarch64-unknown-linux-musl ;;
+            macOS-X64)   target=x86_64-apple-darwin ;;
+            macOS-ARM64) target=aarch64-apple-darwin ;;
+            *) echo "::error title=hushrun deploy::no hushrun build for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
+          esac
+          if ! [[ "$HUSHRUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=hushrun deploy::version must be an exact release such as 0.2.0, not '$HUSHRUN_VERSION'"
+            exit 1
+          fi
+          archive="hushrun-$target.tar.xz"
+          base="https://github.com/hushrun/hushrun/releases/download/v$HUSHRUN_VERSION"
+          dir="$RUNNER_TEMP/hushrun-$HUSHRUN_VERSION"
+          mkdir -p "$dir"
+          cd "$dir"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive" "$base/$archive"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive.sha256" "$base/$archive.sha256"
+          expected=$(cut -d' ' -f1 "$archive.sha256")
+          actual=$( (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") | cut -d' ' -f1)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error title=hushrun deploy::$archive has SHA-256 $actual, expected $expected"
+            exit 1
+          fi
+          tar -xJf "$archive"
+          binary=$(find "$dir" -type f -name hushrun | head -n 1)
+          chmod +x "$binary"
+          dirname "$binary" >> "$GITHUB_PATH"
+          "$binary" --version
+      - &gcp
+        if: inputs.gcp-workload-identity-provider != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+          service_account: ${{ inputs.gcp-service-account }}
+      - &aws
+        if: inputs.aws-role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws-role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+      - &azure
+        if: inputs.azure-client-id != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+      - id: plan
+        name: hushrun plan
+        shell: bash
+        env:
+          HUSHRUN_FORCE_FULL: ${{ inputs.force-full }}
+          HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
+          HUSHRUN_SIGNING: ${{ inputs.signing }}
+          GITHUB_TOKEN: ${{ github.token }}            # liveness of upstream runs, queued runs
+        run: hushrun plan --stage "$STAGE" --start ${SCOPE:+--scope "$SCOPE"}
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.checks != ''
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.signing-environment }}
+    permissions: { contents: read, id-token: write }
+    env:
+      HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
+      HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
+      HUSHRUN_SIGNING: ${{ inputs.signing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: inputs.toolchain == 'go'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.toolchain-version }}
+          go-version-file: ${{ inputs.toolchain-version == '' && 'go.mod' || '' }}
+      - if: inputs.toolchain == 'node'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.toolchain-version }}
+          node-version-file: ${{ inputs.toolchain-version == '' && '.nvmrc' || '' }}
+      - if: inputs.toolchain == 'python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.toolchain-version }}
+          python-version-file: ${{ inputs.toolchain-version == '' && '.python-version' || '' }}
+      - if: inputs.toolchain == 'java'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.toolchain-version || '21' }}
+      - name: Install hushrun
+        shell: bash
+        run: *install
+      - *gcp
+      - *aws
+      - *azure
+      - if: inputs.setup != ''
+        name: Set up
+        shell: bash
+        env: { SETUP: "${{ inputs.setup }}" }
+        run: eval "$SETUP"
+      - name: hushrun run
+        shell: bash
+        env:
+          ISOLATED: ${{ inputs.isolated && 'true' || '' }}
+        run: hushrun run --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} ${ISOLATED:+--isolated}   # exactly the plan's checks_to_run
+
+  deploy:
+    needs: [plan, test]
+    if: >-
+      ${{ !cancelled() && needs.plan.result == 'success' &&
+          contains(fromJSON('["promote","refresh","full"]'), needs.plan.outputs.mode) &&
+          contains(fromJSON('["success","skipped"]'), needs.test.result) }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.deploy-environment }}
+    permissions: { contents: read, id-token: write }
+    outputs:
+      ref: ${{ steps.deployed.outputs.ref }}
+    env:
+      HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
+      HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
+      HUSHRUN_SIGNING: ${{ inputs.signing }}
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install hushrun
+        shell: bash
+        run: *install
+      - *gcp
+      - *aws
+      - *azure
+      # The stage's branch moved on: records superseded and outputs stale=true; the steps below
+      # then skip.
+      - id: guard
+        name: hushrun guard
+        shell: bash
+        run: hushrun guard --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
+      - if: steps.guard.outputs.stale != 'true' && inputs.setup != ''
+        name: Set up
+        shell: bash
+        env: { SETUP: "${{ inputs.setup }}" }
+        run: eval "$SETUP"
+      # Copies the upstream's image by digest, or asks for a build.
+      - id: image
+        if: steps.guard.outputs.stale != 'true'
+        name: hushrun artifact resolve
+        shell: bash
+        run: hushrun artifact resolve --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
+      - id: build
+        if: steps.guard.outputs.stale != 'true' && steps.image.outputs.build == 'true'
+        name: Build
+        shell: bash
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          BUILD: ${{ inputs.build }}
+        run: |
+          set -euo pipefail
+          eval "$BUILD"
+          hushrun attest --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"   # resolves the tag to a digest; outputs ref
+      - id: deployed
+        if: steps.guard.outputs.stale != 'true'
+        name: Deploy
+        shell: bash
+        env:
+          REF: ${{ steps.build.outputs.ref || steps.image.outputs.ref }}
+          DEPLOY: ${{ inputs.deploy }}
+        run: |
+          set -euo pipefail
+          eval "$DEPLOY"
+          hushrun mark deployed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+      # The deployment checks other stages require of this one (plan's deployment_checks).
+      - if: steps.guard.outputs.stale != 'true' && needs.plan.outputs.deployment_checks != ''
+        name: hushrun run (deployment checks)
+        shell: bash
+        env:
+          CHECKS: ${{ needs.plan.outputs.deployment_checks }}
+        run: |
+          set -euo pipefail
+          read -r -a checks <<< "$CHECKS"
+          hushrun run "${checks[@]}" --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
+      - if: steps.guard.outputs.stale != 'true'
+        name: hushrun mark passed
+        shell: bash
+        env:
+          REF: ${{ steps.deployed.outputs.ref }}
+        run: hushrun mark passed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
+
+  # The outcome when something went wrong. Two jobs, because only a job-level `if` can
+  # tell a cancelled workflow from a failed or timed-out job.
+  report-cancelled:
+    needs: [plan, test, deploy]
+    if: ${{ cancelled() && contains(fromJSON('["promote","refresh","full"]'), needs.plan.outputs.mode) }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.signing-environment }}
+    permissions: { contents: read, id-token: write }
+    env:
+      HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
+      HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
+      HUSHRUN_SIGNING: ${{ inputs.signing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install hushrun
+        shell: bash
+        run: *install
+      - *gcp
+      - *aws
+      - *azure
+      - name: hushrun mark superseded
+        shell: bash
+        run: hushrun mark superseded --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --reason cancelled
+
+  report-failed:     # a job failed, or timed out (a timeout shows up as "cancelled" in needs.*.result)
+    needs: [plan, test, deploy]
+    if: >-
+      ${{ !cancelled() && (failure() || contains(needs.*.result, 'cancelled')) &&
+          contains(fromJSON('["promote","refresh","full"]'), needs.plan.outputs.mode) }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.signing-environment }}
+    permissions: { contents: read, id-token: write }
+    env:
+      HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
+      HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
+      HUSHRUN_SIGNING: ${{ inputs.signing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install hushrun
+        shell: bash
+        run: *install
+      - *gcp
+      - *aws
+      - *azure
+      - name: hushrun mark failed
+        shell: bash
+        run: hushrun mark failed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --reason "a job failed or timed out"

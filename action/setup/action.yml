@@ -1,0 +1,73 @@
+name: Set up hushrun
+description: Installs a pinned hushrun release and verifies its SHA-256 before putting it on PATH.
+author: Jccorzo
+
+inputs:
+  version:
+    description: The hushrun version to install, such as 0.1.0. Pin it; there is no "latest".
+    required: true
+  sha256:
+    description: >-
+      The expected SHA-256 of this runner's archive. Optional: without it, the archive is
+      checked against the checksum published next to it in the release.
+    required: false
+    default: ""
+
+outputs:
+  path:
+    description: The installed hushrun binary.
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        EXPECTED: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error title=hushrun setup::version must be an exact release such as 0.1.0, not '$VERSION'"
+          exit 1
+        fi
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)     target=x86_64-unknown-linux-musl;  ext=tar.xz ;;
+          Linux-ARM64)   target=aarch64-unknown-linux-musl; ext=tar.xz ;;
+          macOS-X64)     target=x86_64-apple-darwin;        ext=tar.xz ;;
+          macOS-ARM64)   target=aarch64-apple-darwin;       ext=tar.xz ;;
+          Windows-X64)   target=x86_64-pc-windows-msvc;     ext=zip ;;
+          Windows-ARM64) target=aarch64-pc-windows-msvc;    ext=zip ;;
+          *) echo "::error title=hushrun setup::no hushrun build for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
+        esac
+        archive="hushrun-$target.$ext"
+        base="https://github.com/hushrun/hushrun/releases/download/v$VERSION"
+        dir="$RUNNER_TEMP/hushrun-$VERSION"
+        mkdir -p "$dir"
+        cd "$dir"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive" "$base/$archive"
+        if [ -n "$EXPECTED" ]; then
+          expected="$EXPECTED"
+        else
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive.sha256" "$base/$archive.sha256"
+          expected=$(cut -d' ' -f1 "$archive.sha256")
+        fi
+        actual=$( (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") | cut -d' ' -f1)
+        if [ "$actual" != "$expected" ]; then
+          echo "::error title=hushrun setup::$archive has SHA-256 $actual, expected $expected"
+          exit 1
+        fi
+        case "$ext" in
+          tar.xz) tar -xJf "$archive" ;;
+          zip) unzip -q -o "$archive" ;;
+        esac
+        binary=$(find "$dir" -type f \( -name hushrun -o -name hushrun.exe \) | head -n 1)
+        if [ -z "$binary" ]; then
+          echo "::error title=hushrun setup::no hushrun binary in $archive"
+          exit 1
+        fi
+        chmod +x "$binary" 2>/dev/null || true
+        dirname "$binary" >> "$GITHUB_PATH"
+        echo "path=$binary" >> "$GITHUB_OUTPUT"
+        "$binary" --version
