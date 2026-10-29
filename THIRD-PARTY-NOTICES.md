@@ -230,7 +230,7 @@ This file is generated from Cargo.lock and the crates' own license files; don't 
 | [rustls-native-certs](https://crates.io/crates/rustls-native-certs/0.8.5) | 0.8.5 | Apache-2.0 OR ISC OR MIT | [8](#text-8), [89](#text-89), [90](#text-90), [132](#text-132) |
 | [rustls-pki-types](https://crates.io/crates/rustls-pki-types/1.15.1) | 1.15.1 | MIT OR Apache-2.0 | [133](#text-133), [134](#text-134) |
 | [rustls-platform-verifier](https://crates.io/crates/rustls-platform-verifier/0.7.1) | 0.7.1 | MIT OR Apache-2.0 | [135](#text-135), [136](#text-136) |
-| [rustls-webpki](https://crates.io/crates/rustls-webpki/0.103.15) | 0.103.15 | ISC | [137](#text-137) |
+| [rustls-webpki](https://crates.io/crates/rustls-webpki/0.103.16) | 0.103.16 | ISC | [137](#text-137) |
 | [rustversion](https://crates.io/crates/rustversion/1.0.23) | 1.0.23 | MIT OR Apache-2.0 | [4](#text-4), [5](#text-5) |
 | [ryu](https://crates.io/crates/ryu/1.0.23) | 1.0.23 | Apache-2.0 OR BSL-1.0 | [4](#text-4), [138](#text-138) |
 | [same-file](https://crates.io/crates/same-file/1.0.6) | 1.0.6 | Unlicense/MIT | [1](#text-1), [3](#text-3), [139](#text-139) |
@@ -9742,7 +9742,7 @@ SOFTWARE.
 
 ### Text 137
 
-rustls-webpki 0.103.15 (`LICENSE`).
+rustls-webpki 0.103.16 (`LICENSE`).
 
 ```text
 Except as otherwise noted, this project is licensed under the following
