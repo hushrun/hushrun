@@ -1,6 +1,6 @@
 name: Set up hushrun
 description: Installs a pinned hushrun release and verifies its SHA-256 before putting it on PATH.
-author: Jccorzo
+author: hushrun
 
 inputs:
   version:
