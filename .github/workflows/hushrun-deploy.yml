@@ -7,7 +7,6 @@
 #       uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@<commit>
 #       with:
 #         stage: staging
-#         version: 0.2.0
 #         build: docker build -t "$REF" . && docker push "$REF"
 #         deploy: gcloud run deploy api --image "$REF" --region us-central1
 #
@@ -17,8 +16,10 @@
 # federation, so no job needs a secret. Jobs sign events keylessly with `signing: sigstore`, as
 # the repository's CI, or with HUSHRUN_SIGNING_KEY, from `signing-environment` or passed
 # by the caller, which counts only when the key is a registered machine's. Everything this
-# workflow runs is in this file, so pinning it by commit pins all of it: hushrun itself is
-# installed by exact version and checked against its published SHA-256.
+# workflow runs is in this file, so pinning it by commit pins all of it but hushrun's release:
+# the plan job installs the newest release, unless the caller pins one with `version` (ADR 0035),
+# and every later job installs the release the plan job ran, each checked against its published
+# SHA-256.
 #
 # Callers use it from the public repository, github.com/hushrun/hushrun.
 name: hushrun deploy
@@ -44,9 +45,12 @@ on:
         type: string
         default: ""
       version:
-        description: The hushrun release to install, such as 0.2.0.
+        description: >-
+          The hushrun release to install, such as 0.2.0, for runs that all install the same one,
+          or latest [default latest: the newest release when the plan job starts, which every
+          job of the run installs].
         type: string
-        required: true
+        default: ""
       deploy:
         description: The deploy command. $REF is the image to deploy, pinned by digest.
         type: string
@@ -158,9 +162,12 @@ jobs:
       checks: ${{ steps.plan.outputs.checks }}
       deployment_checks: ${{ steps.plan.outputs.deployment_checks }}
       json: ${{ steps.plan.outputs.json }}
+      # The release this job installed, which every later job installs too.
+      version: ${{ steps.install.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install hushrun
+      - id: install
+        name: Install hushrun
         shell: bash
         run: &install |
           set -euo pipefail
@@ -171,12 +178,25 @@ jobs:
             macOS-ARM64) target=aarch64-apple-darwin ;;
             *) echo "::error title=hushrun deploy::no hushrun build for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
           esac
+          releases=https://github.com/hushrun/hushrun/releases
+          if [ -z "$HUSHRUN_VERSION" ] || [ "$HUSHRUN_VERSION" = latest ]; then
+            # The newest release: GitHub redirects releases/latest to its tag, and everything
+            # below comes from that tag.
+            if ! latest=$(curl --proto '=https' --tlsv1.2 -fsS --retry 3 -o /dev/null -w '%{redirect_url}' "$releases/latest"); then
+              echo "::error title=hushrun deploy::can't reach $releases/latest to find the newest hushrun release"
+              exit 1
+            fi
+            case "$latest" in
+              "$releases"/tag/v*) HUSHRUN_VERSION=${latest#"$releases"/tag/v} ;;
+              *) echo "::error title=hushrun deploy::can't tell the newest hushrun release: $releases/latest didn't redirect to a release's tag"; exit 1 ;;
+            esac
+          fi
           if ! [[ "$HUSHRUN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error title=hushrun deploy::version must be an exact release such as 0.2.0, not '$HUSHRUN_VERSION'"
+            echo "::error title=hushrun deploy::version must be a release such as 0.2.0, or latest, not '$HUSHRUN_VERSION'"
             exit 1
           fi
           archive="hushrun-$target.tar.xz"
-          base="https://github.com/hushrun/hushrun/releases/download/v$HUSHRUN_VERSION"
+          base="$releases/download/v$HUSHRUN_VERSION"
           dir="$RUNNER_TEMP/hushrun-$HUSHRUN_VERSION"
           mkdir -p "$dir"
           cd "$dir"
@@ -193,6 +213,7 @@ jobs:
           chmod +x "$binary"
           dirname "$binary" >> "$GITHUB_PATH"
           "$binary" --version
+          echo "version=$HUSHRUN_VERSION" >> "$GITHUB_OUTPUT"
       - &gcp
         if: inputs.gcp-workload-identity-provider != ''
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -229,6 +250,7 @@ jobs:
     environment: ${{ inputs.signing-environment }}
     permissions: { contents: read, id-token: write }
     env:
+      HUSHRUN_VERSION: ${{ needs.plan.outputs.version }}   # the plan job's release
       HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
       HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
       HUSHRUN_SIGNING: ${{ inputs.signing }}
@@ -283,6 +305,7 @@ jobs:
     outputs:
       ref: ${{ steps.deployed.outputs.ref }}
     env:
+      HUSHRUN_VERSION: ${{ needs.plan.outputs.version }}   # the plan job's release
       HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
       HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
       HUSHRUN_SIGNING: ${{ inputs.signing }}
@@ -361,6 +384,7 @@ jobs:
     environment: ${{ inputs.signing-environment }}
     permissions: { contents: read, id-token: write }
     env:
+      HUSHRUN_VERSION: ${{ needs.plan.outputs.version }}   # the plan job's release
       HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
       HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
       HUSHRUN_SIGNING: ${{ inputs.signing }}
@@ -385,6 +409,7 @@ jobs:
     environment: ${{ inputs.signing-environment }}
     permissions: { contents: read, id-token: write }
     env:
+      HUSHRUN_VERSION: ${{ needs.plan.outputs.version }}   # the plan job's release
       HUSHRUN_PLAN_JSON: ${{ needs.plan.outputs.json }}
       HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
       HUSHRUN_SIGNING: ${{ inputs.signing }}

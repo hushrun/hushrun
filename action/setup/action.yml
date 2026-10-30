@@ -1,15 +1,18 @@
 name: Set up hushrun
-description: Installs a pinned hushrun release and verifies its SHA-256 before putting it on PATH.
+description: Installs a hushrun release, the newest by default, and verifies its SHA-256 before putting it on PATH.
 author: hushrun
 
 inputs:
   version:
-    description: The hushrun version to install, such as 0.1.0. Pin it; there is no "latest".
-    required: true
+    description: >-
+      The hushrun release to install, such as 0.2.0, or latest, the default: the newest release.
+      Pin one, with its sha256, for a workflow that installs the same hushrun until you change it.
+    required: false
+    default: ""
   sha256:
     description: >-
-      The expected SHA-256 of this runner's archive. Optional: without it, the archive is
-      checked against the checksum published next to it in the release.
+      The expected SHA-256 of this runner's archive, with a pinned version. Optional: without it,
+      the archive is checked against the checksum published next to it in the release.
     required: false
     default: ""
 
@@ -17,6 +20,9 @@ outputs:
   path:
     description: The installed hushrun binary.
     value: ${{ steps.install.outputs.path }}
+  version:
+    description: The hushrun release installed, such as 0.2.0.
+    value: ${{ steps.install.outputs.version }}
 
 runs:
   using: composite
@@ -28,8 +34,25 @@ runs:
         EXPECTED: ${{ inputs.sha256 }}
       run: |
         set -euo pipefail
+        releases=https://github.com/hushrun/hushrun/releases
+        if [ -z "$VERSION" ] || [ "$VERSION" = latest ]; then
+          if [ -n "$EXPECTED" ]; then
+            echo "::error title=hushrun setup::sha256 needs a pinned version: the newest release's archive changes with every release"
+            exit 1
+          fi
+          # The newest release: GitHub redirects releases/latest to its tag, and everything below
+          # comes from that tag.
+          if ! latest=$(curl --proto '=https' --tlsv1.2 -fsS --retry 3 -o /dev/null -w '%{redirect_url}' "$releases/latest"); then
+            echo "::error title=hushrun setup::can't reach $releases/latest to find the newest hushrun release"
+            exit 1
+          fi
+          case "$latest" in
+            "$releases"/tag/v*) VERSION=${latest#"$releases"/tag/v} ;;
+            *) echo "::error title=hushrun setup::can't tell the newest hushrun release: $releases/latest didn't redirect to a release's tag"; exit 1 ;;
+          esac
+        fi
         if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-          echo "::error title=hushrun setup::version must be an exact release such as 0.1.0, not '$VERSION'"
+          echo "::error title=hushrun setup::version must be a release such as 0.2.0, or latest, not '$VERSION'"
           exit 1
         fi
         case "$RUNNER_OS-$RUNNER_ARCH" in
@@ -42,7 +65,7 @@ runs:
           *) echo "::error title=hushrun setup::no hushrun build for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
         esac
         archive="hushrun-$target.$ext"
-        base="https://github.com/hushrun/hushrun/releases/download/v$VERSION"
+        base="$releases/download/v$VERSION"
         dir="$RUNNER_TEMP/hushrun-$VERSION"
         mkdir -p "$dir"
         cd "$dir"
@@ -70,4 +93,5 @@ runs:
         chmod +x "$binary" 2>/dev/null || true
         dirname "$binary" >> "$GITHUB_PATH"
         echo "path=$binary" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         "$binary" --version

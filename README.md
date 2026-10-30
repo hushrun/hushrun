@@ -30,20 +30,39 @@ hushrun init
 Each release has an archive for macOS, Linux and Windows on x86_64 and arm64, each with its
 SHA-256 checksum.
 
+## Update
+
+```bash
+hushrun update
+```
+
+replaces the hushrun that the installers above installed with the newest release, after
+checking its SHA-256. hushrun 0.1.0 has no `update`: run the install command again. Installed
+with npm, update the `hushrun` package with your package manager instead.
+
+At a terminal, hushrun asks GitHub at most once a day whether a newer release is out, and says
+so in one line. It never asks in CI. Set `HUSHRUN_NO_UPDATE_CHECK=1` to turn it off.
+
 ## In CI
 
-- **GitHub Actions:** `hushrun/hushrun/action/setup` installs an exact release and checks its
+CI installs the newest release unless you pin one, so a new release reaches every pipeline that
+pins none at its next run: fixes without an edit, and a bad release as fast. To install one
+release until you change it, pin it, with its checksum.
+
+- **GitHub Actions:** `hushrun/hushrun/action/setup` installs the newest release and checks its
   SHA-256. `.github/workflows/hushrun-deploy.yml` is the reusable deploy workflow that
-  `hushrun adopt` sets up. Pin both to a commit of this repository.
+  `hushrun adopt` sets up; every job of a run installs the same release. Pin both to a commit of
+  this repository.
 
   ```yaml
   - uses: hushrun/hushrun/action/setup@main   # pin to a release commit
-    with: { version: 0.1.0 }
+    # with: { version: 0.2.0, sha256: … }     # to install one release until you change it
   ```
 
-- **GitLab CI:** jobs that only run hushrun use the image `ghcr.io/hushrun/hushrun:<version>`.
-  Other jobs install the same release with `install-hushrun.sh`, attached to each release, which
-  checks the archive's SHA-256 against the checksums pinned in it.
+- **GitLab CI:** jobs that only run hushrun use the image `ghcr.io/hushrun/hushrun:latest`, or a
+  version's tag. Other jobs install the same release with `install-hushrun.sh`, attached to each
+  release, which checks the archive's SHA-256 against the checksums pinned in it, or for a
+  release it doesn't list, the one published with the release.
 
 ## License
 
