@@ -7,6 +7,11 @@ environment deploys the same artifact by digest.
 This repository holds hushrun's releases and its GitHub Actions. hushrun's source code isn't
 public.
 
+[Docs](https://hushrun.com/docs) · [Quickstart](https://hushrun.com/docs/quickstart) ·
+[Guides](https://hushrun.com/docs/guides) ·
+[Compared with Nx, Turborepo and Bazel](https://hushrun.com/docs/compare) ·
+[Pricing](https://hushrun.com/pricing)
+
 ## Install
 
 On macOS and Linux:
