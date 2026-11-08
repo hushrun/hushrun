@@ -1,14 +1,16 @@
 # The reusable deploy workflow: the recipes' structure in one versioned place, so that a fix
-# reaches every repository as a version bump. A repository calls it from one
-# short workflow per stage, pinned by commit; `hushrun adopt` writes them:
+# reaches every repository as a version bump. A repository calls it from its one caller
+# workflow, pinned by commit, which `hushrun adopt` writes as .github/workflows/hushrun.yml:
 #
 #   jobs:
 #     deploy:
 #       uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@<commit>
 #       with:
-#         stage: staging
 #         build: docker build -t "$REF" . && docker push "$REF"
 #         deploy: gcloud run deploy api --image "$REF" --region us-central1
+#
+# A repository of several scopes calls it once per scope, with `scope` and `image`, from that same
+# workflow.
 #
 # The repository's URL comes from the organization's HUSHRUN_REPOSITORY_BASE variable, or the
 # repository's HUSHRUN_REPOSITORY_URL, else from the evaluated hushrun.yaml: callers pass
@@ -27,10 +29,6 @@ name: hushrun deploy
 on:
   workflow_call:
     inputs:
-      stage:
-        description: The stage to deploy, as hushrun.yaml names it.
-        type: string
-        required: true
       repository-base:
         description: >-
           The organization's base URL, under which each repository's is <base>/<repository id>,
@@ -135,11 +133,11 @@ on:
         default: ""
     secrets:
       HUSHRUN_SIGNING_KEY:
-        description: The stage's signing key, when jobs sign with a key and signing-environment doesn't hold it.
+        description: The signing key, when jobs sign with a key and signing-environment doesn't hold it.
         required: false
     outputs:
       mode:
-        description: The plan's mode for the stage.
+        description: The plan's mode, promote, refresh, full, current or blocked.
         value: ${{ jobs.plan.outputs.mode }}
       ref:
         description: The image deployed, pinned by digest.
@@ -148,7 +146,6 @@ on:
 env:
   HUSHRUN_REPOSITORY_URL: ${{ inputs.repository-url || vars.HUSHRUN_REPOSITORY_URL }}
   HUSHRUN_REPOSITORY_BASE: ${{ inputs.repository-base || vars.HUSHRUN_REPOSITORY_BASE }}
-  STAGE: ${{ inputs.stage }}
   SCOPE: ${{ inputs.scope }}
   HUSHRUN_VERSION: ${{ inputs.version }}
 
@@ -156,11 +153,10 @@ jobs:
   plan:
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.signing-environment }}
-    permissions: { contents: read, actions: read, id-token: write }
+    permissions: { contents: read, id-token: write }
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       checks: ${{ steps.plan.outputs.checks }}
-      deployment_checks: ${{ steps.plan.outputs.deployment_checks }}
       json: ${{ steps.plan.outputs.json }}
       # The release this job installed, which every later job installs too.
       version: ${{ steps.install.outputs.version }}
@@ -240,8 +236,7 @@ jobs:
           HUSHRUN_FORCE_FULL: ${{ inputs.force-full }}
           HUSHRUN_SIGNING_KEY: ${{ secrets.HUSHRUN_SIGNING_KEY }}
           HUSHRUN_SIGNING: ${{ inputs.signing }}
-          GITHUB_TOKEN: ${{ github.token }}            # liveness of upstream runs, queued runs
-        run: hushrun plan --stage "$STAGE" --start ${SCOPE:+--scope "$SCOPE"}
+        run: hushrun plan --start ${SCOPE:+--scope "$SCOPE"}
 
   test:
     needs: plan
@@ -291,7 +286,7 @@ jobs:
         shell: bash
         env:
           ISOLATED: ${{ inputs.isolated && 'true' || '' }}
-        run: hushrun run --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} ${ISOLATED:+--isolated}   # exactly the plan's checks_to_run
+        run: hushrun run ${SCOPE:+--scope "$SCOPE"} ${ISOLATED:+--isolated}   # exactly the plan's checks_to_run
 
   deploy:
     needs: [plan, test]
@@ -318,23 +313,23 @@ jobs:
       - *gcp
       - *aws
       - *azure
-      # The stage's branch moved on: records superseded and outputs stale=true; the steps below
-      # then skip.
+      # The branch it deploys from (hushrun.yaml's deploy.branch, else this run's) moved on:
+      # records superseded and outputs stale=true; the steps below then skip.
       - id: guard
         name: hushrun guard
         shell: bash
-        run: hushrun guard --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
+        run: hushrun guard ${SCOPE:+--scope "$SCOPE"}
       - if: steps.guard.outputs.stale != 'true' && inputs.setup != ''
         name: Set up
         shell: bash
         env: { SETUP: "${{ inputs.setup }}" }
         run: eval "$SETUP"
-      # Copies the upstream's image by digest, or asks for a build.
+      # The image a passed attempt of this digest built, pinned by digest; else a build.
       - id: image
         if: steps.guard.outputs.stale != 'true'
         name: hushrun artifact resolve
         shell: bash
-        run: hushrun artifact resolve --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
+        run: hushrun artifact resolve ${SCOPE:+--scope "$SCOPE"}
       - id: build
         if: steps.guard.outputs.stale != 'true' && steps.image.outputs.build == 'true'
         name: Build
@@ -345,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           eval "$BUILD"
-          hushrun attest --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"   # resolves the tag to a digest; outputs ref
+          hushrun attest ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"   # resolves the tag to a digest; outputs ref
       - id: deployed
         if: steps.guard.outputs.stale != 'true'
         name: Deploy
@@ -356,24 +351,14 @@ jobs:
         run: |
           set -euo pipefail
           eval "$DEPLOY"
-          hushrun mark deployed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
+          hushrun mark deployed ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
-      # The deployment checks other stages require of this one (plan's deployment_checks).
-      - if: steps.guard.outputs.stale != 'true' && needs.plan.outputs.deployment_checks != ''
-        name: hushrun run (deployment checks)
-        shell: bash
-        env:
-          CHECKS: ${{ needs.plan.outputs.deployment_checks }}
-        run: |
-          set -euo pipefail
-          read -r -a checks <<< "$CHECKS"
-          hushrun run "${checks[@]}" --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"}
       - if: steps.guard.outputs.stale != 'true'
         name: hushrun mark passed
         shell: bash
         env:
           REF: ${{ steps.deployed.outputs.ref }}
-        run: hushrun mark passed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
+        run: hushrun mark passed ${SCOPE:+--scope "$SCOPE"} --artifact "$IMAGE=$REF"
 
   # The outcome when something went wrong. Two jobs, because only a job-level `if` can
   # tell a cancelled workflow from a failed or timed-out job.
@@ -398,7 +383,7 @@ jobs:
       - *azure
       - name: hushrun mark superseded
         shell: bash
-        run: hushrun mark superseded --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --reason cancelled
+        run: hushrun mark superseded ${SCOPE:+--scope "$SCOPE"} --reason cancelled
 
   report-failed:     # a job failed, or timed out (a timeout shows up as "cancelled" in needs.*.result)
     needs: [plan, test, deploy]
@@ -423,4 +408,4 @@ jobs:
       - *azure
       - name: hushrun mark failed
         shell: bash
-        run: hushrun mark failed --stage "$STAGE" ${SCOPE:+--scope "$SCOPE"} --reason "a job failed or timed out"
+        run: hushrun mark failed ${SCOPE:+--scope "$SCOPE"} --reason "a job failed or timed out"

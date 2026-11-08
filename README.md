@@ -1,8 +1,9 @@
 # hushrun
 
 hushrun skips a check that this exact code already passed: on a laptop, in CI and in a coding
-agent's sandbox. In a deploy pipeline, CI builds and validates each change once, and every later
-environment deploys the same artifact by digest.
+agent's sandbox. In a deploy pipeline, CI builds and validates each change once. A digest that
+is deployed already isn't deployed again, and a re-run or a revert deploys the image that passed,
+by digest.
 
 This repository holds hushrun's releases and its GitHub Actions. hushrun's source code isn't
 public.
@@ -55,9 +56,9 @@ pins none at its next run: fixes without an edit, and a bad release as fast. To 
 release until you change it, pin it, with its checksum.
 
 - **GitHub Actions:** `hushrun/hushrun/action/setup` installs the newest release and checks its
-  SHA-256. `.github/workflows/hushrun-deploy.yml` is the reusable deploy workflow that
-  `hushrun adopt` sets up; every job of a run installs the same release. Pin both to a commit of
-  this repository.
+  SHA-256. `.github/workflows/hushrun-deploy.yml` is the reusable deploy workflow that the
+  workflow `hushrun adopt` writes, `.github/workflows/hushrun.yml`, calls; every job of a run
+  installs the same release. Pin both to a commit of this repository.
 
   ```yaml
   - uses: hushrun/hushrun/action/setup@main   # pin to a release commit
