@@ -91,6 +91,7 @@ pub fn run(app: &App<'_>, args: &DoctorArgs) -> CmdResult {
     );
 
     agent_string(&mut report, app);
+    skills(&mut report, app);
 
     // Where `hushrun run` records results, and as whom (C-17): before hushrun.yaml, which a
     // repository that only uses `hushrun run` doesn't have.
@@ -436,6 +437,43 @@ fn clock(report: &mut Report, url: &hushrun_core::ledger_url::LedgerUrl, app: &A
         }
         Ok(None) => report.add("clock", Level::Skipped, "no service to compare with"),
         Err(e) => report.add("clock", Level::Warning, format!("{e}")),
+    }
+}
+
+/// \[ADR 0065\] Each copy of hushrun's skill there is, here and in the person's home, as
+/// [`crate::skill::state_of`] tells it (C-24): an older or a newer one is a warning.
+fn skills(report: &mut Report, app: &App<'_>) {
+    use crate::skill::State;
+    let root = crate::cmd::skill::repository_root(app.global);
+    let copies = crate::skill::copies(root.as_deref(), crate::skill::home().as_deref());
+    let update = crate::notice::update_command(crate::cmd::update::came_with_npm());
+    let hushrun = crate::cmd::ready::hushrun();
+    let mut any = false;
+    for copy in copies.iter().filter(|c| c.state != State::Absent) {
+        any = true;
+        let global = if copy.personal { " --global" } else { "" };
+        let (level, said) = match copy.state {
+            State::Current => (Level::Ok, "current".to_string()),
+            State::Older(n) => (
+                Level::Warning,
+                format!("older, revision {n}: `{hushrun} skill update{global}` updates it"),
+            ),
+            State::Newer(n) => (
+                Level::Warning,
+                format!("newer, revision {n}: update hushrun with `{update}`"),
+            ),
+            State::Edited | State::Absent => {
+                (Level::Ok, "edited by hand: hushrun leaves it".to_string())
+            }
+        };
+        report.add("skill", level, format!("{}: {said}", copy.shown));
+    }
+    if !any {
+        report.add(
+            "skill",
+            Level::Ok,
+            "no copy of hushrun's skill for coding agents: hushrun init writes the repository's",
+        );
     }
 }
 

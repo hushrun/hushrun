@@ -46,8 +46,18 @@ replaces the hushrun that the installers above installed with the newest release
 checking its SHA-256. hushrun 0.1.0 has no `update`: run the install command again. Installed
 with npm, update the `hushrun` package with your package manager instead.
 
-At a terminal, hushrun asks GitHub at most once a day whether a newer release is out, and says
-so in one line. It never asks in CI. Set `HUSHRUN_NO_UPDATE_CHECK=1` to turn it off.
+At a terminal, and to a coding agent, hushrun asks GitHub at most once a day whether a newer
+release is out, and says so in one line: an agent is told to tell you. It never asks in CI. Set
+`HUSHRUN_NO_UPDATE_CHECK=1` to turn it off.
+
+## Coding agents
+
+`hushrun init` writes hushrun's skill into the repository, where Claude Code, Codex, Cursor,
+OpenCode and other agents read it. The skill holds what every hushrun does the same way; the
+agent runs `hushrun guide` for the rest, which prints the rules of the hushrun installed there,
+and says whether hushrun and the skill are current. `hushrun skill update` updates the
+repository's copy, and `hushrun skill update --global` writes your own, in `~/.claude/skills` and
+`~/.agents/skills`.
 
 ## In CI
 

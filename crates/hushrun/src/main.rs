@@ -5,6 +5,7 @@ mod app;
 mod ci;
 mod cli;
 mod cmd;
+mod coding_agent;
 mod context;
 mod credentials;
 mod environment;
@@ -21,6 +22,7 @@ mod planfile;
 mod releases;
 mod results;
 mod signing;
+mod skill;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -122,6 +124,9 @@ fn run(cli: &Cli) -> ExitCode {
         // C-22, C-23: both work without hushrun.yaml.
         Command::Ready(args) => cmd::ready::run(&cli.global, args),
         Command::Hook(command) => cmd::hook::run(&cli.global, command),
+        // C-28, C-29: neither needs hushrun.yaml, nor a repository.
+        Command::Guide => cmd::guide::run(&cli.global),
+        Command::Skill(command) => cmd::skill::run(&cli.global, command),
         // C-15: setting up `hushrun run` needs no hushrun.yaml.
         Command::Init(args) if !args.pipeline() => cmd::setup::run(&cli.global, args),
         command => app::App::new(&cli.global).and_then(|app| match command {
@@ -148,6 +153,8 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Update
             | Command::Ready(_)
             | Command::Hook(_)
+            | Command::Guide
+            | Command::Skill(_)
             | Command::Approve(_) => {
                 unreachable!("handled above")
             }

@@ -1,0 +1,132 @@
+name: skills
+
+# After the Release workflow publishes a release: hushrun's skill bundle (recipes/agents/bundle.mjs,
+# ADR 0066) to github.com/hushrun/skills, the repository skills marketplaces install from:
+# skills.sh, Claude Code, Codex, GitHub Copilot, Gemini CLI, `gh skill` and Anthropic's directory.
+# Nothing there is edited by hand: this workflow replaces its files with the release's bundle,
+# commits, and tags the commit as the release is tagged. Run it by hand to publish a release's
+# bundle again.
+#
+# It pushes with a deploy key of hushrun/skills that may write, SKILLS_DEPLOY_KEY in the environment
+# `release`, which waits for a maintainer's approval. Without the key, it builds and checks the
+# bundle, says so, and publishes nothing. A pre-release is never published: marketplaces follow the
+# newest release, as everything else does (ADR 0035).
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release, such as 0.11.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Where the bundle goes: the repository the bundle's README and marketplaces name.
+  SKILLS_REPOSITORY: hushrun/skills
+
+concurrency:
+  # One run at a time: two releases' bundles never race to the same branch.
+  group: skills
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Release also runs on pull requests, to plan; only a tag's successful run published one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - id: version
+        env:
+          INPUT: ${{ inputs.version }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version="${INPUT:-${TAG#v}}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=skills::not a release version: '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "${version%%+*}" == *-* ]]; then
+            echo "pre-release=true" >> "$GITHUB_OUTPUT"
+            echo "hushrun $version is a pre-release: marketplaces get releases only." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.version.outputs.pre-release != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ format('v{0}', steps.version.outputs.version) }}
+          persist-credentials: false
+      - if: steps.version.outputs.pre-release != 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - if: steps.version.outputs.pre-release != 'true'
+        run: node --test recipes/agents/*.test.mjs
+      - id: bundle
+        if: steps.version.outputs.pre-release != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node recipes/agents/bundle.mjs --out "$RUNNER_TEMP/bundle" --repository "$SKILLS_REPOSITORY"
+          # The bundle says the version the release's Cargo.toml says: the tag's.
+          built="$(jq -r .version "$RUNNER_TEMP/bundle/.claude-plugin/plugin.json")"
+          if [ "$built" != "$VERSION" ]; then
+            echo "::error title=skills::the bundle says $built, and the release is $VERSION"
+            exit 1
+          fi
+      - id: key
+        if: steps.version.outputs.pre-release != 'true'
+        env:
+          KEY: ${{ secrets.SKILLS_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::notice title=skills::no SKILLS_DEPLOY_KEY in the release environment: the bundle was built and checked, and not published"
+            echo "No \`SKILLS_DEPLOY_KEY\`: the bundle was built and checked, and not published to $SKILLS_REPOSITORY." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        if: steps.key.outputs.present == 'true'
+        env:
+          KEY: ${{ secrets.SKILLS_DEPLOY_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ssh_dir="$RUNNER_TEMP/ssh"
+          mkdir -m 700 "$ssh_dir"
+          printf '%s\n' "$KEY" > "$ssh_dir/key"
+          chmod 600 "$ssh_dir/key"
+          # GitHub's published host key, pinned: nothing asked of the network decides whom to trust.
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
+          clone="$RUNNER_TEMP/skills"
+          git clone --quiet "git@github.com:$SKILLS_REPOSITORY.git" "$clone"
+          cd "$clone"
+          git checkout --quiet -B main
+          tag="v$VERSION"
+          if git rev-parse --quiet --verify "refs/tags/$tag" >/dev/null; then
+            echo "$SKILLS_REPOSITORY has $tag already: nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # An older release run by hand never takes a newer one's files back.
+          newest="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" "$tag" | sort -V | tail -n 1)" != "$tag" ]; then
+            echo "::error title=skills::$SKILLS_REPOSITORY has $newest, newer than $tag: an older release's bundle isn't published"
+            exit 1
+          fi
+          # The release's files, and nothing else: what was there and isn't in the bundle goes.
+          rsync -a --delete --exclude .git "$RUNNER_TEMP/bundle/" ./
+          git add -A
+          git -c user.name=hushrun -c user.email=support@hushrun.com \
+            commit --quiet --allow-empty -m "release: hushrun $VERSION" \
+            -m "Written by hushrun/hushrun's skills workflow from v$VERSION's recipes/agents/."
+          git tag "$tag"
+          git push --quiet origin main "refs/tags/$tag"
+          echo "Published hushrun $VERSION's skill to $SKILLS_REPOSITORY ($tag)." >> "$GITHUB_STEP_SUMMARY"

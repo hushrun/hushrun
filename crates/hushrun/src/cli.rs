@@ -128,6 +128,17 @@ pub enum Command {
     /// that is done.
     #[command(subcommand, after_long_help = HOOK_HELP)]
     Hook(HookCommand),
+    /// Print what a coding agent needs to know about this hushrun, and whether hushrun and its
+    /// skill are current.
+    ///
+    /// hushrun's skill for coding agents holds what every hushrun does the same way, and tells
+    /// the agent to run this once per session for the rest: what this hushrun's lines mean, how
+    /// to set it up, and what is true here, such as a newer release, or a copy of the skill that
+    /// is older or newer than this hushrun's.
+    Guide,
+    /// hushrun's skill for coding agents: update the copies agents read.
+    #[command(subcommand)]
+    Skill(SkillCommand),
     /// Run a check's command, unless this exact code already passed it.
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
@@ -228,6 +239,26 @@ pub struct ReadyArgs {
     /// or another machine doesn't stop `ready`.
     #[arg(long)]
     pub strict: bool,
+}
+
+/// `hushrun skill` (C-29).
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    /// Write this hushrun's skill where agents read it: in this repository, as init does, or
+    /// with --global in your home. A copy edited by hand, or written by a newer hushrun, stays.
+    Update(SkillUpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SkillUpdateArgs {
+    /// Your own copies, ~/.claude/skills/hushrun and ~/.agents/skills/hushrun, for repositories
+    /// that have none.
+    #[arg(long)]
+    pub global: bool,
+
+    /// Replace a copy edited by hand, or one a newer hushrun wrote.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// `hushrun hook` (C-23).

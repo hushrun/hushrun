@@ -6,6 +6,37 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Coding agents learn what is out of date ([ADR 0065](docs/adr/0065-agents-learn-what-is-out-of-date.md)):
+hushrun itself, and the copy of its skill they read.
+
+### Added
+
+- Contract: **`hushrun guide`**, and `hushrun.guide/v1` with `--format json`: what a coding agent
+  needs to know about this hushrun beyond its skill, from the binary, then a newer release the
+  daily check learned of and each copy of the skill: `current`, `older`, `newer`, `edited` or
+  `absent`. It asks nobody, and changes nothing.
+- Contract: **`hushrun skill update`**, which writes this hushrun's skill into the repository, as
+  init does, or with `--global` into `~/.claude/skills/hushrun` and `~/.agents/skills/hushrun`. It
+  leaves a copy edited by hand, or written by a newer hushrun, unless `--force`.
+- Contract: **the skill's revision**, `metadata.hushrun-skill` in its frontmatter, which goes up
+  only when its text changes.
+- `hushrun ready` notes when the repository's skill is older than this hushrun's, or a newer
+  hushrun wrote it, and `hushrun doctor` checks each copy.
+
+### Changed
+
+- Contract: **the newer-release notice reaches coding agents**, without a terminal, and in a
+  sandbox that sets `CI` with an agent in it: `hushrun: hushrun <newest> is available, and this
+  is <this>: when you report back, tell the person, …`. Once a day, as for people.
+- The skill holds what every hushrun does the same way, and points to `hushrun guide` for the
+  rest. Its frontmatter no longer says that init wrote it.
+- `hushrun init` no longer takes a copy of the skill that a newer hushrun wrote back to its own.
+- The `hushrun` npm package carries the skill, at `skills/hushrun/SKILL.md`, where tools that link
+  skills from installed packages look.
+- Each release writes the skill's bundle for marketplaces to github.com/hushrun/skills
+  ([ADR 0066](docs/adr/0066-the-skill-goes-to-marketplaces-from-a-repository-the-release-writes.md)):
+  skills.sh, Claude Code, Codex, GitHub Copilot, Gemini CLI and `gh skill` install from there.
+
 ## [0.10.1] - 2026-11-09
 
 ### Security
