@@ -29,3 +29,14 @@ checks:
     counts_from: anywhere
   notices:
     counts_from: anywhere
+  # CI's macOS job runs these under their own names, so that its pass skips its next run on the
+  # same code and never one of the Linux checks above, nor they one of these.
+  clippy-macos:
+    counts_from:
+      os: macos
+  test-macos:
+    counts_from:
+      os: macos
+  doctest-macos:
+    counts_from:
+      os: macos
