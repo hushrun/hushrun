@@ -6,6 +6,12 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Security
+
+- Update gix to 0.90.0 for [GHSA-q54r-jf2p-rfr2](https://github.com/advisories/GHSA-q54r-jf2p-rfr2).
+  hushrun only reads git objects and never reached the affected checkout, index, merge or
+  tree-editing code.
+
 ## [0.10.0] - 2026-11-09
 
 ### Added
