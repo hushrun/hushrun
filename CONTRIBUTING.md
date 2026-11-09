@@ -33,8 +33,9 @@ names it after a `covers:` marker, and `cargo xtask trace` checks every rule is 
   [Developer Certificate of Origin](https://developercertificate.org): that you wrote the change,
   or have the right to submit it under the project's license.
 
-The maintainers develop hushrun alongside the hosted service, so an accepted pull request is
-applied there and comes back here with the next sync, crediting you as its author.
+Pull requests are reviewed and merged here, with your commits and their sign-off as they are.
+This repository is public, so CI scans every push and pull request for anything that looks like
+a secret (`scripts/check-tree.py`, `scripts/verify.sh`).
 
 ## License
 

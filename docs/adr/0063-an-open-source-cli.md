@@ -4,6 +4,7 @@
 - **Date:** 2026-11-09
 - **Rules:** none changed
 - **Supersedes:** [0034](0034-closed-source-cli.md)
+- **Amended by:** [0064](0064-the-source-lives-here.md): the source is developed here
 
 ## Context
 
