@@ -166,7 +166,7 @@ pub fn home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// What [`write`] did with a copy.
+/// What [`write()`] did with a copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Written {
     Wrote,
