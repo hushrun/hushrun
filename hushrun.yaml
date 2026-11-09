@@ -1,0 +1,9 @@
+# hushrun.yaml: where this repository's events go.
+version: 1
+repository: github.com/hushrun/hushrun
+repository_url: https://api.hushrun.com/l/hushrun/hushrun
+backend: https://api.hushrun.com/o/hushrun
+
+transparency_log:   # the server's log key
+  origin: api.hushrun.com/l/hushrun/hushrun
+  key: "ed25519:lvZaTgsagmTcyMB8+XsOts2amd15aWRgkjoCslO9bIM="
