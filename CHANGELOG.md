@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-09
+
 ### Security
 
 - Update gix to 0.90.0 for [GHSA-q54r-jf2p-rfr2](https://github.com/advisories/GHSA-q54r-jf2p-rfr2).
