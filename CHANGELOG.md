@@ -6,6 +6,12 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-09
+
+### Added
+
+- Open-source the hushrun CLI under the MIT license.
+
 ## [0.9.0] - 2026-11-08
 
 hushrun 0.9.0 has no stages ([ADR 0062](docs/adr/0062-no-stages.md)): a repository has one
