@@ -9,7 +9,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { LEGAL, TARGETS, cargoVersion } from '../build.mjs';
+import { LEGAL, SKILL, TARGETS, cargoVersion } from '../build.mjs';
 
 const NPM_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BUILD = path.join(NPM_DIR, 'build.mjs');
@@ -126,6 +126,12 @@ test(
       fs.readFileSync(path.join(NPM_DIR, 'hushrun', 'bin', 'hushrun.js'), 'utf8'),
     );
     assert.ok(fs.existsSync(path.join(pkg, 'README.md')));
+    // [ADR 0066] This release's skill, where tools that link skills from packages look.
+    assert.equal(
+      fs.readFileSync(path.join(pkg, 'skills', 'hushrun', 'SKILL.md'), 'utf8'),
+      fs.readFileSync(SKILL, 'utf8'),
+    );
+    assert.ok(manifest.files.includes('skills/'));
     assertLegal(pkg);
   },
 );
@@ -199,7 +205,11 @@ test(
     assert.ok(!fs.existsSync(path.join(main, 'vendor')));
     assert.deepEqual(
       fs.readdirSync(main).sort(),
-      ['README.md', 'bin', 'package.json', ...LEGAL].sort(),
+      ['README.md', 'bin', 'package.json', 'skills', ...LEGAL].sort(),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(main, 'skills', 'hushrun', 'SKILL.md'), 'utf8'),
+      fs.readFileSync(SKILL, 'utf8'),
     );
     assertLegal(main);
   },

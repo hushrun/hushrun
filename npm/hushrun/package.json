@@ -36,6 +36,7 @@
   },
   "files": [
     "bin/",
+    "skills/",
     "vendor/",
     "LICENSE.md",
     "THIRD-PARTY-NOTICES.md"

@@ -31,6 +31,11 @@ hushrun itself, and the copy of its skill they read.
 - The skill holds what every hushrun does the same way, and points to `hushrun guide` for the
   rest. Its frontmatter no longer says that init wrote it.
 - `hushrun init` no longer takes a copy of the skill that a newer hushrun wrote back to its own.
+- The `hushrun` npm package carries the skill, at `skills/hushrun/SKILL.md`, where tools that link
+  skills from installed packages look.
+- Each release writes the skill's bundle for marketplaces to github.com/hushrun/skills
+  ([ADR 0066](docs/adr/0066-the-skill-goes-to-marketplaces-from-a-repository-the-release-writes.md)):
+  skills.sh, Claude Code, Codex, GitHub Copilot, Gemini CLI and `gh skill` install from there.
 
 ## [0.10.1] - 2026-11-09
 

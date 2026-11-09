@@ -25,6 +25,8 @@ import { parseArgs } from 'node:util';
 
 const NPM_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(NPM_DIR);
+/** hushrun's skill for coding agents (recipes/agents/), which the hushrun package carries. */
+export const SKILL = path.join(ROOT, 'recipes', 'agents', 'SKILL.md');
 
 /** Each platform package's Rust target (dist-workspace.toml), by `<os>-<cpu>` as Node names them. */
 export const TARGETS = {
@@ -133,6 +135,9 @@ function stageMain(dir, version, binary) {
     path.join(dir, 'bin', 'hushrun.js'),
     0o755,
   );
+  // [ADR 0066] The skill of this release, where tools that link skills from installed packages
+  // look (skills/<name>/SKILL.md), so that a repository's copy follows its hushrun's version.
+  copy(SKILL, path.join(dir, 'skills', 'hushrun', 'SKILL.md'), 0o644);
   copyLegal(dir);
   return pkg;
 }

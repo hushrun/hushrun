@@ -109,7 +109,8 @@ jobs:
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
       - run: python3 -I tools/refreports.py check testdata/reports/vectors.json
 
-  # The npm packages (npm/): the platform mapping, bin/hushrun.js and the build.
+  # The npm packages (npm/): the platform mapping, bin/hushrun.js and the build; and the bundle
+  # skills marketplaces read (recipes/agents/bundle.mjs, ADR 0066).
   npm:
     name: npm packages (${{ matrix.os }})
     strategy:
@@ -122,6 +123,8 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test npm/test/*.test.mjs
+        shell: bash
+      - run: node --test recipes/agents/*.test.mjs
         shell: bash
 
   # The same checks on macOS, every time: a run there records nothing (hushrun.yaml's counts_from),
@@ -148,6 +151,7 @@ jobs:
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
       - run: python3 -I tools/refreports.py check testdata/reports/vectors.json
       - run: node --test npm/test/*.test.mjs
+      - run: node --test recipes/agents/*.test.mjs
 
   # Envelope, statement and policy parsing under libFuzzer, 60 s each (M2), M10's
   # certificates, timestamps, TUF metadata and trust roots, and test and coverage reports (C-27).
