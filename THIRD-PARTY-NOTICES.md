@@ -102,47 +102,47 @@ This file is generated from Cargo.lock and the crates' own license files; don't 
 | [getrandom](https://crates.io/crates/getrandom/0.3.4) | 0.3.4 | MIT OR Apache-2.0 | [66](#text-66), [68](#text-68) |
 | [getrandom](https://crates.io/crates/getrandom/0.4.3) | 0.4.3 | MIT OR Apache-2.0 | [66](#text-66), [69](#text-69) |
 | [getset](https://crates.io/crates/getset/0.1.7) | 0.1.7 | MIT | [70](#text-70) |
-| [gix](https://crates.io/crates/gix/0.89.0) | 0.89.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-actor](https://crates.io/crates/gix-actor/0.44.0) | 0.44.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-bitmap](https://crates.io/crates/gix-bitmap/0.6.0) | 0.6.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-chunk](https://crates.io/crates/gix-chunk/0.10.0) | 0.10.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-command](https://crates.io/crates/gix-command/0.12.0) | 0.12.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-commitgraph](https://crates.io/crates/gix-commitgraph/0.41.0) | 0.41.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-config](https://crates.io/crates/gix-config/0.62.0) | 0.62.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-config-value](https://crates.io/crates/gix-config-value/0.21.0) | 0.21.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-date](https://crates.io/crates/gix-date/0.18.0) | 0.18.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-diff](https://crates.io/crates/gix-diff/0.69.0) | 0.69.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-discover](https://crates.io/crates/gix-discover/0.57.0) | 0.57.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-error](https://crates.io/crates/gix-error/0.5.1) | 0.5.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-fs](https://crates.io/crates/gix-fs/0.24.0) | 0.24.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-glob](https://crates.io/crates/gix-glob/0.29.0) | 0.29.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-hash](https://crates.io/crates/gix-hash/0.28.0) | 0.28.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix](https://crates.io/crates/gix/0.90.0) | 0.90.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-actor](https://crates.io/crates/gix-actor/0.44.1) | 0.44.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-bitmap](https://crates.io/crates/gix-bitmap/0.6.1) | 0.6.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-chunk](https://crates.io/crates/gix-chunk/0.10.1) | 0.10.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-command](https://crates.io/crates/gix-command/0.12.1) | 0.12.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-commitgraph](https://crates.io/crates/gix-commitgraph/0.42.0) | 0.42.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-config](https://crates.io/crates/gix-config/0.62.2) | 0.62.2 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-config-value](https://crates.io/crates/gix-config-value/0.21.1) | 0.21.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-date](https://crates.io/crates/gix-date/0.18.1) | 0.18.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-diff](https://crates.io/crates/gix-diff/0.70.0) | 0.70.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-discover](https://crates.io/crates/gix-discover/0.57.1) | 0.57.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-error](https://crates.io/crates/gix-error/0.5.2) | 0.5.2 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-fs](https://crates.io/crates/gix-fs/0.24.1) | 0.24.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-glob](https://crates.io/crates/gix-glob/0.29.1) | 0.29.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-hash](https://crates.io/crates/gix-hash/0.28.1) | 0.28.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
 | [gix-hashtable](https://crates.io/crates/gix-hashtable/0.18.0) | 0.18.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-index](https://crates.io/crates/gix-index/0.57.0) | 0.57.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-index](https://crates.io/crates/gix-index/0.58.0) | 0.58.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
 | [gix-lock](https://crates.io/crates/gix-lock/26.0.0) | 26.0.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
 | [gix-macros](https://crates.io/crates/gix-macros/0.2.0) | 0.2.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-object](https://crates.io/crates/gix-object/0.66.0) | 0.66.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-odb](https://crates.io/crates/gix-odb/0.86.0) | 0.86.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-pack](https://crates.io/crates/gix-pack/0.76.0) | 0.76.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-packetline](https://crates.io/crates/gix-packetline/0.24.0) | 0.24.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-parallel](https://crates.io/crates/gix-parallel/0.50.0) | 0.50.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-path](https://crates.io/crates/gix-path/0.14.0) | 0.14.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-protocol](https://crates.io/crates/gix-protocol/0.67.0) | 0.67.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-quote](https://crates.io/crates/gix-quote/0.10.0) | 0.10.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-ref](https://crates.io/crates/gix-ref/0.69.0) | 0.69.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-refspec](https://crates.io/crates/gix-refspec/0.47.0) | 0.47.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-revision](https://crates.io/crates/gix-revision/0.51.0) | 0.51.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-revwalk](https://crates.io/crates/gix-revwalk/0.37.0) | 0.37.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-sec](https://crates.io/crates/gix-sec/0.16.0) | 0.16.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-shallow](https://crates.io/crates/gix-shallow/0.15.0) | 0.15.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-object](https://crates.io/crates/gix-object/0.66.1) | 0.66.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-odb](https://crates.io/crates/gix-odb/0.87.0) | 0.87.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-pack](https://crates.io/crates/gix-pack/0.77.0) | 0.77.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-packetline](https://crates.io/crates/gix-packetline/0.24.1) | 0.24.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-parallel](https://crates.io/crates/gix-parallel/0.50.1) | 0.50.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-path](https://crates.io/crates/gix-path/0.14.1) | 0.14.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-protocol](https://crates.io/crates/gix-protocol/0.68.0) | 0.68.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-quote](https://crates.io/crates/gix-quote/0.10.1) | 0.10.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-ref](https://crates.io/crates/gix-ref/0.69.1) | 0.69.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-refspec](https://crates.io/crates/gix-refspec/0.47.1) | 0.47.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-revision](https://crates.io/crates/gix-revision/0.52.0) | 0.52.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-revwalk](https://crates.io/crates/gix-revwalk/0.38.0) | 0.38.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-sec](https://crates.io/crates/gix-sec/0.16.1) | 0.16.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-shallow](https://crates.io/crates/gix-shallow/0.15.1) | 0.15.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
 | [gix-tempfile](https://crates.io/crates/gix-tempfile/26.0.0) | 26.0.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-trace](https://crates.io/crates/gix-trace/0.3.0) | 0.3.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72), [73](#text-73) |
-| [gix-transport](https://crates.io/crates/gix-transport/0.61.0) | 0.61.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-traverse](https://crates.io/crates/gix-traverse/0.63.0) | 0.63.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-url](https://crates.io/crates/gix-url/0.40.0) | 0.40.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-utils](https://crates.io/crates/gix-utils/0.5.1) | 0.5.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-validate](https://crates.io/crates/gix-validate/0.13.0) | 0.13.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
-| [gix-zlib](https://crates.io/crates/gix-zlib/0.3.0) | 0.3.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-trace](https://crates.io/crates/gix-trace/0.3.1) | 0.3.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72), [73](#text-73) |
+| [gix-transport](https://crates.io/crates/gix-transport/0.62.0) | 0.62.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-traverse](https://crates.io/crates/gix-traverse/0.64.0) | 0.64.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-url](https://crates.io/crates/gix-url/0.40.1) | 0.40.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-utils](https://crates.io/crates/gix-utils/0.5.2) | 0.5.2 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-validate](https://crates.io/crates/gix-validate/0.13.1) | 0.13.1 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
+| [gix-zlib](https://crates.io/crates/gix-zlib/0.4.0) | 0.4.0 | MIT OR Apache-2.0 | [71](#text-71), [72](#text-72) |
 | [globset](https://crates.io/crates/globset/0.4.20) | 0.4.20 | Unlicense OR MIT | [1](#text-1), [2](#text-2), [3](#text-3) |
 | [granit-parser](https://crates.io/crates/granit-parser/1.3.0) | 1.3.0 | MIT OR Apache-2.0 | [74](#text-74) |
 | [h2](https://crates.io/crates/h2/0.4.20) | 0.4.20 | MIT | [75](#text-75) |
@@ -5082,7 +5082,7 @@ SOFTWARE.
 
 ### Text 71
 
-gix 0.89.0 (`LICENSE-APACHE`), gix-actor 0.44.0 (`LICENSE-APACHE`), gix-bitmap 0.6.0 (`LICENSE-APACHE`), gix-chunk 0.10.0 (`LICENSE-APACHE`), gix-command 0.12.0 (`LICENSE-APACHE`), gix-commitgraph 0.41.0 (`LICENSE-APACHE`), gix-config 0.62.0 (`LICENSE-APACHE`), gix-config-value 0.21.0 (`LICENSE-APACHE`), gix-date 0.18.0 (`LICENSE-APACHE`), gix-diff 0.69.0 (`LICENSE-APACHE`), gix-discover 0.57.0 (`LICENSE-APACHE`), gix-error 0.5.1 (`LICENSE-APACHE`), gix-fs 0.24.0 (`LICENSE-APACHE`), gix-glob 0.29.0 (`LICENSE-APACHE`), gix-hash 0.28.0 (`LICENSE-APACHE`), gix-hashtable 0.18.0 (`LICENSE-APACHE`), gix-index 0.57.0 (`LICENSE-APACHE`), gix-lock 26.0.0 (`LICENSE-APACHE`), gix-macros 0.2.0 (`LICENSE-APACHE`), gix-object 0.66.0 (`LICENSE-APACHE`), gix-odb 0.86.0 (`LICENSE-APACHE`), gix-pack 0.76.0 (`LICENSE-APACHE`), gix-packetline 0.24.0 (`LICENSE-APACHE`), gix-parallel 0.50.0 (`LICENSE-APACHE`), gix-path 0.14.0 (`LICENSE-APACHE`), gix-protocol 0.67.0 (`LICENSE-APACHE`), gix-quote 0.10.0 (`LICENSE-APACHE`), gix-ref 0.69.0 (`LICENSE-APACHE`), gix-refspec 0.47.0 (`LICENSE-APACHE`), gix-revision 0.51.0 (`LICENSE-APACHE`), gix-revwalk 0.37.0 (`LICENSE-APACHE`), gix-sec 0.16.0 (`LICENSE-APACHE`), gix-shallow 0.15.0 (`LICENSE-APACHE`), gix-tempfile 26.0.0 (`LICENSE-APACHE`), gix-trace 0.3.0 (`LICENSE-APACHE`), gix-transport 0.61.0 (`LICENSE-APACHE`), gix-traverse 0.63.0 (`LICENSE-APACHE`), gix-url 0.40.0 (`LICENSE-APACHE`), gix-utils 0.5.1 (`LICENSE-APACHE`), gix-validate 0.13.0 (`LICENSE-APACHE`), gix-zlib 0.3.0 (`LICENSE-APACHE`), pin-project-lite 0.2.17 (`LICENSE-APACHE`), simdutf8 0.1.5 (`LICENSE-Apache`), sync_wrapper 1.0.2 (`LICENSE`).
+gix 0.90.0 (`LICENSE-APACHE`), gix-actor 0.44.1 (`LICENSE-APACHE`), gix-bitmap 0.6.1 (`LICENSE-APACHE`), gix-chunk 0.10.1 (`LICENSE-APACHE`), gix-command 0.12.1 (`LICENSE-APACHE`), gix-commitgraph 0.42.0 (`LICENSE-APACHE`), gix-config 0.62.2 (`LICENSE-APACHE`), gix-config-value 0.21.1 (`LICENSE-APACHE`), gix-date 0.18.1 (`LICENSE-APACHE`), gix-diff 0.70.0 (`LICENSE-APACHE`), gix-discover 0.57.1 (`LICENSE-APACHE`), gix-error 0.5.2 (`LICENSE-APACHE`), gix-fs 0.24.1 (`LICENSE-APACHE`), gix-glob 0.29.1 (`LICENSE-APACHE`), gix-hash 0.28.1 (`LICENSE-APACHE`), gix-hashtable 0.18.0 (`LICENSE-APACHE`), gix-index 0.58.0 (`LICENSE-APACHE`), gix-lock 26.0.0 (`LICENSE-APACHE`), gix-macros 0.2.0 (`LICENSE-APACHE`), gix-object 0.66.1 (`LICENSE-APACHE`), gix-odb 0.87.0 (`LICENSE-APACHE`), gix-pack 0.77.0 (`LICENSE-APACHE`), gix-packetline 0.24.1 (`LICENSE-APACHE`), gix-parallel 0.50.1 (`LICENSE-APACHE`), gix-path 0.14.1 (`LICENSE-APACHE`), gix-protocol 0.68.0 (`LICENSE-APACHE`), gix-quote 0.10.1 (`LICENSE-APACHE`), gix-ref 0.69.1 (`LICENSE-APACHE`), gix-refspec 0.47.1 (`LICENSE-APACHE`), gix-revision 0.52.0 (`LICENSE-APACHE`), gix-revwalk 0.38.0 (`LICENSE-APACHE`), gix-sec 0.16.1 (`LICENSE-APACHE`), gix-shallow 0.15.1 (`LICENSE-APACHE`), gix-tempfile 26.0.0 (`LICENSE-APACHE`), gix-trace 0.3.1 (`LICENSE-APACHE`), gix-transport 0.62.0 (`LICENSE-APACHE`), gix-traverse 0.64.0 (`LICENSE-APACHE`), gix-url 0.40.1 (`LICENSE-APACHE`), gix-utils 0.5.2 (`LICENSE-APACHE`), gix-validate 0.13.1 (`LICENSE-APACHE`), gix-zlib 0.4.0 (`LICENSE-APACHE`), pin-project-lite 0.2.17 (`LICENSE-APACHE`), simdutf8 0.1.5 (`LICENSE-Apache`), sync_wrapper 1.0.2 (`LICENSE`).
 
 ```text
 
@@ -5266,7 +5266,7 @@ gix 0.89.0 (`LICENSE-APACHE`), gix-actor 0.44.0 (`LICENSE-APACHE`), gix-bitmap 0
 
 ### Text 72
 
-gix 0.89.0 (`LICENSE-MIT`), gix-actor 0.44.0 (`LICENSE-MIT`), gix-bitmap 0.6.0 (`LICENSE-MIT`), gix-chunk 0.10.0 (`LICENSE-MIT`), gix-command 0.12.0 (`LICENSE-MIT`), gix-commitgraph 0.41.0 (`LICENSE-MIT`), gix-config 0.62.0 (`LICENSE-MIT`), gix-config-value 0.21.0 (`LICENSE-MIT`), gix-date 0.18.0 (`LICENSE-MIT`), gix-diff 0.69.0 (`LICENSE-MIT`), gix-discover 0.57.0 (`LICENSE-MIT`), gix-error 0.5.1 (`LICENSE-MIT`), gix-fs 0.24.0 (`LICENSE-MIT`), gix-glob 0.29.0 (`LICENSE-MIT`), gix-hash 0.28.0 (`LICENSE-MIT`), gix-hashtable 0.18.0 (`LICENSE-MIT`), gix-index 0.57.0 (`LICENSE-MIT`), gix-lock 26.0.0 (`LICENSE-MIT`), gix-macros 0.2.0 (`LICENSE-MIT`), gix-object 0.66.0 (`LICENSE-MIT`), gix-odb 0.86.0 (`LICENSE-MIT`), gix-pack 0.76.0 (`LICENSE-MIT`), gix-packetline 0.24.0 (`LICENSE-MIT`), gix-parallel 0.50.0 (`LICENSE-MIT`), gix-path 0.14.0 (`LICENSE-MIT`), gix-protocol 0.67.0 (`LICENSE-MIT`), gix-quote 0.10.0 (`LICENSE-MIT`), gix-ref 0.69.0 (`LICENSE-MIT`), gix-refspec 0.47.0 (`LICENSE-MIT`), gix-revision 0.51.0 (`LICENSE-MIT`), gix-revwalk 0.37.0 (`LICENSE-MIT`), gix-sec 0.16.0 (`LICENSE-MIT`), gix-shallow 0.15.0 (`LICENSE-MIT`), gix-tempfile 26.0.0 (`LICENSE-MIT`), gix-trace 0.3.0 (`LICENSE-MIT`), gix-transport 0.61.0 (`LICENSE-MIT`), gix-traverse 0.63.0 (`LICENSE-MIT`), gix-url 0.40.0 (`LICENSE-MIT`), gix-utils 0.5.1 (`LICENSE-MIT`), gix-validate 0.13.0 (`LICENSE-MIT`), gix-zlib 0.3.0 (`LICENSE-MIT`).
+gix 0.90.0 (`LICENSE-MIT`), gix-actor 0.44.1 (`LICENSE-MIT`), gix-bitmap 0.6.1 (`LICENSE-MIT`), gix-chunk 0.10.1 (`LICENSE-MIT`), gix-command 0.12.1 (`LICENSE-MIT`), gix-commitgraph 0.42.0 (`LICENSE-MIT`), gix-config 0.62.2 (`LICENSE-MIT`), gix-config-value 0.21.1 (`LICENSE-MIT`), gix-date 0.18.1 (`LICENSE-MIT`), gix-diff 0.70.0 (`LICENSE-MIT`), gix-discover 0.57.1 (`LICENSE-MIT`), gix-error 0.5.2 (`LICENSE-MIT`), gix-fs 0.24.1 (`LICENSE-MIT`), gix-glob 0.29.1 (`LICENSE-MIT`), gix-hash 0.28.1 (`LICENSE-MIT`), gix-hashtable 0.18.0 (`LICENSE-MIT`), gix-index 0.58.0 (`LICENSE-MIT`), gix-lock 26.0.0 (`LICENSE-MIT`), gix-macros 0.2.0 (`LICENSE-MIT`), gix-object 0.66.1 (`LICENSE-MIT`), gix-odb 0.87.0 (`LICENSE-MIT`), gix-pack 0.77.0 (`LICENSE-MIT`), gix-packetline 0.24.1 (`LICENSE-MIT`), gix-parallel 0.50.1 (`LICENSE-MIT`), gix-path 0.14.1 (`LICENSE-MIT`), gix-protocol 0.68.0 (`LICENSE-MIT`), gix-quote 0.10.1 (`LICENSE-MIT`), gix-ref 0.69.1 (`LICENSE-MIT`), gix-refspec 0.47.1 (`LICENSE-MIT`), gix-revision 0.52.0 (`LICENSE-MIT`), gix-revwalk 0.38.0 (`LICENSE-MIT`), gix-sec 0.16.1 (`LICENSE-MIT`), gix-shallow 0.15.1 (`LICENSE-MIT`), gix-tempfile 26.0.0 (`LICENSE-MIT`), gix-trace 0.3.1 (`LICENSE-MIT`), gix-transport 0.62.0 (`LICENSE-MIT`), gix-traverse 0.64.0 (`LICENSE-MIT`), gix-url 0.40.1 (`LICENSE-MIT`), gix-utils 0.5.2 (`LICENSE-MIT`), gix-validate 0.13.1 (`LICENSE-MIT`), gix-zlib 0.4.0 (`LICENSE-MIT`).
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -5290,7 +5290,7 @@ SOFTWARE.
 
 ### Text 73
 
-gix-trace 0.3.0 (`LICENSE-MIT-tracing-forest`).
+gix-trace 0.3.1 (`LICENSE-MIT-tracing-forest`).
 
 ```text
 The `gix-trace::forest` module is derived from tracing-forest 0.2.0

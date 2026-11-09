@@ -43,7 +43,7 @@ clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 dirs = "6"
 ed25519-dalek = { version = "2.2", features = ["pkcs8", "pem", "zeroize"] }
 getrandom = "0.3"
-gix = { version = "0.89", default-features = false, features = ["max-performance-safe", "parallel", "revision", "sha1", "sha256"] }
+gix = { version = "0.90", default-features = false, features = ["max-performance", "parallel", "revision", "sha1", "sha256"] }
 hex = "0.4.3"
 jiff = { version = "0.2.24", default-features = false, features = ["std"] }
 ignore = "0.4.23"
