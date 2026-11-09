@@ -6,3 +6,5 @@
 *.profdata
 /mutants.out*
 .DS_Store
+# Python writes these beside the reference scripts in tools/ when a test runs them.
+__pycache__/
