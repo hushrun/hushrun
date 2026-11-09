@@ -1,0 +1,9 @@
+# actionlint's configuration (the actionlint job in ci.yml).
+paths:
+  # dist generates release.yml from dist-workspace.toml, and it is never edited by hand: the
+  # shellcheck info and style findings in dist's own scripts are left to dist. Every other finding
+  # in it, and everything in the other workflows, still fails the job.
+  .github/workflows/release.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2086:info:'
+      - 'shellcheck reported issue in this script: SC2129:style:'

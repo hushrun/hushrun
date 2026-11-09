@@ -1,0 +1,26 @@
+# Steps dist puts in release.yml's build jobs, before each build (github-build-setup in
+# dist-workspace.toml). Run `dist generate` after changing them.
+#
+# ring compiles its C for aarch64-pc-windows-msvc with clang only. Visual Studio supplies one,
+# which finds Visual Studio's headers once it is on PATH (ring's BUILDING.md).
+- name: Put Visual Studio's clang on PATH, for ring
+  if: ${{ contains(join(matrix.targets, ' '), 'aarch64-pc-windows-msvc') }}
+  shell: pwsh
+  run: |
+    $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+    $llvm = Join-Path $vs 'VC\Tools\Llvm\x64\bin'
+    if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { throw "no clang.exe in $llvm" }
+    Add-Content -Path $env:GITHUB_PATH -Value $llvm
+    & (Join-Path $llvm 'clang.exe') --version
+
+# dist adds each target with rustup from the repository's root, where rust-toolchain.toml pins the
+# toolchain cargo builds with. This puts the target on that toolchain explicitly, so a runner whose
+# default toolchain differs still has it: otherwise "can't find crate for `core`".
+- name: Add the target to the pinned toolchain
+  shell: bash
+  env:
+    TARGETS: ${{ join(matrix.targets, ' ') }}
+  run: |
+    rustup toolchain install
+    read -ra targets <<<"$TARGETS"
+    rustup target add "${targets[@]}"

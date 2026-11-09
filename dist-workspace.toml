@@ -21,25 +21,23 @@ install-updater = false
 checksum = "sha256"
 # Pull requests only check that the release plan still builds.
 pr-run-mode = "plan"
-# The source is private, and the releases are public (ADR 0034): each GitHub Release goes to
-# hushrun/hushrun, created with the secret GH_RELEASES_TOKEN, a token that can write that
-# repository's contents. The installers download from `repository` in cli/Cargo.toml, which names it.
-github-releases-repo = "hushrun/hushrun"
+# Each GitHub Release goes to this repository, created with GitHub's token for the run. The
+# installers download from `repository` in Cargo.toml, which names it.
 # Each archive holds the binary, the public README, the license and the third-party notices, and
 # not this repository's own README and changelog.
 auto-includes = false
 include = ["README.md", "LICENSE.md", "THIRD-PARTY-NOTICES.md"]
-# GitHub artifact attestations need a public source repository (or GitHub Enterprise Cloud), and
-# this one stays private: checksums only.
+# Checksums only, and no source.tar.gz, for now: these settings date from when the source was
+# private. Releases built here can turn on GitHub artifact attestations and the source archive,
+# one change at a time, once a release built in this repository has gone out (ADR 0064).
 github-attestations = false
-# The source stays private: a release carries no source.tar.gz of this repository, which dist
-# makes by default.
 source-tarball = false
 # Steps before each build: .github/dist-build-setup.yml (the path is from .github/workflows).
+github-build-setup = "../dist-build-setup.yml"
 
 # aarch64-pc-windows-msvc builds on GitHub's Windows runner with Visual Studio, as ring documents.
 # dist's default, cargo-xwin on Linux, gives ring's clang clang-cl's flags, and the build fails.
-# (A release from the owner's Mac uses cargo-xwin with a wrapper for that: docs/deploy.md.)
+# (A release built on a maintainer's Mac uses cargo-xwin with a wrapper for that.)
 # aarch64-apple-darwin leaves dist's default, macos-14: GitHub retired that image on 2026-11-02.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"

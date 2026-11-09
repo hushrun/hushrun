@@ -1,5 +1,20 @@
 name: CI
 
+# The CLI's checks, on every push to main and every pull request. This repository is public, so its
+# Actions minutes cost nothing, macOS's included: the `macos` job runs clippy, the tests, the Python
+# references and the npm packages there too. release.yml builds the Windows binaries when a release
+# is made.
+#
+# `hushrun run NAME -- COMMAND` skips a check this exact code already passed (hushrun.yaml). These
+# stay outside hushrun, since their result can change while the code doesn't: cargo deny (its
+# advisories change by the day), public-good Sigstore (a service and its trust root), fuzzing
+# (random inputs) and the secret scanners (their rules change). Each job that runs through hushrun
+# has one variant, since a job with several never skips (C-14), and a check counts only from Linux
+# on amd64 unless hushrun.yaml says otherwise (C-25): the macOS job runs everything, every time.
+#
+# Pull requests run with `pull_request`, never `pull_request_target`: a fork's code gets a read-only
+# token and no secrets. This repository has no secrets.
+
 on:
   push:
     branches: [main]
@@ -7,25 +22,410 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
 jobs:
-  check:
-    name: fmt, clippy, test
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      # Golden vectors pin exact bytes: a checkout must never convert line endings.
-      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      - run: hushrun run fmt -- cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
-      - run: hushrun run fmt -- cargo fmt --all --check
       - run: hushrun run clippy -- cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: hushrun run test -- cargo test --workspace --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Golden vectors pin exact bytes: a checkout must never convert line endings (M1).
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
+      - run: hushrun run doctest -- cargo test --workspace --doc --locked
+
+  # The independent Python references agree with the golden vectors (D-1 … D-8), the
+  # Ed25519 and DSSE test vectors (E-1, E-2) and the report vectors (C-27) on every OS.
+  reference:
+    name: refdigest.py (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
+      - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
+      - run: python3 -I tools/refdsse.py selftest
+      - run: python3 -I tools/reftlog.py selftest
+      - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
+      - run: python3 -I tools/refreports.py check testdata/reports/vectors.json
+
+  # The npm packages (npm/): the platform mapping, bin/hushrun.js and the build.
+  npm:
+    name: npm packages (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node --test npm/test/*.test.mjs
+        shell: bash
+
+  # The same checks on macOS, every time: a run there records nothing (hushrun.yaml's counts_from),
+  # so nothing on Linux skips on it, and the other way round.
+  macos:
+    name: clippy, test, references, npm (macOS)
+    runs-on: macos-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - run: cargo test --workspace --doc --locked
+      - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
+      - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
+      - run: python3 -I tools/refdsse.py selftest
+      - run: python3 -I tools/reftlog.py selftest
+      - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
+      - run: python3 -I tools/refreports.py check testdata/reports/vectors.json
+      - run: node --test npm/test/*.test.mjs
+
+  # Envelope, statement and policy parsing under libFuzzer, 60 s each (M2), M10's
+  # certificates, timestamps, TUF metadata and trust roots, and test and coverage reports (C-27).
+  # The fuzzing runs on every push, since its inputs are random. One job builds the five targets
+  # once and fuzzes them in turn, each with the runner to itself, as when each had its own job.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    env:
+      # rust-cache runs cargo in fuzz/, where rust-toolchain.toml would make rustup install the
+      # pinned stable, which nothing here uses.
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
+      - id: cargo-fuzz
+        run: echo "version=$(cargo fuzz --version | tr ' ' -)" >> "$GITHUB_OUTPUT"
+      # Caches the third-party crates' sanitizer build. rust-cache's key holds every installed
+      # toolchain's version (so this nightly's) and fuzz/Cargo.lock, and here cargo-fuzz's version,
+      # which sets the instrumentation flags. cargo rebuilds anything whose compiler, flags or
+      # sources differ anyway, so the CLI's own crates build every time. Only main saves it: pull
+      # requests' copies would crowd the repository's 10 GB of cache.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          key: ${{ steps.cargo-fuzz.outputs.version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Seed the corpus
+        run: |
+          mkdir -p fuzz/corpus/policy
+          for f in testdata/policies/*.yaml; do cp "$f" "fuzz/corpus/policy/policy-$(basename "$f")"; done
+          mkdir -p fuzz/corpus/envelope fuzz/corpus/statement fuzz/corpus/sigstore
+          cp testdata/sigstore/*.der crates/hushrun-attest/sigstore/*.json fuzz/corpus/sigstore/
+          mkdir -p fuzz/corpus/reports
+          for f in testdata/reports/*/*; do cp "$f" "fuzz/corpus/reports/$(basename "$(dirname "$f")")-$(basename "$f")"; done
+      # cargo-fuzz builds for the target it was itself built for unless given one, and the one
+      # install-action installs is a musl build: musl links libc statically, which the sanitizer
+      # can't work with. The fuzz targets build for the runner's own target.
+      - id: build
+        name: Build the fuzz targets
+        run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          echo "FUZZ_HOST=$host" >> "$GITHUB_ENV"
+          cargo +nightly fuzz build --target "$host"
+      # Every target runs even after one fails, so a push reports all of them.
+      - name: Fuzz envelope
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" envelope fuzz/corpus/envelope -- -max_total_time=60
+      - name: Fuzz statement
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" statement fuzz/corpus/statement -- -max_total_time=60
+      - name: Fuzz policy
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" policy fuzz/corpus/policy -- -max_total_time=60
+      - name: Fuzz sigstore
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" sigstore fuzz/corpus/sigstore -- -max_total_time=60
+      - name: Fuzz reports
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" reports fuzz/corpus/reports -- -max_total_time=60
+      # cargo-fuzz writes each target's crashes under its own name in fuzz/artifacts.
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  # OCI copies (A-1 … A-4) between two registry implementations, CNCF Distribution and zot,
+  # pinned by digest (M5): Distribution is the source, zot the destination.
+  registries:
+    name: OCI conformance (Distribution, zot)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Start the registries
+        run: |
+          docker run -d --name distribution -p 5001:5000 \
+            registry:3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+          docker run -d --name zot -p 5002:5000 \
+            ghcr.io/project-zot/zot-linux-amd64:v2.1.22@sha256:46f688dc26315a35a247e1784368829e66a67bf91de94c7d8d1645044fac1d5b
+          for port in 5001 5002; do
+            timeout 60 sh -c "until curl -fs http://127.0.0.1:$port/v2/ >/dev/null; do sleep 1; done"
+          done
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      # HUSHRUN_IT_REGISTRIES is part of each command, so of what a pass is for: without it the
+      # tests find nothing to test and pass, and such a pass must never skip these.
+      - run: hushrun run registries -- env "HUSHRUN_IT_REGISTRIES=127.0.0.1:5001 127.0.0.1:5002" cargo test --locked -p hushrun-artifact --features it --test registries -- --nocapture
+      - run: hushrun run artifact-registries -- env "HUSHRUN_IT_REGISTRIES=127.0.0.1:5001 127.0.0.1:5002" cargo test --locked -p hushrun --features it --test artifact_registries -- --nocapture
+      - if: failure()
+        run: docker logs distribution; docker logs zot
+
+  # Public-good Sigstore (M10): a timestamp from its timestamp authority, a TUF refresh of its
+  # trust root from the vendored one, and a Fulcio certificate for this job's own ID token
+  # (skipped where GitHub gives no ID token, such as pull requests from forks).
+  sigstore:
+    name: public-good Sigstore
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # hushrun: leave, public-good Sigstore changes while the code doesn't
+      - run: cargo test --locked -p hushrun-attest --features it --test sigstore -- --nocapture
+
+  # Isolated runs with a real container runtime (E-12, M8): no network by default, exactly the
+  # digested files, only the check's variables, and the export removed afterwards.
+  isolated:
+    name: isolated runs (Docker)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      - run: hushrun run isolated -- cargo test --locked -p hushrun --features it --test isolated_docker -- --nocapture
+
+  # The recipes (§15), the reusable workflow, what `hushrun adopt` writes (its golden files) and
+  # these workflows pass actionlint, with shellcheck on run scripts (M6, M14), and GitLab's
+  # install script and the maintainers' scripts pass shellcheck (M9).
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: '"$(go env GOPATH)/bin/actionlint" recipes/github/*.yml .github/workflows/*.yml testdata/adopt/*/.github/workflows/*.yml'
+      - run: shellcheck -s sh recipes/gitlab/install-hushrun.sh scripts/verify.sh scripts/hooks/pre-push
+      - run: shellcheck scripts/release.sh
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      # RUSTDOCFLAGS is part of the command, so of what a pass is for: rustdoc without -D warnings
+      # passes on a broken link, and such a pass must never skip this one.
+      - run: hushrun run rustdoc -- env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --locked
+
+  trace:
+    name: traceability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run trace -- cargo xtask trace
+
+  # THIRD-PARTY-NOTICES.md names every crate the release binaries are built with, for every
+  # release target, with its license texts: it must be what Cargo.lock gives.
+  notices:
+    name: third-party notices
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      - run: hushrun run notices -- cargo xtask notices --check
+
+  # Nothing that looks like a secret, a dead link or an oversized file (scripts/check-tree.py), and
+  # nothing gitleaks or trufflehog find beyond the reviewed test fixtures (scripts/verify.sh). Every
+  # push here is public at once, so these run on each one.
+  tree:
+    name: secrets and links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # What was pushed, without .git: the scanners' baseline is relative to the tree's root.
+      - run: mkdir "$RUNNER_TEMP/tree" && git archive HEAD | tar -x -C "$RUNNER_TEMP/tree"
+      - run: python3 -I scripts/check-tree.py "$RUNNER_TEMP/tree"
+      # Each scanner's release archive, pinned by its SHA-256.
+      - name: Install gitleaks and trufflehog
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          curl -fsSLO https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.8/trufflehog_3.99.8_linux_amd64.tar.gz
+          sha256sum -c - <<'SUMS'
+          551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz
+          7c3b02f160f28929a467e29e20fba98746e0729f6e37c3c25761e4f8789abe08  trufflehog_3.99.8_linux_amd64.tar.gz
+          SUMS
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz -C "$RUNNER_TEMP/bin" gitleaks
+          tar -xzf trufflehog_3.99.8_linux_amd64.tar.gz -C "$RUNNER_TEMP/bin" trufflehog
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: sh scripts/verify.sh "$RUNNER_TEMP/tree"
+
+  # The Linux release targets build on every change as release.yml (dist) builds them: natively,
+  # with musl-tools, aarch64 on an arm64 runner. Each binary runs. release.yml builds the macOS and
+  # Windows ones.
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, image: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --locked --release --package hushrun --target ${{ matrix.target }}
+      - shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/hushrun
+          "$bin" --version
+          ls -l "$bin"*
+      # The container image (§14, M9) with this binary: it runs, and reads a checkout that
+      # another user owns, as a GitLab runner's can be.
+      - if: matrix.image
+        run: |
+          set -euo pipefail
+          mkdir -p target/image/dist/amd64
+          cp target/${{ matrix.target }}/release/hushrun target/image/dist/amd64/
+          cp LICENSE.md THIRD-PARTY-NOTICES.md target/image/
+          docker build --platform linux/amd64 -f deploy/image/Dockerfile -t hushrun:ci target/image
+          docker run --rm hushrun:ci hushrun --version
+          docker run --rm hushrun:ci test -s /usr/share/licenses/hushrun/THIRD-PARTY-NOTICES.md
+          docker run --rm hushrun:ci sh -euc '
+            mkdir /builds && cd /builds && git init -q && echo hi > a.txt
+            git -c user.name=ci -c user.email=ci@example.invalid add -A
+            git -c user.name=ci -c user.email=ci@example.invalid commit -qm init
+            chown -R 1000:1000 /builds
+            hushrun digest --worktree && git ls-files'
