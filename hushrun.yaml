@@ -7,3 +7,25 @@ backend: https://api.hushrun.com/o/hushrun
 transparency_log:   # the server's log key
   origin: api.hushrun.com/l/hushrun/hushrun
   key: "ed25519:lvZaTgsagmTcyMB8+XsOts2amd15aWRgkjoCslO9bIM="
+
+# A check counts only from a run on CI's system, Linux on amd64, unless `checks` below says
+# otherwise. A run on a Mac still runs and keeps its exit code, and records nothing, so it never
+# skips a test or clippy in CI's Linux jobs.
+counts_from:
+  os: linux
+  arch: amd64
+
+# Checks a Mac's pass can stand in for, since they read the files and nothing of the system.
+checks:
+  fmt:
+    counts_from: anywhere
+  # The code is the same on macOS and Linux but for one private function, whose docs link nothing,
+  # so rustdoc reads the same docs on both.
+  rustdoc:
+    counts_from: anywhere
+  # The spec's rules against the tests, and the notices against Cargo.lock for every release
+  # target.
+  trace:
+    counts_from: anywhere
+  notices:
+    counts_from: anywhere

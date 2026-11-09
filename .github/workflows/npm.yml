@@ -1,0 +1,117 @@
+name: npm
+
+# After the Release workflow publishes a release: hushrun and its six platform packages on npm
+# (npm/), built from the release's archives. Run it by hand to publish a release's packages again;
+# versions npm already has are left as they are. By hand, `ref` names the commit whose npm/ builds
+# them, for a release whose packaging changed after its tag.
+#
+# There is no token: each package on npm trusts this repository, this file and the environment
+# `release` by name (trusted publishing), so renaming any of them stops publishing until each
+# package's trusted publisher is made again. npm records provenance for each version, since this
+# repository is public. The environment waits for a maintainer's approval before anything is
+# published.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release, such as 0.9.0
+        required: true
+      ref:
+        description: The commit to build the packages with (its npm/ and license files); the release's tag when empty
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Where release.yml publishes releases: this repository (github-releases-repo in
+  # dist-workspace.toml).
+  RELEASES: ${{ github.repository }}
+
+concurrency:
+  # One group a release, by its tag: a run by hand names 0.9.0, a release's run v0.9.0.
+  group: npm-${{ inputs.version && format('v{0}', inputs.version) || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Release also runs on pull requests, to plan; only a tag's successful run published one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    # npm's trusted publishers name it, and a maintainer approves each run of it.
+    environment: release
+    permissions:
+      contents: read
+      # What npm checks instead of a token. Every step here could ask for it, so this job installs
+      # nothing: the build uses Node's own modules and the release's archives.
+      id-token: write
+    steps:
+      - id: version
+        env:
+          INPUT: ${{ inputs.version }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version="${INPUT:-${TAG#v}}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=npm::not a release version: '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || format('v{0}', steps.version.outputs.version) }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Trusted publishing needs npm 11.5.1, which Node 24 comes with and Node 22 doesn't. No
+          # registry-url: it is npm's default, and it would add a line for a token there isn't.
+          node-version: 24
+      - run: node --test npm/test/*.test.mjs
+      # A version npm has can't be published again: never one whose license lacks its licensor.
+      - name: The license names its licensor
+        run: |
+          if grep -qF '[LICENSOR]' LICENSE.md; then
+            echo "::error file=LICENSE.md::LICENSE.md still says [LICENSOR]: name the licensor before publishing"
+            exit 1
+          fi
+      - name: Take the release's archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$VERSION" --repo "$RELEASES" --dir release \
+            --pattern 'hushrun-*.tar.xz' --pattern 'hushrun-*.tar.xz.sha256' \
+            --pattern 'hushrun-*.zip' --pattern 'hushrun-*.zip.sha256'
+      # Checks each archive against its checksum; lists the tarballs, platform packages first.
+      - run: node npm/build.mjs --from release --out npm/dist/release > tarballs.txt
+      - name: Publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          if [[ "${VERSION%%+*}" == *-* ]]; then
+            tag=next
+          fi
+          mapfile -t tarballs < tarballs.txt
+          for tarball in "${tarballs[@]}"; do
+            read -r name version < <(tar -xzOf "$tarball" package/package.json | jq -r '"\(.name) \(.version)"')
+            if [ "$version" != "$VERSION" ]; then
+              echo "::error title=npm::$tarball is $name@$version, not version $VERSION"
+              exit 1
+            fi
+            if [ "$(npm view "$name@$version" version 2>/dev/null || true)" = "$version" ]; then
+              echo "$name@$version is on npm already"
+              continue
+            fi
+            # The platform packages are scoped, and a scoped package is private unless published public.
+            # Verbose: npm says why it refused the workflow's identity in no other log, and the
+            # error itself only says that nobody is logged in.
+            npm publish "$tarball" --tag "$tag" --access public --loglevel verbose < /dev/null
+            echo "Published \`$name@$version\` ($tag)" >> "$GITHUB_STEP_SUMMARY"
+          done

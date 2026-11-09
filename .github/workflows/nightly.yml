@@ -1,0 +1,177 @@
+name: Nightly
+
+on:
+  schedule:
+    # Every night: this repository is public, so its Actions minutes cost nothing.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Longer fuzzing than CI's 60 s per target. Its build isn't cached as CI's is: each run gets a
+  # newer nightly, which no saved build matches.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [envelope, statement, policy, reports]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
+      - name: Seed the corpus
+        run: |
+          mkdir -p fuzz/corpus/policy fuzz/corpus/envelope fuzz/corpus/statement
+          for f in testdata/policies/*.yaml; do cp "$f" "fuzz/corpus/policy/policy-$(basename "$f")"; done
+          mkdir -p fuzz/corpus/reports
+          for f in testdata/reports/*/*; do cp "$f" "fuzz/corpus/reports/$(basename "$(dirname "$f")")-$(basename "$f")"; done
+      # cargo-fuzz builds for the target it was itself built for unless given one, and the one
+      # install-action installs is a musl build: musl links libc statically, which the sanitizer
+      # can't work with. The fuzz targets build for the runner's own target.
+      - run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz run --target "$host" ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- -max_total_time=900
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  # init on the survey's 100 repositories (tools/corpus/README.md): one outcome per test job,
+  # the assertions A1 to A10, and the delta against tools/corpus/baseline.json. It needs the
+  # network and takes minutes, so it runs here and by hand, never on every pull request. The
+  # checkouts are pinned by corpus.json, so they are cached on its hash.
+  corpus:
+    name: corpus (100 repositories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/corpus/repos
+          key: corpus-${{ hashFiles('tools/corpus/corpus.json') }}
+      - run: cargo xtask corpus
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-scoreboard
+          path: |
+            target/corpus/scoreboard.md
+            target/corpus/scoreboard.json
+
+  # The planner invariants I-1 … I-8 at the M3 acceptance count.
+  properties:
+    name: properties (10,000 cases)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --release --locked -p hushrun-testkit --test properties
+        env:
+          PROPTEST_CASES: "10000"
+
+  # Every viable mutant of the planner is killed (M3); cargo mutants exits non-zero on a
+  # survivor.
+  mutants:
+    name: mutants (planner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-mutants
+      - run: >-
+          cargo mutants -p hushrun-core -f 'crates/hushrun-core/src/plan/*.rs'
+          --test-package hushrun-core,hushrun-testkit --timeout 300 -j 2 --output target
+        env:
+          PROPTEST_CASES: "256"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants
+          path: target/mutants.out
+
+  # A-2: memory stays bounded while copying a 2 GB layer (budget: 100 MB, plan §12.5).
+  large-copy:
+    name: OCI copy of a 2 GB layer
+    runs-on: ubuntu-latest
+    env:
+      HUSHRUN_IT_REGISTRIES: 127.0.0.1:5001 127.0.0.1:5002
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Start two registries
+        run: |
+          for port in 5001 5002; do
+            docker run -d -p "$port:5000" \
+              registry:3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+            timeout 60 sh -c "until curl -fs http://127.0.0.1:$port/v2/ >/dev/null; do sleep 1; done"
+          done
+      - run: cargo build --release --locked -p hushrun
+      - name: Seed a 2 GB layer
+        run: |
+          cargo test --release --locked -p hushrun-artifact --features it --test registries \
+            -- --ignored seed_a_large_layer --nocapture | tee seed.txt
+          echo "SOURCE=$(sed -n 's/^SEEDED //p' seed.txt)" >> "$GITHUB_ENV"
+      - name: Copy it with bounded memory
+        run: |
+          /usr/bin/time -v target/release/hushrun artifact copy "$SOURCE" 127.0.0.1:5002/hushrun-it/large:v1 \
+            --insecure-registry 127.0.0.1:5001 --insecure-registry 127.0.0.1:5002 2> time.txt
+          cat time.txt
+          rss_kib=$(awk -F: '/Maximum resident set size/ {gsub(/ /, "", $2); print $2}' time.txt)
+          echo "peak RSS: $((rss_kib / 1024)) MiB"
+          test "$rss_kib" -lt 102400
+
+  # A cross-project copy between two Artifact Registry repositories, and a denied copy (M5).
+  # Repository variables: HUSHRUN_IT_AR_SOURCE (an image pinned by digest),
+  # HUSHRUN_IT_AR_DESTINATION (a repository the service account can write),
+  # HUSHRUN_IT_AR_DENIED (one it can't), HUSHRUN_IT_GCP_WIF_PROVIDER and
+  # HUSHRUN_IT_GCP_SERVICE_ACCOUNT.
+  artifact-registry:
+    name: OCI copy across Artifact Registry projects
+    if: vars.HUSHRUN_IT_AR_SOURCE != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.HUSHRUN_IT_GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.HUSHRUN_IT_GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+      - name: Docker credentials for Artifact Registry
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+          SOURCE: ${{ vars.HUSHRUN_IT_AR_SOURCE }}
+        run: echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://${SOURCE%%/*}"
+      - run: cargo build --release --locked -p hushrun
+      - name: Copy across projects
+        env:
+          SOURCE: ${{ vars.HUSHRUN_IT_AR_SOURCE }}
+          DESTINATION: ${{ vars.HUSHRUN_IT_AR_DESTINATION }}
+        run: target/release/hushrun artifact copy "$SOURCE" "$DESTINATION:nightly-$GITHUB_RUN_ID"
+      - name: A denied copy exits 7 and names the missing role
+        env:
+          SOURCE: ${{ vars.HUSHRUN_IT_AR_SOURCE }}
+          DENIED: ${{ vars.HUSHRUN_IT_AR_DENIED }}
+        run: |
+          set +e
+          target/release/hushrun artifact copy "$SOURCE" "$DENIED:nightly" 2> denied.txt
+          code=$?
+          cat denied.txt
+          test "$code" -eq 7 && grep -q "roles/artifactregistry.writer" denied.txt
+

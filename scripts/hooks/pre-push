@@ -1,0 +1,41 @@
+#!/bin/sh
+# pre-push: what a maintainer's push may not carry into this public repository (ADR 0064).
+#
+# For each local branch with commits that origin doesn't have, it exports the branch's tree with
+# git archive and runs scripts/check-tree.py on it, and on those commits' messages and emails.
+# With the maintainers' private denylist it checks that too: HUSHRUN_PUBLIC_DENYLIST, or
+# `git config hushrun.denylist`, names the file, which lives outside this repository.
+#
+# It reads no stdin, so another pre-push hook can run after it. Install it from the hook git runs,
+# before anything that reads stdin:
+#
+#   sh scripts/hooks/pre-push || exit 1
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+deny=${HUSHRUN_PUBLIC_DENYLIST:-$(git config --get hushrun.denylist || true)}
+private=""
+if [ -n "$deny" ]; then
+  HUSHRUN_PUBLIC_DENYLIST=$deny
+  export HUSHRUN_PUBLIC_DENYLIST
+  private=--private
+else
+  echo "pre-push: no denylist (HUSHRUN_PUBLIC_DENYLIST or git config hushrun.denylist): public checks only" >&2
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+status=0
+for branch in $(git for-each-ref --format='%(refname:short)' refs/heads/); do
+  [ -n "$(git rev-list -n 1 "$branch" --not --remotes=origin)" ] || continue
+  tree="$work/$(printf '%s' "$branch" | tr '/' '_')"
+  mkdir -p "$tree"
+  git archive "$branch" | tar -x -C "$tree"
+  python3 -I "$root/scripts/check-tree.py" $private "$tree" >/dev/null || status=1
+  python3 -I "$root/scripts/check-tree.py" $private --log "$branch --not --remotes=origin" >/dev/null || status=1
+done
+if [ "$status" != 0 ]; then
+  echo "pre-push: refused: fix the findings above, then push again" >&2
+fi
+exit "$status"
