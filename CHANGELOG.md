@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-09
+
 Coding agents learn what is out of date ([ADR 0065](docs/adr/0065-agents-learn-what-is-out-of-date.md)):
 hushrun itself, and the copy of its skill they read.
 
