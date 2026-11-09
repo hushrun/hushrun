@@ -1,0 +1,11 @@
+SF:src/a.py
+DA:1,1
+DA:2,0
+DA:2,5
+DA:3,0
+BRDA:3,0,0,-
+BRDA:3,0,1,2
+end_of_record
+SF:src/b.py
+DA:1,4
+end_of_record

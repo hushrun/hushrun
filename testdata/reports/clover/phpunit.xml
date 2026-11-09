@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1762164000">
+  <project timestamp="1762164000">
+    <file name="/repo/src/Math.php">
+      <class name="Math" namespace="App">
+        <metrics complexity="2" methods="2" coveredmethods="1" conditionals="0" coveredconditionals="0" statements="4" coveredstatements="3" elements="6" coveredelements="4"/>
+      </class>
+      <line num="5" type="method" name="add" visibility="public" complexity="1" crap="1" count="2"/>
+      <line num="7" type="stmt" count="2"/>
+      <metrics loc="12" ncloc="12" classes="1" methods="2" coveredmethods="1" conditionals="0" coveredconditionals="0" statements="4" coveredstatements="3" elements="6" coveredelements="4"/>
+    </file>
+    <metrics files="1" loc="12" ncloc="12" classes="1" methods="2" coveredmethods="1" conditionals="0" coveredconditionals="0" statements="4" coveredstatements="3" elements="6" coveredelements="4"/>
+  </project>
+</coverage>

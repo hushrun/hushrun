@@ -1,0 +1,14 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: pytest
+      - uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml

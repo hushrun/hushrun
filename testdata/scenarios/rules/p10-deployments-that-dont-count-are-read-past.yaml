@@ -1,0 +1,16 @@
+name: newer deployments that don't count don't hide the one that does -> current
+covers: [P-10, L-8, T-16]
+description: >-
+  The repository is CI-only. Its deployed index's newest entries are a member's, for other
+  content, and don't count; the newest that counts, CI's, runs this digest, so a push of it is
+  current (ADR 0056).
+policy: acme-api.yaml
+ci_only: true
+now: "16:00"
+context: {branch: main, trigger: push}
+deployed:
+  - {digest: other, at: "15:50", by: alice}
+  - {digest: other, at: "15:40", by: alice}
+  - {digest: this, at: "15:00", by: ci}
+expect:
+  mode: current

@@ -1,0 +1,19 @@
+#!/bin/sh
+# A stand-in for pytest in init's fixtures (A9): writes the reports its flags name, and passes.
+junit=""; cov=""
+for arg in "$@"; do
+  case "$arg" in
+    --junitxml=*|--junit-xml=*) junit="${arg#*=}" ;;
+    --cov-report=xml) cov="coverage.xml" ;;
+    --cov-report=xml:*) cov="${arg#--cov-report=xml:}" ;;
+  esac
+done
+if [ -n "$junit" ]; then
+  mkdir -p "$(dirname "$junit")"
+  printf '<testsuite name="pytest" tests="1" failures="0" errors="0" skipped="0" time="0.01"><testcase classname="t" name="test_one" time="0.01"/></testsuite>\n' > "$junit"
+fi
+if [ -n "$cov" ]; then
+  mkdir -p "$(dirname "$cov")"
+  printf '<coverage line-rate="1" branch-rate="1" lines-covered="1" lines-valid="1" branches-covered="0" branches-valid="0"><packages/></coverage>\n' > "$cov"
+fi
+echo "1 passed"

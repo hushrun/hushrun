@@ -1,0 +1,10 @@
+#!/bin/sh
+# A stand-in for dotnet in init's fixtures (A9): passes, and with coverlet's collector, writes its
+# Cobertura file where the collector does, TestResults/<run>/coverage.cobertura.xml. The plan's
+# words lose the quotes around "XPlat Code Coverage", so they are read joined.
+case " $* " in
+  *" --collect"*"Code Coverage"*)
+    mkdir -p TestResults/run
+    printf '<coverage line-rate="0.5" branch-rate="1" lines-covered="1" lines-valid="2" branches-covered="0" branches-valid="0"><packages/></coverage>\n' > TestResults/run/coverage.cobertura.xml ;;
+esac
+echo "Passed!  - Failed: 0, Passed: 1"

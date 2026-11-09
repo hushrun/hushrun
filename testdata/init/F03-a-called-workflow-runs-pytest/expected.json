@@ -1,0 +1,82 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -4,6 +4,9 @@\n \n jobs:\n   test:\n+    permissions:\n+      contents: read\n+      id-token: write\n     uses: ./.github/workflows/test.yml\n     with:\n       python-version: \"3.12\"\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- a/.github/workflows/test.yml\n+++ b/.github/workflows/test.yml\n@@ -8,10 +8,17 @@\n jobs:\n   pytest:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n+    env:\n+      HUSHRUN_WORKFLOW: .github/workflows/test.yml\n+      HUSHRUN_INPUTS: ${{ toJSON(inputs) }}\n     steps:\n       - uses: actions/checkout@v5\n       - uses: actions/setup-python@v6\n         with:\n           python-version: ${{ inputs.python-version }}\n       - run: pip install -e .\n-      - run: python -m pytest tests\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- python -m pytest tests\n",
+      "path": ".github/workflows/test.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [
+        {
+          "file": ".github/workflows/ci.yml",
+          "job": "test"
+        }
+      ],
+      "commands": [
+        {
+          "after": "hushrun run test -- python -m pytest tests",
+          "before": "python -m pytest tests",
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 17,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/test.yml",
+      "job": "pytest",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "env",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

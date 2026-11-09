@@ -1,0 +1,21 @@
+name: "hushrun 0.8 history: an approval is inert -> refresh"
+covers: [P-1]
+description: >-
+  A member approved `sast` for production with hushrun 0.8's `approve`. Approvals went with
+  stages (ADR 0062): the event is history, and sast still needs a check event.
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: approval, stage: production, run: rm1, at: "09:30", by: ana, check: sast, custody: local}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: refresh
+  checks: [sast]
+  requirements: {sast: missing}

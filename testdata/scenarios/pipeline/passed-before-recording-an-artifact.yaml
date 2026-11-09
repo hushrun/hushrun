@@ -1,0 +1,14 @@
+name: "an attempt passed without recording an artifact -> full"
+covers: [P-13, P-15]
+description: "A run from before the repository recorded its image (was ci-promote case 11)"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: passed, run: p1, at: "15:04", by: ci}
+expect:
+  mode: full
+  reason: "no reusable `image` (none was recorded): building and running toolchain (missing), unit (missing)"
+  build: true
+  checks: [toolchain, unit]

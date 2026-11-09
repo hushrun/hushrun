@@ -1,0 +1,23 @@
+# The example of plan §7.1: one scope, and an image deployed from main (ADR 0062: no stages).
+version: 1
+repository: github.com/Acme/api
+repository_url: https://hushrun.example/l/acme/api   # local runs; CI must also set HUSHRUN_REPOSITORY_URL (T-4)
+
+# No `scopes:` block, so there is one scope, "default", with include ["**"].
+
+checks:
+  toolchain:
+    run: .github/scripts/check-toolchain.sh
+    env: [GO_VERSION]
+  unit:
+    run: go test ./...
+    timeout: 20m
+
+artifacts:
+  image:
+    type: oci
+    location: us-central1-docker.pkg.dev/acme-prod/api/go
+
+deploy:
+  branch: main
+  require: [toolchain, unit]

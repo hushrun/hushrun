@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/adopt.v2.schema.json",
+  "title": "hushrun.adopt/v2",
+  "description": "Output of `hushrun adopt --format json` (M14): what it detected, the files it wrote or would write, and the next steps.",
+  "type": "object",
+  "required": ["schema", "repository", "dryRun", "detected", "branch", "ledger", "workflow", "version", "files", "nextSteps"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.adopt/v2"},
+    "repository": {"type": "string"},
+    "dryRun": {"type": "boolean"},
+    "detected": {
+      "type": "object",
+      "required": ["language", "test", "toolchain", "dockerfiles", "workflows"],
+      "additionalProperties": false,
+      "properties": {
+        "language": {"enum": ["go", "rust", "node", "python", "java", null]},
+        "test": {"description": "The unit check's command.", "type": "string"},
+        "toolchain": {"enum": ["go", "node", "python", "java", "none"]},
+        "dockerfiles": {"description": "Directories with a Dockerfile; . is the root.", "type": "array", "items": {"type": "string"}},
+        "workflows": {
+          "description": "Existing workflows that deploy.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "branches", "deploys"],
+            "additionalProperties": false,
+            "properties": {
+              "file": {"type": "string"},
+              "branches": {"type": "array", "items": {"type": "string"}},
+              "deploys": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "branch": {"description": "[ADR 0062] The branch the workflow deploys from.", "type": "string"},
+    "ledger": {"description": "The ledger hushrun.yaml names: under the organization's base (T-4).", "type": ["string", "null"]},
+    "workflow": {"description": "The reusable workflow the workflow calls.", "type": "string"},
+    "version": {"description": "The hushrun release they pin, with --hushrun-version; null when they install the newest release (ADR 0035).", "type": ["string", "null"]},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "status": {"enum": ["written", "unchanged", "kept", "replaced", "would-write", "would-replace"]},
+          "content": {"description": "What it writes, with --dry-run.", "type": "string"}
+        }
+      }
+    },
+    "nextSteps": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/policy-explain.v2.schema.json",
+  "title": "hushrun.policy.explain/v2",
+  "description": "Output of `hushrun policy explain --format json`: the checks hushrun.yaml requires, its `deploy` settings, and, [ADR 0031 amendments 1 and 2] whether the repository's signers answer makes it CI-only (T-16, L-13). [ADR 0062] v2 has no stage: a repository has one pipeline.",
+  "type": "object",
+  "required": ["schema", "deploy", "requirements", "artifacts", "ciOnly"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.policy.explain/v2"},
+    "deploy": {
+      "description": "hushrun.yaml's `deploy`, or null when it has none.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["branch", "lease", "dedupe", "allowForce", "onRepositoryError"],
+          "additionalProperties": false,
+          "properties": {
+            "branch": {"type": ["string", "null"]},
+            "lease": {"type": "string"},
+            "dedupe": {"type": "array", "items": {"type": "string"}},
+            "allowForce": {"type": "boolean"},
+            "onRepositoryError": {"enum": ["fail", "full"]}
+          }
+        }
+      ]
+    },
+    "requirements": {
+      "description": "The checks hushrun.yaml requires: `deploy.require`, else every check with `run`.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["requirement", "definitionDigest", "maxAge", "accepts"],
+        "additionalProperties": false,
+        "properties": {
+          "requirement": {"type": "string"},
+          "definitionDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "maxAge": {"type": ["string", "null"]},
+          "accepts": {
+            "description": "Whose events count for it: `ci` while the repository is CI-only (T-16); `signers`, members' machines, agents and the repository's CI (T-15), otherwise, including when `ciOnly.checked` is false.",
+            "enum": ["ci", "signers"]
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact", "scope", "location"],
+        "additionalProperties": false,
+        "properties": {
+          "artifact": {"type": "string"},
+          "scope": {"type": "string"},
+          "location": {"type": "string"}
+        }
+      }
+    },
+    "ciOnly": {
+      "description": "Whether the repository is CI-only (T-16), as the repository's signers answer says (L-13): asked of the server, or read from `--signers FILE`. `checked` is false when there was no server to ask or it didn't answer; `reason` says why.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["checked", "from", "source", "statementChecked", "now", "since", "periods"],
+          "additionalProperties": false,
+          "properties": {
+            "checked": {"const": true},
+            "from": {"enum": ["server", "file"]},
+            "source": {"type": "string", "description": "The server's URL, or the file's path."},
+            "statementChecked": {"type": "boolean", "description": "Whether the answer's statement was checked against the log key hushrun.yaml pins (T-9); false, with a warning, when it pins none."},
+            "now": {"type": "boolean", "description": "Whether the repository is CI-only now."},
+            "since": {"type": ["string", "null"], "description": "When the current period began, while the repository is CI-only."},
+            "periods": {
+              "description": "Every period the repository was CI-only, oldest first; `until` is absent while it is. An answer that lists periods per stage is read as their union.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["from"],
+                "additionalProperties": false,
+                "properties": {
+                  "from": {"type": "string"},
+                  "until": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["checked", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "checked": {"const": false},
+            "reason": {"type": "string"}
+          }
+        }
+      ]
+    }
+  }
+}

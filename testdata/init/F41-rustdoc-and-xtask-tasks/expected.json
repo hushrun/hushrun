@@ -1,0 +1,133 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -8,17 +8,25 @@\n   docs:\n     name: rustdoc\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     env:\n       RUSTDOCFLAGS: -D warnings\n     steps:\n       - uses: actions/checkout@v5\n-      - run: cargo doc --workspace --no-deps --locked\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run rustdoc -- env 'RUSTDOCFLAGS=-D warnings' cargo doc --workspace --no-deps --locked\n   tasks:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n-      - run: cargo xtask lint\n-      - run: cargo xtask codegen --check\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run lint -- cargo xtask lint\n+      - run: hushrun run codegen -- cargo xtask codegen --check\n       - run: cargo xtask trace\n   package:\n     runs-on: ubuntu-latest\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run rustdoc -- env 'RUSTDOCFLAGS=-D warnings' cargo doc --workspace --no-deps --locked",
+          "before": "cargo doc --workspace --no-deps --locked",
+          "check": "rustdoc",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 15,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "docs",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run lint -- cargo xtask lint",
+          "before": "cargo xtask lint",
+          "check": "lint",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 20,
+          "status": "wrapped",
+          "why": null
+        },
+        {
+          "after": "hushrun run codegen -- cargo xtask codegen --check",
+          "before": "cargo xtask codegen --check",
+          "check": "codegen",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 21,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "tasks",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [
+    {
+      "after": "hushrun run trace -- cargo xtask trace",
+      "before": "cargo xtask trace",
+      "check": "trace",
+      "dir": "",
+      "file": ".github/workflows/ci.yml",
+      "job": "tasks",
+      "line": 22,
+      "setup": "added",
+      "why": "it runs a task of the repository's own (cargo xtask), which can deploy or write reports: wrap it if it only runs checks"
+    },
+    {
+      "after": "hushrun run dist -- cargo xtask dist",
+      "before": "cargo xtask dist",
+      "check": "dist",
+      "dir": "",
+      "file": ".github/workflows/ci.yml",
+      "job": "package",
+      "line": 27,
+      "setup": "none",
+      "why": "it runs a task of the repository's own (cargo xtask), which can deploy or write reports: wrap it if it only runs checks"
+    }
+  ],
+  "tool": "hushrun <version>"
+}

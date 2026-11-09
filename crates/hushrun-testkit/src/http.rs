@@ -1,0 +1,321 @@
+//! A minimal HTTP/1.1 server on the loopback, for tests that need a service to talk to: one
+//! thread per connection and one request per connection (`connection: close`).
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+/// A request, read whole.
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub method: String,
+    /// The path as sent, without the query.
+    pub path: String,
+    /// Query parameters, percent-decoded.
+    pub query: Vec<(String, String)>,
+    /// Headers, with lowercase names.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Request {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn query(&self, name: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// A response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    pub fn new(status: u16) -> Response {
+        Response {
+            status,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    pub fn bytes(status: u16, body: impl Into<Vec<u8>>) -> Response {
+        Response {
+            body: body.into(),
+            ..Response::new(status)
+        }
+        .header("content-type", "application/octet-stream")
+    }
+
+    pub fn json(status: u16, value: &serde_json::Value) -> Response {
+        Response {
+            body: serde_json::to_vec(value).expect("json"),
+            ..Response::new(status)
+        }
+        .header("content-type", "application/json")
+    }
+
+    pub fn header(mut self, name: &str, value: impl Into<String>) -> Response {
+        self.headers.push((name.to_string(), value.into()));
+        self
+    }
+}
+
+/// What the server does with a request.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    Send(Response),
+    /// Answers after a pause.
+    Later(Duration, Response),
+    /// Closes the connection without answering.
+    Close,
+}
+
+/// A running server. Dropping it stops accepting connections.
+pub struct Server {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl Server {
+    /// Listens on a free loopback port and answers each request with `handler`.
+    pub fn start(handler: impl Fn(Request) -> Reply + Send + Sync + 'static) -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local address");
+        let stop = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(handler);
+        let stopping = stop.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stopping.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(stream) = stream else { continue };
+                let handler = handler.clone();
+                std::thread::spawn(move || serve(stream, handler.as_ref()));
+            }
+        });
+        Server { addr, stop }
+    }
+
+    /// `http://127.0.0.1:<port>`.
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake the accept loop so that it sees the flag.
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
+    }
+}
+
+fn serve(stream: TcpStream, handler: &(dyn Fn(Request) -> Reply + Send + Sync)) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let Some(request) = read_request(&stream) else {
+        return;
+    };
+    match handler(request) {
+        Reply::Send(response) => write_response(stream, &response),
+        Reply::Later(pause, response) => {
+            std::thread::sleep(pause);
+            write_response(stream, &response);
+        }
+        Reply::Close => {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+fn read_request(stream: &TcpStream) -> Option<Request> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':')?;
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+    }
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let mut body = Vec::new();
+    if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+        loop {
+            let mut size = String::new();
+            reader.read_line(&mut size).ok()?;
+            let size = usize::from_str_radix(size.trim().split(';').next()?, 16).ok()?;
+            let mut chunk = vec![0; size + 2];
+            reader.read_exact(&mut chunk).ok()?;
+            if size == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..size]);
+        }
+    } else if let Some(length) = header("content-length") {
+        let mut chunk = vec![0; length.parse().ok()?];
+        reader.read_exact(&mut chunk).ok()?;
+        body = chunk;
+    }
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let query = query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(name), decode(value))
+        })
+        .collect();
+    Some(Request {
+        method,
+        path: path.to_string(),
+        query,
+        headers,
+        body,
+    })
+}
+
+fn write_response(mut stream: TcpStream, response: &Response) {
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+        response.status,
+        reason(response.status),
+        response.body.len()
+    );
+    for (name, value) in &response.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(&response.body))
+        .and_then(|()| stream.flush());
+    let _ = stream.shutdown(Shutdown::Write);
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        307 => "Temporary Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Status",
+    }
+}
+
+/// Percent-decoding of a query component (`+` is a space).
+pub(crate) fn decode(text: &str) -> String {
+    let hex = |b: u8| char::from(b).to_digit(16);
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = match bytes.get(i..i + 3) {
+            Some([b'%', high, low]) => hex(*high).zip(hex(*low)).map(|(h, l)| (h * 16 + l) as u8),
+            _ => None,
+        };
+        match (escaped, bytes[i]) {
+            (Some(byte), _) => {
+                out.push(byte);
+                i += 3;
+            }
+            (None, b'+') => {
+                out.push(b' ');
+                i += 1;
+            }
+            (None, byte) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_query_components() {
+        assert_eq!(decode("v1%2Fevents%2F"), "v1/events/");
+        assert_eq!(decode("a+b%20c"), "a b c");
+        assert_eq!(decode("100%"), "100%");
+        assert_eq!(decode("%zz"), "%zz");
+        assert_eq!(decode("%41"), "A");
+    }
+
+    #[test]
+    fn answers_requests() {
+        let server = Server::start(|request| {
+            Reply::Send(Response::json(
+                200,
+                &serde_json::json!({
+                    "method": request.method,
+                    "path": request.path,
+                    "q": request.query("q"),
+                    "body": String::from_utf8_lossy(&request.body),
+                }),
+            ))
+        });
+        let mut stream = TcpStream::connect(server.addr()).unwrap();
+        stream
+            .write_all(b"POST /x?q=a%2Fb HTTP/1.1\r\nhost: h\r\ncontent-length: 3\r\n\r\nabc")
+            .unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert!(
+            answer.ends_with(r#"{"body":"abc","method":"POST","path":"/x","q":"a/b"}"#),
+            "{answer}"
+        );
+    }
+}

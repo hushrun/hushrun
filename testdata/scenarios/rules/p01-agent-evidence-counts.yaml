@@ -1,0 +1,19 @@
+name: "an agent's evidence counts"
+covers: [P-1, T-15]
+description: "An agent's machine (custody isolated) is one of the signers: unit passed in its sandbox, and CI doesn't run it again"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: laptop-1, at: "09:00", by: agent-fleet, check: unit, custody: isolated}
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: promote
+  checks: []
+  requirements: {unit: satisfied, lint: satisfied, e2e: satisfied, sast: satisfied}

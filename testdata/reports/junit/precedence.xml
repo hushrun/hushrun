@@ -1,0 +1,7 @@
+<testsuites time="0.5">
+  <testsuite name="p">
+    <testcase name="skipped then failed"><skipped/><failure/></testcase>
+    <testcase name="errored and skipped"><error/><skipped/></testcase>
+    <testcase name="failed twice"><failure/><failure/></testcase>
+  </testsuite>
+</testsuites>

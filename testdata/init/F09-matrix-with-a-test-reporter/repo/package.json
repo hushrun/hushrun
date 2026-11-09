@@ -1,0 +1,7 @@
+{
+  "name": "shop",
+  "private": true,
+  "scripts": {
+    "test": "vitest run --reporter=junit --outputFile=junit.xml"
+  }
+}

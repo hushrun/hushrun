@@ -1,0 +1,104 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/unit-tests.yml\n+++ b/.github/workflows/unit-tests.yml\n@@ -3,17 +3,27 @@\n jobs:\n   pytest:\n     runs-on: ${{ matrix.platform }}\n+    permissions:\n+      contents: read\n+      id-token: write\n+    env:\n+      HUSHRUN_VARIANT: ${{ toJSON(matrix) }}\n     strategy:\n       matrix:\n         platform: [ubuntu-24.04, macos-14]\n     steps:\n       - uses: actions/checkout@v5\n+      - uses: hushrun/hushrun/action/setup@v<version>\n       - uses: ./.github/actions/run-tests\n \n   minimum-versions:\n     runs-on: ubuntu-24.04\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n+      - uses: hushrun/hushrun/action/setup@v<version>\n       - uses: ./.github/actions/run-tests\n         with:\n           pattern: not slow and not network\n",
+      "path": ".github/workflows/unit-tests.yml"
+    },
+    {
+      "diff": "--- a/.github/actions/run-tests/action.yml\n+++ b/.github/actions/run-tests/action.yml\n@@ -8,5 +8,5 @@\n   using: composite\n   steps:\n     - name: Test\n-      run: pytest -m \"${{ inputs.pattern }}\" pandas\n+      run: hushrun run test -- pytest -m \"${{ inputs.pattern }}\" pandas\n       shell: bash -el {0}\n",
+      "path": ".github/actions/run-tests/action.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "action": ".github/actions/run-tests/action.yml",
+          "after": "hushrun run test -- pytest -m ${{ inputs.pattern }} pandas",
+          "before": "pytest -m ${{ inputs.pattern }} pandas",
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 11,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/unit-tests.yml",
+      "job": "pytest",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "env",
+      "variants": "several"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "action": ".github/actions/run-tests/action.yml",
+          "after": "hushrun run test -- pytest -m ${{ inputs.pattern }} pandas",
+          "before": "pytest -m ${{ inputs.pattern }} pandas",
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 11,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/unit-tests.yml",
+      "job": "minimum-versions",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

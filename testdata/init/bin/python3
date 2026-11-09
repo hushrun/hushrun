@@ -1,0 +1,14 @@
+#!/bin/sh
+# `python -m pytest …` in init's fixtures (A9): the pytest beside it. `python -m unittest …`
+# finds a test, and passes.
+if [ "$1" = -m ] && [ "$2" = pytest ]; then
+  shift 2
+  exec "$(dirname "$0")/pytest" "$@"
+fi
+if [ "$1" = -m ] && [ "$2" = unittest ]; then
+  echo "Ran 1 test in 0.001s"
+  echo "OK"
+  exit 0
+fi
+echo "fixture python: only -m pytest and -m unittest" >&2
+exit 2

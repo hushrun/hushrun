@@ -1,0 +1,53 @@
+# Deploy with hushrun. Copy to .github/workflows/hushrun.yml, or let `hushrun adopt` write it,
+# beside the workflow that deploys today: remove that one once this one deploys. The jobs live in
+# the reusable workflow it calls, pinned by commit: plan, test, deploy (guard, resolve, build and
+# attest, deploy, mark) and the report jobs, so a fix to them reaches this repository as a
+# version bump.
+#
+# Every push to main plans its digest. A digest main already runs is current, with nothing to
+# deploy; one an earlier attempt built and passed deploys that image again, by digest, and runs
+# no check that already has evidence; new content builds once and runs only the checks it lacks.
+#
+# Replace: the commit, the build and deploy commands, and the credentials (here GCP workload
+# identity federation: no keys). Each run installs the newest hushrun release; set `version` to
+# install one release until you change it. Jobs sign keylessly, as the repository's CI: no
+# signing key to keep. Setup: https://hushrun.com/docs/deploy/github.
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: Build and run every check, whatever the evidence
+        type: boolean
+        default: false
+
+# One deploy at a time. GitHub keeps one pending run, the newest, which does the work of those it
+# replaced; `hushrun guard` skips the deploy of a revision main has moved past. Runs started off
+# main get a group of their own.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'deploy' || format('deploy-refused-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write          # workload identity federation, keyless signing, and hushrun's server
+
+jobs:
+  deploy:
+    uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@main   # pin to a release commit
+    with:
+      # version: 0.9.0          # pins hushrun; without it, each run installs the newest release
+      repository-base: ${{ vars.HUSHRUN_REPOSITORY_BASE }}   # from settings, never from a file
+      repository-url: ${{ vars.HUSHRUN_REPOSITORY_URL }}
+      force-full: ${{ inputs.force_full || false }}
+      toolchain: go
+      setup: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      # It builds only when no attempt of this digest that passed left an image to deploy.
+      build: gcloud builds submit --tag "$REF"
+      deploy: gcloud run deploy api --image "$REF" --region us-central1
+      gcp-workload-identity-provider: projects/123456789/locations/global/workloadIdentityPools/github/providers/github
+      gcp-service-account: deployer@my-project.iam.gserviceaccount.com
+      signing: sigstore                      # keylessly, as this repository's CI
+      # deploy-environment: NAME             # a GitHub environment, whose rules guard the deploy job

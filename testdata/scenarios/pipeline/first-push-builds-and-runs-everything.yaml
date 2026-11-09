@@ -1,0 +1,12 @@
+name: "a first push of this digest: nothing recorded -> full"
+covers: [P-1, P-15]
+description: "Nothing ran these files before: build, and run every required check (was ci-promote case 17)"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+expect:
+  mode: full
+  reason: "no reusable `image` (none was recorded): building and running toolchain (missing), unit (missing)"
+  build: true
+  checks: [toolchain, unit]
+  requirements: {toolchain: missing, unit: missing}

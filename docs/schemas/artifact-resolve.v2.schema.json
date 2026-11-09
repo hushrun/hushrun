@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/artifact-resolve.v2.schema.json",
+  "title": "hushrun.artifact.resolve/v2",
+  "description": "Output of `hushrun artifact resolve --format json` (A-1): the reference to deploy for each artifact of the scope, and whether the pipeline builds instead. [ADR 0062] v2 has no stage, and copies nothing: an artifact has one location.",
+  "type": "object",
+  "required": ["schema", "scope", "mode", "build", "tag", "artifacts", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.artifact.resolve/v2"},
+    "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "mode": {"enum": ["promote", "refresh", "full"]},
+    "build": {"type": "boolean"},
+    "tag": {"type": "string", "minLength": 1},
+    "artifacts": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["ref", "digest"],
+        "additionalProperties": false,
+        "properties": {
+          "ref": {"type": "string", "minLength": 1},
+          "digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

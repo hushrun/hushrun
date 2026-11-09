@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/token.v1.schema.json",
+  "title": "hushrun.token/v1",
+  "description": "Output of `hushrun token create|list|revoke --format json` (spec C-17): an org's agent tokens, as its backend answers them (results-v0 §3). `create` adds the token itself, shown once, to the created token's fields; `list` gives `items`; `revoke` gives `revoked`.",
+  "type": "object",
+  "required": ["schema", "org"],
+  "properties": {
+    "schema": {"const": "hushrun.token/v1"},
+    "org": {"type": "string", "minLength": 1},
+    "token": {"description": "create: the agent token, hra_ and 40 base62 characters.", "type": "string", "pattern": "^hra_"},
+    "backend": {"description": "create: the org's URL, where the token records.", "type": "string"},
+    "hushrun_agent": {"description": "create (ADR 0046): the one string a sandbox needs, for HUSHRUN_AGENT: the backend, the token and the key, shown once. This is how a script gets it: stdout is the token alone without --format json.", "type": "string", "pattern": "^hushrun_agent_v1_[A-Za-z0-9_-]+$"},
+    "machine_key": {
+      "description": "create (ADR 0028, amended 2026-10-28): the agent's machine key, made with the token, registered with it and shown once: its PEM for HUSHRUN_MACHINE_KEY, where CI outside GitHub uses it, its public key, and its key id.",
+      "type": "object",
+      "required": ["pem", "public_key", "keyid"],
+      "properties": {"pem": {"type": "string"}, "public_key": {"type": "string", "pattern": "^ecdsa-p256:"}, "keyid": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+    },
+    "machine": {
+      "description": "create: the machine the backend registered with the token (results-v0 §3): the key in machine_key, named agent:<name>.",
+      "type": "object",
+      "required": ["id", "keyid", "name"],
+      "properties": {"id": {"type": "string"}, "keyid": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "name": {"type": "string", "pattern": "^agent:"}}
+    },
+    "items": {"description": "list: the org's agent tokens that aren't revoked, newest first.", "type": "array", "items": {"$ref": "#/$defs/agentToken"}},
+    "revoked": {"description": "revoke: the token revoked.", "$ref": "#/$defs/agentToken"},
+    "id": {"type": "string"},
+    "name": {"type": "string"},
+    "repository": {"type": ["string", "null"]},
+    "prefix": {"type": "string", "pattern": "^hra_"},
+    "results_per_minute": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string"},
+    "created_by": {"type": "string"},
+    "expires_at": {"type": "string"},
+    "last_used_at": {"type": ["string", "null"]}
+  },
+  "$defs": {
+    "agentToken": {
+      "type": "object",
+      "required": ["id", "name", "repository", "prefix", "expires_at"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"description": "The agent: its results record as agent:<name>.", "type": "string"},
+        "repository": {"description": "host/owner/name, or null for the whole org.", "type": ["string", "null"]},
+        "prefix": {"description": "hra_ and 6 characters, to tell tokens apart.", "type": "string", "pattern": "^hra_"},
+        "results_per_minute": {"type": "integer", "minimum": 1},
+        "created_at": {"type": "string"},
+        "created_by": {"type": "string"},
+        "expires_at": {"type": "string"},
+        "last_used_at": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

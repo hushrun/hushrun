@@ -1,0 +1,74 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -9,7 +9,11 @@\n       matrix:\n         os: [ubuntu-latest, macos-latest]\n     runs-on: ${{ matrix.os }}\n+    permissions:\n+      contents: read\n+      id-token: write\n     env: {CGO_ENABLED: \"0\"}\n     steps:\n       - uses: actions/checkout@v5\n-      - run: go test ./...\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- go test ./...\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- go test ./...",
+          "before": "go test ./...",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "job test of .github/workflows/ci.yml has several variants, and its HUSHRUN_VARIANT isn't ${{ toJSON(matrix) }}, so no pass skips it",
+          "ciWhy": "variants",
+          "dir": "",
+          "line": 15,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "several"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "Change by hand: .github/workflows/ci.yml, job test: its env is written on one line: add HUSHRUN_VARIANT: ${{ toJSON(matrix) }} to it"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

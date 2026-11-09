@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./scripts/setup-db.sh
+      - run: ./scripts/test.sh
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./runtest --verbose
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash scripts/ci/test.sh

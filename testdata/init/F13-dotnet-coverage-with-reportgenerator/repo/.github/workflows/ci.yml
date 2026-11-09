@@ -1,0 +1,15 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: dotnet test --collect:"XPlat Code Coverage"
+      - uses: danielpalme/ReportGenerator-GitHub-Action@5
+        with:
+          reports: '**/coverage.cobertura.xml'
+          targetdir: coverage-report

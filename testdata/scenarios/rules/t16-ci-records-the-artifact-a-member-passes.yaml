@@ -1,0 +1,20 @@
+name: an attempt only a member's lifecycle events ended doesn't count while the repository is CI-only -> full
+covers: [P-5, P-13, T-16]
+description: >-
+  CI built the image in run p1, but the attempt's `started` and `passed` were signed by Ana's
+  machine. While CI-only, lifecycle events count only from CI too, so p1 has no attempt and its
+  image isn't reused.
+policy: acme-api.yaml
+ci_only: true
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ana, custody: local}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, run: p1, at: "15:04", by: ana, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}, custody: local}
+expect:
+  mode: full
+  build: true
+  checks: []

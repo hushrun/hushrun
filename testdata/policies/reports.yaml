@@ -1,0 +1,11 @@
+# [ADR 0047] What a check's reports are, and what CI does when a later step reads them (C-26).
+version: 1
+repository: github.com/acme/app
+checks:
+  unit:
+    reports:
+      files: [coverage.xml, "test-results/**/*.xml"]
+      ci: skip
+  lint:
+    reports:
+      ci: run

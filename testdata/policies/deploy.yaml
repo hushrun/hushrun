@@ -1,0 +1,40 @@
+# [ADR 0062] One pipeline with every `deploy` setting: two scopes, an artifact each, a check pinned
+# to an image and platform, a check with no `run` that a security team's workflow attests, a
+# shorter lease, pushes deduped only, and no forcing.
+version: 1
+repository: github.com/acme/shop
+repository_url: https://hushrun.example/l/acme/shop
+scopes:
+  api:
+    include: ["services/api/**", "go.mod", "go.sum"]
+    exclude: ["**/*_test.go"]
+  web:
+    include: ["web/**"]
+digest:
+  exclude: ["**/*.md"]
+checks:
+  unit:
+    run: go test ./...
+    max_age: 7d
+  lint:
+    run: golangci-lint run
+    image: golangci/golangci-lint@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    platform: linux/amd64
+  e2e:
+    run: ./e2e.sh
+  sast: {}              # no `run`: the security team's workflow attests it
+artifacts:
+  api-image:
+    type: oci
+    scope: api
+    location: ghcr.io/acme/api
+  web-image:
+    type: oci
+    scope: web
+    location: ghcr.io/acme/web
+deploy:
+  branch: main
+  require: [unit, lint, e2e, sast]
+  lease: 1h
+  dedupe: [push]
+  allow_force: false

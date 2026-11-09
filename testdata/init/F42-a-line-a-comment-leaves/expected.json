@@ -1,0 +1,134 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -13,11 +13,15 @@\n       - run: cargo test --locked --features it --test sigstore\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - run: cargo deny check # hushrun: leave\n-      - run: cargo test --locked\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- cargo test --locked\n       - run: |\n-          cargo fmt --all --check\n+          hushrun run fmt -- cargo fmt --all --check\n           # hushrun: leave\n           cargo clippy --all-targets -- -D warnings\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "cargo test --locked --features it --test sigstore",
+          "check": "test",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 13,
+          "status": "left",
+          "why": "a comment says to leave it: public-good Sigstore changes while the code doesn't"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "sigstore",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "cargo deny check",
+          "check": null,
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 18,
+          "status": "left",
+          "why": "a comment says to leave it"
+        },
+        {
+          "after": "hushrun run test -- cargo test --locked",
+          "before": "cargo test --locked",
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 19,
+          "status": "wrapped",
+          "why": null
+        },
+        {
+          "after": "hushrun run fmt -- cargo fmt --all --check",
+          "before": "cargo fmt --all --check",
+          "check": "fmt",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 21,
+          "status": "wrapped",
+          "why": null
+        },
+        {
+          "after": null,
+          "before": "cargo clippy --all-targets -- -D warnings",
+          "check": "clippy",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 23,
+          "status": "left",
+          "why": "a comment says to leave it"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

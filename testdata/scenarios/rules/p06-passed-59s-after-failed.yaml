@@ -1,0 +1,19 @@
+name: a passed 59 s after a failed loses -> full
+covers: [P-6, P-13]
+description: >-
+  Within 60 s, signer clock skew could hide the true order, so the failure wins: the attempt
+  failed, and its image isn't reused.
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: failed, run: p1, at: "15:03:00", by: ci, reason: smoke test failed}
+  - {kind: passed, run: p1, at: "15:03:59", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+expect:
+  mode: full
+  build: true
+  checks: []

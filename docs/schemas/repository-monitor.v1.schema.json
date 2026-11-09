@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/repository-monitor.v1.schema.json",
+  "title": "hushrun.repository.monitor/v1",
+  "description": "Output of `hushrun repository monitor --format json` (L-11, M18; L-12, M19): an https ledger's transparency log, replayed and checked against everything the ledger signed and every map it committed to. `ok` is false, and the command exits 5, when a finding of severity `error` shows the ledger contradicting its own log.",
+  "type": "object",
+  "required": ["schema", "ledger", "origin", "checkpoint", "leaves", "checked", "ok", "findings"],
+  "additionalProperties": false,
+  "$defs": {
+    "note": {"type": "string", "minLength": 1},
+    "run": {
+      "type": "object",
+      "required": ["provider", "id", "attempt"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"type": "string"},
+        "id": {"type": "string"},
+        "attempt": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "properties": {
+    "schema": {"const": "hushrun.repository.monitor/v1"},
+    "ledger": {"type": "string"},
+    "origin": {"type": "string", "minLength": 1},
+    "checkpoint": {
+      "description": "The ledger's latest checkpoint, verified with the log key hushrun.yaml names (T-9).",
+      "type": "object",
+      "required": ["size", "root", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "size": {"type": "integer", "minimum": 0},
+        "root": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
+        "note": {"$ref": "#/$defs/note"}
+      }
+    },
+    "leaves": {
+      "type": "object",
+      "required": ["objects", "config", "tombstones"],
+      "additionalProperties": false,
+      "properties": {
+        "objects": {"type": "integer", "minimum": 0},
+        "config": {"type": "integer", "minimum": 0},
+        "tombstones": {"type": "integer", "minimum": 0}
+      }
+    },
+    "checked": {
+      "type": "object",
+      "required": ["startedEvents", "listings", "checkpoints", "deletions"],
+      "additionalProperties": false,
+      "properties": {
+        "startedEvents": {"type": "integer", "minimum": 0},
+        "listings": {"type": "integer", "minimum": 0},
+        "checkpoints": {"type": "integer", "minimum": 0},
+        "deletions": {"type": "integer", "minimum": 0},
+        "maps": {"type": "integer", "minimum": 0, "description": "[M19] Map leaves checked against the map the log's leaves make (L-12)."}
+      }
+    },
+    "ok": {"type": "boolean"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "severity", "message"],
+        "properties": {
+          "kind": {
+            "description": "Errors: omitted_keys (a recorded listing left out keys the log held, or listed keys it didn't), fork (a signed checkpoint or statement whose root isn't the log's at that size), rollback (one beyond the log), inconsistent_leaves and missing_leaves (the leaves don't hash to the latest checkpoint), unsigned_deletion (a tombstone without a GC statement signed by a machine the repository's signers mark `gc`, L-9), overwrite, delete_missing, delete_mismatch, missing_object and wrong_bytes; [M19] map_mismatch (a map leaf whose map doesn't follow from the log, L-12). Warnings: unverifiable_checkpoint, unverifiable_listing, unverified_event, deleted_event; [M19] unmapped_checkpoint (the latest checkpoint doesn't end with a map leaf).",
+            "enum": [
+              "omitted_keys", "fork", "rollback", "inconsistent_leaves", "missing_leaves",
+              "unsigned_deletion", "overwrite", "delete_missing", "delete_mismatch",
+              "missing_object", "wrong_bytes", "map_mismatch",
+              "unverifiable_checkpoint", "unverifiable_listing", "unverified_event", "deleted_event",
+              "unmapped_checkpoint"
+            ]
+          },
+          "severity": {"enum": ["error", "warning"]},
+          "message": {"type": "string", "minLength": 1},
+          "event": {"type": "string", "description": "The started event that recorded the checkpoint or listing."},
+          "scope": {"type": "string"},
+          "stage": {"type": ["string", "null"]},
+          "digest": {"type": "string"},
+          "run": {"$ref": "#/$defs/run"},
+          "statement": {"$ref": "#/$defs/note", "description": "The ledger's signed listing statement: the proof."},
+          "note": {"$ref": "#/$defs/note", "description": "The signed checkpoint the finding is about."},
+          "latest": {"$ref": "#/$defs/note", "description": "The ledger's latest signed checkpoint, whose leaves contradict the statement or checkpoint."},
+          "source": {"type": "string"},
+          "replayedRoot": {"type": ["string", "null"]},
+          "logSize": {"type": "integer", "minimum": 0},
+          "omitted": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "index"],
+              "additionalProperties": false,
+              "properties": {"key": {"type": "string"}, "index": {"type": "integer", "minimum": 0}}
+            }
+          },
+          "extra": {"type": "array", "items": {"type": "string"}},
+          "logKeys": {"type": "integer", "minimum": 0},
+          "recordedKeys": {"type": ["boolean", "null"]},
+          "index": {"type": "integer", "minimum": 0},
+          "key": {"type": "string"},
+          "checkpoint": {"$ref": "#/$defs/note"},
+          "served": {"type": "integer", "minimum": 0},
+          "recordedRoot": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/hushrun.v1.schema.json",
+  "title": "hushrun.yaml version 1",
+  "description": "The repository policy (spec §7.1). hushrun validates more than this schema can say (C-8): references, cycles, pinned images, locations for every stage, a counts_from in a file with stages, versions and names in a rule. Editors can use it for completion.",
+  "type": "object",
+  "required": ["version", "repository"],
+  "additionalProperties": false,
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "duration": {"type": "string", "pattern": "^([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$"},
+    "patterns": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "version": {"description": "A quoted version prefix: \"1.25\" matches 1.25 and 1.25.14, not 1.250 or 1.2. YAML reads an unquoted 1.20 as the number 1.2, which is an error.", "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*[0-9A-Za-z.-]*$"},
+    "versions": {"oneOf": [{"$ref": "#/$defs/version"}, {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/version"}}]},
+    "counts_from": {
+      "description": "[ADR 0045] What a check needs of the machine a run happens on (C-25): anywhere, which is no rule at this level, or a rule. A run that doesn't meet it records nothing. The check's level wins over the scope's, and the scope's over the file's, whole. Not in a file with stages.",
+      "oneOf": [
+        {"const": "anywhere"},
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "os": {"oneOf": [{"enum": ["macos", "linux", "windows"]}, {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["macos", "linux", "windows"]}}]},
+            "arch": {"oneOf": [{"enum": ["arm64", "amd64"]}, {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["arm64", "amd64"]}}]},
+            "go": {"$ref": "#/$defs/versions"},
+            "rust": {"$ref": "#/$defs/versions"},
+            "node": {"$ref": "#/$defs/versions"},
+            "xcode": {"$ref": "#/$defs/versions"},
+            "env": {
+              "description": "Variables that must hold exactly these values.",
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+              "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}]}
+            }
+          }
+        }
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include": {"$ref": "#/$defs/patterns"},
+        "exclude": {"$ref": "#/$defs/patterns"},
+        "external": {
+          "description": "[ADR 0037] What the scope builds against outside the repository, digested with it; refused in a file with `deploy`.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "include": {"$ref": "#/$defs/patterns"},
+              "exclude": {"$ref": "#/$defs/patterns"}
+            }
+          }
+        },
+        "counts_from": {"$ref": "#/$defs/counts_from"}
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"description": "[ADR 0062] Retired: read past with a warning; every check is a source check.", "deprecated": true},
+        "run": {"type": "string"},
+        "shell": {"enum": ["sh", "bash", "pwsh", "cmd"]},
+        "image": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"},
+        "platform": {"type": "string"},
+        "env": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
+        "network": {"enum": ["none", "restricted", "open"]},
+        "timeout": {"$ref": "#/$defs/duration"},
+        "retries": {"type": "integer", "minimum": 0},
+        "max_age": {"$ref": "#/$defs/duration"},
+        "version": {"type": "string"},
+        "counts_from": {"$ref": "#/$defs/counts_from"},
+        "reports": {
+          "description": "The report files the check writes, and what CI does when a later step of its job reads them (C-26). Not part of the check's definition.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "files": {
+              "description": "Report files it writes, besides those hushrun finds: globs relative to the directory it runs in.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {"type": "string", "minLength": 1, "not": {"pattern": "^(/|\\\\|[A-Za-z]:)"}}
+            },
+            "ci": {
+              "description": "run (the default): CI runs the check every time a later step reads its reports. skip: CI skips it on a pass, because the repository's readers handle a skip.",
+              "enum": ["run", "skip"]
+            }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["oci", "file"]},
+        "scope": {"$ref": "#/$defs/name"},
+        "location": {"description": "[ADR 0062] Where it is deployed from: a repository without tag or digest for OCI.", "type": "string", "minLength": 1},
+        "locations": {"description": "[ADR 0062] Retired: one location per stage. Read past with a warning, and the artifact left out.", "deprecated": true}
+      }
+    },
+    "deploy": {
+      "description": "[ADR 0062] How the repository's one pipeline deploys (C-7).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "branch": {"type": "string"},
+        "require": {"description": "The checks a deploy needs [default: every check with `run`].", "type": "array", "items": {"$ref": "#/$defs/name"}},
+        "lease": {"$ref": "#/$defs/duration"},
+        "dedupe": {"type": "array", "items": {"enum": ["push", "upstream", "manual", "schedule"]}},
+        "allow_force": {"type": "boolean"},
+        "on_repository_error": {"enum": ["fail", "full"]}
+      }
+    }
+  },
+  "properties": {
+    "version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[a-z0-9.-]+(:[0-9]+)?/[^\\s#?@]+$"},
+    "repository_url": {"type": "string", "description": "The repository's URL on hushrun, where its events go: https://, such as the hosted one, or http:// on a loopback host (C-3, L-1).", "pattern": "^https?://"},
+    "backend": {"type": "string", "description": "[ADR 0037] Where its `hushrun run`s share results (C-3, C-11).", "pattern": "^https?://"},
+    "counts_from": {"$ref": "#/$defs/counts_from"},
+    "scopes": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+      "additionalProperties": {"$ref": "#/$defs/scope"}
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"exclude": {"$ref": "#/$defs/patterns"}}
+    },
+    "checks": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+      "additionalProperties": {"$ref": "#/$defs/check"}
+    },
+    "artifacts": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+      "additionalProperties": {"$ref": "#/$defs/artifact"}
+    },
+    "deploy": {"$ref": "#/$defs/deploy"},
+    "stages": {"description": "[ADR 0062] Retired: read past with a warning; a stage's branch, require and lease go under `deploy`.", "deprecated": true},
+    "transparency_log": {
+      "description": "The server's transparency log (T-9, M18): the origin its checkpoints name and the public half of its log key, which readers pin.",
+      "type": "object",
+      "required": [
+        "origin",
+        "key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^[!-*,-~]+$",
+          "not": {
+            "pattern": "://"
+          }
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^ed25519:[A-Za-z0-9+/]{43}=$"
+        }
+      }
+    }
+  }
+}

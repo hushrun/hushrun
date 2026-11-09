@@ -1,0 +1,4 @@
+<testsuite name="lies" tests="99" failures="50" errors="7" skipped="3">
+  <testcase name="a"/>
+  <testcase name="b"><failure message="no">x</failure></testcase>
+</testsuite>

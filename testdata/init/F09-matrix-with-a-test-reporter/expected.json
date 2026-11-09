@@ -1,0 +1,89 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/package.json\n+++ b/package.json\n@@ -2,6 +2,13 @@\n   \"name\": \"shop\",\n   \"private\": true,\n   \"scripts\": {\n-    \"test\": \"vitest run --reporter=junit --outputFile=junit.xml\"\n+    \"test\": \"hushrun run -- vitest run --reporter=junit --outputFile=junit.xml\",\n+    \"prepare\": \"hushrun hook install || exit 0\"\n+  },\n+  \"hushrun\": {\n+    \"backend\": \"<your org's URL, once you sign in>\"\n+  },\n+  \"devDependencies\": {\n+    \"hushrun\": \"^<version>\"\n   }\n }\n",
+      "path": "package.json"
+    },
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -9,6 +9,11 @@\n       matrix:\n         node: [20, 22]\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n+    env:\n+      HUSHRUN_VARIANT: ${{ toJSON(matrix) }}\n     steps:\n       - uses: actions/checkout@v5\n       - run: npm ci\n",
+      "path": ".github/workflows/ci.yml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [
+        {
+          "kinds": [
+            "tests"
+          ],
+          "name": "dorny/test-reporter",
+          "onlyOnFailure": false,
+          "paths": [
+            "junit.xml"
+          ],
+          "step": 3
+        }
+      ],
+      "scripts": [
+        {
+          "check": "test",
+          "ci": "runs",
+          "ciText": "a later step reads its reports (dorny/test-reporter), and a skip writes none",
+          "ciWhy": "reports",
+          "script": "test"
+        }
+      ],
+      "setup": "none",
+      "variantIdentity": "env",
+      "variants": "several"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (dorny/test-reporter). Laptops and agents skip it on a pass."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": [
+      {
+        "after": "hushrun run -- vitest run --reporter=junit --outputFile=junit.xml",
+        "before": "vitest run --reporter=junit --outputFile=junit.xml",
+        "check": "test",
+        "package": "package.json",
+        "script": "test"
+      }
+    ]
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

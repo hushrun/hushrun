@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned stable. Bump it in its own PR, with the full test suite.
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

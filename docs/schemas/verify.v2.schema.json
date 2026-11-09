@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/verify.v2.schema.json",
+  "title": "hushrun.verify/v2",
+  "description": "Output of `hushrun verify --format json`: one result per file or ledger key. [ADR 0062] v2 says whether each event counts, instead of the stages where it doesn't.",
+  "type": "object",
+  "required": ["schema", "results"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.verify/v2"},
+    "results": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["source", "accepted", "signer", "effectiveCustody", "kind", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "source": {"type": "string"},
+              "accepted": {"const": true},
+              "signer": {"type": "string", "description": "[ADR 0031] Who signed, as the repository's signers name it (T-15): ci, user:<email> or agent:<name>."},
+              "effectiveCustody": {"enum": ["local", "isolated", "sandbox", "ci"]},
+              "kind": {"enum": ["started", "check", "artifact", "deployed", "passed", "failed", "superseded", "approval"]},
+              "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "signature": {
+                "description": "How the signature counted: a machine's key, or a signing certificate of the repository's CI (M10). For a certificate, keyid is the sha256 of its DER.",
+                "type": "object",
+                "required": ["kind", "keyid"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {"enum": ["machine", "identity"]},
+                  "keyid": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                  "machine": {"type": "string", "description": "The machine's name, as it registered."},
+                  "identity": {
+                    "type": "object",
+                    "required": ["issuer", "subject"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "issuer": {"type": "string"},
+                      "subject": {"type": "string"},
+                      "repositoryId": {"type": "string"},
+                      "repository": {"type": "string"},
+                      "ref": {"type": "string"},
+                      "workflow": {"type": "string"},
+                      "signerWorkflow": {"type": "string"},
+                      "trigger": {"type": "string"}
+                    }
+                  }
+                }
+              },
+              "trustedTime": {
+                "description": "When a timestamp authority of the Sigstore trust root says the signature existed (M10), or null without a timestamp.",
+                "type": ["string", "null"]
+              },
+              "counts": {
+                "description": "Whether the event counts (T-16): not when the repository was CI-only when it was made, or is now and it has no trusted time, and it isn't the CI's; never for an approval.",
+                "type": "boolean"
+              },
+              "notCounting": {
+                "description": "Why it doesn't count, when it doesn't.",
+                "type": ["string", "null"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["source", "accepted", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "source": {"type": "string"},
+              "accepted": {"const": false},
+              "reason": {"type": "string"}
+            }
+          }
+        ]
+      }
+    }
+  }
+}

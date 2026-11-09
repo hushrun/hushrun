@@ -1,0 +1,54 @@
+{
+  "name": "hushrun",
+  "version": "0.0.0",
+  "description": "Skip tests, lint and typecheck when this exact code already passed them, on laptops, in CI and in coding agents' sandboxes.",
+  "keywords": [
+    "ci",
+    "ci-cd",
+    "continuous-integration",
+    "github-actions",
+    "gitlab-ci",
+    "checks",
+    "test",
+    "testing",
+    "lint",
+    "cache",
+    "test-cache",
+    "skip-ci",
+    "monorepo",
+    "coding-agents",
+    "ai-agents",
+    "pre-push",
+    "artifact-promotion",
+    "devops"
+  ],
+  "homepage": "https://hushrun.com",
+  "bugs": {
+    "email": "support@hushrun.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hushrun/hushrun.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "hushrun": "bin/hushrun.js"
+  },
+  "files": [
+    "bin/",
+    "vendor/",
+    "LICENSE.md",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@hushrun/cli-darwin-arm64": "0.0.0",
+    "@hushrun/cli-darwin-x64": "0.0.0",
+    "@hushrun/cli-linux-arm64": "0.0.0",
+    "@hushrun/cli-linux-x64": "0.0.0",
+    "@hushrun/cli-win32-arm64": "0.0.0",
+    "@hushrun/cli-win32-x64": "0.0.0"
+  }
+}

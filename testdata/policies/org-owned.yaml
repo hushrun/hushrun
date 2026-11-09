@@ -1,0 +1,16 @@
+# [ADR 0062] A repository under an org's base URL, whose deploy requires sast, a check with no
+# `run` that a security team's workflow attests.
+version: 1
+repository: github.com/acme/shop
+repository_url: https://hushrun.example/l/acme/github.com/acme/shop
+checks:
+  unit:
+    run: go test ./...
+  sast: {}              # no `run`: the security team's workflow attests it
+artifacts:
+  image:
+    type: oci
+    location: ghcr.io/acme/shop
+deploy:
+  branch: develop
+  require: [unit, sast]

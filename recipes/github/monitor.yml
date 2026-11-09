@@ -1,0 +1,50 @@
+# Monitor the repository's transparency log on hushrun's server.
+# Copy to .github/workflows/hushrun-monitor.yml.
+#
+# The monitor that counts is the one the server's operator doesn't run: this one, in your own CI.
+# Every hour it replays the log and checks every listing a plan recorded against it, and every map
+# the server committed to; a failure means the server contradicted its own log, and the
+# job's output holds the server's signed statements as proof. It needs read access only, and
+# hushrun.yaml naming the log key (`transparency_log`). Setup:
+# https://hushrun.com/docs/promotion/transparency.
+name: Monitor the hushrun repository
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: hushrun-monitor
+  cancel-in-progress: false
+
+env:
+  HUSHRUN_REPOSITORY_URL: ${{ vars.HUSHRUN_REPOSITORY_URL }}          # from repository settings, never from a file
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    # id-token: write lets hushrun request an ID token whose audience is the repository's URL.
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v4                       # hushrun.yaml names the log key
+      - uses: hushrun/hushrun/action/setup@main        # pin to a release commit
+        # The newest hushrun release; `with: { version: 0.2.0 }` pins one.
+      # The newest checkpoint the last run verified: a server that rolls back between runs
+      # contradicts it.
+      - uses: actions/cache/restore@v4
+        with:
+          path: hushrun-monitor.json
+          key: hushrun-monitor-${{ github.run_id }}
+          restore-keys: hushrun-monitor-
+      - run: hushrun repository monitor --state hushrun-monitor.json --format json > monitor.json
+      - if: always()
+        run: |
+          jq '{ok, checkpoint: .checkpoint.size, checked, findings}' monitor.json
+      - uses: actions/cache/save@v4
+        if: success()
+        with:
+          path: hushrun-monitor.json
+          key: hushrun-monitor-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4               # the findings and their proofs, if any
+        if: failure()
+        with: { name: hushrun-monitor, path: monitor.json }

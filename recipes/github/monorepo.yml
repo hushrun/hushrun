@@ -1,0 +1,47 @@
+# Deploy several scopes of a monorepo with hushrun. Copy to .github/workflows/hushrun.yml, or let
+# `hushrun adopt` write the same with one job per scope: it makes a scope of each directory with
+# a Dockerfile, when none is at the root.
+#
+# One call of the reusable workflow per scope: each plans its own digest, so a scope whose
+# content didn't change is `current`, with nothing to deploy, and the others deploy. The build
+# and deploy commands see the scope as $SCOPE.
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: Build and run every check, whatever the evidence
+        type: boolean
+        default: false
+
+# One run at a time, its scopes side by side; runs started off main get a group of their own.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'deploy' || format('deploy-refused-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [api, web]
+    uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@main   # pin to a release commit
+    with:
+      scope: ${{ matrix.scope }}
+      image: ${{ matrix.scope }}-image
+      # version: 0.9.0          # pins hushrun; without it, each run installs the newest release
+      repository-base: ${{ vars.HUSHRUN_REPOSITORY_BASE }}
+      repository-url: ${{ vars.HUSHRUN_REPOSITORY_URL }}
+      force-full: ${{ inputs.force_full || false }}
+      setup: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      build: gcloud builds submit "services/$SCOPE" --tag "$REF"
+      deploy: gcloud run deploy "$SCOPE" --image "$REF" --region us-central1
+      gcp-workload-identity-provider: projects/123456789/locations/global/workloadIdentityPools/github/providers/github
+      gcp-service-account: deployer@my-project.iam.gserviceaccount.com
+      signing: sigstore

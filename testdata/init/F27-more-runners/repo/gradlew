@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for Gradle's wrapper in init's fixtures (A9): builds nothing, and passes.
+echo "BUILD SUCCESSFUL in 1s"

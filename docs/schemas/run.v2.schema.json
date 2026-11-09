@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/run.v2.schema.json",
+  "title": "hushrun.run/v2",
+  "description": "Output of `hushrun run --format json`: each check run, failed or skipped, and the event recorded for it. [M8] Whether the checks ran isolated, and per check the custody its evidence claims, the environment it ran in. [ADR 0062] v2 has no stage.",
+  "type": "object",
+  "required": ["schema", "scope", "digest", "run", "checks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.run/v2"},
+    "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "run": {"type": "object", "required": ["provider", "id", "attempt"]},
+    "isolated": {"type": "boolean", "description": "[M8] The checks ran with --isolated (E-12)."},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "result", "detail", "exitCode", "attempts", "durationMs", "event"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+          "result": {"enum": ["pass", "fail", "skipped"]},
+          "detail": {"type": "string"},
+          "exitCode": {"type": ["integer", "null"]},
+          "attempts": {"type": "integer", "minimum": 0},
+          "durationMs": {"type": "integer", "minimum": 0},
+          "event": {"description": "The key of the event recorded for it; null when it was skipped, and [ADR 0032] when the server refused the event for the org's plan (L-5): then `detail` ends with `; not recorded`, and `custody` and `environment` are null too.", "type": ["string", "null"], "pattern": "^v1/events/"},
+          "custody": {"enum": ["local", "isolated", "sandbox", "ci", null], "description": "[M8] The custody the recorded event claims; null when nothing was recorded."},
+          "environment": {"type": ["object", "null"], "description": "[M8] The recorded environment (E-7): image, platform, network, runner."}
+        }
+      }
+    }
+  }
+}

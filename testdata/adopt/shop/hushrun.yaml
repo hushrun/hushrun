@@ -1,0 +1,17 @@
+# hushrun.yaml: what a deploy requires (https://hushrun.com/docs/deploy/github). Written by `hushrun adopt`; review it.
+version: 1
+repository: github.com/acme/shop
+repository_url: https://hushrun.example/l/acme/github.com/acme/shop   # CI derives it from HUSHRUN_REPOSITORY_BASE, and checks it is this
+
+checks:
+  unit:
+    run: go test ./...
+
+artifacts:
+  image:
+    type: oci
+    location: registry.example.com/shop
+
+deploy:
+  branch: main
+  require: [unit]

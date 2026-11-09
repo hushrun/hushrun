@@ -1,0 +1,12 @@
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: pytest --token ${{ secrets.NPM_TOKEN }}
+      - run: pytest --token $TOKEN
+      - run: pytest --level $LEVEL

@@ -1,0 +1,20 @@
+name: "another run of this digest is still in flight -> full, no checks"
+covers: [P-1, P-6, P-13, P-15]
+description: >-
+  Its checks passed, and count: evidence is about the files. Its image doesn't, because nothing
+  says yet that its attempt passed; the run being planned builds its own. hushrun 0.8 waited for
+  the upstream stage instead (`wait`, removed with upstreams in ADR 0062; was ci-promote case 02).
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:50", by: ci}
+  - {kind: check, run: p1, at: "15:52", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:53", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:55", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+expect:
+  mode: full
+  reason: "(recorded ones aren't reusable"
+  build: true
+  checks: []
+  requirements: {toolchain: satisfied, unit: satisfied}

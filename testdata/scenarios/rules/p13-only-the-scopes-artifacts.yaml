@@ -1,0 +1,23 @@
+name: "a scope deploys only its own artifacts"
+covers: [P-13, I-4]
+description: >-
+  Planning scope web: its one artifact, web-image, is reusable. api-image belongs to scope api,
+  and api's events don't count for web.
+policy: deploy.yaml
+scope: web
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: started, run: w1, at: "10:00", by: ci}
+  - {kind: check, run: w1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: w1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: w1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: w1, at: "10:03", by: ci, artifact: web-image, ref: "ghcr.io/acme/web@b"}
+  - {kind: passed, run: w1, at: "10:05", by: ci, artifacts: {web-image: "ghcr.io/acme/web@b"}}
+  - {kind: started, run: a1, at: "10:00", by: ci, scope: api}
+  - {kind: artifact, run: a1, at: "10:03", by: ci, scope: api, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: a1, at: "10:05", by: ci, scope: api}
+expect:
+  mode: promote
+  artifacts: {web-image: "ghcr.io/acme/web@b"}

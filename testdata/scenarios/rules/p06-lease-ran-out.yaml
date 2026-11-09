@@ -1,0 +1,18 @@
+name: an attempt whose lease ran out with no outcome is unknown -> full
+covers: [P-6, P-13, P-15]
+description: >-
+  No terminal event, no CI to ask, and the lease (3 h) ended: the attempt is unknown, and its
+  image isn't reused. hushrun 0.8 blocked the next stage on such an upstream attempt (§8.7
+  N15, removed with upstreams in ADR 0062).
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "11:00", by: ci, lease: "3h"}
+  - {kind: check, run: p1, at: "11:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "11:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "11:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+expect:
+  mode: full
+  build: true
+  checks: []

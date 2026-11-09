@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/repository-stats.v2.schema.json",
+  "title": "hushrun.repository.stats/v2",
+  "description": "Output of `hushrun repository stats --format json` (spec L-14, ADR 0032): what hushrun recorded from `from` on, for sharing volume without telemetry. With `source` `repository`, the repository's events, counted from one listing of `v1/events/` on its server, whose keys carry their kind, digest and time (L-2); with `source` `local` (`--local`), this machine's `hushrun run` results (C-11). Nothing is sent anywhere else.",
+  "oneOf": [
+    {"$ref": "#/$defs/repository"},
+    {"$ref": "#/$defs/local"}
+  ],
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "name": {"type": "string", "pattern": "^([a-z][a-z0-9_-]{0,62}|_)$"},
+    "time": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"},
+    "repository": {
+      "type": "object",
+      "required": ["schema", "source", "repository", "since", "from", "until", "events", "byKind", "digests"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "hushrun.repository.stats/v2"},
+        "source": {"const": "repository"},
+        "repository": {"description": "The repository's URL on its server.", "type": "string"},
+        "since": {"description": "--since, such as 30d.", "type": "string", "minLength": 1},
+        "from": {"$ref": "#/$defs/time"},
+        "until": {"$ref": "#/$defs/time"},
+        "events": {"description": "Every event written from `from` on, by its key's ULID.", "$ref": "#/$defs/count"},
+        "byKind": {
+          "description": "Events by kind, every kind named.",
+          "type": "object",
+          "required": ["started", "check", "artifact", "deployed", "passed", "failed", "superseded", "approval"],
+          "additionalProperties": false,
+          "properties": {
+            "started": {"$ref": "#/$defs/count"},
+            "check": {"$ref": "#/$defs/count"},
+            "artifact": {"$ref": "#/$defs/count"},
+            "deployed": {"$ref": "#/$defs/count"},
+            "passed": {"$ref": "#/$defs/count"},
+            "failed": {"$ref": "#/$defs/count"},
+            "superseded": {"$ref": "#/$defs/count"},
+            "approval": {"$ref": "#/$defs/count"}
+          }
+        },
+        "digests": {"description": "The distinct contents the events are about: a scope and its digest.", "$ref": "#/$defs/count"}
+      }
+    },
+    "local": {
+      "type": "object",
+      "required": ["schema", "source", "directory", "since", "from", "until", "results", "byVerdict", "keys", "byCheck", "savedMs"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "hushrun.repository.stats/v2"},
+        "source": {"const": "local"},
+        "directory": {"description": "`<cache dir>/results`; null when there is no cache directory, and so no results.", "type": ["string", "null"]},
+        "since": {"type": "string", "minLength": 1},
+        "from": {"$ref": "#/$defs/time"},
+        "until": {"$ref": "#/$defs/time"},
+        "results": {"description": "Every result that finished from `from` on, by its file's ULID: passes, fails and skips.", "$ref": "#/$defs/count"},
+        "byVerdict": {
+          "type": "object",
+          "required": ["pass", "fail", "skip"],
+          "additionalProperties": false,
+          "properties": {
+            "pass": {"$ref": "#/$defs/count"},
+            "fail": {"$ref": "#/$defs/count"},
+            "skip": {"$ref": "#/$defs/count"}
+          }
+        },
+        "keys": {"description": "The distinct run keys (C-9) among them.", "$ref": "#/$defs/count"},
+        "byCheck": {
+          "description": "Results by check name.",
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/name"},
+          "additionalProperties": {"$ref": "#/$defs/count"}
+        },
+        "savedMs": {"description": "The time the skips saved: the sum of their savedMs (C-10).", "$ref": "#/$defs/count"}
+      }
+    }
+  }
+}

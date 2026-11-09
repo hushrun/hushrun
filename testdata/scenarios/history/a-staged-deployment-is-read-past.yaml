@@ -1,0 +1,13 @@
+name: "hushrun 0.8 history: a newer deployment recorded at a stage doesn't hide the pipeline's -> current"
+covers: [P-10, L-8, I-4]
+description: >-
+  The pipeline deployed this digest at 15:00; a 0.8 job then recorded a deployment of other
+  content at staging. Only stage-free entries count, so the newest that counts is this digest.
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+deployed:
+  - {digest: this, at: "15:00", by: ci}
+  - {digest: other, at: "15:30", by: ci, stage: staging}
+expect:
+  mode: current

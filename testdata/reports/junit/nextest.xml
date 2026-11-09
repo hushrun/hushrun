@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" failures="1" errors="0" uuid="0d0e7c3e-9e3a-4f6e-9a49-2f1b4f3c2a11" timestamp="2026-11-03T10:00:00.000+00:00" time="0.871">
+    <testsuite name="hushrun::reports" tests="3" disabled="0" errors="0" failures="1">
+        <testcase name="reads_junit" classname="hushrun::reports" timestamp="2026-11-03T10:00:00.010+00:00" time="0.012">
+        </testcase>
+        <testcase name="reads_lcov" classname="hushrun::reports" timestamp="2026-11-03T10:00:00.020+00:00" time="0.500">
+            <flakyFailure type="test failure" timestamp="2026-11-03T10:00:00.020+00:00" time="0.250">thread panicked</flakyFailure>
+        </testcase>
+        <testcase name="reads_go" classname="hushrun::reports" timestamp="2026-11-03T10:00:00.520+00:00" time="0.300">
+            <failure type="test failure">thread panicked</failure>
+            <rerunFailure type="test failure" timestamp="2026-11-03T10:00:00.700+00:00" time="0.100">thread panicked</rerunFailure>
+        </testcase>
+    </testsuite>
+</testsuites>

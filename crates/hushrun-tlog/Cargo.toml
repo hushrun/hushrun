@@ -1,0 +1,21 @@
+[package]
+name = "hushrun-tlog"
+description = "The hosted ledger's transparency log: RFC 6962 Merkle trees and proofs, C2SP signed notes and checkpoints, signed listings, and the monitor's replay."
+# Fixed: the hosted service builds with this crate, and a CLI release must not change its lockfile.
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure Rust apart from ring, which TLS already brings (plan §12.3): SHA-256 and Ed25519.
+ring.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true

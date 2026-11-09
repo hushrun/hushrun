@@ -1,0 +1,30 @@
+{
+ "about": "Accepted exceptions to the assertions: score.py doesn't fail on a case listed here, and shows it as known. Each needs a reason, and leaves when what it excuses is fixed.",
+ "A1": [
+  {
+   "repo": "spring-projects/spring-framework",
+   "workflow": ".github/workflows/build-and-deploy-snapshot.yml",
+   "job": "build-and-deploy-snapshot",
+   "why": "the harness counts a Develocity build scan as a reader, by `ge.spring.io` in an action's description; the CLI's readers are steps that read report files, and Gradle sends a scan's results itself. Since Phase 4 the job's check steps aside to Gradle's remote cache (D7), so no skip depends on it. It leaves if the CLI learns build scans as readers."
+  },
+  {
+   "repo": "spring-projects/spring-boot",
+   "workflow": ".github/workflows/build-and-deploy-snapshot.yml",
+   "job": "build-and-deploy-snapshot",
+   "why": "the same as spring-framework's: the harness counts a Develocity build scan as a reader, the CLI's readers are steps that read report files, and the job's Gradle check steps aside to Develocity's cache (io.spring.develocity.conventions with org.gradle.caching=true, D7), so no skip depends on it."
+  },
+  {
+   "repo": "spring-projects/spring-boot",
+   "workflow": ".github/workflows/ci.yml",
+   "job": "ci",
+   "why": "the same as spring-framework's: the harness counts a Develocity build scan as a reader, the CLI's readers are steps that read report files, and the job's Gradle check steps aside to Develocity's cache (io.spring.develocity.conventions with org.gradle.caching=true, D7), so no skip depends on it."
+  }
+ ],
+ "A2": [],
+ "A3": [],
+ "A4": [],
+ "A5": [],
+ "A6": [],
+ "A7": [],
+ "A8": []
+}

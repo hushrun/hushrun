@@ -1,0 +1,15 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rspec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bundle exec rspec --format RspecJunitFormatter --out rspec.xml
+      - uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: rspec.xml

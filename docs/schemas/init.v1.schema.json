@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/init.v1.schema.json",
+  "title": "hushrun.init/v1",
+  "description": "Output of `hushrun init --pipeline --format json`: the policy file written.",
+  "type": "object",
+  "required": [
+    "schema",
+    "policy"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "hushrun.init/v1"
+    },
+    "policy": {
+      "type": "string"
+    }
+  }
+}

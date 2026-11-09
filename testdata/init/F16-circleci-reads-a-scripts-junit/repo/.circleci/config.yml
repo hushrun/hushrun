@@ -1,0 +1,14 @@
+version: 2.1
+jobs:
+  test:
+    docker:
+      - image: cimg/node:22.11
+    steps:
+      - checkout
+      - run: npm ci
+      - run: npm test
+      - store_test_results:
+          path: reports
+workflows:
+  build:
+    jobs: [test]

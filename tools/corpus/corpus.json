@@ -1,0 +1,605 @@
+{
+ "about": "The survey's 100 repositories at pinned commits: python3 -I fetch.py repin moves them on purpose, and invalidates baseline.json.",
+ "repositories": [
+  {
+   "repo": "vuejs/core",
+   "commit": "2b9a0bbbb17166d91a1d394d9aae551a87360d41",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "facebook/react",
+   "commit": "76baa3b5434fad315ece9cfd4d20d7a8d6c34a25",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "microsoft/TypeScript",
+   "commit": "042e0fb9574980bd67964165df295e629f834fe3",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "vercel/next.js",
+   "commit": "61e1348fb523473db8cb3a6cfcadf7eefbf27d5f",
+   "branch": "canary",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "nodejs/node",
+   "commit": "96de0e2f50d5289eaaeade9cc9e5d7e01a850774",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "sveltejs/svelte",
+   "commit": "db5a999b7114cc92c8923fac0a6a733e934cc264",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "microsoft/vscode",
+   "commit": "498770fb016918e2f34e586fc5b26a7342f450a1",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "angular/angular",
+   "commit": "92c7e870caa30a2fa162957a8006deba51c11fb0",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "vitejs/vite",
+   "commit": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "vitest-dev/vitest",
+   "commit": "7a3844954d8753fc0d5bed76a96ffd3a21716c22",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "eslint/eslint",
+   "commit": "896b8ad4f260d060a1df1e6297f4d23b2999bb6f",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "prettier/prettier",
+   "commit": "9714dd4899191a9237f2dda03ace081820c74bf0",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "microsoft/playwright",
+   "commit": "df99adab7ff784412ebf5d0970a03a788184ba6a",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "tailwindlabs/tailwindcss",
+   "commit": "2626ae6ceddf36069ab6d55c53a5857c1e2e360a",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "withastro/astro",
+   "commit": "402c0fae01d251c97298c255804008ff566802f9",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "storybookjs/storybook",
+   "commit": "69011abcc08832cda420a0e7a1bc92e31f176481",
+   "branch": "next",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "mui/material-ui",
+   "commit": "d051e0d5559db350fac41b36c8c19cf07df23122",
+   "branch": "master",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "nestjs/nest",
+   "commit": "d7331590f1208f84f969c7bd89badf69cfd79c0a",
+   "branch": "master",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "axios/axios",
+   "commit": "7324e94d8a7b5156a4baf3c86c8b5daa242daee3",
+   "branch": "v1.x",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "supabase/supabase",
+   "commit": "5ce8532dfffcfc8f2acc11918966a9858bbb8cbe",
+   "branch": "master",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "calcom/cal.com",
+   "commit": "81ce067c1d0e16b21c39c2de98b9a43a92562cd1",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "nrwl/nx",
+   "commit": "1c3de4257b28926c2cf6cba9903c6bfa5445f053",
+   "branch": "master",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "prisma/prisma",
+   "commit": "bb69b5cc061fd7cde924353104168156675db359",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "n8n-io/n8n",
+   "commit": "0ea7cd61ea769c9225092a0d251faba02c26cfc2",
+   "branch": "master",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "google-gemini/gemini-cli",
+   "commit": "0ac57c029b848d109eef940afe0db4b5a0c3dad0",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "electron/electron",
+   "commit": "9c80dad42fb42a445c92e83419b458bb3a785f6c",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "fastapi/fastapi",
+   "commit": "5cb6272ed7e3e07eaf6978e1e65b94aca76fa8e0",
+   "branch": "master",
+   "language": "Python"
+  },
+  {
+   "repo": "immich-app/immich",
+   "commit": "2c87a17c87e68f0180d6982722faa0fbb0238cbc",
+   "branch": "main",
+   "language": "JavaScript / TypeScript"
+  },
+  {
+   "repo": "python/cpython",
+   "commit": "3945eaf2fcd9cbc3f3061275bd29751c8b2e7d3b",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "django/django",
+   "commit": "b501b8493f31cf8cba31211d59b3b78642b8cb02",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "numpy/numpy",
+   "commit": "cd9426f40340fbc67192a9ddf7f66f9aafbe2d71",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "pandas-dev/pandas",
+   "commit": "69839e7243dd83da9c180e7ac2e2853d7d4b3ab7",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "scikit-learn/scikit-learn",
+   "commit": "a6c118dd5d32c1766a4706988c615fb17c1e955f",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "langchain-ai/langchain",
+   "commit": "2775506076baf2cba8126b21b9e63424fcd97ab9",
+   "branch": "master",
+   "language": "Python"
+  },
+  {
+   "repo": "huggingface/transformers",
+   "commit": "409c349011c1099d66501d6c424ba411b9835a19",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "pydantic/pydantic",
+   "commit": "577aa83f5075bff3bef0ffa119ef141675a44822",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "pytorch/pytorch",
+   "commit": "6ddf1c556aafe0295f682a2822d1510eda4beab2",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "pytest-dev/pytest",
+   "commit": "8b005ed7f972987033ec34dc1e68b0635fb8142b",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "home-assistant/core",
+   "commit": "4317ce2630095d695a5de0aa644efcade0698699",
+   "branch": "dev",
+   "language": "Python"
+  },
+  {
+   "repo": "getsentry/sentry",
+   "commit": "e39c07b688d2057c6527f6c066a2d50429c57288",
+   "branch": "master",
+   "language": "Python"
+  },
+  {
+   "repo": "apache/airflow",
+   "commit": "31b558a607684d5c1939e081d5e28e39a6012869",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "langgenius/dify",
+   "commit": "b531dcbeead250092d160bffccafa548b2c1eb3c",
+   "branch": "main",
+   "language": "Python"
+  },
+  {
+   "repo": "golang/go",
+   "commit": "44b6bc904602c7ffe674956d59f804a997f9bae3",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "kubernetes/kubernetes",
+   "commit": "8b2d0e51804e28ad83fb55c1863afda1001c84d5",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "hashicorp/terraform",
+   "commit": "89fa87972b433409e178296c9edb42b027d0b043",
+   "branch": "main",
+   "language": "Go"
+  },
+  {
+   "repo": "moby/moby",
+   "commit": "aed2b781abc209a639b79d00f6962b629242aa1a",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "prometheus/prometheus",
+   "commit": "b0c3a30ab2a09b88e64d876017a0134aa2f38f40",
+   "branch": "main",
+   "language": "Go"
+  },
+  {
+   "repo": "gin-gonic/gin",
+   "commit": "0f09c3a9b4626d9fe9979cf4d0521d6ae32ab646",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "gohugoio/hugo",
+   "commit": "185a609ec26020ac97b0a3f78c9ca299e20e7477",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "PostHog/posthog",
+   "commit": "c0ca174177b2a45f2f4f7f58088d4d7193ae4cd6",
+   "branch": "master",
+   "language": "Python"
+  },
+  {
+   "repo": "go-gitea/gitea",
+   "commit": "12b20c7c9962e0be75912b290a0c5778799b0ad2",
+   "branch": "main",
+   "language": "Go"
+  },
+  {
+   "repo": "cli/cli",
+   "commit": "c4513d446bf98cfcbe72ed83f17cd3220174d88f",
+   "branch": "trunk",
+   "language": "Go"
+  },
+  {
+   "repo": "ollama/ollama",
+   "commit": "9a3e8177767245acc62b735eba7d5d8a553606d0",
+   "branch": "main",
+   "language": "Go"
+  },
+  {
+   "repo": "mattermost/mattermost",
+   "commit": "2a6bf358e4e621cdb10171db5e0e5c8a395513cf",
+   "branch": "master",
+   "language": "Go"
+  },
+  {
+   "repo": "rust-lang/cargo",
+   "commit": "2be5575ba36b55a981cec52575e176d786ee77b5",
+   "branch": "master",
+   "language": "Rust"
+  },
+  {
+   "repo": "tokio-rs/tokio",
+   "commit": "b499257ef62bd631b83a988d371f4330f545670c",
+   "branch": "master",
+   "language": "Rust"
+  },
+  {
+   "repo": "grafana/grafana",
+   "commit": "d278f6b70cf3cb17be7087076ff88ad8affdbcfd",
+   "branch": "main",
+   "language": "Go"
+  },
+  {
+   "repo": "BurntSushi/ripgrep",
+   "commit": "91f5d22ef48bde459d90a8c7dbeab416e97d0f2b",
+   "branch": "master",
+   "language": "Rust"
+  },
+  {
+   "repo": "tauri-apps/tauri",
+   "commit": "31f29e197e7ac18797dbb9270fe658c1ca1010c8",
+   "branch": "dev",
+   "language": "Rust"
+  },
+  {
+   "repo": "serde-rs/serde",
+   "commit": "0db9b3b504bcb0a7fa9cf001429869519afd3e9a",
+   "branch": "master",
+   "language": "Rust"
+  },
+  {
+   "repo": "zed-industries/zed",
+   "commit": "504a7f2cf25b817cda3998cab93473adef15f93c",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "astral-sh/ruff",
+   "commit": "84009d63f122f752b6b2661b8090f290a21d7db9",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "astral-sh/uv",
+   "commit": "f5fde681577aadf322d056dc3c2b5330a8c0a002",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "denoland/deno",
+   "commit": "e7b39ebd55c85aaf6a29290c1f5a99e2e21e09dd",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "biomejs/biome",
+   "commit": "31f1820c01f3f27c70a5b2f985665867222713b5",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "pola-rs/polars",
+   "commit": "5075c5334fdf1436fa018db6cc5e736a792801a8",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "openai/codex",
+   "commit": "fbf5f0d3a716d08c254d3e4941d5b12eaff5afe7",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "spring-projects/spring-boot",
+   "commit": "52d9dfced0102a1c7c74d93aa6da0b97ac6c76ea",
+   "branch": "main",
+   "language": "JVM"
+  },
+  {
+   "repo": "rust-lang/rust",
+   "commit": "1c3a6506966e21845b31de0b075d2527660db132",
+   "branch": "main",
+   "language": "Rust"
+  },
+  {
+   "repo": "spring-projects/spring-framework",
+   "commit": "d5d671b4742fb521b3a4c3f15bf3425b1cf7635b",
+   "branch": "main",
+   "language": "JVM"
+  },
+  {
+   "repo": "apache/kafka",
+   "commit": "2b57423f2ff4a34542fe02c997e202978deec83d",
+   "branch": "trunk",
+   "language": "JVM"
+  },
+  {
+   "repo": "square/okhttp",
+   "commit": "16fb6aef3aee1c4645fc8d24af01f8a4dc128ebf",
+   "branch": "main",
+   "language": "JVM"
+  },
+  {
+   "repo": "google/guava",
+   "commit": "e98ea2340f6acc94ed9e2cca08976ccae68c3412",
+   "branch": "master",
+   "language": "JVM"
+  },
+  {
+   "repo": "netty/netty",
+   "commit": "e1b26c1c071d2b1f781a161acd3097cf1bbde78f",
+   "branch": "4.2",
+   "language": "JVM"
+  },
+  {
+   "repo": "elastic/elasticsearch",
+   "commit": "a172f390f2b15b923d9fde0cf442fbba77838b0b",
+   "branch": "main",
+   "language": "JVM"
+  },
+  {
+   "repo": "apache/spark",
+   "commit": "7640b3df675d479e3f41ac2bc33dcccf0620c015",
+   "branch": "master",
+   "language": "JVM"
+  },
+  {
+   "repo": "quarkusio/quarkus",
+   "commit": "3738a20146d57351b12896873aeac9d5bda2e2e9",
+   "branch": "main",
+   "language": "JVM"
+  },
+  {
+   "repo": "git/git",
+   "commit": "ebdc087dc99d68bb340c282b2ba5f722def28d19",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "curl/curl",
+   "commit": "f0da5390ad9d380807cc83e600196809df8bb96b",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "redis/redis",
+   "commit": "76990001ceb73ebb40c8fb5a45b7d80c8c2ff876",
+   "branch": "unstable",
+   "language": "C / C++"
+  },
+  {
+   "repo": "ggml-org/llama.cpp",
+   "commit": "2cbca389f515df455412dafa07e2b1359cc72a6d",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "tensorflow/tensorflow",
+   "commit": "4ced771810eba7be42eedd15e6e2f164669222bb",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "neovim/neovim",
+   "commit": "6332ba64fe56f922c5cd2d93e4cfa23673966b6d",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "godotengine/godot",
+   "commit": "b251066fb5b5654a6cf9c1bb284fac53d20a10d2",
+   "branch": "master",
+   "language": "C / C++"
+  },
+  {
+   "repo": "duckdb/duckdb",
+   "commit": "4d77d9c103baca29a62af61cba9ebdc40e5d2023",
+   "branch": "main",
+   "language": "C / C++"
+  },
+  {
+   "repo": "rails/rails",
+   "commit": "e64b660612fa582a4a89a91bc002269b29426e76",
+   "branch": "main",
+   "language": "Ruby"
+  },
+  {
+   "repo": "mastodon/mastodon",
+   "commit": "5ccbf0e488801f9b7ee5fbe9d915f861081fa3ca",
+   "branch": "main",
+   "language": "Ruby"
+  },
+  {
+   "repo": "Homebrew/brew",
+   "commit": "053b4507ed270e66b3c92126b3253eb6bb322c5f",
+   "branch": "main",
+   "language": "Ruby"
+  },
+  {
+   "repo": "discourse/discourse",
+   "commit": "ba57e2babca9140f54eb94bd3cf499d02360f61c",
+   "branch": "main",
+   "language": "Ruby"
+  },
+  {
+   "repo": "laravel/framework",
+   "commit": "b20bf7f442beabdb70e45cf9d29cd6c64675f856",
+   "branch": "13.x",
+   "language": "PHP"
+  },
+  {
+   "repo": "nextcloud/server",
+   "commit": "5cc43956c923fabb689fbe1acc3e9a1ad0d8e088",
+   "branch": "master",
+   "language": "PHP"
+  },
+  {
+   "repo": "symfony/symfony",
+   "commit": "e6396e82011ded4608b896e8fff4da24d253382a",
+   "branch": "8.2",
+   "language": "PHP"
+  },
+  {
+   "repo": "llvm/llvm-project",
+   "commit": "864850e66498d0550bdb3758a2e6c5204b4ea4f0",
+   "branch": "main",
+   "language": "C / C++"
+  },
+  {
+   "repo": "dotnet/aspnetcore",
+   "commit": "66e2adb4e0297e445686cb7a70d6c9aa84dcf3af",
+   "branch": "main",
+   "language": ".NET"
+  },
+  {
+   "repo": "PowerShell/PowerShell",
+   "commit": "2725d6aaa6e67219b6c9902adf7b74c52e0371a3",
+   "branch": "master",
+   "language": ".NET"
+  },
+  {
+   "repo": "Alamofire/Alamofire",
+   "commit": "6c2892ea5adb5a03fa81c510933dd782c5ddd9cb",
+   "branch": "master",
+   "language": "Swift"
+  },
+  {
+   "repo": "vapor/vapor",
+   "commit": "0f2a8ee9f38b2589c066b604de3e3168ed54c82d",
+   "branch": "main",
+   "language": "Swift"
+  },
+  {
+   "repo": "dotnet/runtime",
+   "commit": "36797f3d0a6947cd0796a763c3eea5c63a04580e",
+   "branch": "main",
+   "language": ".NET"
+  },
+  {
+   "repo": "phoenixframework/phoenix",
+   "commit": "6daf29b3225d446bab3a78ca249e6552e10f72e2",
+   "branch": "main",
+   "language": "Elixir"
+  },
+  {
+   "repo": "flutter/flutter",
+   "commit": "b5879a35ae7d6620104f3806b44a556e307a8fbb",
+   "branch": "master",
+   "language": "Dart"
+  }
+ ]
+}

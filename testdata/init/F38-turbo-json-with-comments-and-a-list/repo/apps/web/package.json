@@ -1,0 +1,10 @@
+{
+  "name": "web",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ui": "*"
+  }
+}

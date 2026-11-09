@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/ready.v2.schema.json",
+  "title": "hushrun.ready/v2",
+  "description": "Output of `hushrun ready --format json` (spec C-22): what CI would still run on this exact code, and the commands that run it here first. It exits 0 when no check is missing and 10 when one is; with --strict, 0 only when a check is known and every check passed. [ADR 0062] v2 has no stage.",
+  "type": "object",
+  "required": ["schema", "revision", "branch", "ready", "checks", "next", "notes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.ready/v2"},
+    "revision": {"description": "The commit looked at; null for the worktree of a repository with no commit yet.", "type": ["string", "null"]},
+    "branch": {"description": "The branch the code goes to, when one is known.", "type": ["string", "null"]},
+    "ready": {"description": "Whether no check is missing; with --strict, whether a check is known and every check passed.", "type": "boolean"},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "state", "why", "run", "recordedBy"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {"description": "The check's name; <scope>/<check> when hushrun.yaml has several scopes.", "type": "string"},
+          "state": {"description": "passed: CI skips it. missing: it hasn't passed on this code, and `run` runs it here, where a counts_from rule on a tool is the run's to judge; with no `run` when it failed here or elsewhere and a run here wouldn't count, so that `why` says what clears it. ci: nothing here changes it, and CI or another machine has to run it.", "enum": ["passed", "missing", "ci"]},
+          "why": {"description": "Why it isn't passed. For a check with no result whose run here under a counts_from rule didn't count, `a run here didn't count: <what the run said>`: that stands for this code on this machine while the key has no result, and `hushrun ready` read it from that run, starting nothing.", "type": ["string", "null"]},
+          "run": {"description": "The command that runs it here, for a missing check a run here can clear.", "type": ["string", "null"]},
+          "recordedBy": {"description": "[ADR 0045] Who recorded a passed check's result, as the server says: never read from the result itself. Null when the server doesn't say, and for any other state.", "type": ["string", "null"]},
+          "reports": {"description": "[ADR 0048] What a passed check's pass said of its test and coverage reports (spec C-27), as its result holds it. Left out without one.", "type": "object", "properties": {"files": {"description": "The report files read, at most 16, by path from the repository root, /-separated, each at most 160 bytes; left out when none fits.", "type": "array", "maxItems": 16, "items": {"type": "object", "required": ["path", "kind", "format"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 160}, "kind": {"description": "tests or coverage.", "type": "string"}, "format": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,19}$", "description": "junit, trx, lcov, cobertura, jacoco, clover, opencover, go, coveragepy, istanbul or simplecov; another word from a newer hushrun."}}}}, "filesLeftOut": {"description": "The report files read that `files` leaves out; left out when none is.", "type": "integer", "minimum": 1, "maximum": 1000000000}, "filesComplete": {"description": "[ADR 0048] `files` names every report file the search found, each read, and the search went everywhere the job's readers read (spec C-26, C-27); left out otherwise.", "const": true}, "tests": {"description": "When a test-results file was read: its tests, `failed` and `errors` apart, and how long they took when the files say.", "type": "object", "required": ["total", "failed", "errors", "skipped"], "properties": {"total": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "failed": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "errors": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "skipped": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "durationMs": {"type": "integer", "minimum": 0, "maximum": 100000000000}}}, "coverage": {"description": "When a coverage file was read: its format, and the lines (statements, for Go's) and branches it covered, each left out when it counts nothing.", "type": "object", "required": ["format"], "properties": {"format": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,19}$"}, "lines": {"type": "object", "required": ["covered", "total"], "properties": {"covered": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "total": {"type": "integer", "minimum": 0, "maximum": 1000000000}}}, "statements": {"type": "object", "required": ["covered", "total"], "properties": {"covered": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "total": {"type": "integer", "minimum": 0, "maximum": 1000000000}}}, "branches": {"type": "object", "required": ["covered", "total"], "properties": {"covered": {"type": "integer", "minimum": 0, "maximum": 1000000000}, "total": {"type": "integer", "minimum": 0, "maximum": 1000000000}}}}}}}
+        }
+      }
+    },
+    "next": {"description": "The commands to run, in order.", "type": "array", "items": {"type": "string"}},
+    "notes": {"description": "What else to know before running them.", "type": "array", "items": {"type": "string"}}
+  }
+}

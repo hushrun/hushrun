@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/digest.v1.schema.json",
+  "title": "hushrun.digest/v1",
+  "description": "Output of `hushrun digest --format json`.",
+  "type": "object",
+  "required": ["schema", "canonicalization", "source", "scopes", "stats"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.digest/v1"},
+    "canonicalization": {"const": "hushrun-source-v1"},
+    "source": {
+      "type": "object",
+      "required": ["vcs"],
+      "additionalProperties": false,
+      "properties": {
+        "vcs": {"enum": ["git", "dir"]},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+        "ref": {"type": "string", "pattern": "^refs/"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+        "objectFormat": {"enum": ["sha1", "sha256"]}
+      }
+    },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scope", "digest", "files", "bytes"],
+        "additionalProperties": false,
+        "properties": {
+          "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+          "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "files": {"type": "integer", "minimum": 1},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["entries", "cacheHits", "hashed", "hashedBytes", "elapsedMs"],
+      "additionalProperties": false,
+      "properties": {
+        "entries": {"type": "integer", "minimum": 0},
+        "cacheHits": {"type": "integer", "minimum": 0},
+        "hashed": {"type": "integer", "minimum": 0},
+        "hashedBytes": {"type": "integer", "minimum": 0},
+        "elapsedMs": {"type": "integer", "minimum": 0}
+      }
+    },
+    "entries": {
+      "description": "With --explain: every entry of the snapshot and the patterns that decided its scopes.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "scopes"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "kind": {"enum": ["f", "x", "l", "g"]},
+          "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["scope", "member"],
+              "additionalProperties": false,
+              "properties": {
+                "scope": {"type": "string"},
+                "member": {"type": "boolean"},
+                "includedBy": {"type": "string"},
+                "excludedBy": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

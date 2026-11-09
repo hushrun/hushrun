@@ -1,0 +1,48 @@
+{
+ "RSpec": {
+  "coverage": {
+   "/repo/lib/a.rb": {
+    "lines": [
+     null,
+     1,
+     0,
+     null,
+     2
+    ],
+    "branches": {
+     "[:if, 0, 2, 4, 2, 20]": {
+      "[:then, 1, 2, 4, 2, 10]": 1,
+      "[:else, 2, 2, 4, 2, 20]": 0
+     }
+    }
+   },
+   "/repo/lib/b.rb": {
+    "lines": [
+     1,
+     0
+    ]
+   }
+  },
+  "timestamp": 1762164000
+ },
+ "Minitest": {
+  "coverage": {
+   "/repo/lib/a.rb": {
+    "lines": [
+     null,
+     0,
+     3,
+     null,
+     0
+    ],
+    "branches": {
+     "[:if, 0, 2, 4, 2, 20]": {
+      "[:then, 1, 2, 4, 2, 10]": 0,
+      "[:else, 2, 2, 4, 2, 20]": 0
+     }
+    }
+   }
+  },
+  "timestamp": 1762164001
+ }
+}

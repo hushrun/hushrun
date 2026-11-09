@@ -1,0 +1,20 @@
+name: "hushrun 0.8 history: a newer staged attempt's image loses to a stage-free attempt's"
+covers: [P-5, P-13]
+description: >-
+  A 0.9 attempt p1 passed with image @b; later, a 0.8 job recorded a production attempt of the
+  same digest that passed with @a. The newest candidate wins, and the staged one isn't one.
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "14:00", by: ci}
+  - {kind: check, run: p1, at: "14:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "14:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "14:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@b"}
+  - {kind: passed, run: p1, at: "14:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@b"}}
+  - {kind: started, stage: production, run: s9, at: "15:00", by: ci}
+  - {kind: artifact, stage: production, run: s9, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, stage: production, run: s9, at: "15:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+expect:
+  mode: promote
+  artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@b"}

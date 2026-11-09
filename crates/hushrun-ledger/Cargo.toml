@@ -1,0 +1,52 @@
+[package]
+name = "hushrun-ledger"
+description = "The append-only event ledger: the Ledger trait, key layout, and file, mem and HTTP backends."
+# Fixed: the hosted service builds with this crate, and a CLI release must not change its lockfile.
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The network ledger: https:// (M18, L-10), such as the hosted one. The binary enables it;
+# crates that only need the file and mem backends, such as the testkit, build without the
+# network stack. Bucket ledgers (gs://, s3://, az://, M4) are gone (ADR 0022).
+cloud = [
+  "dep:base64",
+  "dep:futures-util",
+  "dep:reqwest",
+  "dep:rustls",
+  "dep:tokio",
+  "dep:tracing",
+  "dep:jiff",
+]
+
+[dependencies]
+base64 = { workspace = true, optional = true }
+getrandom.workspace = true
+hushrun-core.workspace = true
+# [M18] The transparency log of HTTP ledgers (L-11).
+hushrun-tlog.workspace = true
+# [M19] The wire form of listing proofs (L-12), which the server and the testkit's fake write.
+serde.workspace = true
+# [ADR 0031] The signers answer (L-13).
+serde_json.workspace = true
+thiserror.workspace = true
+
+futures-util = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The fake HTTP ledger. The testkit depends on this crate too; its fake shares no types with
+# the tests, so the two builds of this crate never meet.
+hushrun-testkit.workspace = true
+tempfile.workspace = true

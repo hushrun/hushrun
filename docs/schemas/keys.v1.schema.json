@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/keys.v1.schema.json",
+  "title": "hushrun.keys/v1",
+  "description": "Output of `hushrun keys generate --out FILE` and `hushrun keys public` (of a key file) with --format json. Never contains a private key.",
+  "type": "object",
+  "required": ["schema", "publicKey", "keyid"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.keys/v1"},
+    "publicKey": {
+      "description": "E-2: an Ed25519 key, or (M10) an ECDSA P-256 key as the base64 of its DER SubjectPublicKeyInfo.",
+      "type": "string",
+      "pattern": "^(ed25519:[A-Za-z0-9+/]{43}=|ecdsa-p256:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9+/]{86}==)$"
+    },
+    "keyid": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "file": {"type": ["string", "null"]}
+  }
+}

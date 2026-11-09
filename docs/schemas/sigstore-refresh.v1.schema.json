@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/sigstore-refresh.v1.schema.json",
+  "title": "hushrun.sigstore.refresh/v1",
+  "description": "Output of `hushrun sigstore refresh --format json` (T-12): the trust root it verified with TUF and cached.",
+  "type": "object",
+  "required": [
+    "schema",
+    "repository",
+    "rootVersion",
+    "targetsVersion",
+    "trustedRoot",
+    "certificateAuthorities",
+    "timestampAuthorities",
+    "cache"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "hushrun.sigstore.refresh/v1"
+    },
+    "repository": {
+      "description": "The TUF repository's URL.",
+      "type": "string"
+    },
+    "rootVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "targetsVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "trustedRoot": {
+      "description": "sha256: of the cached trusted_root.json.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "certificateAuthorities": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timestampAuthorities": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cache": {
+      "description": "The directory it was written to.",
+      "type": "string"
+    }
+  }
+}

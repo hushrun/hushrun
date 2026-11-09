@@ -1,0 +1,914 @@
+{
+ "about": "Report files and the summary hushrun records for each set of them (C-27). Rust's hushrun-reports and tools/refreports.py must both agree.",
+ "vectors": [
+  {
+   "name": "junit: suites with a failure, an error and a skip",
+   "files": [
+    "junit/basic.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/basic.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 7,
+     "failed": 1,
+     "errors": 1,
+     "skipped": 1,
+     "durationMs": 12500
+    }
+   }
+  },
+  {
+   "name": "junit: no time on the root: the sum of its suites'",
+   "files": [
+    "junit/no-root-time.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/no-root-time.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 4,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 1,
+     "durationMs": 3750
+    }
+   }
+  },
+  {
+   "name": "junit: nested suites count each test once",
+   "files": [
+    "junit/nested.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/nested.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 3,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 3000
+    }
+   }
+  },
+  {
+   "name": "junit: wrong summary attributes are never read",
+   "files": [
+    "junit/wrong-attributes.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/wrong-attributes.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 0
+    }
+   }
+  },
+  {
+   "name": "junit: no attributes at all",
+   "files": [
+    "junit/missing-attributes.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/missing-attributes.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 1
+    }
+   }
+  },
+  {
+   "name": "junit: a failure outweighs an error, an error a skip",
+   "files": [
+    "junit/precedence.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/precedence.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 3,
+     "failed": 2,
+     "errors": 1,
+     "skipped": 0,
+     "durationMs": 500
+    }
+   }
+  },
+  {
+   "name": "junit: Surefire's reruns are no outcome",
+   "files": [
+    "junit/reruns.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/reruns.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 3,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 1750
+    }
+   }
+  },
+  {
+   "name": "junit: a byte order mark",
+   "files": [
+    "junit/bom.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/bom.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 1,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 100
+    }
+   }
+  },
+  {
+   "name": "junit: a DOCTYPE's entities are never expanded",
+   "files": [
+    "junit/doctype-entities.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/doctype-entities.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 2000
+    }
+   }
+  },
+  {
+   "name": "junit: billion laughs, unexpanded",
+   "files": [
+    "junit/billion-laughs.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/billion-laughs.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 1,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 1000
+    }
+   }
+  },
+  {
+   "name": "junit: malformed XML says nothing",
+   "files": [
+    "junit/malformed.xml"
+   ],
+   "reports": null
+  },
+  {
+   "name": "junit: a file cut short says nothing",
+   "files": [
+    "junit/truncated.xml"
+   ],
+   "reports": null
+  },
+  {
+   "name": "junit: an empty file says nothing",
+   "files": [
+    "junit/empty.xml"
+   ],
+   "reports": null
+  },
+  {
+   "name": "junit: no suites, no tests",
+   "files": [
+    "junit/empty-suites.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/empty-suites.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 0,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 0
+    }
+   }
+  },
+  {
+   "name": "junit: Gradle",
+   "files": [
+    "junit/gradle.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/gradle.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 1,
+     "durationMs": 42
+    }
+   }
+  },
+  {
+   "name": "junit: nextest, with a flaky pass and a failed rerun",
+   "files": [
+    "junit/nextest.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/nextest.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 3,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 871
+    }
+   }
+  },
+  {
+   "name": "junit: told by content, not by name",
+   "files": [
+    "junit/odd-name.dat"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/odd-name.dat",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 0,
+     "durationMs": 250
+    }
+   }
+  },
+  {
+   "name": "xml in no format hushrun reads says nothing",
+   "files": [
+    "junit/not-a-report.xml"
+   ],
+   "reports": null
+  },
+  {
+   "name": "text in no format hushrun reads says nothing",
+   "files": [
+    "text/not-a-report.txt"
+   ],
+   "reports": null
+  },
+  {
+   "name": "junit: Surefire's files are summed",
+   "files": [
+    "surefire/TEST-com.acme.ATest.xml",
+    "surefire/TEST-com.acme.BTest.xml",
+    "surefire/TEST-com.acme.CTest.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "surefire/TEST-com.acme.ATest.xml",
+      "kind": "tests",
+      "format": "junit"
+     },
+     {
+      "path": "surefire/TEST-com.acme.BTest.xml",
+      "kind": "tests",
+      "format": "junit"
+     },
+     {
+      "path": "surefire/TEST-com.acme.CTest.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 6,
+     "failed": 1,
+     "errors": 0,
+     "skipped": 1,
+     "durationMs": 2001
+    }
+   }
+  },
+  {
+   "name": "trx: timeouts and aborted tests fail, tests not run are skipped",
+   "files": [
+    "trx/basic.trx"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "trx/basic.trx",
+      "kind": "tests",
+      "format": "trx"
+     }
+    ],
+    "tests": {
+     "total": 12,
+     "failed": 3,
+     "errors": 1,
+     "skipped": 1,
+     "durationMs": 81234
+    }
+   }
+  },
+  {
+   "name": "trx: no Times, no duration",
+   "files": [
+    "trx/no-times.trx"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "trx/no-times.trx",
+      "kind": "tests",
+      "format": "trx"
+     }
+    ],
+    "tests": {
+     "total": 2,
+     "failed": 0,
+     "errors": 0,
+     "skipped": 0
+    }
+   }
+  },
+  {
+   "name": "cobertura: the root's attributes",
+   "files": [
+    "cobertura/attributes.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "cobertura/attributes.xml",
+      "kind": "coverage",
+      "format": "cobertura"
+     }
+    ],
+    "coverage": {
+     "format": "cobertura",
+     "lines": {
+      "covered": 8123,
+      "total": 9310
+     },
+     "branches": {
+      "covered": 2011,
+      "total": 2890
+     }
+    }
+   }
+  },
+  {
+   "name": "cobertura: lines counted once per file and number",
+   "files": [
+    "cobertura/lines-only.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "cobertura/lines-only.xml",
+      "kind": "coverage",
+      "format": "cobertura"
+     }
+    ],
+    "coverage": {
+     "format": "cobertura",
+     "lines": {
+      "covered": 3,
+      "total": 5
+     },
+     "branches": {
+      "covered": 3,
+      "total": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "lcov: LF, LH, BRF and BRH",
+   "files": [
+    "lcov/basic.info"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "lcov/basic.info",
+      "kind": "coverage",
+      "format": "lcov"
+     }
+    ],
+    "coverage": {
+     "format": "lcov",
+     "lines": {
+      "covered": 3,
+      "total": 5
+     },
+     "branches": {
+      "covered": 3,
+      "total": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "lcov: no LF lines: DA and BRDA",
+   "files": [
+    "lcov/no-lf.info"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "lcov/no-lf.info",
+      "kind": "coverage",
+      "format": "lcov"
+     }
+    ],
+    "coverage": {
+     "format": "lcov",
+     "lines": {
+      "covered": 3,
+      "total": 4
+     },
+     "branches": {
+      "covered": 1,
+      "total": 2
+     }
+    }
+   }
+  },
+  {
+   "name": "jacoco: only the report's own counters",
+   "files": [
+    "jacoco/nested-counters.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "jacoco/nested-counters.xml",
+      "kind": "coverage",
+      "format": "jacoco"
+     }
+    ],
+    "coverage": {
+     "format": "jacoco",
+     "lines": {
+      "covered": 5,
+      "total": 7
+     },
+     "branches": {
+      "covered": 3,
+      "total": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "clover: the project's metrics, first",
+   "files": [
+    "clover/openclover.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "clover/openclover.xml",
+      "kind": "coverage",
+      "format": "clover"
+     }
+    ],
+    "coverage": {
+     "format": "clover",
+     "lines": {
+      "covered": 30,
+      "total": 40
+     },
+     "branches": {
+      "covered": 6,
+      "total": 8
+     }
+    }
+   }
+  },
+  {
+   "name": "clover: PHPUnit's, last, with no conditionals",
+   "files": [
+    "clover/phpunit.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "clover/phpunit.xml",
+      "kind": "coverage",
+      "format": "clover"
+     }
+    ],
+    "coverage": {
+     "format": "clover",
+     "lines": {
+      "covered": 3,
+      "total": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "opencover: the session's own summary",
+   "files": [
+    "opencover/basic.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "opencover/basic.xml",
+      "kind": "coverage",
+      "format": "opencover"
+     }
+    ],
+    "coverage": {
+     "format": "opencover",
+     "lines": {
+      "covered": 96,
+      "total": 120
+     },
+     "branches": {
+      "covered": 30,
+      "total": 40
+     }
+    }
+   }
+  },
+  {
+   "name": "go: statements",
+   "files": [
+    "go/basic.out"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "go/basic.out",
+      "kind": "coverage",
+      "format": "go"
+     }
+    ],
+    "coverage": {
+     "format": "go",
+     "statements": {
+      "covered": 3,
+      "total": 5
+     }
+    }
+   }
+  },
+  {
+   "name": "go: duplicate blocks keep their highest count",
+   "files": [
+    "go/duplicates.out"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "go/duplicates.out",
+      "kind": "coverage",
+      "format": "go"
+     }
+    ],
+    "coverage": {
+     "format": "go",
+     "statements": {
+      "covered": 3,
+      "total": 6
+     }
+    }
+   }
+  },
+  {
+   "name": "istanbul: the total's lines and branches",
+   "files": [
+    "istanbul/coverage-summary.json"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "istanbul/coverage-summary.json",
+      "kind": "coverage",
+      "format": "istanbul"
+     }
+    ],
+    "coverage": {
+     "format": "istanbul",
+     "lines": {
+      "covered": 8123,
+      "total": 9310
+     },
+     "branches": {
+      "covered": 2011,
+      "total": 2890
+     }
+    }
+   }
+  },
+  {
+   "name": "coverage.py: lines and branches",
+   "files": [
+    "coveragepy/coverage.json"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "coveragepy/coverage.json",
+      "kind": "coverage",
+      "format": "coveragepy"
+     }
+    ],
+    "coverage": {
+     "format": "coveragepy",
+     "lines": {
+      "covered": 812,
+      "total": 931
+     },
+     "branches": {
+      "covered": 201,
+      "total": 289
+     }
+    }
+   }
+  },
+  {
+   "name": "coverage.py: no branches measured",
+   "files": [
+    "coveragepy/no-branches.json"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "coveragepy/no-branches.json",
+      "kind": "coverage",
+      "format": "coveragepy"
+     }
+    ],
+    "coverage": {
+     "format": "coveragepy",
+     "lines": {
+      "covered": 40,
+      "total": 50
+     }
+    }
+   }
+  },
+  {
+   "name": "simplecov: commands merged",
+   "files": [
+    "simplecov/merged.json"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "simplecov/merged.json",
+      "kind": "coverage",
+      "format": "simplecov"
+     }
+    ],
+    "coverage": {
+     "format": "simplecov",
+     "lines": {
+      "covered": 4,
+      "total": 5
+     },
+     "branches": {
+      "covered": 1,
+      "total": 2
+     }
+    }
+   }
+  },
+  {
+   "name": "simplecov: before 0.18, lines alone",
+   "files": [
+    "simplecov/legacy.json"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "simplecov/legacy.json",
+      "kind": "coverage",
+      "format": "simplecov"
+     }
+    ],
+    "coverage": {
+     "format": "simplecov",
+     "lines": {
+      "covered": 2,
+      "total": 3
+     }
+    }
+   }
+  },
+  {
+   "name": "tests and coverage from one run",
+   "files": [
+    "junit/basic.xml",
+    "cobertura/attributes.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "cobertura/attributes.xml",
+      "kind": "coverage",
+      "format": "cobertura"
+     },
+     {
+      "path": "junit/basic.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 7,
+     "failed": 1,
+     "errors": 1,
+     "skipped": 1,
+     "durationMs": 12500
+    },
+    "coverage": {
+     "format": "cobertura",
+     "lines": {
+      "covered": 8123,
+      "total": 9310
+     },
+     "branches": {
+      "covered": 2011,
+      "total": 2890
+     }
+    }
+   }
+  },
+  {
+   "name": "the same coverage in Cobertura and LCOV counts once, LCOV's",
+   "files": [
+    "cobertura/lines-only.xml",
+    "lcov/basic.info"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "cobertura/lines-only.xml",
+      "kind": "coverage",
+      "format": "cobertura"
+     },
+     {
+      "path": "lcov/basic.info",
+      "kind": "coverage",
+      "format": "lcov"
+     }
+    ],
+    "coverage": {
+     "format": "lcov",
+     "lines": {
+      "covered": 3,
+      "total": 5
+     },
+     "branches": {
+      "covered": 3,
+      "total": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "a broken file beside a good one: the good one counts",
+   "files": [
+    "junit/malformed.xml",
+    "junit/basic.xml"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/basic.xml",
+      "kind": "tests",
+      "format": "junit"
+     }
+    ],
+    "tests": {
+     "total": 7,
+     "failed": 1,
+     "errors": 1,
+     "skipped": 1,
+     "durationMs": 12500
+    }
+   }
+  },
+  {
+   "name": "test results of two formats are summed",
+   "files": [
+    "junit/basic.xml",
+    "trx/basic.trx"
+   ],
+   "reports": {
+    "files": [
+     {
+      "path": "junit/basic.xml",
+      "kind": "tests",
+      "format": "junit"
+     },
+     {
+      "path": "trx/basic.trx",
+      "kind": "tests",
+      "format": "trx"
+     }
+    ],
+    "tests": {
+     "total": 19,
+     "failed": 4,
+     "errors": 2,
+     "skipped": 2,
+     "durationMs": 93734
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,18 @@
+name: "a required check with no `run` waits for its attestation -> refresh"
+covers: [P-1, P-14]
+description: "deploy.require names sast, which nothing runs here: until the security team's workflow attests it, it is missing"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: refresh
+  checks: [sast]
+  requirements: {sast: missing}

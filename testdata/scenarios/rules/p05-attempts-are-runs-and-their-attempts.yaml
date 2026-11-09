@@ -1,0 +1,22 @@
+name: "a re-run's pass doesn't make the first attempt's image reusable -> full"
+covers: [P-5, P-13]
+description: >-
+  Attempts group by provider, run and attempt. Attempt 1 of run p1 built the image and failed;
+  attempt 2 passed without building. The image belongs to the failed attempt, so it isn't
+  reused, though the run as a whole ended with a pass.
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, attempt: 1, at: "15:00", by: ci}
+  - {kind: check, run: p1, attempt: 1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, attempt: 1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, attempt: 1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: failed, run: p1, attempt: 1, at: "15:03", by: ci, reason: deploy failed}
+  - {kind: started, run: p1, attempt: 2, at: "15:20", by: ci}
+  - {kind: passed, run: p1, attempt: 2, at: "15:25", by: ci}
+expect:
+  mode: full
+  reason: "(recorded ones aren't reusable"
+  build: true
+  checks: []

@@ -1,0 +1,19 @@
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      matrix:
+        platform: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/run-tests
+
+  minimum-versions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/run-tests
+        with:
+          pattern: not slow and not network

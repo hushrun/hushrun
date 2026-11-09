@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/doctor.v1.schema.json",
+  "title": "hushrun.doctor/v1",
+  "description": "Output of `hushrun doctor --format json`. `ok` is false when any check has status error; the command then exits 2.",
+  "type": "object",
+  "required": ["schema", "ok", "checks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.doctor/v1"},
+    "ok": {"type": "boolean"},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "status", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {"type": "string", "minLength": 1},
+          "status": {"enum": ["ok", "warning", "error", "skipped"]},
+          "detail": {"type": "string"}
+        }
+      }
+    }
+  }
+}

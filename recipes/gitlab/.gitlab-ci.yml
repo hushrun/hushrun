@@ -1,0 +1,122 @@
+# hushrun on GitLab CI, set up as https://hushrun.com/docs/deploy/gitlab describes. Every push to
+# main plans its digest: a digest main already runs is current, with nothing to deploy; one an
+# earlier pipeline built and passed deploys that image again, by digest; new content builds once
+# and runs only the checks it lacks. Names, images and the build and deploy scripts are
+# placeholders.
+#
+# Before the first pipeline (the page above has the details):
+# - protect main;
+# - hushrun.yaml names the repository's URL on hushrun, `repository_url:`, as
+#   `npx hushrun init` writes it;
+# - an org admin makes the pipeline an agent token, which comes with its machine key, for a
+#   year: `hushrun token create --agent gitlab-ci --expires 365d`;
+# - project CI/CD variables, never set in this file:
+#   - HUSHRUN_TOKEN: the agent token (hra_…), masked and protected. It goes to the repository's
+#     URL on hushrun's host, which takes it for its org only;
+#   - HUSHRUN_MACHINE_KEY_FILE: the agent's machine key, File type and protected. The pipeline
+#     signs its events with it, and they count as agent:gitlab-ci's;
+# - Settings > CI/CD > Variables: let no one set pipeline variables, which would outrank these.
+#   `hushrun doctor`, given HUSHRUN_GITLAB_TOKEN, a project access token with read_api, checks
+#   it, and that main is protected;
+# - vendor install-hushrun.sh, attached to each release, as ci/install-hushrun.sh.
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - when: never
+
+stages: [plan, test, deploy, finish]
+
+# The newest hushrun release: the plan job runs the image's, and every later job the same one,
+# even when a newer one comes out meanwhile. To install one release until you change it, set
+# HUSHRUN_VERSION, and the image to that release, pinned by the digest its release notes give:
+#   HUSHRUN_VERSION: "0.9.0"
+#   HUSHRUN_IMAGE: ghcr.io/hushrun/hushrun:0.9.0@sha256:…
+variables:
+  HUSHRUN_IMAGE: ghcr.io/hushrun/hushrun:latest
+
+# Every job that runs hushrun extends this. GitLab's `extends` replaces a before_script rather
+# than merging it, so your cloud's credential step for the registry, if it needs one, goes
+# here too (https://hushrun.com/docs/deploy/gitlab#cloud-access).
+.hushrun:
+  before_script:
+    # The image has hushrun. On any other image, or when it isn't HUSHRUN_VERSION, the release
+    # the plan job ran (from its dotenv report), install that release, checked against its
+    # checksum.
+    - |
+      have=$(hushrun --version 2>/dev/null || true)
+      if [ -z "$have" ] || { [ -n "${HUSHRUN_VERSION:-}" ] && [ "$have" != "hushrun $HUSHRUN_VERSION" ]; }; then
+        bin=$(sh ci/install-hushrun.sh)
+        PATH="$(dirname "$bin"):$PATH"
+      fi
+  # A cancel records `superseded`: GitLab runs after_script, in a shell of its own, when it
+  # cancels a running job. A timeout is a failure, which mark-failed records.
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = canceled ] && [ -f plan.json ]; then
+        case "$HUSHRUN_MODE" in
+          promote | refresh | full)
+            have=$(hushrun --version 2>/dev/null || true)
+            if [ -z "$have" ] || { [ -n "${HUSHRUN_VERSION:-}" ] && [ "$have" != "hushrun $HUSHRUN_VERSION" ]; }; then
+              bin=$(sh ci/install-hushrun.sh)
+              PATH="$(dirname "$bin"):$PATH"
+            fi
+            hushrun mark superseded --plan plan.json --reason cancelled || true
+            ;;
+        esac
+      fi
+
+plan:
+  stage: plan
+  extends: .hushrun
+  image: $HUSHRUN_IMAGE
+  script:
+    - hushrun plan --start --out plan.json --dotenv plan.env
+    # Later jobs run this release, the one that made the plan.
+    - echo "HUSHRUN_VERSION=$(hushrun --version | cut -d ' ' -f 2)" >> plan.env
+  artifacts:
+    paths: [plan.json]
+    reports:
+      dotenv: plan.env # HUSHRUN_MODE, HUSHRUN_CHECKS, HUSHRUN_DIGEST, HUSHRUN_REF, …, HUSHRUN_VERSION
+
+test:
+  stage: test
+  extends: .hushrun
+  image: golang:1.25 # the toolchain the checks need
+  needs: [plan]
+  script:
+    - '[ -n "$HUSHRUN_CHECKS" ] || { echo "nothing to run"; exit 0; }'
+    - hushrun run --plan plan.json # exactly the plan's checks
+
+deploy:
+  stage: deploy
+  extends: .hushrun
+  image: google/cloud-sdk:slim # what build.sh and deploy.sh need
+  needs: [plan, test]
+  resource_group: deploy # one deploy at a time
+  script:
+    - 'case "$HUSHRUN_MODE" in promote|refresh|full) ;; *) echo "mode $HUSHRUN_MODE: nothing to deploy"; exit 0 ;; esac'
+    # Each output goes through a variable, so a command that fails fails the job.
+    - out=$(hushrun guard --plan plan.json --format env); eval "$out"
+    - '[ "$HUSHRUN_STALE" != true ] || { echo "a newer revision took over"; exit 0; }'
+    - out=$(hushrun artifact resolve --plan plan.json --format env); eval "$out"
+    - |
+      if [ "$HUSHRUN_BUILD" = true ]; then
+        ./build.sh "$HUSHRUN_REF"
+        out=$(hushrun attest --plan plan.json --artifact "image=$HUSHRUN_REF" --format env)
+        eval "$out"
+      fi
+    - ./deploy.sh "$HUSHRUN_REF"
+    - hushrun mark deployed --plan plan.json --artifact "image=$HUSHRUN_REF"
+    # A check of what was just deployed, such as a smoke test, runs here: its failure fails the
+    # job, and mark-failed records it.
+    - hushrun mark passed --plan plan.json --artifact "image=$HUSHRUN_REF"
+
+mark-failed:
+  stage: finish
+  extends: .hushrun
+  image: $HUSHRUN_IMAGE
+  when: on_failure
+  script:
+    - 'case "$HUSHRUN_MODE" in promote|refresh|full) ;; *) exit 0 ;; esac' # nothing started
+    - hushrun mark failed --plan plan.json --reason "pipeline failed"

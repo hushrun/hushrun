@@ -1,0 +1,22 @@
+name: a check pinned to an image counts only evidence from that image
+covers: [P-1, E-7, C-5]
+description: "lint pins golangci-lint by digest and linux/amd64: evidence from another image, another platform or no recorded environment doesn't count"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@2", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/arm64}
+  - {kind: check, run: c1, at: "10:03", by: ci, check: lint}
+  - {kind: check, run: c1, at: "10:03", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:04", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: refresh
+  checks: [lint]
+  artifacts: {api-image: "ghcr.io/acme/api@a"}
+  requirements: {lint: missing, unit: satisfied}

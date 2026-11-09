@@ -1,0 +1,5 @@
+mode: set
+github.com/acme/app/math.go:3.24,5.2 1 1
+github.com/acme/app/math.go:7.24,9.16 2 1
+github.com/acme/app/math.go:9.16,11.3 1 0
+github.com/acme/app/math.go:12.2,12.10 1 0

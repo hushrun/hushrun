@@ -1,0 +1,14 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  py312:
+    uses: ./.github/workflows/test.yml
+    with:
+      python-version: "3.12"
+  py313:
+    uses: ./.github/workflows/test.yml
+    with:
+      python-version: "3.13"

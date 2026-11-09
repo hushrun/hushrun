@@ -1,0 +1,23 @@
+[package]
+name = "hushrun-digest"
+description = "Source digest v1: scope filtering, the canonical manifest, hashing and caches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hushrun-core.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

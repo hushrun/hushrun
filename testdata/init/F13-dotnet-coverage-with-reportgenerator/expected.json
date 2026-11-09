@@ -1,0 +1,86 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -6,9 +6,13 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n-      - run: dotnet test --collect:\"XPlat Code Coverage\"\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- dotnet test --collect:\"XPlat Code Coverage\"\n       - uses: danielpalme/ReportGenerator-GitHub-Action@5\n         with:\n           reports: '**/coverage.cobertura.xml'\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- dotnet test --collect:XPlat Code Coverage",
+          "before": "dotnet test --collect:XPlat Code Coverage",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "a later step reads its reports (danielpalme/ReportGenerator-GitHub-Action), and a skip writes none",
+          "ciWhy": "reports",
+          "dir": "",
+          "line": 11,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [
+        {
+          "kinds": [
+            "coverage"
+          ],
+          "name": "danielpalme/ReportGenerator-GitHub-Action",
+          "onlyOnFailure": false,
+          "paths": [
+            "**/coverage.cobertura.xml"
+          ],
+          "step": 2
+        }
+      ],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (danielpalme/ReportGenerator-GitHub-Action). Laptops and agents skip it on a pass."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

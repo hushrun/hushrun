@@ -1,0 +1,16 @@
+name: "hushrun 0.8 history: the newest check event decides, staged or not"
+covers: [P-1, P-4]
+description: >-
+  0.8 recorded unit passing at staging; a 0.9 run then failed it on the same files. Both are
+  candidates, and the newest decides: unit runs again.
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, stage: staging, run: s1, at: "14:01", by: ci, check: toolchain}
+  - {kind: check, stage: staging, run: s1, at: "14:01", by: ci, check: unit}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit, result: fail}
+expect:
+  mode: full
+  checks: [unit]
+  requirements: {toolchain: satisfied, unit: failed}

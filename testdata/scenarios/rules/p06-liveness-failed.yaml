@@ -1,0 +1,17 @@
+name: liveness reports a failed attempt that recorded nothing -> its image isn't reused
+covers: [P-6, P-13]
+description: "A timed-out run is a failure, not a cancellation"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:30", by: ci}
+  - {kind: check, run: p1, at: "15:31", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:31", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:32", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@b"}
+liveness:
+  - {run: p1, state: failed}
+expect:
+  mode: full
+  build: true
+  checks: []

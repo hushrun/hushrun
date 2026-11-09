@@ -1,0 +1,6 @@
+{
+  "name": "shared",
+  "scripts": {
+    "test": "vitest run"
+  }
+}

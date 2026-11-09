@@ -1,0 +1,20 @@
+name: "push: the repository already runs this digest -> current"
+covers: [P-10, L-8]
+description: "The newest deployment that counts is this digest (was ci-promote case 21)"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: deployed, run: p1, at: "15:10", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+  - {kind: passed, run: p1, at: "15:11", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+deployed:
+  - {digest: this, at: "15:10", by: ci, run: p1}
+expect:
+  mode: current
+  reason: "this repository already runs sha256:329354c1d5b2 (deployed at 2026-10-13T15:10:00.000Z); to deploy it again, re-run it or start it by hand"
+  build: false
+  checks: []

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/repository-usage.v1.schema.json",
+  "title": "hushrun.repository.usage/v1",
+  "description": "Output of `hushrun repository usage --format json` (spec C-19, ADR 0032): the org's plan and this period's recorded checks, from `GET {base}/v0/usage` on the server `hushrun run` records results to here (C-11, C-12). `usage` is null when results stay on this machine (`directory`), when they are off (`off`), and when the server doesn't report usage (it answered 404 or 405: `backend` without `usage`). It exits 0 then, and 6, printing nothing on stdout, when the server can't be reached, refuses the credential or answers anything else.",
+  "type": "object",
+  "required": ["schema", "backend", "named_by", "directory", "off", "repository", "usage"],
+  "additionalProperties": false,
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "optionalCount": {"type": ["integer", "null"], "minimum": 0}
+  },
+  "properties": {
+    "schema": {"const": "hushrun.repository.usage/v1"},
+    "backend": {"description": "The server's org URL, or null when results stay on this machine or are off.", "type": ["string", "null"]},
+    "named_by": {"description": "What named the server (C-11).", "enum": ["HUSHRUN_AGENT", "HUSHRUN_BACKEND", "package.json", "hushrun.yaml", "login", null]},
+    "directory": {"description": "Where results stay when no server is named: hushrun's cache directory. Nothing is metered there.", "type": ["string", "null"]},
+    "off": {"description": "Why results are off, when they are.", "type": ["string", "null"]},
+    "repository": {"description": "This repository, as `hushrun run`'s results name it (C-10): the CI provider's, else hushrun.yaml's, else the `origin` remote's; null outside a repository.", "type": ["string", "null"]},
+    "usage": {
+      "description": "What the server answered (C-12), with this repository's share.",
+      "type": ["object", "null"],
+      "required": ["org", "plan", "plan_name", "period_start", "period_end", "used", "included", "limit", "overage", "overage_cents", "state", "repositories", "repository_checks", "dashboard"],
+      "additionalProperties": false,
+      "properties": {
+        "org": {"type": ["string", "null"]},
+        "plan": {"description": "The plan's id, such as free, team or growth.", "type": ["string", "null"]},
+        "plan_name": {"type": ["string", "null"]},
+        "period_start": {"description": "RFC 3339, as the server wrote it.", "type": ["string", "null"]},
+        "period_end": {"type": ["string", "null"]},
+        "used": {"description": "The checks the org recorded this period.", "$ref": "#/$defs/count"},
+        "included": {"description": "What the plan includes; null for a plan without a number.", "$ref": "#/$defs/optionalCount"},
+        "limit": {"description": "Where recording stops: past it, checks still run, and their results aren't recorded. Null for a plan without one.", "$ref": "#/$defs/optionalCount"},
+        "overage": {"$ref": "#/$defs/optionalCount"},
+        "overage_cents": {"$ref": "#/$defs/optionalCount"},
+        "state": {"description": "The server's word for where the org stands, such as ok, near, over_included or at_limit.", "type": ["string", "null"]},
+        "repositories": {
+          "description": "Each repository's checks this period, most first; \"\" for checks without one.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "checks"],
+            "additionalProperties": false,
+            "properties": {"repository": {"type": "string"}, "checks": {"$ref": "#/$defs/count"}}
+          }
+        },
+        "free": {
+          "description": "What open source repositories recorded for free this period, most first: in none of the other numbers here, and outside the plan. Empty when the server says there are none; left out when it doesn't say, as a server from before the field doesn't.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["repository", "checks"],
+            "additionalProperties": false,
+            "properties": {"repository": {"type": "string"}, "checks": {"$ref": "#/$defs/count"}}
+          }
+        },
+        "repository_checks": {"description": "This repository's checks this period: its entries in `repositories`, ignoring case; null when `repository` is.", "$ref": "#/$defs/optionalCount"},
+        "dashboard": {"description": "The org's usage page on the server's dashboard.", "type": ["string", "null"]}
+      }
+    }
+  }
+}

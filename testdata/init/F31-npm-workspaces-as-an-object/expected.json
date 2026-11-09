@@ -1,0 +1,140 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/package.json\n+++ b/package.json\n@@ -7,6 +7,13 @@\n     ]\n   },\n   \"scripts\": {\n-    \"test\": \"npm test --workspaces\"\n+    \"test\": \"npm test --workspaces\",\n+    \"prepare\": \"hushrun hook install || exit 0\"\n+  },\n+  \"hushrun\": {\n+    \"backend\": \"<your org's URL, once you sign in>\"\n+  },\n+  \"devDependencies\": {\n+    \"hushrun\": \"^<version>\"\n   }\n }\n",
+      "path": "package.json"
+    },
+    {
+      "diff": "--- a/packages/core/package.json\n+++ b/packages/core/package.json\n@@ -1,7 +1,7 @@\n {\n   \"name\": \"core\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope core -- vitest run\"\n   },\n   \"version\": \"1.2.0\"\n }\n",
+      "path": "packages/core/package.json"
+    },
+    {
+      "diff": "--- a/packages/web/package.json\n+++ b/packages/web/package.json\n@@ -1,7 +1,7 @@\n {\n   \"name\": \"web\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope web -- vitest run\"\n   },\n   \"version\": \"1.0.0\",\n   \"dependencies\": {\n",
+      "path": "packages/web/package.json"
+    },
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -3,6 +3,9 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - run: npm ci\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,26 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+\n+# A check skips until its scope's files change, so each project's checks run for its\n+# own changes, and what CI and its tools read.\n+scopes:\n+  core:\n+    include:\n+      - \"packages/core/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n+  web:\n+    include:\n+      - \"packages/web/**\"\n+      - \"packages/core/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/core/package.json",
+          "script": "test"
+        },
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/web/package.json",
+          "script": "test"
+        }
+      ],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "package.json \"test\" runs each package's test, which init wraps there, so it skips package by package"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "dir": "packages/core",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "packages/core/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "core",
+      "why": null
+    },
+    {
+      "dir": "packages/web",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "packages/web/**",
+        "packages/core/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "web",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [
+      {
+        "package": "package.json",
+        "script": "test",
+        "why": "it only runs other scripts or the package manager"
+      }
+    ],
+    "wrapped": [
+      {
+        "after": "hushrun run --scope core -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/core/package.json",
+        "script": "test"
+      },
+      {
+        "after": "hushrun run --scope web -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/web/package.json",
+        "script": "test"
+      }
+    ]
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

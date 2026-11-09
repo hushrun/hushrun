@@ -1,0 +1,19 @@
+#!/bin/sh
+# A stand-in for vitest in init's fixtures (A9): passes, writing a JUnit report when asked, by
+# --outputFile.junit=PATH, or by --outputFile=PATH beside --reporter=junit.
+junit=
+for arg in "$@"; do
+  [ "$arg" = "--reporter=junit" ] && junit=yes
+done
+for arg in "$@"; do
+  case "$arg" in
+    --outputFile=*)
+      [ -n "$junit" ] || continue
+      out="${arg#*=}"; mkdir -p "$(dirname "$out")"
+      printf '<testsuites tests="1"><testsuite name="vitest" tests="1"><testcase name="one"/></testsuite></testsuites>\n' > "$out" ;;
+    --outputFile.junit=*)
+      out="${arg#*=}"; mkdir -p "$(dirname "$out")"
+      printf '<testsuites tests="1"><testsuite name="vitest" tests="1"><testcase name="one"/></testsuite></testsuites>\n' > "$out" ;;
+  esac
+done
+echo "Test Files  1 passed (1)"

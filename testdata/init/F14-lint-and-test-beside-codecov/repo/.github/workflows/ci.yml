@@ -1,0 +1,15 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ruff check .
+      - run: pytest --cov=src --cov-report=xml
+      - uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml

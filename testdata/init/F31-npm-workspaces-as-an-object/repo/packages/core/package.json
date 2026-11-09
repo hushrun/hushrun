@@ -1,0 +1,7 @@
+{
+  "name": "core",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "version": "1.2.0"
+}

@@ -1,0 +1,42 @@
+{
+ "total": {
+  "lines": {
+   "total": 9310,
+   "covered": 8123,
+   "skipped": 0,
+   "pct": 87.25
+  },
+  "statements": {
+   "total": 9500,
+   "covered": 8200,
+   "skipped": 0,
+   "pct": 86.31
+  },
+  "functions": {
+   "total": 300,
+   "covered": 250,
+   "skipped": 0,
+   "pct": 83.33
+  },
+  "branches": {
+   "total": 2890,
+   "covered": 2011,
+   "skipped": 0,
+   "pct": 69.58
+  },
+  "branchesTrue": {
+   "total": 0,
+   "covered": 0,
+   "skipped": 0,
+   "pct": 100
+  }
+ },
+ "/repo/src/a.js": {
+  "lines": {
+   "total": 10,
+   "covered": 9,
+   "skipped": 0,
+   "pct": 90
+  }
+ }
+}

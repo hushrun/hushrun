@@ -1,0 +1,46 @@
+# Release configuration for `dist` (cargo-dist). `dist generate` writes
+# .github/workflows/release.yml from it; never edit that file by hand.
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
+  "aarch64-pc-windows-msvc",
+  "x86_64-pc-windows-msvc",
+]
+# Shell and PowerShell installers now; the Homebrew tap comes with 1.0 (M12).
+installers = ["shell", "powershell"]
+install-path = "CARGO_HOME"
+install-updater = false
+checksum = "sha256"
+# Pull requests only check that the release plan still builds.
+pr-run-mode = "plan"
+# The source is private, and the releases are public (ADR 0034): each GitHub Release goes to
+# hushrun/hushrun, created with the secret GH_RELEASES_TOKEN, a token that can write that
+# repository's contents. The installers download from `repository` in cli/Cargo.toml, which names it.
+github-releases-repo = "hushrun/hushrun"
+# Each archive holds the binary, the public README, the license and the third-party notices, and
+# not this repository's own README and changelog.
+auto-includes = false
+include = ["README.md", "LICENSE.md", "THIRD-PARTY-NOTICES.md"]
+# GitHub artifact attestations need a public source repository (or GitHub Enterprise Cloud), and
+# this one stays private: checksums only.
+github-attestations = false
+# The source stays private: a release carries no source.tar.gz of this repository, which dist
+# makes by default.
+source-tarball = false
+# Steps before each build: .github/dist-build-setup.yml (the path is from .github/workflows).
+
+# aarch64-pc-windows-msvc builds on GitHub's Windows runner with Visual Studio, as ring documents.
+# dist's default, cargo-xwin on Linux, gives ring's clang clang-cl's flags, and the build fails.
+# (A release from the owner's Mac uses cargo-xwin with a wrapper for that: docs/deploy.md.)
+# aarch64-apple-darwin leaves dist's default, macos-14: GitHub retired that image on 2026-11-02.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+aarch64-pc-windows-msvc = "windows-2022"

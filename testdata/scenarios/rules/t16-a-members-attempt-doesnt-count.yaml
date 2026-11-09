@@ -1,0 +1,20 @@
+name: a member's attempt of the pipeline doesn't count while the repository is CI-only -> full
+covers: [P-1, P-5, P-13, T-16]
+description: >-
+  The same events as p05-a-members-attempt-counts, with the repository CI-only: Ana's checks,
+  image and lifecycle events count only from CI, so CI builds and runs everything
+policy: acme-api.yaml
+ci_only: true
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: laptop-1, at: "15:00", by: ana, custody: local}
+  - {kind: check, run: laptop-1, at: "15:01", by: ana, check: toolchain, custody: local}
+  - {kind: check, run: laptop-1, at: "15:01", by: ana, check: unit, custody: local}
+  - {kind: artifact, run: laptop-1, at: "15:02", by: ana, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a", custody: local}
+  - {kind: passed, run: laptop-1, at: "15:04", by: ana, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}, custody: local}
+expect:
+  mode: full
+  reason: "recorded ones aren't reusable"
+  build: true
+  checks: [toolchain, unit]

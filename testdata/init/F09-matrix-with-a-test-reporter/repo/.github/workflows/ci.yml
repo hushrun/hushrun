@@ -1,0 +1,21 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        node: [20, 22]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm ci
+      - run: npm test
+      - uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: tests (${{ matrix.node }})
+          path: junit.xml
+          reporter: java-junit

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/artifact-digest.v1.schema.json",
+  "title": "hushrun.artifact.digest/v1",
+  "description": "Output of `hushrun artifact digest --format json`: the digest a reference points to.",
+  "type": "object",
+  "required": ["schema", "reference", "digest", "ref"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.artifact.digest/v1"},
+    "reference": {"type": "string", "minLength": 1},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"}
+  }
+}

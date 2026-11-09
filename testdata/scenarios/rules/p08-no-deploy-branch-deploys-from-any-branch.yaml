@@ -1,0 +1,15 @@
+name: "a file with no deploy.branch deploys from any branch"
+covers: [P-8]
+description: "P-8 applies only when `deploy.branch` names a branch; here there is no `deploy` at all"
+policy_yaml: |
+  version: 1
+  repository: github.com/acme/app
+  checks:
+    unit: {run: go test ./...}
+now: "12:00"
+context: {branch: feature, trigger: push}
+events:
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+expect:
+  mode: promote
+  reason: "every required check is met"

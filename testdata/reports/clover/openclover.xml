@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1762164000000" clover="4.4.1">
+  <project timestamp="1762164000000" name="app">
+    <metrics conditionals="8" coveredconditionals="6" statements="40" coveredstatements="30" methods="10" coveredmethods="9" elements="58" coveredelements="45" complexity="12" loc="200" ncloc="150" packages="1" files="2" classes="2"/>
+    <package name="com.acme">
+      <metrics conditionals="8" coveredconditionals="6" statements="40" coveredstatements="30"/>
+      <file name="Math.java">
+        <metrics statements="20" coveredstatements="15" conditionals="4" coveredconditionals="3"/>
+        <line num="3" count="4" type="stmt"/>
+      </file>
+    </package>
+  </project>
+  <testproject timestamp="1" name="tests"><metrics statements="99" coveredstatements="99" conditionals="0" coveredconditionals="0"/></testproject>
+</coverage>

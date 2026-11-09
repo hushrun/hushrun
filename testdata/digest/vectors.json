@@ -1,0 +1,730 @@
+{
+  "version": 1,
+  "description": "Golden vectors for source digest v1. Each vector lists entries (path, kind, content) and optional scopes; `expect` holds the digest and file count of every scope, or the error code. `tools/refdigest.py vectors` computes them independently; the Rust adapters must agree. Flags: noGit (git can't store it), noDir (a filesystem can't hold it everywhere), posixOnly (needs execute bits or symbolic links on disk).",
+  "vectors": [
+    {
+      "name": "single-file",
+      "covers": [
+        "D-1",
+        "D-3",
+        "D-4",
+        "D-5"
+      ],
+      "description": "One file; checkable by hand: printf 'hushrun-source-v1\\nf <sha256 of a\\n> a\\0' | sha256sum",
+      "entries": [
+        {
+          "path": "a",
+          "kind": "f",
+          "text": "a\n"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:2e6e1386ab693ebbba1bea3bbbad09c825e4247fb9b1f12fdf7843e1edb1e649",
+          "files": 1
+        }
+      }
+    },
+    {
+      "name": "basic",
+      "covers": [
+        "D-1",
+        "D-3",
+        "D-4",
+        "D-5",
+        "D-13"
+      ],
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "f",
+          "text": "# app\n"
+        },
+        {
+          "path": "src/main.go",
+          "kind": "f",
+          "text": "package main\n\nfunc main() {}\n"
+        },
+        {
+          "path": "src/util/strings.go",
+          "kind": "f",
+          "text": "package util\n"
+        },
+        {
+          "path": "Makefile",
+          "kind": "f",
+          "text": "test:\n\tgo test ./...\n"
+        },
+        {
+          "path": "empty",
+          "kind": "f",
+          "text": ""
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:0221cda33114cb292eae682a5496ba68202e2f75d599a97e37fb97117852cd8e",
+          "files": 5
+        }
+      }
+    },
+    {
+      "name": "executable",
+      "covers": [
+        "D-3",
+        "D-11",
+        "D-13"
+      ],
+      "posixOnly": true,
+      "entries": [
+        {
+          "path": "scripts/run.sh",
+          "kind": "x",
+          "text": "#!/bin/sh\necho run\n"
+        },
+        {
+          "path": "scripts/lib.sh",
+          "kind": "f",
+          "text": "#!/bin/sh\necho run\n"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:3380f098662724bdedced2a91eb4db5326e925dedb5b8935dedf534c6914305f",
+          "files": 2
+        }
+      }
+    },
+    {
+      "name": "symlinks",
+      "covers": [
+        "D-3",
+        "D-11",
+        "D-13"
+      ],
+      "posixOnly": true,
+      "description": "Links are never followed: the content is the target text, dangling or not",
+      "entries": [
+        {
+          "path": "docs/guide.md",
+          "kind": "f",
+          "text": "guide\n"
+        },
+        {
+          "path": "guide",
+          "kind": "l",
+          "target": "docs/guide.md"
+        },
+        {
+          "path": "docs-link",
+          "kind": "l",
+          "target": "docs"
+        },
+        {
+          "path": "dangling",
+          "kind": "l",
+          "target": "no/such/file"
+        },
+        {
+          "path": "absolute",
+          "kind": "l",
+          "target": "/etc/hosts"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:f4170d616d1226a00d47a609afb6845a50e563a4d6724dc73c4692c4985c6e1c",
+          "files": 5
+        }
+      }
+    },
+    {
+      "name": "gitlink",
+      "covers": [
+        "D-3",
+        "D-9"
+      ],
+      "noDir": true,
+      "description": "A submodule is its object format and commit id",
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "f",
+          "text": "parent\n"
+        },
+        {
+          "path": "vendor/lib",
+          "kind": "g",
+          "commit": "3f9c0d2b8a0e4f6c1d7e9a5b3c2d1e0f9a8b7c6d"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:64b52ef2bed6ac647416f8be7df41399bf430ae76760bc04bbe3a4f0b173a7e3",
+          "files": 2
+        }
+      }
+    },
+    {
+      "name": "binary-and-crlf",
+      "covers": [
+        "D-3",
+        "D-13"
+      ],
+      "description": "Bytes as stored: no line-ending conversion",
+      "entries": [
+        {
+          "path": "bin/blob",
+          "kind": "f",
+          "base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIj/f7/"
+        },
+        {
+          "path": "windows.txt",
+          "kind": "f",
+          "text": "line one\r\nline two\r\n"
+        },
+        {
+          "path": "unix.txt",
+          "kind": "f",
+          "text": "line one\nline two\n"
+        },
+        {
+          "path": "no-newline.txt",
+          "kind": "f",
+          "text": "end"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:0038bcc10b6fce128005d67688af26304ac2e55a118f3347b54d55e03aa83bd2",
+          "files": 4
+        }
+      }
+    },
+    {
+      "name": "large-file",
+      "covers": [
+        "D-3",
+        "D-13"
+      ],
+      "description": "Larger than 1 MiB, so adapters stream it",
+      "entries": [
+        {
+          "path": "assets/large.bin",
+          "kind": "f",
+          "generate": {
+            "size": 3145745,
+            "seed": 7
+          }
+        },
+        {
+          "path": "assets/exactly-1mib.bin",
+          "kind": "f",
+          "generate": {
+            "size": 1048576,
+            "seed": 8
+          }
+        },
+        {
+          "path": "assets/small.bin",
+          "kind": "f",
+          "generate": {
+            "size": 100,
+            "seed": 9
+          }
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:8781b600da5fc2134bfc98b29aad1508b98e87a2f80ee99e6d008d21a63d3945",
+          "files": 3
+        }
+      }
+    },
+    {
+      "name": "sort-order",
+      "covers": [
+        "D-4"
+      ],
+      "description": "Sorted by UTF-8 bytes, not by git's tree order (which puts a/b after a.b and a-b)",
+      "entries": [
+        {
+          "path": "a/b",
+          "kind": "f",
+          "text": "1\n"
+        },
+        {
+          "path": "a.b",
+          "kind": "f",
+          "text": "2\n"
+        },
+        {
+          "path": "a-b",
+          "kind": "f",
+          "text": "3\n"
+        },
+        {
+          "path": "a b",
+          "kind": "f",
+          "text": "4\n"
+        },
+        {
+          "path": "a0",
+          "kind": "f",
+          "text": "5\n"
+        },
+        {
+          "path": "B",
+          "kind": "f",
+          "text": "6\n"
+        },
+        {
+          "path": "ä",
+          "kind": "f",
+          "text": "7\n"
+        },
+        {
+          "path": "z",
+          "kind": "f",
+          "text": "8\n"
+        },
+        {
+          "path": "a/b.c/d",
+          "kind": "f",
+          "text": "9\n"
+        },
+        {
+          "path": "a/bc",
+          "kind": "f",
+          "text": "10\n"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:d7707874a14f103af79a974be010edfb9ecfe6f5992e0a78afedb5f530a7ac54",
+          "files": 10
+        }
+      }
+    },
+    {
+      "name": "unicode-nfc",
+      "covers": [
+        "D-2"
+      ],
+      "description": "A path stored in NFD is normalized to NFC",
+      "entries": [
+        {
+          "path": "café.txt",
+          "kind": "f",
+          "text": "nfd\n"
+        },
+        {
+          "path": "été/à.txt",
+          "kind": "f",
+          "text": "nfc\n"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:42be06de2fd518121c99b99dbd65e6426792f5956e7aed40972a95230a75b59b",
+          "files": 2
+        }
+      }
+    },
+    {
+      "name": "vcs-metadata-skipped",
+      "covers": [
+        "D-2",
+        "D-11"
+      ],
+      "entries": [
+        {
+          "path": "src/a.txt",
+          "kind": "f",
+          "text": "a\n"
+        },
+        {
+          "path": ".hg/store/data",
+          "kind": "f",
+          "text": "hg\n"
+        },
+        {
+          "path": "sub/.svn/entries",
+          "kind": "f",
+          "text": "svn\n"
+        },
+        {
+          "path": "x/.bzr/branch",
+          "kind": "f",
+          "text": "bzr\n"
+        },
+        {
+          "path": "_darcs/patches",
+          "kind": "f",
+          "text": "darcs\n"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "kind": "f",
+          "text": "name: CI\n"
+        },
+        {
+          "path": ".gitignore",
+          "kind": "f",
+          "text": "*.log\n"
+        },
+        {
+          "path": "build.log",
+          "kind": "f",
+          "text": "ignore files don't apply\n"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:91e9b28d5a0940a38354f0ca9cfe7093a327d44f0a77043ac8dda02108dc60fb",
+          "files": 4
+        }
+      }
+    },
+    {
+      "name": "backslash",
+      "covers": [
+        "D-2",
+        "D-7"
+      ],
+      "posixOnly": true,
+      "description": "A backslash is an ordinary character, in paths and in patterns",
+      "entries": [
+        {
+          "path": "dir\\file.txt",
+          "kind": "f",
+          "text": "backslash\n"
+        },
+        {
+          "path": "dir/file.txt",
+          "kind": "f",
+          "text": "slash\n"
+        }
+      ],
+      "config": {
+        "scopes": {
+          "backslash": {
+            "include": [
+              "dir\\*"
+            ]
+          },
+          "slash": {
+            "include": [
+              "dir/*"
+            ]
+          }
+        }
+      },
+      "expect": {
+        "backslash": {
+          "digest": "sha256:d5e6397e335e2ec9c90a46fdfe06b2c81734d837219708930f8af9c269ca040f",
+          "files": 1
+        },
+        "slash": {
+          "digest": "sha256:f1f8968288cab494a13897808ebaa765bc0575282b04da5cf0720b6324e4bc98",
+          "files": 1
+        }
+      }
+    },
+    {
+      "name": "scopes",
+      "covers": [
+        "D-6",
+        "D-7",
+        "C-4"
+      ],
+      "description": "A monorepo: include, exclude and digest.exclude",
+      "entries": [
+        {
+          "path": "go.mod",
+          "kind": "f",
+          "text": "module example.com/app\n"
+        },
+        {
+          "path": "services/api/main.go",
+          "kind": "f",
+          "text": "package main\n"
+        },
+        {
+          "path": "services/api/main_test.go",
+          "kind": "f",
+          "text": "package main\n"
+        },
+        {
+          "path": "services/api/README.md",
+          "kind": "f",
+          "text": "api\n"
+        },
+        {
+          "path": "services/apix/a.go",
+          "kind": "f",
+          "text": "package apix\n"
+        },
+        {
+          "path": "services/web/index.ts",
+          "kind": "f",
+          "text": "export {}\n"
+        },
+        {
+          "path": "services/web/assets/logo.svg",
+          "kind": "f",
+          "text": "<svg/>\n"
+        },
+        {
+          "path": "README.md",
+          "kind": "f",
+          "text": "monorepo\n"
+        }
+      ],
+      "config": {
+        "scopes": {
+          "api": {
+            "include": [
+              "services/api/**",
+              "go.mod"
+            ],
+            "exclude": [
+              "**/*_test.go"
+            ]
+          },
+          "web": {
+            "include": [
+              "services/web/**"
+            ],
+            "exclude": [
+              "services/web/assets/*.svg"
+            ]
+          },
+          "everything": {
+            "include": [
+              "**"
+            ]
+          }
+        },
+        "digestExclude": [
+          "**/*.md"
+        ]
+      },
+      "expect": {
+        "api": {
+          "digest": "sha256:3f144b4597a40d419063c782072237e9023eecedc95ccd9c086eceae200a7f2e",
+          "files": 2
+        },
+        "everything": {
+          "digest": "sha256:3ded97a663baa57aef1d8351b397f8dd61fbb52edddd70b93727a530180d5c24",
+          "files": 6
+        },
+        "web": {
+          "digest": "sha256:ee87efd696b53047ef0ef7454a6538f948d8604c855c8fa799cf270d7359e6f5",
+          "files": 1
+        }
+      }
+    },
+    {
+      "name": "pattern-features",
+      "covers": [
+        "D-7"
+      ],
+      "entries": [
+        {
+          "path": "a/x/b/c.txt",
+          "kind": "f",
+          "text": "1\n"
+        },
+        {
+          "path": "a/b/c.txt",
+          "kind": "f",
+          "text": "2\n"
+        },
+        {
+          "path": "a/top",
+          "kind": "f",
+          "text": "3\n"
+        },
+        {
+          "path": "atop",
+          "kind": "f",
+          "text": "3b\n"
+        },
+        {
+          "path": "file1.txt",
+          "kind": "f",
+          "text": "4\n"
+        },
+        {
+          "path": "file22.txt",
+          "kind": "f",
+          "text": "5\n"
+        },
+        {
+          "path": "fileZ.txt",
+          "kind": "f",
+          "text": "6\n"
+        },
+        {
+          "path": "é.md",
+          "kind": "f",
+          "text": "7\n"
+        },
+        {
+          "path": "-.cfg",
+          "kind": "f",
+          "text": "8\n"
+        },
+        {
+          "path": "].cfg",
+          "kind": "f",
+          "text": "9\n"
+        }
+      ],
+      "config": {
+        "scopes": {
+          "middle": {
+            "include": [
+              "a/**/c.txt"
+            ]
+          },
+          "question": {
+            "include": [
+              "file?.txt",
+              "?.md"
+            ]
+          },
+          "classes": {
+            "include": [
+              "file[0-9].txt",
+              "file[!0-9].txt",
+              "[]-].cfg"
+            ]
+          },
+          "last-recursive": {
+            "include": [
+              "a/**"
+            ],
+            "exclude": [
+              "a/top"
+            ]
+          }
+        }
+      },
+      "expect": {
+        "classes": {
+          "digest": "sha256:be051e40405fa40063082d5da20974e5247b7c5efe35a0d5ddfdc9e0dff13c5d",
+          "files": 4
+        },
+        "last-recursive": {
+          "digest": "sha256:8c33b914b7c6ce4eb5c69b644c14604da68970fcae7b3393dbd9c1f6b1318757",
+          "files": 2
+        },
+        "middle": {
+          "digest": "sha256:8c33b914b7c6ce4eb5c69b644c14604da68970fcae7b3393dbd9c1f6b1318757",
+          "files": 2
+        },
+        "question": {
+          "digest": "sha256:e4d18f00128f3de067dad8ab9fdc5cc9b0d5ffd96094b1d2895d1e8109906aa2",
+          "files": 3
+        }
+      }
+    },
+    {
+      "name": "empty-scope",
+      "covers": [
+        "D-6"
+      ],
+      "entries": [
+        {
+          "path": "src/a.go",
+          "kind": "f",
+          "text": "a\n"
+        }
+      ],
+      "config": {
+        "scopes": {
+          "web": {
+            "include": [
+              "web/**"
+            ]
+          }
+        }
+      },
+      "expect": {
+        "error": "E_EMPTY_SCOPE"
+      }
+    },
+    {
+      "name": "nfc-collision",
+      "covers": [
+        "D-2"
+      ],
+      "noDir": true,
+      "description": "Two stored paths that are equal after NFC normalization",
+      "entries": [
+        {
+          "path": "é",
+          "kind": "f",
+          "text": "nfc\n"
+        },
+        {
+          "path": "é",
+          "kind": "f",
+          "text": "nfd\n"
+        }
+      ],
+      "expect": {
+        "error": "E_PATH_COLLISION"
+      }
+    },
+    {
+      "name": "invalid-utf8",
+      "covers": [
+        "D-2"
+      ],
+      "noDir": true,
+      "entries": [
+        {
+          "pathHex": "61ff62",
+          "path": "a?b",
+          "kind": "f",
+          "text": "bad name\n"
+        }
+      ],
+      "expect": {
+        "error": "E_PATH_ENCODING"
+      }
+    },
+    {
+      "name": "sha256-object-format",
+      "covers": [
+        "D-3",
+        "D-9"
+      ],
+      "objectFormat": "sha256",
+      "noDir": true,
+      "description": "The content of a gitlink names the object format",
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "f",
+          "text": "# app\n"
+        },
+        {
+          "path": "vendor/lib",
+          "kind": "g",
+          "objectFormat": "sha256",
+          "commit": "3f9c0d2b8a0e4f6c1d7e9a5b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+        }
+      ],
+      "expect": {
+        "default": {
+          "digest": "sha256:b15eb180f21c2a6b246a0c53d7f787d82b5267debf43b6e39942c20c2c5ea5e6",
+          "files": 2
+        }
+      }
+    }
+  ]
+}

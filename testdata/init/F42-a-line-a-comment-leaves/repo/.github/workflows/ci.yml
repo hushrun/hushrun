@@ -1,0 +1,23 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  sigstore:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      # hushrun: leave, public-good Sigstore changes while the code doesn't
+      - run: cargo test --locked --features it --test sigstore
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo deny check # hushrun: leave
+      - run: cargo test --locked
+      - run: |
+          cargo fmt --all --check
+          # hushrun: leave
+          cargo clippy --all-targets -- -D warnings

@@ -1,0 +1,79 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.gitlab-ci.yml\n+++ b/.gitlab-ci.yml\n@@ -1,9 +1,12 @@\n stages: [test]\n \n test:\n+  variables:\n+    HUSHRUN_REPORTS_READ: \"true\"\n   stage: test\n   script:\n-    - pytest --junitxml=report.xml\n+    - export PATH=\"$(dirname \"$(sh ci/install-hushrun.sh)\"):$PATH\"\n+    - hushrun run test -- pytest --junitxml=report.xml\n   artifacts:\n     when: always\n     reports:\n",
+      "path": ".gitlab-ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/ci/install-hushrun.sh\n@@ -0,0 +1,186 @@\n+#!/bin/sh\n+# install-hushrun.sh: installs a hushrun release on a Linux or macOS CI runner, the newest by\n+# default, after checking the archive's SHA-256.\n+#\n+# Vendor it into your repository as ci/install-hushrun.sh: take the copy attached to a release,\n+# and read it before you commit it. It checks a release it lists below against the checksum it\n+# pins, and any other, such as a newer one, against the checksum published with the release.\n+#\n+#   HUSHRUN_VERSION       the release to install, such as 0.9.0, or latest (default: latest, the\n+#                         newest release)\n+#   HUSHRUN_SHA256        the archive's SHA-256, with HUSHRUN_VERSION, instead of the checksum\n+#                         this copy pins or the release publishes\n+#   HUSHRUN_DOWNLOAD_URL  where HUSHRUN_VERSION's archives and checksums are, such as a mirror\n+#                         your runners can reach (default: the GitHub release)\n+#   HUSHRUN_INSTALLER_GITHUB_BASE_URL\n+#                         GitHub's address, as hushrun's installers take it (default:\n+#                         https://github.com)\n+#   HUSHRUN_INSTALL_DIR   where hushrun goes (default: $HOME/.local/share/hushrun/<version>)\n+#\n+# It prints the binary's path on stdout, for `export PATH=\"$(dirname \"$(sh ci/install-hushrun.sh)\"):$PATH\"`,\n+# and everything else on stderr. The verified archive stays in HUSHRUN_INSTALL_DIR: a second\n+# run checks it again and reinstalls from it, without downloading it.\n+set -eu\n+\n+fail() {\n+  printf 'install-hushrun.sh: %s\\n' \"$*\" >&2\n+  exit 1\n+}\n+\n+# The SHA-256 of a release's archive, by \"<version>/<target>\".\n+pinned() {\n+  case \"$1\" in\n+    # hushrun-pins: begin (cargo xtask installer-pins writes these lines)\n+    # hushrun-pins: end\n+    *) return 1 ;;\n+  esac\n+}\n+\n+sha256() {\n+  if command -v sha256sum >/dev/null 2>&1; then\n+    sha256sum \"$1\" | cut -d' ' -f1\n+  elif command -v shasum >/dev/null 2>&1; then\n+    shasum -a 256 \"$1\" | cut -d' ' -f1\n+  elif command -v openssl >/dev/null 2>&1; then\n+    openssl dgst -sha256 \"$1\" | sed 's/^.*= *//'\n+  else\n+    fail \"no sha256sum, shasum or openssl to check the archive with\"\n+  fi\n+}\n+\n+# Only an explicitly http:// address is fetched without TLS: the checksum, not the transport,\n+# makes an archive trustworthy.\n+proto() {\n+  case \"$1\" in\n+    https://*) echo '=https' ;;\n+    *) echo '=http,https' ;;\n+  esac\n+}\n+\n+# Whether what $1 answers can be trusted without a checksum: it comes over TLS, or from this\n+# machine.\n+trusted() {\n+  case \"$1\" in\n+    https://* | http://127.0.0.1[:/]* | http://localhost[:/]* | \"http://[::1]\"[:/]*) return 0 ;;\n+    *) return 1 ;;\n+  esac\n+}\n+\n+download() {\n+  if command -v curl >/dev/null 2>&1; then\n+    curl --proto \"$(proto \"$1\")\" --tlsv1.2 -fsSL --retry 3 -o \"$2\" \"$1\"\n+  elif command -v wget >/dev/null 2>&1; then\n+    wget -q -O \"$2\" \"$1\"\n+  else\n+    fail \"no curl or wget to download $1 with\"\n+  fi\n+}\n+\n+# The newest release's version. GitHub redirects releases/latest to the newest release's tag,\n+# which is read rather than followed.\n+latest() {\n+  url=$github/hushrun/hushrun/releases/latest\n+  if command -v curl >/dev/null 2>&1; then\n+    location=$(curl --proto \"$(proto \"$url\")\" --tlsv1.2 -fsS --retry 3 -o /dev/null -w '%{redirect_url}' \"$url\") || return 1\n+  elif command -v wget >/dev/null 2>&1; then\n+    # GNU and BusyBox wget print each answer's headers with -S.\n+    location=$(wget -S --spider \"$url\" 2>&1 | sed -n 's/^ *[Ll]ocation: *\\([^ ]*\\).*/\\1/p' | tr -d '\\r' | head -n 1)\n+  else\n+    fail \"no curl or wget to find the newest release with\"\n+  fi\n+  case \"$location\" in\n+    */releases/tag/v*) printf '%s\\n' \"${location##*/releases/tag/v}\" ;;\n+    *) return 1 ;;\n+  esac\n+}\n+\n+github=${HUSHRUN_INSTALLER_GITHUB_BASE_URL:-https://github.com}\n+github=${github%/}\n+trusted \"$github/\" ||\n+  fail \"HUSHRUN_INSTALLER_GITHUB_BASE_URL must be an https:// URL, not '$github'\"\n+\n+version=${HUSHRUN_VERSION:-latest}\n+if [ \"$version\" = latest ]; then\n+  [ -z \"${HUSHRUN_SHA256:-}\" ] ||\n+    fail \"HUSHRUN_SHA256 needs HUSHRUN_VERSION: the newest release's archive changes with every release\"\n+  [ -z \"${HUSHRUN_DOWNLOAD_URL:-}\" ] ||\n+    fail \"HUSHRUN_DOWNLOAD_URL needs HUSHRUN_VERSION: a mirror holds the releases it copied\"\n+  version=$(latest) ||\n+    fail \"can't tell the newest hushrun release from $github: set HUSHRUN_VERSION to the release to install\"\n+fi\n+printf '%s\\n' \"$version\" | grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$' ||\n+  fail \"HUSHRUN_VERSION must be a release such as 0.9.0, or latest, not '$version'\"\n+\n+case \"$(uname -s)\" in\n+  Linux) os=unknown-linux-musl ;;\n+  Darwin) os=apple-darwin ;;\n+  *) fail \"no hushrun build for $(uname -s): use the release's PowerShell installer on Windows\" ;;\n+esac\n+case \"$(uname -m)\" in\n+  x86_64 | amd64) arch=x86_64 ;;\n+  aarch64 | arm64) arch=aarch64 ;;\n+  *) fail \"no hushrun build for $(uname -m)\" ;;\n+esac\n+target=$arch-$os\n+archive=hushrun-$target.tar.xz\n+\n+base=${HUSHRUN_DOWNLOAD_URL:-$github/hushrun/hushrun/releases/download/v$version}\n+base=${base%/}\n+case \"$base\" in\n+  https://* | http://*) ;;\n+  *) fail \"HUSHRUN_DOWNLOAD_URL must be an https:// URL, not '$base'\" ;;\n+esac\n+\n+if [ -n \"${HUSHRUN_INSTALL_DIR:-}\" ]; then\n+  dir=$HUSHRUN_INSTALL_DIR\n+else\n+  [ -n \"${HOME:-}\" ] || fail \"set HUSHRUN_INSTALL_DIR: HOME is not set\"\n+  dir=$HOME/.local/share/hushrun/$version\n+fi\n+mkdir -p \"$dir\"\n+\n+work=$dir/extract.$$\n+trap 'rm -rf \"$work\"' EXIT\n+rm -rf \"$work\"\n+mkdir -p \"$work\"\n+\n+if [ -n \"${HUSHRUN_SHA256:-}\" ]; then\n+  expected=$(printf '%s' \"$HUSHRUN_SHA256\" | tr 'A-F' 'a-f')\n+  printf '%s\\n' \"$expected\" | grep -Eq '^[0-9a-f]{64}$' ||\n+    fail \"HUSHRUN_SHA256 must be 64 hex digits\"\n+elif ! expected=$(pinned \"$version/$target\"); then\n+  # A release this copy doesn't list: the checksum published with it, over TLS, fetched again\n+  # each time, so that nothing kept from an earlier run decides what is trusted.\n+  trusted \"$base/\" ||\n+    fail \"this copy pins no checksum for hushrun $version on $target, and one read from $base over plain HTTP proves nothing: set HUSHRUN_SHA256, or vendor the copy attached to that release\"\n+  download \"$base/$archive.sha256\" \"$work/$archive.sha256\" ||\n+    fail \"downloading $base/$archive.sha256 failed\"\n+  read -r expected name <\"$work/$archive.sha256\" || true\n+  expected=$(printf '%s' \"$expected\" | tr 'A-F' 'a-f')\n+  printf '%s\\n' \"$expected\" | grep -Eq '^[0-9a-f]{64}$' ||\n+    fail \"$archive.sha256 doesn't start with a SHA-256\"\n+  [ -z \"${name:-}\" ] || [ \"${name#\\*}\" = \"$archive\" ] ||\n+    fail \"$archive.sha256 is the checksum of ${name#\\*}, not of $archive\"\n+fi\n+\n+cached=$dir/$archive\n+if [ ! -f \"$cached\" ] || [ \"$(sha256 \"$cached\")\" != \"$expected\" ]; then\n+  partial=$cached.partial\n+  rm -f \"$partial\"\n+  download \"$base/$archive\" \"$partial\" || fail \"downloading $base/$archive failed\"\n+  actual=$(sha256 \"$partial\")\n+  if [ \"$actual\" != \"$expected\" ]; then\n+    rm -f \"$partial\"\n+    fail \"$archive has SHA-256 $actual, expected $expected\"\n+  fi\n+  mv -f \"$partial\" \"$cached\"\n+fi\n+\n+tar -xJf \"$cached\" -C \"$work\" 2>/dev/null ||\n+  fail \"can't extract $archive: this tar needs xz (apk add xz, or apt-get install xz-utils)\"\n+binary=$(find \"$work\" -type f -name hushrun | head -n 1)\n+[ -n \"$binary\" ] || fail \"no hushrun binary in $archive\"\n+chmod 0755 \"$binary\"\n+mv -f \"$binary\" \"$dir/hushrun\"\n+printf 'hushrun %s for %s in %s (sha256 %s)\\n' \"$version\" \"$target\" \"$dir\" \"$expected\" >&2\n+printf '%s\\n' \"$dir/hushrun\"\n",
+      "path": "ci/install-hushrun.sh"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- pytest --junitxml=report.xml",
+          "before": "pytest --junitxml=report.xml",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "HUSHRUN_REPORTS_READ says this job reads reports, and a skip writes none",
+          "ciWhy": "reports",
+          "dir": "",
+          "line": 6,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".gitlab-ci.yml",
+      "job": "test",
+      "provider": "gitlab",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (artifacts:reports:junit). Laptops and agents skip it on a pass.",
+    "Change by hand: .gitlab-ci.yml: its jobs have no ID token to record with: create a token with hushrun token create --agent gitlab-ci --expires 365d, and set HUSHRUN_TOKEN and HUSHRUN_MACHINE_KEY_FILE as CI/CD variables"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

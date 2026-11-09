@@ -1,0 +1,19 @@
+# A GitLab project shaped like policies/acme-api.yaml (ADR 0062: one pipeline): main's
+# pipelines deploy the image, by digest.
+version: 1
+repository: gitlab.com/acme/back
+repository_url: https://hushrun.example/l/acme/back   # local runs; CI must also set HUSHRUN_REPOSITORY_URL (T-4)
+
+checks:
+  unit:
+    run: go test ./...
+    timeout: 20m
+
+artifacts:
+  image:
+    type: oci
+    location: us-central1-docker.pkg.dev/acme-prod/api/go
+
+deploy:
+  branch: main
+  require: [unit]

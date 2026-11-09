@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.acme.MathTest" tests="2" skipped="1" failures="0" errors="0" timestamp="2026-11-03T10:00:00" hostname="ci" time="0.042">
+  <properties/>
+  <testcase name="adds()" classname="com.acme.MathTest" time="0.040"/>
+  <testcase name="later()" classname="com.acme.MathTest" time="0.002">
+    <skipped/>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

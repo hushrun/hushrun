@@ -1,0 +1,95 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -6,11 +6,15 @@\n jobs:\n   coverage:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - name: Prepare coverage\n         run: cargo llvm-cov show-env --export-prefix\n-      - run: cargo test --workspace\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test -- cargo test --workspace\n       - run: cargo llvm-cov report --lcov --output-path coverage.lcov\n       - uses: codecov/codecov-action@v5\n         with:\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- cargo test --workspace",
+          "before": "cargo test --workspace",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "a later step reads its reports (run: cargo llvm-cov report --lcov…), and a skip writes none",
+          "ciWhy": "reports",
+          "dir": "",
+          "line": 13,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "coverage",
+      "provider": "github",
+      "readers": [
+        {
+          "kinds": [
+            "coverage"
+          ],
+          "name": "run: cargo llvm-cov report --lcov…",
+          "onlyOnFailure": false,
+          "paths": [],
+          "step": 3
+        },
+        {
+          "kinds": [
+            "coverage"
+          ],
+          "name": "codecov/codecov-action",
+          "onlyOnFailure": false,
+          "paths": [
+            "coverage.lcov"
+          ],
+          "step": 4
+        }
+      ],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (run: cargo llvm-cov report --lcov…). Laptops and agents skip it on a pass."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

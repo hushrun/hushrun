@@ -1,0 +1,31 @@
+name: an artifact event counts only for the artifact it names
+covers: [P-13, P-15]
+description: >-
+  Two artifacts share a location. The attempt recorded only `image`; its event is not a
+  `migrate`, though it is pinned at `migrate`'s location.
+policy_yaml: |
+  version: 1
+  repository: github.com/Acme/api
+  checks:
+    unit: {run: go test ./...}
+  artifacts:
+    image:
+      type: oci
+      location: us-central1-docker.pkg.dev/acme-prod/api/go
+    migrate:
+      type: oci
+      location: us-central1-docker.pkg.dev/acme-prod/api/go
+  deploy:
+    branch: main
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, run: p1, at: "15:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+expect:
+  mode: full
+  reason: "no reusable `migrate` (none was recorded): building"
+  build: true
+  checks: []

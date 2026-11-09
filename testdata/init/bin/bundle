@@ -1,0 +1,13 @@
+#!/bin/sh
+# A stand-in for `bundle exec rspec` and `bundle exec rake` in init's fixtures (A9): writes what
+# --out names, and passes.
+out=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--out" ] || [ "$previous" = "-o" ]; then out="$arg"; fi
+  previous="$arg"
+done
+if [ -n "$out" ]; then
+  printf '<testsuite name="rspec" tests="1" failures="0" errors="0" skipped="0" time="0.01"><testcase classname="t" name="works" time="0.01"/></testsuite>\n' > "$out"
+fi
+echo "1 example, 0 failures"

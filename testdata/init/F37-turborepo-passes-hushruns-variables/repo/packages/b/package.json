@@ -1,0 +1,6 @@
+{
+  "name": "@acme/b",
+  "scripts": {
+    "test": "vitest run"
+  }
+}

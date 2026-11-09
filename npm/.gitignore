@@ -1,0 +1,4 @@
+# npm/build.mjs writes its packages' tarballs to dist/.
+/dist/
+node_modules/
+*.tgz

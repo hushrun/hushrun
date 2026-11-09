@@ -1,0 +1,16 @@
+name: "forced by hand after a failure -> full, every required check"
+covers: [P-9, I-6]
+description: "was ci-promote case 28"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: manual, force: true}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit, result: fail}
+  - {kind: failed, run: p1, at: "15:05", by: ci}
+expect:
+  mode: full
+  reason: "forced: building and running every required check"
+  build: true
+  checks: [toolchain, unit]
+  artifacts: {}

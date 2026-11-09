@@ -1,0 +1,87 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci-python.yml\n+++ b/.github/workflows/ci-python.yml\n@@ -8,11 +8,15 @@\n jobs:\n   checks:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - uses: astral-sh/setup-uv@v6\n+      - uses: hushrun/hushrun/action/setup@v<version>\n       - name: Test\n-        run: uv run pytest --cov=src --cov-report=xml --cov-report=term-missing\n+        run: hushrun run test -- uv run pytest --cov=src --cov-report=xml --cov-report=term-missing\n       - name: Upload coverage\n         uses: codecov/codecov-action@v5\n         with:\n",
+      "path": ".github/workflows/ci-python.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test -- uv run pytest --cov=src --cov-report=xml --cov-report=term-missing",
+          "before": "uv run pytest --cov=src --cov-report=xml --cov-report=term-missing",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "a later step reads its reports (codecov/codecov-action), and a skip writes none",
+          "ciWhy": "reports",
+          "dir": "",
+          "line": 15,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci-python.yml",
+      "job": "checks",
+      "provider": "github",
+      "readers": [
+        {
+          "kinds": [
+            "coverage"
+          ],
+          "name": "codecov/codecov-action",
+          "onlyOnFailure": false,
+          "paths": [
+            "coverage.xml"
+          ],
+          "step": 3
+        }
+      ],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (codecov/codecov-action). Laptops and agents skip it on a pass.",
+    "To let CI skip test too, set reports.ci: skip for it in hushrun.yaml and give the Codecov step if: steps.test.outputs.hushrun-skipped != 'true', with id: test on the step that runs test. That is safe when Codecov carries the step's flag forward (carryforward: true) and after_n_builds doesn't count its upload."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

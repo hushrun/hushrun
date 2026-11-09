@@ -1,0 +1,59 @@
+# A file from hushrun 0.8 or earlier, kept to test what 0.9 reads past (ADR 0062): scopes, a
+# deployment check, an approval and three stages.
+version: 1
+repository: github.com/acme/shop
+repository_url: https://hushrun.example/l/acme/shop
+scopes:
+  api:
+    include: ["services/api/**", "go.mod", "go.sum"]
+    exclude: ["**/*_test.go"]
+  web:
+    include: ["web/**"]
+digest:
+  exclude: ["**/*.md"]
+checks:
+  unit:
+    kind: source
+    run: go test ./...
+    max_age: 7d
+  lint:
+    kind: source
+    run: golangci-lint run
+    image: golangci/golangci-lint@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    platform: linux/amd64
+  e2e:
+    kind: deployment
+    run: ./e2e.sh
+  release-signoff:
+    kind: approval
+artifacts:
+  api-image:
+    type: oci
+    scope: api
+    locations:
+      staging: ghcr.io/acme/staging/api
+      canary: ghcr.io/acme/prod/api
+      production: ghcr.io/acme/prod/api
+  web-image:
+    type: oci
+    scope: web
+    locations:
+      staging: ghcr.io/acme/staging/web
+      canary: ghcr.io/acme/prod/web
+      production: ghcr.io/acme/prod/web
+stages:
+  staging:
+    branch: develop
+    require: [unit, lint]
+  canary:
+    branch: main
+    after: staging
+    require: [unit, lint, e2e@staging]
+    upstream: passed
+    lease: 1h
+  production:
+    branch: main
+    after: canary
+    require: [unit, e2e@staging, e2e@canary, release-signoff]
+    dedupe: [push]
+    allow_force: false

@@ -1,0 +1,24 @@
+name: every required check met, by every kind of signer -> promote
+covers: [P-1, P-13, P-14]
+description: >-
+  deploy.require lists unit, lint, e2e and sast. CI passed lint and e2e and built the image, Ana
+  ran unit on her laptop, and the security team's workflow attested sast, which has no `run`.
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: laptop-1, at: "09:00", by: ana, check: unit, custody: local}
+  - {kind: check, run: sec1, at: "09:30", by: ci-security, check: sast}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: promote
+  reason: "every required check is met: deploying api-image ghcr.io/acme/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa by digest"
+  build: false
+  artifacts: {api-image: "ghcr.io/acme/api@a"}
+  checks: []
+  requirements: {unit: satisfied, lint: satisfied, e2e: satisfied, sast: satisfied}

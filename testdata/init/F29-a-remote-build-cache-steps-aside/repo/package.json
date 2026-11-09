@@ -1,0 +1,11 @@
+{
+  "name": "shop",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  }
+}

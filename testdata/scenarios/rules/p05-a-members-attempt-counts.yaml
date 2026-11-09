@@ -1,0 +1,18 @@
+name: "a member's attempt of the pipeline counts -> promote"
+covers: [P-5, P-13, T-15]
+description: >-
+  Ana ran the pipeline from her laptop: her machine is one of the signers, so her attempt,
+  checks and image count where the repository isn't CI-only (compare
+  t16-a-members-attempt-doesnt-count)
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: laptop-1, at: "15:00", by: ana, custody: local}
+  - {kind: check, run: laptop-1, at: "15:01", by: ana, check: toolchain, custody: local}
+  - {kind: check, run: laptop-1, at: "15:01", by: ana, check: unit, custody: local}
+  - {kind: artifact, run: laptop-1, at: "15:02", by: ana, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a", custody: local}
+  - {kind: passed, run: laptop-1, at: "15:04", by: ana, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}, custody: local}
+expect:
+  mode: promote
+  artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}

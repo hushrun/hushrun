@@ -1,0 +1,30 @@
+//! One module per command.
+
+pub mod adopt;
+pub mod artifact;
+pub mod attest;
+pub(crate) mod common;
+pub mod digest;
+pub mod doctor;
+pub mod guard;
+pub mod hook;
+pub mod init;
+pub mod keys;
+pub mod login;
+pub mod mark;
+pub mod monitor;
+pub mod plan;
+pub mod policy;
+pub mod ready;
+pub mod repository;
+pub mod run;
+pub mod setup;
+pub mod sigstore;
+pub mod stats;
+pub mod status;
+pub mod token;
+pub mod update;
+pub mod usage;
+pub mod verify;
+pub mod whoami;
+pub mod wrap;

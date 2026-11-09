@@ -1,0 +1,27 @@
+name: CI
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo doc --workspace --no-deps --locked
+  tasks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo xtask lint
+      - run: cargo xtask codegen --check
+      - run: cargo xtask trace
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo xtask dist

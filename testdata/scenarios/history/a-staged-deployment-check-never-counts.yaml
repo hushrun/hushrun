@@ -1,0 +1,22 @@
+name: "hushrun 0.8 history: a deployment check's evidence never counts -> refresh"
+covers: [P-1]
+description: >-
+  e2e was `kind: deployment` in 0.8, and staging recorded it after deploying. It is a check like
+  any other now, and the 0.8 event, `checkKind: deployment`, doesn't count for it: e2e runs.
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: check, stage: staging, run: s1, at: "09:45", by: ci, check: e2e, check_kind: deployment}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: refresh
+  checks: [e2e]
+  artifacts: {api-image: "ghcr.io/acme/api@a"}
+  requirements: {e2e: missing}

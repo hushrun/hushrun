@@ -1,0 +1,67 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [],
+  "notes": [
+    "There is no package.json here, and no check in CI's files that init knows, so init wraps no checks. Put hushrun run NAME -- in front of a check's command wherever it runs, CI included, such as\n  hushrun run test -- go test ./...",
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [
+    {
+      "after": "hushrun run test -- ./scripts/test.sh",
+      "before": "./scripts/test.sh",
+      "check": "test",
+      "dir": "",
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "line": 14,
+      "setup": "none",
+      "why": "it runs a script, which can deploy or write reports: wrap it if it only runs checks"
+    },
+    {
+      "after": "hushrun run runtest -- ./runtest --verbose",
+      "before": "./runtest --verbose",
+      "check": "runtest",
+      "dir": "",
+      "file": ".github/workflows/ci.yml",
+      "job": "server",
+      "line": 20,
+      "setup": "none",
+      "why": "it runs a script, which can deploy or write reports: wrap it if it only runs checks"
+    }
+  ],
+  "tool": "hushrun <version>"
+}

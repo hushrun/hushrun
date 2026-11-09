@@ -1,0 +1,18 @@
+name: "a scope with no artifacts and a missing check -> refresh"
+covers: [P-14]
+description: "No artifact is declared, so P-13 always passes: a missing check makes a refresh, never a full run"
+policy_yaml: |
+  version: 1
+  repository: github.com/acme/app
+  checks:
+    unit: {run: go test ./...}
+    lint: {run: golangci-lint run}
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+expect:
+  mode: refresh
+  reason: "nothing to build; running lint (missing) first"
+  build: false
+  checks: [lint]

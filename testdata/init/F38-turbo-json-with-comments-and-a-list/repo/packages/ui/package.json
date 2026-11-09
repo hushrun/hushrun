@@ -1,0 +1,7 @@
+{
+  "name": "ui",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "vitest run"
+  }
+}

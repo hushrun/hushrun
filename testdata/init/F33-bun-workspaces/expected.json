@@ -1,0 +1,133 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/package.json\n+++ b/package.json\n@@ -4,5 +4,11 @@\n   \"workspaces\": [\n     \"apps/*\",\n     \"libs/*\"\n-  ]\n+  ],\n+  \"hushrun\": {\n+    \"backend\": \"<your org's URL, once you sign in>\"\n+  },\n+  \"devDependencies\": {\n+    \"hushrun\": \"^<version>\"\n+  }\n }\n",
+      "path": "package.json"
+    },
+    {
+      "diff": "--- a/apps/api/package.json\n+++ b/apps/api/package.json\n@@ -1,7 +1,7 @@\n {\n   \"name\": \"api\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope api -- vitest run\"\n   },\n   \"dependencies\": {\n     \"shared\": \"workspace:*\"\n",
+      "path": "apps/api/package.json"
+    },
+    {
+      "diff": "--- a/libs/shared/package.json\n+++ b/libs/shared/package.json\n@@ -1,6 +1,6 @@\n {\n   \"name\": \"shared\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope shared -- vitest run\"\n   }\n }\n",
+      "path": "libs/shared/package.json"
+    },
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -3,6 +3,9 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - uses: oven-sh/setup-bun@v2\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,26 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+\n+# A check skips until its scope's files change, so each project's checks run for its\n+# own changes, and what CI and its tools read.\n+scopes:\n+  api:\n+    include:\n+      - \"apps/api/**\"\n+      - \"libs/shared/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n+  shared:\n+    include:\n+      - \"libs/shared/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "apps/api/package.json",
+          "script": "test"
+        },
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "libs/shared/package.json",
+          "script": "test"
+        }
+      ],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "dir": "apps/api",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "apps/api/**",
+        "libs/shared/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "api",
+      "why": null
+    },
+    {
+      "dir": "libs/shared",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "libs/shared/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "shared",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": [
+      {
+        "after": "hushrun run --scope api -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "apps/api/package.json",
+        "script": "test"
+      },
+      {
+        "after": "hushrun run --scope shared -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "libs/shared/package.json",
+        "script": "test"
+      }
+    ]
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

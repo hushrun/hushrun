@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.acme.ATest" time="1.5" tests="3">
+  <testcase name="t0" classname="com.acme.ATest" time="0"/>
+  <testcase name="t1" classname="com.acme.ATest" time="0"/>
+  <testcase name="t2" classname="com.acme.ATest" time="0"/>
+</testsuite>

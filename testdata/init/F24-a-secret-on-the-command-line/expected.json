@@ -1,0 +1,94 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "pytest --token ${{ secrets.NPM_TOKEN }}",
+          "check": "test",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 10,
+          "status": "left",
+          "why": "it passes a secret on its command line (${{ secrets.NPM_TOKEN }}), which a result would record"
+        },
+        {
+          "after": null,
+          "before": "pytest --token $TOKEN",
+          "check": "test",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 11,
+          "status": "left",
+          "why": "it passes a secret on its command line ($TOKEN), which a result would record"
+        },
+        {
+          "after": null,
+          "before": "pytest --level $LEVEL",
+          "check": "test",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 12,
+          "status": "left",
+          "why": "an earlier step sets LEVEL, and hushrun can't tell it holds no secret"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "There is no package.json here, and init can't wrap the checks in CI's files, so it wraps none: each says why below.",
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

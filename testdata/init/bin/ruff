@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for ruff in init's fixtures (A9): finds nothing to fix, and passes.
+echo "All checks passed!"

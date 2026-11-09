@@ -1,0 +1,21 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # One command, folded over three lines.
+      - run: >-
+          cargo test --locked
+          --workspace
+          --all-features
+      # Through hushrun already, over two.
+      - run: >-
+          hushrun run clippy --
+          cargo clippy --all-targets -- -D warnings
+      # A line indented further keeps its line break: two commands.
+      - run: >
+          cargo fmt --all
+            --check

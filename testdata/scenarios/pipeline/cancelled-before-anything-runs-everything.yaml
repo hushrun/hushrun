@@ -1,0 +1,13 @@
+name: "only a cancelled attempt, which recorded nothing -> full"
+covers: [P-6, P-15]
+description: "was ci-promote case 08"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: superseded, run: p1, at: "15:01", by: ci, reason: cancelled}
+expect:
+  mode: full
+  build: true
+  checks: [toolchain, unit]

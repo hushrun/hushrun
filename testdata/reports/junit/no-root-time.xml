@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="a" time="1.5">
+    <testcase name="one"/>
+    <testcase name="two"/>
+  </testsuite>
+  <testsuite name="b" time="2.25">
+    <testcase name="three"/>
+    <testcase name="four"><skipped/></testcase>
+  </testsuite>
+</testsuites>

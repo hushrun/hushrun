@@ -1,0 +1,15 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env: {CGO_ENABLED: "0"}
+    steps:
+      - uses: actions/checkout@v5
+      - run: go test ./...

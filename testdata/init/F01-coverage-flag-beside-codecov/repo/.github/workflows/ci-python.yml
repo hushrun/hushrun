@@ -1,0 +1,20 @@
+name: CI Python
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Test
+        run: uv run pytest --cov=src --cov-report=xml --cov-report=term-missing
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: python

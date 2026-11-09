@@ -1,0 +1,108 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/package.json\n+++ b/package.json\n@@ -3,6 +3,13 @@\n   \"private\": true,\n   \"packageManager\": \"pnpm@10.0.0\",\n   \"scripts\": {\n-    \"test\": \"pnpm -r test\"\n+    \"test\": \"pnpm -r test\",\n+    \"prepare\": \"hushrun hook install || exit 0\"\n+  },\n+  \"hushrun\": {\n+    \"backend\": \"<your org's URL, once you sign in>\"\n+  },\n+  \"devDependencies\": {\n+    \"hushrun\": \"^<version>\"\n   }\n }\n",
+      "path": "package.json"
+    },
+    {
+      "diff": "--- a/packages/core/package.json\n+++ b/packages/core/package.json\n@@ -1,6 +1,6 @@\n {\n   \"name\": \"@acme/core\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run -- vitest run\"\n   }\n }\n",
+      "path": "packages/core/package.json"
+    },
+    {
+      "diff": "--- a/packages/web/package.json\n+++ b/packages/web/package.json\n@@ -1,7 +1,7 @@\n {\n   \"name\": \"@acme/web\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run -- vitest run\"\n   },\n   \"dependencies\": {\n     \"@acme/core\": \"github:acme/core\"\n",
+      "path": "packages/web/package.json"
+    },
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -3,6 +3,9 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - uses: pnpm/action-setup@v4\n",
+      "path": ".github/workflows/ci.yml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/core/package.json",
+          "script": "test"
+        },
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/web/package.json",
+          "script": "test"
+        }
+      ],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "package.json \"test\" runs each package's test, which init wraps there, so it skips package by package",
+    "One scope for the whole repository: packages/web/package.json gets @acme/core from github:acme/core, which hushrun can't place. Any file's change runs every check; add scopes to hushrun.yaml by hand to narrow that."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": "packages/web/package.json gets @acme/core from github:acme/core, which hushrun can't place"
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [
+      {
+        "package": "package.json",
+        "script": "test",
+        "why": "it only runs other scripts or the package manager"
+      }
+    ],
+    "wrapped": [
+      {
+        "after": "hushrun run -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/core/package.json",
+        "script": "test"
+      },
+      {
+        "after": "hushrun run -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/web/package.json",
+        "script": "test"
+      }
+    ]
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

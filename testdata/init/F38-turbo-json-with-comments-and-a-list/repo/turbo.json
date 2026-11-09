@@ -1,0 +1,15 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  // Rust builds read these, and no cache key should.
+  "globalPassThroughEnv": [
+    "RUSTUP_HOME",
+    "CARGO_HOME", // rustup's too
+  ],
+  "tasks": {
+    /* every package's */
+    "lint": {},
+    "test": {
+      "dependsOn": ["^build"],
+    },
+  },
+}

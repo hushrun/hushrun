@@ -1,0 +1,17 @@
+name: "a run another workflow started, for a digest the repository already runs -> current"
+covers: [P-10]
+description: >-
+  dedupe defaults to push and upstream: a run that another workflow's completion started
+  (workflow_run) for the deployed digest has nothing to deploy (was ci-promote case 24)
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: upstream}
+events:
+  - {kind: started, run: o1, at: "15:00", by: ci, digest: other}
+  - {kind: check, run: o1, at: "15:01", by: ci, check: toolchain, digest: other}
+  - {kind: check, run: o1, at: "15:01", by: ci, check: unit, digest: other}
+  - {kind: passed, run: o1, at: "15:04", by: ci, digest: other}
+deployed:
+  - {digest: this, at: "14:00", by: ci}
+expect:
+  mode: current

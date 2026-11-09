@@ -1,0 +1,9 @@
+{
+  "name": "b",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "a": "workspace:*"
+  }
+}

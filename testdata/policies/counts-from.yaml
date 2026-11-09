@@ -1,0 +1,16 @@
+version: 1
+repository: github.com/acme/shop
+counts_from:
+  os: linux
+scopes:
+  ios:
+    include: ["ios/**"]
+    counts_from: {os: macos, xcode: ["16", "16.2"]}
+  api:
+    include: ["api/**"]
+    counts_from: {os: [linux, macos], arch: arm64, go: "1.25", env: {SANDBOX: go-7}}
+checks:
+  swiftlint:
+    counts_from: anywhere
+  e2e:
+    counts_from: {node: "24", rust: "1.94"}

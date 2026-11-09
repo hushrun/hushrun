@@ -1,0 +1,174 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -8,23 +8,35 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n-      - run: make test-ci -j1 V=1\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run test-ci -- make test-ci -j1 V=1\n   checks:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n-      - run: make lint-ci\n-      - run: pytest --cov=src --cov-report=xml\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run lint-ci -- make lint-ci\n+      - run: hushrun run test -- pytest --cov=src --cov-report=xml\n       - uses: codecov/codecov-action@v5\n         with:\n           files: coverage.xml\n   ui:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n-      - run: make -C web ui-test\n+      - uses: hushrun/hushrun/action/setup@v<version>\n+      - run: hushrun run ui-test -- make -C web ui-test\n   deploy:\n     runs-on: ubuntu-latest\n     steps:\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,4 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+backend: <your org's URL, once you sign in>\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run test-ci -- make test-ci -j1 V=1",
+          "before": "make test-ci -j1 V=1",
+          "check": "test-ci",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 13,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run lint-ci -- make lint-ci",
+          "before": "make lint-ci",
+          "check": "lint-ci",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 18,
+          "status": "wrapped",
+          "why": null
+        },
+        {
+          "after": "hushrun run test -- pytest --cov=src --cov-report=xml",
+          "before": "pytest --cov=src --cov-report=xml",
+          "check": "test",
+          "ci": "runs",
+          "ciText": "a later step reads its reports (codecov/codecov-action), and a skip writes none",
+          "ciWhy": "reports",
+          "dir": "",
+          "line": 19,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "checks",
+      "provider": "github",
+      "readers": [
+        {
+          "kinds": [
+            "coverage"
+          ],
+          "name": "codecov/codecov-action",
+          "onlyOnFailure": false,
+          "paths": [
+            "coverage.xml"
+          ],
+          "step": 3
+        }
+      ],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": "hushrun run ui-test -- make -C web ui-test",
+          "before": "make -C web ui-test",
+          "check": "ui-test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "dir": "",
+          "line": 27,
+          "status": "wrapped",
+          "why": null
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "ui",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "added",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "make test-deploy",
+          "check": null,
+          "ci": null,
+          "ciText": null,
+          "ciWhy": null,
+          "dir": null,
+          "line": 32,
+          "status": "left",
+          "why": "its recipe pushes an image (docker push)"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "deploy",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "CI runs test every time: a later step reads its reports (codecov/codecov-action). Laptops and agents skip it on a pass.",
+    "To let CI skip test too, set reports.ci: skip for it in hushrun.yaml and give the Codecov step if: steps.test.outputs.hushrun-skipped != 'true', with id: test on the step that runs test. That is safe when Codecov carries the step's flag forward (carryforward: true) and after_n_builds doesn't count its upload."
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

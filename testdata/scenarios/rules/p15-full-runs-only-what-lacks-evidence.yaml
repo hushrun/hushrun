@@ -1,0 +1,14 @@
+name: "no reusable image -> full, running only the checks without evidence"
+covers: [P-15]
+description: "unit passed on a laptop; toolchain never ran; nothing was built"
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: laptop-1, at: "15:00", by: ana, check: unit, custody: local}
+expect:
+  mode: full
+  reason: "no reusable `image` (none was recorded): building and running toolchain (missing)"
+  build: true
+  checks: [toolchain]
+  requirements: {unit: satisfied, toolchain: missing}

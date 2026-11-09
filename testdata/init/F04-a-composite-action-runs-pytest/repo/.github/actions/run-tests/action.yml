@@ -1,0 +1,8 @@
+name: Run tests
+description: Runs the test suite
+runs:
+  using: composite
+  steps:
+    - name: Test
+      run: python -m pytest -m "not slow" frames
+      shell: bash

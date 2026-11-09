@@ -1,0 +1,8 @@
+#!/bin/sh
+# `uv run …` in init's fixtures (A9): runs the rest, as uv does in its environment.
+if [ "$1" = run ]; then
+  shift
+  exec "$@"
+fi
+echo "fixture uv: only run" >&2
+exit 2

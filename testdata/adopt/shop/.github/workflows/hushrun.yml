@@ -1,0 +1,39 @@
+# Deploys from main through the reusable workflow. Written by `hushrun adopt`: review it;
+# running adopt again leaves a changed file alone.
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: Build and run every check, whatever the evidence
+        type: boolean
+        default: false
+
+# One deploy at a time; runs started off main get a group of their own.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'deploy' || format('deploy-refused-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write          # workload identity federation; ID tokens for hushrun's server
+
+jobs:
+  deploy:
+    uses: hushrun/hushrun/.github/workflows/hushrun-deploy.yml@main   # pin to a release commit
+    with:
+      # version: 0.9.0          # pins hushrun; without it, each run installs the newest release
+      repository-base: ${{ vars.HUSHRUN_REPOSITORY_BASE }}
+      repository-url: ${{ vars.HUSHRUN_REPOSITORY_URL }}
+      force-full: ${{ inputs.force_full || false }}
+      toolchain: go
+      build: docker build -t "$REF" . && docker push "$REF"
+      # .github/workflows/deploy.yml deploys with: gcloud run deploy shop --image us-docker.pkg.dev/acme/prod/shop --region us-central1
+      deploy: echo 'set deploy in .github/workflows/hushrun.yml to deploy $REF' >&2; exit 1
+      # Cloud credentials for the registry and the deploy, through workload identity federation (no secrets):
+      # gcp-workload-identity-provider: projects/NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
+      # gcp-service-account: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
+      # or aws-role-to-assume and aws-region, or azure-client-id, azure-tenant-id and azure-subscription-id
+      signing: sigstore      # keylessly, as this repository's CI: no key to keep

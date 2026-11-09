@@ -1,0 +1,20 @@
+name: "an attempt built the image, then its deploy step failed -> full, no checks"
+covers: [P-6, P-13, P-15]
+description: >-
+  An artifact a failed attempt recorded is never reused, so the image is built again; the
+  checks passed, so none runs (was ci-promote case 06)
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: failed, run: p1, at: "15:03", by: ci, reason: deploy failed}
+expect:
+  mode: full
+  reason: "no reusable `image` (recorded ones aren't reusable: none is pinned at its location by a signer that counts, from an attempt that passed): building"
+  build: true
+  checks: []
+  artifacts: {}

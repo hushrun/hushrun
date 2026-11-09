@@ -1,0 +1,13 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    uses: ./.github/workflows/test.yml
+    with:
+      python-version: ${{ matrix.python }}

@@ -1,0 +1,20 @@
+name: "forcing with allow_force: false -> blocked"
+covers: [P-9, I-6]
+description: "deploy.allow_force is false: a forced run is refused, whatever the evidence"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: manual, force: true}
+events:
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+expect:
+  mode: blocked
+  reason: "this repository doesn't allow forcing (`deploy.allow_force: false`)"
+  build: false
+  checks: []

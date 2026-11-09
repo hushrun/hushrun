@@ -1,0 +1,9 @@
+# Other repositories call this one: nothing here does.
+on: workflow_call
+
+jobs:
+  shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm test

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CoverageSession xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Summary numSequencePoints="120" visitedSequencePoints="96" numBranchPoints="40" visitedBranchPoints="30" sequenceCoverage="80" branchCoverage="75" maxCyclomaticComplexity="5" minCyclomaticComplexity="1" visitedClasses="4" numClasses="5" visitedMethods="20" numMethods="25" />
+  <Modules>
+    <Module hash="x">
+      <Summary numSequencePoints="60" visitedSequencePoints="50" numBranchPoints="20" visitedBranchPoints="10" sequenceCoverage="83" branchCoverage="50" />
+      <ModulePath>/repo/bin/App.dll</ModulePath>
+    </Module>
+  </Modules>
+</CoverageSession>

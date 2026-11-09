@@ -1,0 +1,21 @@
+name: "two attempts passed with different images -> the newest is reused"
+covers: [P-13]
+description: >-
+  Builds aren't always reproducible: p1 and p2 both passed this digest, with different image
+  digests. The newest candidate wins. hushrun 0.8 took the one the upstream's deciding `passed`
+  named instead (ADR 0062).
+policy: acme-api.yaml
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, run: p1, at: "15:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+  - {kind: started, run: p2, at: "15:10", by: ci, trigger: manual}
+  - {kind: artifact, run: p2, at: "15:11", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@c", trigger: manual}
+  - {kind: passed, run: p2, at: "15:12", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@c"}, trigger: manual}
+expect:
+  mode: promote
+  artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@c"}

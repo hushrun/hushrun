@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make test-ci -j1 V=1
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make lint-ci
+      - run: pytest --cov=src --cov-report=xml
+      - uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make -C web ui-test
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make test-deploy

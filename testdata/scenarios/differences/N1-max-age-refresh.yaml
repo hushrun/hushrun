@@ -1,0 +1,30 @@
+name: "N1: a check with max_age expired -> refresh"
+covers: [P-4, P-14]
+description: "§8.7 N1: ci-promote has no max_age; hushrun runs only the expired check again, then deploys the image it built"
+policy_yaml: |
+  version: 1
+  repository: github.com/Acme/api
+  checks:
+    toolchain: {run: ./toolchain.sh}
+    unit: {run: go test ./..., max_age: 7d}
+  artifacts:
+    image:
+      type: oci
+      location: us-central1-docker.pkg.dev/acme-prod/api/go
+  deploy:
+    branch: main
+now: "2026-10-23T16:00:00Z"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, run: p1, at: "15:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+expect:
+  mode: refresh
+  reason: "the artifacts are reusable: deploying image us-central1-docker.pkg.dev/acme-prod/api/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa by digest; running unit (expired) first"
+  build: false
+  checks: [unit]
+  artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  requirements: {unit: expired, toolchain: satisfied}

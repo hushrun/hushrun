@@ -1,0 +1,9 @@
+{
+  "name": "api",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "shared": "workspace:*"
+  }
+}

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE testsuites [
+  <!ENTITY who "the whole team">
+]>
+<testsuites time="2">
+  <testsuite name="&who;">
+    <testcase name="a"><system-out>written by &who;</system-out></testcase>
+    <testcase name="b"/>
+  </testsuite>
+</testsuites>

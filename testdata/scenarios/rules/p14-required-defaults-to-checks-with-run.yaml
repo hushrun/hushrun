@@ -1,0 +1,26 @@
+name: "without deploy.require, every check with `run` is required"
+covers: [P-1, P-14]
+description: >-
+  `Policy::required()`: no `deploy.require`, so unit and lint are required, and sast, which has no
+  `run`, isn't. Nothing is declared to build, so a promote deploys no artifact.
+policy_yaml: |
+  version: 1
+  repository: github.com/acme/app
+  checks:
+    unit: {run: go test ./...}
+    lint: {run: golangci-lint run}
+    sast: {}
+  deploy:
+    branch: main
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint}
+expect:
+  mode: promote
+  reason: "every required check is met"
+  build: false
+  artifacts: {}
+  checks: []
+  requirements: {unit: satisfied, lint: satisfied}

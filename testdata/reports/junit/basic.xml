@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="unit" tests="7" failures="1" errors="1" skipped="1" time="12.5">
+  <testsuite name="a" tests="4" time="8.25">
+    <testcase classname="a" name="adds" time="1.0"/>
+    <testcase classname="a" name="subtracts" time="2.0">
+      <failure message="expected 2" type="AssertionError">trace</failure>
+    </testcase>
+    <testcase classname="a" name="divides" time="0.25">
+      <error message="ZeroDivisionError" type="ZeroDivisionError">trace</error>
+    </testcase>
+    <testcase classname="a" name="later">
+      <skipped message="not yet"/>
+    </testcase>
+  </testsuite>
+  <testsuite name="b" tests="3" time="4.25">
+    <testcase classname="b" name="one" time="1"/>
+    <testcase classname="b" name="two" time="1"/>
+    <testcase classname="b" name="three" time="2.25">
+      <system-out>hello</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>

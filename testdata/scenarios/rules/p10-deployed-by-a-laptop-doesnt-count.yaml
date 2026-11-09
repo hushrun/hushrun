@@ -1,0 +1,18 @@
+name: a deployed index entry from a laptop is ignored while the repository is CI-only -> promote
+covers: [P-10, T-16]
+description: "The repository takes evidence from its CI only, set on the server (T-16): Ana's deployment of this digest doesn't make it current"
+policy: acme-api.yaml
+ci_only: true
+now: "16:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: started, run: p1, at: "15:00", by: ci}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: toolchain}
+  - {kind: check, run: p1, at: "15:01", by: ci, check: unit}
+  - {kind: artifact, run: p1, at: "15:02", by: ci, artifact: image, ref: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}
+  - {kind: passed, run: p1, at: "15:04", by: ci, artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}}
+deployed:
+  - {digest: this, at: "15:50", by: ana}
+expect:
+  mode: promote
+  artifacts: {image: "us-central1-docker.pkg.dev/acme-prod/api/go@a"}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.acme.FlakyTest" time="1.75" tests="3" errors="0" skipped="0" failures="1">
+  <testcase name="flaky" classname="com.acme.FlakyTest" time="0.5">
+    <flakyFailure message="boom" type="java.lang.AssertionError"><stackTrace>x</stackTrace></flakyFailure>
+  </testcase>
+  <testcase name="broken" classname="com.acme.FlakyTest" time="1">
+    <failure message="boom" type="java.lang.AssertionError">x</failure>
+    <rerunFailure message="boom" type="java.lang.AssertionError"><stackTrace>x</stackTrace></rerunFailure>
+  </testcase>
+  <testcase name="steady" classname="com.acme.FlakyTest" time="0.25"/>
+</testsuite>

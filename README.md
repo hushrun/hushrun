@@ -5,8 +5,8 @@ agent's sandbox. In a deploy pipeline, CI builds and validates each change once.
 is deployed already isn't deployed again, and a re-run or a revert deploys the image that passed,
 by digest.
 
-This repository holds hushrun's releases and its GitHub Actions. hushrun's source code isn't
-public.
+This repository holds hushrun's source code, its releases and its GitHub Actions. The CLI is
+open source under the MIT license.
 
 [Docs](https://hushrun.com/docs) · [Quickstart](https://hushrun.com/docs/quickstart) ·
 [Guides](https://hushrun.com/docs/guides) ·
@@ -70,8 +70,37 @@ release until you change it, pin it, with its checksum.
   release, which checks the archive's SHA-256 against the checksums pinned in it, or for a
   release it doesn't list, the one published with the release.
 
+## Building from source
+
+```bash
+cargo build --release
+./target/release/hushrun --version
+```
+
+The toolchain is pinned in `rust-toolchain.toml`. The release archives above are the supported
+way to install; building from source is for auditing and contributing.
+
+| Path | What it holds |
+|---|---|
+| `crates/hushrun` | The CLI |
+| `crates/hushrun-*` | Its libraries: configuration and the planner, source digests, signing and verification, the event log and its HTTP client, the transparency log, CI providers, registries, reports |
+| `docs/spec` | The normative rules, by ID (`D-3`, `L-10`, …) |
+| `docs/adr` | The decisions behind them |
+| `docs/schemas` | JSON schemas of what hushrun writes |
+| `recipes`, `action` | CI recipes and the GitHub Actions |
+| `testdata` | Fixtures and the scenario catalog |
+
+hushrun's hosted service, which shares results across an org's machines and CI, isn't part of
+this repository; the CLI talks to it over a documented HTTP API.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as
+[SECURITY.md](SECURITY.md) says.
+
 ## License
 
-hushrun is free to use under the terms in [LICENSE.md](LICENSE.md), and isn't open source.
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) lists the open-source crates hushrun is built
-with, and their licenses.
+hushrun is open source under the [MIT license](LICENSE.md).
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) lists the open-source crates its binaries are
+built with, and their licenses. The name and logo aren't covered by the license:
+[TRADEMARKS.md](TRADEMARKS.md).

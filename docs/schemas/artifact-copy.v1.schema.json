@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/artifact-copy.v1.schema.json",
+  "title": "hushrun.artifact.copy/v1",
+  "description": "Output of `hushrun artifact copy --format json` (A-2).",
+  "type": "object",
+  "required": ["schema", "source", "ref", "digest", "tag", "report"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.artifact.copy/v1"},
+    "source": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "tag": {"type": ["string", "null"]},
+    "report": {
+      "type": "object",
+      "required": ["manifests", "blobsCopied", "blobsMounted", "blobsPresent", "blobsForeign"],
+      "additionalProperties": false,
+      "properties": {
+        "manifests": {"type": "integer", "minimum": 1},
+        "blobsCopied": {"type": "integer", "minimum": 0},
+        "blobsMounted": {"type": "integer", "minimum": 0},
+        "blobsPresent": {"type": "integer", "minimum": 0},
+        "blobsForeign": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

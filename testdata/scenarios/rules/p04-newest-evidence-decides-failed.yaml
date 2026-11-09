@@ -1,0 +1,21 @@
+name: "the newest evidence decides: a later failure"
+covers: [P-4, P-14]
+description: "unit passed, then failed on the same digest: it runs again, and the image is reused"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+events:
+  - {kind: check, run: sec1, at: "09:30", by: ci, check: sast}
+  - {kind: started, run: c1, at: "10:00", by: ci}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: unit}
+  - {kind: check, run: c1, at: "10:01", by: ci, check: lint, image: "golangci/golangci-lint@1", platform: linux/amd64}
+  - {kind: check, run: c1, at: "10:02", by: ci, check: e2e}
+  - {kind: artifact, run: c1, at: "10:03", by: ci, artifact: api-image, ref: "ghcr.io/acme/api@a"}
+  - {kind: passed, run: c1, at: "10:05", by: ci, artifacts: {api-image: "ghcr.io/acme/api@a"}}
+  - {kind: check, run: laptop-1, at: "10:30", by: ana, check: unit, result: fail, custody: local}
+expect:
+  mode: refresh
+  reason: "the artifacts are reusable: deploying api-image ghcr.io/acme/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa by digest; running unit (failed) first"
+  checks: [unit]
+  requirements: {unit: failed}

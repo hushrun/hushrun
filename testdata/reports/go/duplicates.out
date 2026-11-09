@@ -1,0 +1,7 @@
+mode: atomic
+github.com/acme/app/math.go:3.24,5.2 1 0
+github.com/acme/app/math.go:7.24,9.16 2 4
+mode: atomic
+github.com/acme/app/math.go:3.24,5.2 1 2
+github.com/acme/app/math.go:7.24,9.16 2 0
+github.com/acme/app/util.go:1.1,2.2 3 0

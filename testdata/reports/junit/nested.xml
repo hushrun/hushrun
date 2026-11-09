@@ -1,0 +1,9 @@
+<testsuite name="all" time="3">
+  <testsuite name="inner" time="1">
+    <testcase name="a"/>
+    <testsuite name="deeper">
+      <testcase name="b"><failure/></testcase>
+    </testsuite>
+  </testsuite>
+  <testcase name="c"/>
+</testsuite>

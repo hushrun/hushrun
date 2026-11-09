@@ -1,0 +1,7 @@
+{
+  "name": "kit",
+  "private": true,
+  "scripts": {
+    "test": "vitest run"
+  }
+}

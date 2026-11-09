@@ -1,0 +1,4 @@
+#!/bin/sh
+# A stand-in for make in init's fixtures (A9): runs no recipe, and passes. hushrun reads the
+# recipe itself, to tell which kind of check a target is.
+echo "fixture make: nothing to be done"

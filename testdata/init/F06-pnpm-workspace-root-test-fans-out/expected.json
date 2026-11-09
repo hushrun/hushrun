@@ -1,0 +1,164 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [
+    {
+      "diff": "--- a/package.json\n+++ b/package.json\n@@ -4,6 +4,13 @@\n   \"packageManager\": \"pnpm@10.0.0\",\n   \"scripts\": {\n     \"test\": \"pnpm -r test\",\n-    \"lint\": \"eslint .\"\n+    \"lint\": \"hushrun run --scope all -- eslint .\",\n+    \"prepare\": \"hushrun hook install || exit 0\"\n+  },\n+  \"hushrun\": {\n+    \"backend\": \"<your org's URL, once you sign in>\"\n+  },\n+  \"devDependencies\": {\n+    \"hushrun\": \"^<version>\"\n   }\n }\n",
+      "path": "package.json"
+    },
+    {
+      "diff": "--- a/packages/a/package.json\n+++ b/packages/a/package.json\n@@ -1,6 +1,6 @@\n {\n   \"name\": \"a\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope a -- vitest run\"\n   }\n }\n",
+      "path": "packages/a/package.json"
+    },
+    {
+      "diff": "--- a/packages/b/package.json\n+++ b/packages/b/package.json\n@@ -1,7 +1,7 @@\n {\n   \"name\": \"b\",\n   \"scripts\": {\n-    \"test\": \"vitest run\"\n+    \"test\": \"hushrun run --scope b -- vitest run\"\n   },\n   \"dependencies\": {\n     \"a\": \"workspace:*\"\n",
+      "path": "packages/b/package.json"
+    },
+    {
+      "diff": "--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -3,6 +3,9 @@\n jobs:\n   test:\n     runs-on: ubuntu-latest\n+    permissions:\n+      contents: read\n+      id-token: write\n     steps:\n       - uses: actions/checkout@v5\n       - uses: pnpm/action-setup@v4\n",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "diff": "--- /dev/null\n+++ b/hushrun.yaml\n@@ -0,0 +1,29 @@\n+# hushrun.yaml: where this repository's events go.\n+version: 1\n+repository: github.com/acme/shop\n+\n+# A check skips until its scope's files change, so each project's checks run for its\n+# own changes, and what CI and its tools read.\n+scopes:\n+  a:\n+    include:\n+      - \"packages/a/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n+  b:\n+    include:\n+      - \"packages/b/**\"\n+      - \"packages/a/**\"\n+      - \"*\"\n+      - \".github/workflows/**\"\n+    exclude:\n+      - \"*.md\"\n+      - \"LICENSE*\"\n+      - \"NOTICE*\"\n+  all:\n+    include:\n+      - \"**\"\n",
+      "path": "hushrun.yaml"
+    }
+  ],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [
+        {
+          "check": "lint",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "script": "lint"
+        },
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/a/package.json",
+          "script": "test"
+        },
+        {
+          "check": "test",
+          "ci": "skips",
+          "ciText": null,
+          "ciWhy": null,
+          "package": "packages/b/package.json",
+          "script": "test"
+        }
+      ],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log",
+    "package.json \"test\" runs each package's test, which init wraps there, so it skips package by package"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "dir": "packages/a",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "packages/a/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "a",
+      "why": null
+    },
+    {
+      "dir": "packages/b",
+      "exclude": [
+        "*.md",
+        "LICENSE*",
+        "NOTICE*"
+      ],
+      "external": [],
+      "include": [
+        "packages/b/**",
+        "packages/a/**",
+        "*",
+        ".github/workflows/**"
+      ],
+      "name": "b",
+      "why": null
+    },
+    {
+      "dir": "",
+      "exclude": [],
+      "external": [],
+      "include": [
+        "**"
+      ],
+      "name": "all",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [
+      {
+        "package": "package.json",
+        "script": "test",
+        "why": "it only runs other scripts or the package manager"
+      }
+    ],
+    "wrapped": [
+      {
+        "after": "hushrun run --scope all -- eslint .",
+        "before": "eslint .",
+        "check": "lint",
+        "package": "package.json",
+        "script": "lint"
+      },
+      {
+        "after": "hushrun run --scope a -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/a/package.json",
+        "script": "test"
+      },
+      {
+        "after": "hushrun run --scope b -- vitest run",
+        "before": "vitest run",
+        "check": "test",
+        "package": "packages/b/package.json",
+        "script": "test"
+      }
+    ]
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

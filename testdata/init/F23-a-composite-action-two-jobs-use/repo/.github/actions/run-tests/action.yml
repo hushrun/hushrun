@@ -1,0 +1,12 @@
+name: Run tests
+description: Runs the test suite
+inputs:
+  pattern:
+    description: The tests to run
+    default: not slow
+runs:
+  using: composite
+  steps:
+    - name: Test
+      run: pytest -m "${{ inputs.pattern }}" pandas
+      shell: bash -el {0}

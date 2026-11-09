@@ -1,0 +1,97 @@
+{
+  "agentFiles": [
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".claude/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "hushrun's skill for coding agents",
+      "path": ".agents/skills/hushrun/SKILL.md"
+    },
+    {
+      "change": "a new file: what agents do before they push",
+      "path": "AGENTS.md"
+    }
+  ],
+  "edits": [],
+  "jobs": [
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "pnpm turbo run test",
+          "check": null,
+          "ci": null,
+          "ciText": null,
+          "ciWhy": "stepped-aside",
+          "dir": null,
+          "line": 19,
+          "status": "left",
+          "why": "Turborepo reuses its own results across machines (remote cache), so init leaves it to Turborepo"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "test",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    },
+    {
+      "calledBy": [],
+      "commands": [
+        {
+          "after": null,
+          "before": "./gradlew test --build-cache",
+          "check": "test",
+          "ci": null,
+          "ciText": null,
+          "ciWhy": "stepped-aside",
+          "dir": null,
+          "line": 31,
+          "status": "left",
+          "why": "Gradle reuses its own results across machines (remote cache), so init leaves it to Gradle"
+        }
+      ],
+      "file": ".github/workflows/ci.yml",
+      "job": "android",
+      "provider": "github",
+      "readers": [],
+      "scripts": [],
+      "setup": "none",
+      "variantIdentity": "none",
+      "variants": "one"
+    }
+  ],
+  "notes": [
+    "No script in package.json can be wrapped, so init wraps no checks. Put hushrun run -- in front of a check's command, such as\n  \"test\": \"hushrun run -- vitest run\"\nthen run hushrun init again.",
+    "your org: connects github.com/acme/shop, so that its CI records results with its own ID token",
+    "your org: adds github.com/acme/shop to your org's dashboard, unless it is there already",
+    "hushrun.yaml: a new file: repository github.com/acme/shop, its URL on hushrun, and the key that verifies hushrun's log"
+  ],
+  "repository": "github.com/acme/shop",
+  "schema": "hushrun.init-plan/v1",
+  "scopes": [
+    {
+      "name": "default",
+      "why": null
+    }
+  ],
+  "scripts": {
+    "already": [],
+    "left": [
+      {
+        "ciWhy": "stepped-aside",
+        "package": "package.json",
+        "script": "test",
+        "why": "Turborepo reuses its own results across machines (remote cache), so init leaves it to Turborepo"
+      }
+    ],
+    "wrapped": []
+  },
+  "suggestions": [],
+  "tool": "hushrun <version>"
+}

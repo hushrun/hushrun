@@ -1,0 +1,6 @@
+{
+  "name": "@acme/ui",
+  "scripts": {
+    "test": "vitest run"
+  }
+}

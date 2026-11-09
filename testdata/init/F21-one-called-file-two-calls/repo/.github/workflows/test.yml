@@ -1,0 +1,16 @@
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        required: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: python -m pytest tests

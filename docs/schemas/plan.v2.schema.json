@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/plan.v2.schema.json",
+  "title": "hushrun.plan/v2",
+  "description": "Output of `hushrun plan --format json`, the `json` output, and `plan --out`: the whole plan, which later jobs carry out with --plan or HUSHRUN_PLAN_JSON (§10.4). [ADR 0062] v2 has no stage, no upstream and no waivers: a repository has one pipeline.",
+  "type": "object",
+  "required": ["schema", "repository", "run", "forced", "time", "scopes"],
+  "additionalProperties": false,
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "time": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"},
+    "decision": {
+      "type": "object",
+      "required": ["scope", "digest", "mode", "reason", "build", "artifacts", "checksToRun", "requirements"],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {"$ref": "#/$defs/name"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "mode": {"description": "What the pipeline does with this digest (spec §3). current: the repository already runs it, so there is nothing to deploy.", "enum": ["promote", "refresh", "full", "current", "blocked"]},
+        "reason": {"type": "string", "minLength": 1},
+        "build": {"type": "boolean"},
+        "artifacts": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+          "additionalProperties": {
+            "type": "object",
+            "required": ["ref", "digest", "event"],
+            "additionalProperties": false,
+            "properties": {
+              "ref": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"},
+              "digest": {"$ref": "#/$defs/digest"},
+              "event": {"type": "string", "pattern": "^v1/events/"}
+            }
+          }
+        },
+        "checksToRun": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["check", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "check": {"$ref": "#/$defs/name"},
+              "reason": {"enum": ["missing", "expired", "failed", "forced"]}
+            }
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["requirement", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "requirement": {"$ref": "#/$defs/name"},
+              "status": {"enum": ["satisfied", "expired", "failed", "missing"]},
+              "event": {"type": "string"}
+            }
+          }
+        },
+        "deployed": {
+          "type": "object",
+          "required": ["digest", "event", "time"],
+          "additionalProperties": false,
+          "properties": {
+            "digest": {"$ref": "#/$defs/digest"},
+            "event": {"type": "string"},
+            "time": {"$ref": "#/$defs/time"}
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema": {"const": "hushrun.plan/v2"},
+    "repository": {"type": "string"},
+    "revision": {"type": "string"},
+    "ref": {"type": "string"},
+    "run": {
+      "type": "object",
+      "required": ["provider", "id", "attempt", "trigger"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"enum": ["github", "gitlab", "buildkite", "circleci", "local", "generic"]},
+        "id": {"type": "string"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "url": {"type": "string"},
+        "trigger": {"enum": ["push", "upstream", "manual", "schedule"]},
+        "job": {"type": "string"},
+        "jobId": {"type": "string"}
+      }
+    },
+    "forced": {"type": "boolean"},
+    "time": {"$ref": "#/$defs/time"},
+    "scopes": {"type": "array", "items": {"$ref": "#/$defs/decision"}}
+  }
+}

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.acme.CTest" time="0.001" tests="1">
+  <testcase name="t0" classname="com.acme.CTest" time="0"><skipped/></testcase>
+</testsuite>

@@ -1,0 +1,13 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shared:
+    uses: acme/shared/.github/workflows/ci.yml@v1
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: go test ./...

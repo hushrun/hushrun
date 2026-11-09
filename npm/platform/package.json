@@ -1,0 +1,26 @@
+{
+  "name": "@hushrun/cli-{os}-{cpu}",
+  "version": "0.0.0",
+  "description": "The hushrun binary for {platform}, which the hushrun package runs.",
+  "homepage": "https://hushrun.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hushrun/hushrun.git"
+  },
+  "license": "MIT",
+  "os": [
+    "{os}"
+  ],
+  "cpu": [
+    "{cpu}"
+  ],
+  "files": [
+    "bin/",
+    "LICENSE.md",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "preferUnplugged": true,
+  "publishConfig": {
+    "access": "public"
+  }
+}

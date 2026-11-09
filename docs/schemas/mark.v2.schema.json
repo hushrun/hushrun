@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/mark.v2.schema.json",
+  "title": "hushrun.mark/v2",
+  "description": "Output of `hushrun mark --format json`. [ADR 0062] v2 has no stage.",
+  "type": "object",
+  "required": ["schema", "scope", "digest", "run", "events"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.mark/v2"},
+    "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "run": {
+      "type": "object",
+      "required": ["provider", "id", "attempt", "trigger"],
+      "properties": {
+        "provider": {"enum": ["github", "gitlab", "buildkite", "circleci", "local", "generic"]},
+        "id": {"type": "string"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "url": {"type": "string"},
+        "trigger": {"enum": ["push", "upstream", "manual", "schedule"]},
+        "job": {"type": "string"},
+        "jobId": {"type": "string"}
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "keys"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"enum": ["started", "deployed", "passed", "failed", "superseded"]},
+          "keys": {"type": "array", "items": {"type": "string", "pattern": "^v1/"}}
+        }
+      }
+    }
+  }
+}

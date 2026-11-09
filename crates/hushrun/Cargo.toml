@@ -1,0 +1,78 @@
+[package]
+name = "hushrun"
+description = "Build and validate each piece of content once, then promote it by digest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "hushrun"
+path = "src/main.rs"
+
+[package.metadata.dist]
+# Released even though the crate is never published to crates.io.
+dist = true
+
+[features]
+# Integration tests that use real registries, Sigstore and Docker (`cargo test --features it`).
+it = ["hushrun-artifact/it", "hushrun-attest/it"]
+
+[dependencies]
+base64.workspace = true
+jiff.workspace = true
+hushrun-artifact.workspace = true
+hushrun-attest = { workspace = true, features = ["sigstore"] }
+hushrun-ci.workspace = true
+hushrun-ledger = { workspace = true, features = ["cloud"] }
+hushrun-tlog.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+mimalloc.workspace = true
+hushrun-core.workspace = true
+hushrun-reports.workspace = true
+hushrun-digest.workspace = true
+hushrun-vcs.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# `hushrun update` and the newer-release notice (ADR 0035): the HTTP stack the ledger and the
+# registries use, the release's SHA-256, versions, and a working directory beside the binary.
+# Each was already part of the binary's build, through other crates: none is new.
+hex.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+semver.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+# Seeding images for the registry integration tests (`--features it`).
+oci-client.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+base64.workspace = true
+predicates.workspace = true
+hushrun-ledger.workspace = true
+hushrun-testkit.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# A terminal for tests of what hushrun says only on one.
+rustix = { workspace = true, features = ["pty"] }

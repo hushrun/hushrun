@@ -1,0 +1,25 @@
+<coverage line-rate="0.6" branch-rate="0.75" version="1.9" timestamp="1">
+  <packages><package name="p"><classes>
+    <class name="A" filename="src/a.js">
+      <methods>
+        <method name="f" signature="()">
+          <lines>
+            <line number="1" hits="3"/>
+            <line number="2" hits="0" branch="true" condition-coverage="50% (1/2)"/>
+          </lines>
+        </method>
+      </methods>
+      <lines>
+        <line number="1" hits="3"/>
+        <line number="2" hits="0" branch="true" condition-coverage="50% (1/2)"/>
+        <line number="3" hits="1"/>
+      </lines>
+    </class>
+    <class name="B" filename="src/b.js">
+      <lines>
+        <line number="1" hits="0"/>
+        <line number="2" hits="2" branch="true" condition-coverage="100% (2/2)"/>
+      </lines>
+    </class>
+  </classes></package></packages>
+</coverage>

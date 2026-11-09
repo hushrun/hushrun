@@ -1,0 +1,5 @@
+{
+  // the shared settings
+  "extends": "@acme/tsconfig/base.json",
+  "references": [{ "path": "../lib" }],
+}

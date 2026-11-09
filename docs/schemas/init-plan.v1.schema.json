@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/init-plan.v1.schema.json",
+  "title": "hushrun.init-plan/v1",
+  "description": "Output of `hushrun init --dry-run --format json` (spec C-15): what init would change, as data, in place of its text. A dry run signs in to nothing, writes nothing, installs nothing and sends nothing. Field names are a contract; fields are only ever added.",
+  "type": "object",
+  "required": ["schema", "tool", "repository", "scopes", "scripts", "jobs", "suggestions", "edits", "agentFiles", "notes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.init-plan/v1"},
+    "tool": {"description": "The hushrun that made the plan, such as `hushrun 0.7.0`.", "type": "string", "pattern": "^hushrun "},
+    "repository": {"description": "The repository's id, `host/owner/name`, as run results name it; null when no origin remote names it.", "type": ["string", "null"]},
+    "scopes": {
+      "description": "The scopes init's checks run under: one, `default`, unless init gives each project one or hushrun.yaml declares them.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "why"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "why": {"description": "Why the repository keeps one scope, when that isn't the obvious; or `hushrun.yaml declares it`.", "type": ["string", "null"]},
+          "dir": {"description": "A project's directory, relative to the root; empty for the root.", "type": "string"},
+          "include": {"type": "array", "items": {"type": "string"}},
+          "exclude": {"type": "array", "items": {"type": "string"}},
+          "external": {"description": "What the project builds against outside the repository.", "type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "scripts": {
+      "description": "The root package.json's scripts init looks at, then each workspace package's (ADR 0051), each by its package.json.",
+      "type": "object",
+      "required": ["wrapped", "already", "left"],
+      "additionalProperties": false,
+      "properties": {
+        "wrapped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["package", "script", "check", "before", "after"],
+            "additionalProperties": false,
+            "properties": {
+              "package": {"type": "string"},
+              "script": {"type": "string"},
+              "check": {"description": "The check it runs under: the script's name, made a name.", "type": ["string", "null"]},
+              "before": {"type": "string"},
+              "after": {"type": "string"}
+            }
+          }
+        },
+        "already": {
+          "description": "Scripts that run through hushrun already.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["package", "script", "check", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "package": {"type": "string"},
+              "script": {"type": "string"},
+              "check": {"type": ["string", "null"]},
+              "command": {"type": "string"}
+            }
+          }
+        },
+        "left": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["package", "script", "why"],
+            "additionalProperties": false,
+            "properties": {
+              "package": {"type": "string"},
+              "script": {"type": "string"},
+              "why": {"type": "string"},
+              "ciWhy": {"description": "stepped-aside, only for a script init leaves since it runs a command through a tool that reuses its own results across machines (a remote cache), as a command's `ciWhy` says; absent for any other.", "const": "stepped-aside"}
+            }
+          }
+        }
+      }
+    },
+    "jobs": {
+      "description": "Each CI job that runs a check: a command init wraps, leaves or finds through hushrun already, or a wrapped script. init wraps and leaves nothing in a file no push or pull request starts, but its jobs may run a wrapped script. A reusable workflow's jobs are predicted as CI names them: by the top-level workflow of this repository that calls them, the first when several do.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "job", "provider", "variants", "variantIdentity", "calledBy", "setup", "commands", "scripts", "readers"],
+        "additionalProperties": false,
+        "properties": {
+          "file": {"description": "The CI file, relative to the root: `.github/workflows/<name>` or `.gitlab-ci.yml`.", "type": "string"},
+          "job": {"description": "The job's id.", "type": "string"},
+          "provider": {"enum": ["github", "gitlab"]},
+          "variants": {"description": "one: it runs once. several: a matrix, or GitLab's `parallel`, runs it several times, or only run time knows. unknown: its file doesn't read as YAML.", "enum": ["one", "several", "unknown"]},
+          "variantIdentity": {"description": "How a job with several variants, or a job of a workflow another calls, tells its passes apart. none: it doesn't, or it has one variant and no caller. named: each variant runs under a name of its own: its `hushrun run` names differ per variant (`${{ strategy.job-index }}`, `${{ matrix.<key> }}`), or GitLab names each instance of the job. env: its own env says which run it is, as init leaves it: HUSHRUN_VARIANT in a job of several variants, and HUSHRUN_WORKFLOW in a job of a workflow another calls; it decides over a name.", "enum": ["none", "named", "env"]},
+          "calledBy": {
+            "description": "The jobs of this repository's workflows that call this file with `uses: ./<file>`.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file", "job"],
+              "additionalProperties": false,
+              "properties": {"file": {"type": "string"}, "job": {"type": "string"}}
+            }
+          },
+          "setup": {"description": "added: init installs hushrun in it first. present: it installs hushrun itself. none: neither, as when hushrun comes with package.json.", "enum": ["added", "present", "none"]},
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "dir", "check", "status", "before", "after", "why", "ci", "ciWhy", "ciText"],
+              "additionalProperties": false,
+              "properties": {
+                "line": {"description": "The line it starts on, from 1; null when that can't be told.", "type": ["integer", "null"], "minimum": 1},
+                "dir": {"description": "The directory it runs in, relative to the root, `/`-separated: empty at the root. Null when init leaves it, or can't tell.", "type": ["string", "null"]},
+                "check": {"description": "The check it is, or would be.", "type": ["string", "null"]},
+                "status": {"description": "wrapped: init puts hushrun run in front of it. left: init leaves it, and `why` says why; the text lists these only when it wraps a command of CI's files, or no script. already: it runs through hushrun already.", "enum": ["wrapped", "left", "already"]},
+                "before": {"description": "The command, as init read it; null for one already through hushrun.", "type": ["string", "null"]},
+                "after": {"description": "What it becomes; null unless wrapped.", "type": ["string", "null"]},
+                "why": {"description": "Why init leaves it; for one already through hushrun, why its key can't be told from the file, when CI fills in its words, or why its step isn't in this repository's checkout.", "type": ["string", "null"]},
+                "command": {"description": "For one already through hushrun: the command it runs.", "type": "string"},
+                "action": {"description": "The composite action of this repository the line is in, by its file, when it isn't the job's own: a step of the job uses it, `uses: ./<dir>`, and `line` is that file's.", "type": "string"},
+                "ci": {"description": "What `hushrun run` decides in this job with a pass of this job on record, by the run's own rule: a prediction, since the run decides from the file it runs in. Null when init leaves it, and when only the run can tell its key.", "enum": ["skips", "runs", null]},
+                "ciWhy": {"description": "What makes it run: variants, reusable, reports or cant-tell, for one init wraps or finds through hushrun already. For one init leaves, stepped-aside when the tool it runs through reuses its own results across machines (a remote cache of Turborepo, Nx, Gradle, Bazel or Pants), so CI runs it as it is, and that tool skips what it can; else null.", "enum": ["variants", "reusable", "reports", "cant-tell", "stepped-aside", null]},
+                "ciText": {"description": "What the run says, after `<NAME> running: `. Null when its words aren't known here: in a reusable workflow whose caller init can't read, and in a step outside the checkout, where the run can't tell which code it is.", "type": ["string", "null"]}
+              }
+            }
+          },
+          "scripts": {
+            "description": "The wrapped package.json scripts its steps start: the root's, and in a workspace its packages' (ADR 0051).",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["script", "check", "ci", "ciWhy", "ciText"],
+              "additionalProperties": false,
+              "properties": {
+                "package": {
+                  "description": "The package.json the script is in, from the root, when it is a workspace package's rather than the root's.",
+                  "type": "string"
+                },
+                "script": {"type": "string"},
+                "check": {"type": "string"},
+                "why": {"description": "Why the steps that start it aren't in this repository's checkout, when none is; or, when it runs under Turborepo, that turbo.json doesn't pass hushrun's variables on to it and init can't change that, so it runs every time (ADR 0051).", "type": "string"},
+                "ci": {"enum": ["skips", "runs"]},
+                "ciWhy": {"enum": ["variants", "reusable", "reports", "cant-tell", "stepped-aside", null]},
+                "ciText": {"type": ["string", "null"]}
+              }
+            }
+          },
+          "readers": {
+            "description": "The steps of the job that read reports a check may write, as the run finds them (C-26): a known action, an artifact whose path names a report, an action whose input names a report file, a command that reads reports, or a local composite action with such a step. A wrapped check here predicts `runs` with `reports`, unless it is a linter and they read only coverage and test results, or hushrun.yaml says `reports.ci: skip`. Empty outside GitHub Actions, where nothing reads the file at run time.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["step", "name", "kinds", "paths", "onlyOnFailure"],
+              "additionalProperties": false,
+              "properties": {
+                "step": {"description": "Its place among the job's steps, from 0.", "type": "integer", "minimum": 0},
+                "name": {"description": "Its `uses:` without the `@ref`, else its `name:`, else `run: ` and at most 40 characters of its command, cut after a word.", "type": "string"},
+                "kinds": {"description": "What it reads.", "type": "array", "items": {"enum": ["coverage", "tests", "other"]}},
+                "paths": {"description": "The paths its inputs name, as written: empty when it reads whatever it finds.", "type": "array", "items": {"type": "string"}},
+                "onlyOnFailure": {"description": "Its `if:` is `failure()`: it never runs after a skip, which succeeds, and doesn't count.", "type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "suggestions": {
+      "description": "Lines init could also wrap, for a person to decide; init applies none. Each is a test script: in a job whose id or `name` holds test, spec, check, unit or integration, in any case, a command the table of commands doesn't know that runs a script of the repository whose file name has a word (split at `-`, `_`, `.` and a capital after a small letter) such as test, tests, spec, check, unit, integration, runtests or testall, as `./scripts/test.sh`, `bash scripts/ci/test.sh` or `./runtest` do. Or (ADR 0055) a task of the repository's own, `cargo xtask <task>`, in any job, that the table doesn't know: one whose task isn't a task runner's name and that doesn't run with `--check`. A script or a task can deploy or write reports, which a skip wouldn't, so a person decides. A line the shell or CI changes, or that a `cd` moves where init can't follow, isn't one, nor is a command a wrapped script runs.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "job", "line", "dir", "check", "before", "after", "setup", "why"],
+        "additionalProperties": false,
+        "properties": {
+          "file": {"description": "The CI file, relative to the root.", "type": "string"},
+          "job": {"description": "The job's id.", "type": "string"},
+          "line": {"description": "The line it starts on, from 1.", "type": "integer", "minimum": 1},
+          "dir": {"description": "The directory it runs in, relative to the root, `/`-separated: empty at the root.", "type": "string"},
+          "check": {"description": "The check it would be: its script's file name without the extension, or (ADR 0055) its task, made a name, as `hushrun run --` names it. When another command here has that name, or another job runs the same command, its job's id goes in front, then a number, as init names what it wraps.", "type": "string"},
+          "before": {"description": "The command, as init read it.", "type": "string"},
+          "after": {"description": "The line to use in its place: `hushrun run [--scope <scope>] <check> -- <before>`.", "type": "string"},
+          "setup": {"description": "Whether its job has hushrun once init is done, as a job's `setup` says: added, present or none. With none, its job needs hushrun installed first.", "enum": ["added", "present", "none"]},
+          "why": {"description": "Why init leaves it to a person.", "type": "string"}
+        }
+      }
+    },
+    "edits": {
+      "description": "Each file init writes from what it found, as a unified diff that `git apply` takes, in the order it writes them: package.json, CI's files, GitLab's install script, and hushrun.yaml's backend, scopes and rule. A dry run that names no org writes its URL as `<your org's URL, once you sign in>`. What the org gives after a sign-in, hushrun.yaml's URL on hushrun and log key, or a move's new backend, isn't in them: `notes` says it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "diff"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "diff": {"type": "string", "pattern": "^--- (a/|/dev/null)"}
+        }
+      }
+    },
+    "agentFiles": {
+      "description": "The files init would write for coding agents (C-24), whose text is hushrun's own: listed, not diffed.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "change"],
+        "additionalProperties": false,
+        "properties": {"path": {"type": "string"}, "change": {"type": "string"}}
+      }
+    },
+    "notes": {"description": "What else the plan says, a sentence each: why it wraps nothing; what the org gets and what hushrun.yaml gets from it once signed in, as `<heading>: <line>`; why one scope; what to change by hand.", "type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/whoami.v1.schema.json",
+  "title": "hushrun.whoami/v1",
+  "description": "Output of `hushrun whoami --format json` (spec C-17): where `hushrun run` records results, with which credential, and who the backend says that credential is. It exits 0 when the backend answered, 1 when it refused the credential and 6 when it couldn't be reached.",
+  "type": "object",
+  "required": ["schema", "backend", "named_by", "directory", "off", "credential", "withheld", "org", "as", "dashboard", "token", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.whoami/v1"},
+    "backend": {"description": "The server's org URL, or null when results stay on this machine or are off.", "type": ["string", "null"]},
+    "named_by": {"description": "What named the server (C-11).", "enum": ["HUSHRUN_AGENT", "HUSHRUN_BACKEND", "package.json", "hushrun.yaml", "login", null]},
+    "directory": {"description": "Where results stay when no server is named: hushrun's cache directory.", "type": ["string", "null"]},
+    "off": {"description": "Why results are off, when they are.", "type": ["string", "null"]},
+    "credential": {"description": "What goes with the server's requests (C-13).", "enum": ["agent_token", "token", "login", "github_oidc", "none"]},
+    "withheld": {"description": "HUSHRUN_TOKEN is set, and this backend doesn't get it.", "type": "boolean"},
+    "org": {"type": ["string", "null"]},
+    "as": {"description": "Who the server says the credential is: user:<email>, oidc:<subject> or agent:<name>.", "type": ["string", "null"]},
+    "dashboard": {"type": ["string", "null"]},
+    "token": {
+      "description": "For an agent token, the token as GET {base}/v0 describes it (C-12).",
+      "type": ["object", "null"],
+      "required": ["kind", "name", "prefix", "repository", "expires_at"],
+      "properties": {
+        "kind": {"const": "agent"},
+        "name": {"type": "string"},
+        "prefix": {"type": "string", "pattern": "^hra_"},
+        "repository": {"type": ["string", "null"]},
+        "expires_at": {"type": "string"},
+        "results_per_minute": {"type": "integer", "minimum": 1}
+      }
+    },
+    "error": {"description": "Why the server didn't say who the credential is.", "type": ["string", "null"]},
+    "machine": {
+      "description": "ADR 0028: this machine's key, which its sign-in registers and which signs its results, and where the key is; null when it has none yet.",
+      "type": ["object", "null"],
+      "required": ["keyid", "source"],
+      "additionalProperties": false,
+      "properties": {"keyid": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "source": {"type": "string"}}
+    }
+  }
+}

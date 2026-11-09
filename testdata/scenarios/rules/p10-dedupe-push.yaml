@@ -1,0 +1,11 @@
+name: "dedupe: [push] -> a push of the deployed digest is current"
+covers: [P-10]
+description: "The same file and deployment as p10-dedupes-only-pushes, on a push"
+policy: deploy.yaml
+scope: api
+now: "12:00"
+context: {branch: main, trigger: push}
+deployed:
+  - {digest: this, at: "11:40", by: ci}
+expect:
+  mode: current

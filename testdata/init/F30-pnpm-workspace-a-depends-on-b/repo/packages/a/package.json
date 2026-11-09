@@ -1,0 +1,9 @@
+{
+  "name": "@acme/a",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@acme/b": "workspace:*"
+  }
+}

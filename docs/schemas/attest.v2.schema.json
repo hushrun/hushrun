@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/attest.v2.schema.json",
+  "title": "hushrun.attest/v2",
+  "description": "Output of `hushrun attest --format json`. [ADR 0062] v2 has no stage.",
+  "type": "object",
+  "required": ["schema", "scope", "digest", "events", "refs"],
+  "additionalProperties": false,
+  "$defs": {
+    "written": {
+      "type": "object",
+      "required": ["kind", "keys"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["started", "check", "artifact", "deployed", "passed", "failed", "superseded", "approval"]},
+        "keys": {"type": "array", "items": {"type": "string", "pattern": "^v1/"}}
+      }
+    }
+  },
+  "properties": {
+    "schema": {"const": "hushrun.attest/v2"},
+    "scope": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "events": {"description": "The events written. [ADR 0032] A check event the server refused for the org's plan isn't among them (L-5).", "type": "array", "items": {"$ref": "#/$defs/written"}},
+    "refs": {
+      "description": "Artifact name to its reference, pinned by digest.",
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"}
+    }
+  }
+}

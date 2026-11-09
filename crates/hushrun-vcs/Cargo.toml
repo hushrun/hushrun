@@ -1,0 +1,30 @@
+[package]
+name = "hushrun-vcs"
+description = "VCS adapters (git, dir, exec) that list the entries of a revision or snapshot."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gix.workspace = true
+hex.workspace = true
+ignore.workspace = true
+hushrun-core.workspace = true
+hushrun-digest.workspace = true
+rayon.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hushrun-digest.workspace = true
+hushrun-testkit.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
