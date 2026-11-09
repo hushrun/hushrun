@@ -78,6 +78,25 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_OIDC_ISSUER",
     "HUSHRUN_OIDC_CLIENT_ID",
     "HUSHRUN_INVOKED_BY",
+    // What coding agents set (C-23): a test sees a person, whichever agent runs the tests, and
+    // \[ADR 0065\] the newer-release notice never asks GitHub from one.
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "OPENCODE",
+    "OPENCODE_CLIENT",
+    "CURSOR_AGENT",
+    "CURSOR_EXTENSION_HOST_ROLE",
+    "GEMINI_CLI",
+    "AUGMENT_AGENT",
+    "ANTIGRAVITY_AGENT",
+    "COPILOT_MODEL",
+    "COPILOT_ALLOW_ALL",
+    "COPILOT_GITHUB_TOKEN",
     // `hushrun run`'s backend and its credentials (C-11, C-13): doctor asks the backend who it
     // is, so a test never reaches a developer's own.
     "HUSHRUN_BACKEND",

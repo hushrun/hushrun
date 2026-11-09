@@ -224,6 +224,14 @@ pub fn run(global: &GlobalOpts, args: &ReadyArgs) -> CmdResult {
     if args.strict {
         report.insist();
     }
+    // [ADR 0065] Whether the skill agents read here is older or newer than this hushrun's: the
+    // command's alone, not the hook's, which a push shouldn't fill with it.
+    if let Some(root) = crate::cmd::skill::repository_root(global) {
+        let update = crate::notice::update_command(crate::cmd::update::came_with_npm());
+        report
+            .notes
+            .extend(crate::skill::notes(&root, hushrun(), update));
+    }
     match global.format {
         Format::Json => {
             let value = serde_json::to_value(&report).context("writing the report")?;

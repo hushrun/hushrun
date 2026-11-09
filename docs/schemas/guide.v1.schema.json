@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hushrun/hushrun/spec/schemas/guide.v1.schema.json",
+  "title": "hushrun.guide/v1",
+  "description": "Output of `hushrun guide --format json` (spec C-28, ADR 0065): what a coding agent needs to know about this hushrun beyond its skill, and what is true here: a newer release the notice learned of, and each copy of the skill. It asks nobody, changes nothing, and exits 0. Fields are only ever added.",
+  "type": "object",
+  "required": ["schema", "version", "skillRevision", "guide", "update", "skills"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "hushrun.guide/v1"},
+    "version": {"description": "This hushrun's version.", "type": "string"},
+    "skillRevision": {"description": "This hushrun's revision of the skill, which its SKILL.md says as metadata.hushrun-skill (C-24).", "type": "integer", "minimum": 1},
+    "guide": {"description": "The guide, in Markdown: what this hushrun's lines mean, how to set it up, and how it and its skill are kept current.", "type": "string", "minLength": 1},
+    "update": {
+      "description": "A newer release than this hushrun, as the newer-release notice last learned of it (C-21), with no question asked now; null when none is known, or with HUSHRUN_NO_UPDATE_CHECK set.",
+      "type": ["object", "null"],
+      "required": ["latest", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "latest": {"type": "string"},
+        "command": {"description": "What updates this hushrun: `hushrun update`, or the package manager's install where one installed it, such as `npm install hushrun@latest`.", "type": "string"}
+      }
+    },
+    "skills": {
+      "description": "Each copy of the skill hushrun looks at: the repository's, when it runs in one, then the person's own, under ~.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "state", "revision"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"description": "Relative to the repository's root, or ~/… for the person's own.", "type": "string"},
+          "state": {"description": "current: this hushrun's revision. older: an older hushrun wrote it, and `hushrun skill update` updates it. newer: a newer hushrun wrote it, and this hushrun is the one to update. edited: no hushrun wrote this text, and hushrun leaves it. absent: there is none.", "enum": ["current", "older", "newer", "edited", "absent"]},
+          "revision": {"description": "The revision it says, for current, older and newer: 0 for a text a hushrun wrote before revisions.", "type": ["integer", "null"], "minimum": 0}
+        }
+      }
+    }
+  }
+}

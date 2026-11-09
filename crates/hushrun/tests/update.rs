@@ -611,6 +611,39 @@ fn an_install_of_npms_is_told_to_update_the_package() {
 
 // covers: C-21
 #[test]
+fn an_agent_is_told_without_a_terminal() {
+    let home = Home::new();
+    let github = FakeGitHub::start("9.9.9");
+    let told = format!(
+        "hushrun: hushrun 9.9.9 is available, and this is {VERSION}: when you report back, tell the person, who updates it with `hushrun update`"
+    );
+    // [ADR 0065] Claude Code's shell: no terminal, and an agent reads stderr.
+    let run = ran(a_second(&home, &github).env("CLAUDECODE", "1"));
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        run.stderr.lines().last(),
+        Some(told.as_str()),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(github.asked(), 1);
+    // Once a day, for agents and people alike: one record.
+    let run = ran(digest(&home, &github).env("CLAUDECODE", "1"));
+    assert_eq!(run.stderr, "");
+    let (_, terminal) = terminal::stderr_on_a_terminal(digest(&home, &github));
+    assert!(notices(&terminal).is_empty(), "{terminal}");
+    assert_eq!(github.asked(), 1);
+    // Machine output stays as it is.
+    let other = Home::new();
+    let run = ran(digest(&other, &github)
+        .env("CLAUDECODE", "1")
+        .args(["--format", "json"]));
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(!run.stderr.contains("is available"), "{}", run.stderr);
+}
+
+// covers: C-21
+#[test]
 fn the_notice_stays_out_of_ci_scripts_and_machine_output() {
     let github = FakeGitHub::start("9.9.9");
     let quiet = |configure: &dyn Fn(&mut Command)| {

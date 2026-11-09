@@ -10,6 +10,10 @@
 //! It stays quiet in CI, without a terminal on stderr, with `--format` other than text, with
 //! `-q`, and with `HUSHRUN_NO_UPDATE_CHECK` set. Without a cache directory to remember its
 //! questions in (`HUSHRUN_CACHE_DIR` set to nothing), it doesn't ask at all.
+//!
+//! \[ADR 0065\] A coding agent's shell has no terminal, and the agent reads stderr: when the
+//! environment says an agent runs hushrun, the notice needs none, and says it in words for the
+//! agent, who tells the person. `hushrun guide` reads what the notice learned.
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -43,6 +47,8 @@ pub struct Notice(Option<Pending>);
 struct Pending {
     path: PathBuf,
     current: Version,
+    /// \[ADR 0065\] Whether a coding agent runs this command, and reads the notice.
+    agent: bool,
     /// The answer, when this command asked: the newest release, or nothing.
     answer: Option<mpsc::Receiver<Option<Version>>>,
 }
@@ -73,18 +79,76 @@ impl Notice {
         let Some(dir) = crate::context::cache_dir() else {
             return Notice(None);
         };
-        Notice(start_in(dir.join(FILE), releases::current(), now(), check))
+        let agent = agent(&env);
+        Notice(
+            start_in(dir.join(FILE), releases::current(), now(), check)
+                .map(|pending| Pending { agent, ..pending }),
+        )
     }
 
     /// Once the answer came, or a moment passed, prints the notice when a newer release is out
     /// and a day passed since hushrun last said so.
     pub fn finish(self) {
-        if let Some(pending) = self.0
-            && let Some(latest) = finish_at(pending, now(), GRACE)
-        {
-            eprintln!("{}", line(&latest, crate::cmd::update::came_with_npm()));
+        if let Some(pending) = self.0 {
+            let (agent, current) = (pending.agent, pending.current.clone());
+            if let Some(latest) = finish_at(pending, now(), GRACE) {
+                let npm = crate::cmd::update::came_with_npm();
+                match agent {
+                    true => eprintln!("{}", agent_line(&latest, &current, npm)),
+                    false => eprintln!("{}", line(&latest, npm)),
+                }
+            }
         }
     }
+}
+
+/// \[ADR 0065\] The newest release the notice learned of, when it is newer than this hushrun:
+/// what `hushrun guide` reports, from the record alone. It asks nobody, and says nothing with
+/// `HUSHRUN_NO_UPDATE_CHECK` set.
+pub fn known_newer() -> Option<Version> {
+    let env = hushrun_ci::Env::from_process();
+    if turned_off(env.get(OFF_VARIABLE)) {
+        return None;
+    }
+    let path = crate::context::cache_dir()?.join(FILE);
+    newer_in(&load(&path), &releases::current())
+}
+
+/// The release `state` names, when it is newer than `current`.
+fn newer_in(state: &State, current: &Version) -> Option<Version> {
+    state
+        .latest
+        .as_deref()
+        .and_then(|text| Version::parse(text).ok())
+        .filter(|latest| latest.cmp_precedence(current).is_gt())
+}
+
+/// How this hushrun is updated: what `hushrun update` does, or the package manager.
+pub fn update_command(npm: bool) -> &'static str {
+    match npm {
+        true => "npm install hushrun@latest",
+        false => "hushrun update",
+    }
+}
+
+/// \[ADR 0065\] The notice for a coding agent: it isn't the one to update hushrun, since the
+/// package is the repository's and the binary the person's, and an update in the middle of a
+/// task changes the tool under it. It tells the person, and says how.
+pub fn agent_line(latest: &Version, current: &Version, npm: bool) -> String {
+    let how = match npm {
+        true => {
+            "updates the hushrun package with the package manager that installed it, such as npm install hushrun@latest"
+        }
+        false => "updates it with `hushrun update`",
+    };
+    format!(
+        "hushrun: hushrun {latest} is available, and this is {current}: when you report back, tell the person, who {how}"
+    )
+}
+
+/// Whether the environment says a coding agent runs this (C-23).
+fn agent(env: &hushrun_ci::Env) -> bool {
+    crate::coding_agent::agent(&|name| env.get(name).map(str::to_string)).is_some()
 }
 
 /// The notice, for a hushrun that came with a JavaScript package manager or not. \[ADR 0061\]
@@ -98,19 +162,22 @@ fn line(latest: &Version, npm: bool) -> String {
     }
 }
 
-/// Whether this command may show the notice: at a terminal, outside CI, for people (`--format
-/// text` without `-q`), unless `HUSHRUN_NO_UPDATE_CHECK` turns it off. `hushrun update` says
-/// what it finds itself. \[ADR 0061\] CI is what [`hushrun_ci::in_ci`] says, as everywhere else in
-/// hushrun; and a sandbox that says `CI`, an agent's or one with `HUSHRUN_PROVIDER=local`, which
-/// detection calls local, has no person to tell either.
+/// Whether this command may show the notice: at a terminal or to a coding agent, outside CI, as
+/// text (`--format text` without `-q`), unless `HUSHRUN_NO_UPDATE_CHECK` turns it off. `hushrun
+/// update` says what it finds itself. \[ADR 0061\] CI is what [`hushrun_ci::in_ci`] says, as
+/// everywhere else in hushrun; and a sandbox that says `CI` with no agent in it, such as one with
+/// `HUSHRUN_PROVIDER=local`, which detection calls local, has no person to tell either.
+/// \[ADR 0065\] An agent, as the hook tells one (C-23), reads the notice without a terminal, and
+/// in a sandbox that says `CI`.
 fn wanted(cli: &Cli, env: &hushrun_ci::Env, terminal: bool) -> bool {
-    terminal
+    let agent = agent(env);
+    (terminal || agent)
         && !matches!(cli.command, Command::Update)
         && cli.global.quiet == 0
         && cli.global.format == Format::Text
         && !turned_off(env.get(OFF_VARIABLE))
         && !hushrun_ci::in_ci(env)
-        && !env.says_yes("CI")
+        && (agent || !env.says_yes("CI"))
 }
 
 /// `HUSHRUN_NO_UPDATE_CHECK`'s value turns the check off unless it is unset, empty, `false`,
@@ -185,6 +252,7 @@ fn start_in(
     Some(Pending {
         path,
         current,
+        agent: false,
         answer,
     })
 }
@@ -219,11 +287,7 @@ fn finish_at(pending: Pending, now: i64, grace: Duration) -> Option<Version> {
         state.answered = now;
         changed = true;
     }
-    let newer = state
-        .latest
-        .as_deref()
-        .and_then(|text| Version::parse(text).ok())
-        .filter(|latest| latest.cmp_precedence(&pending.current).is_gt());
+    let newer = newer_in(&state, &pending.current);
     let said = match newer {
         Some(latest) if passed(DAY, state.noticed, now) => {
             state.noticed = now;
@@ -304,9 +368,8 @@ mod tests {
             &[("TF_BUILD", "True")],
             &[("TEAMCITY_VERSION", "2025.07")],
             &[("CODEBUILD_BUILD_ID", "shop:1")],
-            // A sandbox: detection calls it local, and still no one reads the notice.
+            // A sandbox with no agent in it: detection calls it local, and no one reads it.
             &[("CI", "true"), ("HUSHRUN_PROVIDER", "local")],
-            &[("CI", "1"), ("HUSHRUN_AGENT", "x")],
         ] {
             assert!(!with(vars), "{vars:?}");
         }
@@ -319,6 +382,62 @@ mod tests {
         for on in ["0", "false", "No", "off", "", " "] {
             assert!(with(&[(OFF_VARIABLE, on)]), "{on:?}");
         }
+    }
+
+    // covers: C-21
+    #[test]
+    fn agents_see_it_without_a_terminal() {
+        let with = |args: &[&str], vars: &[(&str, &str)]| {
+            wanted(
+                &cli(args),
+                &hushrun_ci::Env::from_pairs(vars.iter().copied()),
+                false,
+            )
+        };
+        // [ADR 0065] An agent's shell has no terminal, and it reads stderr.
+        for vars in [
+            &[("CLAUDECODE", "1")][..],
+            &[("CODEX_SANDBOX", "seatbelt")],
+            &[("AI_AGENT", "amp")],
+            &[("HUSHRUN_INVOKED_BY", "agent:worker-1")],
+            // A sandbox that says CI, with an agent in it, isn't CI (C-17).
+            &[("CI", "1"), ("HUSHRUN_AGENT", "x")],
+            &[
+                ("CI", "true"),
+                ("HUSHRUN_PROVIDER", "local"),
+                ("CLAUDECODE", "1"),
+            ],
+        ] {
+            assert!(with(&["digest"], vars), "{vars:?}");
+        }
+        // Everything else keeps it quiet, as it does for people.
+        let agent = [("CLAUDECODE", "1")];
+        assert!(!with(&["update"], &agent));
+        assert!(!with(&["-q", "digest"], &agent));
+        assert!(!with(&["--format", "json", "digest"], &agent));
+        assert!(!with(
+            &["digest"],
+            &[("CLAUDECODE", "1"), ("GITHUB_ACTIONS", "true")]
+        ));
+        assert!(!with(
+            &["digest"],
+            &[("CLAUDECODE", "1"), (OFF_VARIABLE, "1")]
+        ));
+        // A person says who they are, whatever the shell has.
+        assert!(!with(
+            &["digest"],
+            &[("CLAUDECODE", "1"), ("HUSHRUN_INVOKED_BY", "human:ana")]
+        ));
+        // Agents get their own words: what to do, and who updates it.
+        let latest = version("9.9.9");
+        assert_eq!(
+            agent_line(&latest, &version("0.11.0"), false),
+            "hushrun: hushrun 9.9.9 is available, and this is 0.11.0: when you report back, tell the person, who updates it with `hushrun update`"
+        );
+        assert_eq!(
+            agent_line(&latest, &version("0.11.0"), true),
+            "hushrun: hushrun 9.9.9 is available, and this is 0.11.0: when you report back, tell the person, who updates the hushrun package with the package manager that installed it, such as npm install hushrun@latest"
+        );
     }
 
     // covers: C-21

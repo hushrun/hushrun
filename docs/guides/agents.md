@@ -124,7 +124,22 @@ signer.
   hooks: without package.json, the first `hushrun ready` or `hushrun run` in a clone installs it,
   a sandbox included, where hushrun is installed. A clone where nobody has run hushrun has none.
 
-[`recipes/agents/`](../../recipes/agents/) holds their text. All of it comes down to one command:
+[`recipes/agents/`](../../recipes/agents/) holds their text. The skill holds what every hushrun
+does the same way, and tells the agent to run `hushrun guide` once per session: it prints the
+rest from the hushrun installed there, such as what each of its lines means, so a copy of the
+skill is right for whichever hushrun reads it. Its last section says what is true on that
+machine: a newer release, and each copy of the skill, `current`, `older`, `newer`, `edited` or
+`absent`. Each copy says its revision in its frontmatter, `hushrun-skill`, which goes up only
+when the text changes.
+
+When a repository's copy is older than the hushrun that reads it, `hushrun ready` says so, and
+`hushrun skill update` updates it, to commit. When a newer hushrun wrote it, `ready` says to
+update hushrun, and neither init nor `skill update` takes it back. An agent that sees either, or
+the line that says a newer release is out, finishes its task and then tells the person: it doesn't
+update hushrun itself. `hushrun skill update --global` writes a person's own copy, in
+`~/.claude/skills/hushrun` and `~/.agents/skills/hushrun`.
+
+All of it comes down to one command:
 
 ```bash
 hushrun ready

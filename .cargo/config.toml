@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# [ADR 0065] Tests run against fakes and need no network: a coding agent's environment, which a
+# test can inherit, would otherwise let the newer-release notice ask GitHub. The notice's own
+# tests clear the environment, and set what they need.
+[env]
+HUSHRUN_NO_UPDATE_CHECK = "1"
