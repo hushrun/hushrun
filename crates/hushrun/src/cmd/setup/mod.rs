@@ -1071,6 +1071,8 @@ struct AgentTools {
     prepare: Option<(String, String)>,
     /// \[ADR 0043\] The directory hushrun goes in, for the hook to find it.
     binary: Option<PathBuf>,
+    /// \[ADR 0067\] `--local`: the hook goes by what passed on this machine, and the plan says so.
+    local: bool,
 }
 
 impl AgentTools {
@@ -1089,6 +1091,7 @@ impl AgentTools {
             hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
             prepare,
             binary: look.binary_directory(),
+            local: false,
         }
     }
 
@@ -1110,7 +1113,13 @@ impl AgentTools {
         }
         if let Some(path) = &self.hook {
             println!("  {path}");
-            println!("    {HOOK_PLAN}");
+            println!(
+                "    {}",
+                match self.local {
+                    true => LOCAL_HOOK_PLAN,
+                    false => HOOK_PLAN,
+                }
+            );
         }
         if let Some(dir) = &self.binary {
             println!("  {}", dir.join("hushrun").display());
@@ -1155,6 +1164,8 @@ impl AgentTools {
 
 /// What the plan says of the hook.
 const HOOK_PLAN: &str = "the pre-push hook: says what CI would run again, and refuses a coding agent's push until that is done";
+/// \[ADR 0067\] What `--local`'s plan says of the hook: CI's results aren't read there.
+const LOCAL_HOOK_PLAN: &str = "the pre-push hook: says which checks haven't passed here, and refuses a coding agent's push until they have";
 /// What the plan says of hushrun.
 const BINARY_PLAN: &str = "hushrun's newest release, on your PATH, so that the hook runs on this machine: hushrun update keeps it up to date";
 
@@ -1359,6 +1370,7 @@ impl Plan {
                 hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
                 prepare: None,
                 binary: look.binary_directory(),
+                local: matches!(backing, Backing::ThisMachine),
             },
             every_time: Vec::new(),
         };

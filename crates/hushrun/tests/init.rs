@@ -961,12 +961,21 @@ fn init_local_dry_run_shows_the_local_plan() {
         LOCAL_PLAN,
         r#"    "lint": "eslint ." → "hushrun run -- eslint .""#,
         "  AGENTS.md\n",
+        // The hook reads this machine's results there, not CI's.
+        "  .git/hooks/pre-push\n    the pre-push hook: says which checks haven't passed here, and refuses a coding agent's push until they have\n",
         "Nothing changed (--dry-run).",
     ] {
         assert!(out.stdout.contains(line), "{line:?} in\n{}", out.stdout);
     }
     let plan = out.stdout.split(LOCAL_PLAN).nth(1).expect("the plan");
-    for absent in ["backend", "your org", "id-token", "ID token", "sign"] {
+    for absent in [
+        "backend",
+        "your org",
+        "id-token",
+        "ID token",
+        "sign",
+        "what CI would run again",
+    ] {
         assert!(!plan.contains(absent), "{absent:?} in\n{}", out.stdout);
     }
     assert_eq!(r.read("package.json"), PACKAGE);
