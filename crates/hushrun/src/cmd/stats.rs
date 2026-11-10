@@ -2,8 +2,8 @@
 //! for sharing volume without telemetry. It counts the keys of one listing of the repository's
 //! events, whose names carry all it counts (L-2), and reads no event; with `--local`, this
 //! machine's `hushrun run` results (C-11), and sends nothing at all; \[ADR 0067\] so does plain
-//! `repository stats` where results stay on this machine and no repository URL names events. Nothing goes anywhere but
-//! the screen, for a team to paste if it chooses.
+//! `repository stats` where results stay on this machine and no repository URL names events.
+//! Nothing goes anywhere but the screen, for a team to paste if it chooses.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

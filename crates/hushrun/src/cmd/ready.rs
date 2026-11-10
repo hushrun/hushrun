@@ -628,13 +628,21 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
     if wrapped.is_empty() {
         return false;
     }
+    // \[ADR 0040\] A pass here does nothing for a check CI runs outside hushrun.
+    let outside = setup::outside_hushrun(package.as_deref(), &pipelines, branch, hushrun());
     let backend = match Backend::select(Some(root)) {
         Ok(Selection::On(backend)) => backend,
         Ok(Selection::Off(off)) => {
             report.results = Some(Results::Off);
+            report.runs_outside = !outside.is_empty();
+            report.notes.extend(outside);
             return leave_all(report, &wrapped, off.reason());
         }
-        Err(err) => return leave_all(report, &wrapped, &format!("{err:#}")),
+        Err(err) => {
+            report.runs_outside = !outside.is_empty();
+            report.notes.extend(outside);
+            return leave_all(report, &wrapped, &format!("{err:#}"));
+        }
     };
     // \[ADR 0067\] Results on this machine: what passed here is what `run` skips here, and CI,
     // which sees none of it, runs every check. Of what makes a check run every time, only what is
@@ -645,10 +653,9 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
         Some(_) => Results::Local,
         None => Results::Shared,
     });
-    // \[ADR 0040\] A pass here does nothing for a check CI runs outside hushrun: here, it does
-    // nothing for any, as the note below says.
+    // Here, a pass skips nothing in CI, as the note below says, so CI's runs outside hushrun
+    // need no note of their own.
     if here.is_none() {
-        let outside = setup::outside_hushrun(package.as_deref(), &pipelines, branch, hushrun());
         report.runs_outside = !outside.is_empty();
         report.notes.extend(outside);
     }
