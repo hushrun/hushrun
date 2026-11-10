@@ -29,6 +29,12 @@
 //! repository can't (ADR 0027). \[ADR 0046\] `HUSHRUN_AGENT` names the backend and its token
 //! together, and that token goes to that backend's origin and nowhere else.
 //!
+//! \[ADR 0067\] [`Backend::select`] alone decides whether results are shared, stay on this machine
+//! or are off: outside CI, a backend the repository's files name that nothing here has a
+//! credential for at all is this machine's directory, until someone signs in; and in CI, where a
+//! runner's directory is shared with no one and a cache of it could be forged, the directory is
+//! off.
+//!
 //! \[ADR 0052\] In GitHub Actions with none of these, as in a pull request from a fork, which
 //! GitHub gives no ID token, a lookup asks as the repository's CI, `?as=ci&repository=` of
 //! `GITHUB_REPOSITORY`, with no credential: a server answers it for a public repository in its
@@ -461,8 +467,8 @@ pub struct Backend {
 }
 
 enum Store {
-    /// A directory only this machine reads, and where it is.
-    File(FileLedger, PathBuf),
+    /// A directory only this machine reads, where it is, and \[ADR 0067\] why results stay there.
+    File(FileLedger, PathBuf, Local),
     Server(Box<Server>),
 }
 
@@ -569,8 +575,8 @@ pub enum Usage {
 /// Where results go, as `hushrun whoami` tells it.
 #[derive(Debug, Clone)]
 pub enum Place {
-    /// A directory only this machine reads.
-    Directory(PathBuf),
+    /// A directory only this machine reads, and \[ADR 0067\] why results stay there.
+    Directory { dir: PathBuf, local: Local },
     /// A server.
     Server {
         base: String,
@@ -610,33 +616,119 @@ impl NamedBy {
     }
 }
 
+/// \[ADR 0067\] Why results stay on this machine (C-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Local {
+    /// Nothing names a server: no variable, no file of the repository, no login.
+    Unnamed,
+    /// The repository's files name `base`, `named_by` package.json or hushrun.yaml, and nothing
+    /// here signs in to it: no login for it, no token that goes there, no ID token, outside CI.
+    SignedOut { base: String, named_by: NamedBy },
+}
+
+impl Local {
+    /// The org the repository names, `acme` in `https://host/o/acme`, else its URL; `None` when it
+    /// names none.
+    pub fn org(&self) -> Option<String> {
+        match self {
+            Local::Unnamed => None,
+            Local::SignedOut { base, .. } => {
+                Some(hosted::org_of(base).unwrap_or_else(|| base.clone()))
+            }
+        }
+    }
+}
+
+/// Why results are off (C-11): nothing is looked up, and nothing is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Off {
+    /// `HUSHRUN_BACKEND` is set, and empty.
+    EmptyBackend,
+    /// There is no cache directory for this machine's results.
+    NoCache,
+    /// \[ADR 0067\] In CI, and nothing names a server: a runner's own directory is shared with no
+    /// one, and whoever can write a cache CI restores could forge what it holds.
+    InCi,
+}
+
+impl Off {
+    /// Why, as a line ends with it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Off::EmptyBackend => "HUSHRUN_BACKEND is empty",
+            Off::NoCache => "there is no cache directory (HUSHRUN_CACHE_DIR is empty)",
+            Off::InCi => {
+                "in CI, nothing names a backend, and a runner's own directory isn't shared: run hushrun init to share results with CI, or set HUSHRUN_BACKEND"
+            }
+        }
+    }
+}
+
+/// \[ADR 0067\] Where results go, as [`Backend::select`] decides it, the one place that does
+/// (C-11): a server's, shared; this machine's directory, local; or nowhere, off. Every command
+/// that says where results go reads it from here.
+pub enum Selection {
+    /// A server, or this machine's directory: [`Backend::place`] says which.
+    On(Backend),
+    /// Results are off.
+    Off(Off),
+}
+
+/// Where this machine keeps its results, `<cache dir>/results` (C-11), whether or not a backend
+/// sends them elsewhere; `None` without a cache directory.
+pub fn local_directory() -> Option<PathBuf> {
+    crate::context::cache_dir().map(|cache| cache.join("results"))
+}
+
 impl Backend {
     /// Where results go (C-11): \[ADR 0046\] the backend in `HUSHRUN_AGENT`; `HUSHRUN_BACKEND`;
     /// else the backend the `package.json` or the `hushrun.yaml` at the repository's `root` names;
-    /// else the one `hushrun login` signed in to; else `<cache dir>/results`. `None` when
-    /// `HUSHRUN_BACKEND` is empty, or there is no cache directory: results are off.
-    pub fn select(root: Option<&Path>) -> anyhow::Result<Option<Backend>> {
+    /// else the one `hushrun login` signed in to; else `<cache dir>/results`. Off when
+    /// `HUSHRUN_BACKEND` is empty, or there is no cache directory. \[ADR 0067\] The repository's
+    /// backend with no credential at all for it, outside CI, is this machine's directory too, and
+    /// in CI the directory is off.
+    pub fn select(root: Option<&Path>) -> anyhow::Result<Selection> {
+        let env = Env::from_process();
+        let in_ci = hushrun_ci::in_ci(&env);
         match hushrun_ci::var("HUSHRUN_BACKEND") {
-            Ok(text) if text.trim().is_empty() => return Ok(None),
+            Ok(text) if text.trim().is_empty() => return Ok(Selection::Off(Off::EmptyBackend)),
             Ok(text) => {
-                let named_by = match Env::from_process().agent() {
+                let named_by = match env.agent() {
                     Some(_) => NamedBy::Agent,
                     None => NamedBy::Environment,
                 };
-                return Backend::server(text.trim(), named_by).map(Some);
+                return Backend::server(text.trim(), named_by).map(Selection::On);
             }
             Err(std::env::VarError::NotPresent) => {}
             Err(err) => return Err(anyhow!("HUSHRUN_BACKEND: {err}")),
         }
         if let Some((url, named_by)) = root.and_then(hosted::named_backend) {
-            return Backend::server(&url, named_by).map(Some);
+            let server = Backend::server(&url, named_by)?;
+            // Nothing here could share a result with that server, and asking it would only be
+            // refused: this machine keeps them, until someone signs in. Never in CI, never for
+            // an agent, and never beside a token, however it fares.
+            let signed_out = !in_ci
+                && !env.agent_set()
+                && matches!(&server.store, Store::Server(s) if s.signed_out());
+            if let (true, Some(dir)) = (signed_out, local_directory()) {
+                let base = match &server.store {
+                    Store::Server(s) => s.base.clone(),
+                    Store::File(..) => url,
+                };
+                return Backend::directory(dir, Local::SignedOut { base, named_by })
+                    .map(Selection::On);
+            }
+            return Ok(Selection::On(server));
         }
         if let Some(url) = Credentials::load()?.backend {
-            return Backend::server(&url, NamedBy::Login).map(Some);
+            return Backend::server(&url, NamedBy::Login).map(Selection::On);
         }
-        match crate::context::cache_dir() {
-            Some(cache) => Backend::directory(cache.join("results")).map(Some),
-            None => Ok(None),
+        if in_ci {
+            return Ok(Selection::Off(Off::InCi));
+        }
+        match local_directory() {
+            Some(dir) => Backend::directory(dir, Local::Unnamed).map(Selection::On),
+            None => Ok(Selection::Off(Off::NoCache)),
         }
     }
 
@@ -654,12 +746,20 @@ impl Backend {
         }
     }
 
-    fn directory(dir: PathBuf) -> anyhow::Result<Backend> {
+    fn directory(dir: PathBuf, local: Local) -> anyhow::Result<Backend> {
         // A missing directory is an empty backend: the most it costs is a run.
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         Ok(Backend {
-            store: Store::File(FileLedger::new(dir.clone()), dir),
+            store: Store::File(FileLedger::new(dir.clone()), dir, local),
         })
+    }
+
+    /// \[ADR 0067\] Why results stay on this machine, when they do.
+    pub fn local(&self) -> Option<&Local> {
+        match &self.store {
+            Store::File(_, _, local) => Some(local),
+            Store::Server(_) => None,
+        }
     }
 
     fn server(text: &str, named_by: NamedBy) -> anyhow::Result<Backend> {
@@ -763,7 +863,10 @@ impl Backend {
     /// Where results go, and with which credential.
     pub fn place(&self) -> Place {
         match &self.store {
-            Store::File(_, dir) => Place::Directory(dir.clone()),
+            Store::File(_, dir, local) => Place::Directory {
+                dir: dir.clone(),
+                local: local.clone(),
+            },
             Store::Server(server) => Place::Server {
                 base: server.base.clone(),
                 named_by: server.named_by,
@@ -816,8 +919,12 @@ impl Backend {
     /// backend is the repository's or the login's, not one the environment named (C-11), and
     /// \[ADR 0046\] no `HUSHRUN_AGENT` refuses the sign-in.
     pub fn sign_in_helps(&self) -> bool {
-        matches!(&self.store, Store::Server(server) if server.named_by != NamedBy::Environment)
-            && !Env::from_process().agent_set()
+        let named_here = match &self.store {
+            Store::Server(server) => server.named_by != NamedBy::Environment,
+            // \[ADR 0067\] The repository names a backend that nobody here signed in to.
+            Store::File(_, _, local) => matches!(local, Local::SignedOut { .. }),
+        };
+        named_here && !Env::from_process().agent_set()
     }
 
     /// `GET {base}/v0`: the org, who the credential is to it, and, for an agent token, the
@@ -920,7 +1027,7 @@ impl Backend {
         counts: &dyn Fn(&RunResult) -> bool,
     ) -> anyhow::Result<Latest> {
         let ledger = match &self.store {
-            Store::File(ledger, _) => ledger,
+            Store::File(ledger, ..) => ledger,
             Store::Server(server) => {
                 let path = format!("v0/results/{}", key.hex());
                 // \[ADR 0052\] With no credential, as the repository's CI, unless it asks so already.
@@ -1011,7 +1118,7 @@ impl Backend {
     /// Records `result` under `key`.
     pub fn record(&self, key: &Digest, result: &RunResult) -> anyhow::Result<()> {
         match &self.store {
-            Store::File(ledger, _) => {
+            Store::File(ledger, ..) => {
                 let name = hushrun_ledger::new_ulid(result.finished_at().millis());
                 let prefix = if result.result == Verdict::Skip {
                     SKIP_PREFIX
@@ -1062,6 +1169,15 @@ impl Backend {
 }
 
 impl Server {
+    /// \[ADR 0067\] Whether nothing here could be sent with its requests: no token goes there,
+    /// none is withheld from it, no login and no ID token, and it asks as no repository's CI.
+    fn signed_out(&self) -> bool {
+        self.credential == Credential::Nothing
+            && self.token.is_none()
+            && !self.withheld
+            && self.reads_as.is_none()
+    }
+
     /// Who signs this server's results: a person's token, an agent token, or nobody.
     fn signer(&self) -> Signer {
         let Some(token) = self.token.as_deref() else {
@@ -1236,15 +1352,6 @@ fn query_value(text: &str) -> String {
             byte => format!("%{byte:02X}"),
         })
         .collect()
-}
-
-/// Why [`Backend::select`] chose no backend, so that results are off.
-pub fn off_reason() -> &'static str {
-    if std::env::var_os("HUSHRUN_BACKEND").is_some() {
-        "HUSHRUN_BACKEND is empty"
-    } else {
-        "there is no cache directory (HUSHRUN_CACHE_DIR is empty)"
-    }
 }
 
 /// Whether `token` is an agent token (`hra_…`).

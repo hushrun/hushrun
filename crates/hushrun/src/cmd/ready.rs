@@ -37,7 +37,9 @@ use crate::exit::{CmdResult, Exit, Failure};
 use crate::isolated::{Isolation, Runtime};
 use crate::measure;
 use crate::output::{self, Format};
-use crate::results::{self, Backend, ExternalInput, Latest, Mark, Place, RunResult, Verdict};
+use crate::results::{
+    self, Backend, ExternalInput, Latest, Mark, Place, RunResult, Selection, Verdict,
+};
 
 /// What a check needs before a push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -591,11 +593,11 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
     report.runs_outside = !outside.is_empty();
     report.notes.extend(outside);
     let backend = match Backend::select(Some(root)) {
-        Ok(Some(backend)) => backend,
-        Ok(None) => return leave_all(report, &wrapped, results::off_reason()),
+        Ok(Selection::On(backend)) => backend,
+        Ok(Selection::Off(off)) => return leave_all(report, &wrapped, off.reason()),
         Err(err) => return leave_all(report, &wrapped, &format!("{err:#}")),
     };
-    if matches!(backend.place(), Place::Directory(_)) {
+    if matches!(backend.place(), Place::Directory { .. }) {
         return leave_all(
             report,
             &wrapped,

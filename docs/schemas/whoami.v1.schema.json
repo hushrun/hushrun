@@ -9,7 +9,8 @@
   "properties": {
     "schema": {"const": "hushrun.whoami/v1"},
     "backend": {"description": "The server's org URL, or null when results stay on this machine or are off.", "type": ["string", "null"]},
-    "named_by": {"description": "What named the server (C-11).", "enum": ["HUSHRUN_AGENT", "HUSHRUN_BACKEND", "package.json", "hushrun.yaml", "login", null]},
+    "signed_out": {"description": "[ADR 0067] The backend the repository's package.json or hushrun.yaml names, which nothing here is signed in to: results stay in `directory` until someone signs in. Null otherwise, and left out by a hushrun from before it.", "type": ["string", "null"]},
+    "named_by": {"description": "What named the server (C-11); with `signed_out`, the file that names it.", "enum": ["HUSHRUN_AGENT", "HUSHRUN_BACKEND", "package.json", "hushrun.yaml", "login", null]},
     "directory": {"description": "Where results stay when no server is named: hushrun's cache directory.", "type": ["string", "null"]},
     "off": {"description": "Why results are off, when they are.", "type": ["string", "null"]},
     "credential": {"description": "What goes with the server's requests (C-13).", "enum": ["agent_token", "token", "login", "github_oidc", "none"]},

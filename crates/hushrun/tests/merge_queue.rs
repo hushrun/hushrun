@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::{git, schema};
 use serde_json::Value;
 
@@ -51,12 +52,13 @@ const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 /// One workflow with the three events, whose job `test` runs the check.
 const CI: &str = "on:\n  pull_request:\n  merge_group:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: hushrun run unit -- sh check.sh\n";
 
-/// A repository with a remote, and a cache and credentials of its own: results are kept in the
-/// cache, as a run with no backend keeps them.
+/// A repository with a remote, a cache and credentials of its own, and \[ADR 0067\] a results
+/// server its CI shares: CI keeps no results in a runner's directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -86,6 +88,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         }
     }
 
@@ -112,7 +115,9 @@ impl Repo {
             )
             .env("GITHUB_JOB", "test")
             .env("GITHUB_EVENT_NAME", event)
-            .env("GITHUB_REF", reference);
+            .env("GITHUB_REF", reference)
+            .env("HUSHRUN_BACKEND", self.fake.url())
+            .env("HUSHRUN_TOKEN", FakeResults::TOKEN);
         cmd
     }
 

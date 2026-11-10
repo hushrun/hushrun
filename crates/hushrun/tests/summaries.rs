@@ -88,11 +88,13 @@ fn writes_basic() -> String {
     )
 }
 
-/// A repository with a remote, a cache and credentials of its own, and `check.sh`.
+/// A repository with a remote, a cache and credentials of its own, `check.sh`, and \[ADR 0067\]
+/// a results server its runs share, in CI and out: CI keeps no results in a runner's directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -116,6 +118,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         };
         r.write(".gitignore", IGNORED);
         r.write("check.sh", check);
@@ -145,7 +148,7 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
-        cmd
+        shared(cmd, &self.fake)
     }
 
     /// `hushrun` in the GitHub Actions job `test` of `repository`'s `ci.yml`, run 41, with its
@@ -173,25 +176,12 @@ impl Repo {
         (read("output"), read("summary"))
     }
 
-    /// The results recorded here, oldest first.
+    /// The results recorded here, skips included, oldest first.
     fn results(&self) -> Vec<Value> {
-        let mut found: Vec<(String, Value)> = Vec::new();
-        for kind in ["results", "skips"] {
-            let Ok(keys) = std::fs::read_dir(self.root.join(format!("cache/results/{kind}/v0")))
-            else {
-                continue;
-            };
-            for key in keys.flatten() {
-                for result in std::fs::read_dir(key.path()).expect("key").flatten() {
-                    let name = result.file_name().to_string_lossy().to_string();
-                    let bytes = std::fs::read(result.path()).expect("result");
-                    found.push((name, serde_json::from_slice(&bytes).expect("json")));
-                }
-            }
-        }
-        // ULIDs sort by time.
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-        found.into_iter().map(|(_, result)| result).collect()
+        let mut found = self.fake.recorded();
+        // RFC 3339 times of one form sort by time; a stable sort keeps the order of a tie.
+        found.sort_by(|a, b| a["startedAt"].as_str().cmp(&b["startedAt"].as_str()));
+        found
     }
 }
 

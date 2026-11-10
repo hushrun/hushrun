@@ -70,11 +70,13 @@ fn one_job(step: &str) -> String {
 
 const NPM_TEST: &str = "      - run: npm test\n";
 
-/// A repository with a remote, and a cache and credentials of its own.
+/// A repository with a remote, a cache and credentials of its own, and \[ADR 0067\] a results
+/// server that its runs share, in CI and out: CI keeps no results in a runner's directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -104,6 +106,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         };
         r.write("check.sh", CHECK);
         for (path, text) in files {
@@ -142,7 +145,7 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
-        cmd
+        shared(cmd, &self.fake)
     }
 
     /// `hushrun` in a GitHub Actions job of `workflow`.
@@ -169,21 +172,13 @@ impl Repo {
         cmd
     }
 
-    /// The results recorded here, oldest first.
-    fn results(&self) -> Vec<(PathBuf, Value)> {
-        let mut found = Vec::new();
-        let Ok(keys) = std::fs::read_dir(self.root.join("cache/results/results/v0")) else {
-            return found;
-        };
-        for key in keys.flatten() {
-            for result in std::fs::read_dir(key.path()).expect("key").flatten() {
-                let bytes = std::fs::read(result.path()).expect("result");
-                let value = serde_json::from_slice(&bytes).expect("json");
-                found.push((result.path(), value));
-            }
-        }
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-        found
+    /// The passes and fails recorded, oldest first for each key.
+    fn results(&self) -> Vec<Value> {
+        self.fake
+            .recorded()
+            .into_iter()
+            .filter(|result| result["result"] != "skip")
+            .collect()
     }
 }
 
@@ -280,7 +275,7 @@ fn a_result_names_its_job() {
     let jobs: Vec<Option<String>> = r
         .results()
         .iter()
-        .map(|(_, result)| {
+        .map(|result| {
             schema::assert_valid(&schema, result);
             result["job"].as_str().map(str::to_string)
         })
@@ -318,9 +313,8 @@ fn a_pass_from_one_job_id_on_another_system_doesnt_skip() {
         (".github/workflows/nightly.yml", &one_job(NPM_TEST)),
     ]);
     passed(&npm_test(r.on_github("nightly.yml", "test"), "0"));
-    let (path, mut pass) = r.results().remove(0);
-    pass["job"] = "test@plan9/mips".into();
-    std::fs::write(path, serde_json::to_vec(&pass).expect("json")).expect("write");
+    r.fake
+        .rewrite(|pass| pass["job"] = "test@plan9/mips".into());
 
     let out = npm_test(r.on_github("ci.yml", "test"), "1");
     failed(&out);
@@ -410,9 +404,9 @@ fn a_ci_pass_with_no_job_runs_once_more() {
         (".github/workflows/ci.yml", &one_job(NPM_TEST)),
     ]);
     passed(&npm_test(r.on_github("ci.yml", "test"), "0"));
-    let (path, mut old) = r.results().remove(0);
-    old.as_object_mut().expect("object").remove("job");
-    std::fs::write(path, serde_json::to_vec(&old).expect("json")).expect("write");
+    r.fake.rewrite(|old| {
+        old.as_object_mut().expect("object").remove("job");
+    });
     passed(&npm_test(r.on_github("ci.yml", "test"), "0"));
     skipped(&npm_test(r.on_github("ci.yml", "test"), "1"));
 }
@@ -441,13 +435,13 @@ fn a_check_two_jobs_run_skips_in_both_on_a_rerun() {
         skipped(&npm_test(job("linux"), "1"));
         skipped(&npm_test(job("mac"), "1"));
     };
-    // In a directory.
+    // On the repository's server.
     let r = Repo::new(&[
         ("package.json", WRAPPED),
         (".github/workflows/ci.yml", &two_systems(NPM_TEST)),
     ]);
     both(&|name| r.on_github("ci.yml", name));
-    // On a server, which answers for the job asked.
+    // On another, which answers for the job asked.
     let fake = FakeResults::start();
     let r = Repo::new(&[
         ("package.json", WRAPPED),
@@ -1639,12 +1633,12 @@ fn each_variant_skips_on_its_own_pass() {
     let labels: Vec<Value> = r
         .results()
         .iter()
-        .map(|(_, result)| result["variant"]["label"].clone())
+        .map(|result| result["variant"]["label"].clone())
         .collect();
     assert_eq!(labels, ["20, ubuntu-latest", "25, ubuntu-latest"]);
-    for (path, result) in r.results() {
+    for result in r.results() {
         let key = result["variant"]["key"].as_str().unwrap_or_default();
-        assert!(key.starts_with("sha256:") && key.len() == 71, "{path:?}");
+        assert!(key.starts_with("sha256:") && key.len() == 71, "{result}");
         schema::assert_valid(&schema::load("run-result.v0.schema.json"), &result);
     }
 }
@@ -1778,7 +1772,7 @@ fn with_a_name_and_the_variable_the_variable_decides() {
     skipped(&run_named(in_variant(&r, NODE_20), "test-0", "1"));
     let results = r.results();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1["variant"]["label"], "20, ubuntu-latest");
+    assert_eq!(results[0]["variant"]["label"], "20, ubuntu-latest");
     // Without the variable, the name alone lets each variant skip, as before.
     let r = Repo::new(&[
         ("check.sh", CHECK),
@@ -1786,7 +1780,7 @@ fn with_a_name_and_the_variable_the_variable_decides() {
     ]);
     passed(&run_named(r.on_github("ci.yml", "test"), "test-0", "0"));
     skipped(&run_named(r.on_github("ci.yml", "test"), "test-0", "1"));
-    assert!(r.results()[0].1.get("variant").is_none());
+    assert!(r.results()[0].get("variant").is_none());
 }
 
 /// V10: a run inside another run, in a job of several variants, doesn't decide, as before.
@@ -1898,13 +1892,13 @@ fn each_call_of_a_reusable_workflow_skips_on_its_own_pass() {
     );
     let results = r.results();
     assert_eq!(results.len(), 2);
-    for (path, result) in results {
+    for result in results {
         let text = result.to_string();
         assert!(
             !text.contains("quokka") && !text.contains("wombat"),
-            "{path:?}: {text}"
+            "{text}"
         );
-        assert_eq!(result["variant"]["label"], "", "{path:?}");
+        assert_eq!(result["variant"]["label"], "", "{result}");
     }
 }
 

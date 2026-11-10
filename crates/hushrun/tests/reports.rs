@@ -60,11 +60,14 @@ const SARIF: &str = "      - uses: github/codeql-action/upload-sarif@v3\n       
 /// The test check: the reports REPORTS names, then VERDICT.
 const CHECK: &str = "for f in $REPORTS; do mkdir -p \"$(dirname \"$f\")\"; echo '<testsuite><testcase name=\"a\"/></testsuite>' > \"$f\"; done\nexit \"${VERDICT:-0}\"\n";
 
-/// A repository with a remote, a check that passes, and a cache and credentials of its own.
+/// A repository with a remote, a check that passes, a cache and credentials of its own, and
+/// \[ADR 0067\] a results server its runs share, in CI and out: CI keeps no results in a runner's
+/// directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -94,6 +97,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         };
         // It writes a test-results file at each path REPORTS names, as a check writes the reports a
         // later step reads, and exits with VERDICT, so a test can fail it on the same code.
@@ -131,7 +135,7 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
-        cmd
+        shared(cmd, &self.fake)
     }
 
     /// `hushrun` in the GitHub Actions job `job` of `ci.yml`, or of `file`.
@@ -163,19 +167,13 @@ impl Repo {
         cmd
     }
 
-    /// The results recorded here.
+    /// The passes and fails recorded.
     fn results(&self) -> Vec<Value> {
-        let mut found = Vec::new();
-        let Ok(keys) = std::fs::read_dir(self.root.join("cache/results/results/v0")) else {
-            return found;
-        };
-        for key in keys.flatten() {
-            for result in std::fs::read_dir(key.path()).expect("key").flatten() {
-                let bytes = std::fs::read(result.path()).expect("result");
-                found.push(serde_json::from_slice(&bytes).expect("json"));
-            }
-        }
-        found
+        self.fake
+            .recorded()
+            .into_iter()
+            .filter(|result| result["result"] != "skip")
+            .collect()
     }
 }
 
@@ -619,27 +617,9 @@ fn a_reader_hushrun_cant_bound_still_runs_the_check() {
     // Another hushrun recorded the pass: it may read the job's readers otherwise.
     let r = Repo::new(&[(WORKFLOW, &two_checks(ONLY_COVERAGE_XML))]);
     ran(&writes(&r, "unit", "junit.xml"));
-    for entry in walk(&r.root.join("cache/results/results/v0")) {
-        let text = std::fs::read_to_string(&entry).expect("result");
-        let mut result: Value = serde_json::from_str(&text).expect("json");
-        result["tool"] = Value::from("hushrun 0.0.1");
-        std::fs::write(&entry, result.to_string()).expect("write");
-    }
+    r.fake
+        .rewrite(|result| result["tool"] = Value::from("hushrun 0.0.1"));
     for_codecov(&writes(&r, "unit", "junit.xml"));
-}
-
-/// The files below `dir`.
-fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            files.extend(walk(&path));
-        } else {
-            files.push(path);
-        }
-    }
-    files
 }
 
 /// `cmd` with the fake results server as its backend, so that CI would see a pass from here.

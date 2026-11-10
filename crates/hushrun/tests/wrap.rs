@@ -678,16 +678,63 @@ fn the_specs_example_key_is_the_key() {
     );
 }
 
+// covers: C-11 (ADR 0067: in CI with no server, results are off, and the run says so once)
+#[test]
+fn in_ci_results_never_stay_on_the_runner() {
+    let r = Repo::new();
+    for _ in 0..2 {
+        let mut ci = r.hushrun();
+        ci.env("CI", "true");
+        let run = ran(ci, &["run", "unit", "--", "git", "--version"]);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert!(run.ran(), "{}", run.stderr);
+        let lines: Vec<&str> = run
+            .stderr
+            .lines()
+            .filter(|line| line.starts_with("hushrun: "))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "hushrun: unit running without skipping: results are off: in CI, nothing names a backend, and a runner's own directory isn't shared: run hushrun init to share results with CI, or set HUSHRUN_BACKEND"
+            ],
+            "{}",
+            run.stderr
+        );
+    }
+    assert!(!r.root.join("cache/results/results").exists());
+    // `-q` silences it, as it does every line of hushrun's.
+    let mut ci = r.hushrun();
+    ci.env("CI", "true");
+    let quiet = ran(ci, &["-q", "run", "unit", "--", "git", "--version"]);
+    assert!(quiet.ran() && quiet.stderr.is_empty(), "{}", quiet.stderr);
+    // Outside CI, the same machine keeps its results.
+    assert!(r.version().ran());
+    assert!(!r.version().ran());
+}
+
 // covers: C-9
 #[test]
 fn a_pass_in_ci_skips_on_a_laptop() {
+    // [ADR 0067] They share a server: CI keeps nothing in a runner's directory.
+    let fake = hushrun_testkit::fake_results::FakeResults::start();
+    let shared = |mut cmd: assert_cmd::Command| {
+        cmd.env("HUSHRUN_BACKEND", fake.url()).env(
+            "HUSHRUN_TOKEN",
+            hushrun_testkit::fake_results::FakeResults::TOKEN,
+        );
+        cmd
+    };
     let r = Repo::new();
-    let mut ci = r.hushrun();
+    let mut ci = shared(r.hushrun());
     ci.env("CI", "true")
         .env("HUSHRUN_RUN_URL", "https://ci.example/runs/7");
     assert!(ran(ci, &["run", "unit", "--", "git", "--version"]).ran());
 
-    let laptop = r.version();
+    let laptop = ran(
+        shared(r.hushrun()),
+        &["run", "unit", "--", "git", "--version"],
+    );
     assert!(!laptop.ran(), "{}", laptop.stderr);
     assert!(
         laptop

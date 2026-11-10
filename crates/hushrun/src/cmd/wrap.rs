@@ -36,7 +36,8 @@ use crate::exit::Exit;
 use crate::measure::{self, Judged};
 use crate::output::Outputs;
 use crate::results::{
-    self, Backend, Ended, ExternalInput, RanAnyway, Refusal, RunEnvironment, RunResult, Verdict,
+    self, Backend, Ended, ExternalInput, Off, RanAnyway, Refusal, RunEnvironment, RunResult,
+    Selection, Verdict,
 };
 
 pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
@@ -78,7 +79,18 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
         }
     };
     let backend = match Backend::select(code.as_ref().map(|code| code.root.as_path())) {
-        Ok(backend) => backend,
+        Ok(Selection::On(backend)) => Some(backend),
+        // \[ADR 0067\] Said once: a CI job that shares nothing would otherwise look as if it did.
+        Ok(Selection::Off(off @ Off::InCi)) => {
+            if Env::from_process().get(variants::INSIDE_A_RUN).is_none() {
+                say.line(format_args!(
+                    "{check} running without skipping: results are off: {}",
+                    off.reason()
+                ));
+            }
+            None
+        }
+        Ok(Selection::Off(_)) => None,
         Err(err) => {
             say.line(format_args!(
                 "{check} running without skipping: results are off ({err:#})"
@@ -145,6 +157,23 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     // A request without a token was refused for want of one, or \[ADR 0052\] a run with none only
     // read: once and last, where a person reads it. At a terminal, signing in fixes it; a script
     // or a CI job has no one to sign in, so it gets the server's reason (C-11, C-14).
+    // \[ADR 0067\] The repository's backend, which nobody here signed in to: this machine kept
+    // the result, and the person can share it.
+    if let Some(org) = backend
+        .as_ref()
+        .and_then(Backend::local)
+        .and_then(results::Local::org)
+    {
+        if backend.as_ref().is_some_and(Backend::sign_in_helps) && std::io::stderr().is_terminal() {
+            say.line(format_args!(
+                "sign in to share results with {org}: npx hushrun login"
+            ));
+        } else {
+            say.line(format_args!(
+                "results aren't shared with {org}: nobody is signed in to it here, so they stay on this machine"
+            ));
+        }
+    }
     if let Some(backend) = backend.as_ref()
         && let Some(why) = match backend.refusal() {
             Some(Refusal::NoToken(why)) => Some(why),
