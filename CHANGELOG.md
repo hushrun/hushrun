@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-10
+
 ### Fixed
 
 - The skill's marketplace bundle has Cursor's manifest, `.cursor-plugin/plugin.json`, and its
