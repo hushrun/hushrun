@@ -863,6 +863,10 @@ fn init_local_sets_up_this_machine_and_signs_in_to_nothing() {
     assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
     assert!(out.stdout.contains(LOCAL_PLAN), "{}", out.stdout);
     assert_eq!(fake.requests(), [], "nothing asked of any server");
+    assert!(
+        r.log("gh.args").is_empty() && r.log("gh-id.args").is_empty(),
+        "nor gh"
+    );
     assert!(!r.credentials().exists());
     assert!(
         !r.root.join("config/machine-key.pem").exists(),
