@@ -1005,7 +1005,8 @@ pub enum RepositoryCommand {
     ///
     /// From one listing of the repository's events on its server, and no event read: events by
     /// kind, distinct digests, and check events. With --local, this machine's `hushrun
-    /// run` results instead: by verdict, by check, distinct run keys, and the time skips saved. It
+    /// run` results instead: by verdict, by check, distinct run keys, and the time skips saved;
+    /// and so without it where results stay on this machine and no repository URL is set. It
     /// sends nothing else anywhere, and prints what you may choose to paste.
     Stats {
         /// Count what was recorded in this long, such as 7d or 12w.

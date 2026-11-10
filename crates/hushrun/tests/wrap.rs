@@ -1431,3 +1431,39 @@ fn ulid_millis(ulid: &str) -> i64 {
         (ms << 5) | digit as i64
     })
 }
+
+// covers: L-14, C-11 (ADR 0067: with results on this machine and no repository URL, stats
+// counts what is here)
+#[test]
+fn stats_without_a_repository_url_counts_this_machines_results() {
+    let r = Repo::new();
+    assert!(r.version().ran());
+    assert!(!r.version().ran());
+    let stats = ran(r.hushrun(), &["repository", "stats", "--format", "json"]);
+    assert_eq!(stats.code, 0, "{}", stats.stderr);
+    let out: Value = serde_json::from_str(&stats.stdout).expect("JSON");
+    schema::assert_valid(&schema::load("repository-stats.v2.schema.json"), &out);
+    assert_eq!(out["source"], "local");
+    assert_eq!(
+        out["byVerdict"],
+        serde_json::json!({"pass": 1, "fail": 0, "skip": 1})
+    );
+    let text = ran(r.hushrun(), &["repository", "stats"]);
+    assert!(
+        text.stdout
+            .starts_with("hushrun run's results on this machine in the last 30d"),
+        "{}",
+        text.stdout
+    );
+
+    // With a server, the repository's events are what it counts, and they need its URL.
+    let mut cmd = r.hushrun();
+    cmd.env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme");
+    let shared = ran(cmd, &["repository", "stats"]);
+    assert_eq!(shared.code, 2, "{}", shared.stderr);
+    assert!(
+        shared.stderr.contains("no repository URL"),
+        "{}",
+        shared.stderr
+    );
+}
