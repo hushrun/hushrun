@@ -37,13 +37,16 @@ use crate::exit::{CmdResult, Exit, Failure};
 use crate::isolated::{Isolation, Runtime};
 use crate::measure;
 use crate::output::{self, Format};
-use crate::results::{self, Backend, ExternalInput, Latest, Mark, Place, RunResult, Verdict};
+use crate::results::{
+    self, Backend, ExternalInput, Latest, Local, Mark, RunResult, Selection, Verdict,
+};
 
 /// What a check needs before a push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
-    /// It passed on this code: CI skips it.
+    /// It passed on this code: CI skips it; \[ADR 0067\] with results on this machine, a run here
+    /// does, and CI runs it all the same.
     Passed,
     /// It hasn't, and `run` makes it pass here.
     Missing,
@@ -68,6 +71,16 @@ pub struct Item {
     pub reports: Option<hushrun_reports::Reports>,
 }
 
+/// \[ADR 0067\] Where the results `ready` read are, as [`Backend::select`] decides for `hushrun
+/// run` (C-11): a server's, which CI reads too; this machine's, which CI doesn't; or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Results {
+    Shared,
+    Local,
+    Off,
+}
+
 /// `hushrun.ready/v2`. \[ADR 0062\] v1 named the stage the code went to.
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -81,6 +94,9 @@ pub struct Report {
     pub next: Vec<String>,
     /// What else to know before running them.
     pub notes: Vec<String>,
+    /// \[ADR 0067\] Where the results of the runs it looked up are, when it looked any up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Results>,
     /// \[ADR 0040\] Whether a note says CI runs a check outside hushrun, so that it wouldn't skip
     /// what passed here.
     #[serde(skip)]
@@ -116,6 +132,12 @@ impl Report {
             !self.checks.is_empty() && self.checks.iter().all(|i| i.state == State::Passed);
     }
 
+    /// \[ADR 0067\] Whether its runs' results stay on this machine: `passed` is a pass here, and
+    /// CI runs them all the same.
+    pub fn here(&self) -> bool {
+        self.results == Some(Results::Local)
+    }
+
     /// The revision, short, for a person: `the worktree` when there is none.
     pub fn short(&self) -> String {
         self.revision
@@ -148,6 +170,14 @@ impl Report {
                 "{code} isn't ready: {} left, and nothing here changes that.",
                 count(self.checks.len() - self.passed().count())
             );
+        } else if self.here() {
+            let missing = self.missing().count();
+            let _ = writeln!(
+                text,
+                "{code} isn't ready: {} {} passed here.",
+                count(missing),
+                have(missing)
+            );
         } else {
             let _ = writeln!(
                 text,
@@ -170,6 +200,9 @@ impl Report {
                 (Some(why), ..) => Some(why.clone()),
                 (None, Some(by), Some(summary)) => Some(format!("recorded by {by}: {summary}")),
                 (None, Some(by), None) => Some(format!("recorded by {by}")),
+                // \[ADR 0067\] A pass here, which CI doesn't see.
+                (None, None, Some(summary)) if self.here() => Some(format!("here: {summary}")),
+                (None, None, None) if self.here() => Some("here".to_string()),
                 (None, None, summary) => summary,
             };
             let line = match said {
@@ -188,6 +221,14 @@ impl Report {
             let _ = writeln!(text, "{note}");
         }
         text
+    }
+}
+
+/// `has` for one, `have` for several: `1 check hasn't`, `lint and unit haven't`.
+pub fn have(n: usize) -> &'static str {
+    match n {
+        1 => "hasn't",
+        _ => "haven't",
     }
 }
 
@@ -260,6 +301,7 @@ pub fn evaluate(global: &GlobalOpts, target: &Target<'_>) -> Result<Report, Fail
         checks: Vec::new(),
         next: Vec::new(),
         notes: Vec::new(),
+        results: None,
         runs_outside: false,
         strict: false,
     };
@@ -588,19 +630,34 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
     }
     // \[ADR 0040\] A pass here does nothing for a check CI runs outside hushrun.
     let outside = setup::outside_hushrun(package.as_deref(), &pipelines, branch, hushrun());
-    report.runs_outside = !outside.is_empty();
-    report.notes.extend(outside);
     let backend = match Backend::select(Some(root)) {
-        Ok(Some(backend)) => backend,
-        Ok(None) => return leave_all(report, &wrapped, results::off_reason()),
-        Err(err) => return leave_all(report, &wrapped, &format!("{err:#}")),
+        Ok(Selection::On(backend)) => backend,
+        Ok(Selection::Off(off)) => {
+            report.results = Some(Results::Off);
+            report.runs_outside = !outside.is_empty();
+            report.notes.extend(outside);
+            return leave_all(report, &wrapped, off.reason());
+        }
+        Err(err) => {
+            report.runs_outside = !outside.is_empty();
+            report.notes.extend(outside);
+            return leave_all(report, &wrapped, &format!("{err:#}"));
+        }
     };
-    if matches!(backend.place(), Place::Directory(_)) {
-        return leave_all(
-            report,
-            &wrapped,
-            "results stay on this machine, so CI can't see a pass here",
-        );
+    // \[ADR 0067\] Results on this machine: what passed here is what `run` skips here, and CI,
+    // which sees none of it, runs every check. Of what makes a check run every time, only what is
+    // about this machine holds: a job's variants, its readers of reports and which job a pass
+    // belongs to are CI's.
+    let here = backend.local().cloned();
+    report.results = Some(match here {
+        Some(_) => Results::Local,
+        None => Results::Shared,
+    });
+    // Here, a pass skips nothing in CI, as the note below says, so CI's runs outside hushrun
+    // need no note of their own.
+    if here.is_none() {
+        report.runs_outside = !outside.is_empty();
+        report.notes.extend(outside);
     }
     let repository = repository_of(content);
     let several = content.scopes.len() > 1;
@@ -640,7 +697,10 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
         ) else {
             continue;
         };
-        let latest = backend.latest_for_ci(&key, repository.as_deref());
+        let latest = match here {
+            Some(_) => backend.latest(&key),
+            None => backend.latest_for_ci(&key, repository.as_deref()),
+        };
         let recorded_by = latest.as_ref().ok().and_then(|l| l.recorded_by.clone());
         let ci_only = matches!(&latest, Ok(latest) if latest.ci_only);
         let failed = matches!(
@@ -649,10 +709,13 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
         );
         // \[ADR 0044\] No pass skips it in CI, unless it failed here: that is still to fix first.
         // \[ADR 0047\] Nor when a later step of its job reads its reports (C-26).
-        let every_time = run.variants.clone().or_else(|| {
-            run.reports.as_ref().map(|reader| {
-                format!("CI runs it every time: a later step reads its reports ({reader})")
-            })
+        let every_time = run.variants.clone().filter(|_| here.is_none()).or_else(|| {
+            run.reports
+                .as_ref()
+                .filter(|_| here.is_none())
+                .map(|reader| {
+                    format!("CI runs it every time: a later step reads its reports ({reader})")
+                })
         });
         if let (Some(why), false) = (&every_time, failed) {
             report.checks.push(ci(&label, why));
@@ -665,8 +728,9 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
             (Some(_), Some(Mark::DidntCount(why))) => Some(why.clone()),
             _ => None,
         };
+        let takes = |last: &RunResult| here.is_some() || ci_takes(last, &run.jobs);
         let (why, state): (String, State) = match (latest.map(|latest| latest.result), &marked) {
-            (Ok(Some(last)), _) if last.result == Verdict::Pass && ci_takes(&last, &run.jobs) => {
+            (Ok(Some(last)), _) if last.result == Verdict::Pass && takes(&last) => {
                 report.checks.push(Item {
                     recorded_by,
                     reports: last.reports,
@@ -678,10 +742,12 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
             (Ok(Some(last)), _) if last.result == Verdict::Pass => (OTHER_JOB.into(), State::Ci),
             // A pass here wouldn't change what CI runs, so this machine has nothing to do.
             _ if ci_only => (CI_REUSES_ONLY_CI.into(), State::Ci),
+            (Ok(Some(_)), _) if here.is_some() => (FAILED_HERE.into(), State::Missing),
             (Ok(Some(_)), _) => (FAILED.into(), State::Missing),
             // A run here didn't count, and doing it again wouldn't either.
             (Ok(None), Some(why)) => (format!("{DIDNT_COUNT}: {why}"), State::Ci),
             (Ok(None), None) if mark.is_some() => (NOT_RECORDED.into(), State::Ci),
+            (Ok(None), None) if here.is_some() => (NOT_HERE.into(), State::Missing),
             (Ok(None), None) => ("no pass yet for this exact code".into(), State::Missing),
             (Err(err), _) => {
                 let why = match backend.refusal() {
@@ -764,8 +830,27 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
             report.next.push(run.with.clone());
         }
     }
+    if let Some(here) = &here {
+        report.notes.push(local_note(here));
+    }
     any
 }
+
+/// \[ADR 0067\] What `ready` and the hook say when results stay on this machine: CI runs every
+/// check all the same, and what would share them with it.
+fn local_note(here: &Local) -> String {
+    let shares = match here.org() {
+        Some(org) => format!("hushrun login shares results with {org}'s CI and teammates"),
+        None => "hushrun init shares results with CI and teammates".to_string(),
+    };
+    format!("Results stay on this machine, so CI still runs these checks: {shares}.")
+}
+
+/// \[ADR 0067\] What the newest result here is when it isn't a pass.
+const FAILED_HERE: &str = "it failed here on this exact code last time";
+
+/// \[ADR 0067\] A run with no result here.
+const NOT_HERE: &str = "no pass here yet for this exact code";
 
 /// \[ADR 0044\] Whether each of `jobs`, CI's jobs that run a check, would take `last` (C-10), by
 /// their names: a job's platform is measured where it runs, so that isn't known here. `run`

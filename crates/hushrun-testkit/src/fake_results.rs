@@ -151,6 +151,23 @@ impl FakeResults {
         self.state().results.values().flatten().cloned().collect()
     }
 
+    /// Every result recorded, with its run key's hex, oldest first for each key.
+    pub fn recorded_by_key(&self) -> Vec<(String, Value)> {
+        self.state()
+            .results
+            .iter()
+            .flat_map(|(key, results)| results.iter().map(move |r| (key.clone(), r.clone())))
+            .collect()
+    }
+
+    /// Changes every result recorded with `edit`, as a test makes one look as an older client, or
+    /// another system, would have recorded it.
+    pub fn rewrite(&self, mut edit: impl FnMut(&mut Value)) {
+        for results in self.state().results.values_mut() {
+            results.iter_mut().for_each(&mut edit);
+        }
+    }
+
     /// Every request so far, oldest first.
     pub fn requests(&self) -> Vec<Seen> {
         self.state().seen.clone()

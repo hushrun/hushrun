@@ -1,8 +1,9 @@
 //! `hushrun repository stats [--since D] [--local]` (L-14, ADR 0032): how much hushrun recorded,
 //! for sharing volume without telemetry. It counts the keys of one listing of the repository's
 //! events, whose names carry all it counts (L-2), and reads no event; with `--local`, this
-//! machine's `hushrun run` results (C-11), and sends nothing at all. Nothing goes anywhere but
-//! the screen, for a team to paste if it chooses.
+//! machine's `hushrun run` results (C-11), and sends nothing at all; \[ADR 0067\] so does plain
+//! `repository stats` where results stay on this machine and no repository URL names events.
+//! Nothing goes anywhere but the screen, for a team to paste if it chooses.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -23,7 +24,7 @@ use crate::app::{App, ledger_failure};
 use crate::context::{Content, Source};
 use crate::exit::{CmdResult, Exit, Failure};
 use crate::output::{self, Format};
-use crate::results::{RESULT_SCHEMA, Verdict, plain};
+use crate::results::{Backend, RESULT_SCHEMA, Selection, Verdict, plain};
 
 const SCHEMA: &str = "hushrun.repository.stats/v2";
 /// The labels' width in the text output.
@@ -62,11 +63,24 @@ pub fn run(app: &App<'_>, since: Dur, local: bool) -> CmdResult {
         from,
         until: app.now,
     };
-    if local {
+    if local || counts_here(app) {
         on_this_machine(app, &window)
     } else {
         on_the_server(app, &window)
     }
+}
+
+/// \[ADR 0067\] Whether plain `repository stats` counts this machine's results: they stay here, as
+/// [`Backend::select`] decides for `hushrun run`, and no repository URL names a server's events to
+/// count instead.
+fn counts_here(app: &App<'_>) -> bool {
+    let root = crate::cmd::login::repository_root(app.global);
+    let here = matches!(
+        Backend::select(root.as_deref()),
+        Ok(Selection::On(backend)) if backend.local().is_some()
+    );
+    here && Content::open(app.global, Source::Repo(Snapshot::default()))
+        .is_ok_and(|content| app.ledger_url(content.policy.as_ref()).is_err())
 }
 
 /// The repository's events, counted by kind and digest.
@@ -182,7 +196,7 @@ impl Results {
 }
 
 fn on_this_machine(app: &App<'_>, window: &Window) -> CmdResult {
-    let dir = crate::context::cache_dir().map(|cache| cache.join("results"));
+    let dir = crate::results::local_directory();
     let mut results = Results::default();
     if let Some(dir) = dir.as_ref().filter(|dir| dir.is_dir()) {
         let ledger = FileLedger::new(dir.clone());

@@ -1584,41 +1584,155 @@ fn hushrun_token_goes_only_to_the_backend_hushrun_backend_names() {
     assert_eq!(fake.recorded_at("acme").len(), 1);
 }
 
-// covers: C-11, C-14
+// covers: C-19 (ADR 0067: signed out of the backend the repository names, usage says whose plan
+// counts results once someone signs in)
 #[test]
-fn a_repositorys_backend_without_a_login_runs_and_says_how_to_sign_in() {
+fn signed_out_usage_says_whose_plan_counts_results_once_signed_in() {
     let (server, fake) = Fake::start(false);
+    let backend = format!("{}/o/acme", server.url());
     let r = Repo::new();
-    r.name_backend(&format!("{}/o/acme", server.url()));
+    r.name_backend(&backend);
+    let mut cmd = r.hushrun();
+    cmd.args(["repository", "usage"]);
+    let out = cmd.output().expect("usage");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains(
+            "usage      results stay on this machine, so nothing is metered: hushrun login shares them with acme, whose plan then counts them\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        fake.requests(),
+        0,
+        "a signed-out usage asks the server nothing"
+    );
+}
 
-    // Without a terminal, such as in CI or a script: no one to sign in, so the server's reason,
-    // once.
+// covers: C-11, C-14 (ADR 0067: a repository's backend that nothing here signs in to leaves
+// results on this machine, and says how to share them)
+#[test]
+fn a_repositorys_backend_without_any_credential_keeps_results_here() {
+    let (server, fake) = Fake::start(false);
+    let backend = format!("{}/o/acme", server.url());
+    let r = Repo::new();
+    r.name_backend(&backend);
+
+    // Without a terminal, such as a script or an agent's sandbox: no one to sign in, so why,
+    // once, and nothing asked of the server.
     let run = ran(r.hushrun(), UNIT);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(run.stdout.contains("git version"));
-    assert_eq!(
-        hushrun_lines(&run.stderr),
-        [
-            "hushrun: results aren't shared with acme: no token: run hushrun login, set HUSHRUN_TOKEN, or in GitHub Actions give the job `permissions: id-token: write`"
-        ],
+    let lines = hushrun_lines(&run.stderr);
+    assert_eq!(lines.len(), 3, "{}", run.stderr);
+    assert!(
+        lines[1].ends_with("; it won't run again on this code"),
         "{}",
         run.stderr
     );
-    assert!(fake.recorded().is_empty());
+    assert_eq!(
+        lines[2],
+        "hushrun: results aren't shared with acme: nobody is signed in to it here, so they stay on this machine",
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        fake.requests(),
+        0,
+        "a signed-out run asks the server nothing"
+    );
+    // This machine's directory keeps it, and the next run here skips.
+    let again = ran(r.hushrun(), UNIT);
+    assert!(!again.stdout.contains("git version"), "{}", again.stderr);
+    assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
+    assert_eq!(fake.requests(), 0);
+    // whoami reads it from the same place: here, and why.
+    let mut cmd = r.hushrun();
+    cmd.args(["whoami", "--format", "json"]);
+    let who: Value = serde_json::from_slice(&cmd.output().expect("whoami").stdout).expect("JSON");
+    schema::assert_valid(&schema::load("whoami.v1.schema.json"), &who);
+    assert_eq!(who["backend"], Value::Null, "{who}");
+    assert_eq!(who["signed_out"], json!(backend), "{who}");
+    assert_eq!(who["named_by"], "package.json", "{who}");
+    assert!(who["directory"].is_string(), "{who}");
+    let mut cmd = r.hushrun();
+    cmd.arg("whoami");
+    let text = String::from_utf8_lossy(&cmd.output().expect("whoami").stdout).into_owned();
+    assert!(
+        text.contains(&format!(
+            "share     this repository shares results at {backend}: sign in with hushrun login"
+        )),
+        "{text}"
+    );
 
-    // At a terminal: the hint is hushrun's one line (C-11, C-14).
+    // At a terminal: the hint is hushrun's last line (C-11, C-14).
     #[cfg(unix)]
     {
-        let before = fake.requests();
         let (code, terminal) = terminal::stderr_on_a_terminal(r.command(&r.root.join("cache")));
         assert_eq!(code, 0, "{terminal}");
         assert_eq!(
-            hushrun_lines(&terminal),
-            ["hushrun: sign in to share results with acme: npx hushrun login"],
+            hushrun_lines(&terminal).last().copied(),
+            Some("hushrun: sign in to share results with acme: npx hushrun login"),
             "{terminal}"
         );
-        assert_eq!(fake.requests_since(before, "POST"), 0);
+        assert_eq!(fake.requests(), 0);
     }
+
+    // hushrun.yaml's backend is the repository's too.
+    let yaml = Repo::new();
+    yaml.name_backend_in_policy(&backend);
+    assert!(ran(yaml.hushrun(), UNIT).stdout.contains("git version"));
+    assert!(!ran(yaml.hushrun(), UNIT).stdout.contains("git version"));
+    assert_eq!(fake.requests(), 0);
+}
+
+// covers: C-11, C-14 (ADR 0067: only no credential at all, outside CI, keeps results here)
+#[test]
+fn a_backend_the_environment_names_or_a_refused_login_never_keeps_results_here() {
+    let (server, fake) = Fake::start(false);
+    let backend = format!("{}/o/acme", server.url());
+    let r = Repo::new();
+    r.name_backend(&backend);
+    let twice = |vars: &[(&str, &str)]| {
+        let before = fake.requests();
+        for _ in 0..2 {
+            let mut cmd = r.hushrun();
+            for (name, value) in vars {
+                cmd.env(name, value);
+            }
+            let run = ran(cmd, UNIT);
+            assert!(
+                run.stdout.contains("git version"),
+                "{vars:?}: {}",
+                run.stderr
+            );
+            assert!(
+                !run.stderr.contains("they stay on this machine"),
+                "{vars:?}: {}",
+                run.stderr
+            );
+        }
+        assert!(fake.requests() > before, "{vars:?} asks the server");
+    };
+    // HUSHRUN_BACKEND names it, with no token.
+    twice(&[("HUSHRUN_BACKEND", &backend)]);
+    // In CI, as a job with no ID token.
+    twice(&[("CI", "true")]);
+    // A login the server refuses: it is a credential, refused.
+    std::fs::create_dir_all(r.credentials().parent().unwrap()).unwrap();
+    std::fs::write(
+        r.credentials(),
+        json!({"hosts": {server.url(): {"token": "hru_refused", "email": "ana@acme.dev"}}})
+            .to_string(),
+    )
+    .unwrap();
+    twice(&[]);
+    assert!(!r.root.join("cache/results/results").exists());
 }
 
 /// A repository that names `server`'s org acme as its backend, on hushrun's host, and the

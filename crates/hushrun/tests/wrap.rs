@@ -28,6 +28,8 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_RUN_ATTEMPT",
     "HUSHRUN_RUN_URL",
     "HUSHRUN_PLAN_JSON",
+    // A run inside another says less: these tests may run inside `hushrun run`, as CI runs them.
+    "HUSHRUN_INSIDE_RUN",
     "npm_lifecycle_event",
 ];
 
@@ -678,16 +680,68 @@ fn the_specs_example_key_is_the_key() {
     );
 }
 
+// covers: C-11 (ADR 0067: in CI with no server, results are off, and the run says so once)
+#[test]
+fn in_ci_results_never_stay_on_the_runner() {
+    let r = Repo::new();
+    for _ in 0..2 {
+        let mut ci = r.hushrun();
+        ci.env("CI", "true");
+        let run = ran(ci, &["run", "unit", "--", "git", "--version"]);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert!(run.ran(), "{}", run.stderr);
+        let lines: Vec<&str> = run
+            .stderr
+            .lines()
+            .filter(|line| line.starts_with("hushrun: "))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "hushrun: unit running without skipping: results are off: in CI, nothing names a backend, and a runner's own directory isn't shared: run hushrun init to share results with CI, or set HUSHRUN_BACKEND"
+            ],
+            "{}",
+            run.stderr
+        );
+    }
+    assert!(!r.root.join("cache/results/results").exists());
+    // `-q` silences it, as it does every line of hushrun's, and a run inside another doesn't
+    // repeat what the outer one said.
+    let mut ci = r.hushrun();
+    ci.env("CI", "true");
+    let quiet = ran(ci, &["-q", "run", "unit", "--", "git", "--version"]);
+    assert!(quiet.ran() && quiet.stderr.is_empty(), "{}", quiet.stderr);
+    let mut inner = r.hushrun();
+    inner.env("CI", "true").env("HUSHRUN_INSIDE_RUN", "1");
+    let inner = ran(inner, &["run", "unit", "--", "git", "--version"]);
+    assert!(inner.ran() && inner.stderr.is_empty(), "{}", inner.stderr);
+    // Outside CI, the same machine keeps its results.
+    assert!(r.version().ran());
+    assert!(!r.version().ran());
+}
+
 // covers: C-9
 #[test]
 fn a_pass_in_ci_skips_on_a_laptop() {
+    // [ADR 0067] They share a server: CI keeps nothing in a runner's directory.
+    let fake = hushrun_testkit::fake_results::FakeResults::start();
+    let shared = |mut cmd: assert_cmd::Command| {
+        cmd.env("HUSHRUN_BACKEND", fake.url()).env(
+            "HUSHRUN_TOKEN",
+            hushrun_testkit::fake_results::FakeResults::TOKEN,
+        );
+        cmd
+    };
     let r = Repo::new();
-    let mut ci = r.hushrun();
+    let mut ci = shared(r.hushrun());
     ci.env("CI", "true")
         .env("HUSHRUN_RUN_URL", "https://ci.example/runs/7");
     assert!(ran(ci, &["run", "unit", "--", "git", "--version"]).ran());
 
-    let laptop = r.version();
+    let laptop = ran(
+        shared(r.hushrun()),
+        &["run", "unit", "--", "git", "--version"],
+    );
     assert!(!laptop.ran(), "{}", laptop.stderr);
     assert!(
         laptop
@@ -1178,4 +1232,245 @@ fn key_of_second_example(external: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Each file under `dir`, by its path from there, `/`-separated.
+fn files_under(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, from: &Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, from, found);
+            } else {
+                let relative = path.strip_prefix(from).expect("below");
+                found.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.sort();
+    found
+}
+
+/// `hushrun run --now <now> <check> -- git --version`.
+fn run_at(r: &Repo, now: &str, check: &str) -> Ran {
+    ran(
+        r.hushrun(),
+        &["run", "--now", now, check, "--", "git", "--version"],
+    )
+}
+
+/// The key directories under `results/v0` or `skips/v0` of this machine's results.
+fn key_dirs(r: &Repo, prefix: &str) -> usize {
+    std::fs::read_dir(r.root.join("cache/results").join(prefix))
+        .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0)
+}
+
+// covers: C-11 (ADR 0067: this machine forgets a result 30 days after its run, sweeping at most
+// once a day, by the command's clock)
+#[test]
+fn this_machine_forgets_results_after_30_days() {
+    const T0: &str = "2026-01-01T00:00:00Z";
+    let r = Repo::new();
+    let results = r.root.join("cache/results");
+    assert!(run_at(&r, T0, "unit").ran());
+    assert!(run_at(&r, T0, "other").ran());
+    // Ten days on, the pass still skips, and the skip is kept apart.
+    let skip = run_at(&r, "2026-01-11T00:00:00Z", "unit");
+    assert!(!skip.ran(), "{}", skip.stderr);
+    assert_eq!(key_dirs(&r, "results/v0"), 2);
+    assert_eq!(key_dirs(&r, "skips/v0"), 1);
+    // What isn't a result of hushrun's stays, whatever its age.
+    let unit_dir = std::fs::read_dir(results.join("skips/v0"))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    let unit_key = unit_dir.file_name().unwrap().to_string_lossy().into_owned();
+    std::fs::write(
+        results.join("results/v0").join(&unit_key).join("notes.txt"),
+        "mine\n",
+    )
+    .unwrap();
+    std::fs::write(
+        results.join("results/v0").join(&unit_key).join(".tmp-x"),
+        "",
+    )
+    .unwrap();
+
+    // 31 days on, the sweep forgets both passes of the first day, and the key that is left with
+    // nothing, and keeps the skip of the tenth day.
+    let late = run_at(&r, "2026-02-01T00:00:00Z", "late");
+    assert!(late.ran() && late.code == 0, "{}", late.stderr);
+    let left = files_under(&results);
+    let cutoff = millis("2026-01-02T00:00:00Z");
+    assert!(
+        left.iter()
+            .filter_map(|path| path.rsplit('/').next()?.strip_suffix(".json"))
+            .all(|ulid| ulid_millis(ulid) >= cutoff),
+        "{left:#?}"
+    );
+    assert_eq!(key_dirs(&r, "skips/v0"), 1, "{left:#?}");
+    // `unit`'s key keeps the files that aren't results; `other`'s is gone; `late` is new.
+    assert_eq!(key_dirs(&r, "results/v0"), 2, "{left:#?}");
+    assert!(
+        left.contains(&format!("results/v0/{unit_key}/notes.txt")),
+        "{left:#?}"
+    );
+    assert!(
+        left.contains(&format!("results/v0/{unit_key}/.tmp-x")),
+        "{left:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(results.join("swept"))
+            .unwrap()
+            .trim(),
+        "2026-02-01T00:00:00.000Z"
+    );
+    // So `other` runs again.
+    assert!(run_at(&r, "2026-02-01T01:00:00Z", "other").ran());
+
+    // A result older than 30 days that appears within a day of a sweep stays until the next one,
+    // a day later.
+    let planted = results
+        .join("results/v0")
+        .join(&unit_key)
+        .join(format!("{}0000000000000000.json", ulid_time(millis(T0))));
+    std::fs::write(&planted, "{}").unwrap();
+    assert!(run_at(&r, "2026-02-01T23:00:00Z", "other").code == 0);
+    assert!(planted.exists(), "swept twice in a day");
+    assert!(run_at(&r, "2026-02-02T00:00:01Z", "other").code == 0);
+    assert!(!planted.exists(), "a day after a sweep, the next");
+
+    // A clock that went back sweeps too, and never past its own cutoff: by it, these are new.
+    std::fs::write(&planted, "{}").unwrap();
+    assert!(run_at(&r, "2026-01-15T00:00:00Z", "other").code == 0);
+    assert!(planted.exists(), "14 days old by this clock");
+    // `unit`'s skip of the tenth day, and `other`'s since.
+    assert_eq!(key_dirs(&r, "skips/v0"), 2);
+    assert_eq!(
+        std::fs::read_to_string(results.join("swept"))
+            .unwrap()
+            .trim(),
+        "2026-01-15T00:00:00.000Z"
+    );
+}
+
+// covers: C-11 (ADR 0067: sweeps at once never take a result newer than their cutoff, and never
+// stop a run)
+#[test]
+fn sweeps_at_once_keep_every_new_result_and_a_stamp_that_cant_be_written_stops_nothing() {
+    let r = Repo::new();
+    assert!(run_at(&r, "2026-01-01T00:00:00Z", "old").ran());
+    // Several runs at once, 40 days on, each sweeping and recording its own check.
+    let children: Vec<_> = (0..6)
+        .map(|n| {
+            let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("hushrun"));
+            cmd.current_dir(&r.repo)
+                .env("HUSHRUN_CACHE_DIR", r.root.join("cache"))
+                .env("HUSHRUN_CREDENTIALS", r.root.join("credentials.json"))
+                .env("HUSHRUN_HOST", NO_HOST)
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+            for var in CLEARED {
+                cmd.env_remove(var);
+            }
+            cmd.args(["run", "--now", "2026-02-10T00:00:00Z"])
+                .arg(format!("check-{n}"))
+                .args(["--", "git", "--version"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("hushrun")
+        })
+        .collect();
+    for child in children {
+        let out = child.wait_with_output().expect("hushrun");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        key_dirs(&r, "results/v0"),
+        6,
+        "each run kept its own, and `old` is gone"
+    );
+    for n in 0..6 {
+        assert!(!run_at(&r, "2026-02-10T00:01:00Z", &format!("check-{n}")).ran());
+    }
+
+    // A stamp that can't be written: no sweep, and the run goes on as ever, saying nothing of it.
+    let stamp = r.root.join("cache/results/swept");
+    std::fs::remove_file(&stamp).unwrap();
+    std::fs::create_dir_all(stamp.join("in-the-way")).unwrap();
+    let first = run_at(&r, "2026-06-01T00:00:00Z", "check-0");
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(!first.stderr.contains("swept"), "{}", first.stderr);
+    assert_eq!(key_dirs(&r, "results/v0"), 6, "no stamp, no sweep");
+}
+
+/// Crockford's base 32, as ULIDs write it.
+const ULID_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// The milliseconds of an RFC 3339 time.
+fn millis(time: &str) -> i64 {
+    time.parse::<jiff::Timestamp>()
+        .expect("a time")
+        .as_millisecond()
+}
+
+/// The first 10 characters of a ULID: its milliseconds.
+fn ulid_time(ms: i64) -> String {
+    (0..10)
+        .rev()
+        .map(|i| ULID_ALPHABET[((ms >> (5 * i)) & 31) as usize] as char)
+        .collect()
+}
+
+/// The milliseconds a ULID's first 10 characters hold.
+fn ulid_millis(ulid: &str) -> i64 {
+    ulid.bytes().take(10).fold(0, |ms, c| {
+        let digit = ULID_ALPHABET.iter().position(|a| *a == c).expect("a ULID");
+        (ms << 5) | digit as i64
+    })
+}
+
+// covers: L-14, C-11 (ADR 0067: with results on this machine and no repository URL, stats
+// counts what is here)
+#[test]
+fn stats_without_a_repository_url_counts_this_machines_results() {
+    let r = Repo::new();
+    assert!(r.version().ran());
+    assert!(!r.version().ran());
+    let stats = ran(r.hushrun(), &["repository", "stats", "--format", "json"]);
+    assert_eq!(stats.code, 0, "{}", stats.stderr);
+    let out: Value = serde_json::from_str(&stats.stdout).expect("JSON");
+    schema::assert_valid(&schema::load("repository-stats.v2.schema.json"), &out);
+    assert_eq!(out["source"], "local");
+    assert_eq!(
+        out["byVerdict"],
+        serde_json::json!({"pass": 1, "fail": 0, "skip": 1})
+    );
+    let text = ran(r.hushrun(), &["repository", "stats"]);
+    assert!(
+        text.stdout
+            .starts_with("hushrun run's results on this machine in the last 30d"),
+        "{}",
+        text.stdout
+    );
+
+    // With a server, the repository's events are what it counts, and they need its URL.
+    let mut cmd = r.hushrun();
+    cmd.env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme");
+    let shared = ran(cmd, &["repository", "stats"]);
+    assert_eq!(shared.code, 2, "{}", shared.stderr);
+    assert!(
+        shared.stderr.contains("no repository URL"),
+        "{}",
+        shared.stderr
+    );
 }

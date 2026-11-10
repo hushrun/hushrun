@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::{git, schema};
-use serde_json::Value;
 
 /// Variables a test must never inherit: GitHub sets the first ones on the jobs that run these.
 const CLEARED: &[&str] = &[
@@ -73,12 +73,13 @@ fn two_systems() -> String {
 const CODECOV: &str =
     "      - uses: codecov/codecov-action@v5\n        with:\n          files: coverage.xml\n";
 
-/// A repository with a remote, and a cache and credentials of its own: results are kept in the
-/// cache, as a run with no backend keeps them.
+/// A repository with a remote, a cache and credentials of its own, and \[ADR 0067\] a results
+/// server its runs share, in CI and out: CI keeps no results in a runner's directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -102,6 +103,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         };
         r.write("check.sh", CHECK);
         r.write(".github/workflows/ci.yml", workflow);
@@ -128,6 +130,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        cmd.env("HUSHRUN_BACKEND", self.fake.url())
+            .env("HUSHRUN_TOKEN", FakeResults::TOKEN);
         cmd
     }
 
@@ -154,22 +158,14 @@ impl Repo {
     /// Each pass's and fail's `ranAnyway`, oldest first, each record as its schema says.
     fn reasons(&self) -> Vec<Option<String>> {
         let records = schema::load("run-result.v0.schema.json");
-        let mut found = Vec::new();
-        let Ok(keys) = std::fs::read_dir(self.root.join("cache/results/results/v0")) else {
-            return Vec::new();
-        };
-        for key in keys.flatten() {
-            for result in std::fs::read_dir(key.path()).expect("key").flatten() {
-                let bytes = std::fs::read(result.path()).expect("result");
-                let value: Value = serde_json::from_slice(&bytes).expect("json");
-                schema::assert_valid(&records, &value);
-                found.push((result.path(), value));
-            }
-        }
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-        found
+        self.fake
+            .recorded()
             .into_iter()
-            .map(|(_, value)| value["ranAnyway"].as_str().map(str::to_string))
+            .filter(|value| value["result"] != "skip")
+            .map(|value| {
+                schema::assert_valid(&records, &value);
+                value["ranAnyway"].as_str().map(str::to_string)
+            })
             .collect()
     }
 }

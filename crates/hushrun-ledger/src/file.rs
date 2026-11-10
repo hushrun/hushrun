@@ -68,16 +68,24 @@ impl Ledger for FileLedger {
     fn append(&self, key: &str, bytes: &[u8]) -> Result<(), LedgerError> {
         let path = self.path(key)?;
         let dir = path.parent().expect("keys have a parent");
-        fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
         let temp = dir.join(temp_name());
-        let written = (|| -> io::Result<()> {
+        let write = || -> io::Result<()> {
+            fs::create_dir_all(dir)?;
+            #[cfg(test)]
+            tests::after_the_directory_is_made(dir);
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)?;
             file.write_all(bytes)?;
             file.sync_all()
-        })();
+        };
+        // A directory left empty may be removed as it is made, as `hushrun run`'s sweep of its
+        // local results removes one: once more, it is made again.
+        let written = match write() {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => write(),
+            other => other,
+        };
         if let Err(err) = written {
             let _ = fs::remove_file(&temp);
             return Err(io_error(&temp, err));
@@ -187,5 +195,65 @@ impl Ledger for FileLedger {
             io::ErrorKind::NotFound => LedgerError::NotFound(key.to_string()),
             _ => io_error(&path, err),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    /// What a test does once a key's directory is made.
+    type Then = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        /// What a test does between `append` making a key's directory and writing into it:
+        /// where a sweep's removal of an empty directory lands.
+        static THEN: RefCell<Option<Then>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_the_directory_is_made(dir: &Path) {
+        THEN.with(|then| {
+            if let Some(then) = then.borrow_mut().as_mut() {
+                then(dir);
+            }
+        });
+    }
+
+    fn then(act: impl FnMut(&Path) + 'static) {
+        THEN.with(|then| *then.borrow_mut() = Some(Box::new(act)));
+    }
+
+    const KEY: &str = "results/v0/aa/01M73PGM5TQ1JSH70TGA34A0ZN.json";
+
+    // covers: L-3 (ADR 0067: a sweep that removes a key's empty directory as a run writes to it
+    // loses no result)
+    #[test]
+    fn a_directory_removed_as_append_writes_is_made_again() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = FileLedger::new(root.path());
+        let mut removed = 0;
+        then(move |dir| {
+            if removed == 0 {
+                fs::remove_dir(dir).expect("the empty directory goes");
+            }
+            removed += 1;
+        });
+        ledger.append(KEY, b"{}").expect("the result is kept");
+        assert_eq!(ledger.get(KEY).unwrap(), b"{}");
+        assert_eq!(ledger.list("results/v0/").unwrap(), [KEY]);
+    }
+
+    // covers: L-3 (a directory that goes every time is an error the caller hears, with nothing
+    // left behind)
+    #[test]
+    fn a_directory_that_keeps_going_fails_and_leaves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = FileLedger::new(root.path());
+        then(|dir| fs::remove_dir(dir).expect("the empty directory goes"));
+        let err = ledger.append(KEY, b"{}").unwrap_err();
+        assert!(matches!(err, LedgerError::Unavailable(_)), "{err:?}");
+        assert!(!root.path().join("results/v0/aa").exists());
     }
 }

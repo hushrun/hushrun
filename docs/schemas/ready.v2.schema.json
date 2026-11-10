@@ -19,7 +19,7 @@
         "additionalProperties": false,
         "properties": {
           "check": {"description": "The check's name; <scope>/<check> when hushrun.yaml has several scopes.", "type": "string"},
-          "state": {"description": "passed: CI skips it. missing: it hasn't passed on this code, and `run` runs it here, where a counts_from rule on a tool is the run's to judge; with no `run` when it failed here or elsewhere and a run here wouldn't count, so that `why` says what clears it. ci: nothing here changes it, and CI or another machine has to run it.", "enum": ["passed", "missing", "ci"]},
+          "state": {"description": "passed: CI skips it; with `results` local, a run here skips it. missing: it hasn't passed on this code, and `run` runs it here, where a counts_from rule on a tool is the run's to judge; with no `run` when it failed here or elsewhere and a run here wouldn't count, so that `why` says what clears it. ci: nothing here changes it, and CI or another machine has to run it.", "enum": ["passed", "missing", "ci"]},
           "why": {"description": "Why it isn't passed. For a check with no result whose run here under a counts_from rule didn't count, `a run here didn't count: <what the run said>`: that stands for this code on this machine while the key has no result, and `hushrun ready` read it from that run, starting nothing.", "type": ["string", "null"]},
           "run": {"description": "The command that runs it here, for a missing check a run here can clear.", "type": ["string", "null"]},
           "recordedBy": {"description": "[ADR 0045] Who recorded a passed check's result, as the server says: never read from the result itself. Null when the server doesn't say, and for any other state.", "type": ["string", "null"]},
@@ -27,6 +27,7 @@
         }
       }
     },
+    "results": {"description": "[ADR 0067] Where the results of the runs it looked up are, as `hushrun run` chooses (spec C-11): shared, on a server CI reads too; local, on this machine only, so that passed means a run here skips it and CI runs every check all the same; off. Left out when it looked up no run, and by a hushrun from before it.", "enum": ["shared", "local", "off"]},
     "next": {"description": "The commands to run, in order.", "type": "array", "items": {"type": "string"}},
     "notes": {"description": "What else to know before running them.", "type": "array", "items": {"type": "string"}}
   }

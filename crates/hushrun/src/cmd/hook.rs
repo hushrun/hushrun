@@ -630,9 +630,16 @@ fn pre_push(global: &GlobalOpts, args: &PrePushArgs) -> Exit {
         if report.ready {
             let passed: Vec<&str> = report.passed().map(|item| item.check.as_str()).collect();
             if !quiet {
+                // \[ADR 0067\] Passed here, which CI doesn't see: a note says CI runs them.
+                if !passed.is_empty() && report.here() {
+                    eprintln!(
+                        "hushrun: {} is ready: {} passed here",
+                        report.short(),
+                        listed(&passed)
+                    );
                 // \[ADR 0040\] A check CI runs outside hushrun leaves a note on a ready report, and
                 // then "CI skips" wouldn't be true.
-                if !passed.is_empty() && !report.runs_outside {
+                } else if !passed.is_empty() && !report.runs_outside {
                     eprintln!(
                         "hushrun: {} is ready: CI skips {}",
                         report.short(),
@@ -656,11 +663,20 @@ fn pre_push(global: &GlobalOpts, args: &PrePushArgs) -> Exit {
 /// What a refused push prints: the agent's next step.
 fn refusal(report: &Report, agent: bool) -> String {
     let names: Vec<&str> = report.missing().map(|item| item.check.as_str()).collect();
-    let mut text = format!(
-        "hushrun: push refused: CI would run {} again on {}\n",
-        listed(&names),
-        report.short()
-    );
+    let mut text = match report.here() {
+        // \[ADR 0067\] What hasn't passed here: CI runs everything anyway.
+        true => format!(
+            "hushrun: push refused: {} {} passed here on {}\n",
+            listed(&names),
+            ready::have(names.len()),
+            report.short()
+        ),
+        false => format!(
+            "hushrun: push refused: CI would run {} again on {}\n",
+            listed(&names),
+            report.short()
+        ),
+    };
     for item in report.missing() {
         let why = item.why.as_deref().unwrap_or_default();
         text.push_str(&format!("  {}: {why}\n", item.check));
@@ -683,15 +699,30 @@ fn refusal(report: &Report, agent: bool) -> String {
 /// What a person's push prints instead: it goes on.
 fn warning(report: &Report) -> String {
     let names: Vec<&str> = report.missing().map(|item| item.check.as_str()).collect();
-    let run_first = match report.next.is_empty() {
-        true => "",
-        false => " To skip that, run these before you push:",
+    let mut text = match (report.here(), report.next.is_empty()) {
+        // \[ADR 0067\] Results here: running them first changes nothing in CI.
+        (true, empty) => format!(
+            "hushrun: {} {} passed here on {}.{}\n",
+            listed(&names),
+            ready::have(names.len()),
+            report.short(),
+            if empty {
+                ""
+            } else {
+                " Run these before you push:"
+            }
+        ),
+        (false, empty) => format!(
+            "hushrun: CI will run {} on {}.{}\n",
+            listed(&names),
+            report.short(),
+            if empty {
+                ""
+            } else {
+                " To skip that, run these before you push:"
+            }
+        ),
     };
-    let mut text = format!(
-        "hushrun: CI will run {} on {}.{run_first}\n",
-        listed(&names),
-        report.short()
-    );
     for command in &report.next {
         text.push_str(&format!("  {command}\n"));
     }

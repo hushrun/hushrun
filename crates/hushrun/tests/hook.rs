@@ -144,6 +144,9 @@ exec sh -c "$script"
         }
         match self.backend.as_str() {
             ON_THIS_MACHINE => cmd.env_remove("HUSHRUN_BACKEND"),
+            SIGNED_OUT => cmd
+                .env_remove("HUSHRUN_BACKEND")
+                .env_remove("HUSHRUN_TOKEN"),
             backend => cmd.env("HUSHRUN_BACKEND", backend),
         };
     }
@@ -210,6 +213,9 @@ const AGENT: &[(&str, &str)] = &[("CLAUDECODE", "1")];
 /// A backend of no server: no variable, no package.json key and no login, so that results stay in
 /// this machine's cache directory (C-11).
 const ON_THIS_MACHINE: &str = "<this machine>";
+/// \[ADR 0067\] No variable and no token: a backend the repository's files name gets nothing, so
+/// results stay on this machine too.
+const SIGNED_OUT: &str = "<signed out>";
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -357,19 +363,6 @@ fn ready_leaves_with_ci_what_it_cannot_do_anything_about() {
     assert_eq!(code, 0, "{report:#}");
     assert_eq!(states(&report), pairs(&[("lint", "ci"), ("unit", "ci")]));
 
-    // Results that stay on this machine: nor does a pass here, even one that would skip here.
-    let r = Repo::new(ON_THIS_MACHINE);
-    let (code, report) = ready(&r, &[]);
-    assert_eq!(code, 0, "{report:#}");
-    assert_eq!(states(&report), pairs(&[("lint", "ci"), ("unit", "ci")]));
-    assert_eq!(
-        report["checks"][0]["why"],
-        "results stay on this machine, so CI can't see a pass here"
-    );
-    r.installed();
-    let pushed = r.push("feature", AGENT);
-    assert!(pushed.status.success(), "{}", stderr(&pushed));
-
     // A backend that can't be reached says nothing about the code.
     let r = Repo::new("http://127.0.0.1:9/o/acme");
     let (code, report) = ready(&r, &[]);
@@ -413,6 +406,190 @@ fn ready_leaves_with_ci_what_it_cannot_do_anything_about() {
     assert_eq!(code, 0);
     assert_eq!(report["checks"], json!([]));
     assert!(stdout(&r.hushrun(&["ready"])).contains("knows no checks"));
+}
+
+// covers: C-22, C-23 (ADR 0067: with results on this machine, ready says what passed here, and
+// the hook holds an agent's push to it)
+#[test]
+fn with_results_on_this_machine_ready_and_the_hook_go_by_what_passed_here() {
+    let r = Repo::new(ON_THIS_MACHINE);
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 10, "{report:#}");
+    assert_eq!(report["results"], "local", "{report:#}");
+    assert_eq!(
+        states(&report),
+        pairs(&[("lint", "missing"), ("unit", "missing")])
+    );
+    assert_eq!(
+        report["checks"][0]["why"],
+        "no pass here yet for this exact code"
+    );
+    assert_eq!(report["next"], json!(["npm run lint", "npm run test"]));
+    let note = "Results stay on this machine, so CI still runs these checks: hushrun init shares results with CI and teammates.";
+    assert_eq!(report["notes"], json!([note]), "{report:#}");
+    let text = stdout(&r.hushrun(&["ready"]));
+    assert!(
+        text.contains("isn't ready: 2 checks haven't passed here.\n"),
+        "{text}"
+    );
+    assert!(text.ends_with(&format!("{note}\n")), "{text}");
+
+    // An agent's push waits for them, as it does with a server.
+    r.installed();
+    let refused = r.push("feature", AGENT);
+    assert!(!refused.status.success(), "{}", stderr(&refused));
+    assert_eq!(r.remote("feature"), None);
+    assert!(
+        stderr(&refused).contains(&format!(
+            "hushrun: push refused: lint and unit haven't passed here on {}\n  lint: no pass here yet for this exact code\n  unit: no pass here yet for this exact code\nRun these here, then push again:\n  npm run lint\n  npm run test\n{note}\n",
+            &r.head()[..7]
+        )),
+        "{}",
+        stderr(&refused)
+    );
+
+    // A failure here is one to fix first.
+    r.write("checks/test.sh", "exit 1\n");
+    git::commit_all(&r.repo, "red");
+    assert!(r.npm("lint").status.success());
+    assert!(!r.npm("test").status.success());
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 10);
+    assert_eq!(
+        states(&report),
+        pairs(&[("lint", "passed"), ("unit", "missing")])
+    );
+    assert_eq!(
+        report["checks"][1]["why"],
+        "it failed here on this exact code last time"
+    );
+
+    // Passed here: ready, and the push goes, saying CI still runs them.
+    r.write("checks/test.sh", "exit 0\n");
+    git::commit_all(&r.repo, "green");
+    assert!(r.npm("lint").status.success());
+    assert!(r.npm("test").status.success());
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 0, "{report:#}");
+    assert_eq!(
+        states(&report),
+        pairs(&[("lint", "passed"), ("unit", "passed")])
+    );
+    assert!(
+        stdout(&r.hushrun(&["ready"]))
+            .contains("is ready to push.\n  passed  lint  here\n  passed  unit  here\n"),
+        "{}",
+        stdout(&r.hushrun(&["ready"]))
+    );
+    let pushed = r.push("feature", AGENT);
+    assert!(pushed.status.success(), "{}", stderr(&pushed));
+    assert_eq!(r.remote("feature"), Some(r.head()));
+    let said = stderr(&pushed);
+    assert!(
+        said.contains(&format!(
+            "hushrun: {} is ready: lint and unit passed here\nhushrun: {note}\n",
+            &r.head()[..7]
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("CI skips"), "{said}");
+
+    // A person is told what hasn't passed here, and goes.
+    r.write("src/lib.txt", "two\n");
+    git::commit_all(&r.repo, "two");
+    let person = r.push("feature", &[]);
+    assert!(person.status.success(), "{}", stderr(&person));
+    assert!(
+        stderr(&person).contains(&format!(
+            "hushrun: lint and unit haven't passed here on {}. Run these before you push:\n  npm run lint\n  npm run test\n",
+            &r.head()[..7]
+        )),
+        "{}",
+        stderr(&person)
+    );
+}
+
+// covers: C-22 (ADR 0067: of what makes a check run every time, only what is about this machine
+// holds when results stay here)
+#[test]
+fn with_results_on_this_machine_only_rules_about_this_machine_hold() {
+    let r = Repo::new(ON_THIS_MACHINE);
+    // CI runs `npm test` in a job of several variants, which no pass from here skips there; here,
+    // a pass here skips the next run here.
+    r.write(
+        ".github/workflows/ci.yml",
+        "on: push\njobs:\n  test:\n    strategy:\n      matrix:\n        node: [20, 22]\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: npm test\n",
+    );
+    // A rule this machine doesn't meet: a run here would record nothing.
+    let elsewhere = if cfg!(target_os = "linux") {
+        "macos"
+    } else {
+        "linux"
+    };
+    r.write(
+        "hushrun.yaml",
+        &format!(
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  unit:\n    counts_from: {{os: {elsewhere}}}\n"
+        ),
+    );
+    git::commit_all(&r.repo, "rules");
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 0, "{report:#}");
+    assert_eq!(states(&report), pairs(&[("unit", "ci")]), "{report:#}");
+    assert!(
+        report["checks"][0]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains(&format!("needs {elsewhere}"))),
+        "{report:#}"
+    );
+    r.write(
+        "hushrun.yaml",
+        "version: 1\nrepository: github.com/acme/shop\n",
+    );
+    git::commit_all(&r.repo, "no rule");
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 10, "{report:#}");
+    assert_eq!(states(&report), pairs(&[("unit", "missing")]), "{report:#}");
+    assert!(r.npm("test").status.success());
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 0, "{report:#}");
+    assert_eq!(states(&report), pairs(&[("unit", "passed")]), "{report:#}");
+}
+
+// covers: C-22 (ADR 0067: a repository's backend nobody here is signed in to)
+#[test]
+fn signed_out_ready_reads_this_machine_and_says_to_sign_in() {
+    let fake = FakeResults::start();
+    let r = Repo::new(SIGNED_OUT);
+    r.write(
+        "package.json",
+        &PACKAGE.replace(
+            "\"name\": \"shop\",",
+            &format!(
+                "\"name\": \"shop\",\n  \"hushrun\": {{\"backend\": \"{}\"}},",
+                fake.url()
+            ),
+        ),
+    );
+    git::commit_all(&r.repo, "backend");
+    assert!(r.npm("lint").status.success());
+    let (code, report) = ready(&r, &[]);
+    assert_eq!(code, 10, "{report:#}");
+    assert_eq!(report["results"], "local");
+    assert_eq!(
+        states(&report),
+        pairs(&[("lint", "passed"), ("unit", "missing")])
+    );
+    assert_eq!(
+        report["notes"],
+        json!([
+            "Results stay on this machine, so CI still runs these checks: hushrun login shares results with acme's CI and teammates."
+        ])
+    );
+    assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+    // With a server, the JSON says so.
+    let shared = Repo::new(&fake.url());
+    assert_eq!(ready(&shared, &[]).1["results"], "shared");
 }
 
 // covers: C-22

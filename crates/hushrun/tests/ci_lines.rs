@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::{git, schema};
 use serde_json::Value;
 
@@ -47,11 +48,14 @@ const NO_HOST: &str = "http://127.0.0.1:9";
 /// The tools CI's lines run here: each passes, whatever it is given.
 const TOOLS: [&str; 2] = ["pytest", "go"];
 
-/// A repository with a remote, a cache and credentials of its own, and [`TOOLS`] on its `PATH`.
+/// A repository with a remote, a cache and credentials of its own, [`TOOLS`] on its `PATH`, and
+/// \[ADR 0067\] a results server its runs share, in CI and out: CI keeps no results in a runner's
+/// directory.
 struct Repo {
     _dir: tempfile::TempDir,
     root: PathBuf,
     repo: PathBuf,
+    fake: FakeResults,
 }
 
 impl Repo {
@@ -90,6 +94,7 @@ impl Repo {
             _dir: dir,
             root,
             repo,
+            fake: FakeResults::start(),
         }
     }
 
@@ -112,6 +117,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        cmd.env("HUSHRUN_BACKEND", self.fake.url())
+            .env("HUSHRUN_TOKEN", FakeResults::TOKEN);
         cmd
     }
 
@@ -169,22 +176,17 @@ impl Repo {
     /// The key of each result recorded here, by the command it ran, its words joined by spaces.
     fn keys(&self) -> BTreeMap<String, String> {
         let mut found = BTreeMap::new();
-        let dir = self.root.join("cache/results/results/v0");
-        for key in std::fs::read_dir(dir).expect("results").flatten() {
-            for result in std::fs::read_dir(key.path()).expect("key").flatten() {
-                let bytes = std::fs::read(result.path()).expect("result");
-                let value: Value = serde_json::from_slice(&bytes).expect("json");
-                let words: Vec<&str> = value["command"]
-                    .as_array()
-                    .expect("command")
-                    .iter()
-                    .map(|word| word.as_str().expect("a word"))
-                    .collect();
-                found.insert(
-                    words.join(" "),
-                    key.file_name().to_string_lossy().into_owned(),
-                );
+        for (key, value) in self.fake.recorded_by_key() {
+            if value["result"] == "skip" {
+                continue;
             }
+            let words: Vec<&str> = value["command"]
+                .as_array()
+                .expect("command")
+                .iter()
+                .map(|word| word.as_str().expect("a word"))
+                .collect();
+            found.insert(words.join(" "), key);
         }
         found
     }

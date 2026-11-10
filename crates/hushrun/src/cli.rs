@@ -350,8 +350,14 @@ pub struct AdoptArgs {
 const INIT_HELP: &str = "\
 Examples:
   npx hushrun init          Find the checks, sign in, show the changes, ask, apply
+  hushrun init --local          The same for this machine only: no sign-in, no backend
   hushrun init --dry-run        Show what init would change, and change nothing
   hushrun init --yes            Apply without asking, as an agent or a script does
+
+At a terminal, with no login and no --local, init first asks whether to share results with CI and
+teammates, which signs in, or to keep them on this machine only. With --local, a run here skips
+what passed here, hushrun ready and the hook go by it, and CI runs every check as before; plain
+hushrun init later signs in and adds the backend, keeping what --local set up.
 
 init wraps package.json's checks (test, lint, typecheck and the like) as \"hushrun run -- …\",
 names the org's backend in package.json, adds hushrun to devDependencies with the repository's
@@ -377,7 +383,9 @@ Examples:
   hushrun ready --strict            Exit 0 only when every check passed, none left with CI
 
 hushrun ready looks at the checks hushrun.yaml requires, and at the `hushrun run`s of
-package.json's scripts and CI's own files, each by its scope and directory. A check it can do
+package.json's scripts and CI's own files, each by its scope and directory. Where results stay on
+this machine (hushrun init --local, or nobody signed in to the repository's backend), it says what
+passed here, failed here or hasn't run here, and CI still runs every check. A check it can do
 nothing about here, such as one in a repository that takes CI's evidence only, or whose job has
 services or a secret, or that a run here showed doesn't meet hushrun.yaml's counts_from, stays with CI or
 another machine and doesn't count against the code. hushrun ready starts no tool: of programs, it
@@ -445,6 +453,11 @@ pub struct InitArgs {
         conflicts_with = "pipeline_flags"
     )]
     pub org: Option<String>,
+
+    /// Keep results on this machine only: wrap the checks and set agents up, with no sign-in and
+    /// no backend. CI runs every check as before; plain hushrun init later shares them.
+    #[arg(long, conflicts_with_all = ["org", "pipeline_flags"])]
+    pub local: bool,
 
     /// Write a starter hushrun.yaml for a deploy pipeline instead. The flags below imply it.
     #[arg(long, help_heading = "Pipeline")]
@@ -1005,7 +1018,8 @@ pub enum RepositoryCommand {
     ///
     /// From one listing of the repository's events on its server, and no event read: events by
     /// kind, distinct digests, and check events. With --local, this machine's `hushrun
-    /// run` results instead: by verdict, by check, distinct run keys, and the time skips saved. It
+    /// run` results instead: by verdict, by check, distinct run keys, and the time skips saved;
+    /// and so without it where results stay on this machine and no repository URL is set. It
     /// sends nothing else anywhere, and prints what you may choose to paste.
     Stats {
         /// Count what was recorded in this long, such as 7d or 12w.

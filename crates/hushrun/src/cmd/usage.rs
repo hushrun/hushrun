@@ -16,7 +16,7 @@ use crate::cmd::token::{now, when};
 use crate::cmd::whoami::{named, named_by_key};
 use crate::exit::{CmdResult, Exit, Failure};
 use crate::output::{self, Format};
-use crate::results::{self, Backend, Place, Usage};
+use crate::results::{Backend, Place, Selection, Usage};
 
 const SCHEMA: &str = "hushrun.repository.usage/v1";
 
@@ -116,9 +116,9 @@ pub fn run(app: &App<'_>) -> CmdResult {
     };
     // Results off: nothing is recorded, so nothing is metered, as `whoami` says.
     let backend = match Backend::select(repository_root(global).as_deref()) {
-        Ok(Some(backend)) => backend,
-        Ok(None) => {
-            report.off = Some(results::off_reason().to_string());
+        Ok(Selection::On(backend)) => backend,
+        Ok(Selection::Off(off)) => {
+            report.off = Some(off.reason().to_string());
             return finish(app, &report);
         }
         Err(err) => {
@@ -136,7 +136,7 @@ pub fn run(app: &App<'_>) -> CmdResult {
         Usage::Reported(value) => {
             let base = match &place {
                 Place::Server { base, .. } => base.as_str(),
-                Place::Directory(_) => "",
+                Place::Directory { .. } => "",
             };
             let usage: Answer = serde_json::from_value(value).map_err(|e| {
                 Failure::new(
@@ -179,14 +179,20 @@ fn text(report: &Report, now: i64) -> String {
         return out;
     };
     let (base, named_by) = match place {
-        Place::Directory(dir) => {
+        Place::Directory { dir, local } => {
             line(
                 "backend",
                 format!("this machine only, in {}", dir.display()),
             );
             line(
                 "usage",
-                "results stay on this machine, so nothing is metered".to_string(),
+                match local.org() {
+                    // \[ADR 0067\] The repository names an org, and nobody here is signed in to it.
+                    Some(org) => format!(
+                        "results stay on this machine, so nothing is metered: hushrun login shares them with {org}, whose plan then counts them"
+                    ),
+                    None => "results stay on this machine, so nothing is metered".to_string(),
+                },
             );
             return out;
         }
@@ -289,7 +295,7 @@ fn text(report: &Report, now: i64) -> String {
 fn json_of(report: &Report) -> Value {
     let (backend, named_by, directory) = match &report.place {
         None => (None, None, None),
-        Some(Place::Directory(dir)) => (None, None, Some(dir.display().to_string())),
+        Some(Place::Directory { dir, .. }) => (None, None, Some(dir.display().to_string())),
         Some(Place::Server { base, named_by, .. }) => {
             (Some(base.clone()), Some(named_by_key(*named_by)), None)
         }

@@ -14,7 +14,7 @@ use crate::cmd::token::{now, when};
 use crate::exit::{CmdResult, Exit};
 use crate::hosted;
 use crate::output::{self, Format};
-use crate::results::{Backend, Credential, NamedBy, Place};
+use crate::results::{Backend, Credential, Local, NamedBy, Place, Selection};
 
 /// \[ADR 0046\] What takes signing in's place where an agent is set: it refuses.
 const AGENT_UNREADABLE: &str = "HUSHRUN_AGENT can't be read, and only it speaks for an agent";
@@ -37,11 +37,11 @@ impl Identity {
     pub(crate) fn read(global: &GlobalOpts) -> Identity {
         let root = repository_root(global);
         let backend = match Backend::select(root.as_deref()) {
-            Ok(Some(backend)) => backend,
-            Ok(None) => {
+            Ok(Selection::On(backend)) => backend,
+            Ok(Selection::Off(off)) => {
                 return Identity {
                     place: None,
-                    off: Some(crate::results::off_reason().to_string()),
+                    off: Some(off.reason().to_string()),
                     info: None,
                     error: None,
                 };
@@ -87,8 +87,17 @@ impl Identity {
             );
         };
         let (base, credential) = match place {
-            Place::Directory(dir) => {
-                return (true, format!("this machine only, in {}", dir.display()));
+            Place::Directory { dir, local } => {
+                let why = match local {
+                    Local::Unnamed => String::new(),
+                    Local::SignedOut { base, .. } => {
+                        format!(", as nobody here is signed in to {base}")
+                    }
+                };
+                return (
+                    true,
+                    format!("this machine only, in {}{why}", dir.display()),
+                );
             }
             Place::Server {
                 base, credential, ..
@@ -183,17 +192,21 @@ fn text(identity: &Identity, now: i64) -> String {
         return out;
     };
     let (base, named_by, credential, withheld) = match place {
-        Place::Directory(dir) => {
+        Place::Directory { dir, local } => {
             line(
                 "backend",
                 format!("this machine only, in {}", dir.display()),
             );
             line(
                 "share",
-                match hushrun_ci::Env::from_process().agent_set() {
-                    true => AGENT_UNREADABLE.to_string(),
-                    false => {
-                        "sign in with hushrun login, or name a backend in package.json".to_string()
+                match (hushrun_ci::Env::from_process().agent_set(), local) {
+                    (true, _) => AGENT_UNREADABLE.to_string(),
+                    // \[ADR 0067\] The repository names one, and nobody here is signed in to it.
+                    (false, Local::SignedOut { base, .. }) => {
+                        format!("this repository shares results at {base}: sign in with hushrun login")
+                    }
+                    (false, Local::Unnamed) => {
+                        "run hushrun init to share results with CI and teammates, or sign in with hushrun login".to_string()
                     }
                 },
             );
@@ -301,7 +314,17 @@ fn machine(agent: bool) -> Option<(String, String)> {
 fn json(identity: &Identity) -> Value {
     let (backend, named_by, directory, credential, withheld) = match &identity.place {
         None => (None, None, None, "none", false),
-        Some(Place::Directory(dir)) => (None, None, Some(dir.display().to_string()), "none", false),
+        // \[ADR 0067\] What named the backend nobody here is signed in to, whose results stay here.
+        Some(Place::Directory { dir, local }) => (
+            None,
+            match local {
+                Local::SignedOut { named_by, .. } => Some(named_by_key(*named_by)),
+                Local::Unnamed => None,
+            },
+            Some(dir.display().to_string()),
+            "none",
+            false,
+        ),
         Some(Place::Server {
             base,
             named_by,
@@ -323,8 +346,17 @@ fn json(identity: &Identity) -> Value {
     };
     let info = identity.info.as_ref();
     let text = |field: &str| info.and_then(|i| i[field].as_str()).map(str::to_string);
+    // \[ADR 0067\] The backend the repository names, which nobody here is signed in to.
+    let signed_out = match &identity.place {
+        Some(Place::Directory {
+            local: Local::SignedOut { base, .. },
+            ..
+        }) => Some(base.clone()),
+        _ => None,
+    };
     json!({
         "schema": "hushrun.whoami/v1",
+        "signed_out": signed_out,
         "backend": backend,
         "named_by": named_by,
         "directory": directory,

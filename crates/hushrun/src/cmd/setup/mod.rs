@@ -5,7 +5,9 @@
 //! makes sure the org has its ledger, and shows a check skipping. While the sign-in waits, it
 //! tells how often CI ran on code it had already passed (C-16). \[ADR 0041\] Someone with several
 //! orgs says which one the repository is for; `--org` says it, and moves one that records to
-//! another.
+//! another. \[ADR 0067\] `--local`, or the answer to the one question a person at a terminal with
+//! no login is asked, sets up this machine only: the same wraps and agents' files, and nothing of
+//! an org's, so that a plain init later adds only what sharing needs.
 //!
 //! `hushrun init --pipeline`, the promotion pipeline's starter files, is `cmd::init`.
 
@@ -93,6 +95,10 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     let moves_to = look.moves_to(args).map(str::to_string);
     if moves_to.is_some() {
         look.can_move()?;
+    }
+    // \[ADR 0067\] Shared or this machine only, decided once, before anything signs in.
+    if sharing(&look, &origin, args)? == Sharing::Local {
+        return local(global, args, &look, json);
     }
 
     if look.set_up() {
@@ -211,7 +217,10 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
             }
             backend
         });
-        let mut plan = Plan::new(&look, backend.as_deref().unwrap_or(UNKNOWN_BACKEND))?;
+        let mut plan = Plan::new(
+            &look,
+            Backing::Org(backend.as_deref().unwrap_or(UNKNOWN_BACKEND)),
+        )?;
         // Nothing asks gh without a sign-in: the plan says what init would derive. For a move,
         // the line above says what hushrun.yaml gets.
         if moves_to.is_none() {
@@ -245,7 +254,7 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
         Moved::Stayed => None,
     };
     let is_moved = moved.is_some();
-    let mut plan = Plan::new(&look, &session.backend)?;
+    let mut plan = Plan::new(&look, Backing::Org(&session.backend))?;
     let promotion = Promotion::new(&look, github.clone());
     // ADR 0026 item 19: the plan shows the ledger before it exists.
     if let Some(repository) = look.repository.as_ref().filter(|_| session.member) {
@@ -1062,6 +1071,8 @@ struct AgentTools {
     prepare: Option<(String, String)>,
     /// \[ADR 0043\] The directory hushrun goes in, for the hook to find it.
     binary: Option<PathBuf>,
+    /// \[ADR 0067\] `--local`: the hook goes by what passed on this machine, and the plan says so.
+    local: bool,
 }
 
 impl AgentTools {
@@ -1080,6 +1091,7 @@ impl AgentTools {
             hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
             prepare,
             binary: look.binary_directory(),
+            local: false,
         }
     }
 
@@ -1101,7 +1113,13 @@ impl AgentTools {
         }
         if let Some(path) = &self.hook {
             println!("  {path}");
-            println!("    {HOOK_PLAN}");
+            println!(
+                "    {}",
+                match self.local {
+                    true => LOCAL_HOOK_PLAN,
+                    false => HOOK_PLAN,
+                }
+            );
         }
         if let Some(dir) = &self.binary {
             println!("  {}", dir.join("hushrun").display());
@@ -1146,6 +1164,8 @@ impl AgentTools {
 
 /// What the plan says of the hook.
 const HOOK_PLAN: &str = "the pre-push hook: says what CI would run again, and refuses a coding agent's push until that is done";
+/// \[ADR 0067\] What `--local`'s plan says of the hook: CI's results aren't read there.
+const LOCAL_HOOK_PLAN: &str = "the pre-push hook: says which checks haven't passed here, and refuses a coding agent's push until they have";
 /// What the plan says of hushrun.
 const BINARY_PLAN: &str = "hushrun's newest release, on your PATH, so that the hook runs on this machine: hushrun update keeps it up to date";
 
@@ -1300,8 +1320,29 @@ fn add_install_script<'d>(
     }
 }
 
+/// \[ADR 0067\] Where results go, as init sets the repository up: the one choice its plan, its
+/// sign-in and its last line read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sharing {
+    /// With CI and teammates, at the org's backend, once signed in.
+    Shared,
+    /// On this machine only: no sign-in, nothing names a backend, and CI runs every check.
+    Local,
+}
+
+/// What a plan names for results: the org's backend, or nothing (\[ADR 0067\] `--local`).
+#[derive(Debug, Clone, Copy)]
+enum Backing<'a> {
+    Org(&'a str),
+    ThisMachine,
+}
+
 impl Plan {
-    fn new(look: &Look, backend: &str) -> Result<Plan, Failure> {
+    fn new(look: &Look, backing: Backing<'_>) -> Result<Plan, Failure> {
+        let backend = match backing {
+            Backing::Org(backend) => Some(backend),
+            Backing::ThisMachine => None,
+        };
         let mut plan = Plan {
             root: look.root.clone(),
             package: None,
@@ -1319,8 +1360,9 @@ impl Plan {
             left_in_ci: Vec::new(),
             suggestions: suggestion_lines(look),
             one_scope: None,
-            repository: look.repository.clone(),
-            org: hosted::org_of(backend),
+            // Nothing of an org's for a repository that names none.
+            repository: look.repository.clone().filter(|_| backend.is_some()),
+            org: backend.and_then(hosted::org_of),
             ledger: ledger::Preview::Unknown,
             promotion: Vec::new(),
             tools: AgentTools {
@@ -1328,6 +1370,7 @@ impl Plan {
                 hook: hook::preview(&look.root, hook::Asked::Implicitly(hook::Mode::default())),
                 prepare: None,
                 binary: look.binary_directory(),
+                local: matches!(backing, Backing::ThisMachine),
             },
             every_time: Vec::new(),
         };
@@ -1356,8 +1399,14 @@ impl Plan {
         }
         match &look.package {
             None if look.repository.is_none() => {
+                let share = match backend {
+                    Some(backend) => format!(
+                        "\nand set HUSHRUN_BACKEND={backend} wherever checks run, CI included, so that they share results."
+                    ),
+                    None => String::new(),
+                };
                 plan.instead = Some(format!(
-                    "No origin remote names this repository, so init can't write hushrun.yaml, and wraps no checks. Put hushrun run NAME -- in front of a check's command, such as\n  hushrun run test -- go test ./...\nand set HUSHRUN_BACKEND={backend} wherever checks run, CI included, so that they share results."
+                    "No origin remote names this repository, so init can't write hushrun.yaml, and wraps no checks. Put hushrun run NAME -- in front of a check's command, such as\n  hushrun run test -- go test ./...{share}"
                 ));
                 return Ok(plan);
             }
@@ -1412,7 +1461,8 @@ impl Plan {
             }
         }
         let package_names_it = look.package.is_some() && scripts_wrap;
-        if look.backend.is_none()
+        if let Some(backend) = backend
+            && look.backend.is_none()
             && !package_names_it
             && look.repository.is_some()
             && !look.unreadable_policy
@@ -1429,10 +1479,13 @@ impl Plan {
         }
         if in_ci {
             plan.rule_macos(look);
-            if look.proposal.touches_gitlab(&look.workflows) {
-                if !look.root.join(GITLAB_INSTALL.0).exists() {
-                    plan.vendored = Some(GITLAB_INSTALL);
-                }
+            if look.proposal.touches_gitlab(&look.workflows)
+                && !look.root.join(GITLAB_INSTALL.0).exists()
+            {
+                plan.vendored = Some(GITLAB_INSTALL);
+            }
+            // A token to record with is for a repository that shares its results.
+            if backend.is_some() && look.proposal.touches_gitlab(&look.workflows) {
                 plan.manual.push(format!(
                     "{}: its jobs have no ID token to record with: create a token with hushrun token create --agent gitlab-ci --expires 365d, and set HUSHRUN_TOKEN and HUSHRUN_MACHINE_KEY_FILE as CI/CD variables",
                     policy::GITLAB_CI
@@ -1444,6 +1497,9 @@ impl Plan {
                 .running(&plan.wrapped)
                 .map(|job| job.id.as_str())
                 .collect();
+            // \[ADR 0067\] An ID token is for recording at a backend: a repository that names none
+            // gets its wraps, and no token.
+            let tokens = backend.is_some();
             // \[ADR 0051\] A job that starts a workspace package's wrapped script needs its ID
             // token too.
             for job in &workflow.jobs {
@@ -1471,6 +1527,9 @@ impl Plan {
             } else {
                 workflows::Changes::default()
             };
+            if !tokens {
+                jobs.clear();
+            }
             if jobs.is_empty() && changes.is_empty() {
                 continue;
             }
@@ -1524,12 +1583,13 @@ impl Plan {
         }
     }
 
-    /// Wraps the scripts, names the backend and adds the npm package, as minimal edits.
+    /// Wraps the scripts, names the backend, unless there is none (\[ADR 0067\] `--local`), and
+    /// adds the npm package, as minimal edits.
     fn edit_package(
         &mut self,
         look: &Look,
         package: &Package,
-        backend: &str,
+        backend: Option<&str>,
     ) -> Result<(), Failure> {
         let doc = &package.doc;
         let top = doc.root();
@@ -1537,7 +1597,7 @@ impl Plan {
         let mut expected =
             json::value(doc.text()).map_err(|e| Failure::usage(anyhow!("package.json: {e}")))?;
         let mut changes = wrap_scripts(package, &mut editor, &mut expected);
-        if look.backend.is_none() {
+        if let Some(backend) = backend.filter(|_| look.backend.is_none()) {
             let named = match top.get("hushrun") {
                 None => {
                     editor.insert(top, Place::Last, "hushrun", json!({"backend": backend}));
@@ -1937,6 +1997,139 @@ impl Plan {
         found.sort_by_key(|(kind, _)| *kind);
         found.into_iter().map(|(_, name)| name).collect()
     }
+}
+
+/// \[ADR 0067\] Where results go: `--local` says this machine; a repository whose files name a
+/// backend shares already, and `--local` there is refused; at a terminal, with no login for
+/// `origin`, nothing that names an org and no agent set, the person says; otherwise, as ever,
+/// they are shared.
+fn sharing(look: &Look, origin: &str, args: &InitArgs) -> Result<Sharing, Failure> {
+    if args.local {
+        if let Some(backend) = &look.backend {
+            return Err(Failure::usage(anyhow!(
+                "this repository shares its results at {backend} already, so --local has nothing to set up: hushrun login signs in to it, and until then results stay on this machine"
+            )));
+        }
+        return Ok(Sharing::Local);
+    }
+    let terminal = std::io::stdin().is_terminal();
+    let asks = asks_where(
+        args,
+        look.backend.is_some(),
+        terminal,
+        || Credentials::load().is_ok_and(|saved| saved.login_at(origin).is_some()),
+        hushrun_ci::Env::from_process().agent_set(),
+    );
+    if !asks {
+        return Ok(Sharing::Shared);
+    }
+    println!();
+    print!("{WHERE_QUESTION}");
+    std::io::stdout()
+        .flush()
+        .context("writing to the terminal")?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("reading the answer")?;
+    Ok(answered(&answer))
+}
+
+/// \[ADR 0067\] The one question init asks before a sign-in no login makes for it.
+const WHERE_QUESTION: &str =
+    "Share results with CI and teammates (signs in), or keep them on this machine only? [S/l] ";
+
+/// \[ADR 0067\] Whether init asks [`WHERE_QUESTION`]: only a person at a terminal who chose
+/// nothing yet. `--yes`, `--dry-run` and `--org` choose sharing as before; a repository that names
+/// a backend, a login and an agent set leave nothing to ask.
+fn asks_where(
+    args: &InitArgs,
+    named: bool,
+    terminal: bool,
+    signed_in: impl FnOnce() -> bool,
+    agent: bool,
+) -> bool {
+    !args.yes && !args.dry_run && args.org.is_none() && terminal && !named && !agent && !signed_in()
+}
+
+/// \[ADR 0067\] What an answer to [`WHERE_QUESTION`] chooses: `l` keeps results here; Enter, or
+/// anything else, shares them, as init did before it asked.
+fn answered(answer: &str) -> Sharing {
+    match answer.trim().to_ascii_lowercase().starts_with('l') {
+        true => Sharing::Local,
+        false => Sharing::Shared,
+    }
+}
+
+/// \[ADR 0067\] What the plan of `--local` says first.
+const LOCAL_PLAN: &str = "Results stay on this machine (--local): init signs in to nothing, names no backend and gives CI's jobs no ID token, so CI runs every check as before.";
+
+/// \[ADR 0067\] What a finished `--local` says to do next.
+const LOCAL_NEXT: &str = "Commit these changes. From now on a check skips here when this exact code already passed here, and hushrun ready and the pre-push hook go by what passed here. To share results with CI and teammates, run hushrun init again, without --local.";
+
+/// \[ADR 0067\] `hushrun init --local`: init's plan and edits with no org in them. Nothing signs
+/// in, nothing names a backend, CI's jobs get no ID token and no machine key is made; the checks
+/// are wrapped, the agents' files written, the hook and the package installed, as ever, so that a
+/// plain init later only adds what sharing needs.
+fn local(global: &GlobalOpts, args: &InitArgs, look: &Look, json: bool) -> CmdResult {
+    let plan = Plan::new(look, Backing::ThisMachine)?;
+    if json {
+        let mut notes = vec![LOCAL_PLAN.to_string()];
+        notes.extend(plan.notes());
+        return print_plan(look, plan.writes(notes));
+    }
+    println!("\n{LOCAL_PLAN}");
+    plan.print();
+    if args.dry_run {
+        println!("\nNothing changed (--dry-run).");
+        return Ok(Exit::Ok);
+    }
+    if !args.yes && !std::io::stdin().is_terminal() {
+        return Err(Failure::usage(anyhow!(
+            "init can't ask without a terminal: run hushrun init --local --yes to apply"
+        )));
+    }
+    if plan.changes() {
+        if args.yes {
+            println!("\nApplying (--yes).");
+        } else if !ask("\nApply? [Y/n] ")? {
+            println!("Nothing changed.");
+            return Ok(Exit::Ok);
+        }
+        plan.write()?;
+    }
+    let installed = match &plan.dependency {
+        Some(spec) => install(look, spec),
+        None => true,
+    };
+    install_hook(&look.root);
+    let demo = !args.no_run && (!args.yes || args.run);
+    if demo && installed {
+        show_a_skip(look, &plan);
+    }
+    plan.tools.install_binary(global);
+    println!();
+    if look.package.is_none() {
+        println!("{}", hook_in_each_clone());
+    }
+    if plan.files() {
+        println!("{LOCAL_NEXT}");
+    }
+    if let Some(line) = bun_test_line(look) {
+        println!("{line}");
+    }
+    if !installed {
+        let command = look.manager().map(|m| m.add(&npm_package()).join(" "));
+        return Err(Failure::new(
+            Exit::Unexpected,
+            anyhow!(
+                "hushrun isn't installed: run {} once the error above is fixed",
+                command.unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(Exit::Ok)
 }
 
 /// What a dry run in a repository set up already says init would do with the org, when it does
@@ -3519,6 +3712,61 @@ fn show_a_skip(look: &Look, plan: &Plan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init_args() -> InitArgs {
+        InitArgs {
+            yes: false,
+            no_browser: false,
+            dry_run: false,
+            no_run: false,
+            run: false,
+            org: None,
+            local: false,
+            pipeline: false,
+            force: false,
+            repository: None,
+            branch: None,
+            image: None,
+        }
+    }
+
+    // covers: C-15
+    #[test]
+    fn init_asks_where_results_go_only_a_person_who_chose_nothing() {
+        let asks = |args: &InitArgs, named, terminal, signed_in, agent| {
+            asks_where(args, named, terminal, || signed_in, agent)
+        };
+        let plain = init_args();
+        assert!(asks(&plain, false, true, false, false));
+        // Without a terminal, signed in, in a repository that names a backend, or for an agent.
+        assert!(!asks(&plain, false, false, false, false));
+        assert!(!asks(&plain, false, true, true, false));
+        assert!(!asks(&plain, true, true, false, false));
+        assert!(!asks(&plain, false, true, false, true));
+        // --yes, --dry-run and --org chose already.
+        for args in [
+            InitArgs {
+                yes: true,
+                ..init_args()
+            },
+            InitArgs {
+                dry_run: true,
+                ..init_args()
+            },
+            InitArgs {
+                org: Some("acme".into()),
+                ..init_args()
+            },
+        ] {
+            assert!(!asks(&args, false, true, false, false));
+        }
+        // `l` keeps results here; Enter and anything else share them, as init did before.
+        assert_eq!(answered("l\n"), Sharing::Local);
+        assert_eq!(answered(" Local\n"), Sharing::Local);
+        for answer in ["\n", "s\n", "share\n", "", "y\n"] {
+            assert_eq!(answered(answer), Sharing::Shared, "{answer:?}");
+        }
+    }
 
     #[test]
     fn an_exact_version_gets_the_caret_package_managers_save() {

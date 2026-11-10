@@ -849,6 +849,313 @@ fn a_dry_run_changes_nothing_and_contacts_nothing() {
     assert!(!r.repo.join(".git/hooks/pre-push").exists());
 }
 
+/// \[ADR 0067\] What the plan of `--local` says first.
+const LOCAL_PLAN: &str = "Results stay on this machine (--local): init signs in to nothing, names no backend and gives CI's jobs no ID token, so CI runs every check as before.";
+
+// covers: C-15, C-24 (ADR 0067: init --local wraps the checks and sets agents up, with no sign-in,
+// no backend, no ID token and no machine key)
+#[cfg(unix)]
+#[test]
+fn init_local_sets_up_this_machine_and_signs_in_to_nothing() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains(LOCAL_PLAN), "{}", out.stdout);
+    assert_eq!(fake.requests(), [], "nothing asked of any server");
+    assert!(
+        r.log("gh.args").is_empty() && r.log("gh-id.args").is_empty(),
+        "nor gh"
+    );
+    assert!(!r.credentials().exists());
+    assert!(
+        !r.root.join("config/machine-key.pem").exists(),
+        "no machine key"
+    );
+    let package = r.read("package.json");
+    assert!(
+        package.contains(r#""lint": "hushrun run -- eslint .""#),
+        "{package}"
+    );
+    assert!(
+        package.contains(&format!(r#""hushrun": "^{VERSION}""#)),
+        "{package}"
+    );
+    assert!(
+        package.contains(r#""prepare": "hushrun hook install || exit 0""#),
+        "{package}"
+    );
+    assert!(!package.contains("backend"), "{package}");
+    // CI's job gets no ID token: nothing names where it would record.
+    assert_eq!(r.read(".github/workflows/ci.yml"), WORKFLOW);
+    assert!(!r.repo.join("hushrun.yaml").exists());
+    assert!(r.read("AGENTS.md").contains("hushrun ready"));
+    assert!(r.repo.join(".claude/skills/hushrun/SKILL.md").exists());
+    assert!(r.repo.join(".git/hooks/pre-push").exists());
+    assert!(
+        r.log("npm.log")
+            .iter()
+            .any(|line| line.starts_with("install --save-dev")),
+        "{:?}",
+        r.log("npm.log")
+    );
+    assert!(
+        out.stdout.contains(
+            "To share results with CI and teammates, run hushrun init again, without --local."
+        ),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("Commit and push: CI records"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("your org"), "{}", out.stdout);
+
+    // Its checks now skip here, with no server anywhere.
+    let mut run = r.hushrun(&fake);
+    run.args(["run", "lint", "--", "eslint", "."]);
+    assert_eq!(ran(run, &[]).code, 0);
+    let mut again = r.hushrun(&fake);
+    again.args(["run", "lint", "--", "eslint", "."]);
+    let again = ran(again, &[]);
+    assert!(again.stderr.contains("lint skipped"), "{}", again.stderr);
+    assert_eq!(fake.requests(), []);
+}
+
+// covers: C-15 (ADR 0067: in any language, --local wraps CI's lines, which ready reads, and
+// gives their jobs no ID token, and hushrun.yaml no backend)
+#[cfg(unix)]
+#[test]
+fn init_local_wraps_cis_lines_with_no_id_token_and_no_backend() {
+    let (_server, fake) = Fake::start(true);
+    let workflow = "on: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: go test ./...\n";
+    let r = Repo::new(&[
+        ("go.mod", "module shop\n"),
+        (".github/workflows/ci.yml", workflow),
+    ]);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(fake.requests(), []);
+    let ci = r.read(".github/workflows/ci.yml");
+    assert!(ci.contains("hushrun run "), "{ci}");
+    assert!(ci.contains(" -- go test ./..."), "{ci}");
+    assert!(!ci.contains("id-token"), "{ci}");
+    assert!(
+        std::fs::read_to_string(r.repo.join("hushrun.yaml"))
+            .map_or(true, |text| !text.contains("backend")),
+        "no backend in hushrun.yaml"
+    );
+    assert!(!out.stdout.contains("HUSHRUN_TOKEN"), "{}", out.stdout);
+}
+
+// covers: C-15 (ADR 0067: --dry-run shows the local plan, as text and as JSON)
+#[test]
+fn init_local_dry_run_shows_the_local_plan() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    for line in [
+        LOCAL_PLAN,
+        r#"    "lint": "eslint ." → "hushrun run -- eslint .""#,
+        "  AGENTS.md\n",
+        // The hook reads this machine's results there, not CI's.
+        "  .git/hooks/pre-push\n    the pre-push hook: says which checks haven't passed here, and refuses a coding agent's push until they have\n",
+        "Nothing changed (--dry-run).",
+    ] {
+        assert!(out.stdout.contains(line), "{line:?} in\n{}", out.stdout);
+    }
+    let plan = out.stdout.split(LOCAL_PLAN).nth(1).expect("the plan");
+    for absent in [
+        "backend",
+        "your org",
+        "id-token",
+        "ID token",
+        "sign",
+        "what CI would run again",
+    ] {
+        assert!(!plan.contains(absent), "{absent:?} in\n{}", out.stdout);
+    }
+    assert_eq!(r.read("package.json"), PACKAGE);
+    assert_eq!(fake.requests(), []);
+
+    let mut cmd = r.hushrun(&fake);
+    cmd.args(["init", "--local", "--dry-run", "--format", "json"]);
+    let json = ran(cmd, &[]);
+    assert_eq!(json.code, 0, "{}", json.stderr);
+    let plan: Value = serde_json::from_str(&json.stdout).expect("JSON");
+    hushrun_testkit::schema::assert_valid(
+        &hushrun_testkit::schema::load("init-plan.v1.schema.json"),
+        &plan,
+    );
+    assert_eq!(plan["notes"][0], LOCAL_PLAN, "{plan:#}");
+    assert!(!plan["edits"].to_string().contains("backend"), "{plan:#}");
+    assert!(!plan["edits"].to_string().contains("id-token"), "{plan:#}");
+
+    // Without a terminal it needs --yes, and names the command with --local.
+    let out = ran(r.hushrun(&fake), &["init", "--local"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("run hushrun init --local --yes to apply"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(r.read("package.json"), PACKAGE);
+    // --local and --org don't go together, nor in a repository that shares already.
+    assert_eq!(
+        ran(r.hushrun(&fake), &["init", "--local", "--org", "acme"]).code,
+        2
+    );
+    let named = Repo::new(&[(
+        "package.json",
+        &format!(
+            r#"{{"scripts": {{"test": "vitest"}}, "hushrun": {{"backend": "{}"}}}}"#,
+            fake.backend()
+        ),
+    )]);
+    let out = ran(named.hushrun(&fake), &["init", "--local", "--yes"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("shares its results at") && out.stderr.contains("hushrun login"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(fake.requests(), []);
+}
+
+// covers: C-15 (ADR 0067: plain init in a repository set up with --local signs in and adds what
+// sharing needs, and wraps nothing twice)
+#[cfg(unix)]
+#[test]
+fn plain_init_after_local_adds_the_backend_and_keeps_the_rest() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    let local = ran(r.hushrun(&fake), &["init", "--local", "--yes", "--no-run"]);
+    assert_eq!(local.code, 0, "{}", local.stderr);
+    git::commit_all(&r.repo, "hushrun init --local");
+    let before = r.read("package.json");
+
+    let out = ran(
+        r.hushrun(&fake),
+        &["init", "--yes", "--no-browser", "--no-run"],
+    );
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("Signed in to acme as ana@acme.dev."),
+        "{}",
+        out.stdout
+    );
+    let package = r.read("package.json");
+    assert!(
+        package.contains(&format!(r#""backend": "{}""#, fake.backend())),
+        "{package}"
+    );
+    assert!(!package.contains("hushrun run -- hushrun run"), "{package}");
+    assert_eq!(
+        package.matches("hushrun hook install").count(),
+        1,
+        "{package}"
+    );
+    // Only the backend is new in package.json.
+    let mut was: Value = serde_json::from_str(&before).unwrap();
+    let now: Value = serde_json::from_str(&package).unwrap();
+    was["hushrun"] = json!({"backend": fake.backend()});
+    assert_eq!(now, was);
+    // CI's job gets its ID token now, and the org the repository.
+    assert!(
+        r.read(".github/workflows/ci.yml")
+            .contains("id-token: write"),
+        "{}",
+        r.read(".github/workflows/ci.yml")
+    );
+    assert_eq!(made(&fake).len(), 1);
+    assert_eq!(r.read("AGENTS.md").matches("<!-- hushrun:start").count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(r.repo.join(".git/hooks/pre-push"))
+            .unwrap()
+            .matches("# hushrun:start")
+            .count(),
+        1
+    );
+}
+
+// covers: C-15 (ADR 0067: at a terminal with no login, init asks where results go)
+#[cfg(unix)]
+#[test]
+fn at_a_terminal_without_a_login_init_asks_where_results_go() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop();
+    // `l` keeps them here; then the plan's own question.
+    let (code, said) = terminal::answering(r.hushrun(&fake), &["init", "--no-run"], "l\ny\n");
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(
+            "Share results with CI and teammates (signs in), or keep them on this machine only? [S/l]"
+        ),
+        "{said}"
+    );
+    assert!(said.contains(LOCAL_PLAN), "{said}");
+    assert!(!r.read("package.json").contains("backend"));
+    assert_eq!(fake.requests(), []);
+
+    // Signed in already, it asks nothing, and shares.
+    let r = shop();
+    r.sign_in(&fake);
+    let (code, said) = terminal::answering(r.hushrun(&fake), &["init", "--no-run"], "y\n");
+    assert_eq!(code, 0, "{said}");
+    assert!(!said.contains("[S/l]"), "{said}");
+    assert!(r.read("package.json").contains("backend"), "{said}");
+}
+
+#[cfg(unix)]
+mod terminal {
+    use std::io::{Read as _, Write as _};
+    use std::process::Command;
+
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+
+    /// Runs `cmd` with `args` on a terminal of its own, stdin, stdout and stderr, typing `input`
+    /// there, and returns its exit code and what it wrote.
+    pub fn answering(mut cmd: Command, args: &[&str], input: &str) -> (i32, String) {
+        let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).expect("openpt");
+        grantpt(&controller).expect("grantpt");
+        unlockpt(&controller).expect("unlockpt");
+        let name = ptsname(&controller, Vec::new()).expect("ptsname");
+        // CLOEXEC: no other test's command may go on holding this terminal.
+        let open = || {
+            std::fs::File::from(
+                rustix::fs::open(
+                    name.as_c_str(),
+                    OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .expect("the terminal"),
+            )
+        };
+        cmd.args(args).stdin(open()).stdout(open()).stderr(open());
+        let mut child = cmd.spawn().expect("hushrun");
+        // Only hushrun holds the terminal now, so reading it ends when hushrun exits.
+        drop(cmd);
+        let mut controller = std::fs::File::from(controller);
+        controller.write_all(input.as_bytes()).expect("typing");
+        let reader = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let mut buf = [0; 4096];
+            // Once nothing holds the terminal, Linux answers EIO, and macOS the end.
+            while let Ok(n @ 1..) = controller.read(&mut buf) {
+                text.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8_lossy(&text).replace("\r\n", "\n")
+        });
+        let status = child.wait().expect("hushrun");
+        (status.code().unwrap_or(-1), reader.join().expect("reader"))
+    }
+}
+
 // covers: C-24
 #[cfg(unix)]
 #[test]
