@@ -16,10 +16,12 @@
 //   .claude-plugin/plugin.json       Claude Code, and Anthropic's directory
 //   .claude-plugin/marketplace.json  Claude Code, Copilot CLI, Factory, Devin, Junie
 //   .agents/plugins/marketplace.json Codex, which asks for policy and category
+//   .cursor-plugin/plugin.json       Cursor's marketplace, whose plugins have their manifest here
 //   gemini-extension.json            Gemini CLI, and its gallery
 //   assets/icon.png                  Anthropic's directory: the listing's icon, read once, at the
 //                                    first submission (hushrun's mark, from the landing's logo)
-//   README.md, LICENSE               people, and the directories' checks
+//   README.md, LICENSE               people, and the directories' checks: Kiro's asks the README
+//                                    for a privacy policy and a support contact
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -41,6 +43,9 @@ const DESCRIPTION =
 const AUTHOR = { name: 'hushrun', email: 'support@hushrun.com', url: 'https://hushrun.com' };
 const HOMEPAGE = 'https://hushrun.com/docs/for-agents';
 const SOURCE = 'https://github.com/hushrun/hushrun';
+const SUPPORT = `${SOURCE}/issues`;
+const PRIVACY = 'https://hushrun.com/privacy';
+const TERMS = 'https://hushrun.com/terms';
 const LICENSE = 'MIT';
 const KEYWORDS = ['ci', 'testing', 'pre-push', 'github-actions', 'gitlab-ci', 'coding-agents', 'skills'];
 
@@ -102,9 +107,9 @@ export function files({ version, repository = REPOSITORY, root = ROOT }) {
       displayName: 'hushrun',
       icon: './assets/icon.png',
       documentationUrl: HOMEPAGE,
-      supportUrl: `${SOURCE}/issues`,
-      privacyPolicyUrl: 'https://hushrun.com/privacy',
-      termsOfServiceUrl: 'https://hushrun.com/terms',
+      supportUrl: SUPPORT,
+      privacyPolicyUrl: PRIVACY,
+      termsOfServiceUrl: TERMS,
     }),
     '.claude-plugin/marketplace.json': json({
       name: NAME,
@@ -123,6 +128,18 @@ export function files({ version, repository = REPOSITORY, root = ROOT }) {
           category: 'Developer Tools',
         },
       ],
+    }),
+    // Cursor's own format: its author takes a name and an email, and its logo a path.
+    '.cursor-plugin/plugin.json': json({
+      name: NAME,
+      version,
+      description: DESCRIPTION,
+      author: { name: AUTHOR.name, email: AUTHOR.email },
+      homepage: HOMEPAGE,
+      repository: `https://github.com/${repository}`,
+      license: LICENSE,
+      keywords: KEYWORDS,
+      logo: 'assets/icon.png',
     }),
     'gemini-extension.json': json({ name: NAME, version, description: DESCRIPTION }),
     'assets/icon.png': icon,
@@ -154,6 +171,16 @@ in \`recipes/agents/\`. Don't edit it here: a change belongs there.
 | GitHub CLI | \`gh skill install ${repository} hushrun\` |
 | One repository | \`npx hushrun init\` writes the skill into it, for every clone |
 | Your home, from hushrun | \`hushrun skill update --global\` |
+
+## Support and privacy
+
+- Support: [${SUPPORT}](${SUPPORT}), or ${AUTHOR.email}
+- Privacy policy: [${PRIVACY}](${PRIVACY})
+- Terms: [${TERMS}](${TERMS})
+
+The skill sends nothing itself. The hushrun CLI it runs hashes files on the machine and never sends
+them; once a person signs in, it records check results with hushrun's service, and about once a day
+it asks GitHub whether a newer release is out (\`HUSHRUN_NO_UPDATE_CHECK=1\` turns that off).
 
 ## Updates
 

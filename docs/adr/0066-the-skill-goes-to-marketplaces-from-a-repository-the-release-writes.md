@@ -33,7 +33,9 @@ copy should still change only with a release.
    fields Anthropic's directory reads and the icon at `assets/icon.png`;
    `.claude-plugin/marketplace.json`, which Claude Code, Copilot CLI, Factory, Devin and Junie
    read; `.agents/plugins/marketplace.json`, with the policy and category Codex asks for;
-   `gemini-extension.json`; a README that says how to install and update it; and `LICENSE`.
+   `.cursor-plugin/plugin.json`, the manifest of Cursor's marketplace plugins;
+   `gemini-extension.json`; a README that says how to install and update it, and gives the
+   privacy policy and a support contact, which Kiro's registry asks of it; and `LICENSE`.
    Every manifest says the CLI's version, from `Cargo.toml`, and the marketplaces' entries none,
    so that Claude Code reads one.
 
@@ -55,6 +57,10 @@ copy should still change only with a release.
 5. **Listings are submitted by a person.** Anthropic's directory, Cursor's marketplace,
    awesome-copilot, ClawHub, Tessl and Kiro each take one submission from an account, and follow
    the repository after it. skills.sh lists a skill after its first install.
+
+6. **`recipes/` ships.** `scripts/release.sh` counts a `fix` or `feat` under `recipes/` toward the
+   next release, as under `crates/`: the binary embeds the skill, the guide and the `AGENTS.md`
+   block, and the bundle is built from them, so a change there reaches nobody until a release.
 
 ## Consequences
 

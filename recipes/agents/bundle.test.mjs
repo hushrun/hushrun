@@ -56,7 +56,12 @@ test('the bundle carries the skill as hushrun wrote it, and every manifest', (t)
 test("every manifest says the CLI's version, and the marketplaces none of their own", () => {
   const bundled = files({ version: VERSION });
   const parse = (relative) => JSON.parse(bundled[relative]);
-  for (const relative of ['plugin.json', '.claude-plugin/plugin.json', 'gemini-extension.json']) {
+  for (const relative of [
+    'plugin.json',
+    '.claude-plugin/plugin.json',
+    '.cursor-plugin/plugin.json',
+    'gemini-extension.json',
+  ]) {
     assert.equal(parse(relative).version, VERSION, relative);
     assert.equal(parse(relative).name, NAME, relative);
   }
@@ -105,6 +110,35 @@ test("Claude's manifest passes what Anthropic's directory checks first", () => {
     if (typeof text !== 'string') continue;
     assert.doesNotMatch(text, /\b(hra|hru)_[A-Za-z0-9]{8,}|hushrun_agent_[A-Za-z0-9]{8,}/, relative);
   }
+});
+
+test("Cursor's manifest has only the fields its format names, and a logo the bundle holds", () => {
+  const bundled = files({ version: VERSION });
+  const manifest = JSON.parse(bundled['.cursor-plugin/plugin.json']);
+  const known = ['name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords', 'logo'];
+  for (const key of Object.keys(manifest)) {
+    assert.ok(known.includes(key), key);
+  }
+  // Lowercase, kebab-case, alphanumerics, hyphens and periods.
+  assert.match(manifest.name, /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
+  assert.deepEqual(Object.keys(manifest.author).sort(), ['email', 'name']);
+  assert.ok(bundled[manifest.logo], manifest.logo);
+  // Skills come from skills/, Cursor's default, so the manifest names none.
+  assert.equal(manifest.skills, undefined);
+});
+
+test("what Kiro's registry asks of the repository", () => {
+  const bundled = files({ version: VERSION });
+  const manifest = JSON.parse(bundled['plugin.json']);
+  for (const key of ['$schema', 'name', 'version', 'description', 'license', 'keywords']) {
+    assert.ok(manifest[key], key);
+  }
+  assert.ok(manifest.author.name);
+  assert.ok(manifest.keywords.length > 0);
+  // The README links a privacy policy and gives a support contact.
+  const readme = bundled['README.md'];
+  assert.match(readme, /Privacy policy: \[https:\/\/hushrun\.com\/privacy\]/);
+  assert.match(readme, /Support: .*https:\/\/github\.com\/hushrun\/hushrun\/issues.*support@hushrun\.com/);
 });
 
 test('the README says how to install and update it, from where it is published', () => {

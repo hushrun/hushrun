@@ -13,8 +13,10 @@
 # neither push starts a workflow: for a release a maintainer built on their own machine.
 set -euo pipefail
 
-# What ships in a release: the binary, its packages and its container image.
-SHIPPED=(crates Cargo.lock npm deploy)
+# What ships in a release: the binary, its packages and its container image; and recipes/, which the
+# binary embeds (the skill, the guide, the AGENTS.md block, GitLab's install script) and the skill's
+# marketplace bundle is built from (ADR 0066).
+SHIPPED=(crates Cargo.lock npm deploy recipes)
 
 type_re='^[a-z]+(\([^)]*\))?'
 

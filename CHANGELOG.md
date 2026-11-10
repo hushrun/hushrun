@@ -6,6 +6,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- The skill's marketplace bundle has Cursor's manifest, `.cursor-plugin/plugin.json`, and its
+  README gives the privacy policy and a support contact, which Kiro's registry asks for.
+- A fix or feature under `recipes/` now counts toward the next release, since the binary embeds
+  the skill and the guide, and the marketplace bundle is built from them.
+
 ## [0.11.0] - 2026-11-09
 
 Coding agents learn what is out of date ([ADR 0065](docs/adr/0065-agents-learn-what-is-out-of-date.md)):
