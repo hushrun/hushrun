@@ -82,8 +82,8 @@
  {
   "RuleID": "generic-api-key",
   "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
-  "StartLine": 644,
-  "EndLine": 644,
+  "StartLine": 646,
+  "EndLine": 646,
   "StartColumn": 10,
   "EndColumn": 81,
   "Match": "key = \"REDACTED\"",
@@ -97,7 +97,7 @@
   "Date": "",
   "Message": "",
   "Tags": [],
-  "Fingerprint": "crates/hushrun/tests/wrap.rs:generic-api-key:644"
+  "Fingerprint": "crates/hushrun/tests/wrap.rs:generic-api-key:646"
  },
  {
   "RuleID": "jwt",
