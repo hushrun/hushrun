@@ -10,7 +10,8 @@ name: CI
 # advisories change by the day), public-good Sigstore (a service and its trust root), fuzzing
 # (random inputs) and the secret scanners (their rules change). Each job that runs through hushrun
 # has one variant, since a job with several never skips (C-14), and a check counts only from Linux
-# on amd64 unless hushrun.yaml says otherwise (C-25): the macOS job runs everything, every time.
+# on amd64 unless hushrun.yaml says otherwise (C-25): the macOS job's checks have names of their own,
+# which count only from macOS.
 #
 # Pull requests run with `pull_request`, never `pull_request_target`: a fork's code gets a read-only
 # token and no secrets. This repository has no secrets.
@@ -127,11 +128,16 @@ jobs:
       - run: node --test recipes/agents/*.test.mjs
         shell: bash
 
-  # The same checks on macOS, every time: a run there records nothing (hushrun.yaml's counts_from),
-  # so nothing on Linux skips on it, and the other way round.
+  # The same checks on macOS. clippy and the tests run as `clippy-macos`, `test-macos` and
+  # `doctest-macos`, whose rule in hushrun.yaml is `os: macos`: a pass here skips this job's next
+  # run on the same code, and nothing on Linux skips on it, nor the other way round. The Python
+  # references and the npm tests take seconds, and run every time.
   macos:
     name: clippy, test, references, npm (macOS)
     runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,9 +147,10 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo nextest run --workspace --locked --no-tests=pass
-      - run: cargo test --workspace --doc --locked
+      - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
+      - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
+      - run: hushrun run doctest-macos -- cargo test --workspace --doc --locked
       - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
       - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
       - run: python3 -I tools/refdsse.py selftest
