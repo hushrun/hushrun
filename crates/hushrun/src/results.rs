@@ -33,7 +33,7 @@
 //! or are off: outside CI, a backend the repository's files name that nothing here has a
 //! credential for at all is this machine's directory, until someone signs in; and in CI, where a
 //! runner's directory is shared with no one and a cache of it could be forged, the directory is
-//! off.
+//! off. This machine's directory forgets a run 30 days after it ([`Backend::sweep`]).
 //!
 //! \[ADR 0052\] In GitHub Actions with none of these, as in a pull request from a fork, which
 //! GitHub gives no ID token, a lookup asks as the repository's CI, `?as=ci&repository=` of
@@ -103,6 +103,14 @@ const PREFIX: &str = "results/v0";
 const SKIP_PREFIX: &str = "skips/v0";
 /// How many of a key's newest results a lookup reads, looking for one it can parse.
 const LOOKUP_LIMIT: usize = 10;
+/// A day, in milliseconds.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// \[ADR 0067\] How long this machine keeps a result or a skip, by its ULID's time.
+const KEPT_FOR_MS: i64 = 30 * DAY_MS;
+/// \[ADR 0067\] How often this machine sweeps its directory at most, and the file, in the directory,
+/// that says when it last began to: an RFC 3339 time.
+const SWEEP_EVERY_MS: i64 = DAY_MS;
+const SWEPT: &str = "swept";
 /// The most a server's requests may take in one run: past it, the command just runs.
 const SERVER_BUDGET: Duration = Duration::from_secs(10);
 /// How much of a mark `hushrun ready` reads.
@@ -754,6 +762,15 @@ impl Backend {
         })
     }
 
+    /// \[ADR 0067\] Forgets what this machine's directory holds of runs that finished 30 days or
+    /// more before `now`, the command's clock, at most once a day. It never fails, and a server
+    /// keeps its own: what goes wrong is only logged.
+    pub fn sweep(&self, now: Time) {
+        if let Store::File(_, dir, _) = &self.store {
+            sweep(dir, now);
+        }
+    }
+
     /// \[ADR 0067\] Why results stay on this machine, when they do.
     pub fn local(&self) -> Option<&Local> {
         match &self.store {
@@ -1340,6 +1357,67 @@ impl Server {
         *self.refusal.borrow_mut() = kind;
         refusal(&self.base, status, body, what)
     }
+}
+
+/// \[ADR 0067\] [`Backend::sweep`] of the directory `dir`. Its stamp, [`SWEPT`], is written whole
+/// before anything goes, so that runs at once mostly leave the sweep to one; two that both sweep
+/// delete the same files, and a sweep stopped halfway is finished by the next. A file goes only
+/// when its name is a ULID older than the cutoff, which no new run writes, so no sweep takes a
+/// result newer than its own cutoff; anything else in the directory stays. A key directory left
+/// empty goes too, and a run that wanted it makes it again (L-3). A clock behind the stamp's
+/// sweeps by its own time.
+fn sweep(dir: &Path, now: Time) {
+    let stamp = dir.join(SWEPT);
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|text| Time::parse(text.trim()).ok());
+    if last.is_some_and(|last| (0..SWEEP_EVERY_MS).contains(&now.millis_since(last))) {
+        return;
+    }
+    // Without a stamp, every run would sweep: none does.
+    if let Err(err) = crate::cmd::setup::write(&stamp, &format!("{now}\n")) {
+        tracing::debug!("{}: not swept: {err:#}", stamp.display());
+        return;
+    }
+    let cutoff = now.millis().saturating_sub(KEPT_FOR_MS);
+    let mut gone = 0usize;
+    for prefix in [PREFIX, SKIP_PREFIX] {
+        let top = dir.join(prefix);
+        let Ok(keys) = std::fs::read_dir(&top) else {
+            continue;
+        };
+        for key in keys.flatten() {
+            let key = key.path();
+            if !key.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&key) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let name = file.file_name();
+                let old = name
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".json"))
+                    .and_then(hushrun_ledger::ulid_millis)
+                    .is_some_and(|finished| finished < cutoff);
+                if !old {
+                    continue;
+                }
+                match std::fs::remove_file(file.path()) {
+                    Ok(()) => gone += 1,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => tracing::debug!("{}: {err}", file.path().display()),
+                }
+            }
+            // Only an empty one goes: one a run has just written to stays.
+            let _ = std::fs::remove_dir(&key);
+        }
+    }
+    tracing::debug!(
+        "{}: swept {gone} results from before {cutoff}",
+        dir.display()
+    );
 }
 
 /// `text` for a URL's query.

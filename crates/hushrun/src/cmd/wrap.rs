@@ -157,6 +157,10 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     // A request without a token was refused for want of one, or \[ADR 0052\] a run with none only
     // read: once and last, where a person reads it. At a terminal, signing in fixes it; a script
     // or a CI job has no one to sign in, so it gets the server's reason (C-11, C-14).
+    // \[ADR 0067\] This machine's directory forgets what is 30 days old, once the run is over.
+    if let Some(backend) = backend.as_ref() {
+        backend.sweep(now(global));
+    }
     // \[ADR 0067\] The repository's backend, which nobody here signed in to: this machine kept
     // the result, and the person can share it.
     if let Some(org) = backend

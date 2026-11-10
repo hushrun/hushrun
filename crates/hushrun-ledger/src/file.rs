@@ -68,16 +68,22 @@ impl Ledger for FileLedger {
     fn append(&self, key: &str, bytes: &[u8]) -> Result<(), LedgerError> {
         let path = self.path(key)?;
         let dir = path.parent().expect("keys have a parent");
-        fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
         let temp = dir.join(temp_name());
-        let written = (|| -> io::Result<()> {
+        let write = || -> io::Result<()> {
+            fs::create_dir_all(dir)?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)?;
             file.write_all(bytes)?;
             file.sync_all()
-        })();
+        };
+        // A directory left empty may be removed as it is made, as `hushrun run`'s sweep of its
+        // local results removes one: once more, it is made again.
+        let written = match write() {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => write(),
+            other => other,
+        };
         if let Err(err) = written {
             let _ = fs::remove_file(&temp);
             return Err(io_error(&temp, err));
