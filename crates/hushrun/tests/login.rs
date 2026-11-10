@@ -1584,6 +1584,36 @@ fn hushrun_token_goes_only_to_the_backend_hushrun_backend_names() {
     assert_eq!(fake.recorded_at("acme").len(), 1);
 }
 
+// covers: C-19 (ADR 0067: signed out of the backend the repository names, usage says whose plan
+// counts results once someone signs in)
+#[test]
+fn signed_out_usage_says_whose_plan_counts_results_once_signed_in() {
+    let (server, fake) = Fake::start(false);
+    let backend = format!("{}/o/acme", server.url());
+    let r = Repo::new();
+    r.name_backend(&backend);
+    let mut cmd = r.hushrun();
+    cmd.args(["repository", "usage"]);
+    let out = cmd.output().expect("usage");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains(
+            "usage      results stay on this machine, so nothing is metered: hushrun login shares them with acme, whose plan then counts them\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        fake.requests(),
+        0,
+        "a signed-out usage asks the server nothing"
+    );
+}
+
 // covers: C-11, C-14 (ADR 0067: a repository's backend that nothing here signs in to leaves
 // results on this machine, and says how to share them)
 #[test]

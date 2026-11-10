@@ -179,14 +179,20 @@ fn text(report: &Report, now: i64) -> String {
         return out;
     };
     let (base, named_by) = match place {
-        Place::Directory { dir, .. } => {
+        Place::Directory { dir, local } => {
             line(
                 "backend",
                 format!("this machine only, in {}", dir.display()),
             );
             line(
                 "usage",
-                "results stay on this machine, so nothing is metered".to_string(),
+                match local.org() {
+                    // \[ADR 0067\] The repository names an org, and nobody here is signed in to it.
+                    Some(org) => format!(
+                        "results stay on this machine, so nothing is metered: hushrun login shares them with {org}, whose plan then counts them"
+                    ),
+                    None => "results stay on this machine, so nothing is metered".to_string(),
+                },
             );
             return out;
         }
