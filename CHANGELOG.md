@@ -6,6 +6,39 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Results stay on this machine until someone shares them ([ADR 0067](docs/adr/0067-results-stay-on-this-machine-until-someone-shares-them.md)):
+hushrun works with no account, and `ready` and the pre-push hook go by what passed here.
+
+### Added
+
+- Contract: **`hushrun init --local`** sets a repository up for this machine only: it wraps the
+  checks, writes the agent skill and AGENTS.md, installs the hook and the package, and signs in to
+  nothing, names no backend, gives CI's jobs no ID token and makes no machine key. `--dry-run`
+  shows that plan. A plain `hushrun init` later signs in and adds what sharing needs, wrapping
+  nothing twice.
+- Contract: **`hushrun.ready/v2` has `results`**, `shared`, `local` or `off`, and
+  **`hushrun.whoami/v1` has `signed_out`**, the backend a repository names that nobody here is
+  signed in to. Both are optional.
+- At a terminal with no login, `hushrun init` asks first whether to share results with CI and
+  teammates, which signs in, or keep them on this machine. `--yes`, `--dry-run` and `--org` share,
+  as before.
+- `hushrun run` forgets this machine's results and skips 30 days after their run, sweeping its
+  cache directory at most once a day.
+
+### Changed
+
+- Contract: **in CI, results never stay on the runner.** With no server named, results are off,
+  and `hushrun run` says so in one line: a cached directory of unsigned results shared between
+  jobs could be forged. A repository whose files name a backend is unaffected.
+- **A repository's backend with no credential here keeps results on this machine.** With no
+  login, no token and no ID token, outside CI, a run asks the server nothing, skips what passed
+  here, and still says `sign in to share results with <org>: npx hushrun login` at a terminal.
+- `hushrun ready` and the pre-push hook work with results on this machine: each check passed here,
+  failed here or has no pass here yet, an agent's push waits for them, and a note says that CI
+  still runs every check and what shares results with it.
+- `hushrun repository stats` counts this machine's results where they stay here and no repository
+  URL is set, instead of failing with `no repository URL`.
+
 ## [0.11.1] - 2026-11-10
 
 ### Fixed

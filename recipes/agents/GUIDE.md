@@ -19,6 +19,12 @@ what is true on this machine.
 `ready` says the code is ready when nothing is `missing`, so a `ci` check hasn't run. To know that
 every check passed, use `hushrun ready --strict`, which exits 0 only then.
 
+Where results stay on this machine, `passed` means it passed here, and a run here skips it, but CI
+sees none of it and runs every check. That is after `hushrun init --local`, or where nobody here
+is signed in to the backend the repository names. `ready` then says `passed here`, `failed here` or
+`no pass here yet`, `--format json` has `"results": "local"`, and a note says what shares the
+results with CI. The hook still refuses a coding agent's push until the checks pass here.
+
 ## The pre-push hook
 
 The hook never runs checks itself, so a long check can't time out your push. It refuses a coding
@@ -45,10 +51,17 @@ them.
   Don't edit `counts_from`, and don't change the command, to get past it: it says where this
   repository's checks count. Tell the person what the line says.
 - `hushrun: installed the pre-push hook in …`: this clone had none. There is nothing to do.
-- `hushrun: sign in to share results with acme: npx hushrun login`: nobody has signed in here. Checks
-  still run. Tell the person, who signs in once.
-- `hushrun: results aren't shared with acme: …`: no credential reached the backend, as in a sandbox
-  without `HUSHRUN_AGENT`. Checks still run. Tell the person, and don't try to sign in.
+- `hushrun: sign in to share results with acme: npx hushrun login`: nobody has signed in here, so
+  results stay on this machine: a check skips here, and CI runs it. Tell the person, who signs in
+  once.
+- `hushrun: results aren't shared with acme: nobody is signed in to it here, so they stay on this
+  machine`: the same, without a terminal, as in a sandbox without `HUSHRUN_AGENT`. Tell the person,
+  and don't try to sign in.
+- `hushrun: results aren't shared with acme: …`, with another reason: no credential the backend
+  takes reached it. Checks still run. Tell the person, and don't try to sign in.
+- `hushrun: test running without skipping: results are off: in CI, nothing names a backend, …`:
+  CI keeps no results on its runners, so this job reruns every check until the repository names a
+  backend. Tell the person, who runs `hushrun init`.
 - `… not recorded: …`: the check ran, and its result isn't shared. `hushrun ready` stops asking for
   it, and CI runs it. Tell the person what the line says.
 - `hushrun: hushrun 0.12.0 is available, and this is 0.11.0: …`: a newer release is out. Once the
@@ -75,6 +88,10 @@ can't skip. Where the `test` script wraps it, run `bun run test`, the way `hushr
 `npx hushrun init --yes` applies init's changes without asking. Without `--yes`, and without a
 terminal, init prints its plan and exits with status 2. `npx hushrun init --dry-run` shows the plan
 and changes nothing.
+
+When the person wants no account, or only this machine, `npx hushrun init --local --yes` wraps the
+checks and sets agents up with no sign-in and no backend: checks skip here, and CI runs every check
+until someone runs `hushrun init` without `--local`, which keeps what is there and adds the rest.
 
 If the person belongs to several organizations and none is named like the repository's owner,
 init lists them, changes nothing and exits with status 2. Ask which one, then run
