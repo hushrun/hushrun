@@ -28,6 +28,8 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_RUN_ATTEMPT",
     "HUSHRUN_RUN_URL",
     "HUSHRUN_PLAN_JSON",
+    // A run inside another says less: these tests may run inside `hushrun run`, as CI runs them.
+    "HUSHRUN_INSIDE_RUN",
     "npm_lifecycle_event",
 ];
 
@@ -703,11 +705,16 @@ fn in_ci_results_never_stay_on_the_runner() {
         );
     }
     assert!(!r.root.join("cache/results/results").exists());
-    // `-q` silences it, as it does every line of hushrun's.
+    // `-q` silences it, as it does every line of hushrun's, and a run inside another doesn't
+    // repeat what the outer one said.
     let mut ci = r.hushrun();
     ci.env("CI", "true");
     let quiet = ran(ci, &["-q", "run", "unit", "--", "git", "--version"]);
     assert!(quiet.ran() && quiet.stderr.is_empty(), "{}", quiet.stderr);
+    let mut inner = r.hushrun();
+    inner.env("CI", "true").env("HUSHRUN_INSIDE_RUN", "1");
+    let inner = ran(inner, &["run", "unit", "--", "git", "--version"]);
+    assert!(inner.ran() && inner.stderr.is_empty(), "{}", inner.stderr);
     // Outside CI, the same machine keeps its results.
     assert!(r.version().ran());
     assert!(!r.version().ran());
