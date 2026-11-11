@@ -165,12 +165,24 @@ pub struct Gathered {
     pub outside: bool,
 }
 
-/// How far back of the compile's start a file date still counts as "during" it. Linux stamps
-/// files from a clock that may lag the real one by a tick; macOS stamps them exactly.
+/// How far back of the compile's start a file date still counts as "during" it when the file
+/// system's own clock couldn't be read ([`floor`]). Linux stamps files from a clock that moves
+/// once a tick (1 to 10 ms) and lags the real one; macOS stamps them exactly.
 #[cfg(target_os = "linux")]
 const CLOCK_SLACK: Duration = Duration::from_millis(20);
 #[cfg(not(target_os = "linux"))]
 const CLOCK_SLACK: Duration = Duration::ZERO;
+
+/// The compile's start as file dates count it (B-11): the date the file system gave a file
+/// created just before (`probe`), never after `now`; without one, `now` less the slack. A file
+/// written after the probe is dated at or after it, since both dates come from one clock; one
+/// written in an earlier tick is dated before it, even a moment before the compile.
+pub fn floor(probe: Option<SystemTime>, now: SystemTime) -> SystemTime {
+    match probe {
+        Some(probe) => probe.min(now),
+        None => now.checked_sub(CLOCK_SLACK).unwrap_or(now),
+    }
+}
 
 fn ns(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
@@ -179,9 +191,10 @@ fn ns(time: SystemTime) -> i64 {
     }
 }
 
-/// Whether a stat carries a date at or after `start` (B-11).
+/// Whether a stat carries a date at or after `start` (B-11), which is a [`floor`]: the
+/// compile's start as file dates count it, not the real clock's.
 pub fn dated_after(stat: &Stat, start: SystemTime) -> bool {
-    let floor = ns(start.checked_sub(CLOCK_SLACK).unwrap_or(start));
+    let floor = ns(start);
     stat.mtime_ns >= floor || stat.ctime_ns >= floor
 }
 

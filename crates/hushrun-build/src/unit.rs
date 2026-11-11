@@ -198,7 +198,7 @@ pub struct Seen {
     pub outputs: Vec<PathBuf>,
     /// What to watch.
     pub items: Vec<Item>,
-    /// When the compile or the reuse began.
+    /// When the compile or the reuse began, as file dates count it: an [`inputs::floor`].
     pub since: SystemTime,
 }
 
@@ -923,7 +923,8 @@ mod tests {
             cwd: dir.to_path_buf(),
             outputs: vec![dir.join("out/libapp-1.rlib")],
             items,
-            since: SystemTime::now(),
+            // As the wrapper hands it: a floor, here without the file system's clock.
+            since: inputs::floor(None, SystemTime::now()),
         }
     }
 
@@ -1025,7 +1026,7 @@ mod tests {
         // digest, so there is none, and the old one is gone too.
         assert!(settle(&u.out, "app-1", Some(&u.seen())));
         let mut late = u.seen();
-        late.since = SystemTime::now();
+        late.since = inputs::floor(None, SystemTime::now());
         std::thread::sleep(Duration::from_millis(20));
         fs::write(u.src.join("lib.rs"), b"pub fn g() {}\n").unwrap();
         assert!(!settle(&u.out, "app-1", Some(&late)));

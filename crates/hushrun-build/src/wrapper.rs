@@ -72,6 +72,13 @@ pub trait Ports {
     fn cwd(&self) -> io::Result<PathBuf>;
     /// The clock.
     fn now(&self) -> SystemTime;
+    /// The date the file system gives a file created in `dir` now, where file dates come from
+    /// another clock than [`Ports::now`] (Linux's moves once a tick and lags it), so that B-11
+    /// compares dates with dates. `None` where dates are exact, or the file can't be made.
+    fn file_clock(&self, dir: &Path) -> Option<SystemTime> {
+        let _ = dir;
+        None
+    }
     /// This process's id, for temporary names.
     fn pid(&self) -> u32;
     /// What `<rustc> -vV` prints (B-17).
@@ -146,6 +153,10 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         unit::forget_for_args(args, Some(&cwd));
         return ports.exec(rustc, args);
     };
+    let floor = inputs::floor(
+        ports.file_clock(&Path::new(invocation.cwd()).join(invocation.out_dir())),
+        start,
+    );
     Call {
         ports,
         err,
@@ -153,6 +164,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         invocation: &invocation,
         env: &env,
         start,
+        floor,
         link_extra: Vec::new(),
         sysroot: None,
         bundle: false,
@@ -218,6 +230,8 @@ struct Call<'a> {
     invocation: &'a Invocation,
     env: &'a Env,
     start: SystemTime,
+    /// The call's start as file dates count it (B-11), for the reuse's unit record.
+    floor: SystemTime,
     /// What a linked output's compile gets besides the remaps (B-9, B-18).
     link_extra: Vec<OsString>,
     /// The compiler's sysroot (B-17), where a link's `-B` folders must lie (B-18).
@@ -699,7 +713,7 @@ impl Call<'_> {
                 .map(|o| out_dir.join(&o.name))
                 .collect();
             let digests = unit::digests(cx, &found.observed);
-            self.record_unit(self.start, outputs, &digests);
+            self.record_unit(self.floor, outputs, &digests);
         }
         let _ = self.err.write_all(&restored.messages);
         let _ = self.err.flush();
@@ -745,6 +759,8 @@ impl Call<'_> {
             && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
                 .is_err();
         self.forget_unit();
+        // What the compile reads is dated against this, a date of the file system's (B-11).
+        let floor = inputs::floor(self.ports.file_clock(&self.out_dir()), self.ports.now());
         let compile_start = self.ports.now();
         let mut recorder = Recorder::new(&mut *self.err, inv.form().clone());
         let ran = self.ports.compile(
@@ -808,7 +824,7 @@ impl Call<'_> {
                 roots,
                 &common,
                 &recorded,
-                compile_start,
+                floor,
                 store,
                 &mut facts,
                 (&ran.stdout, &before),
@@ -849,7 +865,7 @@ impl Call<'_> {
                         .map(|o| o.path.clone())
                         .collect();
                     let digests = unit::digests(cx, &produced.observed);
-                    self.record_unit(compile_start, outputs, &digests);
+                    self.record_unit(floor, outputs, &digests);
                 }
                 if trusted && keep == Keep::Store {
                     let min_free = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
@@ -891,7 +907,7 @@ impl Call<'_> {
         roots: &Roots,
         common: &Common,
         recorded: &Recorded,
-        compile_start: SystemTime,
+        floor: SystemTime,
         store: &Store,
         facts: &mut Facts,
         (stdout, before): (&[u8], &BTreeMap<String, Stat>),
@@ -902,14 +918,14 @@ impl Call<'_> {
         let text = std::fs::read_to_string(&dep_path).map_err(|_| NotStored::DepInfo)?;
         let info = depinfo::parse(&text).map_err(|_| NotStored::DepInfo)?;
         info.check().map_err(|_| NotStored::DepInfo)?;
-        let gathered = cx.after(&info, common, compile_start)?;
+        let gathered = cx.after(&info, common, floor)?;
         facts.changed = gathered.changed;
         // What the lookup hashed must still be there as it was (B-11): otherwise the block
         // found describes other inputs and no comparison with it is fair.
         if let Some(found) = found {
             facts.changed |= inputs::moved(
                 &found.watched,
-                compile_start,
+                floor,
                 &mut std::collections::BTreeSet::new(),
             );
         }
@@ -917,7 +933,7 @@ impl Call<'_> {
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
         if inv.class() != Class::Library {
-            let linked = self.link(cx, stdout, compile_start)?;
+            let linked = self.link(cx, stdout, floor)?;
             observed.link = Some(linked.link);
             outside |= linked.outside;
             facts.changed |= linked.changed;
@@ -1704,6 +1720,11 @@ impl Ports for Real {
         SystemTime::now()
     }
 
+    #[cfg(target_os = "linux")]
+    fn file_clock(&self, dir: &Path) -> Option<SystemTime> {
+        file_clock(dir, std::process::id())
+    }
+
     fn pid(&self) -> u32 {
         std::process::id()
     }
@@ -1790,9 +1811,48 @@ impl Ports for Real {
     }
 }
 
+/// Creates an empty file in `dir` under a name of this process's, reads the date the file system
+/// gave it and removes it. Cost: a create, a stat and an unlink.
+#[cfg(any(target_os = "linux", test))]
+fn file_clock(dir: &Path, pid: u32) -> Option<SystemTime> {
+    let probe = dir.join(format!(".hushrun-clock-{pid}"));
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|file| file.metadata())
+        .and_then(|meta| meta.modified());
+    // Removed whether or not its date could be read; a name this process made, nobody else's.
+    if !matches!(&made, Err(err) if err.kind() == io::ErrorKind::AlreadyExists) {
+        let _ = std::fs::remove_file(&probe);
+    }
+    made.ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-11
+    #[test]
+    fn a_file_written_just_before_the_compile_is_not_taken_for_one_written_during_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let stat = |p: &Path| Stat::of(&std::fs::metadata(p).unwrap());
+        let before = dir.path().join("generated.rs");
+        std::fs::write(&before, b"").unwrap();
+        // A build script's output, a few milliseconds before cargo starts the compile that
+        // reads it: more than a tick of Linux's file clock, less than its fixed slack.
+        std::thread::sleep(Duration::from_millis(5));
+        let floor = inputs::floor(file_clock(dir.path(), 1), SystemTime::now());
+        assert!(!inputs::dated_after(&stat(&before), floor));
+        // Anything written after it is dated at or after it.
+        let during = dir.path().join("during.rs");
+        std::fs::write(&during, b"").unwrap();
+        assert!(inputs::dated_after(&stat(&during), floor));
+        // The probe leaves nothing behind.
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 2);
+    }
 
     // covers: B-2
     #[test]

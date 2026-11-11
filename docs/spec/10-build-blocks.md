@@ -174,7 +174,12 @@ changed and none carries a date at or after the compile's start, and no symlink 
 one (each folder of its path, the path itself, and what each link points at, up to 40 links)
 carries such a date either: a link retargeted during the compile to an older file is new. The
 files a hint hashed for the lookup must be as they were then, and the files a link read and the
-native files (B-6) are checked the same way. Otherwise the outcome is `built, not stored`.
+native files (B-6) are checked the same way. Otherwise the outcome is `built, not stored`. The
+start is taken as file dates count it: on Linux, which dates files from a clock that moves once a
+tick and lags the real one, it is the date the file system gives a file the wrapper creates in
+the output folder just before the compile (for a reuse, as the call begins), so that a file
+written a moment before the compile, such as a build script's output, is not taken for one
+written during it; where that file can't be made, it is 20 ms before the real start.
 
 **B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
 a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
