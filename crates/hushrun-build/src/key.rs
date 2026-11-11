@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v3";
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v4";
 
 /// The schema of the second key.
 pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v4";
@@ -56,6 +56,11 @@ pub struct Asked {
     pub args: Vec<String>,
     /// The keyed variables that are set. An unset one is absent, which differs from empty.
     pub env: BTreeMap<String, String>,
+    /// What the wrapper adds to a linked output's compile besides the remaps (B-9), with roots
+    /// as placeholders: `--print=link-args`, and on Apple targets the install name, the debug-map
+    /// prefix and a program's bundle flags. Empty for a library, and then left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<String>,
 }
 
 impl Asked {
@@ -547,6 +552,7 @@ mod tests {
                 ("CARGO_PKG_NAME".into(), "app".into()),
                 ("CARGO_MANIFEST_DIR".into(), "{hushrun:package}".into()),
             ]),
+            added: Vec::new(),
         }
     }
 
@@ -635,11 +641,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "958a7aaa56141f8f6f6d51d8507b9ad6418fed527ad03e612d4000779925521d"
+            "75d2a3d60b964a1d878868f7e8c1bfe58a86ba0de34a0331bb4320f4373e8399"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v3",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v4",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -656,7 +662,7 @@ mod tests {
         );
     }
 
-    // covers: B-5
+    // covers: B-5, B-21
     #[test]
     fn every_part_of_the_first_key_counts() {
         let base = asked().key().unwrap();
@@ -672,6 +678,15 @@ mod tests {
         let mut a = asked();
         a.env.insert("SDKROOT".into(), String::new());
         assert_ne!(a.key().unwrap(), base, "set to empty is not unset");
+        // What the wrapper adds: a program set to `tied` and one set to `movable` differ.
+        let mut tied = asked();
+        tied.added = vec!["--print=link-args".into()];
+        let mut movable = tied.clone();
+        movable
+            .added
+            .extend(["-C".into(), "split-debuginfo=packed".into()]);
+        assert_ne!(tied.key().unwrap(), base);
+        assert_ne!(movable.key().unwrap(), tied.key().unwrap());
     }
 
     /// One change to an observed compile.

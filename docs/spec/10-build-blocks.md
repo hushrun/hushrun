@@ -61,7 +61,9 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
 `XROS_DEPLOYMENT_TARGET`, `SDKROOT`, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
-`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); and the person's extra variables. No other
+`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); the person's extra variables; and what the
+wrapper adds to the compile besides the remaps (B-9), with roots replaced, so that a program
+compiled `movable` and one compiled `tied` (B-21) never share a key. No other
 `CARGO_` variable is keyed: cargo's own configuration (`CARGO_TARGET_DIR`, `CARGO_HOME`,
 `CARGO_TERM_*`, `CARGO_PROFILE_*`, tokens) reaches rustc only through arguments already keyed;
 the target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` names is a root, so outputs are
@@ -135,17 +137,19 @@ first, with the scope left whole. It leaves `-C incremental` out. On Apple targe
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
 gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
 debugs those, and without it each holds the folder it was linked in. A program (a `bin` that is
-not a build script, or a test) that links with debug info gets a debug bundle instead, through
-three additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
+not a build script, or a test) that links with debug info gets a debug bundle instead, unless the
+person set `programs` to `tied` (B-21), through three additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
 `<program>.dSYM` beside it with the DWARF of every object it was linked from;
 `-C strip=debuginfo`, so that the program keeps no debug map naming those objects by their
 paths; and `-oso_prefix` for the workspace's resolved form, so that the UUID the linker computes
 before the strip holds no path when the target folder is inside the workspace. Before such a
-compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one.
+compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one; it
+does so too for a program set to `tied` whose flags would allow a bundle, since that bundle
+matches no program compiled now and would keep it from being stored (B-18).
 After it, it removes the bundle's `Contents/Resources/Relocations`, which names the program by
-its absolute path and which no debugger reads. A program whose own flags say
-`-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug info and a
-program for any other target are left as they are. It changes nothing else.
+its absolute path and which no debugger reads. A program set to `tied`, a program whose own
+flags say `-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug
+info and a program for any other target are left as they are. It changes nothing else.
 
 No block comes from an incremental compile, and an edit never loses incremental compilation: a
 compile that asks for `-C incremental`, finds no block, and already has its dep-info file in the
@@ -257,9 +261,15 @@ no `--out-dir`, an `-o` or no `--json` with `artifacts` is not one of the build'
 counts nowhere: those are cargo's probes and the ones a build script runs.
 
 **B-21 Settings.** One file per user, `build.json` beside the credentials, written whole under a
-lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable names) and
-`min_free_gb`. `hushrun build status` shows the mode, the store's folder, its size and its blocks
-by age and by repository. `hushrun build clean` empties the store.
+lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable names),
+`min_free_gb` and `programs`. `programs` is `movable` (unless set) or `tied`: a movable program
+gets a debug bundle (B-9), which costs a `dsymutil` run per program and about twice the bytes
+stored on a first build and lets a later checkout reuse it; a tied one is compiled as asked and
+reused only in the target folder that built it. Any other value makes the file invalid. The
+session carries what the file said when `hushrun run` began, so every compile of a run sees one
+value. `hushrun build status` shows the mode, the store's folder, how long blocks are kept,
+`programs`, the store's size and its blocks by age and by repository. `hushrun build clean`
+empties the store.
 
 **B-22 Free space.** Nothing is stored while the store's volume has less than `min_free_gb` free
 (10 unless set; 0 turns the rule off). The outcome is `built, not stored`, and the run's line

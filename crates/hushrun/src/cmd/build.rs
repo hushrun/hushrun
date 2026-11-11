@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::anyhow;
 use serde_json::{Value, json};
 
-use hushrun_build::model::Mode;
+use hushrun_build::model::{Mode, Programs};
 use hushrun_build::session;
 use hushrun_build::settings::{self, Overrides, SettingsError};
 use hushrun_build::store::{Status, Store};
@@ -198,6 +198,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "variables_error": place.overrides.as_ref().err().map(ToString::to_string),
             "store": place.store,
             "keep_days": effective.as_ref().map(|s| s.keep_days),
+            "programs": effective.as_ref().map(|s| s.programs.as_str()),
             "in_ci": in_ci,
             "rustc_wrapper_set": wrapper.is_some(),
             "held": held.as_ref().map(held_json),
@@ -288,6 +289,14 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                     "HUSHRUN_BUILD_KEEP_DAYS"
                 )
             ),
+        );
+        line(
+            "programs",
+            match effective.programs {
+                Programs::Movable => "movable: a program on macOS gets a debug bundle and may be reused in another folder",
+                Programs::Tied => "tied: a program is reused only in the target folder that built it",
+            }
+            .to_string(),
         );
     }
     if let Some(held) = &held {

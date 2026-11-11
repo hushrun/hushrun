@@ -1,5 +1,5 @@
 //! The per-user settings (B-1, B-21): the mode, how long blocks are kept, packages never
-//! stored. One file, changed under a lock and written whole.
+//! stored, what happens to programs. One file, changed under a lock and written whole.
 //!
 //! The file is the only home of the mode. `HUSHRUN_BUILD`, `HUSHRUN_BUILD_KEEP_DAYS` and
 //! `HUSHRUN_BUILD_DIR` change one command's view of it ([`Overrides`]) and never the file.
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::Mode;
+use crate::model::{Mode, Programs};
 
 /// The version of the file this hushrun writes and reads.
 pub const VERSION: u64 = 1;
@@ -34,6 +34,8 @@ pub struct Settings {
     pub env: Vec<String>,
     /// Gigabytes the store's volume keeps free; 0 turns the rule off (B-22).
     pub min_free_gb: u32,
+    /// What the wrapper does with a program on an Apple target (B-9).
+    pub programs: Programs,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             never_store: Vec::new(),
             env: Vec::new(),
             min_free_gb: MIN_FREE_GB,
+            programs: Programs::default(),
         }
     }
 }
@@ -109,6 +112,7 @@ struct Stored {
     never_store: Option<Vec<String>>,
     env: Option<Vec<String>>,
     min_free_gb: Option<u32>,
+    programs: Option<Programs>,
 }
 
 /// The file as written: every field.
@@ -120,6 +124,7 @@ struct Written<'a> {
     never_store: &'a [String],
     env: &'a [String],
     min_free_gb: u32,
+    programs: Programs,
 }
 
 impl Settings {
@@ -181,6 +186,7 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         never_store: stored.never_store.unwrap_or(defaults.never_store),
         env: stored.env.unwrap_or(defaults.env),
         min_free_gb: stored.min_free_gb.unwrap_or(defaults.min_free_gb),
+        programs: stored.programs.unwrap_or(defaults.programs),
     };
     settings.check(path)?;
     Ok(settings)
@@ -235,6 +241,7 @@ fn save(path: &Path, settings: &Settings) -> io::Result<()> {
         never_store: &settings.never_store,
         env: &settings.env,
         min_free_gb: settings.min_free_gb,
+        programs: settings.programs,
     };
     let mut bytes = serde_json::to_vec_pretty(&written)?;
     bytes.push(b'\n');
@@ -356,7 +363,7 @@ fn text(
 #[cfg(test)]
 mod tests {
     use super::{Overrides, Settings, SettingsError, load, update};
-    use crate::model::Mode;
+    use crate::model::{Mode, Programs};
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::fs;
@@ -377,6 +384,7 @@ mod tests {
     }
 
     // covers: B-1
+    // covers: B-21
     // covers: B-22
     #[test]
     fn a_missing_file_is_the_defaults() {
@@ -386,6 +394,7 @@ mod tests {
         assert_eq!(settings.keep_days, 15);
         assert!(settings.never_store.is_empty() && settings.env.is_empty());
         assert_eq!(settings.min_free_gb, 10);
+        assert_eq!(settings.programs, Programs::Movable);
         assert_eq!(settings, Settings::default());
     }
 
@@ -399,12 +408,14 @@ mod tests {
             settings.never_store = vec!["openssl-sys".into()];
             settings.env = vec!["SQLX_OFFLINE".into()];
             settings.min_free_gb = 0;
+            settings.programs = Programs::Tied;
         })
         .unwrap();
         assert_eq!(load(&path).unwrap(), saved);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"version\": 1"), "{text}");
         assert!(text.contains("\"mode\": \"observe\""), "{text}");
+        assert!(text.contains("\"programs\": \"tied\""), "{text}");
         // Only the file and its lock: no temporary file left.
         let mut names: Vec<_> = fs::read_dir(path.parent().unwrap())
             .unwrap()
@@ -423,6 +434,9 @@ mod tests {
         let settings = load(&path).unwrap();
         assert_eq!(settings.mode, Mode::On);
         assert_eq!(settings.keep_days, 15);
+        assert_eq!(settings.programs, Programs::Movable);
+        fs::write(&path, r#"{"version": 1, "programs": "tied"}"#).unwrap();
+        assert_eq!(load(&path).unwrap().programs, Programs::Tied);
     }
 
     // covers: B-21
@@ -469,6 +483,9 @@ mod tests {
             r#"{"version": 1, "mode": "maybe"}"#,
             r#"{"version": 1, "keep_days": 0}"#,
             r#"{"version": 1, "keep_days": -3}"#,
+            r#"{"version": 1, "programs": "loose"}"#,
+            r#"{"version": 1, "programs": "Tied"}"#,
+            r#"{"version": 1, "programs": 1}"#,
         ] {
             fs::write(&path, text).unwrap();
             let err = load(&path).unwrap_err();

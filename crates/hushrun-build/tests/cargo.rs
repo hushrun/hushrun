@@ -105,10 +105,20 @@ impl World {
     }
 
     fn begin(&self, mode: Mode) -> Result<Session, NotBegun> {
+        self.begin_with(mode, |_| {})
+    }
+
+    /// A session with the settings changed by `change` too.
+    fn begin_with(
+        &self,
+        mode: Mode,
+        change: impl FnOnce(&mut settings::Settings),
+    ) -> Result<Session, NotBegun> {
         let settings = self.dir.path().join("build.json");
         settings::update(&settings, |s| {
             s.mode = mode;
             s.min_free_gb = 0;
+            change(s);
         })
         .unwrap();
         let exe = wrapper_exe();
@@ -1456,6 +1466,68 @@ fn a_program_moves_with_its_debug_bundle_when_cargo_target_dir_is_elsewhere() {
     let target_one = w.path("targets/one");
     let target_two = w.path("other-targets/the-second-one");
     programs_move(&w, &one, &two, Some((&target_one, &target_two)));
+}
+
+// covers: B-9, B-10, B-18, B-21
+#[cfg(target_os = "macos")]
+#[test]
+fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
+    let w = World::new();
+    let one = w.programs("one");
+    let target = one.join("target");
+    let session = w
+        .begin_with(Mode::On, |s| {
+            s.programs = hushrun_build::model::Programs::Tied;
+        })
+        .unwrap();
+    let env = session.env();
+    let no_bundle = |name: &str| {
+        let exe = program(&target, name);
+        assert!(
+            !PathBuf::from(format!("{}.dSYM", exe.display())).exists(),
+            "a bundle beside {name}"
+        );
+    };
+    cargo_ok(&one, &["test", "--no-run"], &env);
+    let first = entries(&session);
+    let store = session.current().store.clone();
+    for name in ["prog", "lib_a", "t"] {
+        assert_eq!(
+            last(&first, name, Class::Program).outcome,
+            Outcome::BuiltAndStored,
+            "{name}: {first:#?}"
+        );
+        assert_eq!(places(&store, name, "program"), ["tied"], "{name}");
+        no_bundle(name);
+    }
+
+    // An edit and back, as a branch switched and back: the edit is rebuilt as asked, and the
+    // way back reuses what this folder built first.
+    let lib = one.join("lib_a/src/lib.rs");
+    let text = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{text}// edited\n")).unwrap();
+    cargo_ok(&one, &["test", "--no-run"], &env);
+    fs::write(&lib, &text).unwrap();
+    let n = entries(&session).len();
+    cargo_ok(&one, &["test", "--no-run"], &env);
+    let back = entries(&session)[n..].to_vec();
+    for name in ["prog", "lib_a", "t"] {
+        assert_eq!(
+            last(&back, name, Class::Program).outcome,
+            Outcome::Reused,
+            "{name}: {back:#?}"
+        );
+        no_bundle(name);
+    }
+    let out = Command::new(program(&target, "t"))
+        .arg("passes")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 // covers: B-9, B-10

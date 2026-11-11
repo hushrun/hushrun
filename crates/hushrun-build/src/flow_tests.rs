@@ -2795,6 +2795,63 @@ fn program_plan(bundle_root: bool) -> Plan {
     }
 }
 
+/// Begins the world's next session in the same store, with its settings changed.
+fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
+    let settings = w.dir.path().join("build.json");
+    settings::update(&settings, change).unwrap();
+    let exe = w.dir.path().join("hushrun");
+    let cache = w.dir.path().join("cache");
+    w.session = session::begin(&Start {
+        settings: &settings,
+        cache_dir: Some(&cache),
+        exe: &exe,
+        in_ci: false,
+        repository: Some("test/repo"),
+        env: &|_| None,
+        now: SystemTime::now(),
+    })
+    .unwrap();
+}
+
+// covers: B-5, B-9, B-21
+#[test]
+fn a_program_set_to_tied_is_compiled_as_asked_and_never_takes_a_movable_block() {
+    let mut w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    settle();
+    assert_eq!(call_program(&w, &one, &[]).outcome(), STORED);
+    assert!(one.join("target/debug/deps/a-xa.dSYM").is_dir());
+
+    next_session(&mut w, |s| s.programs = crate::model::Programs::Tied);
+    // Another checkout: a movable block would be reused here, but the setting is part of the
+    // first key, so a tied program never takes it.
+    let r = call_program(&w, &two, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(!r.entry.as_ref().unwrap().found);
+    // Nothing is added to the compile but what B-18 needs, and no bundle is made.
+    let asked = &r.seen.compiles[0];
+    assert!(
+        !asked.iter().any(|a| a.starts_with("split-debuginfo=packed")
+            || a.starts_with("strip=")
+            || a.contains("oso_prefix")),
+        "{asked:?}"
+    );
+    assert!(!two.join("target/debug/deps/a-xa.dSYM").exists());
+    // The first checkout's bundle, left by the movable compile, matches no program compiled
+    // tied: an edit there is compiled with the bundle removed first, and stored.
+    fs::write(one.join("a/src/lib.rs"), "mod foo;\nfn edited() {}\n").unwrap();
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(!one.join("target/debug/deps/a-xa.dSYM").exists());
+    // And reused where it was built.
+    settle();
+    assert_eq!(call_program(&w, &two, &[]).outcome(), REUSED);
+    assert!(!two.join("target/debug/deps/a-xa.dSYM").exists());
+}
+
 // covers: B-9, B-12, B-18
 #[test]
 fn a_programs_debug_bundle_is_stored_and_put_back_whole() {

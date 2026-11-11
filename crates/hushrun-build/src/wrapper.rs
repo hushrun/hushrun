@@ -21,7 +21,7 @@ use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
-use crate::model::{Class, Located, NotStored, Outcome, PassedThrough};
+use crate::model::{Class, Located, NotStored, Outcome, PassedThrough, Programs};
 use crate::restore::Restore;
 use crate::roots::{RootPaths, Roots, resolve_on_disk};
 use crate::scan::Needles;
@@ -150,6 +150,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         link_extra: Vec::new(),
         sysroot: None,
         bundle: false,
+        clear_bundle: false,
     }
     .run()
 }
@@ -218,6 +219,9 @@ struct Call<'a> {
     /// A program that gets a debug bundle and may move (B-9): its compile is changed so, and
     /// its block carries the bundle.
     bundle: bool,
+    /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
+    /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
+    clear_bundle: bool,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -396,7 +400,8 @@ impl Call<'_> {
         }
         if class != Class::Library {
             let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
-            self.bundle = bundled(inv, apple);
+            self.clear_bundle = bundled(inv, apple);
+            self.bundle = self.clear_bundle && self.current.programs == Programs::Movable;
             self.link_extra = linked_args(inv, apple, self.bundle);
             // Debug info packed beside a proc macro or a build script, or beside a program the
             // wrapper leaves as it is, is not something a block carries.
@@ -414,6 +419,16 @@ impl Call<'_> {
         let Ok(key_env) = inv.key_env_with(self.env, &extra) else {
             return self.pass(PassedThrough::NotUtf8);
         };
+        // What the wrapper adds besides the remaps changes the outputs: a program set to
+        // `movable` and one set to `tied` are different compiles (B-5, B-9, B-21).
+        let Some(added) = self
+            .link_extra
+            .iter()
+            .map(|arg| arg.to_str().map(|arg| roots.to_placeholders(arg)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return self.pass(PassedThrough::NotUtf8);
+        };
         let asked = Asked {
             compiler: identity.digest,
             args: inv
@@ -425,6 +440,7 @@ impl Call<'_> {
                 .into_iter()
                 .map(|(name, value)| (name, roots.to_placeholders(&value)))
                 .collect(),
+            added,
         };
         let step = asked.key().ok();
         let cx = step.map(|step| Context {
@@ -600,7 +616,7 @@ impl Call<'_> {
         };
         // dsymutil adds to a bundle that is there and leaves what it doesn't write: the one an
         // earlier compile left goes first, so the bundle after this compile is all its own.
-        let stale_bundle = self.bundle
+        let stale_bundle = self.clear_bundle
             && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
                 .is_err();
         let compile_start = self.ports.now();

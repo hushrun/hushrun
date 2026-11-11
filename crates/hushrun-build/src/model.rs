@@ -38,6 +38,30 @@ impl Mode {
     }
 }
 
+/// What the wrapper does with a program on an Apple target (B-9, B-21): one per user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Programs {
+    /// The program gets a debug bundle and may move to another folder. A first build costs a
+    /// `dsymutil` run per program and about twice the bytes stored; a later checkout pays it
+    /// back.
+    #[default]
+    Movable,
+    /// The program is compiled as asked and stored with the debug objects it names, tied to its
+    /// target folder.
+    Tied,
+}
+
+impl Programs {
+    /// The value as the settings file writes it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Programs::Movable => "movable",
+            Programs::Tied => "tied",
+        }
+    }
+}
+
 /// What a compiler call produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

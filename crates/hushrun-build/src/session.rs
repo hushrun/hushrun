@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough};
+use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs};
 use crate::settings::{self, Overrides, Settings};
 use crate::store::{DAY, Store};
 
@@ -81,6 +81,9 @@ pub struct Current {
     pub env: Vec<String>,
     /// Nothing is stored with less free space than this (B-22). 0 turns the rule off.
     pub min_free_gb: u32,
+    /// What the wrapper does with a program on an Apple target (B-9, B-21).
+    #[serde(default)]
+    pub programs: Programs,
     /// The repository's name, when hushrun knows it (B-13).
     pub repository: Option<String>,
     /// When the run started, in milliseconds since the epoch. The audit's pick uses it (B-16).
@@ -444,6 +447,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         never_store: settings.never_store,
         env: settings.env,
         min_free_gb: settings.min_free_gb,
+        programs: settings.programs,
         repository: start.repository.map(str::to_string),
         started_ms: millis,
         shared: shared_folders(start.env),
@@ -609,7 +613,7 @@ mod tests {
         }
     }
 
-    // covers: B-1, B-2
+    // covers: B-1, B-2, B-21
     #[test]
     fn a_run_has_a_session_only_when_reuse_is_on_here() {
         let dir = tempfile::tempdir().unwrap();
@@ -639,6 +643,7 @@ mod tests {
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(&found, session.current());
         assert_eq!(found.mode, Mode::Observe);
+        assert_eq!(found.programs, Programs::Movable);
         assert!(found.shared.iter().any(|s| s == "/usr"));
         let entry = Entry {
             outcome: crate::decide::passed_through(crate::model::PassedThrough::Probe),
@@ -655,6 +660,14 @@ mod tests {
         found.log(&entry);
         found.log(&entry);
         assert_eq!(found.entries(), vec![entry.clone(), entry]);
+        session.finish(UNIX_EPOCH);
+
+        // What happens to programs is the person's, and every compile of the run sees it.
+        settings::update(&settings, |s| s.programs = Programs::Tied).unwrap();
+        let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        let folder = session.env()[1].1.clone();
+        let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
+        assert_eq!(found.programs, Programs::Tied);
         session.finish(UNIX_EPOCH);
 
         // Never in CI, and never over a wrapper the person set.

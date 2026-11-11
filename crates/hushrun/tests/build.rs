@@ -132,6 +132,31 @@ fn build_sets_the_mode_in_build_json_beside_the_credentials() {
     assert_eq!(saved_mode(&w), "observe");
     assert_eq!(status_json(&w)["mode"], "observe");
 
+    // What happens to programs on macOS: movable unless the person chose tied.
+    let movable = build(&w, &["status"]);
+    assert!(
+        movable.stdout.contains(
+            "programs  movable: a program on macOS gets a debug bundle and may be reused in another folder\n"
+        ),
+        "{}",
+        movable.stdout
+    );
+    assert_eq!(status_json(&w)["programs"], "movable");
+    let mut file: Value =
+        serde_json::from_str(&std::fs::read_to_string(settings(&w)).expect("settings"))
+            .expect("JSON");
+    file["programs"] = "tied".into();
+    std::fs::write(settings(&w), file.to_string()).expect("settings");
+    let tied = build(&w, &["status"]);
+    assert!(
+        tied.stdout.contains(
+            "programs  tied: a program is reused only in the target folder that built it\n"
+        ),
+        "{}",
+        tied.stdout
+    );
+    assert_eq!(status_json(&w)["programs"], "tied");
+
     let off = build(&w, &["off"]);
     assert_eq!(off.code, 0, "{}", off.stderr);
     assert_eq!(
