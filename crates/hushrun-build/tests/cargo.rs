@@ -1160,6 +1160,25 @@ fn lines_after_a_move(
     let out = cargo_ok(two, &["test", "--no-run"], &plain);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("Compiling"), "{stderr}");
+
+    // An edit built without the wrapper: rustc writes the program as cargo asks, and the bundle
+    // left beside it no longer matches its UUID, so readers skip it and use the program's own
+    // debug map. Lines stay.
+    let lib = two.join("lib_a/src/lib.rs");
+    let text = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{text}// edited\n")).unwrap();
+    cargo_ok(two, &["test", "--no-run"], &plain);
+    let t = program(target, "lib_a");
+    let found = uuids(&[&t, &PathBuf::from(format!("{}.dSYM", t.display()))]);
+    assert_ne!(found[0], found[1], "the bundle was not left as it was");
+    let out = Command::new(&t)
+        .arg("fails_in_a_unit_test")
+        .env("RUST_BACKTRACE", "1")
+        .current_dir(two)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("lib_a/src/lib.rs:11:5"), "{text}");
 }
 
 /// Builds the tests at `one`, then at `two`, and checks what moved (B-9, B-10, B-12): the bin
