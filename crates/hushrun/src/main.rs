@@ -23,6 +23,7 @@ mod releases;
 mod results;
 mod signing;
 mod skill;
+mod units;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -37,6 +38,12 @@ use exit::{Exit, Failure};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
+    // of its own: it runs the binary and passes everything through, before anything else.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(code) = units::runner::from_args(&args) {
+        return code;
+    }
     hushrun_core::set_release(env!("CARGO_PKG_VERSION"));
     // \[ADR 0046\] Before clap, which quotes what it can't read, and before a run, which records
     // its command: a string on the command line goes no further than this.

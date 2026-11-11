@@ -364,6 +364,14 @@ pub struct RunResult {
     /// and of a skip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_anyway: Option<String>,
+    /// \[ADR 0068\] A run's test files, when its check's `tests` isn't off (C-10, C-33): how many
+    /// it had, ran and reused. Kept on this machine: a server isn't sent it in this version.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "unit_counts"
+    )]
+    pub units: Option<crate::units::Counts>,
 }
 
 /// Why a run ran although a pass of its key would have skipped it (`ranAnyway`): what the
@@ -422,6 +430,14 @@ fn variant<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<V
 fn summary<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<hushrun_reports::Reports>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// A result's `units`, or none when they don't read, as another client's might not.
+fn unit_counts<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::units::Counts>, D::Error> {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
@@ -1153,7 +1169,12 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
-                let body = serde_json::to_vec(result)?;
+                // \[ADR 0068\] A run's test files stay on this machine in this version (C-10).
+                let sent = RunResult {
+                    units: None,
+                    ..result.clone()
+                };
+                let body = serde_json::to_vec(&sent)?;
                 // ADR 0028: a person's or an agent's result carries this machine's signature,
                 // and without a key to sign with it isn't sent.
                 let machine = server.machine().map_err(|why| {
@@ -1381,7 +1402,13 @@ fn sweep(dir: &Path, now: Time) {
     }
     let cutoff = now.millis().saturating_sub(KEPT_FOR_MS);
     let mut gone = 0usize;
-    for prefix in [PREFIX, SKIP_PREFIX] {
+    // \[ADR 0068\] Unit results, and the runs they went with, are this machine's too (C-33).
+    for prefix in [
+        PREFIX,
+        SKIP_PREFIX,
+        crate::units::store::ENTRIES,
+        crate::units::store::RUNS,
+    ] {
         let top = dir.join(prefix);
         let Ok(keys) = std::fs::read_dir(&top) else {
             continue;
@@ -1502,6 +1529,7 @@ mod tests {
             environment: None,
             reports: None,
             ran_anyway: None,
+            units: None,
         }
     }
 

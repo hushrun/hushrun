@@ -39,6 +39,7 @@ use crate::results::{
     self, Backend, Ended, ExternalInput, Off, RanAnyway, Refusal, RunEnvironment, RunResult,
     Selection, Verdict,
 };
+use crate::units;
 
 pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     let invoked = Instant::now();
@@ -157,6 +158,10 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
     // \[ADR 0067\] This machine's directory forgets what is 30 days old, once the run is over.
     if let Some(backend) = backend.as_ref() {
         backend.sweep(now(global));
+        // \[ADR 0068\] What a stopped run left of its test files' state.
+        if let Some(cache) = context::cache_dir() {
+            units::store::sweep(&cache, SystemTime::now());
+        }
     }
     // \[ADR 0067\] The repository's backend, which nobody here signed in to: this machine kept
     // the result, and the person can share it.
@@ -421,15 +426,26 @@ fn skip_or_run(
         say.line(format_args!("{check} running: this run won't count: {why}"));
     }
 
+    // \[ADR 0068\] With `tests` on, an adapter records what each test file read and how it ended
+    // (C-32); with it off, nothing here changes COMMAND's environment or writes a file.
+    let session = match (code, backend) {
+        (Some(code), Some(_)) => observe_tests(say, check, code, command, dir),
+        _ => None,
+    };
+
     let started_at = now(global);
     let clock = Instant::now();
     let started = SystemTime::now();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let status = Command::new(program(&command[0], dir, &path))
+    let mut child = Command::new(program(&command[0], dir, &path));
+    child
         .args(&command[1..])
         .current_dir(dir)
-        .env(variants::INSIDE_A_RUN, "1")
-        .status();
+        .env(variants::INSIDE_A_RUN, "1");
+    if let Some(session) = &session {
+        session.apply(&mut child);
+    }
+    let status = child.status();
     let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
     let status = match status {
         Ok(status) => status,
@@ -547,7 +563,24 @@ fn skip_or_run(
         }
     }
 
-    let result = code.result(
+    // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done.
+    let observed = session.as_ref().and_then(|session| {
+        observed(
+            global,
+            session,
+            code,
+            command,
+            dir,
+            status.success(),
+            job.as_deref(),
+        )
+    });
+    if let Some((observed, _)) = &observed {
+        for line in &observed.lines {
+            say.line(format_args!("{line}"));
+        }
+    }
+    let mut result = code.result(
         check,
         command,
         verdict,
@@ -561,7 +594,18 @@ fn skip_or_run(
         reports,
         anyway,
     );
+    result.units = observed.as_ref().and_then(|(o, _)| o.counts);
     let recorded = backend.record(&code.key, &result);
+    if let Some((observed, tree)) = &observed {
+        observed.keep(&code.key, tree, now(global));
+        // Unit results go with the run that executed them: only when it was recorded (C-33).
+        if recorded.is_ok()
+            && let Some(store) = units::store()
+            && let Err(err) = observed.record(&store, &code.key, &result)
+        {
+            tracing::debug!("the test files' results weren't kept: {err:#}");
+        }
+    }
     let mark = match (&recorded, verdict) {
         (Ok(()), _) => Some(Ended::Recorded),
         (Err(_), Verdict::Pass) => Some(Ended::Unrecorded),
@@ -943,6 +987,8 @@ pub(crate) fn made_name(text: &str) -> Option<CheckName> {
 /// What decides whether an earlier run stands in for this one.
 struct Code {
     key: Digest,
+    /// The check the key is for.
+    check: CheckName,
     scope: ScopeName,
     digest: Digest,
     /// \[ADR 0037\] What the scope declares outside the repository.
@@ -969,6 +1015,8 @@ struct Code {
     /// \[ADR 0049\] Which variant of its CI job this run is, when the job has several and says
     /// which (C-14): its result says it, and only that variant's passes skip it.
     variant: Option<results::Variant>,
+    /// \[ADR 0068\] The check's `tests`, when they aren't off (C-5).
+    tests: Option<hushrun_core::units::Tests>,
 }
 
 impl Code {
@@ -999,8 +1047,14 @@ impl Code {
         let reports_files = reports
             .map(|reports| reports.files.clone())
             .unwrap_or_default();
+        let tests = current
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.tests.get(check))
+            .cloned();
         Ok(Code {
             key,
+            check: check.clone(),
             scope: current.scope,
             digest: current.digest,
             external: current.external,
@@ -1015,6 +1069,7 @@ impl Code {
             reports_files,
             scopes: current.scopes,
             variant: None,
+            tests,
         })
     }
 
@@ -1066,6 +1121,7 @@ impl Code {
             }),
             reports,
             ran_anyway: ran_anyway.map(|why| why.word().to_string()),
+            units: None,
         }
     }
 
@@ -1114,6 +1170,103 @@ impl Code {
         let now = current(global, args)?;
         Ok(now.digest == self.digest && now.external == self.external)
     }
+}
+
+/// \[ADR 0068\] Starts observing a run's test files, when its check's `tests` isn't off: says
+/// once why it can't, and that `reuse` observes in this version (C-5, C-32).
+fn observe_tests(
+    say: &Say,
+    check: &CheckName,
+    code: &Code,
+    command: &[String],
+    dir: &Path,
+) -> Option<Box<units::Session>> {
+    let tests = code.tests.as_ref()?;
+    if !code.live {
+        say.line(format_args!(
+            "{check}: test files aren't observed: --rev and --digest name other files than these"
+        ));
+        return None;
+    }
+    let session = match units::Session::start(Some(tests), command, &code.root, dir) {
+        units::Start::Off => return None,
+        units::Start::Not(why) => {
+            say.line(format_args!("{check}: test files aren't observed: {why}"));
+            return None;
+        }
+        units::Start::On(session) => session,
+    };
+    if tests.mode == hushrun_core::units::Mode::Reuse {
+        say.line(format_args!(
+            "{check}: `tests: reuse` isn't in this version, so it observes: every test file runs"
+        ));
+    }
+    Some(session)
+}
+
+/// \[ADR 0068\] What a session saw, decided, with the scope's files it ran on; `None` when the
+/// adapter wrote nothing, or the files aren't the ones the run's key is for.
+#[allow(clippy::too_many_arguments)]
+fn observed(
+    global: &GlobalOpts,
+    session: &units::Session,
+    code: &Code,
+    command: &[String],
+    dir: &Path,
+    passed: bool,
+    job: Option<&str>,
+) -> Option<(units::Observed, hushrun_core::units::Tree)> {
+    let (digest, tree) = scope_tree(global, &code.scope)
+        .map_err(|err| tracing::debug!("the scope's files can't be read again: {err:#}"))
+        .ok()?;
+    if digest != code.digest {
+        return None;
+    }
+    let store = units::store()?;
+    let variant = code.variant.as_ref().map(|v| v.key.as_str());
+    let counts = |run: &RunResult| run.counts_in(job, variant);
+    let base = hushrun_core::units::KeyBase {
+        check: code.check.clone(),
+        command: command.to_vec(),
+        cwd: code.cwd.clone(),
+        scope: code.scope.clone(),
+        external: (!code.external.is_empty()).then(|| serde_json::json!(code.external)),
+        counts_from: code.rule.as_ref().map(Rule::normal),
+    };
+    let end = units::Finish {
+        base,
+        tree: &tree,
+        command_passed: passed,
+        counts: &counts,
+        store: &store,
+        root: &code.root,
+        cwd: dir,
+    };
+    session.finish(&end).map(|observed| (observed, tree))
+}
+
+/// The scope's digest and files in the worktree now, as `git add -A && git commit` would record
+/// them (D-10).
+fn scope_tree(
+    global: &GlobalOpts,
+    scope: &ScopeName,
+) -> anyhow::Result<(Digest, hushrun_core::units::Tree)> {
+    let content = Content::open(global, Source::Repo(Snapshot::Worktree)).map_err(|f| f.error)?;
+    let selected = content
+        .scopes
+        .get(scope.as_str())
+        .ok_or_else(|| anyhow!("unknown scope `{scope}`"))?;
+    let run = hushrun_vcs::digest_scopes(
+        content.vcs.as_ref(),
+        &content.listing,
+        &content.scopes,
+        &[selected],
+        false,
+    )?;
+    let digested = &run.scopes[0];
+    let tree = hushrun_core::units::Tree::from_manifest(&digested.manifest)
+        .ok_or_else(|| anyhow!("the scope's manifest doesn't read"))?;
+    Ok((digested.digest, tree))
 }
 
 /// \[ADR 0050\] What a record shows in place of a word that holds a secret (C-10).
