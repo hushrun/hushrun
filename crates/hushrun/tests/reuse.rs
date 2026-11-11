@@ -297,13 +297,11 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     let python = python();
     let pytest = |extra: &[&str]| r.run(&pytest_args(&python, extra), &[]);
 
-    // The first run: nothing passed here yet, so every test file runs.
+    // The first run: every test file runs, and \[ADR 0074\] the plan says nothing, since no
+    // pytest has reported this check's test files here yet: the COMMAND might not start one.
     let first = pytest(&[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
-    assert_eq!(
-        first.plan_line(),
-        "hushrun: unit: all 8 test files run: none had passed here yet on the files it read"
-    );
+    assert!(!first.stderr.contains("test files run"), "{}", first.stderr);
     assert_eq!(r.unit_results(), 7, "every observed test file that passed");
 
     // One module changes: the test file that read it runs, with one audited test file of the six
@@ -328,7 +326,12 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     // A pass with reused test files is a pass (D2), with its counts.
     let result = r.newest_result();
     assert_eq!(result["result"], "pass");
-    assert_eq!(result["units"], json!({"total": 8, "ran": 3, "reused": 5}));
+    // \[ADR 0074\] With what reusing saved: the reused test files' recorded durations, added up.
+    let saved = result["units"]["savedMs"].as_u64().expect("savedMs");
+    assert_eq!(
+        result["units"],
+        json!({"total": 8, "ran": 3, "reused": 5, "savedMs": saved})
+    );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(r.unit_results(), 7 + 3 - 1, "{}", changed.stderr);
     // The same code again skips the whole check (C-10).
@@ -807,7 +810,9 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
         results
             .recorded()
             .iter()
-            .any(|r| r["units"] == json!({"total": 8, "ran": 3, "reused": 5})),
+            .any(|r| r["units"]["savedMs"].is_u64()
+                && r["units"]
+                    == json!({"total": 8, "ran": 3, "reused": 5, "savedMs": r["units"]["savedMs"]})),
         "{:?}",
         results.recorded()
     );
@@ -953,16 +958,20 @@ fn an_older_server_or_one_that_doesnt_answer_means_every_test_file_runs() {
     let python = python();
     let old = r.run(&pytest_args(&python, &[]), &envs(&server));
     assert_eq!(old.code, 0, "{}", old.stderr);
-    assert_eq!(
-        old.plan_line(),
-        "hushrun: unit: every test file runs: can't read which passed (its server doesn't keep test files' results yet)"
-    );
     // The run itself is recorded, as a server from before takes it, and said once.
     assert_eq!(results.recorded().len(), 1);
     assert!(
         old.stderr.contains("test files' results weren't kept"),
         "{}",
         old.stderr
+    );
+    // The next plan asks it, and says what it answered.
+    r.write("liba.py", "X = 1  # changed\n");
+    let old = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(old.code, 0, "{}", old.stderr);
+    assert_eq!(
+        old.plan_line(),
+        "hushrun: unit: every test file runs: can't read which passed (its server doesn't keep test files' results yet)"
     );
     // A server that can't be reached: the check runs, and so does every test file.
     let gone = [
@@ -1104,9 +1113,11 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
         changed.plan_line(),
         "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
     );
+    let units = r.newest_result()["units"].clone();
+    assert!(units["savedMs"].is_u64(), "{units}");
     assert_eq!(
-        r.newest_result()["units"],
-        json!({"total": 5, "ran": 2, "reused": 3})
+        units,
+        json!({"total": 5, "ran": 2, "reused": 3, "savedMs": units["savedMs"]})
     );
     // Plain `cargo test` goes through the same runner.
     let plain = [
@@ -1244,6 +1255,86 @@ fn ready_says_how_many_test_files_a_run_would_run_and_writes_nothing() {
     );
     let ready = r.run(&["ready"], &[]);
     assert!(!ready.stdout.contains("test files"), "{}", ready.stdout);
+}
+
+// covers: C-23, C-22, C-34
+#[test]
+fn the_pre_push_hook_says_how_many_test_files_a_run_would_run() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let python = python();
+    let script = format!("hushrun run unit -- {python} -m pytest -q -p no:cacheprovider");
+    let mut files = shop("reuse");
+    files.push((
+        "package.json".into(),
+        format!(
+            "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"{script}\"}}}}\n"
+        ),
+    ));
+    let r = repo_of(&files);
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[]).code, 0);
+    r.write("app/cart.py", "from app.pricing import price\n\ndef total(xs):\n    return sum(price(x) for x in xs)  # changed\n");
+    git::commit_all(&r.repo, "cart");
+    let head = String::from_utf8(git::run(&r.repo, &["rev-parse", "HEAD"], None)).unwrap();
+    let line = format!(
+        "refs/heads/main {} refs/heads/main {}\n",
+        head.trim(),
+        "0".repeat(40)
+    );
+    // A coding agent's push waits for the check, and the hook says what its run would run.
+    let output = r
+        .hushrun()
+        .env("CLAUDECODE", "1")
+        .args([
+            "hook",
+            "pre-push",
+            "origin",
+            "git@example.com:acme/shop.git",
+        ])
+        .write_stdin(line)
+        .output()
+        .expect("hushrun");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(10), "{stderr}");
+    assert!(stderr.contains("push refused"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "unit: a run here would run 3 of 8 test files; 5 already passed here on the files they read"
+        ),
+        "{stderr}"
+    );
+}
+
+// covers: C-22, C-34, C-30
+#[test]
+fn a_check_where_no_pytest_ever_reported_says_nothing_of_test_files() {
+    // A check whose COMMAND hushrun doesn't recognize gets the pytest adapter, which does nothing
+    // where pytest never starts: its plan and ready count no file that only looks like a test.
+    let script = "hushrun run unit -- git --version";
+    let mut files = shop("reuse");
+    files.push((
+        "package.json".into(),
+        format!(
+            "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"{script}\"}}}}\n"
+        ),
+    ));
+    let r = repo_of(&files);
+    let ran = r.run(&["run", "unit", "--", "git", "--version"], &[]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(!ran.stderr.contains("test file"), "{}", ran.stderr);
+    r.write("app/greet.py", "def hello():\n    return 'hi'  # changed\n");
+    git::commit_all(&r.repo, "greet");
+    let ran = r.run(&["run", "unit", "--", "git", "--version"], &[]);
+    assert!(!ran.stderr.contains("test file"), "{}", ran.stderr);
+    r.write("app/greet.py", "def hello():\n    return 'hi'  # again\n");
+    git::commit_all(&r.repo, "greet again");
+    let ready = r.run(&["ready"], &[]);
+    assert!(
+        ready.stdout.contains("unit") && !ready.stdout.contains("test file"),
+        "{}",
+        ready.stdout
+    );
 }
 
 // covers: C-22, C-34

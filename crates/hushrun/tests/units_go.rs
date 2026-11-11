@@ -560,9 +560,11 @@ fn go_reuses_what_already_passed_and_audits_it() {
     let ran = packages(&second.stdout);
     assert!(ran[&format!("{MODULE}/pricing")].ran && ran[&format!("{MODULE}/cart")].ran);
     assert_eq!(ran.values().filter(|p| p.ran).count(), 3, "{ran:?}");
+    let units = r.newest_result()["units"].clone();
+    assert!(units["savedMs"].is_u64(), "{units}");
     assert_eq!(
-        r.newest_result()["units"],
-        serde_json::json!({"total": 7, "ran": 3, "reused": 4})
+        units,
+        serde_json::json!({"total": 7, "ran": 3, "reused": 4, "savedMs": units["savedMs"]})
     );
     assert!(
         second.stderr.contains("4 test files reused"),
@@ -682,6 +684,20 @@ fn hazards() -> Vec<Hazard> {
                 r.write(
                     "pricing/pricing.go",
                     "// Package pricing changed.\npackage pricing\n\nfunc Price(x int) int { return x * 2 }\n",
+                );
+            },
+            flags: &[],
+        },
+        Hazard {
+            name: "a source read only by a program started by a relative path from another directory",
+            files: vec![file(
+                "greet/relative_test.go",
+                "package greet\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"path/filepath\"\n\t\"testing\"\n)\n\nfunc TestRelative(t *testing.T) {\n\tdir := t.TempDir()\n\tif err := os.WriteFile(filepath.Join(dir, \"read.sh\"), []byte(\"#!/bin/sh\\ngrep -q 'x [*] 2' \\\"$1\\\"\\n\"), 0o755); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tsource, _ := filepath.Abs(\"../pricing/pricing.go\")\n\tcmd := exec.Command(\"./read.sh\", source)\n\tcmd.Dir = dir\n\tif err := cmd.Run(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n",
+            )],
+            change: |r| {
+                r.write(
+                    "pricing/pricing.go",
+                    "package pricing\n\nfunc Price(x int) int { return x + x }\n",
                 );
             },
             flags: &[],

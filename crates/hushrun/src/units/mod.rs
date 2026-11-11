@@ -232,11 +232,13 @@ impl Session {
                     &map,
                     &self.tests.ignore,
                 ) {
-                    Ok(found) => {
+                    Ok(Some(found)) => {
                         patterns = found.python_files;
                         listed_files = found.listed;
                         (found.sets, found.known)
                     }
+                    // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
+                    Ok(None) => return Planned::Plan(String::new()),
                     Err(why) => return Planned::Everything(why),
                 }
             }
@@ -716,7 +718,9 @@ struct ObservedPlan {
 
 /// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the files each would be
 /// keyed by, from the scope's files and the check's map alone: no tool starts. The plan and
-/// `hushrun ready` both read it. `Err` says why nothing can be reused.
+/// `hushrun ready` both read it. `Err` says why nothing can be reused; \[ADR 0074\] `None` that
+/// there is nothing to say: pytest, the adapter of any COMMAND hushrun doesn't recognize, never
+/// reported for this check here ([`speaks_of_test_files`]).
 fn observed_plan(
     adapter: &Adapter,
     tree: &Tree,
@@ -724,7 +728,10 @@ fn observed_plan(
     cwd: &Path,
     map: &store::Map,
     ignore: &[hushrun_core::glob::Pattern],
-) -> Result<ObservedPlan, String> {
+) -> Result<Option<ObservedPlan>, String> {
+    if !speaks_of_test_files(adapter, map) {
+        return Ok(None);
+    }
     match adapter {
         Adapter::Pytest => {
             let found = pytest::python_files(root, cwd);
@@ -744,12 +751,12 @@ fn observed_plan(
                 .files(Set::Units)
                 .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
                 .collect();
-            Ok(ObservedPlan {
+            Ok(Some(ObservedPlan {
                 sets,
                 known,
                 python_files: Some(found),
                 listed: None,
-            })
+            }))
         }
         Adapter::Vitest(recognized) => {
             if recognized.coverage {
@@ -777,16 +784,28 @@ fn observed_plan(
                 .files(Set::Units)
                 .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
                 .collect();
-            Ok(ObservedPlan {
+            Ok(Some(ObservedPlan {
                 sets,
                 known,
                 python_files: None,
                 listed: Some(listed.into_iter().collect()),
-            })
+            }))
         }
         Adapter::Cargo(_) | Adapter::Go(_) => {
             Err("its test files are known from a build, which this doesn't make".into())
         }
+    }
+}
+
+/// \[ADR 0074\] Whether a plan, and `hushrun ready`, say anything of a check's test files before
+/// it runs: always for an adapter its COMMAND was recognized for, and for pytest, which any other
+/// COMMAND gets, only once pytest reported this check's test files here, as its map says. A check
+/// that runs `npm test` or `make test` never started pytest, and its Python-looking files are no
+/// test files of it. The one rule both read.
+fn speaks_of_test_files(adapter: &Adapter, map: &store::Map) -> bool {
+    match adapter {
+        Adapter::Pytest => map.reported(),
+        Adapter::Cargo(_) | Adapter::Go(_) | Adapter::Vitest(_) => true,
     }
 }
 
@@ -848,7 +867,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         &store::check_id(&p.base, p.repository),
         "map",
     ));
-    let found = observed_plan(&adapter, p.tree, p.root, p.cwd, &map, &p.tests.ignore).ok()?;
+    let found = observed_plan(&adapter, p.tree, p.root, p.cwd, &map, &p.tests.ignore).ok()??;
     let total = found.known.len();
     if total == 0 || total > MOST_UNITS {
         return None;
@@ -1027,6 +1046,11 @@ pub struct Counts {
     pub reused: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_anyway: Option<String>,
+    /// \[ADR 0074\] In a run that reused test files, how long they took when they last ran, by
+    /// their recorded results: what reusing saved, which the dashboard shows beside what skips
+    /// saved. Never in `observe`, which saved nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_ms: Option<u64>,
 }
 
 /// How [`decide`] reads a run: as `observe` does, with what the plan would have done; with the
@@ -1048,8 +1072,6 @@ pub struct Observed {
     pub counts: Option<Counts>,
     /// What the run says, each a line after `hushrun: `.
     pub lines: Vec<String>,
-    /// \[ADR 0069\] The time the reused test files took when they ran, by their results.
-    pub saved_ms: u64,
     /// \[C-34\] Test files whose key had a pass that counted, which ran and failed: each runs once
     /// more ([`Session::again`]), with the key of that pass.
     pub again: BTreeMap<String, Digest>,
@@ -1337,7 +1359,9 @@ fn decide(
     }
     out.rest = rest_of(sets, tree);
     out.sources = sources;
-    out.saved_ms = saved_ms;
+    if matches!(how, How::Plan(_)) && counts.reused > 0 {
+        counts.saved_ms = Some(saved_ms);
+    }
     if out.records.len() > MOST_UNITS {
         // More than a server takes for one run: none goes, so none counts.
         out.records.clear();

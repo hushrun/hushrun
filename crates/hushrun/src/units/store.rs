@@ -710,6 +710,14 @@ pub struct Map {
     pub unit_files: BTreeSet<String>,
 }
 
+impl Map {
+    /// \[ADR 0074\] Whether some run of the check here had its adapter report test files: a map
+    /// is written only then.
+    pub fn reported(&self) -> bool {
+        self.schema == MAP_SCHEMA
+    }
+}
+
 /// What a test file read the last time it ran here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

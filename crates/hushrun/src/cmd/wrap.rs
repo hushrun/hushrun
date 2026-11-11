@@ -570,7 +570,10 @@ fn skip_or_run(
     let mut summary = said(reports.as_ref());
     // \[ADR 0069\] What reuse saved, from the reused test files' recorded durations.
     if reused > 0 {
-        let saved = observed.as_ref().map_or(0, |(o, _)| o.saved_ms);
+        let saved = observed
+            .as_ref()
+            .and_then(|(o, _)| o.counts.as_ref()?.saved_ms)
+            .unwrap_or(0);
         let files = if reused == 1 {
             "1 test file".to_string()
         } else {

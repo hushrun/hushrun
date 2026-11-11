@@ -771,11 +771,12 @@ pub struct Log {
 
 /// Reads a test log (`# test log`, then `open`, `stat`, `chdir` and `getenv` lines), whose relative
 /// paths start from `dir`, the package's directory, for the repository at `root`. An `open` of an
-/// executable file is a program started, wherever it is.
+/// executable file is a program started, wherever it is. \[ADR 0074\] So is what
+/// [`started_from`] reads as one: a program found from `exec.Cmd.Dir`, or one gone by now.
 pub fn read_log(lines: &[String], dir: &Path, root: &Path) -> Log {
     let mut out = Log::default();
     let mut pwd = dir.to_path_buf();
-    for line in lines {
+    for (n, line) in lines.iter().enumerate() {
         let Some((op, name)) = line.split_once(' ') else {
             continue;
         };
@@ -787,6 +788,17 @@ pub fn read_log(lines: &[String], dir: &Path, root: &Path) -> Log {
             }
             "open" | "stat" => {}
             _ => continue,
+        }
+        if op == "open"
+            && let Some(program) = started_from(
+                name,
+                n.checked_sub(1).and_then(|before| lines.get(before)),
+                lines.get(n + 1),
+                &pwd,
+            )
+        {
+            out.programs.push(program);
+            continue;
         }
         let real = std::fs::canonicalize(&path).unwrap_or(path);
         let Ok(meta) = std::fs::metadata(&real) else {
@@ -813,6 +825,44 @@ pub fn read_log(lines: &[String], dir: &Path, root: &Path) -> Log {
         }
     }
     out
+}
+
+/// \[ADR 0074\] The program an `open` of `name` started, for what the plain rule (an `open` of
+/// an executable file, from the test's directory `pwd`) can't see. The log is read after the
+/// tests, when a program they wrote to a temporary directory is gone, and `os.StartProcess` logs
+/// the program as given, before the child moves to `exec.Cmd.Dir`. So it is a program:
+///
+/// - when the line after it, `next`, is a `stat` of a directory (`os.StartProcess` looks at
+///   `Dir` right after it logs the program), and the relative `name` is an executable file from
+///   there, or that directory is gone, so nobody can say it wasn't one;
+/// - when the file is gone, and the line before it, `before`, is an `open` of `/dev/null`, which
+///   `exec.Cmd` opens for a child's standard input, output or error just before it starts it.
+///
+/// A file that is gone and was only opened costs its package its reuse, never a wrong one.
+fn started_from(
+    name: &str,
+    before: Option<&String>,
+    next: Option<&String>,
+    pwd: &Path,
+) -> Option<String> {
+    let relative = !Path::new(name).is_absolute();
+    if relative && let Some(("stat", dir)) = next.and_then(|line| line.split_once(' ')) {
+        let dir = normalize(&pwd.join(dir));
+        match std::fs::metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {
+                let program = normalize(&dir.join(name));
+                if std::fs::metadata(&program).is_ok_and(|m| m.is_file() && executable(&m)) {
+                    return Some(program.display().to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return Some(normalize(&dir.join(name)).display().to_string()),
+        }
+    }
+    let path = normalize(&pwd.join(name));
+    let gone = std::fs::symlink_metadata(&path).is_err();
+    let after_null = before.is_some_and(|line| line == "open /dev/null");
+    (gone && after_null && cfg!(unix)).then(|| path.display().to_string())
 }
 
 #[cfg(unix)]
@@ -972,5 +1022,63 @@ mod tests {
         if cfg!(unix) {
             assert_eq!(log.programs.len(), 1, "{log:?}");
         }
+    }
+
+    // covers: C-35, C-32
+    #[cfg(unix)]
+    #[test]
+    fn a_program_started_by_a_relative_path_from_another_directory_is_a_program() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("pkg/sub")).unwrap();
+        let tool = root.join("pkg/sub/tool");
+        std::fs::write(&tool, "#!/bin/sh\ncat ../../other.go\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // What Go 1.27's os/exec logs for `exec.Command("./tool")` with `Dir: "sub"`: the program
+        // as given, then the directory it starts in, which `os.StartProcess` looks at.
+        let log = |lines: &[&str]| {
+            let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+            read_log(&lines, &root.join("pkg"), &root)
+        };
+        let started = log(&["# test log", "open ./tool", "stat sub", "getenv PATH"]);
+        assert_eq!(started.programs.len(), 1, "{started:?}");
+        // A file of that name where the test runs, which isn't the program, changes nothing.
+        std::fs::write(root.join("pkg/tool"), "data").unwrap();
+        let started = log(&["# test log", "open ./tool", "stat sub"]);
+        assert_eq!(started.programs.len(), 1, "{started:?}");
+        // A file the test only opened, and a directory it only looked at, are no program.
+        let read = log(&["# test log", "open ./tool", "stat .."]);
+        assert!(read.programs.is_empty(), "{read:?}");
+        assert_eq!(
+            read.files.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["pkg/tool"]
+        );
+        let missing = log(&["# test log", "open ./missing", "stat sub"]);
+        assert!(missing.programs.is_empty(), "{missing:?}");
+        // A program the test wrote to a temporary directory, gone by the time the log is read:
+        // started from that directory, or by its whole path, after exec.Cmd's /dev/null.
+        let gone = root.join("gone");
+        let temporary = log(&[
+            "# test log",
+            &format!("open {}/read.sh", gone.display()),
+            "open /dev/null",
+            "open ./read.sh",
+            &format!("stat {}", gone.display()),
+        ]);
+        assert_eq!(temporary.programs.len(), 1, "{temporary:?}");
+        let whole = log(&[
+            "# test log",
+            "open /dev/null",
+            &format!("open {}/read.sh", gone.display()),
+        ]);
+        assert_eq!(whole.programs.len(), 1, "{whole:?}");
+        // A temporary file written and read again is no program.
+        let written = log(&[
+            "# test log",
+            &format!("open {}/out.txt", gone.display()),
+            &format!("open {}/out.txt", gone.display()),
+        ]);
+        assert!(written.programs.is_empty(), "{written:?}");
     }
 }
