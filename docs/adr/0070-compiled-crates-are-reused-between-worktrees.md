@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-11
-- **Rules:** B-1 to B-22
+- **Rules:** B-1 to B-23
 
 ## Context
 
@@ -72,25 +72,43 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    nothing is stored. An argument the wrapper doesn't know how to key is a reason to pass through,
    never to guess. Cargo's probes and the compiles a build script runs count nowhere (B-20).
 4. **Two keys, and what was read comes from the compiler** (B-5, B-6, B-7, B-11, B-17). The first
-   key is what was asked: the compiler's identity, which covers its files and its standard
-   library, so a toolchain updated under the same name is a new one; the arguments, with roots
-   replaced and the folder-only and message-format ones left out; the variables cargo sets for the
-   crate's compile and those its build script set; and the variables rustc, the C driver and the
-   linker read without listing them, such as `MACOSX_DEPLOYMENT_TARGET` and `SDKROOT`. It holds no
-   machine, user, branch, commit or time. The second key adds what the compile read, as rustc's own
-   dep-info lists it: each file by SHA-256 and the places a module could have been; each
-   `env-dep`; each dependency by the hash of its file; each native library named with `-l`, in
-   every folder rustc searches for it; the names in every folder a read file sits in, so a new
-   migration changes the key; every file of the build script's output; what a local build script
-   declared; and for a linked output, every library and file the linker was handed. The list of
-   files to hash before a lookup comes from earlier compiles of the same first key, and is a hint
-   that is never trusted: the wrapper hashes the files as they are now, a file that is gone is
-   hashed as absent, and a block exists under a key only because a compile read exactly those
-   bytes. A wrong or old list gives a key nobody recorded, which is a build. A compile during which
-   a read file changed, by size, dates, inode or device, is `built, not stored`.
+   key is what was asked: the compiler's identity, which covers its files and its standard library,
+   so a toolchain updated under the same name is a new one; the arguments, with roots replaced and
+   the folder-only and message-format ones left out; the variables cargo sets for the crate's
+   compile and those its build script set; the variables rustc, the C driver and the linker read
+   without listing them, such as `MACOSX_DEPLOYMENT_TARGET` and `SDKROOT`; `SOURCE_DATE_EPOCH`,
+   which compilers and build tools take "now" from when it is set; and what the wrapper adds to the
+   compile besides the remaps, so that a program compiled `movable` and one compiled `tied` never
+   share a key (decision 11). It holds no machine, user, branch, commit or time. The second key
+   adds what the compile read, as rustc's own dep-info lists it: each file by SHA-256 and the
+   places a module could have been; each `env-dep`; each dependency by the hash of its file; each
+   native library named with `-l`, in every folder rustc searches for it; the names in every folder
+   a read file sits in, so a new migration changes the key; every file of the build script's
+   output; what a local build script declared; and for a linked output, every library and file the
+   linker was handed. The list of files to hash before a lookup comes from earlier compiles of the
+   same first key, and is a hint that is never trusted: the wrapper hashes the files as they are
+   now, a file that is gone is hashed as absent, and a block exists under a key only because a
+   compile read exactly those bytes. A wrong or old list gives a key nobody recorded, which is a
+   build. A compile during which a read file changed, by size, dates, inode or device, is `built,
+   not stored`.
+
+   Two of those parts are narrower than first built. A native search folder (`-L native=`) is
+   keyed, by its names and its static libraries, for a library only: a library can bundle a static
+   library found there with nothing reporting it. A linked output has none in its key, since cargo
+   hands it every dependency's folders whether it links anything from them or not, and its link
+   line names every library it takes. Keyed for every compile, the folder of `libmimalloc-sys`,
+   whose library changed in every build (decision 14), made every program of a package that depends
+   on it miss, though two of them link it. And a macro that reads the first `.env` found walking up
+   (sqlx, `dotenvy_macro`, `dotenv_codegen`) is keyed by the file it finds above the roots, by
+   SHA-256 or none, not by each place it looked: every place above the workspace lay outside every
+   root, which tied the server's library and every program to its folder.
 5. **Paths are recorded from their roots, and a block moves only with proof** (B-8, B-9, B-10). A
-   root is the workspace, the package, the build script's output, the output folder or a dependency
-   folder. A path under a root is recorded as the root's name and the rest, in its given and its
+   root is the workspace, the package, the build script's output, the output folder, a dependency
+   folder, a native search folder, or a location cargo hands the compile: the target folder
+   `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` names when it is absolute, `CARGO_TARGET_TMPDIR`,
+   and each folder a `CARGO_BIN_EXE_<name>` value is in. Before those locations were roots, an
+   integration test got another key in every checkout whose target folder lay outside it. A path
+   under a root is recorded as the root's name and the rest, in its given and its
    resolved form, and looked up under the current root; a path under another checkout is never
    opened. The wrapper adds `--remap-path-prefix` for the workspace, as `.`, and for the build
    script's output, as a fixed stand-in that names the package. After a compile every output is
@@ -108,8 +126,10 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    was identical (288 of 288 `.rlib` and `.rmeta` on the CLI, 270 of 270 on the server), and so were
    the server's 4 git libraries and its workspace library, the CLI's 9 of 10 workspace libraries,
    all 20 and 14 proc macros, and all 33 build-script binaries of each (`m0-cli.md`, `m0-back.md`).
-   The one library that differed, `hushrun-testkit`, reads `env!("CARGO_MANIFEST_DIR")`: it depends
-   on its path, and the second compile is what ties it.
+   The one library that differed, `hushrun-testkit`, read `env!("CARGO_MANIFEST_DIR")`: it depended
+   on its path, the second compile tied it, and with it every test binary that links it. It now
+   finds the workspace when the tests run, from the running process's `CARGO_MANIFEST_DIR` or by
+   walking up from the executable, so it bakes no folder in.
 6. **No block comes from an incremental compile, and an edit keeps incremental compilation**
    (B-9). An incremental compile gives a different crate hash, and storing one could carry an
    incremental-compilation bug into every worktree. So the wrapper leaves `-C incremental` out of
@@ -119,12 +139,15 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    compile was measured first, on a one-line edit and `cargo test --no-run` on a warm target: on
    the CLI, 9.0 to 11.7 s with incremental became 17.3 to 33.5 s without (`m0-cli.md`); on the
    server, 9.8 to 14.5 s became 40.2 to 77.9 s (`m0-back.md`). A cold build without incremental was
-   no slower: on the CLI, a mean of 253.5 s of user CPU against 275.7 s with it (`m0-cli.md`).
+   no slower: on the CLI, a mean of 253.5 s of user CPU against 275.7 s with it (`m0-cli.md`). The
+   owner kept this rule on 2026-11-11: "Keep it".
 7. **A reused block is new files in the target** (B-12). Each file is cloned, or copied where the
    file system can't clone, under a temporary name in the output folder and renamed into place,
-   writable, all with one modification time. The dep-info file and the recorded compiler messages
-   are written with this folder's paths, the notices cargo waits on last. A step that fails before
-   the first message is written ends in rustc running.
+   writable, all with one modification time. A program's debug bundle is cloned whole into a
+   temporary folder and renamed into place as one folder, after a bundle already there is moved
+   aside and removed, so no bundle is ever there in part. The dep-info file and the recorded
+   compiler messages are written with this folder's paths, the notices cargo waits on last. A step
+   that fails before the first message is written ends in rustc running.
 8. **One store for the machine, not one per repository** (B-13). The store is `<cache
    directory>/build`, or `HUSHRUN_BUILD_DIR`. A key commits to everything a block was built from,
    so a block is as valid in another repository as in the one that built it, and dependencies two
@@ -141,21 +164,75 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    size, by the owner's decision: last use is the only rule. Separately, nothing is stored while the
    store's volume has less than `min_free_gb` free, 10 GB unless set, 0 to turn it off; those
    compiles are `built, not stored`, and the run says so once. The floor is not a limit: it deletes
-   nothing and only stops new blocks. The plan proposed it, and the owner has not yet ruled on it.
-10. **Programs are in scope** (B-6, B-9, B-18), by the owner's decision: test binaries, `hushrun`
-    and `hushrun-cloud`, not only libraries. A program's key includes every library the linker was
-    handed (`--print=link-args`), the libraries `-l` names and the files linker options name, the
-    linker and the SDK; where that list can't be read, or names a file that can't be found, it is
-    `built, not stored`. A program is stored with the debug objects it names, and gets no
-    `-oso_prefix`, since its debug info must work; so on macOS a debug program names its target
-    folder and is tied to it. It is reused when the same folder comes back to the same inputs,
-    such as a branch switched back, or the gate, which builds every commit in one folder.
+   nothing and only stops new blocks. The plan proposed it, and the owner accepted it on
+   2026-11-11: "the free space floor is fine".
+10. **Programs are in scope, and on macOS they move with a debug bundle** (B-6, B-9, B-10, B-18),
+    by the owner's decisions: test binaries, `hushrun` and `hushrun-cloud`, not only libraries. A
+    program's key includes every library the linker was handed (`--print=link-args`), the
+    libraries `-l` names and the files linker options name, the linker, the `dsymutil` rustc runs
+    and the SDK; where that list can't be read, or names a file that can't be found, it is `built,
+    not stored`.
+
+    As first built, a debug program on macOS named its object files by absolute path in its debug
+    map, so it was tied to its target folder. Three ways were weighed: leave it tied; give it
+    `-oso_prefix` alone; or give it a debug bundle. `-oso_prefix` alone made programs identical
+    across paths, but lost `file:line` for the workspace's own frames whenever the working
+    directory was not the target folder, which includes every `cargo test`, and no setting gives
+    them back. With a bundle and the prefix at the workspace, programs and their bundles were
+    identical across paths, and backtraces kept their lines from every working directory tried,
+    with the checkout that built them gone (`m3-programs-oso-prefix.md`). On 2026-11-11 the owner
+    chose "the third option": movable, with a debug bundle per program.
+
+    So on Apple targets a program that links with debug info gets `-C split-debuginfo=packed`, and
+    rustc runs `dsymutil` and writes `<program>.dSYM` beside it with the DWARF of every object it
+    was linked from; `-C strip=debuginfo`, so the program keeps no debug map naming those objects
+    by their paths; and `-oso_prefix` for the workspace's resolved form, so the UUID the linker
+    computes before the strip holds no path when the target folder is inside the workspace. The
+    bundle's `Contents/Resources/Relocations`, which names the program by its absolute path and
+    which no debugger reads, is removed. The bundle is part of the block: every file under it is
+    stored, searched for the roots, and put back as one folder.
+
+    A program still ties when it bakes a folder in, such as a test that holds
+    `env!("CARGO_BIN_EXE_hushrun")` or a path made from `env!("CARGO_MANIFEST_DIR")`: B-10's search
+    finds it. Checking out one commit at a new path rebuilt 12 of the CLI's 70 programs, every one
+    tied for that reason (`m4-own-sde-inside-on.md`), and 2 of the server's 26,
+    `no_stages_migration` and `billing` (`m4-back-inside-on.md`). Such a program is reused when the
+    same folder comes back to the same inputs, such as a branch switched back.
+
     On Apple targets a proc macro gets an install name that doesn't hold its folder
     (`-install_name @rpath/<file>`), and proc macros and build-script binaries get `-oso_prefix`
     for their dependency folder: nobody debugs those, and without it each holds the folder it was
     linked in. Those two made all 20 and 14 proc macros identical in M0, where without them all
-    differed (`m0-cli.md`, `m0-back.md`).
-11. **Every failure of the machinery ends in rustc running as asked** (B-15, B-16, B-19). An error
+    differed (`m0-cli.md`, `m0-back.md`). They are reused anywhere unless B-10 finds a root in them.
+11. **A setting keeps programs tied, for whoever wants that** (B-21). `programs` in `build.json`
+    is `movable`, the default, or `tied`, the behavior first built: none of the three additions,
+    the program stored with the debug objects it names and reused only in the target folder that
+    built it. Any other value makes the file invalid. The session carries what the file said when
+    the run began, so every compile of a run sees one value. A program set to `tied` whose flags
+    would allow a bundle has the bundle an earlier compile left removed first, since that bundle
+    matches no program compiled now and would keep it from being stored. A program whose own flags
+    say `-C split-debuginfo=off` or a `-C strip` other than `none`, one without debug info, and
+    one for another target are left as they are under either value.
+
+    What `movable` costs is a `dsymutil` run per program and about twice the bytes on a first
+    build. What it gains is the programs of every further checkout. Measured:
+
+    | | CLI | Server |
+    |---|---|---|
+    | First build, CPU, programs tied | 259.3 s | 291.2 s |
+    | First build, CPU, programs movable | 362.4 s and 371.5 s | 507.5 s and 488.6 s |
+    | First build, bytes stored, tied | 1.97 GB | 3.30 GB |
+    | First build, bytes stored, movable | 3.90 GB | 6.96 GB |
+    | Further checkout, programs tied | 18.0 s and 17.8 s wall, 118.3 s and 114.0 s CPU, 344 and 337 of 422 reused | 37.5 s and 30.1 s wall, 148.3 s and 151.7 s CPU, 313 and 315 of 355 reused |
+    | Further checkout, programs movable | 19.4 s and 19.8 s wall, 73.4 s and 72.4 s CPU, 404 and 402 of 429 reused | 40.6 s and 30.2 s wall, 66.2 s and 60.3 s CPU, 342 and 342 of 355 reused |
+
+    The first-build rows are `observe` runs from an empty store at the same commit
+    (`m1-*-observe.md` tied, `m4-*-observe.md` movable). The further-checkout rows are three
+    checkouts of one commit on a separate volume (`m5-disk-and-times.md`): the tied ones were
+    measured on an earlier commit of the branch with the target outside the checkout, the CLI at
+    another commit. Other sessions were compiling the whole time, so wall times track the load and
+    CPU is the steadier figure.
+12. **Every failure of the machinery ends in rustc running as asked** (B-15, B-16, B-19). An error
     computing a key, reading the store or putting files in place runs rustc with nothing stored.
     Settings that can't be read, a store that can't be written, CI and Windows are `passed
     through`. A kill at any point leaves nothing a later build takes for a block. A first key is
@@ -166,58 +243,140 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
     reused runs anyway and is compared byte for byte with the block, and a difference serves the
     fresh outputs. Programs and proc macros are not compared. `hushrun build clean` clears every
     suspension.
-12. **Each piece of state has one home.**
+13. **`hushrun run` rebuilds what changed in ways cargo can't see** (B-23). Cargo decides whether
+    to call rustc by dates and by the files rustc listed last time, so four changes never reached
+    the wrapper, though its keys cover them: a file added to a folder a crate reads (sqlx's
+    `migrate!` includes each migration but lists the folder unseen), a file a known macro reads, a
+    file where a module could also have been, and bytes changed under a date older than the last
+    build (an archive extracted with its own dates). The owner asked for a fix "transparently to
+    users, without adding random flags no one will remember". So inside `hushrun run`, with the
+    mode `observe` or `on`, before COMMAND starts, hushrun checks the crates it has seen compiled
+    in the target folders of the folder it runs in, and removes the outputs of any whose inputs
+    changed in one of those ways. Cargo finds them missing and calls rustc, and the wrapper answers
+    by content as usual. Nothing is asked of the person.
+
+    Every compile the wrapper sees through to a successful end, a reuse among them, leaves a
+    record of its unit in its output folder's `.hushrun/units/`: its outputs by inode, device and
+    size, and what to watch outside the shared folders, with what was seen. The store keeps one
+    file per output folder with a record, under `out-dirs/`, naming every working directory its
+    compiles ran in. The check takes the lock cargo holds on each target folder and skips one a
+    build holds; leaves to cargo what cargo sees itself; removes only files a record names, never
+    a source file; keeps the dep-info, so a crate cargo builds incrementally stays incremental;
+    and stops at a two-second deadline, leaving the rest for the next run. A crate from a registry
+    or a git source has no record: what its build script wrote is cargo's to watch.
+
+    Its limits, as B-23 states them: only crates the wrapper saw compiled are checked, and only in
+    the output folders registered for the folder `hushrun run` runs in, so a script that builds
+    into a folder elsewhere is not covered, and neither is a crate last built by plain cargo. A
+    macro that reads a file the table of known macros doesn't name, and a file the link line names,
+    are not watched. A name added to a watched folder that a fresh compile would also see, such as
+    an editor's swap file beside a source, rebuilds the crate, as its key says.
+14. **This repository pins the date its C code is compiled with.** `libmimalloc-sys` 0.1.49 writes
+    the C compiler's `__DATE__` and `__TIME__` into its static library
+    (`c_src/mimalloc/v2/src/options.c:222`), so that library differed in every build, and nothing
+    that links it could be reused from another build. Of the 393 packages in the released lockfile
+    it is the only one that does. On 2026-11-11 the owner agreed: "yes add it, run the full test
+    suite with it". The CLI's `.cargo/config.toml` sets `SOURCE_DATE_EPOCH = "315532800"`
+    (1980-01-01, which every tool accepts); a value set in the environment wins. With it the
+    library is byte-identical across builds (`m0-cli.md`), and the gate's whole suite passed:
+    1,705 tests (`m5-disk-and-times.md`). The effect, on six checkouts of one commit with the
+    variable set in the environment against without it: at a path no build used before, 10.3 to
+    12.8 s wall and 402 to 405 of 429 compiles reused, against 31.3 to 38.3 s and 359 to 365; at a
+    path built before, 5.3 to 6.5 s against 25.6 to 27.2 s (`m4-own-sde-inside-on.md`,
+    `m4-own-inside-on.md`). The wrapper never sets the variable, since the C compile runs in the
+    build script, which never goes through `RUSTC_WRAPPER`; it keys it (decision 4). The server
+    needs nothing: no dependency of its writes the time.
+15. **Each piece of state has one home.**
 
     | Thing | States | Home | Moved by |
     |---|---|---|---|
     | Mode | `off`, `observe`, `on` | `build.json` beside the credentials, written whole under a lock; a variable changes one command's view | `hushrun build on\|observe\|off` |
+    | What programs do | `movable`, `tied` | `programs` in `build.json`; the session carries one value for the run | The person, in the file |
     | One compile in a run | `reused`, `built and stored`, `built, not stored`, `passed through` | A line in the run's log, which the summary reads | One function in the wrapper |
     | A block | writing, stored, expired, gone | The folder it is in: `tmp/`, `blocks/`, `trash/` | Publishing and expiring are renames |
     | Last use | A time | The block's `used` file, from the command's clock | A reuse or a creation sets it, the sweep reads it |
     | A first key | `ok`, `suspended` | A file beside its hints | A failed load or audit sets it, `hushrun build clean` clears it |
+    | A unit's record | there, gone | `.hushrun/units/` in the output folder, written whole | One function: removed before rustc runs or a reuse, written after one that ends well; the check removes it with the outputs it names |
+    | An output folder known to the check | registered, dropped | `out-dirs/` in the store, written at most once per run per folder | A compile's record registers it; the sweep drops a folder that is gone or unseen for `keep_days` |
 
 ## Consequences
 
 - **What a person sees.** `hushrun build on`, `observe` and `off` set the mode, `hushrun build
-  status` shows it with the store's folder, its size and its blocks by age and by repository, and
-  `hushrun build clean` empties the store. After each command `hushrun run` writes one line after
-  its own prefix, such as `build: 331 of 372 crates reused, 41 built, saving about 2m 40s`,
-  `build: 41 crates built, none reused`, or, in `observe`, `build: observing: 2 of 3 crates would
-  have been reused, 1 differed from what a reuse would have given`; then at most five notes, such
-  as a suspended key, and the free-space line once.
+  status` shows it with the store's folder, how long blocks are kept, `programs`, the store's size
+  and its blocks by age and by repository, and `hushrun build clean` empties the store. After each
+  command `hushrun run` writes one line after its own prefix, such as `build: 331 of 372 crates
+  reused, 41 built, saving about 2m 40s`, `build: 41 crates built, none reused`, or, in
+  `observe`, `build: observing: 2 of 3 crates would have been reused, 1 differed from what a reuse
+  would have given`. Then, for each crate the check before the command removed, at most three
+  lines, such as `build: app is rebuilt: a file was added to migrations, which cargo doesn't
+  watch`; then at most five notes, such as a suspended key, and the free-space line once.
+- **On macOS each program has a `.dSYM` beside it in `target/`,** and the program holds no debug
+  map: its debug info is in the bundle. Cargo links `target/debug/<bin>.dSYM` to the hashed
+  program's bundle, so the copy cargo makes finds its lines too. With `programs` set to `tied`,
+  programs are as cargo builds them.
 - **Debug info names workspace files from the workspace root.** Compiler messages are unchanged,
   since cargo already passes relative paths. A backtrace frame reads `./crates/…` where it read an
-  absolute path. A debugger shows source when its working directory is the workspace root, or with
-  a source map from `.` to it; from elsewhere, breakpoints by file and line still resolve
-  (`m0-cli.md`).
+  absolute path, and keeps its `file:line` from any working directory, in a program reused in
+  another checkout with the checkout that built it deleted. A debugger shows source when its
+  working directory is the workspace root, or with a source map from `.` to it; with the bundle,
+  breakpoints by file and line resolve from the workspace root and from `/`
+  (`m0-cli.md`, `m3-programs-oso-prefix.md`).
 - **The first build in an output folder is not incremental.** Rebuilds after an edit are. A cold
   target without incremental state was 2.3 GB against 3.4 GB (`m0-cli.md`).
+- **Measured on the final build** (`m5-disk-and-times.md`, `m5-*-on.md`, `m5-*-none.md`): three
+  or four checkouts of one commit, each with its own target inside it, built with `cargo test
+  --no-run` (`--workspace` on the CLI). Other sessions were compiling heavily: the 1-minute load
+  was 54 to 460 during the timed runs, so wall times track the load and CPU is the steadier
+  figure.
+
+  | | CLI | Server |
+  |---|---|---|
+  | No wrapper, one build | 94.4 s and 77.7 s wall, 363.9 s and 357.9 s CPU | 134.5 s and 139.2 s wall, 403.9 s and 376.3 s CPU |
+  | Reuse on, the first build | 126.8 s wall, 470.1 s CPU, 4.13 GB stored | 140.7 s wall, 539.0 s CPU, 6.98 GB stored |
+  | Reuse on, each further checkout | 21.3 s, 19.0 s and 35.1 s wall; 76.1 s, 72.7 s and 83.5 s CPU; 403 to 406 of 429 compiles reused; 0.57 GB stored | 22.3 s, 19.3 s and 16.0 s wall; 58.3 s, 54.6 s and 50.6 s CPU; 338 to 344 of 355 reused; 0.48 GB stored |
+  | Real disk for three checkouts, no wrapper | 11,230 MB | 14,373 MB |
+  | Real disk for three checkouts, reuse on | 5,649 MB; the store alone 5,031 MB apparent | 7,920 MB; the store alone 7,579 MB apparent |
+  | A block against a fresh compile | 0 differences in 1,716 compiles | 0 differences in 1,420 compiles |
+
+  Real disk is `df` on a separate volume, where a reused file is a clone of the store's and is
+  counted once.
 - **What it does not do.**
   - It doesn't shrink a target. Blocks make one cheap to delete; cleaning targets is later.
   - Build scripts still run in each target, such as ring's C compile.
   - What neither rustc nor cargo can see, this can't either: a database a macro queries, a file a
     macro reads without listing it. Known macros are handled by name, a package can be put on the
     never-store list, and the audit is the backstop. Inside one target folder cargo still decides
-    what to compile, and a compile cargo doesn't ask for never reaches the wrapper.
-  - A build script that writes the time into its output, such as libmimalloc-sys's C code, gives
-    its crate a new key each time it runs, unless the person sets `SOURCE_DATE_EPOCH`; the wrapper
-    can't set it, since that compile happens in the build script (`m0-cli.md`).
+    what to compile; the check before a run (decision 13) makes it ask for the four changes cargo
+    misses, within that rule's limits, and any other compile cargo doesn't ask for never reaches
+    the wrapper.
+  - A build script that writes the time into its output, such as `libmimalloc-sys`'s C code,
+    gives its crate a new key each time it runs, unless `SOURCE_DATE_EPOCH` is set. This
+    repository sets it (decision 14); another project with such a dependency has to set it
+    itself, since the wrapper can't (`m0-cli.md`).
   - Nothing changes on Windows or in CI: the wrapper isn't set there.
   - Cargo's new build layout (1.100) is not handled; both repositories pin 1.94.
-- **The store can grow past the free disk.** With programs stored and no limit, one set of test
-  binaries with their debug objects is 1 to 5 GB, stored again whenever a library they link
-  changes (the plan). The free-space floor stops new blocks below 10 GB; the 15-day expiry is the
-  only thing that deletes.
+- **The store grows, and only expiry shrinks it.** On the final build the first build stored 4.13
+  GB on the CLI and 6.98 GB on the server, and each further checkout of the same commit 0.57 GB and
+  0.48 GB: 5.83 GB and 8.42 GB after four (`m5-*-on.md`). A new commit of the server stored 0.48
+  GB (`m4-back-inside-on.md`). Replaying the CLI's released history stored 2.10 to 2.74 GB per
+  commit, most of it test binaries that the test library of those commits tied to their folder
+  (`m4-cli-inside-on.md`). The free-space floor stops new blocks below 10 GB; the 15-day expiry is
+  the only thing that deletes.
 - **Sharing between machines is later.** Nothing leaves the machine. Keys hold no machine, user or
   time, and each block records the repository that built it, so later rules can decide whose
-  blocks count; registry
-  crates' paths under the cargo home stay absolute, which M0 did not test across machines
-  (`m0-cli.md`).
+  blocks count; registry crates' paths under the cargo home stay absolute, which M0 did not test
+  across machines (`m0-cli.md`).
+- **Found while measuring, not part of this decision.** The gate's `cargo deny` step reports
+  RUSTSEC-2026-0486, an advisory published 2026-11-11, against `rustix` 1.1.5
+  (`m5-disk-and-times.md`: "advisories FAILED"). That version is in the released lockfile already,
+  through `gix` and `tempfile`, and this work adds no third-party package. It needs `rustix` 1.1.6
+  on main, separately.
 - **Open, for the owner:**
-  - the free-space floor (B-22), built at 10 GB, not yet ruled on;
-  - the size limit, to revisit with the numbers from replaying each repository's history;
-  - programs made movable on macOS with `-oso_prefix`, at the cost of their debug paths;
-  - the gate sharing the worktrees' store, with `check-local.sh` setting `HUSHRUN_BUILD_DIR`.
+  - "no size limit", against the store's measured growth above;
+  - the gate sharing the worktrees' store, with `check-local.sh` setting `HUSHRUN_BUILD_DIR`. The
+    gate's export, which gave every file the commit's date, now extracts with `tar -x -m`, fixed
+    in the owner's script on his word, "fix what you found";
+  - pushing and releasing. Nothing is released.
 
 ## Alternatives considered
 
@@ -240,3 +399,10 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
   parameter, so it stays a small change.
 - **A size limit.** Declined by the owner: a block is deleted when unused for 15 days, and that is
   the only rule.
+- **Programs tied, or movable by `-oso_prefix` alone.** Tied, every further checkout links every
+  program again. `-oso_prefix` alone loses the workspace's own `file:line` in backtraces under
+  `cargo test`, with no setting to bring it back (`m3-programs-oso-prefix.md`). `tied` stays as a
+  setting (decision 11).
+- **A flag or a build script line for what cargo can't see.** The owner asked for it to work
+  without flags a person has to remember. The plan's line for the server, `rerun-if-changed` on
+  its migrations folder, would cover one of the four cases in one repository.

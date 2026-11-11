@@ -122,17 +122,40 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   no cache directory. A `cargo` outside `hushrun run` is untouched, and cargo's configuration is
   never edited.
 - Contract: **`build.json`**, beside the credentials file, holds the mode, `keep_days` (15),
-  `never_store` (package names), `env` (more variable names for the key) and `min_free_gb` (10),
-  written whole under a lock. A file `hushrun run` can't read means it reuses nothing and says why;
-  `hushrun build status` exits 2.
+  `never_store` (package names), `env` (more variable names for the key), `min_free_gb` (10) and
+  `programs`, written whole under a lock. A file `hushrun run` can't read means it reuses nothing
+  and says why; `hushrun build status` exits 2.
+- Contract: **`programs` in `build.json`** is `movable`, the default, or `tied`; any other value
+  makes the file invalid. `movable`: on macOS a program that links with debug info gets a debug
+  bundle, `<program>.dSYM` beside it in `target/`, and keeps no debug map of its own, so it can be
+  reused in another checkout and its backtraces keep `file:line`. That costs a `dsymutil` run per
+  program and about twice the bytes stored on a first build. `tied`: a program is compiled as
+  asked and reused only in the target folder that built it. **`hushrun build status`** shows the
+  setting, as `programs` in its text and in its JSON.
+- Contract: **`SOURCE_DATE_EPOCH` is part of every compile's key**, since compilers and build tools
+  take "now" from it when it is set. hushrun never sets it.
 - Contract: **the `build` folder in the cache directory** is the store: `blocks/`, the hints and
-  suspensions under `steps/`, `tmp/`, `trash/`, the runs' `sessions/`, the wrapper's link under
-  `bin/` and the sweep's `swept` stamp. One store serves every repository on the machine.
-- After its command, `hushrun run` writes one line of what the compiles came to:
+  suspensions under `steps/`, `tmp/`, `trash/`, the runs' `sessions/`, the output folders the
+  wrapper has written records in under `out-dirs/`, the wrapper's link under `bin/` and the
+  sweep's `swept` stamp. One store serves every repository on the machine. In each output folder,
+  `.hushrun/` holds the wrapper's records beside the outputs, `units/` among them, and goes with
+  `cargo clean`.
+- Contract: after its command, `hushrun run` writes one line of what the compiles came to:
   `build: 331 of 372 crates reused, 41 built, saving about 2m 40s`, `build: 41 crates built, none
   reused`, or in `observe`, `build: observing: 2 of 3 crates would have been reused, 1 differed
-  from what a reuse would have given`. Then at most five notes, such as a key suspended, and once
-  `build: nothing was stored because the disk has less than 10 GB free`.
+  from what a reuse would have given`. Then at most three lines for the crates it made cargo
+  rebuild, such as `build: app is rebuilt: a file was added to migrations, which cargo doesn't
+  watch` or `build: 4 more are rebuilt for changes cargo doesn't watch`; then at most five notes,
+  such as a key suspended, and once `build: nothing was stored because the disk has less than 10
+  GB free`.
+- **`hushrun run` rebuilds a crate that changed in ways cargo can't see.** Before its command,
+  with reuse on or in `observe`, it removes the outputs of a crate it has seen compiled in the
+  target folders here when a file was added to a folder the crate reads, a file a known macro
+  reads changed, a file appeared where a module could also have been, or a file's bytes changed
+  under a date older than the last build. Cargo then builds it. A new migration for sqlx's
+  `migrate!` used to leave the old library in place; now the run says `build: app is rebuilt: a
+  file was added to migrations, which cargo doesn't watch` and the library has it. Nothing is
+  asked of the person.
 - Inside `hushrun run` with reuse on, debug info names workspace files from the workspace root,
   so a debugger shows source from there, and the first build in an output folder is not
   incremental. Rebuilds after an edit stay incremental.
