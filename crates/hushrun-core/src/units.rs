@@ -30,7 +30,8 @@ pub enum Mode {
     Off,
     /// Every test file runs, and hushrun records and says what reuse would have done.
     Observe,
-    /// Test files that already passed on the files they read are reused. This version observes.
+    /// \[ADR 0069\] Test files that already passed on the files they read are reused, with audit
+    /// runs (C-34).
     Reuse,
 }
 
@@ -314,7 +315,7 @@ pub struct Facts {
     pub failed: bool,
     /// What the adapter couldn't follow while it ran.
     pub not_followed: BTreeSet<NotFollowed>,
-    /// The adapter deselected it, as the plan listed it.
+    /// The adapter deselected it, as the plan listed it: every process that collected it did.
     pub deselected: bool,
 }
 
@@ -374,10 +375,17 @@ impl State {
 }
 
 /// \[C-32, ADR 0060\] The one place a unit's state is decided, from what its adapter reported and
-/// what the run knows. A failure is a failure, whatever else is true; a unit that didn't run whole
-/// is `not run`; one with something the adapter couldn't follow is `not observed`; and a pass
-/// holds only when COMMAND passed or the adapter reports each failure by unit.
+/// what the run knows. A failure is a failure, whatever else is true, a deselection included; a
+/// unit the plan listed and the adapter deselected is `reused`; a unit that didn't run whole is
+/// `not run`; one with something the adapter couldn't follow is `not observed`; and a pass holds
+/// only when COMMAND passed or the adapter reports each failure by unit.
 pub fn state(facts: &Facts, run: &RunFacts) -> State {
+    // \[ADR 0069\] First, before a deselection: a process that may not deselect (a nested pytest, an
+    // xdist worker the plan doesn't speak for) can run a unit another deselected, and its failure
+    // must never read as a reuse.
+    if facts.failed {
+        return State::Failed;
+    }
     if facts.deselected {
         // Deselected by something other than the plan, such as another plugin: nothing ran.
         return if run.planned {
@@ -385,9 +393,6 @@ pub fn state(facts: &Facts, run: &RunFacts) -> State {
         } else {
             State::NotRun
         };
-    }
-    if facts.failed {
-        return State::Failed;
     }
     if !facts.complete {
         return State::NotRun;
@@ -400,6 +405,42 @@ pub fn state(facts: &Facts, run: &RunFacts) -> State {
     } else {
         State::NotRun
     }
+}
+
+/// \[C-34, ADR 0069\] How many of `reusable` units an audit runs anyway: 2%, rounded up, and at
+/// least one when there is any (RFC 0003 D5).
+pub fn audit_share(reusable: usize) -> usize {
+    if reusable == 0 {
+        0
+    } else {
+        reusable.div_ceil(50).max(1)
+    }
+}
+
+/// \[C-34, ADR 0069\] The one function that chooses a run's audited units among those the plan
+/// could reuse, each named with the key whose pass would reuse it: [`audit_share`] of them, those
+/// whose SHA-256 of `<key hex>\n<run start, RFC 3339>` is lowest. Nobody picks: the key holds what
+/// the unit read, and the start is the run's own.
+pub fn audited<'a>(
+    reusable: impl IntoIterator<Item = (&'a str, &'a Digest)>,
+    started: &str,
+) -> BTreeSet<String> {
+    let mut ranked: Vec<(Digest, &str)> = reusable
+        .into_iter()
+        .map(|(unit, key)| {
+            (
+                Digest::of(format!("{}\n{started}", key.hex()).as_bytes()),
+                unit,
+            )
+        })
+        .collect();
+    ranked.sort();
+    let take = audit_share(ranked.len());
+    ranked
+        .into_iter()
+        .take(take)
+        .map(|(_, unit)| unit.to_string())
+        .collect()
 }
 
 #[cfg(test)]

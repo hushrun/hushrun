@@ -301,3 +301,47 @@ fn modes_read_as_written() {
     assert!(!tests.always_runs("crates/a/src/lib.rs"));
     assert!(!Tests::default().is_on());
 }
+
+// covers: C-32
+#[test]
+fn a_failure_outranks_a_deselection_the_plan_listed() {
+    // One process (an xdist worker that may deselect) reports the unit deselected; another, which
+    // may not, ran it and saw it fail. Reused would hide the failure: a failure is a failure.
+    let both = Facts {
+        deselected: true,
+        failed: true,
+        complete: true,
+        ..Facts::default()
+    };
+    let planned = RunFacts {
+        planned: true,
+        ..PASSED
+    };
+    assert_eq!(state(&both, &planned), State::Failed);
+    assert_eq!(state(&both, &PASSED), State::Failed);
+}
+
+// covers: C-34
+#[test]
+fn audits_take_two_percent_at_least_one_chosen_by_key_and_start() {
+    assert_eq!(audit_share(0), 0);
+    assert_eq!(audit_share(1), 1);
+    assert_eq!(audit_share(50), 1);
+    assert_eq!(audit_share(51), 2);
+    assert_eq!(audit_share(328), 7);
+    let keys: Vec<(String, Digest)> = (0..120)
+        .map(|n| {
+            (
+                format!("tests/test_{n}.py"),
+                Digest::of(format!("{n}").as_bytes()),
+            )
+        })
+        .collect();
+    let pick = |started: &str| audited(keys.iter().map(|(u, k)| (u.as_str(), k)), started);
+    let one = pick("2026-11-10T12:00:00.000Z");
+    assert_eq!(one.len(), 3);
+    // The same run picks the same; another start picks others.
+    assert_eq!(one, pick("2026-11-10T12:00:00.000Z"));
+    assert_ne!(one, pick("2026-11-10T12:00:00.001Z"));
+    assert!(audited([], "x").is_empty());
+}
