@@ -51,7 +51,7 @@ const SUSPENDED: &str = "suspended";
 /// The registry of output folders the wrapper wrote unit records in (B-23): one file each.
 const OUT_DIRS: &str = "out-dirs";
 /// The schema name of an entry of that registry.
-const OUT_DIR_SCHEMA: &str = "hushrun.build.out-dir/1";
+const OUT_DIR_SCHEMA: &str = "hushrun.build.out-dir/2";
 /// How many times a step is tried when a name is taken or a folder vanished under it.
 const ATTEMPTS: usize = 8;
 
@@ -197,8 +197,8 @@ struct RecordFile {
 pub struct OutDir {
     /// The output folder (`--out-dir`), resolved.
     pub out_dir: PathBuf,
-    /// The working directory of its compiles (the workspace), resolved.
-    pub cwd: PathBuf,
+    /// The working directories of its compiles (the workspaces that share it), resolved.
+    pub cwds: Vec<PathBuf>,
     /// When a run last saw a compile there, in milliseconds since the epoch.
     pub seen_ms: u64,
 }
@@ -611,9 +611,9 @@ impl Store {
     }
 
     /// Remembers an output folder the wrapper wrote a unit record in, and the working directory
-    /// of its compiles (B-23): one small file named by a digest of the folder, written whole.
-    /// Both paths are resolved, so that the check finds them from any form of the folder it
-    /// runs in.
+    /// of its compiles (B-23): one small file named by a digest of the folder, written whole,
+    /// that keeps every working directory seen there (workspaces may share a target folder).
+    /// Paths are resolved, so that the check finds them from any form of the folder it runs in.
     pub fn register_out_dir(
         &self,
         out_dir: &Path,
@@ -621,15 +621,29 @@ impl Store {
         now: SystemTime,
     ) -> Result<(), StoreError> {
         let resolve = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let out_dir = resolve(out_dir);
+        let name = Digest::of(out_dir.as_os_str().as_encoded_bytes()).hex();
+        let dir = self.root.join(OUT_DIRS);
+        let dest = dir.join(format!("{}.json", &name[..32]));
+        // Two runs adding a working directory at once may keep one: the next run adds it again.
+        let mut cwds: Vec<PathBuf> = fs::read(&dest)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<OutDirFile>(&bytes).ok())
+            .filter(|file| file.schema == OUT_DIR_SCHEMA && file.entry.out_dir == out_dir)
+            .map(|file| file.entry.cwds)
+            .unwrap_or_default();
+        let cwd = resolve(cwd);
+        if !cwds.contains(&cwd) {
+            cwds.push(cwd);
+            cwds.sort();
+        }
         let entry = OutDir {
-            out_dir: resolve(out_dir),
-            cwd: resolve(cwd),
+            out_dir,
+            cwds,
             seen_ms: now.duration_since(UNIX_EPOCH).map_or(0, |since| {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             }),
         };
-        let name = Digest::of(entry.out_dir.as_os_str().as_encoded_bytes()).hex();
-        let dir = self.root.join(OUT_DIRS);
         fs::create_dir_all(&dir).map_err(at(&dir))?;
         let bytes = serde_json::to_vec(&OutDirFile {
             schema: OUT_DIR_SCHEMA.to_string(),
@@ -639,7 +653,6 @@ impl Store {
             path: dir.clone(),
             source: io::Error::other(err),
         })?;
-        let dest = dir.join(format!("{}.json", &name[..32]));
         let temp = dir.join(format!(".{}.tmp", unique(&name[..16])));
         fs::write(&temp, bytes)
             .and_then(|()| fs::rename(&temp, &dest))

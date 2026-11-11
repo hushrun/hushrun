@@ -721,9 +721,11 @@ fn forms(folder: &Path) -> Vec<PathBuf> {
 
 /// Whether an output folder's compiles ran in the folder, inside it or above it.
 fn related(entry: &OutDir, folder: &[PathBuf]) -> bool {
-    folder
-        .iter()
-        .any(|form| entry.cwd.starts_with(form) || form.starts_with(&entry.cwd))
+    entry.cwds.iter().any(|cwd| {
+        folder
+            .iter()
+            .any(|form| cwd.starts_with(form) || form.starts_with(cwd))
+    })
 }
 
 /// Cargo's lock for the target folder `out_dir` is in: `.cargo-lock` in the profile folder,
@@ -1076,7 +1078,14 @@ mod tests {
         let all = store.out_dirs();
         assert_eq!(all.len(), 1, "{all:?}");
         assert_eq!(all[0].out_dir, u.out);
-        assert_eq!(all[0].cwd, u.root());
+        assert_eq!(all[0].cwds, [u.root()]);
+        // A second workspace sharing the target folder is kept beside the first.
+        let shared = u.root().join("second");
+        fs::create_dir_all(&shared).unwrap();
+        store
+            .register_out_dir(&u.out, &shared, SystemTime::now())
+            .unwrap();
+        assert_eq!(store.out_dirs()[0].cwds, [u.root(), shared]);
         // Another folder, then gone, and one not seen for long: both forgotten by the sweep.
         let other = u.root().join("other/target/debug/deps");
         fs::create_dir_all(&other).unwrap();

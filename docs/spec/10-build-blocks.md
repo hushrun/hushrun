@@ -297,8 +297,9 @@ wrapper answers by content as usual. Nothing is asked of the person.
   for a library each native folder and the static libraries in it, and each place a `-l` may be
   found; for a file its size, both dates, inode, device and, when the compile hashed it, its
   SHA-256; for a place, absent; for a folder, its entry names. Nothing under a shared folder
-  (B-8) or in the unit's own output folder is watched, and a crate with nothing to watch has no
-  record. It is written whole, under a temporary name that begins with a dot, after the outputs
+  (B-8) or in the unit's own output folder is watched; a crate with nothing to watch has no
+  record, and neither has one whose package lies in a shared folder (a registry or git crate:
+  what its build script wrote is cargo's to watch). It is written whole, under a temporary name that begins with a dot, after the outputs
   are in place. A watched file or folder dated at or after the start of the compile (or the
   reuse) means it changed meanwhile: no record is written then.
 - *One record or none.* The record is removed before rustc runs and before a reuse puts files in
@@ -309,10 +310,11 @@ wrapper answers by content as usual. Nothing is asked of the person.
   session) removes the record of the unit its `--crate-name`, `-C extra-filename` and `--out-dir`
   name before rustc runs. A failed compile leaves none.
 - *The registry.* The store keeps one file per output folder the wrapper wrote a record in,
-  `out-dirs/<digest of its path>.json`: the folder and the working directory of its compiles,
-  both resolved, and when a run last saw it, written at most once per run per folder. The sweep
+  `out-dirs/<digest of its path>.json`: the folder, every working directory its compiles ran in
+  (workspaces may share a target folder), all resolved, and when a run last saw it, written at
+  most once per run per folder. The sweep
   (B-14) drops an entry whose folder is gone or that no run saw for `keep_days`.
-- *The check.* It takes the registered output folders whose working directory is the folder
+- *The check.* It takes the registered output folders with a working directory that is the folder
   `hushrun run` runs in, inside it or above it, and for each takes the lock cargo holds on its
   target folder (`.cargo-lock` in the profile folder), skipping a folder a build holds or one
   with no such lock. For each record there: an output that is gone or isn't the file the record

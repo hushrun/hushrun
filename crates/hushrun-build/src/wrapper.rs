@@ -345,8 +345,12 @@ impl Call<'_> {
         digests: &BTreeMap<PathBuf, Digest>,
     ) {
         let inv = self.invocation;
-        let info = std::fs::read_to_string(inv.dep_info_path())
-            .ok()
+        // A registry or git crate: its sources never change, and what its build script wrote is
+        // cargo's to watch. No record, and its output folder isn't registered by it.
+        let info = self
+            .local()
+            .then(|| std::fs::read_to_string(inv.dep_info_path()).ok())
+            .flatten()
             .and_then(|text| depinfo::parse(&text).ok());
         let seen = info.map(|info| Seen {
             crate_name: inv.crate_name().to_string(),

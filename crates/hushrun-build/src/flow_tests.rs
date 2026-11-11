@@ -3128,6 +3128,12 @@ fn every_call_leaves_a_record_of_its_unit_or_none() {
     let r = w.call_with(&ws, "a", &["-C", "incremental=/tmp/inc"], from_a_registry);
     assert_eq!(r.seen.execs.len(), 1);
     assert!(!unit_record(&ws).exists());
+    // So does one compiled whole: what its build script wrote is cargo's to watch.
+    fs::write(ws.join("a/src/lib.rs"), "mod foo;\nfn registry() {}\n").unwrap();
+    settle();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED);
+    assert!(!unit_record(&ws).exists());
     // A failed compile leaves none.
     w.plan(
         "a",
