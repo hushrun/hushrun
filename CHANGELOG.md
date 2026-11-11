@@ -47,6 +47,12 @@ hushrun works with no account, and `ready` and the pre-push hook go by what pass
   with no account to `hushrun guide`. `hushrun ready` notes a repository's copy of revision 1 as
   older, and `hushrun skill update` or `hushrun init` updates it, to commit.
 
+### Fixed
+
+- A coverage report whose counts don't fit together no longer wraps them, or stops a debug build:
+  the statements of a Go coverprofile and a Cobertura report's branches stop at the largest count
+  there is. A fuzz run in CI found it.
+
 ## [0.11.1] - 2026-11-10
 
 ### Fixed

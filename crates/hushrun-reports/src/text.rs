@@ -168,12 +168,13 @@ fn go(text: &str, deadline: Deadline) -> Result<Counts, Error> {
         seen.0 = seen.0.max(statements);
         seen.1 = seen.1.max(count);
     }
-    let total: u64 = blocks.values().map(|(statements, _)| statements).sum();
-    let covered: u64 = blocks
-        .values()
-        .filter(|(_, count)| *count > 0)
-        .map(|(statements, _)| statements)
-        .sum();
+    let total = crate::sum(blocks.values().map(|(statements, _)| statements));
+    let covered = crate::sum(
+        blocks
+            .values()
+            .filter(|(_, count)| *count > 0)
+            .map(|(statements, _)| statements),
+    );
     Ok(Counts {
         lines: None,
         statements: Ratio::some(covered, total),
