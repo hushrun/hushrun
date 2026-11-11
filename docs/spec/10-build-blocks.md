@@ -19,12 +19,16 @@ turns it on. In `observe` every compile runs as in `off`, blocks are stored, and
 block already exists is compared with it. In `on` a compile whose block exists is not run.
 `hushrun build on|observe|off` sets it; `HUSHRUN_BUILD` overrides it for one command.
 
-**B-2 The wrapper.** When the mode is not `off`, `hushrun run NAME -- COMMAND` runs COMMAND with
-`RUSTC_WRAPPER` set to a link named `hushrun-rustc` that points at the hushrun binary. It MUST NOT
-set it when `RUSTC_WRAPPER` is set already, in CI (C-14's detection), or on Windows. A binary
-called by that name is the wrapper and does nothing else; it MUST decide that from its own name,
-before reading any setting. A build outside `hushrun run` neither reads nor fills the store.
-Cargo's own fingerprints don't count the wrapper, so changing the mode never forces a rebuild.
+**B-2 The wrapper.** When the mode is not `off`, `hushrun run` sets `RUSTC_WRAPPER` to a link
+named `hushrun-rustc` that points at the hushrun binary, in both its forms:
+`hushrun run NAME -- COMMAND` sets it for COMMAND, and `hushrun run CHECK…` sets it for each
+hushrun.yaml check it runs on this machine, with one session per check that all of the check's
+attempts share. It MUST NOT set it for an isolated check: that check runs in a container, where
+the link and the store don't exist. It MUST NOT set it either when `RUSTC_WRAPPER` is set
+already, in CI (C-14's detection), or on Windows. A binary called by that name is the wrapper and
+does nothing else; it MUST decide that from its own name, before reading any setting. A build
+outside `hushrun run` neither reads nor fills the store. Cargo's own fingerprints don't count the
+wrapper, so changing the mode never forces a rebuild.
 
 **B-3 Outcomes.** Every compiler call ends in exactly one outcome, decided by one function from
 facts: `reused`, `built and stored`, `built, not stored` (with the reason) or `passed through`
