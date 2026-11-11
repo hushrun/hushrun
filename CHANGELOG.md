@@ -74,6 +74,21 @@ test`), `go test` and Vitest; audited as it goes; and explained, one test file a
   one full run and one line, and is made again. A cache step that keeps it between CI runs saves
   `<cache dir>/units/*.v1.sqlite`. SQLite is built into hushrun (`rusqlite`, bundled).
 - The unit key's vectors, `testdata/digest/unit-keys.json`, and `tools/refdigest.py unit-keys`.
+- **A machine with an empty cache reuses what a warm one would**
+  ([ADR 0075](docs/adr/0075-what-other-machines-saw-test-files-read.md)): a CI runner or an agent's
+  sandbox asks the server for what other machines saw its test files read, keys each test file by
+  this machine's list and theirs, newest first, three at most, and reuses it when some list's key
+  has a pass that counts here and none has a fail. What a run saw goes back to the server once it
+  is recorded, in `observe` too, and not again while it is the same. Every file path in it is a
+  keyed hash under a key the server never has, derived from the names of the check's sources.
+  Lists are kept per system (Linux, macOS, Windows), and a check whose `counts_from` names `os`
+  reads those systems'. A test file reused on another machine's list is kept in this machine's
+  store as `shared` until it runs here, and `hushrun why` says `another machine saw it read …`.
+  Never in local mode, for Cargo, or for a run that recorded nothing. Contract:
+  **`hushrun-results/v0`** gains `PUT {base}/v0/units/hints/{sha256}` and `POST
+  {base}/v0/units/hints/lookup`; a server without them changes nothing, said once,
+  `hushrun: unit: acme doesn't keep what other machines saw its test files read yet, so this
+  machine goes by what it saw itself`. One too large to send isn't sent, said once.
 
 ### Changed
 
