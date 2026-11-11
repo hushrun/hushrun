@@ -1013,6 +1013,11 @@ fn a_token_where_the_string_goes_says_what_to_do() {
 /// hushrun's variables, every one it reads: a string in any is dropped, and said once.
 const HUSHRUNS_VARIABLES: &[&str] = &[
     "HUSHRUN_BACKEND",
+    // B-1, B-13, B-14: build blocks' variables; `hushrun run` hands the session to the wrapper.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_SESSION",
     "HUSHRUN_CACHE_DIR",
     "HUSHRUN_CONFIG",
     "HUSHRUN_CONTAINER_RUNTIME",

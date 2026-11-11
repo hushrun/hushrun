@@ -46,6 +46,13 @@ impl Credentials {
         }
     }
 
+    /// \[B-21\] The build blocks' settings, `build.json`, beside the credentials file: so
+    /// `HUSHRUN_CREDENTIALS=/x/credentials.json` keeps them in `/x/build.json`. `hushrun run` and
+    /// `hushrun build` both read it from here.
+    pub fn build_settings_path() -> Option<PathBuf> {
+        Credentials::path().map(|path| path.with_file_name("build.json"))
+    }
+
     /// What was saved; nothing when there is no file.
     pub fn load() -> anyhow::Result<Credentials> {
         match Credentials::path() {

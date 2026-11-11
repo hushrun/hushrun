@@ -31,6 +31,12 @@ const CLEARED: &[&str] = &[
     // A run inside another says less: these tests may run inside `hushrun run`, as CI runs them.
     "HUSHRUN_INSIDE_RUN",
     "npm_lifecycle_event",
+    // B-1, B-2: the developer's build mode, store and wrapper stay out.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_SESSION",
+    "RUSTC_WRAPPER",
 ];
 
 /// Where the hosted backend would be: nothing listens on the discard port, so no test reaches

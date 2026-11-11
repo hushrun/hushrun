@@ -146,6 +146,14 @@ const CLEARED: &[&str] = &[
     // The repository's id is the provider's word, never a developer's environment.
     "GITHUB_REPOSITORY_ID",
     "CI_DEFAULT_BRANCH",
+    // B-1, B-2: build blocks follow the world's own settings, never the developer's mode or
+    // store, and a test run under cargo, which may itself compile through the wrapper, doesn't
+    // pass its wrapper on.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_SESSION",
+    "RUSTC_WRAPPER",
 ];
 
 /// A git repository with a policy, a fake HTTP server (L-10), and test keys. \[ADR 0031\] The

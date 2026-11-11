@@ -16,6 +16,7 @@ use std::time::{Instant, SystemTime};
 
 use anyhow::{Context as _, anyhow};
 
+use hushrun_build::session::{self, NotBegun, Session};
 use hushrun_ci::{Env, RunContext};
 use hushrun_core::counts_from::Rule;
 use hushrun_core::digest::Digest;
@@ -32,6 +33,7 @@ use crate::cli::{GlobalOpts, RunArgs};
 use crate::cmd::init::origin_repository;
 use crate::cmd::setup::{checks, variants};
 use crate::context::{self, Content, Source};
+use crate::credentials::Credentials;
 use crate::exit::Exit;
 use crate::measure::{self, Judged};
 use crate::output::Outputs;
@@ -433,6 +435,13 @@ fn skip_or_run(
         (Some(code), Some(_)) => observe_tests(say, check, code, command, dir),
         _ => None,
     };
+    // B-2: with reuse on, cargo in COMMAND compiles through the wrapper: one session for every
+    // start of COMMAND in this run, begun before the first and finished after the last.
+    let mut build = BuildRun {
+        session: build_session(global, say, code),
+        global,
+        say,
+    };
     let started_at = now(global);
     // \[ADR 0069\] With `tests: reuse`, the plan: which test files already passed on the files they
     // read, and aren't run again (C-34); or why every test file runs.
@@ -495,6 +504,7 @@ fn skip_or_run(
         .args(&command[1..])
         .current_dir(dir)
         .env(variants::INSIDE_A_RUN, "1");
+    build.apply(&mut child);
     if let Some(session) = &session {
         session.apply(&mut child);
     }
@@ -658,6 +668,7 @@ fn skip_or_run(
                     .args(&command[1..])
                     .current_dir(dir)
                     .env(variants::INSIDE_A_RUN, "1");
+                build.apply(&mut second);
                 session.apply(&mut second);
                 again.apply(&mut second);
                 let passed = second.status().is_ok_and(|s| s.success());
@@ -671,6 +682,9 @@ fn skip_or_run(
                 .collect(),
         };
     }
+    // B-20: COMMAND starts no more: what its compiles came to, whatever its exit codes. A run
+    // that returned before here said it when it returned (`BuildRun`'s drop).
+    build.finish();
     match code.unchanged(global, args) {
         Ok(true) => {}
         Ok(false) => {
@@ -852,6 +866,82 @@ fn skip_or_run(
         },
     }
     ExitCode::from(exit)
+}
+
+/// B-2, B-19: the build blocks' session for COMMAND, when reuse is on here. Settings that can't
+/// be used cost one line and COMMAND runs as usual; every other reason for none is silent.
+fn build_session(global: &GlobalOpts, say: &Say, code: Option<&Code>) -> Option<Session> {
+    let settings = Credentials::build_settings_path()?;
+    let cache_dir = context::cache_dir();
+    // With no path to the binary, a session can't link to it: `begin` says so when it gets
+    // that far.
+    let exe = std::env::current_exe().unwrap_or_default();
+    let repository = code.and_then(Code::repository_here);
+    let env = |name: &str| hushrun_ci::var_os(name);
+    let start = session::Start {
+        settings: &settings,
+        cache_dir: cache_dir.as_deref(),
+        exe: &exe,
+        in_ci: hushrun_ci::in_ci(&Env::from_process()),
+        repository: repository.as_deref(),
+        env: &env,
+        now: system_time(now(global)),
+    };
+    match session::begin(&start) {
+        Ok(session) => Some(session),
+        Err(NotBegun::Unusable(why)) => {
+            say.line(format_args!("build reuse is off for this run: {why}"));
+            None
+        }
+        Err(
+            NotBegun::Off
+            | NotBegun::Ci
+            | NotBegun::Windows
+            | NotBegun::WrapperSet
+            | NotBegun::NoCache,
+        ) => None,
+    }
+}
+
+/// `time` as the build blocks take it.
+fn system_time(time: Time) -> SystemTime {
+    u64::try_from(time.millis()).map_or(SystemTime::UNIX_EPOCH, |ms| {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms)
+    })
+}
+
+/// B-2, B-20: a run's build session, begun once before COMMAND first starts. Every start of
+/// COMMAND gets its environment, and it is finished once, after the last: by [`BuildRun::finish`]
+/// where the run's lines go, else when the run returns before there, whatever COMMAND's exit
+/// codes. Nothing in it changes how COMMAND ends or what is recorded.
+struct BuildRun<'a> {
+    session: Option<Session>,
+    global: &'a GlobalOpts,
+    say: &'a Say,
+}
+
+impl BuildRun<'_> {
+    /// Sets the wrapper and the session on a start of COMMAND, when there is a session.
+    fn apply(&self, command: &mut Command) {
+        if let Some(session) = &self.session {
+            command.envs(session.env());
+        }
+    }
+
+    /// Ends the session, once, and says what its compiles came to.
+    fn finish(&mut self) {
+        if let Some(session) = self.session.take() {
+            for line in session.finish(system_time(now(self.global))).lines() {
+                self.say.line(format_args!("{line}"));
+            }
+        }
+    }
+}
+
+impl Drop for BuildRun<'_> {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// The newest result of `key` that counts in the CI job `job` and its `variant`, for a run that
