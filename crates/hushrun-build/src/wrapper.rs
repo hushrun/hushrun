@@ -377,11 +377,10 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::TargetFile);
         }
-        let Ok(mut roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
+        let Ok(roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
         else {
             return self.pass(PassedThrough::Roots);
         };
-        roots.add_needles(&inv.package().target_dirs, resolve_on_disk);
 
         // The build script's saved output: its `rustc-env` names belong in the first key.
         let script: Option<Script> = inv.package().out_dir.as_ref().and_then(|out| {

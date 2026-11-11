@@ -23,7 +23,8 @@
 //!    [`store`] is the only code that moves a block between writing, stored, expired and gone,
 //!    and every move is a rename. [`settings`] is the only home of the mode.
 //! 4. **Placeholders in, proof out** (B-8, B-10). A path under a root (the workspace, the
-//!    package, the build script's output, the output folder, the `-L` search folders) is
+//!    package, the build script's output, the output folder, the `-L` search folders, and the
+//!    target folder, test folder and program folders cargo or the person name) is
 //!    recorded from that root and
 //!    looked up from the current one, in its given and its resolved form. A path under another
 //!    checkout is never opened. A block may move to another folder only when its outputs were

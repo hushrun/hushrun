@@ -1181,11 +1181,12 @@ fn lines_after_a_move(
     assert!(text.contains("lib_a/src/lib.rs:11:5"), "{text}");
 }
 
-/// Builds the tests at `one`, then at `two`, and checks what moved (B-9, B-10, B-12): the bin
-/// and the test binaries are reused, may move, and are `one`'s bytes, bundles included; the bin
-/// that holds its folder is built again and prints `two`'s. With `CARGO_TARGET_DIR` outside the
-/// checkouts an integration test is not reused: cargo sets `CARGO_TARGET_TMPDIR` for it, under
-/// the target folder, and B-5 keys it, so it has another key in each.
+/// Builds the tests at `one`, then at `two`, and checks what moved (B-5, B-8, B-9, B-10, B-12):
+/// the bin and the test binaries are reused, may move, and are `one`'s bytes, bundles included;
+/// the bin that holds its folder is built again and prints `two`'s. That holds with
+/// `CARGO_TARGET_DIR` outside the checkouts too: the integration test's `CARGO_TARGET_TMPDIR` and
+/// `CARGO_BIN_EXE_*` lie under the target folder, which is a root of its own. The test that bakes
+/// `env!("CARGO_BIN_EXE_prog")` in is tied, by the search, in either layout.
 #[cfg(target_os = "macos")]
 fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Path)>) {
     let session = w.begin(Mode::On).unwrap();
@@ -1205,11 +1206,7 @@ fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Pat
         &env_with(&session, targets.map(|t| t.1)),
     );
     let second = entries(&session)[n..].to_vec();
-    let movable: &[&str] = match targets {
-        None => &["prog", "lib_a", "t"],
-        Some(_) => &["prog", "lib_a"],
-    };
-    for name in movable.iter().copied() {
+    for name in ["prog", "lib_a", "t"] {
         assert_eq!(
             last(&second, name, Class::Program).outcome,
             Outcome::Reused,
@@ -1221,6 +1218,11 @@ fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Pat
         assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
         assert_eq!(bundle(&a), bundle(&b), "{name}'s bundle");
     }
+    let baked = places(&session.current().store, "bin", "program");
+    assert!(
+        !baked.is_empty() && baked.iter().all(|place| place == "tied"),
+        "{baked:?}"
+    );
     let tied = last(&second, "where", Class::Program);
     assert_eq!(tied.outcome, Outcome::BuiltAndStored, "{second:#?}");
     assert!(!tied.found);
@@ -1252,7 +1254,7 @@ fn a_program_moves_with_its_debug_bundle_and_keeps_its_lines() {
     programs_move(&w, &one, &two, None);
 }
 
-// covers: B-9, B-10, B-12, B-18
+// covers: B-5, B-8, B-9, B-10, B-12, B-18
 #[cfg(target_os = "macos")]
 #[test]
 fn a_program_moves_with_its_debug_bundle_when_cargo_target_dir_is_elsewhere() {

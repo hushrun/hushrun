@@ -3,8 +3,10 @@
 //!
 //! A root is a folder a compile's paths start from: the workspace (rustc's working directory),
 //! the package (`CARGO_MANIFEST_DIR`), the build script's output (`OUT_DIR`), the output folder
-//! (`--out-dir`), each `-L dependency=` folder and each `-L native=`, `all=` or bare folder that
-//! is not under a shared folder. Each has a given form, as cargo wrote it, and
+//! (`--out-dir`), each `-L dependency=` folder, each `-L native=`, `all=` or bare folder that
+//! is not under a shared folder, and the locations cargo or the person hand a compile: the
+//! target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` names, `CARGO_TARGET_TMPDIR`
+//! and the folders of the `CARGO_BIN_EXE_*` values. Each has a given form, as cargo wrote it, and
 //! a resolved form, with symlinks resolved (`/tmp` is `/private/tmp` on macOS, and some macros
 //! canonicalize). A path under either form is recorded as the root's name and the rest.
 //!
@@ -35,6 +37,10 @@ pub fn stand_in(root: RootName, package_id: &str) -> String {
         RootName::OutDir => "/hushrun/out-dir".to_string(),
         RootName::Deps(i) => format!("/hushrun/dependency/{i}"),
         RootName::Native(i) => format!("/hushrun/native/{i}"),
+        RootName::TargetDir => "/hushrun/target-dir".to_string(),
+        RootName::BuildTargetDir => "/hushrun/build-target-dir".to_string(),
+        RootName::TargetTmp => "/hushrun/target-tmpdir".to_string(),
+        RootName::BinExe(i) => format!("/hushrun/bin-exe/{i}"),
     }
 }
 
@@ -50,6 +56,9 @@ pub enum RootsError {
     /// More `-L dependency=` folders than a root name can number.
     #[error("more than 256 dependency folders")]
     TooManyDeps,
+    /// More folders of `CARGO_BIN_EXE_*` values than a root name can number.
+    #[error("more than 256 folders of programs")]
+    TooManyBinFolders,
     /// A native folder whose place among the `-L` flags a root name can't number.
     #[error("a native folder after the 256th -L flag")]
     TooManySearchFolders,
@@ -79,6 +88,14 @@ pub struct RootPaths {
     pub native: Vec<(usize, String)>,
     /// The package's `name-version`, for the stand-ins.
     pub package_id: String,
+    /// `CARGO_TARGET_DIR`, when absolute.
+    pub target_dir: Option<String>,
+    /// `CARGO_BUILD_TARGET_DIR`, when absolute.
+    pub build_target_dir: Option<String>,
+    /// `CARGO_TARGET_TMPDIR`, when absolute.
+    pub target_tmpdir: Option<String>,
+    /// The folders of the `CARGO_BIN_EXE_*` values, in the order of the variables' names.
+    pub bin_exe_dirs: Vec<String>,
 }
 
 impl RootPaths {
@@ -104,6 +121,10 @@ impl RootPaths {
                 .map(|(i, search)| (i, search.path.clone()))
                 .collect(),
             package_id,
+            target_dir: package.target_dir.clone(),
+            build_target_dir: package.build_target_dir.clone(),
+            target_tmpdir: package.target_tmpdir.clone(),
+            bin_exe_dirs: package.bin_exe_dirs.clone(),
         }
     }
 }
@@ -127,9 +148,6 @@ pub struct Roots {
     /// The shared folders in both forms, longest first.
     shared: Vec<String>,
     package_id: String,
-    /// Folders outputs are searched for besides the roots, in both forms: cargo's target
-    /// folder when a variable names it (B-10).
-    extra_needles: Vec<String>,
 }
 
 /// Resolves a folder on disk: symlinks followed, `.` and `..` gone. `None` when it can't be
@@ -201,6 +219,20 @@ impl Roots {
             let i = u8::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
             candidates.push((RootName::Native(i), dir));
         }
+        // What cargo or the person gave: never derived from another root by position.
+        if let Some(dir) = &paths.target_dir {
+            candidates.push((RootName::TargetDir, dir));
+        }
+        if let Some(dir) = &paths.build_target_dir {
+            candidates.push((RootName::BuildTargetDir, dir));
+        }
+        if let Some(dir) = &paths.target_tmpdir {
+            candidates.push((RootName::TargetTmp, dir));
+        }
+        for (i, dir) in paths.bin_exe_dirs.iter().enumerate() {
+            let i = u8::try_from(i).map_err(|_| RootsError::TooManyBinFolders)?;
+            candidates.push((RootName::BinExe(i), dir));
+        }
 
         let mut roots = Vec::new();
         for (name, path) in candidates {
@@ -239,7 +271,6 @@ impl Roots {
             forms,
             shared: shared_forms,
             package_id: paths.package_id.clone(),
-            extra_needles: Vec::new(),
         })
     }
 
@@ -392,34 +423,13 @@ impl Roots {
         self.root(name).map(|root| root.given.as_str())
     }
 
-    /// Adds folders the outputs are searched for, in their given and resolved forms: cargo's
-    /// target folder as `CARGO_TARGET_DIR` names it. It is not keyed (B-5), so a macro that read
-    /// it without telling rustc and wrote it into an output must leave the block tied (B-10).
-    /// A relative or `/` folder is skipped.
-    pub fn add_needles(&mut self, folders: &[String], resolve: impl Fn(&str) -> Option<String>) {
-        for folder in folders {
-            let given = clean(folder);
-            if !given.starts_with('/') || given == "/" {
-                continue;
-            }
-            let resolved = resolve(&given)
-                .map(|r| clean(&r))
-                .filter(|r| r.starts_with('/') && r != "/");
-            for text in std::iter::once(given).chain(resolved) {
-                if !self.extra_needles.contains(&text) {
-                    self.extra_needles.push(text);
-                }
-            }
-        }
-    }
-
-    /// What outputs are searched for (B-10): every root in every distinct form, and the
-    /// folders [`Roots::add_needles`] added, as raw bytes.
+    /// What outputs are searched for (B-10): every root in every distinct form, as raw bytes.
+    /// The target folder a variable names is a root, so a macro that read it without telling
+    /// rustc and wrote it into an output leaves the block tied.
     pub fn needles(&self) -> Vec<Vec<u8>> {
         self.forms
             .iter()
             .map(|(text, _)| text.as_bytes().to_vec())
-            .chain(self.extra_needles.iter().map(|t| t.as_bytes().to_vec()))
             .collect()
     }
 
@@ -452,12 +462,17 @@ fn precedence(name: RootName) -> (u8, u16) {
     match name {
         RootName::Workspace => (0, 0),
         RootName::Package => (1, 0),
+        // The person's target folder, then cargo's folders under it.
+        RootName::BuildTargetDir => (2, 0),
+        RootName::TargetDir => (3, 0),
+        RootName::BinExe(i) => (4, 255 - u16::from(i)),
+        RootName::TargetTmp => (5, 0),
         // The first folder of a kind wins over a later one with the same text.
-        RootName::Native(i) => (2, 255 - u16::from(i)),
-        RootName::Deps(i) => (3, 255 - u16::from(i)),
-        RootName::OutDir => (4, 0),
+        RootName::Native(i) => (6, 255 - u16::from(i)),
+        RootName::Deps(i) => (7, 255 - u16::from(i)),
+        RootName::OutDir => (8, 0),
         // A package's own output named as a native folder too is its output (B-6 `generated`).
-        RootName::ScriptOut => (5, 0),
+        RootName::ScriptOut => (9, 0),
     }
 }
 
@@ -527,6 +542,10 @@ mod tests {
             ],
             native: vec![],
             package_id: "app-0.1.0".to_string(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
         }
     }
 
@@ -666,6 +685,10 @@ mod tests {
             deps: vec!["/w/ws/target/debug/deps".into()],
             native: vec![],
             package_id: "serde-1.0.0".into(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
         };
         let roots = Roots::new(&paths, &shared(), |_| None).unwrap();
         assert!(!roots.has(RootName::Workspace));
@@ -794,29 +817,40 @@ mod tests {
     // covers: B-8
     #[test]
     fn placeholders_round_trip_and_never_collide() {
-        let roots = roots("/w/ws");
-        let mut fragments: Vec<&str> = JUNK.to_vec();
-        fragments.extend(GIVEN);
-        let mut rng = Gen(0x9e37_79b9_7f4a_7c15);
-        let mut seen: HashMap<String, String> = HashMap::new();
-        for _ in 0..20_000 {
-            let len = rng.next() % 8;
-            let input: String = (0..len).map(|_| rng.pick(&fragments)).collect();
-            let encoded = roots.to_placeholders(&input);
-            assert_eq!(
-                roots.from_placeholders(&encoded).unwrap(),
-                input,
-                "{input:?}"
-            );
-            if let Some(other) = seen.insert(encoded.clone(), input.clone()) {
-                assert_eq!(other, input, "both give {encoded:?}");
+        // Plain, and with cargo's target folder and its test folders as roots too (B-5).
+        let with_target =
+            Roots::new(&test_paths("/w/ws", "/w/ws/target"), &shared(), with_r).unwrap();
+        for (roots, extra) in [
+            (roots("/w/ws"), &[][..]),
+            (
+                with_target,
+                &["/w/ws/target", "/w/ws/target/tmp", "/w/ws/target/debug"][..],
+            ),
+        ] {
+            let mut fragments: Vec<&str> = JUNK.to_vec();
+            fragments.extend(GIVEN);
+            fragments.extend(extra);
+            let mut rng = Gen(0x9e37_79b9_7f4a_7c15);
+            let mut seen: HashMap<String, String> = HashMap::new();
+            for _ in 0..20_000 {
+                let len = rng.next() % 8;
+                let input: String = (0..len).map(|_| rng.pick(&fragments)).collect();
+                let encoded = roots.to_placeholders(&input);
+                assert_eq!(
+                    roots.from_placeholders(&encoded).unwrap(),
+                    input,
+                    "{input:?}"
+                );
+                if let Some(other) = seen.insert(encoded.clone(), input.clone()) {
+                    assert_eq!(other, input, "both give {encoded:?}");
+                }
             }
+            assert!(
+                seen.len() > 5_000,
+                "too few distinct inputs: {}",
+                seen.len()
+            );
         }
-        assert!(
-            seen.len() > 5_000,
-            "too few distinct inputs: {}",
-            seen.len()
-        );
     }
 
     // covers: B-8
@@ -922,25 +956,89 @@ mod tests {
         assert_eq!(needles, expected);
     }
 
-    // covers: B-10
+    /// A checkout at `ws` whose target folder is `target`, outside it, as `CARGO_TARGET_DIR`
+    /// names it: an integration test's compile.
+    fn test_paths(ws: &str, target: &str) -> RootPaths {
+        RootPaths {
+            out_dir: format!("{target}/debug/deps"),
+            deps: vec![format!("{target}/debug/deps")],
+            script_out: None,
+            target_dir: Some(target.to_string()),
+            target_tmpdir: Some(format!("{target}/tmp")),
+            bin_exe_dirs: vec![format!("{target}/debug")],
+            ..paths(ws)
+        }
+    }
+
+    // covers: B-5, B-8, B-10
     #[test]
-    fn a_target_folder_named_by_a_variable_is_searched_for_in_both_forms() {
-        let mut roots = roots("/w/ws");
-        let before = roots.needles().len();
-        roots.add_needles(
-            &[
-                "/elsewhere/target/".to_string(),
-                "relative/target".to_string(),
-                "/".to_string(),
-            ],
+    fn the_locations_cargo_hands_a_compile_are_roots_wherever_the_target_folder_is() {
+        let a = Roots::new(&test_paths("/w/ws", "/t/one"), &shared(), with_r).unwrap();
+        let b = Roots::new(
+            &test_paths("/elsewhere/checkout-2", "/other/targets/the-second-one"),
+            &shared(),
             with_r,
+        )
+        .unwrap();
+        // The values cargo sets for the test give one text in both.
+        for (text_a, text_b) in [
+            ("/t/one/tmp", "/other/targets/the-second-one/tmp"),
+            (
+                "/t/one/debug/prog",
+                "/other/targets/the-second-one/debug/prog",
+            ),
+            ("/R/t/one/tmp/x", "/other/targets/the-second-one/tmp/x"),
+        ] {
+            assert_eq!(a.to_placeholders(text_a), b.to_placeholders(text_b));
+        }
+        assert_eq!(a.to_placeholders("/t/one/tmp"), "{hushrun:target-tmpdir}");
+        assert_eq!(
+            a.to_placeholders("/t/one/debug/prog"),
+            "{hushrun:bin-exe-0}/prog"
         );
-        let needles = roots.needles();
-        assert_eq!(needles.len(), before + 2);
-        assert!(needles.contains(&b"/elsewhere/target".to_vec()));
-        assert!(needles.contains(&b"/R/elsewhere/target".to_vec()));
-        // It is not a root: nothing is recorded from it, and the place is unchanged.
-        assert_eq!(roots.tied(), self::roots("/w/ws").tied());
+        assert_eq!(
+            a.to_placeholders("/t/one/release"),
+            "{hushrun:target-dir}/release"
+        );
+        assert_eq!(
+            b.from_placeholders("{hushrun:bin-exe-0}/prog").unwrap(),
+            "/other/targets/the-second-one/debug/prog"
+        );
+        assert_eq!(a.to_placeholders("/t/one2/tmp"), "/t/one2/tmp");
+        // Each is searched for in outputs, in both forms, and is part of a tied place.
+        let needles = a.needles();
+        for text in ["/t/one", "/R/t/one", "/t/one/tmp", "/R/t/one/debug"] {
+            assert!(needles.contains(&text.as_bytes().to_vec()), "{text}");
+        }
+        let tied = a.tied();
+        assert!(tied.contains(&(RootName::TargetDir, "/t/one".into())));
+        assert!(tied.contains(&(RootName::TargetTmp, "/R/t/one/tmp".into())));
+        assert!(tied.contains(&(RootName::BinExe(0), "/t/one/debug".into())));
+        assert_eq!(
+            a.locate("/t/one/tmp/fixture.txt"),
+            rooted(RootName::TargetTmp, "fixture.txt")
+        );
+        assert_eq!(
+            a.locate("/t/one/debug/deps/liba.rlib"),
+            rooted(RootName::OutDir, "liba.rlib")
+        );
+        // Inside the workspace too, the more specific root names them.
+        let inside = Roots::new(&test_paths("/w/ws", "/w/ws/target"), &shared(), with_r).unwrap();
+        assert_eq!(
+            inside.to_placeholders("/w/ws/target/tmp /w/ws/src"),
+            "{hushrun:target-tmpdir} {hushrun:workspace}/src"
+        );
+        // Not set: not roots.
+        let plain = roots("/w/ws");
+        assert!(!plain.has(RootName::TargetDir));
+        assert!(!plain.has(RootName::TargetTmp));
+        assert!(!plain.has(RootName::BinExe(0)));
+        let mut many = test_paths("/w/ws", "/t/one");
+        many.bin_exe_dirs = (0..300).map(|i| format!("/t/one/{i}")).collect();
+        assert_eq!(
+            Roots::new(&many, &[], |_| None),
+            Err(RootsError::TooManyBinFolders)
+        );
     }
 
     // covers: B-10
@@ -1043,6 +1141,10 @@ mod tests {
             deps: vec![],
             native: vec![],
             package_id: "x-1".into(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
         };
         let roots = Roots::new(&p, &[], resolve_on_disk).unwrap();
         assert_eq!(

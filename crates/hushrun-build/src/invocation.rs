@@ -172,9 +172,17 @@ pub struct Package {
     pub manifest_dir: Option<String>,
     /// `OUT_DIR`, set when the package has a build script.
     pub out_dir: Option<String>,
-    /// `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR`, when set to an absolute path. Not keyed:
-    /// outputs are searched for them (B-10).
-    pub target_dirs: Vec<String>,
+    /// `CARGO_TARGET_DIR`, when set to an absolute path. Not keyed, but a root (B-8): a
+    /// location cargo hands a compile under it is recorded from it.
+    pub target_dir: Option<String>,
+    /// `CARGO_BUILD_TARGET_DIR`, when set to an absolute path; a root like `target_dir`.
+    pub build_target_dir: Option<String>,
+    /// `CARGO_TARGET_TMPDIR`, when set to an absolute path: an integration test's folder, under
+    /// the target folder. A root (B-8).
+    pub target_tmpdir: Option<String>,
+    /// The folders the `CARGO_BIN_EXE_<name>` values are in, each once, in the order of the
+    /// variables' names; only absolute values. Each is a root (B-8).
+    pub bin_exe_dirs: Vec<String>,
 }
 
 /// What a call says about debug info, each the last one given: `-C debuginfo` (`-g` is `2`),
@@ -272,9 +280,6 @@ const OTHER_KEYED: [&str; 15] = [
     "COMPILER_PATH",
     "GCC_EXEC_PREFIX",
 ];
-
-/// The variables that name cargo's target folder. Outputs are searched for their values.
-const TARGET_DIR_VARS: [&str; 2] = ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"];
 
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
 /// keyed. Every other `-Z` passes through (B-4).
@@ -1130,18 +1135,35 @@ fn read_env(env: &Env) -> Result<(BTreeMap<String, String>, Package), PassedThro
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
-    let target_dirs = TARGET_DIR_VARS
-        .iter()
-        .filter_map(|name| env.get(name)?.to_str())
-        .filter(|dir| dir.starts_with('/'))
-        .map(str::to_string)
-        .collect();
+    // The locations cargo or the person gave, each a root of its own (B-8). Only absolute
+    // values: a relative one names no folder by itself, and is keyed as written.
+    let absolute = |value: Option<&str>| value.filter(|v| v.starts_with('/')).map(str::to_string);
+    let mut bin_exe_dirs: Vec<String> = Vec::new();
+    for (name, value) in &keyed {
+        if !name.starts_with("CARGO_BIN_EXE_") {
+            continue;
+        }
+        let Some(dir) = absolute(Some(value)).and_then(|v| {
+            Path::new(&v)
+                .parent()
+                .and_then(|p| p.to_str())
+                .map(str::to_string)
+        }) else {
+            continue;
+        };
+        if !bin_exe_dirs.contains(&dir) {
+            bin_exe_dirs.push(dir);
+        }
+    }
     let package = Package {
         name: keyed.get("CARGO_PKG_NAME").cloned(),
         version: keyed.get("CARGO_PKG_VERSION").cloned(),
         manifest_dir: keyed.get("CARGO_MANIFEST_DIR").cloned(),
         out_dir: env.get("OUT_DIR").map(utf8).transpose()?,
-        target_dirs,
+        target_dir: absolute(env.get("CARGO_TARGET_DIR").and_then(OsStr::to_str)),
+        build_target_dir: absolute(env.get("CARGO_BUILD_TARGET_DIR").and_then(OsStr::to_str)),
+        target_tmpdir: absolute(keyed.get("CARGO_TARGET_TMPDIR").map(String::as_str)),
+        bin_exe_dirs,
     };
     Ok((keyed, package))
 }
@@ -2059,15 +2081,41 @@ pub(crate) mod tests {
         }
     }
 
-    // covers: B-10
+    // covers: B-5, B-8
     #[test]
-    fn target_folders_are_kept_to_search_outputs_for() {
+    fn the_locations_cargo_hands_a_compile_are_read_as_roots() {
         let env = Env::from_vars([
             ("CARGO_TARGET_DIR", "/elsewhere/target"),
             ("CARGO_BUILD_TARGET_DIR", "relative/target"),
+            ("CARGO_TARGET_TMPDIR", "/elsewhere/target/tmp"),
+            ("CARGO_BIN_EXE_where", "/elsewhere/target/debug/where"),
+            ("CARGO_BIN_EXE_prog", "/elsewhere/target/debug/prog"),
+            (
+                "CARGO_BIN_EXE_cross",
+                "/elsewhere/target/x86_64-apple-darwin/debug/cross",
+            ),
+            ("CARGO_BIN_EXE_rel", "debug/rel"),
         ]);
         let inv = handled(&argv(&minimal("")), &env);
-        assert_eq!(inv.package().target_dirs, ["/elsewhere/target"]);
+        let package = inv.package();
+        assert_eq!(package.target_dir.as_deref(), Some("/elsewhere/target"));
+        assert_eq!(package.build_target_dir, None);
+        assert_eq!(
+            package.target_tmpdir.as_deref(),
+            Some("/elsewhere/target/tmp")
+        );
+        // In the order of the names: cross, prog (where shares prog's folder); rel is relative.
+        assert_eq!(
+            package.bin_exe_dirs,
+            [
+                "/elsewhere/target/x86_64-apple-darwin/debug",
+                "/elsewhere/target/debug"
+            ]
+        );
+        let none = handled(&argv(&minimal("")), &Env::default());
+        assert_eq!(none.package().target_dir, None);
+        assert_eq!(none.package().target_tmpdir, None);
+        assert!(none.package().bin_exe_dirs.is_empty());
     }
 
     #[test]

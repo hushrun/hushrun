@@ -11,8 +11,11 @@ A **block** is what one compiler call produced: one crate built one way. The **s
 blocks for every repository on the machine. A **root** is a folder a compile's paths start from:
 the workspace (rustc's working directory), the package (`CARGO_MANIFEST_DIR`), the build script's
 output (`OUT_DIR`), the output folder (`--out-dir`), each dependency search folder
-(`-L dependency=`) and each native search folder (`-L native=`, `-L all=` or a bare `-L`, named by
-its place among the `-L` flags) that is not under a shared folder.
+(`-L dependency=`), each native search folder (`-L native=`, `-L all=` or a bare `-L`, named by
+its place among the `-L` flags) that is not under a shared folder, and the locations cargo or the
+person hand a compile: the target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` names when
+it is absolute, `CARGO_TARGET_TMPDIR`, and each folder a `CARGO_BIN_EXE_<name>` value is in (named
+by its place in the order of the variables' names). None of them is derived from another root.
 
 **B-1 Mode.** Reuse has one mode per user: `off`, `observe` or `on`. It is `off` until the person
 turns it on. In `observe` every compile runs as in `off`, blocks are stored, and a compile whose
@@ -60,9 +63,9 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
 `DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); and the person's extra variables. No other
 `CARGO_` variable is keyed: cargo's own configuration (`CARGO_TARGET_DIR`, `CARGO_HOME`,
-`CARGO_TERM_*`, `CARGO_PROFILE_*`, tokens) reaches rustc only through arguments already keyed,
-and outputs are searched for the target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR`
-names (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_PATH` and
+`CARGO_TERM_*`, `CARGO_PROFILE_*`, tokens) reaches rustc only through arguments already keyed;
+the target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` names is a root, so outputs are
+searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_PATH` and
 `CARGO_RUSTC_CURRENT_DIR` are not keyed. It holds no machine, user, branch, commit or time.
 
 **B-6 What was read.** The second key is the SHA-256 of the JCS form of the first key and:

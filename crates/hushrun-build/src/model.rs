@@ -379,11 +379,22 @@ pub enum RootName {
     /// A `-L native=`, `-L all=` or bare `-L` folder, by its place among all the `-L` flags,
     /// counted from 0: usually another package's build-script output (B-6, B-8).
     Native(u8),
+    /// `CARGO_TARGET_DIR`, when it is absolute: cargo's target folder as the person named it.
+    TargetDir,
+    /// `CARGO_BUILD_TARGET_DIR`, when it is absolute.
+    BuildTargetDir,
+    /// `CARGO_TARGET_TMPDIR`: the folder cargo gives an integration test, under the target
+    /// folder (B-5).
+    TargetTmp,
+    /// The i-th distinct folder a `CARGO_BIN_EXE_<name>` value is in, counted from 0 in the
+    /// order of the variables' names: where cargo puts the package's programs for its tests.
+    BinExe(u8),
 }
 
 impl RootName {
     /// The name as records and placeholders write it: `workspace`, `package`, `script-out`,
-    /// `out-dir`, `deps-<i>`, `native-<i>`. Stable.
+    /// `out-dir`, `deps-<i>`, `native-<i>`, `target-dir`, `build-target-dir`, `target-tmpdir`,
+    /// `bin-exe-<i>`. Stable.
     pub fn as_string(self) -> String {
         match self {
             RootName::Workspace => "workspace".to_string(),
@@ -392,6 +403,10 @@ impl RootName {
             RootName::OutDir => "out-dir".to_string(),
             RootName::Deps(i) => format!("deps-{i}"),
             RootName::Native(i) => format!("native-{i}"),
+            RootName::TargetDir => "target-dir".to_string(),
+            RootName::BuildTargetDir => "build-target-dir".to_string(),
+            RootName::TargetTmp => "target-tmpdir".to_string(),
+            RootName::BinExe(i) => format!("bin-exe-{i}"),
         }
     }
 
@@ -403,10 +418,15 @@ impl RootName {
             "package" => Some(RootName::Package),
             "script-out" => Some(RootName::ScriptOut),
             "out-dir" => Some(RootName::OutDir),
+            "target-dir" => Some(RootName::TargetDir),
+            "build-target-dir" => Some(RootName::BuildTargetDir),
+            "target-tmpdir" => Some(RootName::TargetTmp),
             _ => {
                 let (make, digits): (fn(u8) -> RootName, &str) =
                     if let Some(digits) = text.strip_prefix("deps-") {
                         (RootName::Deps, digits)
+                    } else if let Some(digits) = text.strip_prefix("bin-exe-") {
+                        (RootName::BinExe, digits)
                     } else {
                         (RootName::Native, text.strip_prefix("native-")?)
                     };
@@ -531,6 +551,11 @@ mod tests {
             RootName::Deps(255),
             RootName::Native(0),
             RootName::Native(17),
+            RootName::TargetDir,
+            RootName::BuildTargetDir,
+            RootName::TargetTmp,
+            RootName::BinExe(0),
+            RootName::BinExe(3),
         ] {
             assert_eq!(RootName::parse(&name.as_string()), Some(name));
             assert_eq!(serde_name(&name), name.as_string());
@@ -542,6 +567,9 @@ mod tests {
             "deps--1",
             "native-01",
             "native-",
+            "bin-exe-01",
+            "bin-exe-",
+            "target-tmp",
             "Workspace",
             "",
         ] {

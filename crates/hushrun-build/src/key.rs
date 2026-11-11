@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v2";
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v3";
 
 /// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v2";
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v3";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -608,11 +608,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "9716411467c5143a77058ffce0b5793dc7c1a17c0280762d0c1ffe40b7729626"
+            "958a7aaa56141f8f6f6d51d8507b9ad6418fed527ad03e612d4000779925521d"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v2",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v3",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -625,7 +625,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "2bc376c97f4c5264beee60e6821e399679ebf4325633ab34d3e0d8350d7ea263"
+            "56c46195a8397877a96897d4bdf20e289a9a7ee9b2a91bab30806c0acad5f3e3"
         );
     }
 
