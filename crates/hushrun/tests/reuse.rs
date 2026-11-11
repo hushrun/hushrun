@@ -1407,13 +1407,14 @@ fn ready_asks_the_server_as_ci_counts_and_says_a_suspension() {
         ready.stdout,
         ready.stderr
     );
-    // One batch lookup, and nothing written to the server.
+    // \[C-38\] What other machines saw its test files read, then one batch lookup, and nothing
+    // written to the server.
     let asked: Vec<String> = results.requests()[before..]
         .iter()
         .map(|s| s.path.clone())
         .filter(|p| p.starts_with("v0/units/"))
         .collect();
-    assert_eq!(asked, ["v0/units/lookup"]);
+    assert_eq!(asked, ["v0/units/hints/lookup", "v0/units/lookup"]);
     // Suspended by an audit's disagreement: ready says so, as a run does. test_hidden.py passes
     // on what it reads now, then the flag it can't see makes it fail when it is the one audited.
     assert_eq!(r.run(&pytest_args(&python, &[]), &envs(&server)).code, 0);
