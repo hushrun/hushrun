@@ -100,7 +100,7 @@ test`), `go test` and Vitest; audited as it goes; and explained, one test file a
 - In CI where a later step reads a check's reports, no test file is reused, as no check is
   skipped; a summary of a run with reused test files leaves its coverage out.
 
-Build blocks ([ADR 0070](docs/adr/0070-compiled-crates-are-reused-between-worktrees.md)): a crate
+Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
 machine, through a rustc wrapper that `hushrun run` sets. New, and off until a person turns it on.
 
@@ -120,7 +120,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   the mode is not `off`: to a link named `hushrun-rustc` that points at the hushrun binary. It
   doesn't when `RUSTC_WRAPPER` is set already, in CI, on Windows, for an isolated check, or with
   no cache directory. A `cargo` outside `hushrun run` is untouched, and cargo's configuration is
-  never edited.
+  never edited. With `tests: reuse`, the build made before the command and a test file's second
+  run compile through it too, in the same session, and the run says once what its compiles came
+  to.
 - Contract: **`build.json`**, beside the credentials file, holds the mode, `keep_days` (15),
   `never_store` (package names), `env` (more variable names for the key), `min_free_gb` (10) and
   `programs`, written whole under a lock. A file `hushrun run` can't read means it reuses nothing

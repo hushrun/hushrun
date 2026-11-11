@@ -13,6 +13,7 @@
 //!   of every target of its package, since it may run them (the package rule).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -337,10 +338,17 @@ pub struct BuiltUnit {
 /// \[ADR 0069\] The plan's build (RFC 0003 §3.9): the build COMMAND makes, made first, so that
 /// COMMAND's own finds it done and the binaries' dep-info is there before any test runs. Cargo's
 /// progress goes to stderr as COMMAND's would. `Err` when it fails: then nothing is reused, and
-/// COMMAND says why.
-pub fn plan_build(recognized: &Recognized, root: &Path, cwd: &Path) -> Result<Built, String> {
+/// COMMAND says why. `env` is what COMMAND's compiles get beside hushrun's own environment: the
+/// build blocks' wrapper and session (B-2), so that this build, which is COMMAND's, compiles
+/// through it too.
+pub fn plan_build(
+    recognized: &Recognized,
+    root: &Path,
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> Result<Built, String> {
     let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, true)?;
+    let artifacts = build(recognized, cwd, true, env)?;
     Ok(read_build(&metadata, artifacts, root))
 }
 
@@ -424,7 +432,7 @@ pub fn observe(
         .filter_map(|f| f.invocation.as_ref())
         .collect();
     let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, false)?;
+    let artifacts = build(recognized, cwd, false, &[])?;
     let built = read_build(&metadata, artifacts, root);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
@@ -709,8 +717,14 @@ fn cargo(recognized: &Recognized, cwd: &Path) -> Command {
 /// COMMAND's build options and `--locked`. Every artifact must be fresh, or this isn't COMMAND's
 /// build: then Cargo is stopped at once, and nothing is read. \[ADR 0069\] For the plan (`plan`),
 /// the build COMMAND will make, made now: whatever it builds, with Cargo's progress on stderr.
-fn build(recognized: &Recognized, cwd: &Path, plan: bool) -> Result<Vec<Artifact>, String> {
+fn build(
+    recognized: &Recognized,
+    cwd: &Path,
+    plan: bool,
+    env: &[(OsString, OsString)],
+) -> Result<Vec<Artifact>, String> {
     let mut command = cargo(recognized, cwd);
+    command.envs(env.iter().map(|(name, value)| (name, value)));
     command.args(["test", "--no-run", "--message-format=json"]);
     if !recognized
         .build

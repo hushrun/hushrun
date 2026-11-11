@@ -1,4 +1,4 @@
-# 0070. Compiled crates are reused between worktrees
+# 0076. Compiled crates are reused between worktrees
 
 - **Status:** accepted
 - **Date:** 2026-11-11

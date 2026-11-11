@@ -7,7 +7,7 @@ xtask = "run --quiet --package xtask --"
 [env]
 HUSHRUN_NO_UPDATE_CHECK = "1"
 
-# [ADR 0070] mimalloc's C code writes the compiler's __DATE__ and __TIME__ into its library
+# [ADR 0076] mimalloc's C code writes the compiler's __DATE__ and __TIME__ into its library
 # (libmimalloc-sys, options.c), so that library differed in every build, and nothing that links
 # it could be reused from another build. A compiler takes the date from this variable when it
 # is set. The value is 1980-01-01, which every tool accepts; one set in the environment wins.

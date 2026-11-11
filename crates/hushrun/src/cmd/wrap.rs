@@ -436,8 +436,12 @@ fn skip_or_run(
         _ => None,
     };
     // B-2: with reuse on, cargo in COMMAND compiles through the wrapper: one session for every
-    // start of COMMAND in this run, begun before the first and finished after the last.
+    // start of COMMAND in this run, begun before the first and finished after the last. It
+    // begins before the plan, whose build is COMMAND's made first, and compiles through it too.
     let mut build = BuildRun::begin(global, say, code);
+    if let Some(session) = session.as_deref_mut() {
+        session.compile_with(build.env());
+    }
     let started_at = now(global);
     // \[ADR 0069\] With `tests: reuse`, the plan: which test files already passed on the files they
     // read, and aren't run again (C-34); or why every test file runs.
@@ -897,11 +901,14 @@ impl<'a> BuildRun<'a> {
         }
     }
 
+    /// What a start of COMMAND gets: the wrapper and the session; nothing without a session.
+    fn env(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        self.session.as_ref().map(Session::env).unwrap_or_default()
+    }
+
     /// Sets the wrapper and the session on a start of COMMAND, when there is a session.
     fn apply(&self, command: &mut Command) {
-        if let Some(session) = &self.session {
-            command.envs(session.env());
-        }
+        command.envs(self.env());
     }
 
     /// Ends the session, once, and says what its compiles came to.
