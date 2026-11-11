@@ -40,10 +40,14 @@ struct World {
 }
 
 fn world() -> World {
+    world_in(Mode::On)
+}
+
+fn world_in(mode: Mode) -> World {
     let dir = tempfile::tempdir().unwrap();
     let settings = dir.path().join("build.json");
     settings::update(&settings, |s| {
-        s.mode = Mode::On;
+        s.mode = mode;
         s.min_free_gb = 0;
     })
     .unwrap();
@@ -92,6 +96,19 @@ impl World {
         more: &[&str],
         env: &[(&str, &str)],
     ) -> (Output, Entry) {
+        self.call_as(ws, name, source, "lib", more, env)
+    }
+
+    /// [`World::call`] for a crate of type `crate_type`.
+    fn call_as(
+        &self,
+        ws: &Path,
+        name: &str,
+        source: &str,
+        crate_type: &str,
+        more: &[&str],
+        env: &[(&str, &str)],
+    ) -> (Output, Entry) {
         let link = &self.session.env()[0].1;
         let before = self.session.current().entries().len();
         // Files written in this test are older than the compile's start (B-11).
@@ -104,7 +121,7 @@ impl World {
                 "--error-format=json",
                 "--json=artifacts",
                 "--crate-type",
-                "lib",
+                crate_type,
             ])
             .args(["--emit=dep-info,metadata,link", "-C", "extra-filename=-x"])
             .arg("--out-dir")
@@ -331,4 +348,43 @@ fn an_extern_found_through_a_search_folder_passes_through() {
     let (out, third) = w.call(&three, "user", "user.rs", &["--extern", "proc_macro"], &[]);
     ok(&out);
     assert_eq!(third.outcome, Outcome::BuiltAndStored, "{third:?}");
+}
+
+/// The blocks in the store.
+fn blocks(w: &World) -> usize {
+    let blocks = w.dir.path().join("cache/build/blocks");
+    fs::read_dir(blocks)
+        .map(|dirs| {
+            dirs.flatten()
+                .map(|d| fs::read_dir(d.path()).map_or(0, Iterator::count))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+// covers: B-18
+#[test]
+fn a_linked_output_compiled_again_from_the_same_inputs_has_the_same_key() {
+    // On Linux rustc hands the linker a search folder of its own temporary folder
+    // (`-L <out>/rustcXXXXXX/raw-dylibs`), new at each compile: it is no input, or every
+    // compile of a program or a proc macro had a key of its own.
+    let w = world_in(Mode::Observe);
+    let ws = w.checkout("ws");
+    write(
+        &ws.join("m/lib.rs"),
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(_: TokenStream) -> TokenStream {\n    TokenStream::new()\n}\n",
+    );
+    let args = ["--extern", "proc_macro"];
+    let (out, first) = w.call_as(&ws, "m", "m/lib.rs", "proc-macro", &args, &[]);
+    ok(&out);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    assert_eq!(blocks(&w), 1);
+    let (out, second) = w.call_as(&ws, "m", "m/lib.rs", "proc-macro", &args, &[]);
+    ok(&out);
+    assert!(second.found && !second.differed, "{second:?}");
+    assert_eq!(
+        blocks(&w),
+        1,
+        "the second compile's key differs from the first's"
+    );
 }

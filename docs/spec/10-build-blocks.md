@@ -251,7 +251,9 @@ linker script names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`, `STAR
 outcome is `built, not stored`. Every other argument of the link line that is the path of an
 existing regular file (an object a `link-arg` names, `-bundle_loader`'s, `-dylib_file`'s), and is
 not an output of the compile, is an input by SHA-256. A `-B` folder outside the compiler's
-sysroot is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
+sysroot is `built, not stored`. Files in rustc's own temporary folder, and the search folder
+rustc makes in it (`-L <output folder>/rustcXXXXXX/raw-dylibs` on Linux), are not inputs: what
+they hold comes from the compile, and their name is new at each compile. What rustc
 prints on stdout goes on to the wrapper's stdout, but the linker command. The `dsymutil` rustc
 runs for a debug bundle (B-9), the first on `PATH`, is an input like the linker. A program is
 stored with its debug bundle: every file under `<program>.dSYM`, named by its path from the

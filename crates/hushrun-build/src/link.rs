@@ -733,6 +733,20 @@ pub fn in_rustc_temp(path: &Path) -> bool {
         .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// Whether `path` lies in one of rustc's own temporary folders in the output folder `out_dir`,
+/// at any depth: on Linux rustc hands the linker `-L <out_dir>/rustcXXXXXX/raw-dylibs`, a
+/// folder of stubs it writes from the compile itself and removes after the link, under a name
+/// that is new each time (B-18). Only a folder directly in `out_dir` counts, so a folder of the
+/// person's that happens to have such a name elsewhere is still keyed.
+pub fn under_rustc_temp(path: &Path, out_dir: &Path) -> bool {
+    path.strip_prefix(out_dir)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .and_then(|first| first.as_os_str().to_str())
+        .and_then(|name| name.strip_prefix("rustc"))
+        .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 /// Whether a linker script's text may name more files the linker reads: `INCLUDE`, `INPUT`,
 /// `GROUP`, `SEARCH_DIR`, `STARTUP`. Those files can't be keyed without reading the script as
 /// the linker does, so such a link isn't stored.
@@ -957,6 +971,20 @@ mod tests {
         assert!(in_rustc_temp(&places[4].0[0]));
         assert!(!in_rustc_temp(Path::new("/w/out/rustc/list")));
         assert!(!in_rustc_temp(Path::new("/w/rustcfoobarbaz/list")));
+        // A search folder inside one, as rustc passes it on Linux, at any depth.
+        let out = Path::new("/w/target/debug/deps");
+        assert!(under_rustc_temp(
+            Path::new("/w/target/debug/deps/rustcT5XijC/raw-dylibs/libc.so"),
+            out
+        ));
+        assert!(!under_rustc_temp(
+            Path::new("/w/rustcT5XijC/raw-dylibs/libc.so"),
+            out
+        ));
+        assert!(!under_rustc_temp(
+            Path::new("/w/target/debug/deps/rustcfoobarbaz/libc.so"),
+            out
+        ));
 
         let libraries = library_places(&inputs);
         assert_eq!(libraries[0], PathBuf::from("/w/out/libfoo.a"));

@@ -1149,7 +1149,13 @@ impl Call<'_> {
             .cwd
             .as_ref()
             .map_or_else(|| PathBuf::from(self.invocation.cwd()), PathBuf::from);
-        let inputs = args.inputs(&cwd);
+        let mut inputs = args.inputs(&cwd);
+        // rustc's own temporary search folder (Linux's `-L <out>/rustcXXXXXX/raw-dylibs`): its
+        // stubs come from the compile itself and its name is new each time (B-18).
+        let out_dir = self.out_dir();
+        inputs
+            .search
+            .retain(|dir| !link::under_rustc_temp(dir, &out_dir));
         // Arguments hidden in a file can't be keyed.
         if !inputs.response_files.is_empty() {
             return Err(NotStored::LinkInputs);
@@ -1263,7 +1269,6 @@ impl Call<'_> {
         // `link-arg` names, a file an option this list doesn't know names) is an input too, but
         // the compile's own outputs and rustc's own temporary files (B-18). Cost: one stat per
         // argument that is not an option.
-        let out_dir = self.out_dir();
         let stem = self.invocation.file_stem();
         for path in &inputs.paths {
             let own_output = path.parent() == Some(out_dir.as_path())
