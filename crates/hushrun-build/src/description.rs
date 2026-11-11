@@ -13,7 +13,7 @@ use crate::messages;
 use crate::model::Class;
 
 /// The schema name every description carries. One with another name is not read.
-pub const SCHEMA: &str = "hushrun.build.description/1";
+pub const SCHEMA: &str = "hushrun.build.description/2";
 
 /// What one output file of a block is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,12 +25,24 @@ pub enum OutputKind {
     Link,
     /// A debug object a program names (macOS keeps them beside it).
     DebugObject,
+    /// A file of a program's debug bundle (`<program>.dSYM/...`, B-9): its name is its path
+    /// from the output folder. The bundle is put back as one folder (B-12).
+    DebugBundle,
+}
+
+impl OutputKind {
+    /// Whether the file belongs to a folder the block carries whole, rather than lying
+    /// directly in the output folder.
+    pub const fn in_bundle(self) -> bool {
+        matches!(self, OutputKind::DebugBundle)
+    }
 }
 
 /// One file of a block, by its name in the output folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
-    /// The file's name in the output folder, and in the block.
+    /// The file's name in the output folder, and in the block: a path from the output folder
+    /// for a file of a debug bundle.
     pub name: String,
     /// What it is.
     pub kind: OutputKind,
@@ -168,10 +180,16 @@ mod tests {
             step: Digest::of(b"step"),
             origin: Digest::of(b"origin"),
             place: PlaceKind::Anywhere,
-            outputs: vec![Output {
-                name: "liba.rmeta".into(),
-                kind: OutputKind::Metadata,
-            }],
+            outputs: vec![
+                Output {
+                    name: "liba.rmeta".into(),
+                    kind: OutputKind::Metadata,
+                },
+                Output {
+                    name: "a.dSYM/Contents/Resources/DWARF/a".into(),
+                    kind: OutputKind::DebugBundle,
+                },
+            ],
             dep_info: StoredDepInfo {
                 targets: vec!["{hushrun:out-dir}/a.d".into()],
                 files: vec!["src/lib.rs".into()],
@@ -193,6 +211,7 @@ mod tests {
     fn round_trips_and_names_its_repository_at_the_top() {
         let value = description().to_value().unwrap();
         assert_eq!(value["repository"], "hushrun/hushrun");
+        assert_eq!(value["outputs"][1]["kind"], "debug-bundle");
         assert_eq!(Description::from_value(&value), Some(description()));
         let mut other = value.clone();
         other["schema"] = "other/1".into();
