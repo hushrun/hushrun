@@ -1,6 +1,6 @@
 //! \[C-38\] Hints: what one machine's store says a check's test files read, in a form another
 //! machine can fetch from a server and use to compute the same unit keys (C-31), with no file
-//! path in it. Cloud `docs/plans/test-by-test-across-machines.md`, phase 1.
+//! path in it. RFC 0003 §3.11, ADR 0075.
 //!
 //! A hint is never trusted: a wrong one only makes a key no run recorded, and that test file runs.
 //! It holds, for each test file whose reads were fully observed, the files it read that its key

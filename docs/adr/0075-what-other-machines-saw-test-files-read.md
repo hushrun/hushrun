@@ -12,7 +12,7 @@ can ask for it. But a machine can compute a key only when it knows which files t
 and that list, the map, lives in one machine's store (ADR 0072). A CI runner or a coding agent's
 sandbox starts with an empty cache, so it has no map: it runs every pytest and Vitest test file,
 and every Go package whose tests opened a file their key holds beyond what the package is built
-from. Phase 0 of cloud `docs/plans/test-by-test-across-machines.md` measured that, in
+from. That is measured in
 `crates/hushrun/tests/two_machines.rs`. Cargo needs no map: its keys come from the build.
 
 RFC 0003 (D3) chose CI's own cache to carry the map, and the server only if that wasn't enough.
