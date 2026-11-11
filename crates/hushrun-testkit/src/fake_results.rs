@@ -7,7 +7,10 @@
 //! records its results only signed by that key. It keeps each request whole, for tests that look
 //! at everything that left a process ([`FakeResults::raw_requests`]). \[ADR 0052\] Told to, it
 //! answers a lookup without a token as a repository's CI, as hushrun cloud does for a public
-//! repository of its open-source program ([`FakeResults::answer_without_a_token`]).
+//! repository of its open-source program ([`FakeResults::answer_without_a_token`]). \[ADR 0069\]
+//! It keeps a run's test files' results with it (`POST {base}/v0/runs/{key}`), answers the batch
+//! lookup and a check's reuse state as hushrun cloud does (results-v0 §3), or, told to, answers
+//! them 404 as a server from before them does ([`FakeResults::forget_units`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,6 +64,14 @@ struct State {
     agent: Option<PublicKey>,
     /// The repository as whose CI a lookup without a token is answered.
     anonymous: Option<String>,
+    /// \[ADR 0069\] Every run that came with test files' results, oldest first.
+    runs: Vec<Value>,
+    /// Each test file's result: its key, `pass` or `fail`, its duration and its run's index.
+    units: Vec<(String, String, u64, usize)>,
+    /// Each check's reuse state, by lowercase repository and check.
+    reuse: BTreeMap<(String, String), Value>,
+    /// It answers what a server from before test files' results does: 404.
+    no_units: bool,
 }
 
 /// A running fake results server for the org [`FakeResults::ORG`].
@@ -144,6 +155,37 @@ impl FakeResults {
     /// one for a public repository of its open-source program. Nothing else takes no token.
     pub fn answer_without_a_token(&self, repository: &str) {
         self.state().anonymous = Some(repository.to_string());
+    }
+
+    /// \[ADR 0069\] From now on it answers the requests about test files 404, as a server from
+    /// before them does.
+    pub fn forget_units(&self) {
+        self.state().no_units = true;
+    }
+
+    /// \[ADR 0069\] How many test files' results it keeps.
+    pub fn unit_results(&self) -> usize {
+        self.state().units.len()
+    }
+
+    /// \[ADR 0069\] Records a test file's result under `key` (64 hex) with a run of `run`, as a
+    /// run would have: what a test makes wrong for the files to see an audit catch it.
+    pub fn add_unit_result(&self, key: &str, result: &str, duration_ms: u64, run: Value) {
+        let mut state = self.state();
+        state.runs.push(run);
+        let index = state.runs.len() - 1;
+        state
+            .units
+            .push((key.to_string(), result.to_string(), duration_ms, index));
+    }
+
+    /// \[ADR 0069\] A check's reuse state for a repository, as a lookup answers it.
+    pub fn reuse_state(&self, repository: &str, check: &str) -> Value {
+        self.state()
+            .reuse
+            .get(&(repository.to_lowercase(), check.to_string()))
+            .cloned()
+            .unwrap_or_else(|| json!({"state": "on", "generation": 0}))
     }
 
     /// Every result recorded, oldest first for each key.
@@ -280,6 +322,13 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
         injected.times -= 1;
         return Reply::Send(Response::json(injected.status, &injected.body));
     }
+    // \[ADR 0069\] A check's test files (results-v0 §3).
+    if path.starts_with("v0/runs/") || path.starts_with("v0/units/") {
+        if state.no_units {
+            return error(404, "not_found", "no such endpoint");
+        }
+        return units(&mut state, &request, &path, agent.as_ref());
+    }
     let key = path.strip_prefix("v0/results/").map(str::to_string);
     match (request.method.as_str(), path.as_str(), key) {
         ("GET", "v0", _) if agent.is_some() => Reply::Send(Response::json(
@@ -385,6 +434,136 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
                 Err(_) => error(400, "invalid", "not a run result"),
             }
         }
+        _ => error(404, "not_found", "no such endpoint"),
+    }
+}
+
+/// Whether a run's result counts in the job `job`, of the variant `variant` (results-v0 §3).
+fn counts_in(r: &Value, job: Option<&str>, variant: Option<&str>) -> bool {
+    let Some(job) = job else {
+        return true;
+    };
+    match (r["provider"].as_str(), r["job"].as_str()) {
+        (Some("local"), _) => variant.is_none(),
+        (_, Some(recorded)) => recorded == job && r["variant"]["key"].as_str() == variant,
+        (Some("generic"), None) => variant.is_none(),
+        _ => false,
+    }
+}
+
+/// \[ADR 0069\] `POST {base}/v0/runs/{key}`, `…/units/lookup` and `…/units/reuse`, as hushrun
+/// cloud answers them.
+fn units(state: &mut State, request: &Request, path: &str, agent: Option<&PublicKey>) -> Reply {
+    if request.method != "POST" {
+        return error(405, "invalid", "another method");
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+        return error(400, "invalid", "not JSON");
+    };
+    if let Some(key) = path.strip_prefix("v0/runs/") {
+        if let Some(refused) = agent.and_then(|agent| agent_refusal(agent, key, request)) {
+            return refused;
+        }
+        if body["schema"] != "hushrun.run-units/v0" {
+            return error(400, "invalid", "not a run with its test files' results");
+        }
+        let result = body["result"].clone();
+        state
+            .results
+            .entry(key.to_string())
+            .or_default()
+            .push(result.clone());
+        state.runs.push(result);
+        let index = state.runs.len() - 1;
+        for unit in body["units"].as_array().into_iter().flatten() {
+            state.units.push((
+                unit["key"].as_str().unwrap_or_default().to_string(),
+                unit["result"].as_str().unwrap_or_default().to_string(),
+                unit["durationMs"].as_u64().unwrap_or_default(),
+                index,
+            ));
+        }
+        return Reply::Send(Response::json(201, &json!({})));
+    }
+    let check = body["check"].as_str().unwrap_or_default().to_string();
+    let repository = body["repository"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let reuse_key = (repository, check);
+    let reuse = state
+        .reuse
+        .get(&reuse_key)
+        .cloned()
+        .unwrap_or_else(|| json!({"state": "on", "generation": 0}));
+    match path {
+        "v0/units/lookup" => {
+            let job = body["job"].as_str();
+            let variant = body["variant"].as_str();
+            let mut units = serde_json::Map::new();
+            let mut runs: Vec<Value> = Vec::new();
+            let mut index: BTreeMap<usize, usize> = BTreeMap::new();
+            for key in body["keys"].as_array().into_iter().flatten() {
+                let key = key.as_str().unwrap_or_default();
+                let newest =
+                    state.units.iter().rev().find(|(k, _, _, run)| {
+                        k == key && counts_in(&state.runs[*run], job, variant)
+                    });
+                if let Some((_, result, ms, run)) = newest {
+                    let at = *index.entry(*run).or_insert_with(|| {
+                        runs.push(state.runs[*run].clone());
+                        runs.len() - 1
+                    });
+                    units.insert(
+                        key.to_string(),
+                        json!({"result": result, "durationMs": ms, "run": at}),
+                    );
+                }
+            }
+            let mut answer = json!({"units": units, "runs": runs, "reuse": reuse});
+            if job.is_some() {
+                answer["forJob"] = json!(true);
+            }
+            Reply::Send(Response::json(200, &answer))
+        }
+        "v0/units/reuse" => match body["state"].as_str() {
+            Some("suspended") => {
+                if reuse["state"] != "suspended" {
+                    let generation = reuse["generation"].as_i64().unwrap_or(0) + 1;
+                    state.reuse.insert(
+                        reuse_key.clone(),
+                        json!({"state": "suspended", "generation": generation,
+                               "suspendedAt": "2026-11-10T12:00:00.000Z",
+                               "suspendedBy": "user:ana@acme.dev"}),
+                    );
+                }
+                let now = state.reuse[&reuse_key].clone();
+                Reply::Send(Response::json(200, &json!({"reuse": now})))
+            }
+            Some("on") => {
+                if agent.is_some() {
+                    return error(
+                        403,
+                        "forbidden",
+                        "an agent token can't turn reuse on again: a person does",
+                    );
+                }
+                let generation = reuse["generation"].as_i64().unwrap_or(0);
+                if reuse["state"] != "suspended" || body["generation"].as_i64() != Some(generation)
+                {
+                    return Reply::Send(Response::json(
+                        409,
+                        &json!({"error": {"code": "conflict", "message": "stale"}, "reuse": reuse}),
+                    ));
+                }
+                let now = json!({"state": "on", "generation": generation + 1,
+                                 "suspendedAt": reuse["suspendedAt"], "suspendedBy": reuse["suspendedBy"],
+                                 "resumedAt": "2026-11-10T13:00:00.000Z", "resumedBy": "user:ana@acme.dev"});
+                state.reuse.insert(reuse_key, now.clone());
+                Reply::Send(Response::json(200, &json!({"reuse": now})))
+            }
+            _ => error(400, "invalid", "`state` is suspended or on"),
+        },
         _ => error(404, "not_found", "no such endpoint"),
     }
 }
