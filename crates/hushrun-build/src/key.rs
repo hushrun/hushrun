@@ -167,12 +167,19 @@ pub struct LinkLibrary {
 pub struct Link {
     /// Every library the linker was handed.
     pub libraries: Vec<LinkLibrary>,
-    /// The linker's identity: its path, size and modification time, as one text.
+    /// Every place the linker may take a file from besides those: each candidate for a library
+    /// named with `-l` in each search folder, and the files options name (linker scripts,
+    /// symbol lists), present or absent (B-6).
+    pub files: Vec<Read>,
+    /// The linker's identity: its path, size and modification time, as one text; with the same
+    /// for the linker `-fuse-ld` names, when there is one.
     pub linker: String,
     /// The SDK, as one text.
     pub sdk: String,
     /// Where the linker is. Kept for the hint; the key holds only `linker`.
     pub linker_path: String,
+    /// Where the linker `-fuse-ld` names is. Kept for the hint; the key holds only `linker`.
+    pub ld_path: Option<String>,
     /// Where the SDK is. Kept for the hint; the key holds only `sdk`.
     pub sdk_path: Option<String>,
 }
@@ -182,8 +189,14 @@ pub struct Link {
 pub struct LinkList {
     /// The libraries the linker was handed.
     pub libraries: Vec<Located>,
+    /// The other places the linker may take a file from.
+    #[serde(default)]
+    pub files: Vec<Located>,
     /// The linker's path.
     pub linker: String,
+    /// The path of the linker `-fuse-ld` names.
+    #[serde(default)]
+    pub ld: Option<String>,
     /// The SDK's path, if any.
     pub sdk: Option<String>,
 }
@@ -209,6 +222,9 @@ pub struct Observed {
     pub env: Vec<EnvRead>,
     /// Every `--extern`.
     pub externs: Vec<ExternInput>,
+    /// Each place a native library named with `-l` may be in the `-L` folders, present or
+    /// absent (B-6).
+    pub native: Vec<Read>,
     /// Every folder that directly holds a read file.
     pub shape: Vec<Shape>,
     /// Every file under `OUT_DIR`; `None` when the package has no build script.
@@ -231,6 +247,7 @@ impl Observed {
             externs: normalize(&self.externs, "externs", |e| {
                 (e.name.clone(), e.options.clone())
             })?,
+            native: normalize(&self.native, "native", |r| r.at.clone())?,
             shape: normalize_shape(&self.shape)?,
             generated: self
                 .generated
@@ -247,17 +264,22 @@ impl Observed {
                     })
                 })
                 .transpose()?,
-            link: self.link.as_ref().map(|link| {
-                let mut libraries: Vec<Digest> =
-                    link.libraries.iter().map(|lib| lib.sha256).collect();
-                libraries.sort();
-                libraries.dedup();
-                LinkBody {
-                    libraries,
-                    linker: link.linker.clone(),
-                    sdk: link.sdk.clone(),
-                }
-            }),
+            link: self
+                .link
+                .as_ref()
+                .map(|link| -> Result<_, KeyError> {
+                    let mut libraries: Vec<Digest> =
+                        link.libraries.iter().map(|lib| lib.sha256).collect();
+                    libraries.sort();
+                    libraries.dedup();
+                    Ok(LinkBody {
+                        libraries,
+                        files: normalize(&link.files, "link files", |r| r.at.clone())?,
+                        linker: link.linker.clone(),
+                        sdk: link.sdk.clone(),
+                    })
+                })
+                .transpose()?,
             place: match &self.place {
                 Place::Anywhere => Place::Anywhere,
                 Place::Tied(roots) => {
@@ -279,6 +301,7 @@ struct BlockBody {
     reads: Vec<Read>,
     env: Vec<EnvRead>,
     externs: Vec<ExternInput>,
+    native: Vec<Read>,
     shape: Vec<Shape>,
     generated: Option<Vec<Generated>>,
     declared: Option<DeclaredBody>,
@@ -295,6 +318,7 @@ struct DeclaredBody {
 #[derive(Serialize)]
 struct LinkBody {
     libraries: Vec<Digest>,
+    files: Vec<Read>,
     linker: String,
     sdk: String,
 }
@@ -416,7 +440,9 @@ impl ReadList {
             }),
             link: observed.link.as_ref().map(|l| LinkList {
                 libraries: sorted(l.libraries.iter().map(|lib| lib.at.clone()).collect()),
+                files: sorted(l.files.iter().map(|r| r.at.clone()).collect()),
                 linker: l.linker_path.clone(),
+                ld: l.ld_path.clone(),
                 sdk: l.sdk_path.clone(),
             }),
             place: match observed.place {
@@ -502,6 +528,10 @@ mod tests {
                     by: ExternBy::ProducedBy(d(7)),
                 },
             ],
+            native: vec![Read {
+                at: at(RootName::Workspace, "vendor/libfoo.a"),
+                state: ReadState::Present(d(10)),
+            }],
             shape: vec![Shape {
                 dir: at(RootName::Package, "src"),
                 names: vec!["lib.rs".into(), "util.rs".into()],
@@ -547,7 +577,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "3d319725bf98712468938ebfa260434346a1907616a4b32272419a8758f85df2"
+            "c8ddfbcd2e33b96dfefa4b1858508ab8a299267509dcc59619058c98691e92fc"
         );
     }
 
@@ -603,6 +633,12 @@ mod tests {
             ("an extern's options", |o| {
                 o.externs[0].options = vec!["priv".into()]
             }),
+            ("a native library's bytes", |o| {
+                o.native[0].state = ReadState::Present(d(99))
+            }),
+            ("a native library gone", |o| {
+                o.native[0].state = ReadState::Absent
+            }),
             ("an added shape name", |o| {
                 o.shape[0].names.push("new.rs".into())
             }),
@@ -622,9 +658,25 @@ mod tests {
             ("link inputs", |o| {
                 o.link = Some(Link {
                     libraries: vec![],
+                    files: vec![],
                     linker: "cc".into(),
                     sdk: String::new(),
                     linker_path: "cc".into(),
+                    ld_path: None,
+                    sdk_path: None,
+                })
+            }),
+            ("a file the linker reads", |o| {
+                o.link = Some(Link {
+                    libraries: vec![],
+                    files: vec![Read {
+                        at: at(RootName::Workspace, "link.x"),
+                        state: ReadState::Present(d(1)),
+                    }],
+                    linker: "cc".into(),
+                    sdk: String::new(),
+                    linker_path: "cc".into(),
+                    ld_path: None,
                     sdk_path: None,
                 })
             }),
@@ -649,9 +701,11 @@ mod tests {
             let mut o = observed();
             o.link = Some(Link {
                 libraries,
+                files: vec![],
                 linker: linker.into(),
                 sdk: sdk.into(),
                 linker_path: "cc".into(),
+                ld_path: None,
                 sdk_path: None,
             });
             o.key().unwrap()
@@ -827,9 +881,14 @@ mod tests {
                 at: at(RootName::OutDir, "liba.rlib"),
                 sha256: d(1),
             }],
+            files: vec![Read {
+                at: at(RootName::Workspace, "link.x"),
+                state: ReadState::Absent,
+            }],
             linker: "cc".into(),
             sdk: String::new(),
             linker_path: "/usr/bin/cc".into(),
+            ld_path: Some("/usr/bin/ld.lld".into()),
             sdk_path: Some("/sdk".into()),
         });
         let hint = ReadList::of(&o);
@@ -852,7 +911,9 @@ mod tests {
             hint.link,
             Some(LinkList {
                 libraries: vec![at(RootName::OutDir, "liba.rlib")],
+                files: vec![at(RootName::Workspace, "link.x")],
                 linker: "/usr/bin/cc".into(),
+                ld: Some("/usr/bin/ld.lld".into()),
                 sdk: Some("/sdk".into()),
             })
         );

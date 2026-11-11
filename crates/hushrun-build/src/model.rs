@@ -84,8 +84,17 @@ pub enum PassedThrough {
     Probe,
     /// An `@file` argument.
     ArgFile,
-    /// A `--target` that names a file.
+    /// A `--target` that names a file, or a name that is not one of the compiler's built-in
+    /// targets: rustc would load `<name>.json` from `RUST_TARGET_PATH` or the working directory.
     TargetFile,
+    /// A `--sysroot`: the standard library comes from a folder the compiler's identity doesn't
+    /// cover.
+    Sysroot,
+    /// A `-Z` flag outside the short list of ones that read no file.
+    Unstable,
+    /// An `--extern` with no path other than `proc_macro`: rustc finds the crate through the
+    /// search folders, and nothing hashes it.
+    ExternWithoutPath,
     /// A `--remap-path-prefix` of the caller's.
     CallerRemap,
     /// `-C instrument-coverage`, `-C profile-generate` or `-C profile-use`.
@@ -135,12 +144,15 @@ pub enum PassedThrough {
 
 impl PassedThrough {
     /// Every reason, for tests and tables.
-    pub const ALL: [PassedThrough; 27] = [
+    pub const ALL: [PassedThrough; 30] = [
         PassedThrough::NotRustc,
         PassedThrough::NoCrateName,
         PassedThrough::Probe,
         PassedThrough::ArgFile,
         PassedThrough::TargetFile,
+        PassedThrough::Sysroot,
+        PassedThrough::Unstable,
+        PassedThrough::ExternWithoutPath,
         PassedThrough::CallerRemap,
         PassedThrough::Instrumented,
         PassedThrough::Emit,
@@ -173,6 +185,9 @@ impl PassedThrough {
             PassedThrough::Probe => "probe",
             PassedThrough::ArgFile => "arg-file",
             PassedThrough::TargetFile => "target-file",
+            PassedThrough::Sysroot => "sysroot",
+            PassedThrough::Unstable => "unstable",
+            PassedThrough::ExternWithoutPath => "extern-without-path",
             PassedThrough::CallerRemap => "caller-remap",
             PassedThrough::Instrumented => "instrumented",
             PassedThrough::Emit => "emit",
@@ -209,7 +224,8 @@ pub enum NotStored {
     Changed,
     /// The store's volume has less free space than `min_free_gb` (B-22).
     LowSpace,
-    /// A native search path lies outside the build script's output.
+    /// A native library (`-l`) named in a form whose file can't be found with certainty:
+    /// `+verbatim`, a rename or `:file`, a kind this crate doesn't know (B-6).
     NativeOutside,
     /// The build script's saved output was not found.
     ScriptOutputMissing,

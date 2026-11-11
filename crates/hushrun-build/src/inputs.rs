@@ -15,7 +15,7 @@ use hushrun_core::Digest;
 use hushrun_digest::cache::Stat;
 
 use crate::depinfo::{self, DepInfo};
-use crate::invocation::{Env, Invocation};
+use crate::invocation::{Env, Invocation, NativeKind};
 use crate::key::{
     Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, Observed, Place, Read,
     ReadList, ReadState, Shape,
@@ -24,7 +24,7 @@ use crate::known::{self, Where};
 use crate::model::{Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
-use crate::{shape, sidecar};
+use crate::{link, shape, sidecar};
 
 /// What every gathering needs: the call, its roots and variables, and the build script's
 /// saved output when it has one.
@@ -58,6 +58,8 @@ pub struct Watched {
 pub struct Common {
     /// Every `--extern`.
     pub externs: Vec<ExternInput>,
+    /// Each place a library named with `-l` may be in the `-L` folders (B-6).
+    pub native: Vec<Read>,
     /// Every file under `OUT_DIR`, when it is set.
     pub generated: Option<Vec<Generated>>,
     /// What the build script declared and the known macros read.
@@ -217,8 +219,10 @@ impl Context<'_> {
         };
         let mut outside = false;
         let declared = self.declared(&mut watched, &mut outside)?;
+        let native = self.native(generated.is_some(), &mut watched, &mut outside)?;
         Ok(Common {
             externs: self.externs()?,
+            native,
             generated,
             declared,
             outside,
@@ -345,6 +349,82 @@ impl Context<'_> {
         Ok(Some(Declared { files: reads, env }))
     }
 
+    /// B-6's `native`: for each `-l`, every name its file may have in every folder rustc and
+    /// the linker search for it (`-L native=`, `all=` and bare; `framework=` for a framework),
+    /// in order, present (by content, through the record where one exists) or absent. A file
+    /// under the build script's output is in `generated` already. A name found in none of them
+    /// is a system library: the SDK and the linker cover it.
+    ///
+    /// Cost: one stat per candidate, six names per folder, only for calls that have `-l`.
+    fn native(
+        &self,
+        generated: bool,
+        watched: &mut Vec<Watched>,
+        outside: &mut bool,
+    ) -> Result<Vec<Read>, NotStored> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for lib in self.invocation.native_libs() {
+            let files = match lib.kind {
+                NativeKind::Framework => link::framework_files(&lib.name),
+                NativeKind::Static | NativeKind::Dylib => link::library_files(&lib.name),
+            };
+            for dir in self.invocation.native_dirs(lib.kind) {
+                let dir = self.absolute(dir);
+                let mut found = false;
+                for file in &files {
+                    let path = dir.join(file);
+                    let (read, stat, is_outside) = self.place(&path)?;
+                    found |= read.state != ReadState::Absent;
+                    let covered = generated
+                        && matches!(&read.at, Located::Rooted(r) if r.root == RootName::ScriptOut);
+                    if covered || !seen.insert(read.at.clone()) {
+                        continue;
+                    }
+                    *outside |= is_outside;
+                    watched.push(Watched { path, stat });
+                    out.push(read);
+                }
+                // A framework folder with neither its binary nor its stub: its file can't be
+                // named with certainty.
+                if lib.kind == NativeKind::Framework
+                    && !found
+                    && dir.join(format!("{}.framework", lib.name)).exists()
+                {
+                    return Err(NotStored::NativeOutside);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One place a file may be, as the key holds it: where it lies, and its content (through
+    /// the record where one exists) or absent; with its stat for B-11 and whether it lies
+    /// outside every root (B-8).
+    pub fn place(&self, path: &Path) -> Result<(Read, Option<Stat>, bool), NotStored> {
+        let at = self.located(path)?;
+        let outside = matches!(at, Located::Outside(_));
+        let (state, stat) = match fs::symlink_metadata(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
+            Err(_) => return Err(NotStored::Hash),
+            Ok(meta) => {
+                let sha = library_digest(path).map_err(|_| NotStored::Hash)?;
+                (ReadState::Present(sha), Some(Stat::of(&meta)))
+            }
+        };
+        Ok((Read { at, state }, stat, outside))
+    }
+
+    /// The state of a recorded place as it is now, for a hint: `None` when it can't be read.
+    fn state_now(&self, at: &Located) -> Option<ReadState> {
+        let path = self.open_at(at)?;
+        match fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Some(ReadState::Absent),
+            Err(_) => None,
+            Ok(_) => Some(ReadState::Present(library_digest(&path).ok()?)),
+        }
+    }
+
     /// Folders never walked as inputs: the target folders this call writes to (they hold the
     /// outputs), and `.git`.
     fn never_inputs(&self) -> Vec<PathBuf> {
@@ -397,6 +477,7 @@ impl Context<'_> {
             reads,
             env,
             externs: common.externs.clone(),
+            native: common.native.clone(),
             shape: shapes,
             generated: common.generated.clone(),
             declared: common.declared.clone(),
@@ -414,11 +495,20 @@ impl Context<'_> {
                 sha256: library_digest(&path).ok()?,
             });
         }
+        let mut files = Vec::with_capacity(list.files.len());
+        for at in &list.files {
+            files.push(Read {
+                at: at.clone(),
+                state: self.state_now(at)?,
+            });
+        }
         Some(Link {
             libraries,
-            linker: linker_text(Path::new(&list.linker))?,
+            files,
+            linker: linkers_text(Path::new(&list.linker), list.ld.as_deref().map(Path::new))?,
             sdk: sdk_text(list.sdk.as_deref()),
             linker_path: list.linker.clone(),
+            ld_path: list.ld.clone(),
             sdk_path: list.sdk.clone(),
         })
     }
@@ -513,6 +603,7 @@ impl Context<'_> {
                 reads,
                 env,
                 externs: common.externs.clone(),
+                native: common.native.clone(),
                 shape: shapes,
                 generated: common.generated.clone(),
                 declared: common.declared.clone(),
@@ -634,6 +725,17 @@ pub fn linker_text(path: &Path) -> Option<String> {
         stat.size,
         stat.mtime_ns
     ))
+}
+
+/// The identity of the linkers a link ran: the driver's ([`linker_text`]) and, on a line of
+/// its own, the one `-fuse-ld` named. `None` when one can't be read.
+pub fn linkers_text(driver: &Path, ld: Option<&Path>) -> Option<String> {
+    let mut text = linker_text(driver)?;
+    if let Some(ld) = ld {
+        text.push('\n');
+        text.push_str(&linker_text(ld)?);
+    }
+    Some(text)
 }
 
 /// The SDK as one text: its path and the modification time of its settings file, which an

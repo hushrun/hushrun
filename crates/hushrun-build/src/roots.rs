@@ -112,6 +112,9 @@ pub struct Roots {
     /// The shared folders in both forms, longest first.
     shared: Vec<String>,
     package_id: String,
+    /// Folders outputs are searched for besides the roots, in both forms: cargo's target
+    /// folder when a variable names it (B-10).
+    extra_needles: Vec<String>,
 }
 
 /// Resolves a folder on disk: symlinks followed, `.` and `..` gone. `None` when it can't be
@@ -212,6 +215,7 @@ impl Roots {
             forms,
             shared: shared_forms,
             package_id: paths.package_id.clone(),
+            extra_needles: Vec::new(),
         })
     }
 
@@ -364,11 +368,34 @@ impl Roots {
         self.root(name).map(|root| root.given.as_str())
     }
 
-    /// What outputs are searched for (B-10): every root in every distinct form, as raw bytes.
+    /// Adds folders the outputs are searched for, in their given and resolved forms: cargo's
+    /// target folder as `CARGO_TARGET_DIR` names it. It is not keyed (B-5), so a macro that read
+    /// it without telling rustc and wrote it into an output must leave the block tied (B-10).
+    /// A relative or `/` folder is skipped.
+    pub fn add_needles(&mut self, folders: &[String], resolve: impl Fn(&str) -> Option<String>) {
+        for folder in folders {
+            let given = clean(folder);
+            if !given.starts_with('/') || given == "/" {
+                continue;
+            }
+            let resolved = resolve(&given)
+                .map(|r| clean(&r))
+                .filter(|r| r.starts_with('/') && r != "/");
+            for text in std::iter::once(given).chain(resolved) {
+                if !self.extra_needles.contains(&text) {
+                    self.extra_needles.push(text);
+                }
+            }
+        }
+    }
+
+    /// What outputs are searched for (B-10): every root in every distinct form, and the
+    /// folders [`Roots::add_needles`] added, as raw bytes.
     pub fn needles(&self) -> Vec<Vec<u8>> {
         self.forms
             .iter()
             .map(|(text, _)| text.as_bytes().to_vec())
+            .chain(self.extra_needles.iter().map(|t| t.as_bytes().to_vec()))
             .collect()
     }
 
@@ -865,6 +892,27 @@ mod tests {
             .collect();
         expected.sort();
         assert_eq!(needles, expected);
+    }
+
+    // covers: B-10
+    #[test]
+    fn a_target_folder_named_by_a_variable_is_searched_for_in_both_forms() {
+        let mut roots = roots("/w/ws");
+        let before = roots.needles().len();
+        roots.add_needles(
+            &[
+                "/elsewhere/target/".to_string(),
+                "relative/target".to_string(),
+                "/".to_string(),
+            ],
+            with_r,
+        );
+        let needles = roots.needles();
+        assert_eq!(needles.len(), before + 2);
+        assert!(needles.contains(&b"/elsewhere/target".to_vec()));
+        assert!(needles.contains(&b"/R/elsewhere/target".to_vec()));
+        // It is not a root: nothing is recorded from it, and the place is unchanged.
+        assert_eq!(roots.tied(), self::roots("/w/ws").tied());
     }
 
     // covers: B-10

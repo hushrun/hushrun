@@ -1335,6 +1335,87 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
     );
     assert_eq!(w.blocks(), 0);
 }
+
+// covers: B-6, B-18
+#[test]
+fn files_the_linker_finds_through_its_search_folders_are_keyed() {
+    let w = world(Mode::On);
+    let tools = w.dir.path().join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("cc"), b"driver").unwrap();
+    fs::write(tools.join("ld.fake"), b"linker one").unwrap();
+    let cc = tools.join("cc");
+    let ld = tools.join("ld.fake");
+    let line = format!(
+        r#""{}" "{{ws}}/target/debug/deps/x.o" "-L" "{{ws}}/vendor" "-lfoo" "-Tscript.ld" "-fuse-ld={}" "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#,
+        cc.display(),
+        ld.display()
+    );
+    let setup = |name: &str| {
+        let ws = w.checkout(name);
+        fs::create_dir_all(ws.join("vendor")).unwrap();
+        fs::write(ws.join("vendor/libfoo.a"), b"foo one").unwrap();
+        fs::write(ws.join("script.ld"), b"SECTIONS { }").unwrap();
+        ws
+    };
+    let as_proc_macro = |w: &World, ws: &Path| {
+        let mut args = w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        args
+    };
+    let run = |ws: &Path| -> Outcome {
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                ..Plan::default()
+            },
+        );
+        settle();
+        let seen = Rc::new(RefCell::new(Seen::default()));
+        let mut fake = Fake {
+            vars: w.vars(ws, "a"),
+            cwd: ws.to_path_buf(),
+            plans: w.plans.clone(),
+            during: None,
+            seen,
+            version_fails: false,
+            audit: false,
+        };
+        call(&mut fake, &mut Vec::new(), &as_proc_macro(&w, ws));
+        w.session.current().entries().last().unwrap().outcome
+    };
+    let one = setup("one");
+    assert_eq!(run(&one), STORED);
+    let two = setup("two-longer");
+    assert_eq!(run(&two), REUSED, "the same inputs elsewhere");
+
+    let lib = setup("lib");
+    fs::write(lib.join("vendor/libfoo.a"), b"foo two").unwrap();
+    assert_eq!(run(&lib), STORED, "a library found through -L changed");
+
+    let earlier = setup("earlier");
+    fs::write(
+        earlier.join("vendor/libfoo.dylib"),
+        b"a dylib the linker prefers",
+    )
+    .unwrap();
+    assert_eq!(
+        run(&earlier),
+        STORED,
+        "a library appeared that the linker picks first"
+    );
+
+    let script = setup("script");
+    fs::write(script.join("script.ld"), b"SECTIONS { .x : { } }").unwrap();
+    assert_eq!(run(&script), STORED, "a linker script changed");
+
+    let linker = setup("linker");
+    fs::write(&ld, b"linker two, longer").unwrap();
+    assert_eq!(run(&linker), STORED, "the linker -fuse-ld names changed");
+}
+
 // covers: B-4
 #[test]
 fn a_target_that_is_not_one_of_the_compilers_own_passes_through() {

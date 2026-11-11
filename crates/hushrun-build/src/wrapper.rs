@@ -291,10 +291,11 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::TargetFile);
         }
-        let Ok(roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
+        let Ok(mut roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
         else {
             return self.pass(PassedThrough::Roots);
         };
+        roots.add_needles(&inv.package().target_dirs, resolve_on_disk);
 
         // The build script's saved output: its `rustc-env` names belong in the first key.
         let script: Option<Script> = inv.package().out_dir.as_ref().and_then(|out| {
@@ -304,6 +305,10 @@ impl Call<'_> {
         });
         let mut unstorable = (inv.package().out_dir.is_some() && script.is_none())
             .then_some(NotStored::ScriptOutputMissing);
+        // A `-l` whose file can't be found with certainty can't be keyed (B-6).
+        if !inv.native_certain() {
+            unstorable = unstorable.or(Some(NotStored::NativeOutside));
+        }
         if class != Class::Library {
             let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
             self.link_extra = linked_args(inv, apple);
@@ -849,7 +854,55 @@ impl Call<'_> {
             .to_str()
             .ok_or(NotStored::LinkInputs)?
             .to_string();
+        // The linker the driver runs instead of its own (B-18).
+        let ld = match &inputs.fuse_ld {
+            None => None,
+            Some(name) => {
+                let found = link::fuse_linker(name, &inputs.prefixes, path_var.as_deref(), &cwd)
+                    .ok_or(NotStored::LinkInputs)?;
+                Some(
+                    found
+                        .path
+                        .to_str()
+                        .ok_or(NotStored::LinkInputs)?
+                        .to_string(),
+                )
+            }
+        };
         let mut outside = false;
+        // Libraries named with `-l` found through `-L` and `-F`, and the files options name
+        // (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
+        let mut files = Vec::new();
+        for place in link::library_places(&inputs) {
+            let (read, _, is_outside) = cx.place(&place)?;
+            outside |= is_outside;
+            files.push(read);
+        }
+        for (places, script) in link::file_places(&inputs, &cwd) {
+            // rustc's own symbol list, gone after the link: it comes from the compile itself.
+            if places.len() == 1 && link::in_rustc_temp(&places[0]) {
+                continue;
+            }
+            let mut found = false;
+            for place in &places {
+                let (read, _, is_outside) = cx.place(place)?;
+                if read.state != crate::key::ReadState::Absent {
+                    found = true;
+                    if script {
+                        let text = std::fs::read(place).map_err(|_| NotStored::LinkInputs)?;
+                        if link::script_names_files(&text) {
+                            return Err(NotStored::LinkInputs);
+                        }
+                    }
+                }
+                outside |= is_outside;
+                files.push(read);
+            }
+            // A file the linker read that is gone can't be keyed.
+            if !found {
+                return Err(NotStored::LinkInputs);
+            }
+        }
         let mut libraries = Vec::with_capacity(inputs.libraries.len());
         for library in &inputs.libraries {
             let at = cx.located_path(library)?;
@@ -864,9 +917,12 @@ impl Call<'_> {
         Ok((
             Link {
                 libraries,
-                linker: inputs::linker_text(&linker.path).ok_or(NotStored::LinkInputs)?,
+                files,
+                linker: inputs::linkers_text(&linker.path, ld.as_deref().map(Path::new))
+                    .ok_or(NotStored::LinkInputs)?,
                 sdk: inputs::sdk_text(sdk_path.as_deref()),
                 linker_path,
+                ld_path: ld,
                 sdk_path,
             },
             outside,

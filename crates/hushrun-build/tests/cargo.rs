@@ -480,6 +480,44 @@ fn each_probe_changes_what_is_reused() {
     assert!(run_c(&input).contains("|generated two|"));
 }
 
+// covers: B-5
+#[test]
+fn a_target_folder_set_by_cargo_target_dir_does_not_change_what_is_reused() {
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("a-second-checkout/longer");
+    let target_a = w.path("ta");
+    let target_b = w.path("targets/the-second-one");
+    let session = w.begin(Mode::On).unwrap();
+    let with_target = |dir: &Path| {
+        let mut env = session.env();
+        env.push(("CARGO_TARGET_DIR".into(), dir.as_os_str().to_owned()));
+        env
+    };
+    let out = cargo(&one, &["build"], &with_target(&target_a));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = entries(&session);
+    assert_eq!(
+        last(&first, "a", Class::Library).outcome,
+        Outcome::BuiltAndStored
+    );
+    let out = cargo(&two, &["build"], &with_target(&target_b));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let second = entries(&session)[first.len()..].to_vec();
+    assert!(reused(&last(&second, "a", Class::Library)), "{second:#?}");
+    assert!(reused(&last(&second, "b", Class::Library)), "{second:#?}");
+    let printed = Command::new(target_b.join("debug/c")).output().unwrap();
+    assert!(String::from_utf8_lossy(&printed.stdout).starts_with("first text|set one|2|7|"));
+}
+
 // covers: B-12
 #[test]
 fn check_after_build_and_build_after_check_both_work() {

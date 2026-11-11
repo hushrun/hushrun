@@ -13,8 +13,9 @@ use crate::model::{Class, PassedThrough};
 
 /// The variables cargo set for a call, captured once by the caller from the process.
 ///
-/// Names that are not UTF-8 are dropped, except that one starting with `CARGO_` is remembered:
-/// it would belong in the key (B-5) and can't be written there, so the call passes through.
+/// Names that are not UTF-8 are dropped, except that one cargo sets for a crate (a keyed
+/// `CARGO_` prefix) is remembered: it would belong in the key (B-5) and can't be written there,
+/// so the call passes through.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Env {
     vars: BTreeMap<String, OsString>,
@@ -37,7 +38,11 @@ impl Env {
                     env.vars.insert(name, value.into());
                 }
                 Err(name) => {
-                    if name.as_encoded_bytes().starts_with(b"CARGO_") {
+                    let bytes = name.as_encoded_bytes();
+                    if CARGO_KEYED_PREFIXES
+                        .iter()
+                        .any(|prefix| bytes.starts_with(prefix.as_bytes()))
+                    {
                         env.unreadable_cargo_name = true;
                     }
                 }
@@ -114,6 +119,26 @@ pub struct SearchPath {
     pub path: String,
 }
 
+/// How a `-l` asks for a native library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NativeKind {
+    /// `static=`: bundled into an rlib when the library is compiled.
+    Static,
+    /// `dylib=`, or no kind.
+    Dylib,
+    /// `framework=`: found in framework folders, as `<name>.framework`.
+    Framework,
+}
+
+/// One `-l` whose file can be found the way the toolchain finds it (B-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLib {
+    /// The kind.
+    pub kind: NativeKind,
+    /// The name, without `lib` or an extension.
+    pub name: String,
+}
+
 /// One `--extern` argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extern {
@@ -147,6 +172,9 @@ pub struct Package {
     pub manifest_dir: Option<String>,
     /// `OUT_DIR`, set when the package has a build script.
     pub out_dir: Option<String>,
+    /// `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR`, when set to an absolute path. Not keyed:
+    /// outputs are searched for them (B-10).
+    pub target_dirs: Vec<String>,
 }
 
 /// One compiler call the wrapper handles.
@@ -163,6 +191,8 @@ pub struct Invocation {
     source: String,
     externs: Vec<Extern>,
     search_paths: Vec<SearchPath>,
+    native: Vec<NativeLib>,
+    native_certain: bool,
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
@@ -186,16 +216,58 @@ struct Token {
     out_dir: bool,
 }
 
-/// The `CARGO_*` variables B-5 leaves out of the first key.
-const CARGO_NOT_KEYED: [&str; 4] = [
-    "CARGO_MAKEFLAGS",
-    "CARGO_PRIMARY_PACKAGE",
-    "CARGO_SBOM_PATH",
-    "CARGO_RUSTC_CURRENT_DIR",
+/// The prefixes of the variables cargo sets for a crate's compile that B-5 keys. Cargo's own
+/// configuration (`CARGO_TARGET_DIR`, `CARGO_HOME`, `CARGO_TERM_*`, `CARGO_PROFILE_*`, tokens,
+/// …) is not here: it reaches rustc only through arguments already keyed, and a token must
+/// never reach a key.
+const CARGO_KEYED_PREFIXES: [&str; 3] = ["CARGO_PKG_", "CARGO_MANIFEST_", "CARGO_BIN_EXE_"];
+
+/// The other variables cargo sets for a crate's compile that B-5 keys. `CARGO`,
+/// `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_PATH` and `CARGO_RUSTC_CURRENT_DIR`
+/// are left out: they don't reach the output.
+const CARGO_KEYED: [&str; 3] = ["CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_TARGET_TMPDIR"];
+
+/// Variables outside `CARGO_*` that B-5 keys: rustc reads them without an `env-dep` line
+/// (rustc 1.94: the deployment targets, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
+/// `RUST_TARGET_PATH`), and the C driver and the linker read the rest.
+const OTHER_KEYED: [&str; 15] = [
+    "RUSTC_BOOTSTRAP",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "IPHONEOS_DEPLOYMENT_TARGET",
+    "TVOS_DEPLOYMENT_TARGET",
+    "WATCHOS_DEPLOYMENT_TARGET",
+    "XROS_DEPLOYMENT_TARGET",
+    "SDKROOT",
+    "RUSTC_FORCE_RUSTC_VERSION",
+    "LLVM_OVERRIDE_PRODUCER",
+    "RUST_TARGET_PATH",
+    "LIBRARY_PATH",
+    "LD_RUN_PATH",
+    "DEVELOPER_DIR",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
 ];
 
-/// Variables outside `CARGO_*` that B-5 keys.
-const OTHER_KEYED: [&str; 3] = ["RUSTC_BOOTSTRAP", "MACOSX_DEPLOYMENT_TARGET", "SDKROOT"];
+/// The variables that name cargo's target folder. Outputs are searched for their values.
+const TARGET_DIR_VARS: [&str; 2] = ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"];
+
+/// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
+/// keyed. Every other `-Z` passes through (B-4).
+const UNSTABLE_KEYED: [&str; 5] = [
+    "unstable-options",
+    "threads",
+    "share-generics",
+    "macro-backtrace",
+    "debuginfo-compression",
+];
+
+/// Whether a variable cargo sets for a crate belongs in the first key (B-5).
+fn cargo_keyed(name: &str) -> bool {
+    CARGO_KEYED.contains(&name)
+        || CARGO_KEYED_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 
 /// Reads one call. `argv` is what cargo passed after the wrapper's own name: the compiler's
 /// path, then its arguments. `env` is the call's variables and `cwd` its working directory.
@@ -275,6 +347,8 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         source,
         externs: seen.externs,
         search_paths: seen.search_paths,
+        native: seen.native,
+        native_certain: seen.native_certain,
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
@@ -335,6 +409,31 @@ impl Invocation {
     /// Every `-L`, in order.
     pub fn search_paths(&self) -> &[SearchPath] {
         &self.search_paths
+    }
+
+    /// Every `-l` whose file can be found, in order (B-6).
+    pub fn native_libs(&self) -> &[NativeLib] {
+        &self.native
+    }
+
+    /// Whether every `-l` is in a form whose file can be found with certainty. Not with
+    /// `+verbatim`, a rename, `:file` or a kind this crate doesn't know (B-6).
+    pub fn native_certain(&self) -> bool {
+        self.native_certain
+    }
+
+    /// The folders searched for a native library of `kind`, in order: `native=`, `all=` and
+    /// bare ones, and `framework=` ones for a framework, as rustc's `PathKind` matches them.
+    pub fn native_dirs(&self, kind: NativeKind) -> impl Iterator<Item = &str> {
+        self.search_paths
+            .iter()
+            .filter(move |search| match search.kind {
+                SearchKind::All => true,
+                SearchKind::Native => kind != NativeKind::Framework,
+                SearchKind::Framework => kind == NativeKind::Framework,
+                SearchKind::Dependency | SearchKind::Crate => false,
+            })
+            .map(|search| search.path.as_str())
     }
 
     /// The `-L dependency=` folders, in order: the `Deps` roots.
@@ -411,9 +510,10 @@ impl Invocation {
             .collect()
     }
 
-    /// B-5's variables from the call: every `CARGO_*` except the ones it names, and
-    /// `RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TARGET` and `SDKROOT` when set. Roots are still in
-    /// place.
+    /// B-5's variables from the call: the ones cargo sets for a crate (`CARGO_PKG_*`,
+    /// `CARGO_MANIFEST_*`, `CARGO_BIN_EXE_*`, `CARGO_CRATE_NAME`, `CARGO_BIN_NAME`,
+    /// `CARGO_TARGET_TMPDIR`) and the fixed list of others rustc, the C driver and the linker
+    /// read, when set. Roots are still in place.
     pub fn key_env(&self) -> &BTreeMap<String, String> {
         &self.env
     }
@@ -493,7 +593,6 @@ enum Flag {
     CheckCfg,
     CapLints,
     Target,
-    Sysroot,
     /// A lint level, by its long name.
     Lint(&'static str),
     Codegen,
@@ -536,7 +635,7 @@ fn long_flag(name: &str) -> Long {
         "check-cfg" => Long::Valued(Flag::CheckCfg),
         "cap-lints" => Long::Valued(Flag::CapLints),
         "target" => Long::Valued(Flag::Target),
-        "sysroot" => Long::Valued(Flag::Sysroot),
+        "sysroot" => Long::Refuse(PassedThrough::Sysroot),
         "allow" => Long::Valued(Flag::Lint("allow")),
         "warn" => Long::Valued(Flag::Lint("warn")),
         "deny" => Long::Valued(Flag::Lint("deny")),
@@ -637,6 +736,8 @@ struct Seen {
     source: Option<String>,
     externs: Vec<Extern>,
     search_paths: Vec<SearchPath>,
+    native: Vec<NativeLib>,
+    native_certain: bool,
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
@@ -658,6 +759,8 @@ impl Default for Seen {
             source: None,
             externs: Vec::new(),
             search_paths: Vec::new(),
+            native: Vec::new(),
+            native_certain: true,
             incremental: None,
             target: None,
             searchable: true,
@@ -741,6 +844,9 @@ impl Seen {
             }
             Flag::Extern => {
                 let parsed = parse_extern(v)?;
+                if parsed.path.is_none() && parsed.name != "proc_macro" {
+                    return Err(PassedThrough::ExternWithoutPath);
+                }
                 let key = format!("--extern={}", parsed.reduced());
                 self.externs.push(parsed);
                 Some(key)
@@ -755,7 +861,6 @@ impl Seen {
                 once(&mut self.target, v)?;
                 Some(format!("--target={v}"))
             }
-            Flag::Sysroot => Some(format!("--sysroot={v}")),
             Flag::Lint(level) => Some(format!("--{level}={v}")),
             Flag::Codegen => {
                 let (name, setting) = match v.split_once('=') {
@@ -783,10 +888,7 @@ impl Seen {
                         self.searchable = false;
                     }
                     "link-arg" | "link-args" => {
-                        let text = setting.unwrap_or_default();
-                        if text.contains("compress-debug-sections")
-                            && !text.contains("compress-debug-sections=none")
-                        {
+                        if compresses_debug(setting.unwrap_or_default(), name == "link-args") {
                             self.searchable = false;
                         }
                     }
@@ -795,6 +897,13 @@ impl Seen {
                 (name != "incremental").then(|| format!("-C{v}"))
             }
             Flag::Unstable => {
+                let name = v.split_once('=').map_or(v, |(name, _)| name);
+                if matches!(name, "remap-cwd-prefix" | "remap-path-scope") {
+                    return Err(PassedThrough::CallerRemap);
+                }
+                if !UNSTABLE_KEYED.contains(&name) {
+                    return Err(PassedThrough::Unstable);
+                }
                 if let Some(kind) = v.strip_prefix("debuginfo-compression=")
                     && kind != "none"
                 {
@@ -809,7 +918,13 @@ impl Seen {
                 self.search_paths.push(search);
                 key
             }
-            Flag::Library => Some(format!("-l{v}")),
+            Flag::Library => {
+                match parse_native(v) {
+                    Some(lib) => self.native.push(lib),
+                    None => self.native_certain = false,
+                }
+                Some(format!("-l{v}"))
+            }
             Flag::Test => {
                 self.test = true;
                 Some("--test".to_string())
@@ -824,6 +939,78 @@ impl Seen {
             out_dir: flag == Flag::OutDir,
         })
     }
+}
+
+/// Whether a `-C link-arg` (or the words of a `-C link-args`) asks the C driver or the linker
+/// to compress debug sections: `-gz` or `-gz=<kind>`, or `--compress-debug-sections` in any
+/// spelling, with any value but `none` (B-10). A flag whose value can't be seen counts.
+fn compresses_debug(value: &str, words: bool) -> bool {
+    let parts: Vec<&str> = if words {
+        value.split_whitespace().collect()
+    } else {
+        vec![value]
+    };
+    let mut tokens: Vec<&str> = Vec::new();
+    for part in parts {
+        match part.strip_prefix("-Wl,") {
+            Some(rest) => tokens.extend(rest.split(',')),
+            None => tokens.push(part),
+        }
+    }
+    tokens.iter().enumerate().any(|(i, token)| {
+        if *token == "-gz" {
+            return true;
+        }
+        if let Some(kind) = token.strip_prefix("-gz=") {
+            return kind != "none";
+        }
+        let flag = token.trim_start_matches('-');
+        if token.starts_with('-') && flag.starts_with("compress-debug-sections") {
+            return match flag.strip_prefix("compress-debug-sections") {
+                Some("") => tokens.get(i + 1) != Some(&"none"),
+                Some(rest) => rest != "=none",
+                None => true,
+            };
+        }
+        false
+    })
+}
+
+/// Reads `-l [KIND[:MODIFIERS]=]NAME[:RENAME]` as rustc does. `None` for a form whose file
+/// can't be found with certainty: `+verbatim`, a rename or `:file`, `link-arg=`, a kind or
+/// modifier this crate doesn't know.
+fn parse_native(value: &str) -> Option<NativeLib> {
+    let (spec, name) = match value.split_once('=') {
+        Some((spec, name)) => (Some(spec), name),
+        None => (None, value),
+    };
+    let (kind, modifiers) = match spec {
+        None => ("dylib", None),
+        Some(spec) => match spec.split_once(':') {
+            Some((kind, modifiers)) => (kind, Some(modifiers)),
+            None => (spec, None),
+        },
+    };
+    let kind = match kind {
+        "static" => NativeKind::Static,
+        "dylib" => NativeKind::Dylib,
+        "framework" => NativeKind::Framework,
+        _ => return None,
+    };
+    for modifier in modifiers.into_iter().flat_map(|m| m.split(',')) {
+        match modifier {
+            "+bundle" | "-bundle" | "+whole-archive" | "-whole-archive" | "+as-needed"
+            | "-as-needed" | "-verbatim" => {}
+            _ => return None,
+        }
+    }
+    if name.is_empty() || name.contains([':', '/', '\\']) {
+        return None;
+    }
+    Some(NativeLib {
+        kind,
+        name: name.to_string(),
+    })
 }
 
 /// Reads `[opt,opt:]name[=path]`.
@@ -900,16 +1087,22 @@ fn read_env(env: &Env) -> Result<(BTreeMap<String, String>, Package), PassedThro
     }
     let mut keyed = BTreeMap::new();
     for (name, value) in &env.vars {
-        let cargo = name.starts_with("CARGO_") && !CARGO_NOT_KEYED.contains(&name.as_str());
-        if cargo || OTHER_KEYED.contains(&name.as_str()) {
+        if cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
+    let target_dirs = TARGET_DIR_VARS
+        .iter()
+        .filter_map(|name| env.get(name)?.to_str())
+        .filter(|dir| dir.starts_with('/'))
+        .map(str::to_string)
+        .collect();
     let package = Package {
         name: keyed.get("CARGO_PKG_NAME").cloned(),
         version: keyed.get("CARGO_PKG_VERSION").cloned(),
         manifest_dir: keyed.get("CARGO_MANIFEST_DIR").cloned(),
         out_dir: env.get("OUT_DIR").map(utf8).transpose()?,
+        target_dirs,
     };
     Ok((keyed, package))
 }
@@ -1243,13 +1436,11 @@ pub(crate) mod tests {
                 "--target aarch64-apple-darwin",
                 "--target=aarch64-apple-darwin",
             ),
-            ("--sysroot /s", "--sysroot=/s"),
             ("--extern a=/p/liba.rlib", "--extern=a"),
             (
                 "--extern priv,noprelude:a=/p/liba.rlib",
                 "--extern=priv,noprelude:a",
             ),
-            ("--extern=a", "--extern=a"),
             ("-O", "-O"),
             ("-g", "-g"),
         ];
@@ -1562,12 +1753,20 @@ pub(crate) mod tests {
             parse(&good, &env, Path::new(WS)),
             Parsed::PassedThrough(PassedThrough::NotUtf8)
         ));
-        let mut name = b"CARGO_".to_vec();
+        let mut name = b"CARGO_PKG_".to_vec();
         name.push(0xff);
         let env = Env::from_vars([(OsString::from_vec(name), OsString::from("x"))]);
         assert!(matches!(
             parse(&good, &env, Path::new(WS)),
             Parsed::PassedThrough(PassedThrough::NotUtf8)
+        ));
+        // A name of cargo's configuration is not keyed, so it can't stop a call.
+        let mut name = b"CARGO_TERM_".to_vec();
+        name.push(0xff);
+        let env = Env::from_vars([(OsString::from_vec(name), OsString::from("x"))]);
+        assert!(matches!(
+            parse(&good, &env, Path::new(WS)),
+            Parsed::Handled(_)
         ));
         let env = Env::from_vars([(OsString::from("HOME"), bad.clone())]);
         assert!(matches!(
@@ -1630,6 +1829,206 @@ pub(crate) mod tests {
             &Env::default(),
         );
         assert_ne!(plain, short.message_form());
+    }
+
+    // covers: B-5
+    #[test]
+    fn variables_rustc_or_the_linker_read_without_an_env_dep_are_keyed() {
+        let read = [
+            "RUSTC_BOOTSTRAP",
+            "MACOSX_DEPLOYMENT_TARGET",
+            "SDKROOT",
+            "IPHONEOS_DEPLOYMENT_TARGET",
+            "TVOS_DEPLOYMENT_TARGET",
+            "WATCHOS_DEPLOYMENT_TARGET",
+            "XROS_DEPLOYMENT_TARGET",
+            "RUSTC_FORCE_RUSTC_VERSION",
+            "LLVM_OVERRIDE_PRODUCER",
+            "RUST_TARGET_PATH",
+            "LIBRARY_PATH",
+            "LD_RUN_PATH",
+            "DEVELOPER_DIR",
+            "COMPILER_PATH",
+            "GCC_EXEC_PREFIX",
+        ];
+        for name in read {
+            let env = Env::from_vars([(name, "x")]);
+            let inv = handled(&argv(&minimal("")), &env);
+            assert_eq!(
+                inv.key_env().get(name).map(String::as_str),
+                Some("x"),
+                "{name}"
+            );
+        }
+    }
+
+    // covers: B-5
+    #[test]
+    fn the_persons_cargo_configuration_is_not_keyed() {
+        let (argv, env) = workspace_lib();
+        let base = handled(&argv, &env).key_env().clone();
+        for (name, value) in [
+            ("CARGO_TARGET_DIR", "/elsewhere/target"),
+            ("CARGO_BUILD_TARGET_DIR", "/elsewhere/t"),
+            ("CARGO_HOME", "/home/dev/.cargo"),
+            ("CARGO_TERM_COLOR", "always"),
+            ("CARGO_REGISTRY_TOKEN", "secret"),
+            ("CARGO_REGISTRIES_MINE_TOKEN", "secret"),
+            ("CARGO_INCREMENTAL", "0"),
+            ("CARGO_BUILD_JOBS", "4"),
+            ("CARGO_PROFILE_DEV_OPT_LEVEL", "1"),
+            ("CARGO_ENCODED_RUSTFLAGS", "-Copt-level=1"),
+            ("CARGO_NET_OFFLINE", "true"),
+            ("CARGO_HTTP_TIMEOUT", "5"),
+            ("CARGO_LOG", "debug"),
+            ("CARGO_UNSTABLE_X", "1"),
+            ("CARGO_ALIAS_B", "build"),
+            ("CARGO", "/bin/cargo"),
+            ("CARGO_MAKEFLAGS", "-j"),
+            ("CARGO_PRIMARY_PACKAGE", "1"),
+            ("CARGO_SBOM_PATH", "/x"),
+            ("CARGO_RUSTC_CURRENT_DIR", "/x"),
+        ] {
+            let mut env = env.clone();
+            env.vars.insert(name.into(), value.into());
+            assert_eq!(handled(&argv, &env).key_env(), &base, "{name}");
+        }
+        for (name, value) in [
+            ("CARGO_PKG_VERSION", "0.13.0"),
+            ("CARGO_PKG_AUTHORS", "someone"),
+            ("CARGO_CRATE_NAME", "other"),
+            ("CARGO_MANIFEST_LINKS", "z"),
+            ("CARGO_BIN_EXE_tool", "/w/target/debug/tool"),
+            ("CARGO_BIN_NAME", "tool"),
+            ("CARGO_TARGET_TMPDIR", "/w/target/tmp"),
+        ] {
+            let mut env = env.clone();
+            env.vars.insert(name.into(), value.into());
+            assert_ne!(handled(&argv, &env).key_env(), &base, "{name}");
+        }
+    }
+
+    // covers: B-4
+    #[test]
+    fn flags_that_name_a_file_rustc_reads_pass_through() {
+        for (extra, why) in [
+            ("--sysroot /s", PassedThrough::Sysroot),
+            ("--sysroot=/s", PassedThrough::Sysroot),
+            ("-Z dump-mir=all", PassedThrough::Unstable),
+            ("-Zself-profile=/p", PassedThrough::Unstable),
+            ("-Zcodegen-backend=/b.so", PassedThrough::Unstable),
+            ("-Zllvm-plugins=/p.so", PassedThrough::Unstable),
+            ("-Zno-codegen", PassedThrough::Unstable),
+            ("--extern foo", PassedThrough::ExternWithoutPath),
+            ("--extern priv:foo", PassedThrough::ExternWithoutPath),
+        ] {
+            assert_eq!(line_why(&minimal(extra)), Some(why), "{extra}");
+        }
+        for extra in ["-Zremap-cwd-prefix=.", "-Z remap-path-scope=all"] {
+            assert_eq!(
+                line_why(&minimal(extra)),
+                Some(PassedThrough::CallerRemap),
+                "{extra}"
+            );
+        }
+        for extra in [
+            "-Z unstable-options",
+            "-Zthreads=8",
+            "-Zshare-generics=y",
+            "-Zmacro-backtrace",
+            "-Zdebuginfo-compression=none",
+            "--extern proc_macro",
+        ] {
+            assert_eq!(line_why(&minimal(extra)), None, "{extra}");
+        }
+    }
+
+    // covers: B-10
+    #[test]
+    fn compressed_debug_sections_asked_through_the_driver_cannot_be_searched() {
+        for extra in [
+            "-C link-arg=-gz",
+            "-C link-arg=-gz=zlib",
+            "-C link-arg=-gz=zstd",
+            "-C 'link-args=-O1 -gz'",
+            "-C link-arg=-Wl,--compress-debug-sections,zlib",
+            "-C link-arg=-Wl,--compress-debug-sections",
+            "-C link-arg=--compress-debug-sections=zstd",
+            "-C link-arg=-Xlinker -C link-arg=--compress-debug-sections=zlib",
+        ] {
+            let inv = handled(&argv(&minimal(extra)), &Env::default());
+            assert!(!inv.searchable(), "{extra}");
+        }
+        for extra in [
+            "-C link-arg=-gz=none",
+            "-C link-arg=-Wl,--compress-debug-sections=none",
+            "-C link-arg=-Wl,--compress-debug-sections,none",
+            "-C link-arg=-gzip-not-a-flag",
+        ] {
+            let inv = handled(&argv(&minimal(extra)), &Env::default());
+            assert!(inv.searchable(), "{extra}");
+        }
+    }
+
+    // covers: B-6
+    #[test]
+    fn native_libraries_are_read_as_rustc_reads_them() {
+        let inv = handled(
+            &argv(&minimal(
+                "-l z -l static=foo -lstatic:+whole-archive,-bundle=bar -l framework=Security \
+                 -l dylib:-verbatim=baz -L native=/n -L /a -L framework=/f -L dependency=/d -L crate=/c",
+            )),
+            &Env::default(),
+        );
+        let libs: Vec<_> = inv
+            .native_libs()
+            .iter()
+            .map(|lib| (lib.kind, lib.name.as_str()))
+            .collect();
+        assert_eq!(
+            libs,
+            [
+                (NativeKind::Dylib, "z"),
+                (NativeKind::Static, "foo"),
+                (NativeKind::Static, "bar"),
+                (NativeKind::Framework, "Security"),
+                (NativeKind::Dylib, "baz"),
+            ]
+        );
+        assert!(inv.native_certain());
+        assert_eq!(
+            inv.native_dirs(NativeKind::Static).collect::<Vec<_>>(),
+            ["/n", "/a"]
+        );
+        assert_eq!(
+            inv.native_dirs(NativeKind::Framework).collect::<Vec<_>>(),
+            ["/a", "/f"]
+        );
+        for uncertain in [
+            "-l static:+verbatim=libfoo.a",
+            "-l foo:bar",
+            "-l :libfoo.a",
+            "-l static=:libfoo.a",
+            "-l link-arg=-Tx",
+            "-l weird=foo",
+            "-l static:+unknown=foo",
+            "-l static=",
+            "-l static=../foo",
+        ] {
+            let inv = handled(&argv(&minimal(uncertain)), &Env::default());
+            assert!(!inv.native_certain(), "{uncertain}");
+        }
+    }
+
+    // covers: B-10
+    #[test]
+    fn target_folders_are_kept_to_search_outputs_for() {
+        let env = Env::from_vars([
+            ("CARGO_TARGET_DIR", "/elsewhere/target"),
+            ("CARGO_BUILD_TARGET_DIR", "relative/target"),
+        ]);
+        let inv = handled(&argv(&minimal("")), &env);
+        assert_eq!(inv.package().target_dirs, ["/elsewhere/target"]);
     }
 
     #[test]

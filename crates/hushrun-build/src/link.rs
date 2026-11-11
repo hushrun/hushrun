@@ -55,8 +55,10 @@ pub struct Inputs {
     /// Objects given by path: `.o`, `.obj`. These include rustc's temporary files and the
     /// compile's own outputs, which the wrapper doesn't hash.
     pub objects: Vec<PathBuf>,
-    /// Library and framework search folders: `-L x`, `-Lx`, `--library-path`, `-F x`, `-Fx`.
+    /// Library search folders: `-L x`, `-Lx`, `--library-path`.
     pub search: Vec<PathBuf>,
+    /// Framework search folders: `-F x`, `-Fx`.
+    pub framework_search: Vec<PathBuf>,
     /// Libraries given by name (`-lz`, `-l z`, `-l:libz.a`, `--library=z` give `z` or `:libz.a`)
     /// and frameworks (`-framework Security` and its weak, needed and reexport forms give
     /// `Security.framework`).
@@ -67,7 +69,45 @@ pub struct Inputs {
     /// Response files (`@file`). Their contents are more arguments that this list doesn't see,
     /// so a link that has one can't be keyed (B-18).
     pub response_files: Vec<PathBuf>,
+    /// Files options name for the linker to read: linker scripts (`-T`, `--script`), symbol
+    /// lists and the like, in order, as given.
+    pub files: Vec<FileArg>,
+    /// The linker the C driver runs instead of its own, from the last `-fuse-ld=`.
+    pub fuse_ld: Option<String>,
+    /// The C driver's program folders (`-B x`, `-Bx`), searched first for the linker.
+    pub prefixes: Vec<PathBuf>,
 }
+
+/// A file an option names for the linker to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileArg {
+    /// The value as given.
+    pub value: String,
+    /// A linker script (`-T`, `--script`): looked for in the working directory and then in each
+    /// `-L` folder, and it may name more files.
+    pub script: bool,
+}
+
+/// Options whose value is a file the linker reads, besides libraries and objects: GNU ld's and
+/// lld's scripts and lists, and ld64's lists.
+const FILE_OPTIONS: &[(&str, bool)] = &[
+    ("-T", true),
+    ("--script", true),
+    ("--version-script", false),
+    ("--dynamic-list", false),
+    ("--retain-symbols-file", false),
+    ("--just-symbols", false),
+    ("-exported_symbols_list", false),
+    ("-unexported_symbols_list", false),
+    ("-reexported_symbols_list", false),
+    ("-order_file", false),
+    ("-filelist", false),
+    ("-alias_list", false),
+];
+
+/// Options whose third value is a file whose bytes go into the output: ld64's
+/// `-sectcreate segment section file`.
+const SECTION_FILE_OPTIONS: &[&str] = &["-sectcreate", "-segcreate"];
 
 /// The linker program as the system found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,10 +375,37 @@ impl LinkArgs {
                 i += 1;
                 continue;
             }
-            if let Some(value) = take_value(token, next, &["-L", "-F"], &["--library-path"]) {
+            if let Some(value) = take_value(token, next, &["-L"], &["--library-path"]) {
                 let (value, used_next) = value;
                 i += usize::from(used_next);
                 push_once(&mut inputs.search, cwd.join(value));
+                continue;
+            }
+            if let Some((value, used_next)) = take_value(token, next, &["-F"], &[]) {
+                i += usize::from(used_next);
+                push_once(&mut inputs.framework_search, cwd.join(value));
+                continue;
+            }
+            if let Some(value) = token.strip_prefix("-fuse-ld=") {
+                inputs.fuse_ld = Some(value.to_owned());
+                continue;
+            }
+            if let Some((value, used_next, script)) = take_file(token, next) {
+                i += usize::from(used_next);
+                inputs.files.push(FileArg {
+                    value: value.to_owned(),
+                    script,
+                });
+                continue;
+            }
+            if SECTION_FILE_OPTIONS.contains(&token) {
+                if let Some(file) = tokens.get(i + 2) {
+                    inputs.files.push(FileArg {
+                        value: (*file).to_owned(),
+                        script: false,
+                    });
+                }
+                i += 3;
                 continue;
             }
             if let Some((value, used_next)) = take_value(token, next, &["-l"], &["--library"]) {
@@ -372,7 +439,32 @@ impl LinkArgs {
             }
         }
         inputs.sdk = sdk.or_else(|| self.set_var("SDKROOT")).map(|s| cwd.join(s));
+        inputs.prefixes = self.prefixes(cwd);
         inputs
+    }
+
+    /// The C driver's own `-B` folders, from its arguments (never from `-Wl,`, where `-Bstatic`
+    /// and `-Bdynamic` are the linker's).
+    fn prefixes(&self, cwd: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut iter = self.args.iter();
+        while let Some(arg) = iter.next() {
+            let value = match arg.strip_prefix("-B") {
+                Some("") => iter.next().map(String::as_str),
+                Some(rest)
+                    if !rest.starts_with("static")
+                        && !rest.starts_with("dynamic")
+                        && !rest.starts_with("symbolic") =>
+                {
+                    Some(rest)
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                push_once(&mut out, cwd.join(value));
+            }
+        }
+        out
     }
 }
 
@@ -418,6 +510,34 @@ fn take_value<'a>(
         }
         if let Some(value) = token.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
             return Some((value, false));
+        }
+    }
+    None
+}
+
+/// A file option's value (`-T x`, `-Tx`, `--script=x`, `--version-script x`, …), whether it
+/// was the next token, and whether it is a linker script. `-Tbss`, `-Tdata` and `-Ttext` take an
+/// address, not a file.
+fn take_file<'a>(token: &'a str, next: Option<&'a str>) -> Option<(&'a str, bool, bool)> {
+    for (flag, script) in FILE_OPTIONS {
+        if token == *flag {
+            return next.map(|v| (v, true, *script));
+        }
+        let Some(rest) = token.strip_prefix(flag) else {
+            continue;
+        };
+        if let Some(value) = rest.strip_prefix('=') {
+            return Some((value, false, *script));
+        }
+        if *flag == "-T" && !rest.is_empty() {
+            if matches!(
+                rest,
+                "bss" | "data" | "text" | "text-segment" | "rodata-segment"
+            ) || rest.starts_with("ext=")
+            {
+                return None;
+            }
+            return Some((rest, false, true));
         }
     }
     None
@@ -490,6 +610,120 @@ pub fn linker(program: &str, path: Option<&OsStr>, cwd: &Path) -> Option<Linker>
         return stat(cwd.join(program), false);
     }
     std::env::split_paths(path?).find_map(|dir| stat(cwd.join(dir).join(program), true))
+}
+
+/// Finds the linker `-fuse-ld=<name>` makes the C driver run, as gcc and clang look for it: a
+/// value with a `/` is a path; a name is `ld.<name>`, then `<name>`, first in each `-B` folder
+/// and then on `path`. `None` when it can't be found: the link can't be keyed (B-18).
+///
+/// Apple's `/usr/bin/cc` is a shim that runs the selected Xcode's driver; its identity is the
+/// shim's. The SDK's identity (its path and the date of its settings file) changes with an Xcode
+/// update in practice, so the shim is left as it is.
+pub fn fuse_linker(
+    name: &str,
+    prefixes: &[PathBuf],
+    path: Option<&OsStr>,
+    cwd: &Path,
+) -> Option<Linker> {
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
+        return stat(cwd.join(name), false);
+    }
+    let names = [format!("ld.{name}"), name.to_owned()];
+    for program in &names {
+        if let Some(found) = prefixes
+            .iter()
+            .find_map(|dir| stat(cwd.join(dir).join(program), true))
+        {
+            return Some(found);
+        }
+    }
+    names.iter().find_map(|program| linker(program, path, cwd))
+}
+
+/// The files the linker may take a library named with `-l` (or `-framework`) from: every
+/// candidate name in every search folder, in order (B-6). A name the linker finds elsewhere is
+/// a system library, keyed by name with the SDK and the linker. `-l:file` names the file itself.
+pub fn library_places(inputs: &Inputs) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for named in &inputs.named {
+        if let Some(framework) = named.strip_suffix(".framework") {
+            for dir in &inputs.framework_search {
+                for file in framework_files(framework) {
+                    push_once(&mut out, dir.join(file));
+                }
+            }
+            continue;
+        }
+        let files = match named.strip_prefix(':') {
+            Some(file) => vec![file.to_owned()],
+            None => library_files(named),
+        };
+        for dir in &inputs.search {
+            for file in &files {
+                push_once(&mut out, dir.join(file));
+            }
+        }
+    }
+    out
+}
+
+/// The names a library `name` may have in a search folder, for any toolchain.
+pub fn library_files(name: &str) -> Vec<String> {
+    ["a", "dylib", "so", "tbd", "rlib"]
+        .iter()
+        .map(|ext| format!("lib{name}.{ext}"))
+        .chain([format!("{name}.lib")])
+        .collect()
+}
+
+/// The files of framework `name` in a framework folder: its binary or its text stub.
+pub fn framework_files(name: &str) -> Vec<String> {
+    vec![
+        format!("{name}.framework/{name}"),
+        format!("{name}.framework/{name}.tbd"),
+    ]
+}
+
+/// The places each file option's value may be: a path as given (joined to `cwd`), and for a
+/// linker script also in each `-L` folder, as GNU ld looks for one.
+pub fn file_places(inputs: &Inputs, cwd: &Path) -> Vec<(Vec<PathBuf>, bool)> {
+    inputs
+        .files
+        .iter()
+        .map(|file| {
+            let mut places = vec![cwd.join(&file.value)];
+            if file.script && !Path::new(&file.value).is_absolute() {
+                for dir in &inputs.search {
+                    push_once(&mut places, dir.join(&file.value));
+                }
+            }
+            (places, file.script)
+        })
+        .collect()
+}
+
+/// Whether a path lies in one of rustc's own temporary folders (`rustc` and six characters):
+/// rustc writes the symbol list there and removes it after the link. What it holds comes from
+/// the compile itself, and its name is new each time.
+pub fn in_rustc_temp(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix("rustc"))
+        .is_some_and(|rest| rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// Whether a linker script's text may name more files the linker reads: `INCLUDE`, `INPUT`,
+/// `GROUP`, `SEARCH_DIR`, `STARTUP`. Those files can't be keyed without reading the script as
+/// the linker does, so such a link isn't stored.
+pub fn script_names_files(text: &[u8]) -> bool {
+    const WORDS: [&[u8]; 5] = [b"INCLUDE", b"INPUT", b"GROUP", b"SEARCH_DIR", b"STARTUP"];
+    WORDS
+        .iter()
+        .any(|word| text.windows(word.len()).any(|window| window == *word))
 }
 
 fn stat(path: PathBuf, need_exec: bool) -> Option<Linker> {
@@ -662,6 +896,97 @@ mod tests {
         assert_eq!(inputs.sdk, Some(PathBuf::from("/opt/sysroot")));
         // `-soname libapp.so.1` names the output.
         assert!(!inputs.libraries.iter().any(|p| p.ends_with("libapp.so.1")));
+        // rustc's own lld on Linux: `-fuse-ld=lld`, found first in the `-B` folder.
+        assert_eq!(inputs.fuse_ld.as_deref(), Some("lld"));
+        assert_eq!(
+            inputs.prefixes,
+            [PathBuf::from(
+                "/home/u/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
+            )]
+        );
+    }
+
+    #[test]
+    // covers: B-6, B-18
+    fn files_the_linker_reads_are_named() {
+        let line = r#""cc" "-Tlink.x" "-T" "/abs/memory.x" "-Ttext" "0x100" "-Wl,--version-script=/w/exports.map" "-Wl,--dynamic-list,dyn.list" "-Wl,-exported_symbols_list" "-Wl,/w/out/rustcqqZKHU/list" "-Wl,-sectcreate,__TEXT,__info,Info.plist" "-L" "/w/out" "-lfoo" "-l:libbar.a" "-framework" "Sec" "-F/fw" "-o" "/w/out/app""#;
+        let inputs = parse(line).unwrap().inputs(Path::new("/w"));
+        let files: Vec<(&str, bool)> = inputs
+            .files
+            .iter()
+            .map(|f| (f.value.as_str(), f.script))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("link.x", true),
+                ("/abs/memory.x", true),
+                ("/w/exports.map", false),
+                ("dyn.list", false),
+                ("/w/out/rustcqqZKHU/list", false),
+                ("Info.plist", false),
+            ]
+        );
+        let places = file_places(&inputs, Path::new("/w"));
+        assert_eq!(
+            places[0],
+            (
+                vec![PathBuf::from("/w/link.x"), PathBuf::from("/w/out/link.x")],
+                true
+            )
+        );
+        assert_eq!(places[1].0, [PathBuf::from("/abs/memory.x")]);
+        assert_eq!(places[3].0, [PathBuf::from("/w/dyn.list")]);
+        assert!(in_rustc_temp(&places[4].0[0]));
+        assert!(!in_rustc_temp(Path::new("/w/out/rustc/list")));
+        assert!(!in_rustc_temp(Path::new("/w/rustcfoobarbaz/list")));
+
+        let libraries = library_places(&inputs);
+        assert_eq!(libraries[0], PathBuf::from("/w/out/libfoo.a"));
+        assert!(libraries.contains(&PathBuf::from("/w/out/libfoo.dylib")));
+        assert!(libraries.contains(&PathBuf::from("/w/out/foo.lib")));
+        assert!(libraries.contains(&PathBuf::from("/w/out/libbar.a")));
+        assert!(libraries.contains(&PathBuf::from("/fw/Sec.framework/Sec")));
+        assert_eq!(libraries.len(), 6 + 1 + 2);
+
+        assert!(script_names_files(b"MEMORY {}\nINCLUDE memory.x\n"));
+        assert!(script_names_files(b"GROUP ( libc.so.6 )"));
+        assert!(!script_names_files(b"SECTIONS { .text : { *(.text) } }"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // covers: B-18
+    fn the_linker_fuse_ld_names_is_found_like_the_driver_finds_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let exec = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exec(&root.join("gcc-ld/ld.lld"));
+        exec(&root.join("bin/ld.lld"));
+        exec(&root.join("bin/mold"));
+        let path = root.join("bin");
+        let prefixes = [root.join("gcc-ld")];
+        let found = fuse_linker("lld", &prefixes, Some(path.as_os_str()), root).unwrap();
+        assert_eq!(found.path, root.join("gcc-ld/ld.lld"));
+        let found = fuse_linker("lld", &[], Some(path.as_os_str()), root).unwrap();
+        assert_eq!(found.path, root.join("bin/ld.lld"));
+        let found = fuse_linker("mold", &[], Some(path.as_os_str()), root).unwrap();
+        assert_eq!(found.path, root.join("bin/mold"));
+        let found = fuse_linker("bin/mold", &[], None, root).unwrap();
+        assert_eq!(found.path, root.join("bin/mold"));
+        assert_eq!(
+            fuse_linker("gold", &prefixes, Some(path.as_os_str()), root),
+            None
+        );
+        assert_eq!(
+            fuse_linker("", &prefixes, Some(path.as_os_str()), root),
+            None
+        );
     }
 
     #[test]
@@ -674,7 +999,8 @@ mod tests {
             inputs.named,
             ["Security.framework", "CoreFoundation.framework"]
         );
-        assert_eq!(inputs.search, [PathBuf::from("/fw")]);
+        assert!(inputs.search.is_empty());
+        assert_eq!(inputs.framework_search, [PathBuf::from("/fw")]);
 
         for (arg, want) in [
             (r#""-isysroot/b/sdk""#, "/b/sdk"),
