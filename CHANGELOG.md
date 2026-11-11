@@ -6,6 +6,41 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+A check's test files, reused ([ADR 0069](docs/adr/0069-test-files-reused.md)): with
+`tests: reuse`, a run whose check missed doesn't run again the test files that already passed on
+the files they read, audit runs check that it holds, and a disagreement suspends reuse until a
+person turns it on again.
+
+### Added
+
+- Contract: **`tests: reuse`** reuses. Before COMMAND, hushrun says
+  `hushrun: unit: 12 of 340 test files run; 328 already passed on the files they read, and 7 more
+  that did run as a check`, or why every test file runs; the last line adds what reuse saved. A run
+  that passed with reused test files is a pass. COMMAND stays as written: the pytest plugin
+  deselects the listed test files (and turns pytest's "no tests collected" into 0 only when it
+  deselected what was left), and the target runner answers a listed binary's `--list` with no test.
+  For Cargo, hushrun makes COMMAND's build first.
+- Contract: **audit runs**. 2% of the test files that could be reused, at least one, run anyway; one
+  that fails runs once more: passing then, it may be flaky; failing again, the check's reuse is
+  suspended for the repository.
+- Contract: **`hushrun tests resume NAME`** turns a check's reuse on again, for people: a coding
+  agent can't.
+- Contract: **`units`** goes with a run's result to a server too, with `ranAnyway` when nothing
+  could be reused (`force`, `reports`, `suspended`, …); and **`hushrun-results/v0`** gains
+  `POST {base}/v0/runs/{key}` (a run with its test files' results, by key, never a name),
+  `POST {base}/v0/units/lookup` and `POST {base}/v0/units/reuse`. A server without them records
+  the run alone, and nothing is reused.
+- Contract: `hushrun.json` (`HUSHRUN_UNITS`) lists what adapters deselect, with `pythonFiles` and
+  `binaries`; facts say `deselected`, `removedItems` and, for a binary, `reused`.
+
+### Changed
+
+- In CI where a later step reads a check's reports, no test file is reused; a summary of a run with
+  reused test files leaves its coverage out.
+- A test file's failure outranks a deselection, and it counts as deselected only when every process
+  that saw it deselected it.
+- `observe` asks a server for test files' results in one batch, as `reuse` does.
+
 A check's test files, observed ([ADR 0068](docs/adr/0068-test-files-observed.md)): with
 `tests: observe`, every test file runs as before, and hushrun says how many `tests: reuse` would
 have run.
