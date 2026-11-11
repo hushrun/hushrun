@@ -355,7 +355,7 @@ class Observer(object):
             frame = frame.f_back
         return "other", None
 
-    def on_spawn(self, event, args):
+    def on_spawn(self, event, args, frame):
         reason = SPAWN_EVENTS[event]
         detail = event
         try:
@@ -372,8 +372,16 @@ class Observer(object):
                 detail = os.path.basename(os.fsdecode(path))
         except Exception:
             pass
-        target = self.not_followed.setdefault(self.active, {}) if self.active \
-            else self.session_not_followed
+        if self.active:
+            target = self.not_followed.setdefault(self.active, {})
+        elif self.repo_frames(frame):
+            # Outside any test file, by the repository's own code (a conftest.py that generates
+            # files as it loads): it may change what every test file reads.
+            target = self.session_not_followed
+        else:
+            # Outside any test file, by code outside the repository alone: the runner's own, such
+            # as pytest-xdist's workers asking `uname` where they run. No test file asked for it.
+            return
         target.setdefault(reason, set()).add(detail)
 
     def on_dlopen(self, name):
@@ -533,7 +541,7 @@ def _audit(event, args):
         if not getattr(_LOCAL, "busy", False):
             _guard(obs.on_open, args, sys._getframe(1))
     elif event in SPAWN_EVENTS:
-        _guard(obs.on_spawn, event, args)
+        _guard(obs.on_spawn, event, args, sys._getframe(1))
     elif event == "ctypes.dlopen" and args:
         _guard(obs.on_dlopen, args[0])
 
