@@ -112,7 +112,7 @@ impl Fake {
             match arg {
                 "--crate-name" => crate_name = value(),
                 "--out-dir" => out_dir = value(),
-                "--crate-type" | "-L" | "--json" | "--color" => {
+                "--crate-type" | "-L" | "--json" | "--color" | "--target" => {
                     value();
                 }
                 "-C" => {
@@ -305,6 +305,10 @@ impl Ports for Fake {
             "rustc 1.94.0 (fake)\nbinary: rustc\nhost: aarch64-apple-darwin\nrelease: 1.94.0\n"
                 .into(),
         )
+    }
+
+    fn rustc_targets(&self, _rustc: &Path) -> io::Result<String> {
+        Ok("aarch64-apple-darwin\naarch64-apple-ios\nx86_64-unknown-linux-gnu\n".into())
     }
 
     fn stdout(&mut self, bytes: &[u8]) {
@@ -1331,6 +1335,22 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
     );
     assert_eq!(w.blocks(), 0);
 }
+// covers: B-4
+#[test]
+fn a_target_that_is_not_one_of_the_compilers_own_passes_through() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let r = w.call(&ws, "a", &["--target", "mytgt"]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::TargetFile)
+    );
+    assert_eq!(r.seen.execs.len(), 1);
+    settle();
+    let r = w.call(&ws, "a", &["--target", "aarch64-apple-ios"]);
+    assert_eq!(r.outcome(), STORED);
+}
+
 // covers: B-18
 #[test]
 fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {

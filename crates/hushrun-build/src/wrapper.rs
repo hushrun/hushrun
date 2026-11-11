@@ -75,6 +75,8 @@ pub trait Ports {
     fn pid(&self) -> u32;
     /// What `<rustc> -vV` prints (B-17).
     fn rustc_version(&self, rustc: &Path) -> io::Result<String>;
+    /// What `<rustc> --print target-list` prints: the compiler's built-in targets (B-4).
+    fn rustc_targets(&self, rustc: &Path) -> io::Result<String>;
     /// Writes to the wrapper's stdout what rustc printed there (B-18).
     fn stdout(&mut self, bytes: &[u8]);
     /// Runs rustc exactly as asked and returns its exit code. The real one replaces the process
@@ -272,14 +274,23 @@ impl Call<'_> {
             let ports = &*self.ports;
             compiler::identity(
                 Path::new(inv.rustc()),
+                inv.target(),
                 &|name| ports.var(name),
                 &store.root().join("compilers"),
                 &|path| ports.rustc_version(path),
+                &|path| ports.rustc_targets(path),
             )
         };
         let Ok(identity) = identity else {
             return self.pass(PassedThrough::Compiler);
         };
+        // A target that is not one of the compiler's own is a file rustc loads (B-4).
+        if inv
+            .target()
+            .is_some_and(|target| !identity.builds_for(target))
+        {
+            return self.pass(PassedThrough::TargetFile);
+        }
         let Ok(roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
         else {
             return self.pass(PassedThrough::Roots);
@@ -1091,6 +1102,19 @@ fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
     Err(io::Error::other("no symlinks here"))
 }
 
+/// What `<rustc> <args>` prints on stdout, when it succeeds.
+fn run_for_output(rustc: &Path, args: &[&str]) -> io::Result<String> {
+    let out = std::process::Command::new(rustc).args(args).output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "{} {} failed",
+            rustc.display(),
+            args.join(" ")
+        )));
+    }
+    String::from_utf8(out.stdout).map_err(io::Error::other)
+}
+
 /// The real world.
 struct Real;
 
@@ -1116,11 +1140,11 @@ impl Ports for Real {
     }
 
     fn rustc_version(&self, rustc: &Path) -> io::Result<String> {
-        let out = std::process::Command::new(rustc).arg("-vV").output()?;
-        if !out.status.success() {
-            return Err(io::Error::other(format!("{} -vV failed", rustc.display())));
-        }
-        String::from_utf8(out.stdout).map_err(io::Error::other)
+        run_for_output(rustc, &["-vV"])
+    }
+
+    fn rustc_targets(&self, rustc: &Path) -> io::Result<String> {
+        run_for_output(rustc, &["--print", "target-list"])
     }
 
     fn exec(&mut self, rustc: &OsStr, args: &[OsString]) -> i32 {

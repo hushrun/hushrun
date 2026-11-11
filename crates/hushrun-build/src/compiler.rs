@@ -8,8 +8,17 @@
 //! `rustup update nightly` changes neither the proxy nor the variable. Here the toolchain's
 //! `librustc_driver`, where nearly all of the compiler lives, is stated too.
 //!
-//! `rustc -vV` runs once per compiler, not once per call: its output is kept in a memo named by
-//! the hash of everything else in the identity.
+//! The identity also covers the standard library the compiler links against: the names, sizes
+//! and modification times of the files in `<sysroot>/lib/rustlib/<triple>/lib/` for the host and
+//! for the call's `--target`. And it knows the compiler's built-in targets (`rustc --print
+//! target-list`): a `--target` outside them loads a target file (B-4).
+//!
+//! `rustc -vV` and `rustc --print target-list` run once per compiler and target, not once per
+//! call, and the standard library's folders are listed then too: all of it is kept in a memo
+//! named by the hash of everything else in the identity. Each call stats the compiler's files as
+//! before and, besides, each standard library folder: an installer adds, removes or renames files
+//! there, which changes the folder's dates, and a memo whose folders changed is computed again.
+//! A file rewritten in place, keeping its folder's dates, is not seen.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -23,7 +32,7 @@ use hushrun_digest::cache::Stat;
 use serde_json::{Value, json};
 
 /// Names the form of the identity, so a change to what goes in gives new identities.
-const SCHEMA: &str = "hushrun.build.compiler/1";
+const SCHEMA: &str = "hushrun.build.compiler/2";
 
 /// The prefix of the compiler library's file name in a toolchain's `lib/`.
 const DRIVER_PREFIX: &str = "librustc_driver-";
@@ -39,6 +48,27 @@ pub struct Identity {
     pub host: String,
     /// The `release:` line of that output, such as `1.94.0`.
     pub release: String,
+    /// The compiler's built-in targets, from `rustc --print target-list`, sorted.
+    pub targets: Vec<String>,
+}
+
+impl Identity {
+    /// Whether `target` is one of the compiler's built-in targets. Any other name makes rustc
+    /// look for `<name>.json` in `RUST_TARGET_PATH` or the working directory (B-4).
+    pub fn builds_for(&self, target: &str) -> bool {
+        self.targets
+            .binary_search_by(|t| t.as_str().cmp(target))
+            .is_ok()
+    }
+}
+
+/// What a memo holds besides its key.
+struct Memo {
+    verbose_version: String,
+    host: String,
+    release: String,
+    targets: Vec<String>,
+    std: Vec<Value>,
 }
 
 /// Why the compiler's identity can't be established. The wrapper passes the call through.
@@ -65,8 +95,8 @@ pub enum Unknown {
     /// `RUSTUP_TOOLCHAIN` names a toolchain by a relative path, which depends on the folder.
     #[error("RUSTUP_TOOLCHAIN names a relative path: {0}")]
     RelativeToolchain(String),
-    /// `rustc -vV` could not be run.
-    #[error("running {} -vV: {source}", .path.display())]
+    /// `rustc -vV` or `rustc --print target-list` could not be run.
+    #[error("running {} -vV or --print target-list: {source}", .path.display())]
     VersionFailed {
         /// The compiler as given.
         path: PathBuf,
@@ -83,15 +113,18 @@ pub enum Unknown {
 
 /// The identity of the compiler at `rustc`, the path cargo handed the wrapper.
 ///
-/// `env` looks up a variable of the call (`PATH`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`,
-/// `CARGO_HOME`, `HOME`). `run` runs `<rustc> -vV` and returns what it printed; it is called only
-/// when `memo_dir` has no memo for this compiler. A memo that can't be read or written is no
-/// error: `-vV` runs instead.
+/// `target` is the call's `--target`. `env` looks up a variable of the call (`PATH`,
+/// `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `CARGO_HOME`, `HOME`). `run` runs `<rustc> -vV` and
+/// `targets` runs `<rustc> --print target-list`, each returning what it printed; they are called
+/// only when `memo_dir` has no memo for this compiler and target, or one whose standard library
+/// folders changed. A memo that can't be read or written is no error: they run instead.
 pub fn identity(
     rustc: &Path,
+    target: Option<&str>,
     env: &dyn Fn(&str) -> Option<OsString>,
     memo_dir: &Path,
     run: &dyn Fn(&Path) -> io::Result<String>,
+    targets: &dyn Fn(&Path) -> io::Result<String>,
 ) -> Result<Identity, Unknown> {
     let located = locate(rustc, env)?;
     let resolved = fs::canonicalize(&located).map_err(|source| Unknown::Unreadable {
@@ -119,6 +152,14 @@ pub fn identity(
     if let Some(sysroot) = resolved.parent().and_then(Path::parent) {
         libraries.push(sysroot.join("lib"));
     }
+    // The sysroot rustc uses: the toolchain's under rustup, else the folder above the compiler's
+    // own `bin/`.
+    let sysroot = toolchain.clone().or_else(|| {
+        resolved
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    });
     let toolchain_rustc = match &toolchain {
         Some(dir) => {
             let lib = dir.join("lib");
@@ -149,11 +190,40 @@ pub fn identity(
         "rustup_toolchain": rustup_toolchain,
         "toolchain_rustc": toolchain_rustc,
         "rustc_driver": drivers,
+        "target": target,
     });
     let memo_key = jcs::digest(&facts)?;
     let memo = memo_dir.join(format!("{}.json", memo_key.hex()));
+    let std_dirs = |host: &str| -> Vec<(String, PathBuf)> {
+        let mut triples = vec![host.to_string()];
+        if let Some(target) = target
+            && target != host
+        {
+            triples.push(target.to_string());
+        }
+        triples
+            .into_iter()
+            .filter_map(|triple| {
+                let dir = sysroot
+                    .as_ref()?
+                    .join("lib/rustlib")
+                    .join(&triple)
+                    .join("lib");
+                Some((triple, dir))
+            })
+            .collect()
+    };
 
-    let (verbose_version, host, release) = match read_memo(&memo, &memo_key) {
+    let found = read_memo(&memo, &memo_key).filter(|found| {
+        // One stat per standard library folder: the memo holds while none changed.
+        let dirs = std_dirs(&found.host);
+        dirs.len() == found.std.len()
+            && dirs.iter().zip(&found.std).all(|((triple, dir), kept)| {
+                kept.get("triple").and_then(Value::as_str) == Some(triple.as_str())
+                    && kept.get("folder").and_then(Value::as_str) == Some(&folder_stamp(dir))
+            })
+    });
+    let memo_found = match found {
         Some(found) => found,
         None => {
             let out = run(rustc).map_err(|source| Unknown::VersionFailed {
@@ -162,24 +232,119 @@ pub fn identity(
             })?;
             let (host, release) =
                 parse_verbose(&out).ok_or_else(|| Unknown::NotRustc(rustc.to_path_buf()))?;
-            // A memo not written only means `-vV` runs again next time.
-            let _ = write_memo(memo_dir, &memo, &memo_key, &out);
-            (out, host, release)
+            let list = targets(rustc).map_err(|source| Unknown::VersionFailed {
+                path: rustc.to_path_buf(),
+                source,
+            })?;
+            let std = std_dirs(&host)
+                .iter()
+                .map(|(triple, dir)| std_listing(triple, dir))
+                .collect::<Result<Vec<_>, _>>()?;
+            let fresh = Memo {
+                verbose_version: out,
+                host,
+                release,
+                targets: parse_targets(&list),
+                std,
+            };
+            // A memo not written only means it is computed again next time.
+            let _ = write_memo(memo_dir, &memo, &memo_key, &fresh);
+            fresh
         }
     };
 
     if let Value::Object(members) = &mut facts {
         members.insert(
             "verbose_version".into(),
-            Value::String(verbose_version.clone()),
+            Value::String(memo_found.verbose_version.clone()),
         );
+        // The files, not the folders' dates: those change for reasons that change no file.
+        let files: Vec<Value> = memo_found
+            .std
+            .iter()
+            .map(|kept| {
+                json!({
+                    "triple": kept.get("triple").cloned().unwrap_or(Value::Null),
+                    "files": kept.get("files").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        members.insert("std".into(), Value::Array(files));
     }
     Ok(Identity {
         digest: jcs::digest(&facts)?,
-        verbose_version,
-        host,
-        release,
+        verbose_version: memo_found.verbose_version,
+        host: memo_found.host,
+        release: memo_found.release,
+        targets: memo_found.targets,
     })
+}
+
+/// A folder's dates and inode as one text, or `absent`: what changes when files are added,
+/// removed or renamed in it.
+fn folder_stamp(dir: &Path) -> String {
+    match fs::metadata(dir) {
+        Ok(meta) => {
+            let stat = Stat::of(&meta);
+            format!("{} {} {}", stat.mtime_ns, stat.ctime_ns, stat.inode)
+        }
+        Err(_) => "absent".to_string(),
+    }
+}
+
+/// The standard library folder of one triple: its stamp, and each entry's name, size and
+/// modification time, in name order. A folder that doesn't exist holds nothing: rustc fails by
+/// itself for a target that isn't installed.
+fn std_listing(triple: &str, dir: &Path) -> Result<Value, Unknown> {
+    let stamp = folder_stamp(dir);
+    let mut files = Vec::new();
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|source| Unknown::Unreadable {
+                    path: dir.to_path_buf(),
+                    source,
+                })?;
+                let path = entry.path();
+                let meta = fs::metadata(&path).map_err(|source| Unknown::Unreadable {
+                    path: path.clone(),
+                    source,
+                })?;
+                let stat = Stat::of(&meta);
+                files.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    stat.size.to_string(),
+                    stat.mtime_ns.to_string(),
+                ));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Unknown::Unreadable {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    }
+    files.sort();
+    Ok(json!({
+        "triple": triple,
+        "folder": stamp,
+        "files": files.into_iter().map(|(n, s, m)| json!([n, s, m])).collect::<Vec<_>>(),
+    }))
+}
+
+/// The lines of `rustc --print target-list`, sorted.
+fn parse_targets(out: &str) -> Vec<String> {
+    let mut targets: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
 /// The compiler's file: a bare name is looked up on `PATH`, as cargo's `resolve_executable`
@@ -337,8 +502,9 @@ fn parse_verbose(out: &str) -> Option<(String, String)> {
 }
 
 /// What a memo holds: the key it was written under, so a file that doesn't match its name is
-/// ignored, and the output.
-fn read_memo(memo: &Path, key: &Digest) -> Option<(String, String, String)> {
+/// ignored, the outputs and the standard library's listings. A memo without one of them (an
+/// older one) is no memo.
+fn read_memo(memo: &Path, key: &Digest) -> Option<Memo> {
     let bytes = fs::read(memo).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     if value.get("key")?.as_str()? != key.to_string() {
@@ -346,14 +512,27 @@ fn read_memo(memo: &Path, key: &Digest) -> Option<(String, String, String)> {
     }
     let out = value.get("verbose_version")?.as_str()?.to_string();
     let (host, release) = parse_verbose(&out)?;
-    Some((out, host, release))
+    let targets = parse_targets(value.get("target_list")?.as_str()?);
+    let std = value.get("std")?.as_array()?.clone();
+    Some(Memo {
+        verbose_version: out,
+        host,
+        release,
+        targets,
+        std,
+    })
 }
 
 /// Writes the memo whole: a temporary file of this writer's own, then a rename. Two writers of
 /// the same memo write the same bytes, so whichever rename comes last is right.
-fn write_memo(dir: &Path, memo: &Path, key: &Digest, out: &str) -> io::Result<()> {
+fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let bytes = serde_json::to_vec(&json!({ "key": key.to_string(), "verbose_version": out }))?;
+    let bytes = serde_json::to_vec(&json!({
+        "key": key.to_string(),
+        "verbose_version": found.verbose_version,
+        "target_list": found.targets.join("\n"),
+        "std": found.std,
+    }))?;
     let name = memo.file_name().unwrap_or_default().to_string_lossy();
     for n in 0..64 {
         let temp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
@@ -378,7 +557,7 @@ fn write_memo(dir: &Path, memo: &Path, key: &Digest, out: &str) -> io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, Unknown, identity};
+    use super::{Identity, Unknown};
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -389,6 +568,18 @@ mod tests {
 
     const VERBOSE: &str = "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\n\
         commit-hash: 4a4ef493e\nhost: aarch64-apple-darwin\nrelease: 1.94.0\nLLVM version: 21.1.8\n";
+
+    const TARGETS: &str = "aarch64-apple-darwin\naarch64-apple-ios\nx86_64-unknown-linux-gnu\n";
+
+    /// [`super::identity`] with no `--target` and a fixed target list.
+    fn identity(
+        rustc: &Path,
+        env: &dyn Fn(&str) -> Option<OsString>,
+        memo_dir: &Path,
+        run: &dyn Fn(&Path) -> io::Result<String>,
+    ) -> Result<Identity, Unknown> {
+        super::identity(rustc, None, env, memo_dir, run, &|_| Ok(TARGETS.into()))
+    }
 
     /// A fake `-vV` that counts its calls.
     struct Fake {
@@ -705,6 +896,99 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, Unknown::NotRustc(_)), "{err}");
+    }
+
+    // covers: B-17
+    #[test]
+    fn a_changed_standard_library_is_a_new_compiler() {
+        let setup = rustup();
+        let fake = Fake::new();
+        let std_dir = setup
+            .home
+            .join("toolchains/nightly-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib");
+        write(&std_dir.join("libstd-1.rlib"), b"std", 1_000);
+        let before = setup.identity(&setup.rustc, &fake).unwrap();
+        // A std replaced the way an installer does it: a new file renamed over the old one.
+        write(&std_dir.join(".new"), b"std, patched", 2_000);
+        fs::rename(std_dir.join(".new"), std_dir.join("libstd-1.rlib")).unwrap();
+        let after = setup.identity(&setup.rustc, &fake).unwrap();
+        assert_ne!(before.digest, after.digest);
+    }
+
+    // covers: B-4, B-17
+    #[test]
+    fn the_built_in_targets_are_listed_once_per_compiler_and_target() {
+        let setup = rustup();
+        let fake = Fake::new();
+        let listed = Cell::new(0);
+        let targets = |_: &Path| {
+            listed.set(listed.get() + 1);
+            Ok(TARGETS.to_string())
+        };
+        let call = |target: Option<&str>| {
+            super::identity(
+                &setup.rustc,
+                target,
+                &setup.env(),
+                &setup.memo,
+                &fake.run(),
+                &targets,
+            )
+            .unwrap()
+        };
+        let host = call(None);
+        assert!(host.builds_for("aarch64-apple-ios"));
+        assert!(!host.builds_for("mytgt"));
+        assert!(!host.builds_for("aarch64-apple"));
+        call(None);
+        assert_eq!((fake.calls.get(), listed.get()), (1, 1));
+        // Another target is another identity, with its own memo.
+        let ios = call(Some("aarch64-apple-ios"));
+        call(Some("aarch64-apple-ios"));
+        assert_ne!(host.digest, ios.digest);
+        assert_eq!((fake.calls.get(), listed.get()), (2, 2));
+        // The target's standard library counts too, once it is there.
+        let ios_std = setup
+            .home
+            .join("toolchains/nightly-aarch64-apple-darwin/lib/rustlib/aarch64-apple-ios/lib");
+        write(&ios_std.join("libcore-1.rlib"), b"core", 1_000);
+        let installed = call(Some("aarch64-apple-ios"));
+        assert_ne!(ios.digest, installed.digest);
+        assert_eq!(call(None).digest, host.digest);
+
+        // A list that can't be had: the identity can't be established.
+        let failing = |_: &Path| -> io::Result<String> { Err(io::Error::other("no")) };
+        let err = super::identity(
+            &setup.rustc,
+            None,
+            &setup.env(),
+            &setup.home.join("memo-x"),
+            &fake.run(),
+            &failing,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Unknown::VersionFailed { .. }), "{err}");
+    }
+
+    // covers: B-17
+    #[test]
+    fn a_memo_written_before_the_target_list_is_computed_again() {
+        let setup = rustup();
+        let fake = Fake::new();
+        let first = setup.identity(&setup.rustc, &fake).unwrap();
+        let memo = fs::read_dir(&setup.memo)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&memo).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("target_list");
+        fs::write(&memo, serde_json::to_vec(&value).unwrap()).unwrap();
+        let again = setup.identity(&setup.rustc, &fake).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(fake.calls.get(), 2);
     }
 
     // covers: B-17

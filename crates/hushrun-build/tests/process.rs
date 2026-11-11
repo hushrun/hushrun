@@ -13,11 +13,15 @@ use hushrun_build::model::{Mode, NotStored, Outcome};
 use hushrun_build::session::{self, Session, Start};
 use hushrun_build::settings;
 
-/// A rustc that answers `-vV`, writes its outputs and a dep-info, prints the notices on stderr
+/// A rustc that answers `-vV` and `--print target-list`, writes its outputs and a dep-info, prints the notices on stderr
 /// and exits with `FAKE_EXIT`.
 const FAKE_RUSTC: &str = r#"#!/bin/sh
 if [ "$1" = "-vV" ]; then
   printf 'rustc 1.94.0 (fake)\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\n'
+  exit 0
+fi
+if [ "$1" = "--print" ] && [ "$2" = "target-list" ]; then
+  printf 'x86_64-unknown-linux-gnu\n'
   exit 0
 fi
 name=""; out=""; extra=""; src=""; prev=""
