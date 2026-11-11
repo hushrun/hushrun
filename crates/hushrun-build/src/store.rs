@@ -12,7 +12,8 @@
 //!
 //! A stored block's folder holds `block.json` (its description and each file's name, size and
 //! SHA-256), `files/<name>` (read-only) and `used`, whose modification time is the block's last
-//! use (B-14). Per first key, `steps/<2 hex>/<key hex>/` holds `hints/<SHA-256 of the hint>`,
+//! use (B-14). A name is one file name, or a path of plain parts inside the block for a file of a
+//! folder the block carries (a program's debug bundle, `<program>.dSYM/Contents/...`). Per first key, `steps/<2 hex>/<key hex>/` holds `hints/<SHA-256 of the hint>`,
 //! one file per distinct hint dated by its last refresh (B-7), and `suspended`, whose presence
 //! is the suspension (B-15). Small files are written whole: a temporary file under `tmp/`, then
 //! a rename.
@@ -53,7 +54,8 @@ const ATTEMPTS: usize = 8;
 /// Why the store couldn't do what was asked. Every one ends in rustc running as asked (B-19).
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// A block's file name is not a single path component, or appears twice.
+    /// A block's file name is not a plain relative path inside the block, appears twice, or
+    /// names a folder of another of its files.
     #[error("{name:?} is not a block's file name: {why}")]
     Name {
         /// The name given.
@@ -84,7 +86,8 @@ pub enum StoreError {
 /// A file to store in a new block: `source` is copied in as `name`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFile {
-    /// The name in the block: one path component.
+    /// The name in the block: one file name, or plain parts joined by `/`, none empty, `.` or
+    /// `..`.
     pub name: String,
     /// The file to copy.
     pub source: PathBuf,
@@ -722,8 +725,16 @@ fn write_block(
     let folder = dir.join(FILES);
     fs::create_dir(&folder).map_err(at(&folder))?;
     let mut records = Vec::with_capacity(files.len());
+    let mut made = std::collections::BTreeSet::new();
     for file in files {
         let path = folder.join(&file.name);
+        // The folders of a nested name, each made once and synced with its entries below.
+        if let Some(parent) = path.parent()
+            && parent != folder
+            && made.insert(parent.to_path_buf())
+        {
+            fs::create_dir_all(parent).map_err(at(parent))?;
+        }
         // A copy-on-write clone on APFS.
         fs::copy(&file.source, &path).map_err(at(&file.source))?;
         let (sha256, size) = hushrun_digest::hash::hash_file(&path).map_err(at(&path))?;
@@ -733,6 +744,9 @@ fn write_block(
             size,
             sha256: Digest::from_bytes(sha256),
         });
+    }
+    for parent in made.iter().rev() {
+        sync_dir(parent).map_err(at(parent))?;
     }
     sync_dir(&folder).map_err(at(&folder))?;
     let json = dir.join(BLOCK_JSON);
@@ -821,29 +835,53 @@ fn last_use_in(dir: &Path) -> io::Result<Option<SystemTime>> {
     }
 }
 
-/// Every name is one path component, and none appears twice.
+/// Every name passes [`check_name`], none appears twice, and none is a folder of another (`a`
+/// and `a/b`), which could not both be files.
 fn check_names(files: &[NewFile]) -> Result<(), StoreError> {
     for (i, file) in files.iter().enumerate() {
         check_name(&file.name)?;
-        if files[..i].iter().any(|other| other.name == file.name) {
-            return Err(StoreError::Name {
-                name: file.name.clone(),
-                why: "it appears twice",
-            });
+        for other in &files[..i] {
+            let why = if other.name == file.name {
+                Some("it appears twice")
+            } else if is_folder_of(&other.name, &file.name) || is_folder_of(&file.name, &other.name)
+            {
+                Some("it is a folder of another file")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(StoreError::Name {
+                    name: file.name.clone(),
+                    why,
+                });
+            }
         }
     }
     Ok(())
 }
 
+/// Whether `folder` is a folder on the way to `name`.
+fn is_folder_of(folder: &str, name: &str) -> bool {
+    name.strip_prefix(folder)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A block's file name: one file name, or plain parts joined by `/`. No part is empty, `.` or
+/// `..`, none holds a `\` or a NUL, and the name doesn't start with `/`: the file lies inside
+/// the block's folder, and a reuse puts it inside the output folder.
 fn check_name(name: &str) -> Result<(), StoreError> {
     let why = if name.is_empty() {
         Some("it is empty")
-    } else if name == "." || name == ".." {
-        Some("it names a folder")
-    } else if name.contains(['/', '\\']) {
-        Some("it has a path separator")
+    } else if name.starts_with('/') {
+        Some("it is absolute")
+    } else if name.contains('\\') {
+        Some("it has a backslash")
     } else if name.contains('\0') {
         Some("it has a NUL")
+    } else if name.split('/').any(|part| part.is_empty()) {
+        Some("it has an empty part")
+    } else if name.split('/').any(|part| part == "." || part == "..") {
+        Some("it names a folder")
     } else {
         None
     };
@@ -1033,9 +1071,11 @@ mod tests {
     impl World {
         /// A source file with these bytes, unique to this call.
         fn file(&self, name: &str, bytes: &[u8]) -> NewFile {
-            let source = self
-                .sources
-                .join(format!("{name}.{}", Digest::of(bytes).hex()));
+            let source = self.sources.join(format!(
+                "{}.{}",
+                name.replace('/', "_"),
+                Digest::of(bytes).hex()
+            ));
             fs::write(&source, bytes).unwrap();
             NewFile {
                 name: name.to_string(),
@@ -1137,9 +1177,21 @@ mod tests {
 
     // covers: B-13
     #[test]
-    fn a_file_name_that_is_not_one_component_is_refused() {
+    fn a_file_name_that_is_not_a_plain_path_inside_the_block_is_refused() {
         let w = world();
-        for name in ["a/b", "../lib.rlib", "..", ".", "", "a\\b"] {
+        for name in [
+            "../lib.rlib",
+            "..",
+            ".",
+            "",
+            "a\\b",
+            "/abs/lib.rlib",
+            "x.dSYM/../../escape",
+            "x.dSYM/./Contents",
+            "x.dSYM//Contents",
+            "x.dSYM/Contents/",
+            "x.dSYM/Contents/..",
+        ] {
             let file = NewFile {
                 name: name.to_string(),
                 source: w.file("x", b"x").source,
@@ -1155,7 +1207,97 @@ mod tests {
             w.store.publish(&key(1), &description("r"), &twice, day(1)),
             Err(StoreError::Name { .. })
         ));
+        // A file and a folder of the same name can't both be stored.
+        let clash = [
+            w.file("x.dSYM", b"a"),
+            w.file("x.dSYM/Contents/Info.plist", b"b"),
+        ];
+        assert!(matches!(
+            w.store.publish(&key(1), &description("r"), &clash, day(1)),
+            Err(StoreError::Name { .. })
+        ));
         assert!(w.store.block(&key(1)).unwrap().is_none());
+        assert_eq!(w.entries(TMP), 0);
+    }
+
+    /// A program, its debug bundle's files under nested names, and a library beside them.
+    fn bundled(w: &World, dwarf: &[u8]) -> Vec<NewFile> {
+        vec![
+            w.file("prog-1", b"program"),
+            w.file("prog-1.dSYM/Contents/Info.plist", b"<plist/>"),
+            w.file("prog-1.dSYM/Contents/Resources/DWARF/prog-1", dwarf),
+        ]
+    }
+
+    // covers: B-12, B-13
+    #[test]
+    fn a_debug_bundle_is_stored_under_nested_names_and_read_back_whole() {
+        let w = world();
+        let files = bundled(&w, b"dwarf bytes");
+        assert_eq!(
+            w.store
+                .publish(&key(1), &description("r"), &files, day(1))
+                .unwrap(),
+            Published::Stored
+        );
+        let block = w.store.block(&key(1)).unwrap().unwrap();
+        let names: Vec<_> = block.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "prog-1",
+                "prog-1.dSYM/Contents/Info.plist",
+                "prog-1.dSYM/Contents/Resources/DWARF/prog-1"
+            ]
+        );
+        let dwarf = &block.files[2];
+        assert!(
+            dwarf
+                .path
+                .starts_with(w.store.block_dir(&key(1)).join(FILES))
+        );
+        assert_eq!(fs::read(&dwarf.path).unwrap(), b"dwarf bytes");
+        assert_eq!(dwarf.sha256, Digest::of(b"dwarf bytes"));
+        assert!(fs::metadata(&dwarf.path).unwrap().permissions().readonly());
+        assert_eq!(w.store.status(day(1)).bytes, 7 + 8 + 11);
+        // A nested file cut short makes the whole block absent.
+        let mut perms = fs::metadata(&dwarf.path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&dwarf.path, perms).unwrap();
+        fs::write(&dwarf.path, b"dwarf").unwrap();
+        assert_eq!(w.store.block(&key(1)).unwrap(), None);
+        assert!(!w.store.block_dir(&key(1)).exists());
+        assert_eq!(w.entries(TRASH), 0);
+    }
+
+    // covers: B-13
+    #[test]
+    fn two_writers_of_one_bundled_block_give_one_block_and_leave_nothing_in_tmp() {
+        let w = world();
+        for round in 0..8 {
+            let k = key(100 + round);
+            let files = bundled(&w, b"same dwarf");
+            let barrier = Arc::new(Barrier::new(4));
+            let results: Vec<Published> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..4)
+                    .map(|i| {
+                        let (barrier, store, files) = (barrier.clone(), &w.store, &files);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store
+                                .publish_inner(&k, &description("r"), files, day(1), i % 2 == 0)
+                                .unwrap()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let stored = results.iter().filter(|r| **r == Published::Stored).count();
+            assert_eq!(stored, 1, "round {round}: {results:?}");
+            let block = w.store.block(&k).unwrap().unwrap();
+            assert_eq!(block.files.len(), 3);
+        }
         assert_eq!(w.entries(TMP), 0);
     }
 
