@@ -243,12 +243,13 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
 }
 
 /// Whether a reuse put `file` there: its record says so and still holds for the file as it is
-/// (B-15). Never reads the file itself.
+/// (B-15). Never reads the file itself, and stats it only when its record says reused: a
+/// file with no record costs one failed open.
 pub fn reused(file: &Path) -> bool {
-    let Ok(meta) = fs::metadata(file) else {
+    let Some(record) = load(file).filter(|record| record.reused) else {
         return false;
     };
-    load(file).is_some_and(|record| record.reused && same_file(&record.stat, &Stat::of(&meta)))
+    fs::metadata(file).is_ok_and(|meta| same_file(&record.stat, &Stat::of(&meta)))
 }
 
 /// Removes the record of `file`. A missing record is fine.

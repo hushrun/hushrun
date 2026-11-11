@@ -171,10 +171,14 @@ E0463, E0464, E0514 and E0786, never an error in the dependent's own code); in t
 the reused files are removed from the output folder so that cargo builds them, and one line says
 so. Only the externs the error names are acted on: by their name, their crate's name or their
 file (E0463's "can't find crate for `x` which `y` depends on" names `x` and `y`); a crate that is
-not one of the call's `--extern`s, or one no reuse put in place, changes nothing. A call about to
-pass through as an incremental rebuild (B-9) while one of its externs was reused runs rustc as a
-child, with the same arguments and its stderr passed on line by line, so that this rule runs. A
-suspended key is never reused. `hushrun build clean` clears it.
+not one of the call's `--extern`s, or one no reuse put in place, changes nothing. Every call that
+runs rustc as asked after its arguments were read (`passed through` for a reason found after
+reading them, such as the never-store list, a compiler of unknown identity or an incremental rebuild
+(B-9), or `built, not stored` because a key, the store or a reuse failed) runs rustc as a child
+when a reuse put at least one of its externs in place, with the same arguments, its stderr passed
+on line by line and its stdout untouched, so that this rule runs. Otherwise rustc replaces the
+wrapper, and so does it for a call whose arguments can't be read (B-4). A suspended key is never
+reused. `hushrun build clean` clears it.
 
 **B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
 chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the

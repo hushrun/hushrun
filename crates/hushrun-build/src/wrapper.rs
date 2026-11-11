@@ -261,8 +261,22 @@ impl Call<'_> {
         });
     }
 
-    /// Runs rustc as asked after logging `outcome` (the process may be replaced).
+    /// Runs rustc exactly as asked, logging `outcome`: the one place that decides how, for every
+    /// call passed through or built as asked after its arguments were read (never-store, an
+    /// unknown compiler identity, a target that is not the compiler's, unusable roots, a keyed
+    /// variable that is not UTF-8, mode `off`, an incremental rebuild, a key that can't be
+    /// computed (a not-a-file input among them), a store that can't be read, a block that
+    /// can't be put in place). When a reuse put at least one of the call's externs in place,
+    /// rustc runs as a child ([`Call::watched_as_asked`]) so that B-15 can heal a block it
+    /// can't load; otherwise the process is replaced, as cheap as a pass-through gets.
+    ///
+    /// Calls whose arguments could not be read (the parser's own pass-through reasons) and
+    /// calls with no session or working directory never get here: [`call`] replaces the
+    /// process for them, since there are no externs to look at and no store to suspend in.
     fn as_asked(&mut self, outcome: Outcome) -> i32 {
+        if self.any_extern_reused() {
+            return self.watched_as_asked(outcome);
+        }
         self.log(entry(outcome, Some(self.invocation.class())));
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
@@ -273,8 +287,9 @@ impl Call<'_> {
         self.as_asked(decide::passed_through(why))
     }
 
-    /// Whether a reuse put any of this call's externs in place (B-15). Cost: a stat and a small
-    /// read per extern, only for a call about to pass through as an incremental rebuild.
+    /// Whether a reuse put any of this call's externs in place (B-15). Cost, for a call run as
+    /// asked: one read of each extern's small record (a failed open where there is none), and a
+    /// stat only for a record that says reused. No file is hashed.
     fn any_extern_reused(&self) -> bool {
         self.invocation.externs().iter().any(|ext| {
             ext.path
@@ -283,10 +298,11 @@ impl Call<'_> {
         })
     }
 
-    /// Runs rustc exactly as asked, as a child whose stderr goes on line by line, so that a
-    /// failure to load a reused extern suspends and removes it (B-15) as it does for a compile
-    /// the wrapper handles. The outcome stays `passed through`.
-    fn watched_as_asked(&mut self, store: &Store, why: PassedThrough) -> i32 {
+    /// Runs rustc exactly as asked, as a child whose stderr goes on line by line and whose
+    /// stdout is left alone, so that a failure to load a reused extern suspends and removes it
+    /// (B-15) as it does for a compile the wrapper handles. The outcome stays the one asked.
+    fn watched_as_asked(&mut self, outcome: Outcome) -> i32 {
+        let store = Store::new(&self.current.store);
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
         let mut recorder = Recorder::new(&mut *self.err, self.invocation.form().clone());
@@ -302,11 +318,11 @@ impl Call<'_> {
             },
         );
         let recorded = recorder.finish();
-        let mut log = entry(decide::passed_through(why), Some(self.invocation.class()));
+        let mut log = entry(outcome, Some(self.invocation.class()));
         let code = match ran {
             Ok(ran) => {
                 if !ran.success {
-                    log.note = self.reject_reused(store, &recorded);
+                    log.note = self.reject_reused(&store, &recorded);
                 }
                 ran.code
             }
@@ -441,10 +457,6 @@ impl Call<'_> {
         });
 
         match plan {
-            // A rebuild against a reused extern runs as a child, so B-15 can heal it.
-            Plan::PassThrough(PassedThrough::Incremental) if self.any_extern_reused() => {
-                self.watched_as_asked(&store, PassedThrough::Incremental)
-            }
             Plan::PassThrough(why) => self.pass(why),
             Plan::AsAsked(why) => self.as_asked(Outcome::BuiltNotStored(why)),
             Plan::Reuse => {

@@ -1944,6 +1944,112 @@ fn an_incremental_rebuild_against_a_reused_extern_still_heals_a_rejected_block()
     assert!(r.seen.compiles.is_empty());
 }
 
+/// A reason to pass through: its name, the settings it needs and the arguments it adds.
+type Reason = (
+    &'static str,
+    fn(&mut settings::Settings),
+    &'static [&'static str],
+);
+
+// covers: B-15
+#[test]
+fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_block() {
+    let reasons: [Reason; 2] = [
+        ("never-store", |s| s.never_store = vec!["b".into()], &[]),
+        // Not one of the compiler's own targets: refused after the parse.
+        ("target", |_| {}, &["--target", "thumbv0-none-fake"]),
+    ];
+    for (name, settings, more) in reasons {
+        let w = world_with(Mode::On, settings);
+        let (two, a, z) = two_reused(&w);
+        w.plan(
+            "b",
+            Plan {
+                fail: Some("E0463"),
+                fail_message: Some("can't find crate for `m` which `a` depends on".into()),
+                ..Plan::default()
+            },
+        );
+        let mut args = externs(&two);
+        args.extend(more.iter().map(|s| s.to_string()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let r = w.call(&two, "b", &args);
+        assert_eq!(r.code, 1, "{name}");
+        assert!(
+            matches!(r.outcome(), Outcome::PassedThrough(_)),
+            "{name}: {:?}",
+            r.outcome()
+        );
+        // Run as asked, as a child: the same arguments, nothing added.
+        assert!(r.seen.execs.is_empty(), "{name}");
+        assert_eq!(r.seen.compiles.len(), 1, "{name}");
+        assert_eq!(r.seen.compiles[0], strings(&w.args(&two, "b", &args)[1..]));
+        assert!(r.stderr.contains("E0463"), "{name}");
+        assert!(w.store().suspended(&a).is_some(), "{name}");
+        assert!(w.store().suspended(&z).is_none(), "{name}");
+        assert!(
+            !two.join("target/debug/deps/liba-xa.rmeta").exists(),
+            "{name}"
+        );
+        assert!(r.entry.unwrap().note.is_some(), "{name}");
+    }
+
+    // Built as asked: b's own block can't be put in place.
+    let w = world(Mode::On);
+    let (two, a, _) = two_reused(&w);
+    let one = two.parent().unwrap().join("one");
+    let ext_one = externs(&one);
+    let ext_one: Vec<&str> = ext_one.iter().map(String::as_str).collect();
+    assert_eq!(w.call(&one, "b", &ext_one).outcome(), STORED);
+    let json = walk(&w.session.current().store.join("blocks"))
+        .into_iter()
+        .filter(|p| p.ends_with("block.json"))
+        .find(|p| {
+            fs::read_to_string(p)
+                .unwrap()
+                .contains(r#""crate_name":"b""#)
+        })
+        .unwrap();
+    let mut perms = fs::metadata(&json).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(&json, perms).unwrap();
+    let text = fs::read_to_string(&json).unwrap();
+    fs::write(&json, text.replace("{hushrun:out-dir}", "{hushrun:deps-9}")).unwrap();
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `m` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    let ext_two = externs(&two);
+    let ext_two: Vec<&str> = ext_two.iter().map(String::as_str).collect();
+    let r = w.call(&two, "b", &ext_two);
+    assert_eq!(r.outcome(), not_stored(NotStored::Restore));
+    assert!(r.seen.execs.is_empty());
+    assert_eq!(r.seen.compiles.len(), 1);
+    assert!(w.store().suspended(&a).is_some());
+    assert!(!two.join("target/debug/deps/liba-xa.rmeta").exists());
+
+    // No reused extern: the process is replaced as before.
+    let w = world_with(Mode::On, |s| s.never_store = vec!["b".into()]);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    settle();
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
+    let ext = format!("a={}", ws.join("target/debug/deps/liba-xa.rmeta").display());
+    let r = w.call(&ws, "b", &["--extern", &ext]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::NeverStore)
+    );
+    assert_eq!(r.seen.execs.len(), 1);
+    assert!(r.seen.compiles.is_empty());
+}
+
 // covers: B-11
 #[cfg(unix)]
 #[test]
