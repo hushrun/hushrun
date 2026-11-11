@@ -12,7 +12,11 @@
 //! lookup and a check's reuse state as hushrun cloud does (results-v0 §3), or, told to, answers
 //! them 404 as a server from before them does ([`FakeResults::forget_units`]). What it recorded
 //! can be put back as it stood ([`FakeResults::recorded_so_far`], [`FakeResults::go_back_to`]),
-//! for tests that run two machines against the same server.
+//! for tests that run two machines against the same server. \[C-38\] It keeps hints as results-v0
+//! has them (`PUT {base}/v0/units/hints/{sha256}`, `POST {base}/v0/units/hints/lookup`): opaque
+//! bytes at a place, the same bytes twice kept once, the newest 3 for an address and system; or,
+//! told to, answers both 404 or 405 as a server from before them does
+//! ([`FakeResults::forget_hints`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -74,17 +78,46 @@ struct State {
     reuse: BTreeMap<(String, String), Value>,
     /// It answers what a server from before test files' results does: 404.
     no_units: bool,
+    /// \[C-38\] Every hint it keeps.
+    hints: Vec<Hint>,
+    /// What moves each time a hint is sent again: the order in which hints were last seen.
+    hint_clock: u64,
+    /// It answers the hint requests with this status (404 or 405), as a server from before them.
+    no_hints: Option<u16>,
+}
+
+/// \[C-38\] One hint the fake keeps, where it is: what `PUT {base}/v0/units/hints/{sha256}` sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    /// Lowercase, `""` for none.
+    pub repository: String,
+    pub check_id: String,
+    pub address: String,
+    pub os: String,
+    pub sha256: String,
+    pub body: Vec<u8>,
+    /// When it was last seen, on the fake's own clock.
+    seen: u64,
 }
 
 /// What a fake results server recorded at one moment: results, the runs that came with test
-/// files' results and theirs, and each check's reuse state.
+/// files' results and theirs, each check's reuse state, and the hints.
 #[derive(Debug, Clone)]
 pub struct Recorded {
     results: BTreeMap<String, Vec<Value>>,
     runs: Vec<Value>,
     units: Vec<(String, String, u64, usize)>,
     reuse: BTreeMap<(String, String), Value>,
+    hints: Vec<Hint>,
+    hint_clock: u64,
 }
+
+/// \[C-38\] The most hints a server keeps for one address and system.
+pub const HINTS_PER_ADDRESS: usize = 3;
+/// \[C-38\] The most addresses a server keeps hints for, for one repository and check.
+pub const HINT_ADDRESSES: usize = 50;
+/// \[C-38\] The most bytes a hint has.
+pub const HINT_BYTES: usize = 2 * 1024 * 1024;
 
 /// A running fake results server for the org [`FakeResults::ORG`].
 pub struct FakeResults {
@@ -185,6 +218,34 @@ impl FakeResults {
         self.state().runs.clone()
     }
 
+    /// \[C-38\] From now on it answers both hint requests with `status`, 404 or 405, as a server
+    /// from before hints does. Test files' results stay as they are.
+    pub fn forget_hints(&self, status: u16) {
+        self.state().no_hints = Some(status);
+    }
+
+    /// \[C-38\] Every hint it keeps, the least recently seen first.
+    pub fn hints(&self) -> Vec<Hint> {
+        let mut hints = self.state().hints.clone();
+        hints.sort_by_key(|h| h.seen);
+        hints
+    }
+
+    /// \[C-38\] Keeps `body` as a hint at a place, as `PUT {base}/v0/units/hints/{sha256}` would:
+    /// what a test sends that no machine saw, such as a hint written to mislead.
+    pub fn add_hint(&self, repository: &str, check_id: &str, address: &str, os: &str, body: &[u8]) {
+        let mut state = self.state();
+        put_hint(
+            &mut state,
+            repository.trim().to_lowercase(),
+            check_id,
+            address,
+            os,
+            &Digest::of(body).hex(),
+            body,
+        );
+    }
+
     /// What it has recorded so far, to put back with [`FakeResults::go_back_to`].
     pub fn recorded_so_far(&self) -> Recorded {
         let state = self.state();
@@ -193,17 +254,22 @@ impl FakeResults {
             runs: state.runs.clone(),
             units: state.units.clone(),
             reuse: state.reuse.clone(),
+            hints: state.hints.clone(),
+            hint_clock: state.hint_clock,
         }
     }
 
     /// Forgets everything recorded since `recorded`: a second machine then finds the server as
-    /// the first left it, whatever another machine recorded meanwhile. The requests it saw stay.
+    /// the first left it, whatever another machine recorded meanwhile, hints included. The
+    /// requests it saw stay.
     pub fn go_back_to(&self, recorded: &Recorded) {
         let mut state = self.state();
         state.results = recorded.results.clone();
         state.runs = recorded.runs.clone();
         state.units = recorded.units.clone();
         state.reuse = recorded.reuse.clone();
+        state.hints = recorded.hints.clone();
+        state.hint_clock = recorded.hint_clock;
     }
 
     /// \[ADR 0069\] Records a test file's result under `key` (64 hex) with a run of `run`, as a
@@ -359,6 +425,16 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
     if let Some(injected) = injected {
         injected.times -= 1;
         return Reply::Send(Response::json(injected.status, &injected.body));
+    }
+    // \[C-38\] Hints, which a server from before test files' results doesn't know either.
+    if path.starts_with("v0/units/hints/") {
+        if state.no_units {
+            return error(404, "not_found", "no such endpoint");
+        }
+        if let Some(status) = state.no_hints {
+            return error(status, "not_found", "no such endpoint");
+        }
+        return hints(&mut state, &request, &path);
     }
     // \[ADR 0069\] A check's test files (results-v0 §3).
     if path.starts_with("v0/runs/") || path.starts_with("v0/units/") {
@@ -604,4 +680,204 @@ fn units(state: &mut State, request: &Request, path: &str, agent: Option<&Public
         },
         _ => error(404, "not_found", "no such endpoint"),
     }
+}
+
+/// Whether `text` is 64 lowercase hex characters.
+fn hex64(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// \[C-38\] Where a hint is, from four values as a request carries them, or the 400 that names
+/// what doesn't fit (results-v0, Hints).
+fn hint_place(
+    repository: Option<&str>,
+    check_id: Option<&str>,
+    address: Option<&str>,
+    os: Option<&str>,
+) -> Result<(String, String, String, String), Reply> {
+    let repository = repository.unwrap_or_default().trim().to_lowercase();
+    if repository.len() > 200 {
+        return Err(error(
+            400,
+            "invalid",
+            "`repository` is longer than 200 bytes",
+        ));
+    }
+    let check_id = check_id
+        .filter(|c| hex64(c))
+        .ok_or_else(|| error(400, "invalid", "`checkId` is 64 lowercase hex characters"))?;
+    let address = address
+        .filter(|a| hex64(a))
+        .ok_or_else(|| error(400, "invalid", "`address` is 64 lowercase hex characters"))?;
+    let os = os
+        .filter(|o| ["linux", "macos", "windows"].contains(o))
+        .ok_or_else(|| error(400, "invalid", "`os` is linux, macos or windows"))?;
+    Ok((
+        repository,
+        check_id.to_string(),
+        address.to_string(),
+        os.to_string(),
+    ))
+}
+
+/// \[C-38\] Keeps one hint, or sees it again: the same bytes at the same place are one hint,
+/// whose time moves. Past the limits, what was seen least recently goes, never this one. `true`
+/// when it is new.
+fn put_hint(
+    state: &mut State,
+    repository: String,
+    check_id: &str,
+    address: &str,
+    os: &str,
+    sha256: &str,
+    body: &[u8],
+) -> bool {
+    state.hint_clock += 1;
+    let now = state.hint_clock;
+    let at = |h: &Hint| {
+        h.repository == repository && h.check_id == check_id && h.address == address && h.os == os
+    };
+    if let Some(hint) = state.hints.iter_mut().find(|h| at(h) && h.sha256 == sha256) {
+        hint.seen = now;
+        return false;
+    }
+    state.hints.push(Hint {
+        repository: repository.clone(),
+        check_id: check_id.to_string(),
+        address: address.to_string(),
+        os: os.to_string(),
+        sha256: sha256.to_string(),
+        body: body.to_vec(),
+        seen: now,
+    });
+    // At most 3 for the address and system.
+    let mut here: Vec<u64> = state
+        .hints
+        .iter()
+        .filter(|h| at(h))
+        .map(|h| h.seen)
+        .collect();
+    here.sort_unstable_by(|a, b| b.cmp(a));
+    if let Some(oldest_kept) = here.get(HINTS_PER_ADDRESS - 1).copied() {
+        state.hints.retain(|h| !at(h) || h.seen >= oldest_kept);
+    }
+    // At most 50 addresses for the repository and check, every system together.
+    let mut addresses: BTreeMap<String, u64> = BTreeMap::new();
+    for h in state
+        .hints
+        .iter()
+        .filter(|h| h.repository == repository && h.check_id == check_id)
+    {
+        let seen = addresses.entry(h.address.clone()).or_default();
+        *seen = (*seen).max(h.seen);
+    }
+    if addresses.len() > HINT_ADDRESSES {
+        let drop = addresses.len() - HINT_ADDRESSES;
+        let mut by_seen: Vec<(u64, String)> = addresses
+            .into_iter()
+            .filter(|(a, _)| a != address)
+            .map(|(a, s)| (s, a))
+            .collect();
+        by_seen.sort();
+        let gone: Vec<String> = by_seen.into_iter().take(drop).map(|(_, a)| a).collect();
+        state.hints.retain(|h| {
+            !(h.repository == repository && h.check_id == check_id && gone.contains(&h.address))
+        });
+    }
+    true
+}
+
+/// \[C-38\] `PUT {base}/v0/units/hints/{sha256}` and `POST {base}/v0/units/hints/lookup`, as
+/// hushrun cloud answers them (results-v0, Hints).
+fn hints(state: &mut State, request: &Request, path: &str) -> Reply {
+    let query = |name: &str| {
+        request
+            .query
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    if path == "v0/units/hints/lookup" {
+        if request.method != "POST" {
+            return error(405, "invalid", "another method");
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return error(400, "invalid", "not JSON");
+        };
+        let (repository, check_id, address, os) = match hint_place(
+            body["repository"].as_str(),
+            body["checkId"].as_str(),
+            body["address"].as_str(),
+            body["os"].as_str(),
+        ) {
+            Ok(place) => place,
+            Err(reply) => return reply,
+        };
+        let mut found: Vec<&Hint> = state
+            .hints
+            .iter()
+            .filter(|h| {
+                h.repository == repository
+                    && h.check_id == check_id
+                    && h.address == address
+                    && h.os == os
+            })
+            .collect();
+        found.sort_by(|a, b| b.seen.cmp(&a.seen));
+        let answer: Vec<Value> = found
+            .into_iter()
+            .take(HINTS_PER_ADDRESS)
+            .map(|h| {
+                json!({
+                    "sha256": h.sha256,
+                    "body": base64::engine::general_purpose::STANDARD.encode(&h.body),
+                })
+            })
+            .collect();
+        return Reply::Send(Response::json(200, &json!({"hints": answer})));
+    }
+    let Some(sha256) = path.strip_prefix("v0/units/hints/") else {
+        return error(404, "not_found", "no such endpoint");
+    };
+    if request.method != "PUT" {
+        return error(405, "invalid", "another method");
+    }
+    if request.body.len() > HINT_BYTES {
+        return error(413, "too_large", "a hint is at most 2 MiB");
+    }
+    if !hex64(sha256) {
+        return error(
+            400,
+            "invalid",
+            "the path's SHA-256 is 64 lowercase hex characters",
+        );
+    }
+    let (repository, check_id, address, os) = match hint_place(
+        query("repository"),
+        query("checkId"),
+        query("address"),
+        query("os"),
+    ) {
+        Ok(place) => place,
+        Err(reply) => return reply,
+    };
+    if request.body.is_empty() {
+        return error(400, "invalid", "an empty hint");
+    }
+    if Digest::of(&request.body).hex() != sha256 {
+        return error(400, "invalid", "the body's SHA-256 isn't the path's");
+    }
+    let new = put_hint(
+        state,
+        repository,
+        &check_id,
+        &address,
+        &os,
+        sha256,
+        &request.body,
+    );
+    Reply::Send(Response::json(if new { 201 } else { 200 }, &json!({})))
 }
