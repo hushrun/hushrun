@@ -20,7 +20,9 @@
 //! memo names, each `lib/` folder and each standard library folder: an installer adds, removes
 //! or renames files there, which changes the folder's dates, and a memo whose folders changed is
 //! computed again. A standard library file rewritten in place, keeping its folder's dates, is not
-//! seen; a compiler library rewritten in place is, by its own stat.
+//! seen; a compiler library rewritten in place is, by its own stat. A memo is kept only when all
+//! it is trusted by is dated before the memo file: Linux dates files once a tick, and a folder
+//! changed twice in a tick would otherwise keep a stamp the memo trusts.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -268,6 +270,27 @@ pub fn identity(
             for lib in &libraries {
                 drivers.extend(driver_stats(lib)?);
             }
+            // Every folder and file whose stat the memo is trusted by, for the racy check.
+            let mut relied: Vec<PathBuf> = libraries.clone();
+            relied.push(resolved.clone());
+            if let Some(dir) = &toolchain {
+                relied.push(
+                    dir.join("bin")
+                        .join("rustc")
+                        .with_extension(std::env::consts::EXE_EXTENSION),
+                );
+            }
+            for (_, dir) in std_dirs(&host) {
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    relied.extend(entries.filter_map(|e| e.ok().map(|e| e.path())));
+                }
+                relied.push(dir);
+            }
+            relied.extend(
+                drivers
+                    .iter()
+                    .filter_map(|d| d.get("path").and_then(Value::as_str).map(PathBuf::from)),
+            );
             let fresh = Memo {
                 verbose_version: out,
                 host,
@@ -277,7 +300,7 @@ pub fn identity(
                 drivers,
             };
             // A memo not written only means it is computed again next time.
-            let _ = write_memo(memo_dir, &memo, &memo_key, &fresh);
+            let _ = write_memo(memo_dir, &memo, &memo_key, &fresh, newest(&relied));
             fresh
         }
     };
@@ -558,9 +581,33 @@ fn read_memo(memo: &Path, key: &Digest) -> Option<Memo> {
     })
 }
 
+/// The newest date, modification or change, of `paths`, in nanoseconds. A path that isn't there
+/// is skipped (its absence is in the stamps already); one that can't be stat'ed is the newest
+/// of all, so no memo is kept.
+fn newest(paths: &[PathBuf]) -> i64 {
+    paths
+        .iter()
+        .filter_map(|path| match fs::metadata(path) {
+            Ok(meta) => {
+                let stat = Stat::of(&meta);
+                Some(stat.mtime_ns.max(stat.ctime_ns))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => Some(i64::MAX),
+        })
+        .max()
+        .unwrap_or(i64::MIN)
+}
+
 /// Writes the memo whole: a temporary file of this writer's own, then a rename. Two writers of
 /// the same memo write the same bytes, so whichever rename comes last is right.
-fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo) -> io::Result<()> {
+///
+/// The memo is trusted later by stats alone, and Linux dates files from a clock that moves
+/// once a tick (1 to 10 ms): a folder changed again in the tick it was listed keeps its stamp.
+/// So the memo is published only when everything it is trusted by (`newest`, from
+/// [`newest`]) is dated before the memo file itself, from the same clock; otherwise it is
+/// dropped and computed again by a later call, as git treats a racily clean index entry.
+fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo, newest: i64) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let bytes = serde_json::to_vec(&json!({
         "key": key.to_string(),
@@ -577,9 +624,13 @@ fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo) -> io::Result
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
         };
-        let written = file
-            .write_all(&bytes)
-            .and_then(|()| fs::rename(&temp, memo));
+        let written = file.write_all(&bytes).and_then(|()| {
+            let dated = Stat::of(&file.metadata()?).mtime_ns;
+            if newest >= dated {
+                return Err(io::Error::other("the memo's inputs changed in its tick"));
+            }
+            fs::rename(&temp, memo)
+        });
         if written.is_err() {
             let _ = fs::remove_file(&temp);
         }
@@ -692,6 +743,8 @@ mod tests {
             1_000,
         );
         fs::hard_link(cargo_home.join("bin/rustup"), cargo_home.join("bin/rustc")).unwrap();
+        // A memo is kept only for files dated before it, and Linux dates them a tick late.
+        settle();
         Rustup {
             _dir: dir,
             home,
@@ -957,6 +1010,30 @@ mod tests {
         assert_ne!(before.digest, after.digest);
     }
 
+    // covers: B-17
+    #[test]
+    fn a_standard_library_changed_in_the_tick_its_memo_was_written_is_a_new_compiler() {
+        // Linux dates files and folders from a clock that moves once a tick (1 to 10 ms), so a
+        // folder changed twice in one tick keeps its stamp. A memo written between the two
+        // changes must not hold. Each round adds a file and replaces it at once, which on Linux
+        // often falls in one tick; on macOS the stamps always differ.
+        let setup = rustup();
+        let fake = Fake::new();
+        let std_dir = setup
+            .home
+            .join("toolchains/nightly-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/lib");
+        for round in 0..200 {
+            let name = format!("libstd-{round}.rlib");
+            fs::create_dir_all(&std_dir).unwrap();
+            fs::write(std_dir.join(&name), b"std").unwrap();
+            let before = setup.identity(&setup.rustc, &fake).unwrap();
+            fs::write(std_dir.join(".new"), b"std, patched").unwrap();
+            fs::rename(std_dir.join(".new"), std_dir.join(&name)).unwrap();
+            let after = setup.identity(&setup.rustc, &fake).unwrap();
+            assert_ne!(before.digest, after.digest, "round {round}");
+        }
+    }
+
     // covers: B-4, B-17
     #[test]
     fn the_built_in_targets_are_listed_once_per_compiler_and_target() {
@@ -1051,10 +1128,8 @@ mod tests {
         let text = fs::read_to_string(&memo).unwrap();
         assert!(text.contains("librustc_driver-0a1b2c.dylib"), "{text}");
         let lib = setup.driver.parent().unwrap();
-        // Linux dates a folder from a clock that moves once a tick: a file added in the tick
-        // the setup wrote its last one leaves the folder's stamp as it was.
-        settle();
         write(&lib.join("other"), b"another file", 1_000);
+        settle();
         // Writing it moved the folder's stamp: put the memo back under the stamp it has now by
         // computing once, then point its listing at the other file.
         let again = setup.identity(&setup.rustc, &fake).unwrap();

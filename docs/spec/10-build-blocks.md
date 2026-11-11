@@ -231,7 +231,10 @@ the standard library: the names, sizes and modification times of the files in
 built-in targets are the output of `rustc --print target-list`. `-vV`, the target list, the
 standard library's listing and which `librustc_driver` files the toolchain's `lib/` holds are kept
 per compiler and target, and computed again when a standard library folder, a `lib/` folder or
-one of those files changes. A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
+one of those files changes. They are kept only when every one of those folders and files, and
+the compiler's own files, is dated before what keeps them: a file system may date from a clock
+that moves once a tick (Linux), so a folder changed twice in one tick keeps its dates. A rustup
+proxy with no `RUSTUP_TOOLCHAIN` is passed through.
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
 reports with `--print=link-args`; the libraries named with `-l` and the files options name, as
