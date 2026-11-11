@@ -21,7 +21,7 @@ use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
-use crate::model::{Class, NotStored, Outcome, PassedThrough};
+use crate::model::{Class, Located, NotStored, Outcome, PassedThrough};
 use crate::restore::Restore;
 use crate::roots::{RootPaths, Roots, resolve_on_disk};
 use crate::scan::Needles;
@@ -217,6 +217,18 @@ struct Call<'a> {
 struct Found {
     block: Block,
     description: Description,
+    /// The files the hint that found it hashed, at the stats they were hashed at: a compile
+    /// that follows must find them unchanged (B-11).
+    watched: Vec<inputs::Watched>,
+}
+
+/// What a linked output was linked from (B-18), with the facts B-8 and B-11 need.
+struct Linked {
+    link: Link,
+    /// A file the link read lies outside every root: the block is tied (B-8).
+    outside: bool,
+    /// A file the link read changed while compiling (B-11).
+    changed: bool,
 }
 
 /// What a compile produced, for the store.
@@ -480,7 +492,7 @@ impl Call<'_> {
             let Ok(hint) = serde_json::from_slice::<ReadList>(&bytes) else {
                 continue;
             };
-            let Some(observed) = cx.from_hint(&hint, &shared) else {
+            let Some((observed, watched)) = cx.from_hint(&hint, &shared) else {
                 continue;
             };
             let Ok(key) = observed.key() else {
@@ -498,7 +510,11 @@ impl Call<'_> {
                     let serves_form = description.messages.form() == self.invocation.form()
                         || description.messages.only_notices();
                     let audit = self.ports.audited(&key, self.current.started_ms);
-                    *found = Some(Found { block, description });
+                    *found = Some(Found {
+                        block,
+                        description,
+                        watched,
+                    });
                     return Lookup::Found { audit, serves_form };
                 }
             }
@@ -627,6 +643,7 @@ impl Call<'_> {
                 store,
                 &mut facts,
                 (&ran.stdout, &before),
+                found,
             )
         });
         match produced {
@@ -695,6 +712,7 @@ impl Call<'_> {
         store: &Store,
         facts: &mut Facts,
         (stdout, before): (&[u8], &BTreeMap<String, Stat>),
+        found: Option<&Found>,
     ) -> Result<Produced, NotStored> {
         let inv = self.invocation;
         let dep_path = inv.dep_info_path();
@@ -703,13 +721,23 @@ impl Call<'_> {
         info.check().map_err(|_| NotStored::DepInfo)?;
         let gathered = cx.after(&info, common, compile_start)?;
         facts.changed = gathered.changed;
+        // What the lookup hashed must still be there as it was (B-11): otherwise the block
+        // found describes other inputs and no comparison with it is fair.
+        if let Some(found) = found {
+            facts.changed |= inputs::moved(
+                &found.watched,
+                compile_start,
+                &mut std::collections::BTreeSet::new(),
+            );
+        }
         let mut outputs = self.outputs(recorded, roots)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
         if inv.class() != Class::Library {
-            let (link, link_outside) = self.link(cx, stdout)?;
-            observed.link = Some(link);
-            outside |= link_outside;
+            let linked = self.link(cx, stdout, compile_start)?;
+            observed.link = Some(linked.link);
+            outside |= linked.outside;
+            facts.changed |= linked.changed;
             outputs.extend(self.debug_outputs(roots, before)?);
         }
 
@@ -717,7 +745,7 @@ impl Call<'_> {
         let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.0).collect();
         let origin = observed.key().map_err(|_| NotStored::Key)?;
         let mut tied = !inv.searchable() || tied_by_bytes || outside;
-        if !tied && !gathered.changed {
+        if !tied && !facts.changed {
             let through_vars: Vec<(String, String)> = info
                 .env
                 .iter()
@@ -887,9 +915,15 @@ impl Call<'_> {
         Path::new(self.invocation.cwd()).join(self.invocation.out_dir())
     }
 
-    /// B-18: what the linker was handed, from rustc's `--print=link-args` line. Whether a
-    /// library lies outside every root comes back too: that ties the block (B-8).
-    fn link(&self, cx: &Context<'_>, stdout: &[u8]) -> Result<(Link, bool), NotStored> {
+    /// B-18: what the linker was handed, from rustc's `--print=link-args` line, with whether a
+    /// file it names lies outside every root (that ties the block, B-8) and whether one changed
+    /// while compiling (B-11): a date at or after `start`, or a link on the way to it that is.
+    fn link(
+        &self,
+        cx: &Context<'_>,
+        stdout: &[u8],
+        start: SystemTime,
+    ) -> Result<Linked, NotStored> {
         let text = std::str::from_utf8(stdout).map_err(|_| NotStored::LinkInputs)?;
         let args = link::parse(text).map_err(|_| NotStored::LinkInputs)?;
         let cwd = args
@@ -907,33 +941,51 @@ impl Call<'_> {
             .or_else(|| self.env.get("PATH").map(OsStr::to_os_string));
         let linker =
             link::linker(&args.linker, path_var.as_deref(), &cwd).ok_or(NotStored::LinkInputs)?;
-        let linker_path = linker
-            .path
-            .to_str()
-            .ok_or(NotStored::LinkInputs)?
-            .to_string();
         // The linker the driver runs instead of its own (B-18).
         let ld = match &inputs.fuse_ld {
             None => None,
-            Some(name) => {
-                let found = link::fuse_linker(name, &inputs.prefixes, path_var.as_deref(), &cwd)
-                    .ok_or(NotStored::LinkInputs)?;
-                Some(
-                    found
-                        .path
-                        .to_str()
-                        .ok_or(NotStored::LinkInputs)?
-                        .to_string(),
-                )
-            }
+            Some(name) => Some(
+                link::fuse_linker(name, &inputs.prefixes, path_var.as_deref(), &cwd)
+                    .ok_or(NotStored::LinkInputs)?
+                    .path,
+            ),
         };
         let mut outside = false;
+        let mut changed = false;
+        let mut links = std::collections::BTreeSet::new();
+        let mut moved = |path: &Path, stat: Option<&Stat>| {
+            stat.is_some_and(|stat| inputs::dated_after(stat, start))
+                || inputs::links_changed(path, start, &mut links)
+        };
+        // The linker, the one `-fuse-ld` names and the SDK, located like every other path, so a
+        // path under another checkout is never recorded as it is (B-8).
+        let linker_at = cx.located_path(&linker.path)?;
+        let ld_at = match &ld {
+            Some(path) => Some(cx.located_path(path)?),
+            None => None,
+        };
+        let sdk_at = match &inputs.sdk {
+            Some(path) => Some(cx.located_path(path)?),
+            None => None,
+        };
+        for (at, path) in [
+            (Some(&linker_at), Some(&linker.path)),
+            (ld_at.as_ref(), ld.as_ref()),
+        ] {
+            if let (Some(at), Some(path)) = (at, path) {
+                outside |= matches!(at, Located::Outside(_));
+                let stat = std::fs::metadata(path).ok().map(|m| Stat::of(&m));
+                changed |= moved(path, stat.as_ref());
+            }
+        }
+        outside |= matches!(sdk_at, Some(Located::Outside(_)));
         // Libraries named with `-l` found through `-L` and `-F`, and the files options name
         // (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
         let mut files = Vec::new();
         for place in link::library_places(&inputs) {
-            let (read, _, is_outside) = cx.place(&place)?;
+            let (read, stat, is_outside) = cx.place(&place)?;
             outside |= is_outside;
+            changed |= stat.is_some() && moved(&place, stat.as_ref());
             files.push(read);
         }
         for (places, script) in link::file_places(&inputs, &cwd) {
@@ -943,9 +995,10 @@ impl Call<'_> {
             }
             let mut found = false;
             for place in &places {
-                let (read, _, is_outside) = cx.place(place)?;
+                let (read, stat, is_outside) = cx.place(place)?;
                 if read.state != crate::key::ReadState::Absent {
                     found = true;
+                    changed |= moved(place, stat.as_ref());
                     if script {
                         let text =
                             crate::regular::read(place).map_err(|_| NotStored::LinkInputs)?;
@@ -965,27 +1018,32 @@ impl Call<'_> {
         let mut libraries = Vec::with_capacity(inputs.libraries.len());
         for library in &inputs.libraries {
             let at = cx.located_path(library)?;
-            outside |= matches!(at, crate::model::Located::Outside(_));
+            outside |= matches!(at, Located::Outside(_));
             let sha256 = inputs::library_digest(library).map_err(|_| NotStored::LinkInputs)?;
+            let stat = std::fs::metadata(library)
+                .map(|m| Stat::of(&m))
+                .map_err(|_| NotStored::LinkInputs)?;
+            changed |= moved(library, Some(&stat));
             libraries.push(LinkLibrary { at, sha256 });
         }
-        let sdk_path = match &inputs.sdk {
-            Some(sdk) => Some(sdk.to_str().ok_or(NotStored::LinkInputs)?.to_string()),
-            None => None,
+        let link = Link {
+            libraries,
+            files,
+            linker: inputs::linkers_text(
+                (&linker_at, &linker.path),
+                ld_at.as_ref().zip(ld.as_deref()),
+            )
+            .ok_or(NotStored::LinkInputs)?,
+            sdk: inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
+            linker_path: linker_at,
+            ld_path: ld_at,
+            sdk_path: sdk_at,
         };
-        Ok((
-            Link {
-                libraries,
-                files,
-                linker: inputs::linkers_text(&linker.path, ld.as_deref().map(Path::new))
-                    .ok_or(NotStored::LinkInputs)?,
-                sdk: inputs::sdk_text(sdk_path.as_deref()),
-                linker_path,
-                ld_path: ld,
-                sdk_path,
-            },
+        Ok(Linked {
+            link,
             outside,
-        ))
+            changed,
+        })
     }
 
     /// A program's debug objects (B-18): the `<crate><extra>.*.o` files in the output folder

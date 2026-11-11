@@ -64,6 +64,8 @@ struct Fake {
     seen: Rc<RefCell<Seen>>,
     version_fails: bool,
     audit: bool,
+    /// Runs when the lookup found a block: between the lookup and the compile.
+    on_found: RefCell<Option<During>>,
 }
 
 /// Applies `--remap-path-prefix` pairs as rustc does: the last one that holds the path wins.
@@ -349,6 +351,9 @@ impl Ports for Fake {
     }
 
     fn audited(&self, _key: &Digest, _started_ms: u64) -> bool {
+        if let Some(found) = self.on_found.borrow_mut().as_mut() {
+            found();
+        }
         self.audit
     }
 }
@@ -505,6 +510,7 @@ impl World {
             seen: seen.clone(),
             version_fails: false,
             audit: false,
+            on_found: RefCell::new(None),
         };
         change(&mut fake);
         let before = self.session.current().entries().len();
@@ -568,6 +574,7 @@ fn probes_pass_through_before_anything_and_are_not_logged() {
         seen: seen.clone(),
         version_fails: false,
         audit: false,
+        on_found: RefCell::new(None),
     };
     // The session's file is gone: a probe must not need it.
     fs::remove_file(w.session.current().folder.join("session.json")).unwrap();
@@ -1327,6 +1334,7 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
         seen: seen.clone(),
         version_fails: false,
         audit: false,
+        on_found: RefCell::new(None),
     };
     let code = call(&mut fake, &mut Vec::new(), &args);
     assert_eq!(code, 0);
@@ -1348,19 +1356,14 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
 #[test]
 fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     let w = world(Mode::On);
-    let tools = w.dir.path().join("tools");
-    fs::create_dir_all(&tools).unwrap();
-    fs::write(tools.join("cc"), b"driver").unwrap();
-    fs::write(tools.join("ld.fake"), b"linker one").unwrap();
-    let cc = tools.join("cc");
-    let ld = tools.join("ld.fake");
-    let line = format!(
-        r#""{}" "{{ws}}/target/debug/deps/x.o" "-L" "{{ws}}/vendor" "-lfoo" "-Tscript.ld" "-fuse-ld={}" "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#,
-        cc.display(),
-        ld.display()
-    );
+    // The driver and the linker are the repository's own: under the workspace, so the block
+    // may move (a linker outside every root ties it, B-8).
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-L" "{ws}/vendor" "-lfoo" "-Tscript.ld" "-fuse-ld={ws}/tools/ld.fake" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
     let setup = |name: &str| {
         let ws = w.checkout(name);
+        fs::create_dir_all(ws.join("tools")).unwrap();
+        fs::write(ws.join("tools/cc"), b"driver").unwrap();
+        fs::write(ws.join("tools/ld.fake"), b"linker one").unwrap();
         fs::create_dir_all(ws.join("vendor")).unwrap();
         fs::write(ws.join("vendor/libfoo.a"), b"foo one").unwrap();
         fs::write(ws.join("script.ld"), b"SECTIONS { }").unwrap();
@@ -1390,6 +1393,7 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
             seen,
             version_fails: false,
             audit: false,
+            on_found: RefCell::new(None),
         };
         call(&mut fake, &mut Vec::new(), &as_proc_macro(&w, ws));
         w.session.current().entries().last().unwrap().outcome
@@ -1420,7 +1424,7 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     assert_eq!(run(&script), STORED, "a linker script changed");
 
     let linker = setup("linker");
-    fs::write(&ld, b"linker two, longer").unwrap();
+    fs::write(linker.join("tools/ld.fake"), b"linker two").unwrap();
     assert_eq!(run(&linker), STORED, "the linker -fuse-ld names changed");
 }
 
@@ -1471,6 +1475,7 @@ fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {
         seen: seen.clone(),
         version_fails: false,
         audit: false,
+        on_found: RefCell::new(None),
     };
     assert_eq!(call(&mut fake, &mut Vec::new(), &args), 0);
     assert_eq!(
@@ -1937,4 +1942,394 @@ fn an_incremental_rebuild_against_a_reused_extern_still_heals_a_rejected_block()
     );
     assert_eq!(r.seen.execs.len(), 1);
     assert!(r.seen.compiles.is_empty());
+}
+
+// covers: B-11
+#[cfg(unix)]
+#[test]
+fn a_symlink_retargeted_during_the_compile_to_an_older_file_is_not_stored() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/data/text.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("a/shared")).unwrap();
+    fs::write(ws.join("a/shared/A.txt"), "AAA\n").unwrap();
+    fs::write(ws.join("a/shared/B.txt"), "BBB\n").unwrap();
+    let data = ws.join("a/data/text.txt");
+    fs::remove_file(&data).unwrap();
+    std::os::unix::fs::symlink("../shared/A.txt", &data).unwrap();
+    settle();
+    let swap = data.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        fake.during = Some(Box::new(move || {
+            let temp = swap.with_extension("new");
+            std::os::unix::fs::symlink("../shared/B.txt", &temp).unwrap();
+            fs::rename(&temp, &swap).unwrap();
+        }));
+    });
+    // rustc read A; the link now names B, whose dates are older than the compile.
+    assert!(
+        fs::read_to_string(w.rlib(&ws, "a"))
+            .unwrap()
+            .contains("AAA")
+    );
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed));
+    assert_eq!(w.blocks(), 0);
+
+    // A folder on the way retargeted the same way.
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/data/text.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("d1")).unwrap();
+    fs::create_dir_all(ws.join("d2")).unwrap();
+    fs::write(ws.join("d1/text.txt"), "one\n").unwrap();
+    fs::write(ws.join("d2/text.txt"), "two\n").unwrap();
+    fs::remove_dir_all(ws.join("a/data")).unwrap();
+    std::os::unix::fs::symlink("../d1", ws.join("a/data")).unwrap();
+    settle();
+    let dir = ws.join("a/data");
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        fake.during = Some(Box::new(move || {
+            let temp = dir.with_extension("new");
+            std::os::unix::fs::symlink("../d2", &temp).unwrap();
+            fs::rename(&temp, &dir).unwrap();
+        }));
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed));
+}
+
+// covers: B-11, B-16
+#[test]
+fn a_read_changed_between_the_lookup_and_the_compile_suspends_nothing() {
+    let w = world(Mode::Observe);
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/data/text.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let one = w.checkout("one");
+    let two = w.checkout("two");
+    settle();
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    let data = two.join("a/data/text.txt");
+    let r = w.call_with(&two, "a", &[], move |fake| {
+        *fake.on_found.borrow_mut() = Some(Box::new(move || {
+            // Replaced after the lookup hashed it, before the compile started.
+            let temp = data.with_extension("new");
+            fs::write(&temp, "changed\n").unwrap();
+            fs::rename(&temp, &data).unwrap();
+        }));
+    });
+    let entry = r.entry.unwrap();
+    assert!(entry.found);
+    assert_eq!(entry.outcome, not_stored(NotStored::Changed));
+    assert!(w.store().suspended(&only_step(&w)).is_none());
+}
+
+// covers: B-8
+#[cfg(unix)]
+#[test]
+fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            // A file beside the workspace: outside every root, so the block is tied.
+            reads: vec!["../proto/x.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let one = w.checkout("one/rust");
+    let two = w.checkout("two-longer/rust");
+    for ws in [&one, &two] {
+        let proto = ws.parent().unwrap().join("proto");
+        fs::create_dir_all(&proto).unwrap();
+        fs::write(proto.join("x.txt"), "proto\n").unwrap();
+    }
+    settle();
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    // One's file becomes a pipe: opening it from two would block.
+    let pipe = one.parent().unwrap().join("proto/x.txt");
+    fifo(&pipe);
+    let dog = Watchdog::new(vec![pipe], 5);
+    let r = w.call(&two, "a", &[]);
+    assert!(!dog.finish(), "two opened a file of checkout one");
+    assert_eq!(r.outcome(), STORED);
+    assert!(!r.entry.unwrap().found);
+
+    // With one's file a plain file again, two still doesn't follow one's hint: it is skipped
+    // for its roots, not for what it finds.
+    fs::remove_file(one.parent().unwrap().join("proto/x.txt")).unwrap();
+    fs::write(one.parent().unwrap().join("proto/x.txt"), "proto\n").unwrap();
+    let step = only_step(&w);
+    let hints: Vec<crate::key::ReadList> = w
+        .store()
+        .hints(&step)
+        .iter()
+        .map(|bytes| serde_json::from_slice(bytes).unwrap())
+        .collect();
+    assert_eq!(hints.len(), 2, "one hint per checkout");
+    let follows = |ws: &Path| -> usize {
+        let env = crate::invocation::Env::from_vars(w.vars(ws, "a"));
+        let crate::invocation::Parsed::Handled(inv) =
+            crate::invocation::parse(&w.args(ws, "a", &[]), &env, ws)
+        else {
+            panic!("not handled");
+        };
+        let roots = crate::roots::Roots::new(
+            &crate::roots::RootPaths::of(&inv),
+            &[],
+            crate::roots::resolve_on_disk,
+        )
+        .unwrap();
+        let cx = crate::inputs::Context {
+            invocation: &inv,
+            roots: &roots,
+            env: &env,
+            step,
+            script: None,
+        };
+        let common = cx.common().unwrap();
+        hints
+            .iter()
+            .filter(|hint| cx.from_hint(hint, &common).is_some())
+            .count()
+    };
+    assert_eq!(follows(&one), 1);
+    assert_eq!(follows(&two), 1);
+}
+
+/// A linked output whose link line names `tools/cc` as the linker and `vendor/libfoo.a` as a
+/// library, both under the workspace.
+fn linked_in(w: &World, ws: &Path) -> Outcome {
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "{ws}/vendor/libfoo.a" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/data/text.txt".into()],
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let mut args = w.args(ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let mut fake = Fake {
+        vars: w.vars(ws, "a"),
+        cwd: ws.to_path_buf(),
+        plans: w.plans.clone(),
+        during: None,
+        seen: Rc::default(),
+        version_fails: false,
+        audit: false,
+        on_found: RefCell::new(None),
+    };
+    call(&mut fake, &mut Vec::new(), &args);
+    w.session.current().entries().last().unwrap().outcome
+}
+
+fn with_tools(ws: &Path) {
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    fs::create_dir_all(ws.join("vendor")).unwrap();
+    fs::write(ws.join("vendor/libfoo.a"), b"foo").unwrap();
+}
+
+// covers: B-7, B-8
+#[test]
+fn a_hint_is_followed_under_this_checkout_while_the_other_one_differs() {
+    type Change = fn(&Path);
+    let plain = Plan {
+        reads: vec!["a/src/foo.rs".into(), "a/data/text.txt".into()],
+        include_var: Some(("OUT_DIR".into(), "gen.rs".into())),
+        ..Plan::default()
+    };
+    let kinds: [(&str, Change); 5] = [
+        ("a read", |one| {
+            fs::write(one.join("a/data/text.txt"), "other\n").unwrap()
+        }),
+        ("an absent place", |one| {
+            fs::create_dir_all(one.join("a/src/foo")).unwrap();
+            fs::write(one.join("a/src/foo/mod.rs"), "").unwrap();
+        }),
+        ("a shape folder", |one| {
+            fs::write(one.join("a/data/more.txt"), "").unwrap()
+        }),
+        ("a declared input", |one| {
+            fs::write(one.join("a/input.txt"), "other").unwrap()
+        }),
+        ("a generated file", |one| {
+            fs::write(
+                one.join("target/debug/build/a-1/out/gen.rs"),
+                "pub const X: u8 = 2;\n",
+            )
+            .unwrap()
+        }),
+    ];
+    for (what, change) in kinds {
+        let w = world(Mode::On);
+        w.plan("a", plain.clone());
+        let one = w.checkout("one");
+        let two = w.checkout("two-longer");
+        let mut outs = Vec::new();
+        for ws in [&one, &two] {
+            let (name, out) = with_script(ws);
+            fs::write(
+                out.clone() + "/../output",
+                "cargo:rerun-if-changed=input.txt\n",
+            )
+            .unwrap();
+            fs::write(ws.join("a/input.txt"), "input").unwrap();
+            outs.push((name, out));
+        }
+        settle();
+        let set = |(name, out): (String, String)| {
+            move |f: &mut Fake| {
+                f.vars.insert(name, out);
+            }
+        };
+        assert_eq!(
+            w.call_with(&one, "a", &[], set(outs[0].clone())).outcome(),
+            STORED,
+            "{what}"
+        );
+        change(&one);
+        settle();
+        let r = w.call_with(&two, "a", &[], set(outs[1].clone()));
+        assert_eq!(r.outcome(), REUSED, "{what}: two read checkout one");
+    }
+    // The linker and a library the linker was handed.
+    let kinds: [(&str, Change); 2] = [
+        ("a link library", |one| {
+            fs::write(one.join("vendor/libfoo.a"), b"other foo").unwrap()
+        }),
+        ("the linker", |one| {
+            fs::write(one.join("tools/cc"), b"another driver").unwrap()
+        }),
+    ];
+    for (what, change) in kinds {
+        let w = world(Mode::On);
+        let one = w.checkout("one");
+        let two = w.checkout("two-longer");
+        with_tools(&one);
+        with_tools(&two);
+        settle();
+        assert_eq!(linked_in(&w, &one), STORED, "{what}");
+        change(&one);
+        settle();
+        assert_eq!(linked_in(&w, &two), REUSED, "{what}: two read checkout one");
+        // And a change here is seen.
+        let three = w.checkout("three");
+        with_tools(&three);
+        change(&three);
+        settle();
+        assert_eq!(linked_in(&w, &three), STORED, "{what}: a change missed");
+    }
+}
+
+// covers: B-11, B-18
+#[test]
+fn a_link_input_replaced_during_the_compile_is_not_stored() {
+    for file in ["vendor/libfoo.a", "script.ld"] {
+        let w = world(Mode::On);
+        let ws = w.checkout("ws");
+        with_tools(&ws);
+        fs::write(ws.join("script.ld"), b"SECTIONS { }").unwrap();
+        let line = r#""{ws}/tools/cc" "{ws}/vendor/libfoo.a" "-T{ws}/script.ld" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                ..Plan::default()
+            },
+        );
+        settle();
+        let mut args = w.args(&ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        let path = ws.join(file);
+        let old = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut fake = Fake {
+            vars: w.vars(&ws, "a"),
+            cwd: ws.clone(),
+            plans: w.plans.clone(),
+            during: Some(Box::new(move || {
+                let temp = path.with_extension("new");
+                fs::write(&temp, b"replaced, same date").unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&temp)
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+                fs::rename(&temp, &path).unwrap();
+            })),
+            seen: Rc::default(),
+            version_fails: false,
+            audit: false,
+            on_found: RefCell::new(None),
+        };
+        call(&mut fake, &mut Vec::new(), &args);
+        let outcome = w.session.current().entries().last().unwrap().outcome;
+        assert_eq!(outcome, not_stored(NotStored::Changed), "{file}");
+        assert_eq!(w.blocks(), 0, "{file}");
+    }
+}
+
+// covers: B-8, B-18
+#[test]
+fn a_linker_outside_every_root_ties_the_block() {
+    let w = world(Mode::On);
+    let tools = w.dir.path().join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("cc"), b"driver").unwrap();
+    let line = format!(
+        r#""{}" "{{ws}}/target/debug/deps/x.o" "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#,
+        tools.join("cc").display()
+    );
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let run = |ws: &Path| {
+        let mut args = w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        let mut fake = Fake {
+            vars: w.vars(ws, "a"),
+            cwd: ws.to_path_buf(),
+            plans: w.plans.clone(),
+            during: None,
+            seen: Rc::default(),
+            version_fails: false,
+            audit: false,
+            on_found: RefCell::new(None),
+        };
+        call(&mut fake, &mut Vec::new(), &args);
+        w.session.current().entries().last().unwrap().outcome
+    };
+    let one = w.checkout("one");
+    let two = w.checkout("two");
+    settle();
+    assert_eq!(run(&one), STORED);
+    assert_eq!(run(&two), STORED, "a block tied to its linker moved");
+    // In its own checkout it is reused.
+    fs::remove_file(one.join("target/debug/deps/liba-xa.rlib")).unwrap();
+    assert_eq!(run(&one), REUSED);
 }

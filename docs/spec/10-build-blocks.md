@@ -90,7 +90,9 @@ hash. It comes from the lists earlier compiles of the same first key recorded. A
 and MUST NOT be trusted: the wrapper hashes the files as they are now, and a block exists under a
 key only because a compile read exactly those bytes. A file the list names that is gone is
 hashed as absent, so the key differs and the compile runs. A list that names a root this call
-doesn't have is skipped. The result of a compile is always recorded under the key computed from
+doesn't have is skipped, and so is the list of a tied block (B-10) recorded with other roots
+than this call's: it carries a digest of them and is skipped before anything it names is
+opened. The result of a compile is always recorded under the key computed from
 what that compile read, never from a hint.
 
 **B-8 Roots.** A path that lies under a root, in the root's given form or its resolved form, is
@@ -127,8 +129,11 @@ bytes.
 
 **B-11 Changed while compiling.** The wrapper records each read file's size, dates, inode and
 device around the compile and around its hashing. A compile is stored only if no read file
-changed and none carries a date at or after the compile's start. Otherwise the outcome is
-`built, not stored`.
+changed and none carries a date at or after the compile's start, and no symlink on the way to
+one (each folder of its path, the path itself, and what each link points at, up to 40 links)
+carries such a date either: a link retargeted during the compile to an older file is new. The
+files a hint hashed for the lookup must be as they were then, and the files a link read and the
+native files (B-6) are checked the same way. Otherwise the outcome is `built, not stored`.
 
 **B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
 a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
@@ -180,9 +185,10 @@ library folder changes. A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed thro
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
 reports with `--print=link-args`; the libraries named with `-l` and the files options name, as
-B-6's `link` says; the linker's path, size and modification time, and the same for the linker
-`-fuse-ld` names (found as `ld.<name>` or `<name>` in the `-B` folders, then on `PATH`); and the
-SDK. Where that list can't be read, where a file it names is gone or can't be found, or where a
+B-6's `link` says; the linker, and the linker `-fuse-ld` names (found as `ld.<name>` or `<name>`
+in the `-B` folders, then on `PATH`), each by where it lies (B-8) and, under a root, its SHA-256,
+else its size and modification time; and the SDK, by where it lies and the date of its settings
+file. A linker or SDK outside every root ties the block. Where that list can't be read, where a file it names is gone or can't be found, or where a
 linker script names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`, `STARTUP`), the
 outcome is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
 prints on stdout goes on to the wrapper's stdout, but the linker command. A program is stored

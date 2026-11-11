@@ -18,7 +18,7 @@ use crate::model::{Located, RootName};
 pub const STEP_SCHEMA: &str = "hushrun.build-step/v0";
 
 /// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v0";
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v1";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -171,17 +171,18 @@ pub struct Link {
     /// named with `-l` in each search folder, and the files options name (linker scripts,
     /// symbol lists), present or absent (B-6).
     pub files: Vec<Read>,
-    /// The linker's identity: its path, size and modification time, as one text; with the same
-    /// for the linker `-fuse-ld` names, when there is one.
+    /// The linker's identity: where it lies (B-8) and, for one under a root, its SHA-256, else
+    /// its size and modification time, as one text; with the same for the linker `-fuse-ld`
+    /// names, when there is one.
     pub linker: String,
     /// The SDK, as one text.
     pub sdk: String,
     /// Where the linker is. Kept for the hint; the key holds only `linker`.
-    pub linker_path: String,
+    pub linker_path: Located,
     /// Where the linker `-fuse-ld` names is. Kept for the hint; the key holds only `linker`.
-    pub ld_path: Option<String>,
+    pub ld_path: Option<Located>,
     /// Where the SDK is. Kept for the hint; the key holds only `sdk`.
-    pub sdk_path: Option<String>,
+    pub sdk_path: Option<Located>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -192,13 +193,12 @@ pub struct LinkList {
     /// The other places the linker may take a file from.
     #[serde(default)]
     pub files: Vec<Located>,
-    /// The linker's path.
-    pub linker: String,
-    /// The path of the linker `-fuse-ld` names.
-    #[serde(default)]
-    pub ld: Option<String>,
-    /// The SDK's path, if any.
-    pub sdk: Option<String>,
+    /// Where the linker is (B-8).
+    pub linker: Located,
+    /// Where the linker `-fuse-ld` names is.
+    pub ld: Option<Located>,
+    /// Where the SDK is, if any.
+    pub sdk: Option<Located>,
 }
 
 /// Where a block may be reused (B-10).
@@ -419,6 +419,22 @@ pub struct ReadList {
     pub link: Option<LinkList>,
     /// How the block was placed.
     pub place: PlaceKind,
+    /// For a tied block, the digest of the roots it was recorded with ([`roots_digest`]). A
+    /// lookup whose roots differ skips the hint before it opens anything: its paths outside
+    /// every root are another checkout's (B-8).
+    pub roots: Option<Digest>,
+}
+
+/// The digest of a call's roots as [`crate::roots::Roots::tied`] gives them, in any order.
+pub fn roots_digest(tied: &[(RootName, String)]) -> Digest {
+    let mut sorted = tied.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let text: Vec<String> = sorted
+        .iter()
+        .map(|(name, path)| format!("{name}\0{path}"))
+        .collect();
+    Digest::of(text.join("\n").as_bytes())
 }
 
 impl ReadList {
@@ -448,6 +464,10 @@ impl ReadList {
             place: match observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
                 Place::Tied(_) => PlaceKind::Tied,
+            },
+            roots: match &observed.place {
+                Place::Anywhere => None,
+                Place::Tied(roots) => Some(roots_digest(roots)),
             },
         }
     }
@@ -577,7 +597,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "c8ddfbcd2e33b96dfefa4b1858508ab8a299267509dcc59619058c98691e92fc"
+            "d0c79865bcf60410f2c666d292027c80bd4f86706518862dfcba71e9e9e9734e"
         );
     }
 
@@ -661,7 +681,7 @@ mod tests {
                     files: vec![],
                     linker: "cc".into(),
                     sdk: String::new(),
-                    linker_path: "cc".into(),
+                    linker_path: Located::Shared("/usr/bin/cc".into()),
                     ld_path: None,
                     sdk_path: None,
                 })
@@ -675,7 +695,7 @@ mod tests {
                     }],
                     linker: "cc".into(),
                     sdk: String::new(),
-                    linker_path: "cc".into(),
+                    linker_path: Located::Shared("/usr/bin/cc".into()),
                     ld_path: None,
                     sdk_path: None,
                 })
@@ -704,7 +724,7 @@ mod tests {
                 files: vec![],
                 linker: linker.into(),
                 sdk: sdk.into(),
-                linker_path: "cc".into(),
+                linker_path: Located::Shared("/usr/bin/cc".into()),
                 ld_path: None,
                 sdk_path: None,
             });
@@ -887,9 +907,9 @@ mod tests {
             }],
             linker: "cc".into(),
             sdk: String::new(),
-            linker_path: "/usr/bin/cc".into(),
-            ld_path: Some("/usr/bin/ld.lld".into()),
-            sdk_path: Some("/sdk".into()),
+            linker_path: Located::Shared("/usr/bin/cc".into()),
+            ld_path: Some(Located::Shared("/usr/bin/ld.lld".into())),
+            sdk_path: Some(Located::Outside("/sdk".into())),
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);
@@ -912,12 +932,20 @@ mod tests {
             Some(LinkList {
                 libraries: vec![at(RootName::OutDir, "liba.rlib")],
                 files: vec![at(RootName::Workspace, "link.x")],
-                linker: "/usr/bin/cc".into(),
-                ld: Some("/usr/bin/ld.lld".into()),
-                sdk: Some("/sdk".into()),
+                linker: Located::Shared("/usr/bin/cc".into()),
+                ld: Some(Located::Shared("/usr/bin/ld.lld".into())),
+                sdk: Some(Located::Outside("/sdk".into())),
             })
         );
         assert_eq!(hint.place, PlaceKind::Tied);
+        assert_eq!(
+            hint.roots,
+            Some(roots_digest(&[(RootName::Workspace, "/w/ws".into())]))
+        );
+        assert_ne!(
+            roots_digest(&[(RootName::Workspace, "/w/ws".into())]),
+            roots_digest(&[(RootName::Workspace, "/w/other".into())])
+        );
         let json = serde_json::to_string(&hint).unwrap();
         assert!(!json.contains("/w/ws"), "{json}");
         assert_eq!(serde_json::from_str::<ReadList>(&json).unwrap(), hint);
@@ -939,6 +967,7 @@ mod tests {
 
         let plain = ReadList::of(&observed());
         assert_eq!(plain.place, PlaceKind::Anywhere);
+        assert_eq!(plain.roots, None);
         assert_eq!(plain.link, None);
         let mut none = observed();
         none.generated = None;

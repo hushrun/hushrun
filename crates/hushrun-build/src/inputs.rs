@@ -17,8 +17,8 @@ use hushrun_digest::cache::Stat;
 use crate::depinfo::{self, DepInfo};
 use crate::invocation::{Env, Invocation, NativeKind};
 use crate::key::{
-    Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, Observed, Place, Read,
-    ReadList, ReadState, Shape,
+    Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, Observed, Place,
+    PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
 };
 use crate::known::{self, Where};
 use crate::model::{Located, NotStored, RootName};
@@ -42,13 +42,91 @@ pub struct Context<'a> {
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
-/// same file with no date at or after the compile's start (B-11).
+/// same file with no date at or after the compile's start, and no link on the way to it may be
+/// newer than that either (B-11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watched {
     /// The file.
     pub path: PathBuf,
     /// How it was when hashed; `None` when it was absent.
     pub stat: Option<Stat>,
+    /// Whether `stat` is of what the path points at (the file was hashed through its links),
+    /// or of the path itself (a symlink keyed by its text).
+    pub follow: bool,
+}
+
+/// Whether any watched file moved (B-11): another file, another stat, a date at or after
+/// `start`, or, for one hashed through its links, a link on the way to it that is. `links` is
+/// the set of paths already looked at in this compile.
+pub fn moved(watched: &[Watched], start: SystemTime, links: &mut BTreeSet<PathBuf>) -> bool {
+    watched.iter().any(|watched| {
+        let now = if watched.follow {
+            fs::metadata(&watched.path)
+        } else {
+            fs::symlink_metadata(&watched.path)
+        }
+        .ok()
+        .map(|m| Stat::of(&m));
+        let file_moved = match (&watched.stat, &now) {
+            (None, None) => false,
+            (Some(then), Some(now)) => !same(then, now) || dated_after(now, start),
+            _ => true,
+        };
+        file_moved || (watched.follow && links_changed(&watched.path, start, links))
+    })
+}
+
+/// The most links followed on the way to one file before giving up, as the kernel's own limit.
+const MAX_LINKS: u32 = 40;
+
+/// Whether a symlink on the way to `path` carries a date at or after `start` (B-11): each
+/// folder of the path and the path itself, and what each link points at, in turn, up to
+/// 40 links (more counts as changed). A link made or retargeted during the compile
+/// is new even when what it points at is old. A path that can't be stat'ed is left to the
+/// hashing, which fails for it.
+///
+/// Cost: one `lstat` per part of the path not looked at before in this compile (`seen`), and a
+/// `readlink` per link.
+pub fn links_changed(path: &Path, start: SystemTime, seen: &mut BTreeSet<PathBuf>) -> bool {
+    links_changed_from(path, start, seen, 0)
+}
+
+fn links_changed_from(
+    path: &Path,
+    start: SystemTime,
+    seen: &mut BTreeSet<PathBuf>,
+    depth: u32,
+) -> bool {
+    if depth > MAX_LINKS {
+        return true;
+    }
+    let mut prefix = PathBuf::new();
+    for part in path.components() {
+        prefix.push(part);
+        if !seen.insert(prefix.clone()) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&prefix) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        if dated_after(&Stat::of(&meta), start) {
+            return true;
+        }
+        let Ok(target) = fs::read_link(&prefix) else {
+            return true;
+        };
+        let next = match prefix.parent() {
+            Some(parent) => parent.join(&target),
+            None => target,
+        };
+        if links_changed_from(&next, start, seen, depth + 1) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The parts of the second key that don't come from the dep-info: externs, the build script's
@@ -234,6 +312,7 @@ impl Context<'_> {
             watched.push(Watched {
                 stat: fs::symlink_metadata(&path).ok().map(|m| Stat::of(&m)),
                 path,
+                follow: false,
             });
             out.push(Generated {
                 // A symlink is its target's text; this keeps it apart from a file of those bytes.
@@ -329,7 +408,11 @@ impl Context<'_> {
                     (ReadState::Present(sha), Some(stat))
                 }
             };
-            watched.push(Watched { path, stat });
+            watched.push(Watched {
+                path,
+                stat,
+                follow: true,
+            });
             reads.push(Read { at, state });
         }
         env.sort();
@@ -374,7 +457,11 @@ impl Context<'_> {
                         continue;
                     }
                     *outside |= is_outside;
-                    watched.push(Watched { path, stat });
+                    watched.push(Watched {
+                        path,
+                        stat,
+                        follow: true,
+                    });
                     out.push(read);
                 }
                 // A framework folder with neither its binary nor its stub: its file can't be
@@ -391,30 +478,42 @@ impl Context<'_> {
     }
 
     /// One place a file may be, as the key holds it: where it lies, and its content (through
-    /// the record where one exists) or absent; with its stat for B-11 and whether it lies
-    /// outside every root (B-8).
+    /// the record where one exists) or absent; with the stat of what it points at for B-11 and
+    /// whether it lies outside every root (B-8).
     pub fn place(&self, path: &Path) -> Result<(Read, Option<Stat>, bool), NotStored> {
         let at = self.located(path)?;
         let outside = matches!(at, Located::Outside(_));
         let (state, stat) = match fs::symlink_metadata(path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
             Err(_) => return Err(NotStored::Hash),
-            Ok(meta) => {
+            Ok(_) => {
                 let sha = library_digest(path).map_err(|err| hash_error(&err))?;
+                let meta = fs::metadata(path).map_err(|err| hash_error(&err))?;
                 (ReadState::Present(sha), Some(Stat::of(&meta)))
             }
         };
         Ok((Read { at, state }, stat, outside))
     }
 
-    /// The state of a recorded place as it is now, for a hint: `None` when it can't be read.
-    fn state_now(&self, at: &Located) -> Option<ReadState> {
+    /// The state of a recorded place as it is now, for a hint, with the stat of what it points
+    /// at: `None` when it can't be read.
+    fn state_now(&self, at: &Located, watched: &mut Vec<Watched>) -> Option<ReadState> {
         let path = self.open_at(at)?;
-        match fs::symlink_metadata(&path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Some(ReadState::Absent),
-            Err(_) => None,
-            Ok(_) => Some(ReadState::Present(library_digest(&path).ok()?)),
-        }
+        let state = match fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => ReadState::Absent,
+            Err(_) => return None,
+            Ok(_) => ReadState::Present(library_digest(&path).ok()?),
+        };
+        let stat = match state {
+            ReadState::Absent => None,
+            ReadState::Present(_) => Some(Stat::of(&fs::metadata(&path).ok()?)),
+        };
+        watched.push(Watched {
+            path,
+            stat,
+            follow: true,
+        });
+        Some(state)
     }
 
     /// Folders never walked as inputs: the target folders this call writes to (they hold the
@@ -427,18 +526,33 @@ impl Context<'_> {
         skip
     }
 
-    /// The second key's parts from a hint, with every file as it is now (B-7). `None` when the
-    /// hint can't be followed here: a root this call doesn't have, a folder gone, a value that
-    /// can't be keyed. That hint is skipped; it is never an error.
-    pub fn from_hint(&self, hint: &ReadList, common: &Common) -> Option<Observed> {
+    /// The second key's parts from a hint, with every file as it is now (B-7), and the stats
+    /// they were hashed at, which the compile that may follow checks again (B-11). `None` when
+    /// the hint can't be followed here: a tied block's hint recorded with other roots (checked
+    /// before anything is opened, B-8), a root this call doesn't have, a folder gone, a value
+    /// that can't be keyed, a file that is not a regular file. That hint is skipped; it is
+    /// never an error.
+    pub fn from_hint(&self, hint: &ReadList, common: &Common) -> Option<(Observed, Vec<Watched>)> {
+        if hint.place == PlaceKind::Tied && hint.roots != Some(roots_digest(&self.roots.tied())) {
+            return None;
+        }
+        let mut watched = Vec::with_capacity(hint.reads.len());
         let mut reads = Vec::with_capacity(hint.reads.len());
         for at in &hint.reads {
             let path = self.open_at(at)?;
-            let state = match fs::metadata(&path) {
-                Err(err) if err.kind() == io::ErrorKind::NotFound => ReadState::Absent,
+            let (state, stat) = match fs::metadata(&path) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
                 Err(_) => return None,
-                Ok(_) => ReadState::Present(hash_steady(&path).ok()?.0),
+                Ok(_) => {
+                    let (sha, stat) = hash_steady(&path).ok()?;
+                    (ReadState::Present(sha), Some(stat))
+                }
             };
+            watched.push(Watched {
+                path,
+                stat,
+                follow: true,
+            });
             reads.push(Read {
                 at: at.clone(),
                 state,
@@ -462,9 +576,9 @@ impl Context<'_> {
         }
         let link = match &hint.link {
             None => None,
-            Some(list) => Some(self.link_from_hint(list)?),
+            Some(list) => Some(self.link_from_hint(list, &mut watched)?),
         };
-        Some(Observed {
+        let observed = Observed {
             step: self.step,
             reads,
             env,
@@ -475,30 +589,53 @@ impl Context<'_> {
             declared: common.declared.clone(),
             link,
             place: hint.place.place(self.roots.tied()),
-        })
+        };
+        Some((observed, watched))
     }
 
-    fn link_from_hint(&self, list: &crate::key::LinkList) -> Option<Link> {
+    fn link_from_hint(
+        &self,
+        list: &crate::key::LinkList,
+        watched: &mut Vec<Watched>,
+    ) -> Option<Link> {
         let mut libraries = Vec::with_capacity(list.libraries.len());
         for at in &list.libraries {
             let path = self.open_at(at)?;
+            let sha256 = library_digest(&path).ok()?;
+            watched.push(Watched {
+                stat: Some(Stat::of(&fs::metadata(&path).ok()?)),
+                path,
+                follow: true,
+            });
             libraries.push(LinkLibrary {
                 at: at.clone(),
-                sha256: library_digest(&path).ok()?,
+                sha256,
             });
         }
         let mut files = Vec::with_capacity(list.files.len());
         for at in &list.files {
             files.push(Read {
                 at: at.clone(),
-                state: self.state_now(at)?,
+                state: self.state_now(at, watched)?,
             });
         }
+        let linker = self.open_at(&list.linker)?;
+        let ld = match &list.ld {
+            Some(at) => Some((at, self.open_at(at)?)),
+            None => None,
+        };
+        let sdk = match &list.sdk {
+            Some(at) => Some((at, self.open_at(at)?)),
+            None => None,
+        };
         Some(Link {
             libraries,
             files,
-            linker: linkers_text(Path::new(&list.linker), list.ld.as_deref().map(Path::new))?,
-            sdk: sdk_text(list.sdk.as_deref()),
+            linker: linkers_text(
+                (&list.linker, &linker),
+                ld.as_ref().map(|(at, p)| (*at, p.as_path())),
+            )?,
+            sdk: sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
             linker_path: list.linker.clone(),
             ld_path: list.ld.clone(),
             sdk_path: list.sdk.clone(),
@@ -514,6 +651,7 @@ impl Context<'_> {
         start: SystemTime,
     ) -> Result<Gathered, NotStored> {
         let mut changed = false;
+        let mut links = BTreeSet::new();
         let mut outside = common.outside;
         let mut reads = Vec::with_capacity(info.files.len() * 2);
         let mut seen = BTreeSet::new();
@@ -527,7 +665,7 @@ impl Context<'_> {
             }
             match hash_steady(&path) {
                 Ok((sha, stat)) => {
-                    changed |= dated_after(&stat, start);
+                    changed |= dated_after(&stat, start) || links_changed(&path, start, &mut links);
                     reads.push(Read {
                         at,
                         state: ReadState::Present(sha),
@@ -560,7 +698,7 @@ impl Context<'_> {
                 Err(_) => return Err(NotStored::Hash),
                 Ok(_) => {
                     let (sha, stat) = hash_steady(&path).map_err(|err| hash_error(&err))?;
-                    changed |= dated_after(&stat, start);
+                    changed |= dated_after(&stat, start) || links_changed(&path, start, &mut links);
                     ReadState::Present(sha)
                 }
             };
@@ -580,16 +718,7 @@ impl Context<'_> {
             let names = shape::names(&folder).map_err(|_| NotStored::Hash)?;
             shapes.push(Shape { dir, names });
         }
-        for watched in &common.watched {
-            let now = fs::symlink_metadata(&watched.path)
-                .ok()
-                .map(|m| Stat::of(&m));
-            changed |= match (&watched.stat, &now) {
-                (None, None) => false,
-                (Some(then), Some(now)) => !same(then, now) || dated_after(now, start),
-                _ => true,
-            };
-        }
+        changed |= moved(&common.watched, start, &mut links);
         Ok(Gathered {
             observed: Observed {
                 step: self.step,
@@ -720,41 +849,47 @@ pub fn library_digest(path: &Path) -> io::Result<Digest> {
     hash_steady(path).map(|(sha, _)| sha)
 }
 
-/// The linker's identity as one text: its path, size and modification time (B-18). `None`
-/// when it can't be read.
-pub fn linker_text(path: &Path) -> Option<String> {
+/// Where a place lies, as one text for a key.
+fn located_text(at: &Located) -> Option<String> {
+    serde_json::to_string(at).ok()
+}
+
+/// The linker's identity as one text (B-18): where it lies (B-8) and, for one under a root (a
+/// script in the repository, another file in each checkout), its SHA-256; for any other, its
+/// size and modification time. `None` when it can't be read.
+pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
+    let place = located_text(at)?;
+    if matches!(at, Located::Rooted(_)) {
+        let (sha, _) = regular::hash_steady(path).ok()?;
+        return Some(format!("{place} {}", sha.hex()));
+    }
     let meta = fs::metadata(path).ok()?;
     let stat = Stat::of(&meta);
-    Some(format!(
-        "{} {} {}",
-        path.to_str()?,
-        stat.size,
-        stat.mtime_ns
-    ))
+    Some(format!("{place} {} {}", stat.size, stat.mtime_ns))
 }
 
 /// The identity of the linkers a link ran: the driver's ([`linker_text`]) and, on a line of
 /// its own, the one `-fuse-ld` named. `None` when one can't be read.
-pub fn linkers_text(driver: &Path, ld: Option<&Path>) -> Option<String> {
-    let mut text = linker_text(driver)?;
-    if let Some(ld) = ld {
+pub fn linkers_text(driver: (&Located, &Path), ld: Option<(&Located, &Path)>) -> Option<String> {
+    let mut text = linker_text(driver.0, driver.1)?;
+    if let Some((at, path)) = ld {
         text.push('\n');
-        text.push_str(&linker_text(ld)?);
+        text.push_str(&linker_text(at, path)?);
     }
     Some(text)
 }
 
-/// The SDK as one text: its path and the modification time of its settings file, which an
+/// The SDK as one text: where it lies and the modification time of its settings file, which an
 /// update of the SDK in place changes (B-18).
-pub fn sdk_text(sdk: Option<&str>) -> String {
+pub fn sdk_text(sdk: Option<(&Located, &Path)>) -> String {
     match sdk {
         None => String::new(),
-        Some(path) => {
-            let settings = Path::new(path).join("SDKSettings.json");
+        Some((at, path)) => {
+            let settings = path.join("SDKSettings.json");
             let stamp = fs::metadata(settings)
                 .map(|m| Stat::of(&m).mtime_ns.to_string())
                 .unwrap_or_default();
-            format!("{path} {stamp}")
+            format!("{} {stamp}", located_text(at).unwrap_or_default())
         }
     }
 }
