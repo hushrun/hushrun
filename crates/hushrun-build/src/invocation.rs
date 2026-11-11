@@ -177,6 +177,30 @@ pub struct Package {
     pub target_dirs: Vec<String>,
 }
 
+/// What a call says about debug info, each the last one given: `-C debuginfo` (`-g` is `2`),
+/// `-C split-debuginfo` and `-C strip`. The wrapper reads them to decide whether a program gets
+/// a debug bundle (B-9).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugFlags {
+    /// `-C debuginfo`.
+    pub debuginfo: Option<String>,
+    /// `-C split-debuginfo`.
+    pub split: Option<String>,
+    /// `-C strip`.
+    pub strip: Option<String>,
+}
+
+impl DebugFlags {
+    /// Whether the compile writes debug info: a `-C debuginfo` other than `0`, `none` or a
+    /// spelling of "no". rustc's default is none.
+    pub fn any(&self) -> bool {
+        !matches!(
+            self.debuginfo.as_deref(),
+            None | Some("0" | "none" | "n" | "no" | "off" | "false")
+        )
+    }
+}
+
 /// One compiler call the wrapper handles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
@@ -196,6 +220,7 @@ pub struct Invocation {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    debug: DebugFlags,
     message_form: String,
     form: crate::messages::Form,
     cwd: String,
@@ -352,6 +377,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
+        debug: seen.debug,
         message_form,
         form,
         cwd,
@@ -458,6 +484,11 @@ impl Invocation {
     /// `-C linker-plugin-lto`, `-C embed-bitcode=yes` or compressed debug sections.
     pub fn searchable(&self) -> bool {
         self.searchable
+    }
+
+    /// What the call says about debug info (B-9).
+    pub fn debug(&self) -> &DebugFlags {
+        &self.debug
     }
 
     /// The form of the compiler's messages (`--error-format`, `--json`, `--color`,
@@ -741,6 +772,7 @@ struct Seen {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    debug: DebugFlags,
     error_format: Option<String>,
     json: Vec<String>,
     color: Option<String>,
@@ -764,6 +796,7 @@ impl Default for Seen {
             incremental: None,
             target: None,
             searchable: true,
+            debug: DebugFlags::default(),
             error_format: None,
             json: Vec::new(),
             color: None,
@@ -892,6 +925,9 @@ impl Seen {
                             self.searchable = false;
                         }
                     }
+                    "debuginfo" => self.debug.debuginfo = setting.map(str::to_string),
+                    "split-debuginfo" => self.debug.split = setting.map(str::to_string),
+                    "strip" => self.debug.strip = setting.map(str::to_string),
                     _ => {}
                 }
                 (name != "incremental").then(|| format!("-C{v}"))
@@ -930,7 +966,10 @@ impl Seen {
                 Some("--test".to_string())
             }
             Flag::Optimize => Some("-O".to_string()),
-            Flag::Debug => Some("-g".to_string()),
+            Flag::Debug => {
+                self.debug.debuginfo = Some("2".to_string());
+                Some("-g".to_string())
+            }
         };
         Ok(Token {
             span,

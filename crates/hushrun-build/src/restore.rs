@@ -303,6 +303,16 @@ impl Prepared {
         self.ready.iter().map(|file| file.temp.clone()).collect()
     }
 
+    /// Renames the first `n` of [`Prepared::temporary_files`] into place and stops, as a
+    /// process killed then would: no record is written and nothing is cleaned up.
+    #[cfg(test)]
+    pub(crate) fn place_first(&self, n: usize) -> Result<(), RestoreError> {
+        for file in self.ready.iter().take(n) {
+            file.rename(self.pid)?;
+        }
+        Ok(())
+    }
+
     /// Renames each file into place and records it as reused (B-12, B-15). On an error the
     /// files renamed so far are removed again, so the compile that follows writes every one.
     pub fn place(self) -> Result<Restored, RestoreError> {

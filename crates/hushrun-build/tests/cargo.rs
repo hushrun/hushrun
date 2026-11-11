@@ -881,3 +881,432 @@ fn a_static_library_bundled_from_a_dependencys_output_folder_is_keyed() {
     let third = entries(&session)[n..].to_vec();
     assert!(reused(&last(&third, "p", Class::Library)), "{third:#?}");
 }
+
+/// A workspace whose programs B-9 makes movable on Apple targets: `lib_a` panics three calls
+/// deep on a bad index (`lib_a/src/lib.rs:11:5`), and its unit test fails there; the bin `prog`
+/// calls it with its first argument; the bin `where` prints its package's folder, read at compile
+/// time; the integration test `t` fails inside `lib_a`; the integration test `bin` runs `prog`
+/// through `CARGO_BIN_EXE_prog` and shows what it printed.
+#[cfg(target_os = "macos")]
+const PROGRAMS: &[(&str, &str)] = &[
+    (
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"lib_a\", \"prog\"]\nresolver = \"2\"\n",
+    ),
+    (
+        "lib_a/Cargo.toml",
+        "[package]\nname = \"lib_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ndoctest = false\n",
+    ),
+    (
+        "lib_a/src/lib.rs",
+        "pub fn top(values: &[u32], index: usize) -> u32 {\n    middle(values, index)\n}\n\npub fn middle(values: &[u32], index: usize) -> u32 {\n    deep(values, index) + 1\n}\n\n#[inline(never)]\npub fn deep(values: &[u32], index: usize) -> u32 {\n    values[index]\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn fails_in_a_unit_test() {\n        super::top(&[1, 2], 9);\n    }\n}\n",
+    ),
+    (
+        "prog/Cargo.toml",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"prog\"\npath = \"src/main.rs\"\ntest = false\n\n[[bin]]\nname = \"where\"\npath = \"src/where.rs\"\ntest = false\n\n[dependencies]\nlib_a = { path = \"../lib_a\" }\n",
+    ),
+    (
+        "prog/src/main.rs",
+        "fn main() {\n    let index: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0);\n    println!(\"{}\", lib_a::top(&[10, 20, 30], index));\n}\n",
+    ),
+    (
+        "prog/src/where.rs",
+        "fn main() {\n    println!(\"{}\", env!(\"CARGO_MANIFEST_DIR\"));\n}\n",
+    ),
+    (
+        "prog/tests/t.rs",
+        "#[test]\nfn passes() {\n    assert_eq!(lib_a::top(&[1, 2], 0), 2);\n}\n\n#[test]\nfn fails_inside_lib_a() {\n    lib_a::top(&[1, 2], 9);\n}\n",
+    ),
+    (
+        "prog/tests/bin.rs",
+        "#[test]\nfn the_bin_panics() {\n    let out = std::process::Command::new(env!(\"CARGO_BIN_EXE_prog\"))\n        .arg(\"9\")\n        .env(\"RUST_BACKTRACE\", \"1\")\n        .output()\n        .unwrap();\n    panic!(\"the bin said:\\n{}\", String::from_utf8_lossy(&out.stderr));\n}\n",
+    ),
+];
+
+#[cfg(target_os = "macos")]
+impl World {
+    /// A fresh copy of [`PROGRAMS`] at `rest`.
+    fn programs(&self, rest: &str) -> PathBuf {
+        let ws = self.path(rest);
+        for (file, text) in PROGRAMS {
+            let path = ws.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        ws
+    }
+}
+
+/// Runs cargo and insists it succeeded.
+#[cfg(target_os = "macos")]
+fn cargo_ok(ws: &Path, args: &[&str], env: &[(OsString, OsString)]) -> Output {
+    let out = cargo(ws, args, env);
+    assert!(
+        out.status.success(),
+        "cargo {args:?} in {} failed:\n{}",
+        ws.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+/// The session's variables, with `CARGO_TARGET_DIR` when given.
+#[cfg(target_os = "macos")]
+fn env_with(session: &Session, target: Option<&Path>) -> Vec<(OsString, OsString)> {
+    let mut env = session.env();
+    if let Some(dir) = target {
+        env.push(("CARGO_TARGET_DIR".into(), dir.as_os_str().to_owned()));
+    }
+    env
+}
+
+/// The program `<target>/debug/deps/<name>-<16 hex digits>`.
+#[cfg(target_os = "macos")]
+fn program(target: &Path, name: &str) -> PathBuf {
+    let deps = target.join("debug/deps");
+    fs::read_dir(&deps)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            let n = p.file_name().unwrap().to_str().unwrap();
+            n.strip_prefix(&format!("{name}-"))
+                .is_some_and(|hash| hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .unwrap_or_else(|| panic!("no program {name} in {}", deps.display()))
+}
+
+/// Every file of a program's debug bundle, by its path in the bundle, with its bytes.
+#[cfg(target_os = "macos")]
+fn bundle(program: &Path) -> BTreeMap<String, Vec<u8>> {
+    let dir = PathBuf::from(format!("{}.dSYM", program.display()));
+    let files: BTreeMap<String, Vec<u8>> = walk(&dir)
+        .into_iter()
+        .map(|file| {
+            let rest = file
+                .strip_prefix(&dir)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            (rest, fs::read(&file).unwrap())
+        })
+        .collect();
+    assert!(
+        files
+            .keys()
+            .any(|k| k.starts_with("Contents/Resources/DWARF/")),
+        "no debug bundle beside {}: {:?}",
+        program.display(),
+        files.keys().collect::<Vec<_>>()
+    );
+    files
+}
+
+/// The places of the stored blocks of a crate of a class, from each `block.json`.
+#[cfg(target_os = "macos")]
+fn places(store: &Path, name: &str, class: &str) -> Vec<String> {
+    walk(&store.join("blocks"))
+        .into_iter()
+        .filter(|p| p.ends_with("block.json"))
+        .filter_map(|p| {
+            let record: serde_json::Value = serde_json::from_slice(&fs::read(p).unwrap()).unwrap();
+            let d = &record["description"];
+            (d["crate_name"] == name && d["class"] == class)
+                .then(|| d["place"].as_str().unwrap_or_default().to_string())
+        })
+        .collect()
+}
+
+/// Whether a backtrace in `text` shows `frame` with `at <place>` on the next line.
+#[cfg(target_os = "macos")]
+fn frame_at(text: &str, frame: &str, place: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    lines.windows(2).any(|pair| {
+        pair[0].trim_end().ends_with(&format!(": {frame}"))
+            && pair[1].trim().starts_with(&format!("at {place}"))
+    })
+}
+
+/// The UUIDs `dwarfdump --uuid` prints for each file, in order.
+#[cfg(target_os = "macos")]
+fn uuids(files: &[&Path]) -> Vec<String> {
+    let out = Command::new("dwarfdump")
+        .arg("--uuid")
+        .args(files)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// The checks that follow a reuse at `two` with `one` gone (B-9, B-12): every backtrace in the
+/// person's own code keeps its file and line, under `cargo test`, run directly from another
+/// folder, through `CARGO_BIN_EXE_prog` and under `cargo run`; the bundles match their
+/// programs; nothing is built again, with or without the wrapper.
+#[cfg(target_os = "macos")]
+fn lines_after_a_move(
+    w: &World,
+    session: &Session,
+    two: &Path,
+    target: &Path,
+    target_env: Option<&Path>,
+) {
+    let env = env_with(session, target_env);
+    let mut bt = env.clone();
+    bt.push(("RUST_BACKTRACE".into(), "1".into()));
+    let deep = ("lib_a::deep", "./lib_a/src/lib.rs:11:5");
+
+    // `cargo test` runs each test binary from its package folder. None is built again.
+    let before = entries(session).len();
+    for (package, which, frame) in [
+        (
+            "lib_a",
+            "--lib",
+            (
+                "lib_a::tests::fails_in_a_unit_test",
+                "./lib_a/src/lib.rs:18:9",
+            ),
+        ),
+        (
+            "prog",
+            "--test=t",
+            ("t::fails_inside_lib_a", "./prog/tests/t.rs:8:5"),
+        ),
+    ] {
+        let out = cargo(two, &["test", "-p", package, which], &bt);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "the failing test passed:\n{text}");
+        assert!(!stderr.contains("Compiling"), "{stderr}");
+        assert!(frame_at(&text, deep.0, deep.1), "{text}");
+        assert!(frame_at(&text, frame.0, frame.1), "{text}");
+    }
+    assert_eq!(entries(session).len(), before, "the wrapper ran again");
+
+    // The test binaries run directly from a folder of no checkout.
+    for (t, test) in [
+        (program(target, "lib_a"), "fails_in_a_unit_test"),
+        (program(target, "t"), "fails_inside_lib_a"),
+    ] {
+        let out = Command::new(&t)
+            .arg(test)
+            .env("RUST_BACKTRACE", "1")
+            .current_dir(w.path("somewhere-else"))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(frame_at(&text, deep.0, deep.1), "{text}");
+    }
+
+    // The bin, through the copy cargo puts at `<target>/debug/prog`.
+    let out = cargo(two, &["test", "-p", "prog", "--test", "bin"], &bt);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("the bin said:"), "{text}");
+    assert!(frame_at(&text, deep.0, deep.1), "{text}");
+    assert!(
+        frame_at(&text, "prog::main", "./prog/src/main.rs:3:"),
+        "{text}"
+    );
+    let out = cargo(
+        two,
+        &["run", "-q", "-p", "prog", "--bin", "prog", "--", "9"],
+        &bt,
+    );
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(frame_at(&text, deep.0, deep.1), "{text}");
+    assert!(
+        frame_at(&text, "prog::main", "./prog/src/main.rs:3:"),
+        "{text}"
+    );
+
+    // Each bundle is the one its program needs, for the hashed file and for cargo's copy.
+    let prog = program(target, "prog");
+    let t = program(target, "lib_a");
+    for (exe, dsym) in [
+        (t.clone(), PathBuf::from(format!("{}.dSYM", t.display()))),
+        (
+            prog.clone(),
+            PathBuf::from(format!("{}.dSYM", prog.display())),
+        ),
+        (target.join("debug/prog"), target.join("debug/prog.dSYM")),
+    ] {
+        let found = uuids(&[&exe, &dsym]);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0], found[1], "{} and its bundle", exe.display());
+    }
+
+    // Built again, through the wrapper or without it: nothing is compiled.
+    let before = entries(session).len();
+    let out = cargo_ok(two, &["test", "--no-run"], &env);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("Compiling"));
+    assert_eq!(entries(session).len(), before);
+    let plain: Vec<(OsString, OsString)> = target_env
+        .map(|dir| vec![("CARGO_TARGET_DIR".into(), dir.as_os_str().to_owned())])
+        .unwrap_or_default();
+    let out = cargo_ok(two, &["test", "--no-run"], &plain);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("Compiling"), "{stderr}");
+}
+
+/// Builds the tests at `one`, then at `two`, and checks what moved (B-9, B-10, B-12): the bin
+/// and the test binaries are reused, may move, and are `one`'s bytes, bundles included; the bin
+/// that holds its folder is built again and prints `two`'s. With `CARGO_TARGET_DIR` outside the
+/// checkouts an integration test is not reused: cargo sets `CARGO_TARGET_TMPDIR` for it, under
+/// the target folder, and B-5 keys it, so it has another key in each.
+#[cfg(target_os = "macos")]
+fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Path)>) {
+    let session = w.begin(Mode::On).unwrap();
+    let (target_one, target_two) = match targets {
+        Some((a, b)) => (a.to_path_buf(), b.to_path_buf()),
+        None => (one.join("target"), two.join("target")),
+    };
+    cargo_ok(
+        one,
+        &["test", "--no-run"],
+        &env_with(&session, targets.map(|t| t.0)),
+    );
+    let n = entries(&session).len();
+    cargo_ok(
+        two,
+        &["test", "--no-run"],
+        &env_with(&session, targets.map(|t| t.1)),
+    );
+    let second = entries(&session)[n..].to_vec();
+    let movable: &[&str] = match targets {
+        None => &["prog", "lib_a", "t"],
+        Some(_) => &["prog", "lib_a"],
+    };
+    for name in movable.iter().copied() {
+        assert_eq!(
+            last(&second, name, Class::Program).outcome,
+            Outcome::Reused,
+            "{name}: {second:#?}"
+        );
+        let places = places(&session.current().store, name, "program");
+        assert_eq!(places, ["anywhere"], "{name}");
+        let (a, b) = (program(&target_one, name), program(&target_two, name));
+        assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
+        assert_eq!(bundle(&a), bundle(&b), "{name}'s bundle");
+    }
+    let tied = last(&second, "where", Class::Program);
+    assert_eq!(tied.outcome, Outcome::BuiltAndStored, "{second:#?}");
+    assert!(!tied.found);
+    let out = cargo_ok(
+        two,
+        &["run", "-q", "-p", "prog", "--bin", "where"],
+        &env_with(&session, targets.map(|t| t.1)),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        two.join("prog").display().to_string()
+    );
+
+    // The checkout that built them is gone.
+    fs::remove_dir_all(one).unwrap();
+    if targets.is_some() {
+        fs::remove_dir_all(&target_one).unwrap();
+    }
+    lines_after_a_move(w, &session, two, &target_two, targets.map(|t| t.1));
+}
+
+// covers: B-9, B-10, B-12, B-18
+#[cfg(target_os = "macos")]
+#[test]
+fn a_program_moves_with_its_debug_bundle_and_keeps_its_lines() {
+    let w = World::new();
+    let one = w.programs("one");
+    let two = w.programs("a-second-checkout/with-a-longer-path");
+    programs_move(&w, &one, &two, None);
+}
+
+// covers: B-9, B-10, B-12, B-18
+#[cfg(target_os = "macos")]
+#[test]
+fn a_program_moves_with_its_debug_bundle_when_cargo_target_dir_is_elsewhere() {
+    let w = World::new();
+    let one = w.programs("one");
+    let two = w.programs("a-second-checkout/with-a-longer-path");
+    let target_one = w.path("targets/one");
+    let target_two = w.path("other-targets/the-second-one");
+    programs_move(&w, &one, &two, Some((&target_one, &target_two)));
+}
+
+// covers: B-9, B-10
+#[cfg(target_os = "macos")]
+#[test]
+fn two_independent_builds_at_two_paths_give_the_same_programs_and_bundles() {
+    let first = World::new();
+    let second = World::new();
+    let one = first.programs("one");
+    let two = second.programs("a-second-checkout/with-a-longer-path");
+    for (w, ws) in [(&first, &one), (&second, &two)] {
+        let session = w.begin(Mode::On).unwrap();
+        cargo_ok(ws, &["test", "--no-run"], &session.env());
+        let built = entries(&session);
+        assert_eq!(
+            last(&built, "t", Class::Program).outcome,
+            Outcome::BuiltAndStored
+        );
+    }
+    for name in ["prog", "lib_a", "t"] {
+        let (a, b) = (
+            program(&one.join("target"), name),
+            program(&two.join("target"), name),
+        );
+        assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
+        assert_eq!(bundle(&a), bundle(&b), "{name}'s bundle");
+    }
+}
+
+// covers: B-12, B-19
+#[cfg(target_os = "macos")]
+#[test]
+fn a_truncated_file_in_a_stored_bundle_gives_a_green_build() {
+    let w = World::new();
+    let one = w.programs("one");
+    let session = w.begin(Mode::On).unwrap();
+    cargo_ok(&one, &["test", "--no-run"], &session.env());
+    let store = session.current().store.clone();
+    let dwarf: Vec<PathBuf> = walk(&store.join("blocks"))
+        .into_iter()
+        .filter(|p| {
+            p.to_str()
+                .unwrap()
+                .contains(".dSYM/Contents/Resources/DWARF/")
+        })
+        .collect();
+    assert!(!dwarf.is_empty(), "no bundle in the store");
+    for file in &dwarf {
+        let mut perms = fs::metadata(file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(file, perms).unwrap();
+        fs::write(file, b"truncated").unwrap();
+    }
+    let two = w.programs("two-two");
+    let n = entries(&session).len();
+    cargo_ok(&two, &["test", "--no-run"], &session.env());
+    let second = entries(&session)[n..].to_vec();
+    assert_eq!(
+        last(&second, "t", Class::Program).outcome,
+        Outcome::BuiltAndStored,
+        "{second:#?}"
+    );
+    let t = program(&two.join("target"), "t");
+    let found = uuids(&[&t, &PathBuf::from(format!("{}.dSYM", t.display()))]);
+    assert_eq!(found[0], found[1]);
+}

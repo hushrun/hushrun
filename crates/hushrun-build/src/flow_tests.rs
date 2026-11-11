@@ -43,6 +43,9 @@ struct Plan {
     /// What the compiler prints on stdout, with `{ws}` for the working directory: a proc
     /// macro's own printing, the linker command `--print=link-args` asks for.
     stdout: Option<String>,
+    /// Write the output folder's path into the debug bundle's DWARF file, as debug info that
+    /// names a file under a root does.
+    bundle_root: bool,
 }
 
 type During = Box<dyn FnMut()>;
@@ -106,6 +109,7 @@ impl Fake {
         let mut source = String::new();
         let mut remaps = Vec::new();
         let mut externs = Vec::new();
+        let mut packed = false;
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
@@ -123,6 +127,9 @@ impl Fake {
                     let v = value();
                     if let Some(e) = v.strip_prefix("extra-filename=") {
                         extra = e.to_string();
+                    }
+                    if let Some(split) = v.strip_prefix("split-debuginfo=") {
+                        packed = split == "packed";
                     }
                 }
                 "--extern" => {
@@ -247,6 +254,28 @@ impl Fake {
         };
         if emits.iter().any(|e| e == "dep-info") {
             fs::write(out.join(format!("{stem}.d")), crate::depinfo::render(&info)).unwrap();
+        }
+        // dsymutil's bundle beside the program, as rustc writes it with packed debug info: it
+        // adds to a bundle that is there, and its relocations name the program by its path.
+        if packed && emits.iter().any(|e| e == "link") {
+            let bundle = out.join(format!("{stem}.dSYM/Contents"));
+            fs::create_dir_all(bundle.join("Resources/DWARF")).unwrap();
+            fs::create_dir_all(bundle.join("Resources/Relocations/aarch64")).unwrap();
+            fs::write(
+                bundle.join("Info.plist"),
+                format!("<plist>{stem}</plist>\n"),
+            )
+            .unwrap();
+            let mut dwarf = format!("dwarf\n{content}");
+            if plan.bundle_root {
+                dwarf.push_str(&format!("object {out_dir}/x.o\n"));
+            }
+            fs::write(bundle.join(format!("Resources/DWARF/{stem}")), dwarf).unwrap();
+            fs::write(
+                bundle.join(format!("Resources/Relocations/aarch64/{stem}.yml")),
+                format!("binary-path: '{out_dir}/{stem}'\n"),
+            )
+            .unwrap();
         }
         if plan.warn {
             lines.push(format!(
@@ -501,6 +530,17 @@ impl World {
         more: &[&str],
         change: impl FnOnce(&mut Fake),
     ) -> Result {
+        self.call_args(ws, crate_name, self.args(ws, crate_name, more), change)
+    }
+
+    /// A call with these arguments.
+    fn call_args(
+        &self,
+        ws: &Path,
+        crate_name: &str,
+        args: Vec<OsString>,
+        change: impl FnOnce(&mut Fake),
+    ) -> Result {
         let seen = Rc::new(RefCell::new(Seen::default()));
         let mut fake = Fake {
             vars: self.vars(ws, crate_name),
@@ -515,7 +555,7 @@ impl World {
         change(&mut fake);
         let before = self.session.current().entries().len();
         let mut stderr = Vec::new();
-        let code = call(&mut fake, &mut stderr, &self.args(ws, crate_name, more));
+        let code = call(&mut fake, &mut stderr, &args);
         drop(fake);
         let entries = self.session.current().entries();
         assert!(entries.len() <= before + 1, "one entry per call");
@@ -2606,4 +2646,281 @@ fn a_driver_prefix_outside_the_compilers_sysroot_is_not_stored() {
         linked_with(&w, &ws, outside),
         not_stored(NotStored::LinkInputs)
     );
+}
+
+/// The arguments of the program `a` as cargo's dev profile gives them on macOS: a bin with
+/// debug info in unpacked form; `more` at the end.
+fn program_args(w: &World, ws: &Path, more: &[&str]) -> Vec<OsString> {
+    let mut args = w.args(
+        ws,
+        "a",
+        &["-C", "debuginfo=2", "-C", "split-debuginfo=unpacked"],
+    );
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "bin".into();
+    args.extend(more.iter().map(OsString::from));
+    args
+}
+
+/// A checkout whose program `a` is linked by `tools/cc`, and whose `PATH` finds `tools/dsymutil`.
+fn program_checkout(w: &World, name: &str) -> PathBuf {
+    let ws = w.checkout(name);
+    with_tools(&ws);
+    let dsymutil = ws.join("tools/dsymutil");
+    fs::write(&dsymutil, b"dsymutil").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dsymutil, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    ws
+}
+
+/// The link line rustc prints for `a`.
+const PROGRAM_LINK: &str =
+    r#""{ws}/tools/cc" "{ws}/vendor/libfoo.a" "-o" "{ws}/target/debug/deps/a-xa""#;
+
+/// Calls the program `a` in `ws` with `more` after cargo's arguments.
+fn call_program(w: &World, ws: &Path, more: &[&str]) -> Result {
+    let tools = ws.join("tools").to_str().unwrap().to_string();
+    w.call_args(ws, "a", program_args(w, ws, more), move |fake| {
+        fake.vars.insert("PATH".into(), tools);
+    })
+}
+
+/// Every file of `a`'s bundle in `ws`, by its path in the bundle, with its bytes.
+fn bundle_of(ws: &Path) -> BTreeMap<String, Vec<u8>> {
+    let dir = ws.join("target/debug/deps/a-xa.dSYM");
+    walk(&dir)
+        .into_iter()
+        .map(|f| {
+            let rest = f.strip_prefix(&dir).unwrap().to_str().unwrap().to_string();
+            (rest, fs::read(&f).unwrap())
+        })
+        .collect()
+}
+
+fn program_plan(bundle_root: bool) -> Plan {
+    Plan {
+        stdout: Some(format!("{PROGRAM_LINK}\n")),
+        bundle_root,
+        ..Plan::default()
+    }
+}
+
+// covers: B-9, B-12, B-18
+#[test]
+fn a_programs_debug_bundle_is_stored_and_put_back_whole() {
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    // What the wrapper adds to a program's compile on an Apple target (B-9).
+    let asked = &r.seen.compiles[0];
+    let tail: Vec<&str> = asked
+        .iter()
+        .rev()
+        .take(6)
+        .rev()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            "-C",
+            "split-debuginfo=packed",
+            "-C",
+            "strip=debuginfo",
+            "-C",
+            &format!("link-arg=-Wl,-oso_prefix,{}/", one.display()),
+        ]
+    );
+    // The relocations dsymutil wrote name the program's folder: they are not kept.
+    let made = bundle_of(&one);
+    assert!(!made.keys().any(|k| k.contains("Relocations")), "{made:?}");
+    assert!(made.contains_key("Contents/Resources/DWARF/a-xa"));
+    let names: Vec<String> = walk(&w.session.current().store.join("blocks"))
+        .into_iter()
+        .filter_map(|p| {
+            let p = p.to_str().unwrap().to_string();
+            p.split_once("/files/").map(|(_, name)| name.to_string())
+        })
+        .collect();
+    assert!(
+        names.contains(&"a-xa.dSYM/Contents/Resources/DWARF/a-xa".to_string()),
+        "{names:?}"
+    );
+    assert!(names.contains(&"a-xa.dSYM/Contents/Info.plist".to_string()));
+
+    // An earlier bundle at two, with a file of its own: replaced whole.
+    let old = two.join("target/debug/deps/a-xa.dSYM/Contents/Resources");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("left-over"), b"old").unwrap();
+    let r = call_program(&w, &two, &[]);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(bundle_of(&two), made);
+    let deps = two.join("target/debug/deps");
+    let hidden: Vec<String> = fs::read_dir(&deps)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with(".hushrun-restore") || n.starts_with(".hushrun-old"))
+        .collect();
+    assert!(hidden.is_empty(), "{hidden:?}");
+    assert!(
+        !walk(&deps.join("a-xa.dSYM"))
+            .iter()
+            .any(|p| p.to_str().unwrap().contains(".hushrun"))
+    );
+
+    // A program the person strips or keeps from packing, one with no debug info, one for
+    // another target, and a library: none is changed.
+    for more in [
+        &["-C", "strip=symbols"][..],
+        &["-C", "strip=debuginfo"],
+        &["-C", "split-debuginfo=off"],
+        &["-C", "debuginfo=0"],
+        &["--target", "x86_64-unknown-linux-gnu"],
+    ] {
+        let ws = program_checkout(&w, &format!("left-{}", more[1]));
+        let r = call_program(&w, &ws, more);
+        let asked = r.seen.compiles.first().or(r.seen.execs.first()).unwrap();
+        assert!(
+            !asked
+                .iter()
+                .any(|a| a == "split-debuginfo=packed" || a.contains("oso_prefix")),
+            "{more:?}: {asked:?}"
+        );
+        assert!(!ws.join("target/debug/deps/a-xa.dSYM").exists(), "{more:?}");
+    }
+    let ws = w.checkout("library");
+    let r = w.call(&ws, "a", &["-C", "debuginfo=2"]);
+    assert!(
+        !r.seen.compiles[0]
+            .iter()
+            .any(|a| a == "split-debuginfo=packed")
+    );
+}
+
+// covers: B-10
+#[test]
+fn a_bundle_file_that_holds_a_root_ties_the_program() {
+    let w = world(Mode::On);
+    w.plan("a", program_plan(true));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    settle();
+    assert_eq!(call_program(&w, &one, &[]).outcome(), STORED);
+    let r = call_program(&w, &two, &[]);
+    assert_eq!(r.outcome(), STORED, "a bundle naming one's folder moved");
+    assert!(!r.entry.unwrap().found);
+    // Tied, it is still reused where it was built.
+    fs::remove_dir_all(one.join("target/debug/deps/a-xa.dSYM")).unwrap();
+    assert_eq!(call_program(&w, &one, &[]).outcome(), REUSED);
+    assert!(bundle_of(&one).contains_key("Contents/Resources/DWARF/a-xa"));
+}
+
+// covers: B-12, B-19
+#[test]
+fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whole() {
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    settle();
+    assert_eq!(call_program(&w, &one, &[]).outcome(), STORED);
+    let made = bundle_of(&one);
+    let json = walk(&w.session.current().store.join("blocks"))
+        .into_iter()
+        .find(|p| p.ends_with("block.json"))
+        .unwrap();
+    let hex = json
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let key = Digest::parse(&format!("sha256:{hex}")).unwrap();
+    let block = w.store().block(&key).unwrap().unwrap();
+    let description = crate::description::Description::from_value(&block.description).unwrap();
+    // A kill after each rename but the last: the bundle, then each file, then the dep-info.
+    for renamed in 0..3 {
+        let two = program_checkout(&w, &format!("two-{renamed}"));
+        let deps = two.join("target/debug/deps");
+        let tools = two.join("tools").to_str().unwrap().to_string();
+        let mut vars = w.vars(&two, "a");
+        vars.insert("PATH".into(), tools);
+        let env = crate::invocation::Env::from_vars(vars);
+        let crate::invocation::Parsed::Handled(inv) =
+            crate::invocation::parse(&program_args(&w, &two, &[]), &env, &two)
+        else {
+            panic!("not handled");
+        };
+        let roots = crate::roots::Roots::new(
+            &crate::roots::RootPaths::of(&inv),
+            &[],
+            crate::roots::resolve_on_disk,
+        )
+        .unwrap();
+        let prepared = crate::restore::Restore {
+            block: &block,
+            description: &description,
+            invocation: &inv,
+            roots: &roots,
+            start: SystemTime::now(),
+            pid: 7,
+        }
+        .prepare()
+        .unwrap();
+        let temps = prepared.temporary_files();
+        assert_eq!(temps.len(), 4, "{temps:?}");
+        assert!(
+            temps[0].to_str().unwrap().ends_with(".a-xa.dSYM"),
+            "{temps:?}"
+        );
+        prepared.place_first(renamed).unwrap();
+        // A kill now: nothing runs after this point.
+        std::mem::forget(prepared);
+        for temp in &temps[renamed..] {
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.starts_with(".hushrun") && !name.starts_with("lib"),
+                "{name}"
+            );
+        }
+        // The bundle is there whole or not at all; the dep-info cargo reads is not there; no
+        // file is recorded as reused.
+        let bundle = deps.join("a-xa.dSYM");
+        assert!(!bundle.exists() || bundle_of(&two) == made, "{renamed}");
+        assert_eq!(bundle.exists(), renamed >= 1);
+        assert!(!deps.join("a-xa.d").exists(), "{renamed}");
+        assert!(crate::sidecar::reused_in(&deps).unwrap().is_empty());
+        // Cargo asks again: the block is reused, whole.
+        let r = call_program(&w, &two, &[]);
+        assert_eq!(r.outcome(), REUSED, "{renamed}: {}", r.stderr);
+        assert_eq!(bundle_of(&two), made, "{renamed}");
+        assert_eq!(
+            fs::read(deps.join("liba-xa.rlib")).unwrap(),
+            fs::read(one.join("target/debug/deps/liba-xa.rlib")).unwrap()
+        );
+    }
+}
+
+// covers: B-18
+#[test]
+fn the_dsymutil_that_writes_a_programs_bundle_is_keyed() {
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    let three = program_checkout(&w, "three");
+    fs::write(three.join("tools/dsymutil"), b"another dsymutil").unwrap();
+    settle();
+    assert_eq!(call_program(&w, &one, &[]).outcome(), STORED);
+    assert_eq!(call_program(&w, &two, &[]).outcome(), REUSED);
+    let r = call_program(&w, &three, &[]);
+    assert_eq!(r.outcome(), STORED, "another dsymutil wrote this bundle");
+    assert!(!r.entry.unwrap().found);
 }

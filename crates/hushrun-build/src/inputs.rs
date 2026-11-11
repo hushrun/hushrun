@@ -709,17 +709,23 @@ impl Context<'_> {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
         };
+        let dsymutil = match &list.dsymutil {
+            Some(at) => Some((at, self.open_at(at)?)),
+            None => None,
+        };
         Some(Link {
             libraries,
             files,
             linker: linkers_text(
                 (&list.linker, &linker),
                 ld.as_ref().map(|(at, p)| (*at, p.as_path())),
+                dsymutil.as_ref().map(|(at, p)| (*at, p.as_path())),
             )?,
             sdk: sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
             linker_path: list.linker.clone(),
             ld_path: list.ld.clone(),
             sdk_path: list.sdk.clone(),
+            dsymutil_path: list.dsymutil.clone(),
         })
     }
 
@@ -945,11 +951,20 @@ pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
 }
 
 /// The identity of the linkers a link ran: the driver's ([`linker_text`]) and, on a line of
-/// its own, the one `-fuse-ld` named. `None` when one can't be read.
-pub fn linkers_text(driver: (&Located, &Path), ld: Option<(&Located, &Path)>) -> Option<String> {
+/// its own, the one `-fuse-ld` named; then, on a line that says what it is, the `dsymutil` that
+/// wrote a program's debug bundle (B-9). `None` when one can't be read.
+pub fn linkers_text(
+    driver: (&Located, &Path),
+    ld: Option<(&Located, &Path)>,
+    dsymutil: Option<(&Located, &Path)>,
+) -> Option<String> {
     let mut text = linker_text(driver.0, driver.1)?;
     if let Some((at, path)) = ld {
         text.push('\n');
+        text.push_str(&linker_text(at, path)?);
+    }
+    if let Some((at, path)) = dsymutil {
+        text.push_str("\ndsymutil ");
         text.push_str(&linker_text(at, path)?);
     }
     Some(text)

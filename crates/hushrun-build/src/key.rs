@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v1";
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v2";
 
 /// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v1";
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v2";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -185,7 +185,8 @@ pub struct Link {
     pub files: Vec<Read>,
     /// The linker's identity: where it lies (B-8) and, for one under a root, its SHA-256, else
     /// its size and modification time, as one text; with the same for the linker `-fuse-ld`
-    /// names, when there is one.
+    /// names, when there is one, and for the `dsymutil` that writes a program's debug bundle
+    /// (B-9), when the compile runs one.
     pub linker: String,
     /// The SDK, as one text.
     pub sdk: String,
@@ -195,6 +196,8 @@ pub struct Link {
     pub ld_path: Option<Located>,
     /// Where the SDK is. Kept for the hint; the key holds only `sdk`.
     pub sdk_path: Option<Located>,
+    /// Where the `dsymutil` the compile runs is. Kept for the hint; the key holds only `linker`.
+    pub dsymutil_path: Option<Located>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -211,6 +214,9 @@ pub struct LinkList {
     pub ld: Option<Located>,
     /// Where the SDK is, if any.
     pub sdk: Option<Located>,
+    /// Where the `dsymutil` a program's compile runs is (B-9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsymutil: Option<Located>,
 }
 
 /// Where a block may be reused (B-10).
@@ -476,6 +482,7 @@ impl ReadList {
                 linker: l.linker_path.clone(),
                 ld: l.ld_path.clone(),
                 sdk: l.sdk_path.clone(),
+                dsymutil: l.dsymutil_path.clone(),
             }),
             place: match observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
@@ -601,11 +608,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "f58311b54909be7ee1e3247e075588ed0e438ad2d4a87f930c2b400a280030f0"
+            "9716411467c5143a77058ffce0b5793dc7c1a17c0280762d0c1ffe40b7729626"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v1",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v2",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -618,7 +625,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "780ef53f6329f39c9a7f741e3dadbeb3fa623f52e9871817d9039753f393efc0"
+            "2bc376c97f4c5264beee60e6821e399679ebf4325633ab34d3e0d8350d7ea263"
         );
     }
 
@@ -716,6 +723,7 @@ mod tests {
                     linker_path: Located::Shared("/usr/bin/cc".into()),
                     ld_path: None,
                     sdk_path: None,
+                    dsymutil_path: None,
                 })
             }),
             ("a file the linker reads", |o| {
@@ -730,6 +738,7 @@ mod tests {
                     linker_path: Located::Shared("/usr/bin/cc".into()),
                     ld_path: None,
                     sdk_path: None,
+                    dsymutil_path: None,
                 })
             }),
             ("place", |o| {
@@ -759,6 +768,7 @@ mod tests {
                 linker_path: Located::Shared("/usr/bin/cc".into()),
                 ld_path: None,
                 sdk_path: None,
+                dsymutil_path: None,
             });
             o.key().unwrap()
         };
@@ -942,6 +952,7 @@ mod tests {
             linker_path: Located::Shared("/usr/bin/cc".into()),
             ld_path: Some(Located::Shared("/usr/bin/ld.lld".into())),
             sdk_path: Some(Located::Outside("/sdk".into())),
+            dsymutil_path: None,
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);
@@ -967,6 +978,7 @@ mod tests {
                 linker: Located::Shared("/usr/bin/cc".into()),
                 ld: Some(Located::Shared("/usr/bin/ld.lld".into())),
                 sdk: Some(Located::Outside("/sdk".into())),
+                dsymutil: None,
             })
         );
         assert_eq!(hint.place, PlaceKind::Tied);

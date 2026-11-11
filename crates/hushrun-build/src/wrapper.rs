@@ -149,6 +149,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         start,
         link_extra: Vec::new(),
         sysroot: None,
+        bundle: false,
     }
     .run()
 }
@@ -214,6 +215,9 @@ struct Call<'a> {
     link_extra: Vec<OsString>,
     /// The compiler's sysroot (B-17), where a link's `-B` folders must lie (B-18).
     sysroot: Option<PathBuf>,
+    /// A program that gets a debug bundle and may move (B-9): its compile is changed so, and
+    /// its block carries the bundle.
+    bundle: bool,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -393,13 +397,11 @@ impl Call<'_> {
         }
         if class != Class::Library {
             let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
-            self.link_extra = linked_args(inv, apple);
-            // Debug info packed beside the output is not something a block carries.
-            let packed = inv
-                .args()
-                .iter()
-                .any(|arg| arg.ends_with("split-debuginfo=packed"));
-            if packed {
+            self.bundle = bundled(inv, apple);
+            self.link_extra = linked_args(inv, apple, self.bundle);
+            // Debug info packed beside a proc macro or a build script, or beside a program the
+            // wrapper leaves as it is, is not something a block carries.
+            if inv.debug().split.as_deref() == Some("packed") && !self.bundle {
                 unstorable = unstorable.or(Some(NotStored::DebugFiles));
             }
         }
@@ -592,11 +594,16 @@ impl Call<'_> {
         extra.extend(self.link_extra.iter().cloned());
         let args = inv.command(&extra);
         let rustc = OsString::from(inv.rustc());
-        let before = if inv.class() == Class::Program {
+        let before = if inv.class() == Class::Program && !self.bundle {
             debug_objects(&self.out_dir(), &inv.file_stem())
         } else {
             BTreeMap::new()
         };
+        // dsymutil adds to a bundle that is there and leaves what it doesn't write: the one an
+        // earlier compile left goes first, so the bundle after this compile is all its own.
+        let stale_bundle = self.bundle
+            && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
+                .is_err();
         let compile_start = self.ports.now();
         let mut recorder = Recorder::new(&mut *self.err, inv.form().clone());
         let ran = self.ports.compile(
@@ -650,6 +657,10 @@ impl Call<'_> {
         }
 
         let mut facts = Facts::ran(Rustc::Succeeded);
+        let common = match common {
+            Ok(_) if stale_bundle => Err(NotStored::DebugFiles),
+            other => other,
+        };
         let produced = common.and_then(|common| {
             self.produced(
                 cx,
@@ -675,7 +686,9 @@ impl Call<'_> {
                     // is another file in another checkout, under the same origin (B-6).
                     let produced_by = matches!(produced.observed.place, Place::Anywhere)
                         .then_some(produced.origin);
-                    for output in &produced.outputs {
+                    // A bundle's files are a program's debug info: no dependent loads them, and
+                    // no record is written inside the bundle.
+                    for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
                         let _ = sidecar::record_block(
                             &output.path,
                             output.sha256,
@@ -946,6 +959,12 @@ impl Call<'_> {
         Path::new(self.invocation.cwd()).join(self.invocation.out_dir())
     }
 
+    /// Where rustc writes a program's debug bundle: `<output folder>/<file stem>.dSYM`.
+    fn bundle_dir(&self) -> PathBuf {
+        self.out_dir()
+            .join(bundle_name(&self.invocation.file_stem()))
+    }
+
     /// B-18: what the linker was handed, from rustc's `--print=link-args` line, with whether a
     /// file it names lies outside every root (that ties the block, B-8) and whether one changed
     /// while compiling (B-11): a date at or after `start`, or a link on the way to it that is.
@@ -1006,9 +1025,23 @@ impl Call<'_> {
             Some(path) => Some(cx.located_path(path)?),
             None => None,
         };
+        // The `dsymutil` rustc runs for a program's bundle: the first on its own `PATH` (B-9).
+        let dsymutil = match self.bundle {
+            false => None,
+            true => Some(
+                link::linker("dsymutil", self.env.get("PATH"), &cwd)
+                    .ok_or(NotStored::LinkInputs)?
+                    .path,
+            ),
+        };
+        let dsymutil_at = match &dsymutil {
+            Some(path) => Some(cx.located_path(path)?),
+            None => None,
+        };
         for (at, path) in [
             (Some(&linker_at), Some(&linker.path)),
             (ld_at.as_ref(), ld.as_ref()),
+            (dsymutil_at.as_ref(), dsymutil.as_ref()),
         ] {
             if let (Some(at), Some(path)) = (at, path) {
                 outside |= matches!(at, Located::Outside(_));
@@ -1106,12 +1139,14 @@ impl Call<'_> {
             linker: inputs::linkers_text(
                 (&linker_at, &linker.path),
                 ld_at.as_ref().zip(ld.as_deref()),
+                dsymutil_at.as_ref().zip(dsymutil.as_deref()),
             )
             .ok_or(NotStored::LinkInputs)?,
             sdk: inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
             linker_path: linker_at,
             ld_path: ld_at,
             sdk_path: sdk_at,
+            dsymutil_path: dsymutil_at,
         };
         Ok(Linked {
             link,
@@ -1120,13 +1155,17 @@ impl Call<'_> {
         })
     }
 
-    /// A program's debug objects (B-18): the `<crate><extra>.*.o` files in the output folder
-    /// the compile wrote. Debug files a block doesn't carry (`.dSYM`, `.dwp`) refuse the store.
+    /// A program's debug files (B-18): its debug bundle when it gets one (B-9), else the
+    /// `<crate><extra>.*.o` files in the output folder the compile wrote. Debug files a block
+    /// doesn't carry (a `.dSYM` the wrapper didn't ask for, `.dwp`) refuse the store.
     fn debug_outputs(
         &self,
         roots: &Roots,
         before: &BTreeMap<String, Stat>,
     ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+        if self.bundle {
+            return self.bundle_outputs(roots);
+        }
         let inv = self.invocation;
         let stem = inv.file_stem();
         let out_dir = self.out_dir();
@@ -1157,6 +1196,44 @@ impl Call<'_> {
                     path,
                     name,
                     kind: OutputKind::DebugObject,
+                    sha256,
+                    size,
+                },
+                hit.is_some(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// A program's debug bundle as outputs (B-9, B-10): every file under `<stem>.dSYM`, named
+    /// by its path from the output folder, hashed and searched for the roots like every other
+    /// output. The relocations dsymutil writes for tools that rewrite a program later
+    /// (`Contents/Resources/Relocations`) name the program by its absolute path; no debugger
+    /// reads them, and they are removed first. A bundle with no DWARF file, or holding anything
+    /// but folders and regular files, refuses the store.
+    fn bundle_outputs(&self, roots: &Roots) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+        let dir = self.bundle_dir();
+        let top = bundle_name(&self.invocation.file_stem());
+        match std::fs::remove_dir_all(dir.join(RELOCATIONS)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(NotStored::DebugFiles),
+        }
+        let mut files = Vec::new();
+        bundle_files(&dir, &top, &mut files)?;
+        let dwarf = format!("{top}/{DWARF}/");
+        if !files.iter().any(|(_, name)| name.starts_with(&dwarf)) {
+            return Err(NotStored::DebugFiles);
+        }
+        let needles = Needles::new(roots.needles());
+        let mut out = Vec::with_capacity(files.len());
+        for (path, name) in files {
+            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
+            out.push((
+                OutputFile {
+                    path,
+                    name,
+                    kind: OutputKind::DebugBundle,
                     sha256,
                     size,
                 },
@@ -1290,15 +1367,64 @@ fn crate_of_file(path: &Path) -> Option<&str> {
     Some(name.rsplit_once('-').map_or(name, |(name, _)| name))
 }
 
+/// Where dsymutil writes the relocations a later rewrite of the program needs, in a bundle.
+const RELOCATIONS: &str = "Contents/Resources/Relocations";
+/// Where the DWARF files of a bundle lie.
+const DWARF: &str = "Contents/Resources/DWARF";
+
+/// The name of a program's debug bundle: `<file stem>.dSYM`.
+fn bundle_name(stem: &str) -> String {
+    format!("{stem}.dSYM")
+}
+
+/// Whether a compile is a program that gets a debug bundle and may move (B-9): a program that
+/// links, for an Apple target, with debug info, whose own flags don't rule a bundle out. A
+/// `-C split-debuginfo=off` (no bundle wanted) or a `-C strip` other than `none` (the person
+/// strips the program themselves) leaves the program as it is, tied to its folder like before.
+/// An explicit `unpacked` can't be told from cargo's default for its dev profile on macOS, and
+/// is replaced.
+fn bundled(inv: &Invocation, apple: bool) -> bool {
+    let debug = inv.debug();
+    inv.class() == Class::Program
+        && apple
+        && inv.emits().contains(&Emit::Link)
+        && debug.any()
+        && matches!(debug.split.as_deref(), None | Some("packed" | "unpacked"))
+        && matches!(debug.strip.as_deref(), None | Some("none"))
+}
+
 /// What a linked output's compile gets besides the remaps: `--print=link-args` for its link
-/// inputs (B-18) and, on Apple targets, an install name and debug-map prefix that don't hold
-/// the folder it was linked in (B-9). Programs get neither: their debug info must work.
-fn linked_args(inv: &Invocation, apple: bool) -> Vec<OsString> {
+/// inputs (B-18) and, on Apple targets (B-9), an install name and debug-map prefix that don't
+/// hold the folder it was linked in for a proc macro and a build script, and for a program that
+/// gets a debug bundle ([`bundled`]): `-C split-debuginfo=packed`, so rustc runs dsymutil and
+/// writes `<program>.dSYM` with the DWARF of every object; `-C strip=debuginfo`, so the program
+/// keeps no debug map naming those objects by path (the bundle has what it pointed at); and
+/// `-oso_prefix` for the workspace, so the program's UUID, which the linker computes before the
+/// strip, holds no path when the target folder is inside it.
+fn linked_args(inv: &Invocation, apple: bool, bundle: bool) -> Vec<OsString> {
     let mut out = vec![OsString::from("--print=link-args")];
     if !apple {
         return out;
     }
     let class = inv.class();
+    if bundle {
+        for arg in ["split-debuginfo=packed", "strip=debuginfo"] {
+            out.push("-C".into());
+            out.push(arg.into());
+        }
+        // The linker names objects by their real path. A comma would split `-Wl,`.
+        let workspace = crate::roots::resolve_on_disk(inv.cwd()).unwrap_or(inv.cwd().to_string());
+        if !workspace.contains(',') {
+            out.push("-C".into());
+            out.push(
+                format!(
+                    "link-arg=-Wl,-oso_prefix,{}/",
+                    workspace.trim_end_matches('/')
+                )
+                .into(),
+            );
+        }
+    }
     if class == Class::ProcMacro {
         out.push("-C".into());
         out.push(
@@ -1316,6 +1442,34 @@ fn linked_args(inv: &Invocation, apple: bool) -> Vec<OsString> {
         out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
     }
     out
+}
+
+/// Collects the regular files under the bundle folder `dir`, with their names from the output
+/// folder (`top/...`), in a stable order. Anything else in it (a link, a pipe) or a name that
+/// is not UTF-8 refuses the store.
+fn bundle_files(dir: &Path, top: &str, out: &mut Vec<(PathBuf, String)>) -> Result<(), NotStored> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|_| NotStored::DebugFiles)?
+        .collect::<Result<_, _>>()
+        .map_err(|_| NotStored::DebugFiles)?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| NotStored::DebugFiles)?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|_| NotStored::DebugFiles)?;
+        let named = format!("{top}/{name}");
+        if kind.is_dir() {
+            bundle_files(&path, &named, out)?;
+        } else if kind.is_file() {
+            out.push((path, named));
+        } else {
+            return Err(NotStored::DebugFiles);
+        }
+    }
+    Ok(())
 }
 
 /// The loose objects named `<stem>.*.o` in a folder, by name, with their stats.
