@@ -225,8 +225,22 @@ fn a_machine_reads_its_own_systems_hints_or_those_counts_from_names() {
         systems(&base(Some(serde_json::json!({"go": ["1.25"]})))),
         vec![this]
     );
+    // A rule that names this system and another: this system's own lists only (S3).
+    let other = if this == Os::Linux {
+        Os::Macos
+    } else {
+        Os::Linux
+    };
+    let both = serde_json::json!({"os": [this.word(), other.word()]});
+    assert_eq!(systems(&base(Some(both))), vec![this]);
+    // A rule that names only other systems: theirs.
+    let others: Vec<Os> = [Os::Linux, Os::Macos, Os::Windows]
+        .into_iter()
+        .filter(|os| *os != this)
+        .collect();
+    let words: Vec<&str> = others.iter().map(|os| os.word()).collect();
     assert_eq!(
-        systems(&base(Some(serde_json::json!({"os": ["linux", "windows"]})))),
-        vec![Os::Linux, Os::Windows]
+        systems(&base(Some(serde_json::json!({ "os": words })))),
+        others
     );
 }

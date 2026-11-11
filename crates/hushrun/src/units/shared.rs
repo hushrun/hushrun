@@ -34,9 +34,11 @@ use crate::results::RunResult;
 /// The most lists a test file's key is computed from.
 pub const MOST_LISTS: usize = 3;
 
-/// \[C-38\] Whose hints a machine reads: those of the systems the check's `counts_from` names,
-/// one lookup each, since only those systems leave results for it (ADR 0045); else its own. None
-/// on a system that shares none. A machine always writes under its own.
+/// \[C-38\] Whose hints a machine reads: its own system's (the plan's S3), when there is no rule
+/// or the check's `counts_from` names this system among others; only when the rule names
+/// systems and this machine's isn't one of them, those systems', one lookup each, since only
+/// they leave results for the check (ADR 0045). Never one pool of several. None on a system that
+/// shares none. A machine always writes under its own.
 pub fn systems(base: &KeyBase) -> Vec<Os> {
     let Some(this) = Os::this() else {
         return Vec::new();
@@ -50,7 +52,11 @@ pub fn systems(base: &KeyBase) -> Vec<Os> {
         .flatten()
         .filter_map(|word| word.as_str().and_then(Os::from_word))
         .collect();
-    if named.is_empty() { vec![this] } else { named }
+    if named.is_empty() || named.contains(&this) {
+        vec![this]
+    } else {
+        named
+    }
 }
 
 /// \[C-38\] The sources a check's hints are addressed and keyed by: its sources set, the files
