@@ -76,6 +76,10 @@ pub struct Inputs {
     pub fuse_ld: Option<String>,
     /// The C driver's program folders (`-B x`, `-Bx`), searched first for the linker.
     pub prefixes: Vec<PathBuf>,
+    /// Every other argument that may name a file (anything not an option, and not the value of
+    /// one that names an output), joined to the working directory: the caller keys each that is
+    /// an existing regular file it didn't key already (B-18).
+    pub paths: Vec<PathBuf>,
 }
 
 /// A file an option names for the linker to read.
@@ -103,6 +107,7 @@ const FILE_OPTIONS: &[(&str, bool)] = &[
     ("-order_file", false),
     ("-filelist", false),
     ("-alias_list", false),
+    ("-bundle_loader", false),
 ];
 
 /// Options whose third value is a file whose bytes go into the output: ld64's
@@ -398,6 +403,17 @@ impl LinkArgs {
                 });
                 continue;
             }
+            // ld64's `-dylib_file install_name:file`: the file after the colon.
+            if token == "-dylib_file" {
+                if let Some((_, file)) = next.and_then(|value| value.split_once(':')) {
+                    inputs.files.push(FileArg {
+                        value: file.to_owned(),
+                        script: false,
+                    });
+                }
+                i += 1;
+                continue;
+            }
             if SECTION_FILE_OPTIONS.contains(&token) {
                 if let Some(file) = tokens.get(i + 2) {
                     inputs.files.push(FileArg {
@@ -432,6 +448,7 @@ impl LinkArgs {
             if token.starts_with('-') || token.is_empty() {
                 continue;
             }
+            push_once(&mut inputs.paths, cwd.join(token));
             match kind_of(token) {
                 Some(Kind::Library) => push_once(&mut inputs.libraries, cwd.join(token)),
                 Some(Kind::Object) => push_once(&mut inputs.objects, cwd.join(token)),
@@ -948,6 +965,20 @@ mod tests {
         assert!(libraries.contains(&PathBuf::from("/w/out/libbar.a")));
         assert!(libraries.contains(&PathBuf::from("/fw/Sec.framework/Sec")));
         assert_eq!(libraries.len(), 6 + 1 + 2);
+
+        let mac = r#""cc" "-Wl,-bundle_loader,/w/host" "-Wl,-dylib_file,@rpath/libq.dylib:/w/q/libq.dylib" "obj.o" "data.bin" "-arch" "arm64" "-o" "/w/out/app""#;
+        let inputs = parse(mac).unwrap().inputs(Path::new("/w"));
+        let files: Vec<&str> = inputs.files.iter().map(|f| f.value.as_str()).collect();
+        assert_eq!(files, ["/w/host", "/w/q/libq.dylib"]);
+        assert!(inputs.libraries.is_empty(), "{:?}", inputs.libraries);
+        assert_eq!(
+            inputs.paths,
+            [
+                PathBuf::from("/w/obj.o"),
+                PathBuf::from("/w/data.bin"),
+                PathBuf::from("/w/arm64"),
+            ]
+        );
 
         assert!(script_names_files(b"MEMORY {}\nINCLUDE memory.x\n"));
         assert!(script_names_files(b"GROUP ( libc.so.6 )"));

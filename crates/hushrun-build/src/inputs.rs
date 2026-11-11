@@ -15,16 +15,16 @@ use hushrun_core::Digest;
 use hushrun_digest::cache::Stat;
 
 use crate::depinfo::{self, DepInfo};
-use crate::invocation::{Env, Invocation, NativeKind};
+use crate::invocation::{Env, Invocation, NativeKind, SearchKind};
 use crate::key::{
-    Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, Observed, Place,
-    PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
+    Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, NativeDir, Observed,
+    Place, PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
 };
 use crate::known::{self, Where};
 use crate::model::{Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
-use crate::{link, regular, shape, sidecar};
+use crate::{link, memo, regular, shape, sidecar};
 
 /// What every gathering needs: the call, its roots and variables, and the build script's
 /// saved output when it has one.
@@ -39,6 +39,9 @@ pub struct Context<'a> {
     pub step: Digest,
     /// What the build script printed, when the package has one (`OUT_DIR` is set).
     pub script: Option<&'a Script>,
+    /// The run's session folder, where digests of files in folders the wrapper doesn't own are
+    /// remembered for the run ([`crate::memo`]); `None` hashes them each time.
+    pub run_memo: Option<&'a Path>,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -138,6 +141,8 @@ pub struct Common {
     pub externs: Vec<ExternInput>,
     /// Each place a library named with `-l` may be in the `-L` folders (B-6).
     pub native: Vec<Read>,
+    /// Every `-L native=`, `all=` and bare folder: its names and static libraries (B-6).
+    pub native_dirs: Vec<NativeDir>,
     /// Every file under `OUT_DIR`, when it is set.
     pub generated: Option<Vec<Generated>>,
     /// What the build script declared and the known macros read.
@@ -287,9 +292,11 @@ impl Context<'_> {
         let mut outside = false;
         let declared = self.declared(&mut watched, &mut outside)?;
         let native = self.native(generated.is_some(), &mut watched, &mut outside)?;
+        let native_dirs = self.native_dirs(generated.is_some(), &mut watched)?;
         Ok(Common {
             externs: self.externs()?,
             native,
+            native_dirs,
             generated,
             declared,
             outside,
@@ -477,6 +484,79 @@ impl Context<'_> {
         Ok(out)
     }
 
+    /// B-6's `native_dirs`: each `-L native=`, `all=` and bare folder, by where it lies, the
+    /// names of its entries, and the bytes of each static library directly in it (`*.a`,
+    /// `*.lib`), which a `#[link(kind = "static")]` in the source would bundle. These are
+    /// usually other packages' build-script outputs: each is a root of its own (B-8) and no
+    /// record is written there; digests are remembered for the run instead ([`crate::memo`]).
+    ///
+    /// Cost: one `readdir` per folder, and per static library one `stat` and a small read once
+    /// it was hashed in this run.
+    fn native_dirs(
+        &self,
+        generated: bool,
+        watched: &mut Vec<Watched>,
+    ) -> Result<Vec<NativeDir>, NotStored> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for search in self.invocation.search_paths() {
+            if !matches!(search.kind, SearchKind::Native | SearchKind::All) {
+                continue;
+            }
+            let dir = self.absolute(&search.path);
+            let at = self.located(&dir)?;
+            // The package's own output is in `generated` already, names and bytes.
+            let covered =
+                generated && matches!(&at, Located::Rooted(r) if r.root == RootName::ScriptOut);
+            if covered || !seen.insert(at.clone()) {
+                continue;
+            }
+            let names = match shape::names(&dir) {
+                Ok(names) => Some(names),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                Err(_) => return Err(NotStored::Hash),
+            };
+            watched.push(Watched {
+                stat: fs::metadata(&dir).ok().map(|m| Stat::of(&m)),
+                path: dir.clone(),
+                follow: true,
+            });
+            let mut archives = Vec::new();
+            for name in names.iter().flatten() {
+                if !(name.ends_with(".a") || name.ends_with(".lib")) {
+                    continue;
+                }
+                let path = dir.join(name);
+                if fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                let (sha, stat) =
+                    memo::digest(self.run_memo, &path).map_err(|err| hash_error(&err))?;
+                watched.push(Watched {
+                    path,
+                    stat: Some(stat),
+                    follow: true,
+                });
+                archives.push((name.clone(), sha));
+            }
+            out.push(NativeDir {
+                dir: at,
+                names,
+                archives,
+            });
+        }
+        Ok(out)
+    }
+
+    /// A file's SHA-256: through its record where it lies in a folder the wrapper writes
+    /// records in (an output folder), else remembered for the run ([`crate::memo`]).
+    pub fn digest(&self, path: &Path) -> io::Result<Digest> {
+        if in_record_folder(path) {
+            return sidecar::lookup(path).map(|known| known.sha256);
+        }
+        memo::digest(self.run_memo, path).map(|(sha, _)| sha)
+    }
+
     /// One place a file may be, as the key holds it: where it lies, and its content (through
     /// the record where one exists) or absent; with the stat of what it points at for B-11 and
     /// whether it lies outside every root (B-8).
@@ -487,7 +567,7 @@ impl Context<'_> {
             Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
             Err(_) => return Err(NotStored::Hash),
             Ok(_) => {
-                let sha = library_digest(path).map_err(|err| hash_error(&err))?;
+                let sha = self.digest(path).map_err(|err| hash_error(&err))?;
                 let meta = fs::metadata(path).map_err(|err| hash_error(&err))?;
                 (ReadState::Present(sha), Some(Stat::of(&meta)))
             }
@@ -502,7 +582,7 @@ impl Context<'_> {
         let state = match fs::symlink_metadata(&path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => ReadState::Absent,
             Err(_) => return None,
-            Ok(_) => ReadState::Present(library_digest(&path).ok()?),
+            Ok(_) => ReadState::Present(self.digest(&path).ok()?),
         };
         let stat = match state {
             ReadState::Absent => None,
@@ -584,6 +664,7 @@ impl Context<'_> {
             env,
             externs: common.externs.clone(),
             native: common.native.clone(),
+            native_dirs: common.native_dirs.clone(),
             shape: shapes,
             generated: common.generated.clone(),
             declared: common.declared.clone(),
@@ -601,7 +682,7 @@ impl Context<'_> {
         let mut libraries = Vec::with_capacity(list.libraries.len());
         for at in &list.libraries {
             let path = self.open_at(at)?;
-            let sha256 = library_digest(&path).ok()?;
+            let sha256 = self.digest(&path).ok()?;
             watched.push(Watched {
                 stat: Some(Stat::of(&fs::metadata(&path).ok()?)),
                 path,
@@ -726,6 +807,7 @@ impl Context<'_> {
                 env,
                 externs: common.externs.clone(),
                 native: common.native.clone(),
+                native_dirs: common.native_dirs.clone(),
                 shape: shapes,
                 generated: common.generated.clone(),
                 declared: common.declared.clone(),
@@ -837,16 +919,10 @@ fn walk(dir: &Path, skip: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// A library handed to the linker, by content: through its record when it lies in a folder
-/// the wrapper writes records in, else read.
-pub fn library_digest(path: &Path) -> io::Result<Digest> {
-    let in_target = path
-        .parent()
-        .is_some_and(|dir| dir.join(sidecar::DIR).is_dir());
-    if in_target {
-        return sidecar::lookup(path).map(|known| known.sha256);
-    }
-    hash_steady(path).map(|(sha, _)| sha)
+/// Whether `path` lies in a folder the wrapper writes records in: an output folder.
+fn in_record_folder(path: &Path) -> bool {
+    path.parent()
+        .is_some_and(|dir| dir.join(sidecar::DIR).is_dir())
 }
 
 /// Where a place lies, as one text for a key.

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v0";
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v1";
 
 /// The schema of the second key.
 pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v1";
@@ -144,6 +144,18 @@ pub struct Generated {
     pub sha256: Digest,
 }
 
+/// A `-L native=`, `-L all=` or bare `-L` folder (B-6): a `#[link(kind = "static")]` in the
+/// source bundles a static library found there into the crate, and the dep-info never lists it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NativeDir {
+    /// The folder.
+    pub dir: Located,
+    /// The names of its entries; `None` when it doesn't exist.
+    pub names: Option<Vec<String>>,
+    /// Each static library directly in it (`*.a`, `*.lib`), by name and SHA-256.
+    pub archives: Vec<(String, Digest)>,
+}
+
 /// What the build script declared, and what macros known to read unlisted files read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declared {
@@ -225,6 +237,8 @@ pub struct Observed {
     /// Each place a native library named with `-l` may be in the `-L` folders, present or
     /// absent (B-6).
     pub native: Vec<Read>,
+    /// Every `-L native=`, `all=` and bare folder: its names and its static libraries (B-6).
+    pub native_dirs: Vec<NativeDir>,
     /// Every folder that directly holds a read file.
     pub shape: Vec<Shape>,
     /// Every file under `OUT_DIR`; `None` when the package has no build script.
@@ -248,6 +262,7 @@ impl Observed {
                 (e.name.clone(), e.options.clone())
             })?,
             native: normalize(&self.native, "native", |r| r.at.clone())?,
+            native_dirs: normalize(&self.native_dirs, "native folders", |d| d.dir.clone())?,
             shape: normalize_shape(&self.shape)?,
             generated: self
                 .generated
@@ -302,6 +317,7 @@ struct BlockBody {
     env: Vec<EnvRead>,
     externs: Vec<ExternInput>,
     native: Vec<Read>,
+    native_dirs: Vec<NativeDir>,
     shape: Vec<Shape>,
     generated: Option<Vec<Generated>>,
     declared: Option<DeclaredBody>,
@@ -552,6 +568,11 @@ mod tests {
                 at: at(RootName::Workspace, "vendor/libfoo.a"),
                 state: ReadState::Present(d(10)),
             }],
+            native_dirs: vec![NativeDir {
+                dir: at(RootName::Native(3), ""),
+                names: Some(vec!["libx.a".into(), "x.h".into()]),
+                archives: vec![("libx.a".into(), d(11))],
+            }],
             shape: vec![Shape {
                 dir: at(RootName::Package, "src"),
                 names: vec!["lib.rs".into(), "util.rs".into()],
@@ -580,11 +601,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "c415cdb42470252d283dd318f36818ff073659c2acab0ac0b2a2e87b33362b90"
+            "f58311b54909be7ee1e3247e075588ed0e438ad2d4a87f930c2b400a280030f0"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v0",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v1",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -597,7 +618,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "d0c79865bcf60410f2c666d292027c80bd4f86706518862dfcba71e9e9e9734e"
+            "780ef53f6329f39c9a7f741e3dadbeb3fa623f52e9871817d9039753f393efc0"
         );
     }
 
@@ -659,6 +680,17 @@ mod tests {
             ("a native library gone", |o| {
                 o.native[0].state = ReadState::Absent
             }),
+            ("a static library in a native folder", |o| {
+                o.native_dirs[0].archives[0].1 = d(99)
+            }),
+            ("a name in a native folder", |o| {
+                o.native_dirs[0]
+                    .names
+                    .as_mut()
+                    .unwrap()
+                    .push("liby.a".into())
+            }),
+            ("a native folder gone", |o| o.native_dirs[0].names = None),
             ("an added shape name", |o| {
                 o.shape[0].names.push("new.rs".into())
             }),

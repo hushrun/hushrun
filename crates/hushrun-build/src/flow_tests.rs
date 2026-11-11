@@ -2101,6 +2101,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             env: &env,
             step,
             script: None,
+            run_memo: None,
         };
         let common = cx.common().unwrap();
         hints
@@ -2332,4 +2333,171 @@ fn a_linker_outside_every_root_ties_the_block() {
     // In its own checkout it is reused.
     fs::remove_file(one.join("target/debug/deps/liba-xa.rlib")).unwrap();
     assert_eq!(run(&one), REUSED);
+}
+
+// covers: B-6, B-8
+#[test]
+fn a_native_folder_is_an_input_and_a_root_of_its_own() {
+    // Another package's build-script output: `#[link(name = "x", kind = "static")]` in the
+    // source bundles `libx.a` from it, and the dep-info never says so.
+    let native_in = |ws: &Path| ws.join("target/debug/build/z-1/out");
+    let setup = |w: &World, name: &str, native: &dyn Fn(&Path) -> PathBuf, bytes: &[u8]| {
+        let ws = w.checkout(name);
+        let dir = native(&ws);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("libx.a"), bytes).unwrap();
+        fs::write(dir.join("x.h"), "").unwrap();
+        let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
+        (ws, format!("native={dir}"), PathBuf::from(dir))
+    };
+    let run = |w: &World, (ws, native, _): &(PathBuf, String, PathBuf)| {
+        settle();
+        w.call(ws, "a", &["-L", native]).outcome()
+    };
+    let w = world(Mode::On);
+    let one = setup(&w, "one", &native_in, b"x one");
+    assert_eq!(run(&w, &one), STORED);
+    assert!(
+        !one.2.join(crate::sidecar::DIR).exists(),
+        "a record in another package's folder"
+    );
+    assert_eq!(
+        run(&w, &setup(&w, "two-longer", &native_in, b"x one")),
+        REUSED
+    );
+    assert_eq!(
+        run(&w, &setup(&w, "three", &native_in, b"x two")),
+        STORED,
+        "a static library changed"
+    );
+    let four = setup(&w, "four", &native_in, b"x one");
+    fs::write(four.2.join("liby.a"), b"y").unwrap();
+    assert_eq!(run(&w, &four), STORED, "a static library appeared");
+    let five = setup(&w, "five", &native_in, b"x one");
+    fs::write(five.2.join("notes.txt"), b"").unwrap();
+    assert_eq!(run(&w, &five), STORED, "the folder's names changed");
+
+    // A target folder outside the workspace: the folder is a root of its own, named by its
+    // place among the `-L` flags, so another checkout's folder of the same contents reuses.
+    let w = world(Mode::On);
+    let dir = w.dir.path().to_path_buf();
+    let outside = move |ws: &Path| {
+        dir.join("targets")
+            .join(ws.file_name().unwrap())
+            .join("debug/build/z-1/out")
+    };
+    assert_eq!(run(&w, &setup(&w, "one", &outside, b"x one")), STORED);
+    assert_eq!(
+        run(&w, &setup(&w, "two-longer", &outside, b"x one")),
+        REUSED
+    );
+    assert_eq!(run(&w, &setup(&w, "three", &outside, b"x two")), STORED);
+}
+
+// covers: B-11
+#[test]
+fn a_native_library_replaced_during_the_compile_is_not_stored() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let dir = ws.join("target/debug/build/z-1/out");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("libx.a"), b"x one").unwrap();
+    settle();
+    let native = format!("native={}", dir.display());
+    let lib = dir.join("libx.a");
+    let old = fs::metadata(&lib).unwrap().modified().unwrap();
+    let r = w.call_with(&ws, "a", &["-L", &native], move |fake| {
+        fake.during = Some(Box::new(move || {
+            let temp = lib.with_extension("new");
+            fs::write(&temp, b"x two").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&temp)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            fs::rename(&temp, &lib).unwrap();
+        }));
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed));
+    assert_eq!(w.blocks(), 0);
+}
+
+/// The outcome of a proc macro whose compile printed `line` as its link line.
+fn linked_with(w: &World, ws: &Path, line: &str) -> Outcome {
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let mut fake = Fake {
+        vars: w.vars(ws, "a"),
+        cwd: ws.to_path_buf(),
+        plans: w.plans.clone(),
+        during: None,
+        seen: Rc::default(),
+        version_fails: false,
+        audit: false,
+        on_found: RefCell::new(None),
+    };
+    call(&mut fake, &mut Vec::new(), &args);
+    w.session.current().entries().last().unwrap().outcome
+}
+
+// covers: B-6, B-18
+#[test]
+fn every_file_the_link_line_names_is_keyed() {
+    let line = r#""{ws}/tools/cc" "{ws}/extra/glue.o" "{ws}/extra/blob.bin" "-Wl,-bundle_loader,{ws}/extra/host" "-Wl,-dylib_file,@rpath/libq.dylib:{ws}/extra/libq.dylib" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let setup = |w: &World, name: &str| {
+        let ws = w.checkout(name);
+        with_tools(&ws);
+        fs::create_dir_all(ws.join("extra")).unwrap();
+        for file in ["glue.o", "blob.bin", "host", "libq.dylib"] {
+            fs::write(ws.join("extra").join(file), file).unwrap();
+        }
+        ws
+    };
+    let w = world(Mode::On);
+    assert_eq!(linked_with(&w, &setup(&w, "one"), line), STORED);
+    assert_eq!(linked_with(&w, &setup(&w, "two-longer"), line), REUSED);
+    for file in ["glue.o", "blob.bin", "host", "libq.dylib"] {
+        let ws = setup(&w, &format!("changed-{file}"));
+        fs::write(ws.join("extra").join(file), "other bytes").unwrap();
+        assert_eq!(linked_with(&w, &ws, line), STORED, "{file} changed");
+    }
+}
+
+// covers: B-18
+#[test]
+fn a_driver_prefix_outside_the_compilers_sysroot_is_not_stored() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let sysroot_bin = w
+        .rustc
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("lib/rustlib/x/bin/gcc-ld");
+    fs::create_dir_all(&sysroot_bin).unwrap();
+    let inside = format!(
+        r#""{{ws}}/tools/cc" "-B{}" "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#,
+        sysroot_bin.display()
+    );
+    assert_eq!(linked_with(&w, &ws, &inside), STORED);
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let outside = r#""{ws}/tools/cc" "-B{ws}/tools" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    assert_eq!(
+        linked_with(&w, &ws, outside),
+        not_stored(NotStored::LinkInputs)
+    );
 }

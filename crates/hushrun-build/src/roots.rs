@@ -3,7 +3,8 @@
 //!
 //! A root is a folder a compile's paths start from: the workspace (rustc's working directory),
 //! the package (`CARGO_MANIFEST_DIR`), the build script's output (`OUT_DIR`), the output folder
-//! (`--out-dir`) and each `-L dependency=` folder. Each has a given form, as cargo wrote it, and
+//! (`--out-dir`), each `-L dependency=` folder and each `-L native=`, `all=` or bare folder that
+//! is not under a shared folder. Each has a given form, as cargo wrote it, and
 //! a resolved form, with symlinks resolved (`/tmp` is `/private/tmp` on macOS, and some macros
 //! canonicalize). A path under either form is recorded as the root's name and the rest.
 //!
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::invocation::Invocation;
+use crate::invocation::{Invocation, SearchKind};
 use crate::model::{Located, RootName, Rooted};
 
 /// What a placeholder starts with. A placeholder is `{hushrun:<root name>}`; `{hushrun:}` is
@@ -33,6 +34,7 @@ pub fn stand_in(root: RootName, package_id: &str) -> String {
         RootName::ScriptOut => format!("/hushrun/out/{package_id}"),
         RootName::OutDir => "/hushrun/out-dir".to_string(),
         RootName::Deps(i) => format!("/hushrun/dependency/{i}"),
+        RootName::Native(i) => format!("/hushrun/native/{i}"),
     }
 }
 
@@ -48,6 +50,9 @@ pub enum RootsError {
     /// More `-L dependency=` folders than a root name can number.
     #[error("more than 256 dependency folders")]
     TooManyDeps,
+    /// A native folder whose place among the `-L` flags a root name can't number.
+    #[error("a native folder after the 256th -L flag")]
+    TooManySearchFolders,
     /// A placeholder names a root this call doesn't have.
     #[error("{0:?} names no root of this call")]
     UnknownRoot(String),
@@ -69,6 +74,9 @@ pub struct RootPaths {
     pub out_dir: String,
     /// The `-L dependency=` folders, in order.
     pub deps: Vec<String>,
+    /// The `-L native=`, `-L all=` and bare `-L` folders, each with its place among all the
+    /// `-L` flags.
+    pub native: Vec<(usize, String)>,
     /// The package's `name-version`, for the stand-ins.
     pub package_id: String,
 }
@@ -88,6 +96,13 @@ impl RootPaths {
             script_out: package.out_dir.clone(),
             out_dir: invocation.out_dir().to_string(),
             deps: invocation.dependency_dirs().map(str::to_string).collect(),
+            native: invocation
+                .search_paths()
+                .iter()
+                .enumerate()
+                .filter(|(_, search)| matches!(search.kind, SearchKind::Native | SearchKind::All))
+                .map(|(i, search)| (i, search.path.clone()))
+                .collect(),
             package_id,
         }
     }
@@ -182,11 +197,20 @@ impl Roots {
             let i = u8::try_from(i).map_err(|_| RootsError::TooManyDeps)?;
             candidates.push((RootName::Deps(i), dir));
         }
+        for (i, dir) in &paths.native {
+            let i = u8::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
+            candidates.push((RootName::Native(i), dir));
+        }
 
         let mut roots = Vec::new();
         for (name, path) in candidates {
             let (given, resolved) = both(path)?;
-            let movable = matches!(name, RootName::Workspace | RootName::Package);
+            // A system library folder (`-L native=/usr/lib`) is the same for every checkout:
+            // not a root, or every output naming it would be tied.
+            let movable = matches!(
+                name,
+                RootName::Workspace | RootName::Package | RootName::Native(_)
+            );
             if movable && (is_shared(&given) || is_shared(&resolved)) {
                 continue;
             }
@@ -428,10 +452,12 @@ fn precedence(name: RootName) -> (u8, u16) {
     match name {
         RootName::Workspace => (0, 0),
         RootName::Package => (1, 0),
-        // The first dependency folder wins over a later one with the same text.
-        RootName::Deps(i) => (2, 255 - u16::from(i)),
-        RootName::OutDir => (3, 0),
-        RootName::ScriptOut => (4, 0),
+        // The first folder of a kind wins over a later one with the same text.
+        RootName::Native(i) => (2, 255 - u16::from(i)),
+        RootName::Deps(i) => (3, 255 - u16::from(i)),
+        RootName::OutDir => (4, 0),
+        // A package's own output named as a native folder too is its output (B-6 `generated`).
+        RootName::ScriptOut => (5, 0),
     }
 }
 
@@ -499,6 +525,7 @@ mod tests {
                 format!("{ws}/target/debug/deps"),
                 format!("{ws}/vendor/deps"),
             ],
+            native: vec![],
             package_id: "app-0.1.0".to_string(),
         }
     }
@@ -637,6 +664,7 @@ mod tests {
             script_out: Some("/w/ws/target/debug/build/serde-1/out".into()),
             out_dir: "/w/ws/target/debug/deps".into(),
             deps: vec!["/w/ws/target/debug/deps".into()],
+            native: vec![],
             package_id: "serde-1.0.0".into(),
         };
         let roots = Roots::new(&paths, &shared(), |_| None).unwrap();
@@ -928,6 +956,48 @@ mod tests {
         assert_eq!(tied, roots("/w/ws").tied());
     }
 
+    // covers: B-6, B-8
+    #[test]
+    fn a_native_folder_is_a_root_named_by_its_place_unless_it_is_shared() {
+        let p = RootPaths {
+            native: vec![
+                (2, "/elsewhere/target/debug/build/z-1/out".into()),
+                (3, "/usr/lib".into()),
+                (4, "/w/ws/target/debug/build/app-1/out".into()),
+            ],
+            ..paths("/w/ws")
+        };
+        let roots = Roots::new(&p, &shared(), |_| None).unwrap();
+        assert_eq!(
+            roots.locate("/elsewhere/target/debug/build/z-1/out/libz.a"),
+            rooted(RootName::Native(2), "libz.a")
+        );
+        assert_eq!(
+            roots.to_placeholders("native=/elsewhere/target/debug/build/z-1/out"),
+            "native={hushrun:native-2}"
+        );
+        // A system folder stays shared; the package's own output stays its output.
+        assert!(!roots.has(RootName::Native(3)));
+        assert_eq!(
+            roots.locate("/usr/lib/libz.a"),
+            Located::Shared("/usr/lib/libz.a".into())
+        );
+        assert_eq!(
+            roots.locate("/w/ws/target/debug/build/app-1/out/libapp.a"),
+            rooted(RootName::ScriptOut, "libapp.a")
+        );
+        assert!(roots.tied().contains(&(
+            RootName::Native(2),
+            "/elsewhere/target/debug/build/z-1/out".into()
+        )));
+        let mut far = paths("/w/ws");
+        far.native = vec![(300, "/x".into())];
+        assert_eq!(
+            Roots::new(&far, &[], |_| None),
+            Err(RootsError::TooManySearchFolders)
+        );
+    }
+
     #[test]
     fn bad_roots_are_errors() {
         let mut p = paths("/w/ws");
@@ -971,6 +1041,7 @@ mod tests {
             script_out: None,
             out_dir: format!("{link}/target"),
             deps: vec![],
+            native: vec![],
             package_id: "x-1".into(),
         };
         let roots = Roots::new(&p, &[], resolve_on_disk).unwrap();

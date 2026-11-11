@@ -148,6 +148,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         env: &env,
         start,
         link_extra: Vec::new(),
+        sysroot: None,
     }
     .run()
 }
@@ -211,6 +212,8 @@ struct Call<'a> {
     start: SystemTime,
     /// What a linked output's compile gets besides the remaps (B-9, B-18).
     link_extra: Vec<OsString>,
+    /// The compiler's sysroot (B-17), where a link's `-B` folders must lie (B-18).
+    sysroot: Option<PathBuf>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -346,6 +349,7 @@ impl Call<'_> {
         let Ok(identity) = identity else {
             return self.pass(PassedThrough::Compiler);
         };
+        self.sysroot = identity.sysroot.clone();
         // A target that is not one of the compiler's own is a file rustc loads (B-4).
         if inv
             .target()
@@ -412,6 +416,7 @@ impl Call<'_> {
             env: self.env,
             step,
             script: script.as_ref(),
+            run_memo: Some(&self.current.folder),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -910,6 +915,20 @@ impl Call<'_> {
         Ok(true)
     }
 
+    /// Whether `dir` lies under the compiler's sysroot, in either form.
+    fn in_sysroot(&self, dir: &Path) -> bool {
+        let Some(sysroot) = &self.sysroot else {
+            return false;
+        };
+        if dir.starts_with(sysroot) {
+            return true;
+        }
+        match (std::fs::canonicalize(dir), std::fs::canonicalize(sysroot)) {
+            (Ok(dir), Ok(sysroot)) => dir.starts_with(sysroot),
+            _ => false,
+        }
+    }
+
     /// The output folder as an absolute path.
     fn out_dir(&self) -> PathBuf {
         Path::new(self.invocation.cwd()).join(self.invocation.out_dir())
@@ -934,6 +953,13 @@ impl Call<'_> {
         // Arguments hidden in a file can't be keyed.
         if !inputs.response_files.is_empty() {
             return Err(NotStored::LinkInputs);
+        }
+        // A driver folder (`-B`) is searched for programs the driver runs: only the compiler's
+        // own (rustc's `gcc-ld`) is covered by its identity (B-17, B-18).
+        for prefix in &inputs.prefixes {
+            if !self.in_sysroot(prefix) {
+                return Err(NotStored::LinkInputs);
+            }
         }
         let path_var = args
             .set_var("PATH")
@@ -982,11 +1008,14 @@ impl Call<'_> {
         // Libraries named with `-l` found through `-L` and `-F`, and the files options name
         // (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
         let mut files = Vec::new();
+        let mut keyed: std::collections::BTreeSet<PathBuf> =
+            inputs.libraries.iter().cloned().collect();
         for place in link::library_places(&inputs) {
             let (read, stat, is_outside) = cx.place(&place)?;
             outside |= is_outside;
             changed |= stat.is_some() && moved(&place, stat.as_ref());
             files.push(read);
+            keyed.insert(place);
         }
         for (places, script) in link::file_places(&inputs, &cwd) {
             // rustc's own symbol list, gone after the link: it comes from the compile itself.
@@ -1009,17 +1038,50 @@ impl Call<'_> {
                 }
                 outside |= is_outside;
                 files.push(read);
+                keyed.insert(place.clone());
             }
             // A file the linker read that is gone can't be keyed.
             if !found {
                 return Err(NotStored::LinkInputs);
             }
         }
+        // Any other argument that is the path of an existing regular file (an object a
+        // `link-arg` names, a file an option this list doesn't know names) is an input too, but
+        // the compile's own outputs and rustc's own temporary files (B-18). Cost: one stat per
+        // argument that is not an option.
+        let out_dir = self.out_dir();
+        let stem = self.invocation.file_stem();
+        for path in &inputs.paths {
+            let own_output = path.parent() == Some(out_dir.as_path())
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(&stem));
+            if keyed.contains(path) || link::in_rustc_temp(path) || own_output {
+                continue;
+            }
+            let meta = match std::fs::metadata(path) {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(NotStored::LinkInputs),
+            };
+            if meta.is_dir() {
+                continue;
+            }
+            if !crate::regular::is_regular(&meta) {
+                return Err(NotStored::NotAFile);
+            }
+            let (read, stat, is_outside) = cx.place(path)?;
+            outside |= is_outside;
+            changed |= moved(path, stat.as_ref());
+            files.push(read);
+            keyed.insert(path.clone());
+        }
         let mut libraries = Vec::with_capacity(inputs.libraries.len());
         for library in &inputs.libraries {
             let at = cx.located_path(library)?;
             outside |= matches!(at, Located::Outside(_));
-            let sha256 = inputs::library_digest(library).map_err(|_| NotStored::LinkInputs)?;
+            let sha256 = cx.digest(library).map_err(|_| NotStored::LinkInputs)?;
             let stat = std::fs::metadata(library)
                 .map(|m| Stat::of(&m))
                 .map_err(|_| NotStored::LinkInputs)?;

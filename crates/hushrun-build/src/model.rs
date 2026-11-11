@@ -376,11 +376,14 @@ pub enum RootName {
     OutDir,
     /// The i-th `-L dependency=` folder, counted from 0.
     Deps(u8),
+    /// A `-L native=`, `-L all=` or bare `-L` folder, by its place among all the `-L` flags,
+    /// counted from 0: usually another package's build-script output (B-6, B-8).
+    Native(u8),
 }
 
 impl RootName {
     /// The name as records and placeholders write it: `workspace`, `package`, `script-out`,
-    /// `out-dir`, `deps-<i>`. Stable.
+    /// `out-dir`, `deps-<i>`, `native-<i>`. Stable.
     pub fn as_string(self) -> String {
         match self {
             RootName::Workspace => "workspace".to_string(),
@@ -388,6 +391,7 @@ impl RootName {
             RootName::ScriptOut => "script-out".to_string(),
             RootName::OutDir => "out-dir".to_string(),
             RootName::Deps(i) => format!("deps-{i}"),
+            RootName::Native(i) => format!("native-{i}"),
         }
     }
 
@@ -400,9 +404,14 @@ impl RootName {
             "script-out" => Some(RootName::ScriptOut),
             "out-dir" => Some(RootName::OutDir),
             _ => {
-                let digits = text.strip_prefix("deps-")?;
+                let (make, digits): (fn(u8) -> RootName, &str) =
+                    if let Some(digits) = text.strip_prefix("deps-") {
+                        (RootName::Deps, digits)
+                    } else {
+                        (RootName::Native, text.strip_prefix("native-")?)
+                    };
                 let i: u8 = digits.parse().ok()?;
-                (i.to_string() == digits).then_some(RootName::Deps(i))
+                (i.to_string() == digits).then_some(make(i))
             }
         }
     }
@@ -520,11 +529,22 @@ mod tests {
             RootName::OutDir,
             RootName::Deps(0),
             RootName::Deps(255),
+            RootName::Native(0),
+            RootName::Native(17),
         ] {
             assert_eq!(RootName::parse(&name.as_string()), Some(name));
             assert_eq!(serde_name(&name), name.as_string());
         }
-        for bad in ["deps-01", "deps-256", "deps-", "deps--1", "Workspace", ""] {
+        for bad in [
+            "deps-01",
+            "deps-256",
+            "deps-",
+            "deps--1",
+            "native-01",
+            "native-",
+            "Workspace",
+            "",
+        ] {
             assert_eq!(RootName::parse(bad), None, "{bad}");
         }
         let located = Located::Rooted(Rooted {

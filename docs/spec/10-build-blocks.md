@@ -10,8 +10,9 @@
 A **block** is what one compiler call produced: one crate built one way. The **store** holds
 blocks for every repository on the machine. A **root** is a folder a compile's paths start from:
 the workspace (rustc's working directory), the package (`CARGO_MANIFEST_DIR`), the build script's
-output (`OUT_DIR`), the output folder (`--out-dir`) and each dependency search folder
-(`-L dependency=`).
+output (`OUT_DIR`), the output folder (`--out-dir`), each dependency search folder
+(`-L dependency=`) and each native search folder (`-L native=`, `-L all=` or a bare `-L`, named by
+its place among the `-L` flags) that is not under a shared folder.
 
 **B-1 Mode.** Reuse has one mode per user: `off`, `observe` or `on`. It is `off` until the person
 turns it on. In `observe` every compile runs as in `off`, blocks are stored, and a compile whose
@@ -74,6 +75,12 @@ names (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_P
   file under `OUT_DIR` is in `generated` already. A name found in none of them is a system
   library, covered by the SDK and the linker. A `-l` whose file can't be found with certainty
   (`+verbatim`, a rename or `:file`, a kind this crate doesn't know) is `built, not stored`;
+- `native folders`: every `-L native=`, `all=` and bare folder, whether or not a `-l` names
+  anything in it (a `#[link(kind = "static")]` in the source bundles a static library found
+  there, and the dep-info doesn't say so): the names of its entries, and each `*.a` and `*.lib`
+  directly in it by SHA-256. These folders are usually other packages' `OUT_DIR`s: no record is
+  written there, and digests are remembered for the run under its session's folder, by path and
+  stat;
 - `shape`: the names of the entries of every folder that directly holds a read file;
 - `generated`: every file under `OUT_DIR`, by path and SHA-256;
 - `declared`: for a package that is not from a registry or a git source, what its build script
@@ -190,7 +197,10 @@ in the `-B` folders, then on `PATH`), each by where it lies (B-8) and, under a r
 else its size and modification time; and the SDK, by where it lies and the date of its settings
 file. A linker or SDK outside every root ties the block. Where that list can't be read, where a file it names is gone or can't be found, or where a
 linker script names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`, `STARTUP`), the
-outcome is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
+outcome is `built, not stored`. Every other argument of the link line that is the path of an
+existing regular file (an object a `link-arg` names, `-bundle_loader`'s, `-dylib_file`'s), and is
+not an output of the compile, is an input by SHA-256. A `-B` folder outside the compiler's
+sysroot is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
 prints on stdout goes on to the wrapper's stdout, but the linker command. A program is stored
 with the debug objects it names.
 

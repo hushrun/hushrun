@@ -794,3 +794,90 @@ fn a_typo_in_a_dependents_own_extern_crate_suspends_nothing() {
     assert!(reused(&last(&third, "a", Class::Library)), "{third:#?}");
     assert!(reused(&last(&third, "b", Class::Library)), "{third:#?}");
 }
+
+/// Adds `n`, whose build script puts a static library `libx.a` in its output folder and names
+/// that folder with `rustc-link-search`, and `p`, which bundles it with
+/// `#[link(name = "x", kind = "static")]`; `c` prints what `x_value()` returns.
+fn with_bundled_static_library(ws: &Path, value: u32) {
+    let files = [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"m\", \"c\", \"d\", \"n\", \"p\"]\nresolver = \"2\"\n".to_string(),
+        ),
+        (
+            "n/Cargo.toml",
+            "[package]\nname = \"n\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string(),
+        ),
+        ("n/src/lib.rs", String::new()),
+        (
+            "n/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=libx.a\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::copy(\"libx.a\", format!(\"{out}/libx.a\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}\");\n}\n".to_string(),
+        ),
+        (
+            "p/Cargo.toml",
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nn = { path = \"../n\" }\n".to_string(),
+        ),
+        (
+            "p/src/lib.rs",
+            "#[link(name = \"x\", kind = \"static\")]\nextern \"C\" {\n    fn x_value() -> u32;\n}\n\npub fn value() -> u32 {\n    unsafe { x_value() }\n}\n".to_string(),
+        ),
+        (
+            "c/Cargo.toml",
+            "[package]\nname = \"c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\nd = { path = \"../d\" }\np = { path = \"../p\" }\n".to_string(),
+        ),
+        (
+            "c/src/main.rs",
+            "fn main() {\n    println!(\"{}|{}|{}|{}|{}|{}|{}\", a::text(), a::var(), a::twice(), b::made(), b::GEN, p::value(), d::dir());\n}\n".to_string(),
+        ),
+        ("n/x.c", format!("unsigned x_value(void) {{ return {value}; }}\n")),
+    ];
+    for (file, text) in files {
+        let path = ws.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let n = ws.join("n");
+    let compiled = Command::new("cc")
+        .args(["-c", "x.c", "-o", "x.o"])
+        .current_dir(&n)
+        .status()
+        .unwrap();
+    assert!(compiled.success());
+    let archived = Command::new("ar")
+        .args(["rcs", "libx.a", "x.o"])
+        .current_dir(&n)
+        .status()
+        .unwrap();
+    assert!(archived.success());
+}
+
+// covers: B-6, B-8
+#[test]
+fn a_static_library_bundled_from_a_dependencys_output_folder_is_keyed() {
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("two-longer");
+    let three = w.checkout("three");
+    with_bundled_static_library(&one, 7);
+    with_bundled_static_library(&two, 8);
+    with_bundled_static_library(&three, 7);
+    // An archive holds its members' dates: three gets one's very bytes.
+    fs::copy(one.join("n/libx.a"), three.join("n/libx.a")).unwrap();
+    let session = w.begin(Mode::On).unwrap();
+    build(&one, &session);
+    assert!(run_c(&one).starts_with("first text|set one|2|7|generated one|7|"));
+    let n = entries(&session).len();
+    build(&two, &session);
+    let printed = run_c(&two);
+    assert!(
+        printed.starts_with("first text|set one|2|7|generated one|8|"),
+        "a wrong reuse: {printed}\n{:#?}",
+        &entries(&session)[n..]
+    );
+    // The same library elsewhere: p is reused.
+    let n = entries(&session).len();
+    build(&three, &session);
+    assert!(run_c(&three).starts_with("first text|set one|2|7|generated one|7|"));
+    let third = entries(&session)[n..].to_vec();
+    assert!(reused(&last(&third, "p", Class::Library)), "{third:#?}");
+}

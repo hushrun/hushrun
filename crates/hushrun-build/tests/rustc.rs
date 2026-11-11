@@ -200,7 +200,14 @@ fn a_static_library_found_through_dash_l_is_keyed_by_its_bytes() {
     let three = w.checkout("three");
     write(&three.join("b/lib.rs"), BUNDLE);
     fs::create_dir_all(three.join("vendor")).unwrap();
-    fs::copy(one.join("vendor/libfoo.a"), three.join("vendor/libfoo.a")).unwrap();
+    // The folder's names count too (B-6's native folders): the same entries, one's bytes.
+    for file in ["libfoo.a", "foo.c", "foo.o"] {
+        fs::copy(
+            one.join("vendor").join(file),
+            three.join("vendor").join(file),
+        )
+        .unwrap();
+    }
     let (out, third) = w.call(&three, "b", "b/lib.rs", &args, &[]);
     ok(&out);
     assert!(reused(&third), "{third:?}");

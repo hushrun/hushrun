@@ -50,6 +50,9 @@ pub struct Identity {
     pub release: String,
     /// The compiler's built-in targets, from `rustc --print target-list`, sorted.
     pub targets: Vec<String>,
+    /// The sysroot rustc uses: the toolchain's folder under rustup, else the folder above the
+    /// compiler's own `bin/`. A link's `-B` folder outside it is not keyed (B-18).
+    pub sysroot: Option<PathBuf>,
 }
 
 impl Identity {
@@ -277,6 +280,7 @@ pub fn identity(
         host: memo_found.host,
         release: memo_found.release,
         targets: memo_found.targets,
+        sysroot,
     })
 }
 
