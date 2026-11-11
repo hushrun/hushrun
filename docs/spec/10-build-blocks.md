@@ -186,9 +186,10 @@ modification time; `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; under rustup, the size 
 time of the toolchain's own `rustc` and of its `librustc_driver`; the output of `rustc -vV`; and
 the standard library: the names, sizes and modification times of the files in
 `<sysroot>/lib/rustlib/<triple>/lib/` for the host and for the call's `--target`. The compiler's
-built-in targets are the output of `rustc --print target-list`. `-vV`, the target list and the
-standard library's listing are kept per compiler and target, and computed again when a standard
-library folder changes. A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
+built-in targets are the output of `rustc --print target-list`. `-vV`, the target list, the
+standard library's listing and which `librustc_driver` files the toolchain's `lib/` holds are kept
+per compiler and target, and computed again when a standard library folder, a `lib/` folder or
+one of those files changes. A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
 reports with `--print=link-args`; the libraries named with `-l` and the files options name, as

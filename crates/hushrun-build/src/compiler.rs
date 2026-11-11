@@ -14,11 +14,13 @@
 //! target-list`): a `--target` outside them loads a target file (B-4).
 //!
 //! `rustc -vV` and `rustc --print target-list` run once per compiler and target, not once per
-//! call, and the standard library's folders are listed then too: all of it is kept in a memo
-//! named by the hash of everything else in the identity. Each call stats the compiler's files as
-//! before and, besides, each standard library folder: an installer adds, removes or renames files
-//! there, which changes the folder's dates, and a memo whose folders changed is computed again.
-//! A file rewritten in place, keeping its folder's dates, is not seen.
+//! call, and the standard library's folders and the toolchain's `lib/` are listed then too: all
+//! of it is kept in a memo named by the hash of everything else in the identity, the `lib/`
+//! folders' own stamps included. Each call stats the compiler's files, each compiler library the
+//! memo names, each `lib/` folder and each standard library folder: an installer adds, removes
+//! or renames files there, which changes the folder's dates, and a memo whose folders changed is
+//! computed again. A standard library file rewritten in place, keeping its folder's dates, is not
+//! seen; a compiler library rewritten in place is, by its own stat.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -32,7 +34,7 @@ use hushrun_digest::cache::Stat;
 use serde_json::{Value, json};
 
 /// Names the form of the identity, so a change to what goes in gives new identities.
-const SCHEMA: &str = "hushrun.build.compiler/2";
+const SCHEMA: &str = "hushrun.build.compiler/3";
 
 /// The prefix of the compiler library's file name in a toolchain's `lib/`.
 const DRIVER_PREFIX: &str = "librustc_driver-";
@@ -72,6 +74,8 @@ struct Memo {
     release: String,
     targets: Vec<String>,
     std: Vec<Value>,
+    /// Every `librustc_driver-*` in the `lib/` folders, by path, size and dates.
+    drivers: Vec<Value>,
 }
 
 /// Why the compiler's identity can't be established. The wrapper passes the call through.
@@ -181,10 +185,17 @@ pub fn identity(
         }
         None => None,
     };
-    let mut drivers = Vec::new();
-    for lib in &libraries {
-        drivers.extend(driver_stats(lib)?);
-    }
+    // The `lib/` folders by their stamps: their listing is in the memo, which a change of
+    // either names anew (cost: one stat per folder instead of a listing per call).
+    let lib_stamps: Vec<Value> = libraries
+        .iter()
+        .map(|lib| {
+            Ok(json!({
+                "folder": lib.to_str().ok_or_else(|| Unknown::NotUtf8(lib.to_string_lossy().into_owned()))?,
+                "stamp": folder_stamp(lib),
+            }))
+        })
+        .collect::<Result<_, Unknown>>()?;
 
     let mut facts = json!({
         "schema": SCHEMA,
@@ -192,7 +203,7 @@ pub fn identity(
         "rustup_home": rustup_home,
         "rustup_toolchain": rustup_toolchain,
         "toolchain_rustc": toolchain_rustc,
-        "rustc_driver": drivers,
+        "libraries": lib_stamps,
         "target": target,
     });
     let memo_key = jcs::digest(&facts)?;
@@ -220,10 +231,20 @@ pub fn identity(
     let found = read_memo(&memo, &memo_key).filter(|found| {
         // One stat per standard library folder: the memo holds while none changed.
         let dirs = std_dirs(&found.host);
-        dirs.len() == found.std.len()
+        let std_holds = dirs.len() == found.std.len()
             && dirs.iter().zip(&found.std).all(|((triple, dir), kept)| {
                 kept.get("triple").and_then(Value::as_str) == Some(triple.as_str())
                     && kept.get("folder").and_then(Value::as_str) == Some(&folder_stamp(dir))
+            });
+        // And one per compiler library it names: rewritten in place, it is a new compiler.
+        std_holds
+            && found.drivers.iter().all(|kept| {
+                kept.get("path")
+                    .and_then(Value::as_str)
+                    .map(Path::new)
+                    .and_then(|path| stat_value(path, &fs::metadata(path).ok()?).ok())
+                    .as_ref()
+                    == Some(kept)
             })
     });
     let memo_found = match found {
@@ -243,12 +264,17 @@ pub fn identity(
                 .iter()
                 .map(|(triple, dir)| std_listing(triple, dir))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut drivers = Vec::new();
+            for lib in &libraries {
+                drivers.extend(driver_stats(lib)?);
+            }
             let fresh = Memo {
                 verbose_version: out,
                 host,
                 release,
                 targets: parse_targets(&list),
                 std,
+                drivers,
             };
             // A memo not written only means it is computed again next time.
             let _ = write_memo(memo_dir, &memo, &memo_key, &fresh);
@@ -257,6 +283,9 @@ pub fn identity(
     };
 
     if let Value::Object(members) = &mut facts {
+        // The compiler libraries themselves, not the folders' dates.
+        members.remove("libraries");
+        members.insert("rustc_driver".into(), Value::Array(memo_found.drivers));
         members.insert(
             "verbose_version".into(),
             Value::String(memo_found.verbose_version.clone()),
@@ -518,12 +547,14 @@ fn read_memo(memo: &Path, key: &Digest) -> Option<Memo> {
     let (host, release) = parse_verbose(&out)?;
     let targets = parse_targets(value.get("target_list")?.as_str()?);
     let std = value.get("std")?.as_array()?.clone();
+    let drivers = value.get("drivers")?.as_array()?.clone();
     Some(Memo {
         verbose_version: out,
         host,
         release,
         targets,
         std,
+        drivers,
     })
 }
 
@@ -536,6 +567,7 @@ fn write_memo(dir: &Path, memo: &Path, key: &Digest, found: &Memo) -> io::Result
         "verbose_version": found.verbose_version,
         "target_list": found.targets.join("\n"),
         "std": found.std,
+        "drivers": found.drivers,
     }))?;
     let name = memo.file_name().unwrap_or_default().to_string_lossy();
     for n in 0..64 {
@@ -993,6 +1025,62 @@ mod tests {
         let again = setup.identity(&setup.rustc, &fake).unwrap();
         assert_eq!(first, again);
         assert_eq!(fake.calls.get(), 2);
+    }
+
+    // covers: B-17
+    #[test]
+    fn the_toolchains_lib_folder_is_listed_once_and_again_when_it_changes() {
+        let setup = rustup();
+        let fake = Fake::new();
+        let before = setup.identity(&setup.rustc, &fake).unwrap();
+        // The memo keeps which compiler libraries the folder holds: while the folder's own
+        // stamp holds, it is not listed again. A memo that names another file (which nothing
+        // but this test writes) proves it: that file's stat is what the identity holds now.
+        let memo = fs::read_dir(&setup.memo)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = fs::read_to_string(&memo).unwrap();
+        assert!(text.contains("librustc_driver-0a1b2c.dylib"), "{text}");
+        let lib = setup.driver.parent().unwrap();
+        write(&lib.join("other"), b"another file", 1_000);
+        // Writing it moved the folder's stamp: put the memo back under the stamp it has now by
+        // computing once, then point its listing at the other file.
+        let again = setup.identity(&setup.rustc, &fake).unwrap();
+        assert_eq!(before.digest, again.digest, "a file that is no driver");
+        let memo = fs::read_dir(&setup.memo)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                fs::read_to_string(p)
+                    .unwrap()
+                    .contains("librustc_driver-0a1b2c.dylib")
+                    && *p != memo
+            })
+            .unwrap();
+        let text = fs::read_to_string(&memo).unwrap();
+        let other = lib.join("other");
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let driver = setup.driver.to_str().unwrap();
+        let swapped = serde_json::to_string(&value["drivers"])
+            .unwrap()
+            .replace(driver, other.to_str().unwrap());
+        let other_meta = fs::metadata(&other).unwrap();
+        value["drivers"] = serde_json::from_str(&swapped).unwrap();
+        value["drivers"][0]["size"] = other_meta.len().to_string().into();
+        fs::write(&memo, serde_json::to_vec(&value).unwrap()).unwrap();
+        let listed = setup.identity(&setup.rustc, &fake).unwrap();
+        assert_ne!(listed.digest, again.digest, "the folder was listed again");
+        // A driver added changes the folder's stamp: listed again, a new compiler.
+        write(
+            &lib.join("librustc_driver-ffff.dylib"),
+            b"a second compiler",
+            1_000,
+        );
+        let added = setup.identity(&setup.rustc, &fake).unwrap();
+        assert_ne!(added.digest, again.digest);
     }
 
     // covers: B-17
