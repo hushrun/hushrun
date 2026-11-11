@@ -427,9 +427,19 @@ impl Drop for Forwarding {
     }
 }
 
+/// Where there are no signals, nothing to pass on. Not `()`: the caller drops what it gets, and
+/// rustc and clippy warn of dropping a value that has nothing to drop in the Windows build.
 #[cfg(not(unix))]
-fn forward_signals(_: u32) -> Option<()> {
-    None
+struct Forwarding;
+
+#[cfg(not(unix))]
+impl Drop for Forwarding {
+    fn drop(&mut self) {}
+}
+
+#[cfg(not(unix))]
+fn forward_signals(_: u32) -> Option<Forwarding> {
+    Some(Forwarding)
 }
 
 #[cfg(test)]
