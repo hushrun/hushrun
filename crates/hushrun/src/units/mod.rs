@@ -17,6 +17,7 @@
 
 pub mod cargo;
 pub mod facts;
+pub mod gotest;
 pub mod pytest;
 pub mod runner;
 pub mod store;
@@ -50,6 +51,8 @@ pub struct Seen {
 enum Adapter {
     Pytest,
     Cargo(cargo::Recognized),
+    /// \[ADR 0070\]
+    Go(gotest::Recognized),
 }
 
 /// What starting to observe a run came to.
@@ -111,6 +114,21 @@ impl Session {
         };
         let env = |name: &str| std::env::var(name).ok();
         let (adapter, mut variables) = match cargo::recognize(command) {
+            None if gotest::recognize(command).is_some() => {
+                let recognized = match gotest::recognize(command) {
+                    Some(Ok(recognized)) => recognized,
+                    Some(Err(why)) => return Start::Not(why),
+                    None => return Start::Off,
+                };
+                let exe = match std::env::current_exe() {
+                    Ok(exe) => exe,
+                    Err(err) => return Start::Not(format!("can't tell where hushrun is: {err}")),
+                };
+                match gotest::variables(&recognized, &exe, cwd, std::env::var_os("GOFLAGS")) {
+                    Ok(vars) => (Adapter::Go(recognized), vars),
+                    Err(why) => return Start::Not(why),
+                }
+            }
             Some(recognized) => {
                 let exe = match std::env::current_exe() {
                     Ok(exe) => exe,
@@ -179,64 +197,81 @@ impl Session {
     /// observed`, one whose newest result is a fail or none, and an audited one: runs.
     pub fn plan(&mut self, input: &PlanInput<'_>) -> Planned {
         let started = input.started.to_string();
-        let (patterns, built) = match &self.adapter {
+        let map = store::load_map(&self.map_path(&input.base, input.repository));
+        let mut patterns = None;
+        let mut built = None;
+        let (sets, known): (units::Sets, Known) = match &self.adapter {
             Adapter::Pytest => {
-                let patterns = pytest::python_files(input.root, input.cwd);
-                if pytest::is_test_file(&patterns, "x.py").is_none() {
+                let found = pytest::python_files(input.root, input.cwd);
+                if pytest::is_test_file(&found, "x.py").is_none() {
                     return Planned::Everything(
                         "pytest's python_files names a directory, which this version doesn't read"
                             .into(),
                     );
                 }
-                (Some(patterns), None)
+                let sets = units::classify(
+                    input.tree.paths(),
+                    &|path| pytest::is_test_file(&found, path) == Some(true),
+                    Sources::Kinds(pytest::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let known = sets
+                    .files(Set::Units)
+                    .map(|unit| (unit.to_string(), mapped_reads(&map, unit, input.tree)))
+                    .collect();
+                patterns = Some(found);
+                (sets, known)
             }
             Adapter::Cargo(recognized) => {
-                match cargo::plan_build(recognized, input.root, input.cwd) {
-                    Ok(built) => (None, Some(built)),
+                let b = match cargo::plan_build(recognized, input.root, input.cwd) {
+                    Ok(b) => b,
                     Err(why) => return Planned::Everything(why),
-                }
+                };
+                let sets = units::classify(
+                    input.tree.paths(),
+                    &|path| b.unit_files.contains(path),
+                    Sources::Named(&b.named, cargo::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let known = b
+                    .units
+                    .iter()
+                    .map(|(unit, b)| {
+                        let reads = (b.not_followed.is_empty() && input.tree.contains(unit))
+                            .then(|| b.reads.clone());
+                        (unit.clone(), reads)
+                    })
+                    .collect();
+                built = Some(b);
+                (sets, known)
+            }
+            Adapter::Go(recognized) => {
+                let listed = match gotest::list(recognized, input.root, input.cwd) {
+                    Ok(listed) => listed,
+                    Err(why) => return Planned::Everything(why),
+                };
+                let sets = units::classify(
+                    input.tree.paths(),
+                    &|path| listed.unit_files.contains(path),
+                    Sources::Named(&listed.named, gotest::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let known = listed
+                    .units
+                    .iter()
+                    .map(|(unit, u)| {
+                        let whole = u.not_followed.is_empty()
+                            && u.own.iter().all(|f| input.tree.contains(f));
+                        let reads = whole
+                            .then(|| go_reads(&u.reads, map.units.get(unit), input.tree))
+                            .flatten();
+                        (unit.clone(), reads)
+                    })
+                    .collect();
+                (sets, known)
             }
         };
-        let sets = match (&patterns, &built) {
-            (Some(patterns), _) => units::classify(
-                input.tree.paths(),
-                &|path| pytest::is_test_file(patterns, path) == Some(true),
-                Sources::Kinds(pytest::SOURCE_KINDS),
-                &self.tests.ignore,
-            ),
-            (None, Some(built)) => units::classify(
-                input.tree.paths(),
-                &|path| built.unit_files.contains(path),
-                Sources::Named(&built.named, cargo::SOURCE_KINDS),
-                &self.tests.ignore,
-            ),
-            (None, None) => return Planned::Everything("no adapter".into()),
-        };
         let keyer = Keyer::new(input.tree, &sets, &input.base);
-        let map = store::load_map(&self.map_path(&input.base, input.repository));
-        // The test files the plan knows of, and the files each read, as far as it can tell.
-        let known: Vec<(String, Option<BTreeSet<String>>)> = match &built {
-            None => sets
-                .files(Set::Units)
-                .map(|unit| {
-                    let reads = map
-                        .units
-                        .get(unit)
-                        .filter(|mapped| mapped.not_followed.is_empty())
-                        .map(|mapped| mapped.reads.clone());
-                    (unit.to_string(), reads)
-                })
-                .collect(),
-            Some(built) => built
-                .units
-                .iter()
-                .map(|(unit, b)| {
-                    let reads = (b.not_followed.is_empty() && input.tree.contains(unit))
-                        .then(|| b.reads.clone());
-                    (unit.clone(), reads)
-                })
-                .collect(),
-        };
         let total = known.len();
         if total == 0 {
             // No test file: nothing to say, and nothing to deselect.
@@ -371,37 +406,37 @@ impl Session {
             "audit",
         );
         let map = store::load_map(&map_path);
-        let (seen, failures_by_unit, sets, from_this_run, executables) =
-            match self.read(&files, end.root, end.cwd, end.tree, end.command_passed) {
-                Ok(Some(read)) => read,
-                Ok(None) => return None,
-                Err(why) => return Observed::unread(&end.base.check, &why),
-            };
+        let read = match self.read(
+            &files,
+            end.root,
+            end.cwd,
+            end.tree,
+            end.command_passed,
+            &map,
+        ) {
+            Ok(Some(read)) => read,
+            Ok(None) => return None,
+            Err(why) => return Observed::unread(&end.base.check, &why),
+        };
         let how = match (end.mode, &self.plan) {
             (Mode::Reuse, Some(plan)) => How::Plan(plan),
             (Mode::Reuse, None) => How::Quiet,
             _ => How::Observe,
         };
-        let mut observed = decide(
+        Some(decide(
             end,
             &self.tests,
-            seen,
-            failures_by_unit,
-            &sets,
+            read,
             &map,
-            from_this_run,
             map_path,
             audit_path,
             how,
-        );
-        observed.executables = executables;
-        Some(observed)
+        ))
     }
 
     /// What the adapter wrote in `dir`, read: each unit as seen, whether failures are reported by
-    /// unit, the four sets, whether the keys come from this run (Cargo) and each test binary's
-    /// executable. `Ok(None)` when it wrote nothing; `Err` why it couldn't be read.
-    #[allow(clippy::type_complexity)]
+    /// unit, the four sets, what a plan would have keyed each unit by, and what the map keeps.
+    /// `Ok(None)` when it wrote nothing; `Err` why it couldn't be read.
     fn read(
         &self,
         files: &[facts::FactsFile],
@@ -409,16 +444,8 @@ impl Session {
         cwd: &Path,
         tree: &Tree,
         command_passed: bool,
-    ) -> Result<
-        Option<(
-            BTreeMap<String, Seen>,
-            bool,
-            units::Sets,
-            bool,
-            BTreeMap<String, PathBuf>,
-        )>,
-        String,
-    > {
+        map: &store::Map,
+    ) -> Result<Option<Read>, String> {
         match &self.adapter {
             Adapter::Pytest => {
                 let merged = facts::merged(files, "pytest");
@@ -462,7 +489,17 @@ impl Session {
                     Sources::Kinds(pytest::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
-                Ok(Some((seen, failures_by_unit, sets, false, BTreeMap::new())))
+                let planned = seen
+                    .keys()
+                    .filter_map(|unit| Some((unit.clone(), mapped_reads(map, unit, tree)?)))
+                    .collect();
+                Ok(Some(Read {
+                    seen,
+                    failures_by_unit,
+                    sets,
+                    planned,
+                    ..Read::default()
+                }))
             }
             Adapter::Cargo(recognized) => {
                 if !files.iter().any(|f| f.adapter == cargo::ADAPTER) {
@@ -475,13 +512,47 @@ impl Session {
                     Sources::Named(&observed.named, cargo::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
-                Ok(Some((
-                    observed.units,
-                    true,
+                let planned = observed
+                    .units
+                    .iter()
+                    .map(|(unit, seen)| (unit.clone(), seen.reads.clone()))
+                    .collect();
+                Ok(Some(Read {
+                    seen: observed.units,
+                    failures_by_unit: true,
                     sets,
-                    true,
-                    observed.executables,
-                )))
+                    planned,
+                    executables: observed.executables,
+                    ..Read::default()
+                }))
+            }
+            Adapter::Go(recognized) => {
+                if !files.iter().any(|f| f.adapter == gotest::ADAPTER) {
+                    return Ok(None);
+                }
+                let observed = gotest::observe(recognized, files, root, cwd, tree)?;
+                let sets = units::classify(
+                    tree.paths(),
+                    &|path| observed.unit_files.contains(path),
+                    Sources::Named(&observed.named, gotest::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let planned = observed
+                    .compiled
+                    .iter()
+                    .filter_map(|(unit, compiled)| {
+                        Some((unit.clone(), go_reads(compiled, map.units.get(unit), tree)?))
+                    })
+                    .collect();
+                Ok(Some(Read {
+                    seen: observed.units,
+                    failures_by_unit: true,
+                    sets,
+                    planned,
+                    own: observed.own,
+                    dirs: observed.dirs,
+                    ..Read::default()
+                }))
             }
         }
     }
@@ -517,6 +588,7 @@ impl Session {
                 }
                 (None, binaries)
             }
+            Adapter::Go(_) => (None, Vec::new()),
         };
         write_run_file(&dir, &self.root, &others, patterns.as_deref(), &binaries).ok()?;
         let mut variables = self.variables.clone();
@@ -543,7 +615,14 @@ impl Session {
     ) -> BTreeMap<String, State> {
         let files = facts::read_all(&again.dir).unwrap_or_default();
         let read = self
-            .read(&files, &self.root, &observed.cwd, tree, passed)
+            .read(
+                &files,
+                &self.root,
+                &observed.cwd,
+                tree,
+                passed,
+                &store::Map::default(),
+            )
             .ok()
             .flatten();
         again
@@ -552,13 +631,13 @@ impl Session {
             .map(|unit| {
                 let state = read
                     .as_ref()
-                    .and_then(|(seen, by_unit, ..)| {
-                        let seen = seen.get(unit)?;
+                    .and_then(|read| {
+                        let seen = read.seen.get(unit)?;
                         Some(units::state(
                             &seen.facts,
                             &RunFacts {
                                 command_passed: passed,
-                                failures_by_unit: *by_unit,
+                                failures_by_unit: read.failures_by_unit,
                                 planned: false,
                             },
                         ))
@@ -568,6 +647,62 @@ impl Session {
             })
             .collect()
     }
+}
+
+/// The test files a plan knows of, each with the files it would be keyed by, as far as it can
+/// tell: `None` when it can't, and it runs.
+type Known = Vec<(String, Option<BTreeSet<String>>)>;
+
+/// What an adapter's files came to, before any state is decided.
+#[derive(Debug, Default)]
+struct Read {
+    /// Each unit, as seen, merged over its processes.
+    seen: BTreeMap<String, Seen>,
+    /// The adapter reports each failure by unit.
+    failures_by_unit: bool,
+    /// The four sets (C-30), by the adapter's rule for this run.
+    sets: units::Sets,
+    /// For each unit a plan of this run would have keyed, the files it would have keyed it by:
+    /// what `observe` says reuse would have done. A unit not here would have run.
+    planned: BTreeMap<String, BTreeSet<String>>,
+    /// \[ADR 0069\] Each test binary's executable, by its unit.
+    executables: BTreeMap<String, PathBuf>,
+    /// \[ADR 0070\] The files each unit is made of, when they aren't its own path: a Go package's
+    /// test files. All must be in the scope.
+    own: BTreeMap<String, Vec<String>>,
+    /// \[ADR 0070\] The directories each unit listed, which the map keeps for the plan.
+    dirs: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// \[C-34\] What the map says `unit` read, for a key: its reads, and every file now below a
+/// directory it listed; `None` when the map doesn't have it, or something of it wasn't followed.
+fn mapped_reads(map: &store::Map, unit: &str, tree: &Tree) -> Option<BTreeSet<String>> {
+    let mapped = map.units.get(unit)?;
+    if !mapped.not_followed.is_empty() {
+        return None;
+    }
+    let mut reads = mapped.reads.clone();
+    reads.extend(gotest::under(tree, &mapped.dirs));
+    Some(reads)
+}
+
+/// \[ADR 0070\] What a Go package's tests are keyed by in a plan: what its test binary is built
+/// from now, `go list` says, with what the map says it opened last time it ran (a hint); `None`
+/// when the map says something of it wasn't followed then.
+fn go_reads(
+    compiled: &BTreeSet<String>,
+    mapped: Option<&Mapped>,
+    tree: &Tree,
+) -> Option<BTreeSet<String>> {
+    let mut reads = compiled.clone();
+    if let Some(mapped) = mapped {
+        if !mapped.not_followed.is_empty() {
+            return None;
+        }
+        reads.extend(mapped.reads.iter().cloned());
+        reads.extend(gotest::under(tree, &mapped.dirs));
+    }
+    Some(reads)
 }
 
 /// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root, what adapters may
@@ -810,19 +945,25 @@ fn rest_of(sets: &units::Sets, tree: &Tree) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decide(
     end: &Finish<'_>,
     tests: &Tests,
-    seen: BTreeMap<String, Seen>,
-    failures_by_unit: bool,
-    sets: &units::Sets,
+    read: Read,
     map: &store::Map,
-    from_this_run: bool,
     map_path: PathBuf,
     audit_path: PathBuf,
     how: How<'_>,
 ) -> Observed {
+    let Read {
+        seen,
+        failures_by_unit,
+        sets,
+        planned,
+        executables,
+        own,
+        dirs,
+    } = read;
+    let sets = &sets;
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base);
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
@@ -830,28 +971,22 @@ fn decide(
         map_path: Some(map_path),
         audit_path: Some(audit_path),
         cwd: end.cwd.to_path_buf(),
+        executables,
         ..Observed::default()
     };
     // What the plan would have done, in `observe`: from what was recorded before this run, a unit
-    // the map has (or, for a compiler-given adapter, this build's list) whose key has a pass that
-    // counts here, unless `tests.always` names it. One batch.
+    // the plan would have keyed (from the map, or for a compiler-given adapter this build's list)
+    // whose key has a pass that counts here, unless `tests.always` names it. One batch.
     let mut would: BTreeMap<String, (Digest, Found)> = BTreeMap::new();
     if matches!(how, How::Observe) {
-        let planned: BTreeMap<String, Digest> = seen
+        let keyed: BTreeMap<String, Digest> = planned
             .iter()
-            .filter(|(unit, _)| !tests.always_runs(unit))
-            .filter_map(|(unit, s)| {
-                let reads = if from_this_run {
-                    Some(&s.reads)
-                } else {
-                    map.units.get(unit).map(|m| &m.reads)
-                }?;
-                Some((unit.clone(), keyer.key(unit, reads)?))
-            })
+            .filter(|(unit, _)| seen.contains_key(*unit) && !tests.always_runs(unit))
+            .filter_map(|(unit, reads)| Some((unit.clone(), keyer.key(unit, reads)?)))
             .collect();
-        let keys: Vec<Digest> = planned.values().copied().collect();
+        let keys: Vec<Digest> = keyed.values().copied().collect();
         if let Ok(lookup) = end.store.lookup(&keys, end.counts) {
-            for (unit, key) in planned {
+            for (unit, key) in keyed {
                 if let Some(found) = lookup.found.get(&key).filter(|f| f.passed) {
                     would.insert(unit, (key, found.clone()));
                 }
@@ -864,10 +999,14 @@ fn decide(
     for (unit, seen) in &seen {
         counts.total += 1;
         let mut facts = seen.facts.clone();
-        if !tree.contains(unit) {
+        let outside = match own.get(unit) {
+            Some(files) => files.iter().find(|f| !tree.contains(f)).cloned(),
+            None => (!tree.contains(unit)).then(|| unit.clone()),
+        };
+        if let Some(file) = outside {
             facts.not_followed.insert(units::NotFollowed {
                 why: "outside-scope".into(),
-                detail: unit.clone(),
+                detail: file,
             });
         }
         let planned = match &how {
@@ -937,6 +1076,7 @@ fn decide(
                         .map(str::to_string)
                         .collect(),
                     not_followed: facts.not_followed.iter().map(|n| n.why.clone()).collect(),
+                    dirs: dirs.get(unit).cloned().unwrap_or_default(),
                 },
             );
         }
@@ -1019,6 +1159,9 @@ fn describe(why: &str) -> String {
         "python-files" => "pytest's python_files".into(),
         "adapter-error" => "an error of hushrun's adapter".into(),
         "outside-scope" => "a file outside the check's scope".into(),
+        "test-main" => "a TestMain".into(),
+        "go-list" => "what go list couldn't load".into(),
+        "test-log" => "a test log Go didn't write whole".into(),
         other => other.to_string(),
     }
 }

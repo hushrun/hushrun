@@ -126,6 +126,10 @@ pub struct UnitFacts {
     pub reads: Vec<String>,
     #[serde(default)]
     pub not_followed: Vec<Unfollowed>,
+    /// \[ADR 0071\] Directories it listed, from the repository root or absolute: it read every
+    /// file below each.
+    #[serde(default)]
+    pub dirs: Vec<String>,
 }
 
 /// One start of a test binary by hushrun's target runner.
@@ -148,6 +152,16 @@ pub struct Invocation {
     /// plan's key was for. A list answered with no test, a run with exit 0.
     #[serde(default)]
     pub reused: bool,
+    /// \[ADR 0070\] The directory it ran in, which for `go test` is its package's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// \[ADR 0070\] Go's test log of the start, its lines as the binary wrote them, when it wrote
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testlog: Option<Vec<String>>,
+    /// \[ADR 0070\] The test log had more lines than hushrun reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub testlog_truncated: bool,
 }
 
 /// Every adapter file of a run's directory, in name order, with those that don't parse or have

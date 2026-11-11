@@ -994,6 +994,9 @@ mod tests {
             signal: None,
             duration_ms: 5,
             reused: false,
+            dir: None,
+            testlog: None,
+            testlog_truncated: false,
         }
     }
 

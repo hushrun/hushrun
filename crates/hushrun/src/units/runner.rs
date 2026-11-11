@@ -64,35 +64,77 @@ fn run(args: &[OsString]) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = std::env::var_os(UNITS_VAR).map(PathBuf::from);
+    // \[ADR 0070\] `go test` starts each test binary in its package's directory.
+    let go = told.variable == super::gotest::RUNNER_WORD;
+    let here = std::env::current_dir().ok();
+    let reuse = dir.as_deref().is_some_and(|dir| {
+        if go {
+            here.as_deref()
+                .is_some_and(|here| reused_package(dir, here))
+        } else {
+            reused(dir, Path::new(&told.binary))
+        }
+    });
+    // \[ADR 0070\] Go's test log, which `go test` asks for itself when it caches a result: what
+    // the tests opened, listed and started.
+    let testlog = (go && !reuse).then_some(()).and(dir.as_ref()).map(|dir| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        dir.join(format!("go-{}-{nanos}.testlog", std::process::id()))
+    });
+    let mut args: Vec<OsString> = Vec::new();
+    if let Some(log) = &testlog {
+        let mut arg = OsString::from("-test.testlogfile=");
+        arg.push(log);
+        args.push(arg);
+    }
+    args.extend(told.args.iter().cloned());
     let (program, rest) = match told.chain.split_first() {
         Some((first, more)) => {
             let mut rest: Vec<OsString> = more.to_vec();
             rest.push(told.binary.clone());
-            rest.extend(told.args.iter().cloned());
+            rest.extend(args.iter().cloned());
             (first.clone(), rest)
         }
-        None => (told.binary.clone(), told.args.clone()),
+        None => (told.binary.clone(), args.clone()),
     };
     let mut command = Command::new(&program);
     command.args(&rest);
-    // What the test would have seen without hushrun: its runner variable as the environment had
-    // it, and no directory of hushrun's.
-    let runner_var = format!("CARGO_TARGET_{}_RUNNER", told.variable);
-    if told.chain.is_empty() {
-        command.env_remove(&runner_var);
+    // What the test would have seen without hushrun: its runner variable, or `GOFLAGS`, as the
+    // environment had it, and no directory of hushrun's.
+    if go {
+        match std::env::var_os(super::gotest::GOFLAGS_WAS) {
+            Some(was) => {
+                let was = was.to_string_lossy().into_owned();
+                match was.strip_prefix('=') {
+                    Some(value) => command.env("GOFLAGS", value),
+                    None => command.env_remove("GOFLAGS"),
+                };
+            }
+            None => {
+                command.env_remove("GOFLAGS");
+            }
+        }
+        command.env_remove(super::gotest::GOFLAGS_WAS);
     } else {
-        let words: Vec<String> = told
-            .chain
-            .iter()
-            .map(|w| w.to_string_lossy().into_owned())
-            .collect();
-        command.env(&runner_var, words.join(" "));
+        let runner_var = format!("CARGO_TARGET_{}_RUNNER", told.variable);
+        if told.chain.is_empty() {
+            command.env_remove(&runner_var);
+        } else {
+            let words: Vec<String> = told
+                .chain
+                .iter()
+                .map(|w| w.to_string_lossy().into_owned())
+                .collect();
+            command.env(&runner_var, words.join(" "));
+        }
     }
     command.env_remove(UNITS_VAR);
-    let listing = told.args.iter().any(|a| a == "--list");
+    let listing = !go && told.args.iter().any(|a| a == "--list");
     // \[ADR 0069\] A binary the plan reuses: what the run would have said of its passing tests.
     if let Some(dir) = &dir
-        && reused(dir, Path::new(&told.binary))
+        && reuse
     {
         record(
             dir,
@@ -108,6 +150,9 @@ fn run(args: &[OsString]) -> ExitCode {
                 signal: None,
                 duration_ms: 0,
                 reused: true,
+                dir: go.then(|| here.clone()).flatten(),
+                testlog: None,
+                testlog_truncated: false,
             },
         );
         return ExitCode::SUCCESS;
@@ -163,6 +208,17 @@ fn run(args: &[OsString]) -> ExitCode {
     };
     if let Some(dir) = dir {
         let listed = listing.then(|| terse_list(&listed_bytes));
+        let (lines, truncated) = match &testlog {
+            Some(log) => {
+                let read = read_testlog(log);
+                let _ = std::fs::remove_file(log);
+                match read {
+                    Some((lines, truncated)) => (Some(lines), truncated),
+                    None => (None, false),
+                }
+            }
+            None => (None, false),
+        };
         record(
             &dir,
             Invocation {
@@ -177,6 +233,9 @@ fn run(args: &[OsString]) -> ExitCode {
                 signal,
                 duration_ms,
                 reused: false,
+                dir: go.then(|| here.clone()).flatten(),
+                testlog: lines,
+                testlog_truncated: truncated,
             },
         );
     }
@@ -210,6 +269,57 @@ fn reused(dir: &Path, binary: &Path) -> bool {
     std::fs::read(&real).is_ok_and(|bytes| hushrun_core::Digest::of(&bytes).hex() == listed.sha256)
 }
 
+/// \[ADR 0070\] Whether the run's `hushrun.json` reuses the Go package whose directory is `here`:
+/// it lists that directory, from the repository's root (`.` for the root). Anything that can't be
+/// read is no.
+fn reused_package(dir: &Path, here: &Path) -> bool {
+    let Some(run) = std::fs::read(dir.join(facts::RUN_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<facts::RunFile>(&bytes).ok())
+        .filter(|run| run.schema == facts::RUN_SCHEMA)
+    else {
+        return false;
+    };
+    let (Ok(root), Ok(here)) = (
+        std::fs::canonicalize(&run.root),
+        std::fs::canonicalize(here),
+    ) else {
+        return false;
+    };
+    let Ok(inside) = here.strip_prefix(&root) else {
+        return false;
+    };
+    let parts: Vec<String> = inside
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let unit = if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    };
+    run.reuse.contains(&unit)
+}
+
+/// \[ADR 0070\] A Go test log's lines, and whether there were more than hushrun reads; `None` when
+/// the binary wrote none, or not one that starts as Go's do.
+fn read_testlog(path: &Path) -> Option<(Vec<String>, bool)> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if lines.next()? != "# test log" {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        if out.len() >= super::gotest::MOST_LOG_LINES {
+            return Some((out, true));
+        }
+        out.push(line.to_string());
+    }
+    Some((out, false))
+}
+
 /// The tests a libtest `--list --format terse` printed: `name: test` lines.
 fn terse_list(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
@@ -222,9 +332,15 @@ fn terse_list(bytes: &[u8]) -> Vec<String> {
 /// Writes one start's facts, whole, under a name no other start of this run has. A file that
 /// can't be written changes nothing for the test: hushrun then knows less, and records less.
 fn record(dir: &std::path::Path, invocation: Invocation) {
+    // \[ADR 0070\] A start `go test` asked for says where it ran.
+    let adapter = if invocation.dir.is_some() {
+        super::gotest::ADAPTER
+    } else {
+        super::cargo::ADAPTER
+    };
     let file = FactsFile {
         schema: facts::FACTS_SCHEMA.into(),
-        adapter: super::cargo::ADAPTER.into(),
+        adapter: adapter.into(),
         failures_by_unit: true,
         invocation: Some(invocation),
         ..FactsFile::default()
@@ -232,7 +348,7 @@ fn record(dir: &std::path::Path, invocation: Invocation) {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let path = dir.join(format!("cargo-{}-{nanos}.json", std::process::id()));
+    let path = dir.join(format!("{adapter}-{}-{nanos}.json", std::process::id()));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }

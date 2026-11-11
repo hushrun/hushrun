@@ -686,6 +686,9 @@ pub struct Mapped {
     /// What the adapter couldn't follow then, by its word.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub not_followed: BTreeSet<String>,
+    /// \[ADR 0070\] Directories it listed then: a plan adds every file below each now.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dirs: BTreeSet<String>,
 }
 
 /// One test file that would have been reused and failed.
