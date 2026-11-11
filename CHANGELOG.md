@@ -38,6 +38,9 @@ hushrun works with no account, and `ready` and the pre-push hook go by what pass
   still runs every check and what shares results with it.
 - `hushrun repository stats` counts this machine's results where they stay here and no repository
   URL is set, instead of failing with `no repository URL`.
+- The block `hushrun init` writes in AGENTS.md holds with or without shared results: hushrun skips
+  a check "on this machine, and in CI once the repository shares its results", where it said "in
+  CI". init replaces an older block where it is.
 
 ## [0.11.1] - 2026-11-10
 

@@ -187,6 +187,21 @@ mod tests {
         );
     }
 
+    // covers: C-24 (ADR 0067: init writes one block, with or without --local, so it says
+    // nothing that only holds where results are shared)
+    #[test]
+    fn the_block_holds_where_results_stay_on_this_machine() {
+        let block = BLOCK.split_whitespace().collect::<Vec<_>>().join(" ");
+        // After init --local, CI skips nothing.
+        assert!(!block.contains("skips a check in CI when"), "{block}");
+        for says in [
+            "skips a check when this exact code already passed it: on this machine, and in CI once the repository shares its results",
+            "which `hushrun ready` said CI still runs",
+        ] {
+            assert!(block.contains(says), "{says:?} in {block}");
+        }
+    }
+
     // covers: C-24
     #[test]
     fn agents_md_keeps_what_it_has() {
