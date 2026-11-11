@@ -123,7 +123,18 @@ fixed stand-in that names the package; each in its given and its resolved form, 
 first, with the scope left whole. It leaves `-C incremental` out. On Apple targets it also gives
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
 gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
-debugs those, and without it each holds the folder it was linked in. It changes nothing else.
+debugs those, and without it each holds the folder it was linked in. A program (a `bin` that is
+not a build script, or a test) that links with debug info gets a debug bundle instead, through
+three additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
+`<program>.dSYM` beside it with the DWARF of every object it was linked from;
+`-C strip=debuginfo`, so that the program keeps no debug map naming those objects by their
+paths; and `-oso_prefix` for the workspace's resolved form, so that the UUID the linker computes
+before the strip holds no path when the target folder is inside the workspace. Before such a
+compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one.
+After it, it removes the bundle's `Contents/Resources/Relocations`, which names the program by
+its absolute path and which no debugger reads. A program whose own flags say
+`-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug info and a
+program for any other target are left as they are. It changes nothing else.
 
 No block comes from an incremental compile, and an edit never loses incremental compilation: a
 compile that asks for `-C incremental`, finds no block, and already has its dep-info file in the
@@ -131,7 +142,7 @@ output folder (so this is a rebuild, not a first build there) is `passed through
 asked. A first build there is compiled without `-C incremental` and stored.
 
 **B-10 Place.** After a compile, every output is searched for each root as raw bytes, in its
-given and resolved forms. None found: the block's place is `anywhere`. Any found, or an output
+given and resolved forms, each file of a program's debug bundle among them. None found: the block's place is `anywhere`. Any found, or an output
 that can't be searched (`-C lto`, `-C linker-plugin-lto`, `-C embed-bitcode=yes`, compressed debug
 sections): the place is the roots, and the block is reused only where they are the same. A
 compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
@@ -148,8 +159,11 @@ native files (B-6) are checked the same way. Otherwise the outcome is `built, no
 
 **B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
 a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
-new file the owner can write. All get one modification time, the wrapper's start. The dep-info
-file is written with this folder's paths. Then the recorded messages are written to stderr with
+new file the owner can write. All get one modification time, the wrapper's start. A program's
+debug bundle is cloned whole into a temporary folder in the output folder, and that folder is
+renamed into place after a bundle already there is moved aside and removed, so that no bundle is
+ever there in part. The bundle goes first, then the other files, then the dep-info file, which
+is written with this folder's paths. Then the recorded messages are written to stderr with
 this folder's paths, the notices that an output is ready last. If any step fails before the first
 message is written, rustc runs. Messages are kept per form (`--error-format`, `--json`, colour);
 a block whose compile wrote only notices serves every form, and otherwise a missing form is a
@@ -210,8 +224,12 @@ outcome is `built, not stored`. Every other argument of the link line that is th
 existing regular file (an object a `link-arg` names, `-bundle_loader`'s, `-dylib_file`'s), and is
 not an output of the compile, is an input by SHA-256. A `-B` folder outside the compiler's
 sysroot is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
-prints on stdout goes on to the wrapper's stdout, but the linker command. A program is stored
-with the debug objects it names.
+prints on stdout goes on to the wrapper's stdout, but the linker command. The `dsymutil` rustc
+runs for a debug bundle (B-9), the first on `PATH`, is an input like the linker. A program is
+stored with its debug bundle: every file under `<program>.dSYM`, named by its path from the
+output folder; a bundle with no DWARF file, or that holds anything but folders and regular
+files, is `built, not stored`. A program the wrapper leaves as it is (B-9) is stored with the
+debug objects it names.
 
 **B-19 Every failure runs rustc.** An error computing a key, reading the store, or putting files
 in place MUST end in rustc running as asked with nothing stored. A settings file that can't be
