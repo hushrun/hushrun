@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v4";
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v5";
 
 /// The schema of the second key.
 pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v4";
@@ -641,11 +641,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "75d2a3d60b964a1d878868f7e8c1bfe58a86ba0de34a0331bb4320f4373e8399"
+            "24d66a5d192aaeeec35ab19a84dadf9fb86964300a0b13ee14f6af19e83dde9a"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v4",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v5",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,

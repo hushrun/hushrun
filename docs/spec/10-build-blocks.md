@@ -61,7 +61,9 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
 `XROS_DEPLOYMENT_TARGET`, `SDKROOT`, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
-`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); the person's extra variables; and what the
+`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); `SOURCE_DATE_EPOCH`, which compilers and
+build tools take "now" from when it is set (the wrapper never sets it); the person's extra
+variables; and what the
 wrapper adds to the compile besides the remaps (B-9), with roots replaced, so that a program
 compiled `movable` and one compiled `tied` (B-21) never share a key. No other
 `CARGO_` variable is keyed: cargo's own configuration (`CARGO_TARGET_DIR`, `CARGO_HOME`,

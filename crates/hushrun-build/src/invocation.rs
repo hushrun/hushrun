@@ -262,8 +262,10 @@ const CARGO_KEYED: [&str; 3] = ["CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_TAR
 
 /// Variables outside `CARGO_*` that B-5 keys: rustc reads them without an `env-dep` line
 /// (rustc 1.94: the deployment targets, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
-/// `RUST_TARGET_PATH`), and the C driver and the linker read the rest.
-const OTHER_KEYED: [&str; 15] = [
+/// `RUST_TARGET_PATH`), the C driver and the linker read the next five, and compilers and build
+/// tools take "now" from `SOURCE_DATE_EPOCH` when it is set, so it reaches anything that embeds a
+/// date.
+const OTHER_KEYED: [&str; 16] = [
     "RUSTC_BOOTSTRAP",
     "MACOSX_DEPLOYMENT_TARGET",
     "IPHONEOS_DEPLOYMENT_TARGET",
@@ -279,6 +281,7 @@ const OTHER_KEYED: [&str; 15] = [
     "DEVELOPER_DIR",
     "COMPILER_PATH",
     "GCC_EXEC_PREFIX",
+    "SOURCE_DATE_EPOCH",
 ];
 
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
@@ -1911,6 +1914,7 @@ pub(crate) mod tests {
             "DEVELOPER_DIR",
             "COMPILER_PATH",
             "GCC_EXEC_PREFIX",
+            "SOURCE_DATE_EPOCH",
         ];
         for name in read {
             let env = Env::from_vars([(name, "x")]);
@@ -1921,6 +1925,34 @@ pub(crate) mod tests {
                 "{name}"
             );
         }
+    }
+
+    // covers: B-5
+    #[test]
+    fn source_date_epoch_is_part_of_the_first_key() {
+        // Compilers and build tools take "now" from it, so it reaches anything that embeds a
+        // date. Unset, one value and another are three different compiles.
+        let key = |value: Option<&str>| {
+            let env = match value {
+                Some(value) => Env::from_vars([("SOURCE_DATE_EPOCH", value)]),
+                None => Env::default(),
+            };
+            let inv = handled(&argv(&minimal("")), &env);
+            crate::key::Asked {
+                compiler: hushrun_core::Digest::of(b"rustc"),
+                args: inv.key_args(),
+                env: inv.key_env().clone(),
+                added: Vec::new(),
+            }
+            .key()
+            .unwrap()
+        };
+        let unset = key(None);
+        let one = key(Some("1700000000"));
+        let two = key(Some("1800000000"));
+        assert_ne!(unset, one);
+        assert_ne!(one, two);
+        assert_eq!(one, key(Some("1700000000")));
     }
 
     // covers: B-5
