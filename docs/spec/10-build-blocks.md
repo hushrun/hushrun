@@ -65,8 +65,9 @@ names (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_P
 - `reads`: each file rustc's dep-info lists, as a path from its root with its SHA-256, and each
   place a module of a read `.rs` file could also have been, as absent;
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
-- `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro is named by
-  the key of the block that produced it, without its place;
+- `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose
+  block may move (`anywhere`) is named by the key of the block that produced it, without its
+  place; a tied one is another file in each checkout, and is named by its SHA-256;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
   `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A

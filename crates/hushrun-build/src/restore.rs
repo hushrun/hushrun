@@ -19,6 +19,7 @@ use hushrun_core::Digest;
 use crate::depinfo;
 use crate::description::Description;
 use crate::invocation::Invocation;
+use crate::key::PlaceKind;
 use crate::roots::Roots;
 use crate::sidecar;
 use crate::store::Block;
@@ -91,7 +92,7 @@ pub struct Restored {
 pub struct Prepared {
     ready: Vec<Ready>,
     messages: Vec<u8>,
-    origin: Digest,
+    origin: Option<Digest>,
     step: Digest,
 }
 
@@ -215,7 +216,8 @@ impl Restore<'_> {
         Ok(Prepared {
             ready,
             messages,
-            origin: description.origin,
+            // Only a block that may move is known to dependents by its origin (B-6).
+            origin: (description.place == PlaceKind::Anywhere).then_some(description.origin),
             step: description.step,
         })
     }
@@ -243,7 +245,7 @@ impl Prepared {
                 placed.push(file.dest.clone());
             }
             for file in &ready {
-                sidecar::record_block(&file.dest, file.sha256, Some(origin), Some(step), true)
+                sidecar::record_block(&file.dest, file.sha256, origin, Some(step), true)
                     .map_err(at(&file.dest))?;
             }
             Ok(())

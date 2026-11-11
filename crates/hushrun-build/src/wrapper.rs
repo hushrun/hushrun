@@ -583,11 +583,15 @@ impl Call<'_> {
                 }
                 let trusted = !facts.changed && facts.compared != Compared::Differed;
                 if trusted {
+                    // Dependents may know a block by its origin only if it may move: a tied one
+                    // is another file in another checkout, under the same origin (B-6).
+                    let produced_by = matches!(produced.observed.place, Place::Anywhere)
+                        .then_some(produced.origin);
                     for output in &produced.outputs {
                         let _ = sidecar::record_block(
                             &output.path,
                             output.sha256,
-                            Some(produced.origin),
+                            produced_by,
                             Some(cx.step),
                             false,
                         );

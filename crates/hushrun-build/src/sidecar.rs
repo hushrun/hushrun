@@ -43,7 +43,7 @@ pub const DIR: &str = ".hushrun";
 const EXT: &str = "json";
 
 /// The schema name every record carries. A record with another one is treated as absent.
-const SCHEMA: &str = "hushrun.build.sidecar/1";
+const SCHEMA: &str = "hushrun.build.sidecar/2";
 
 /// How much of a file is read at a time when it has to be hashed.
 const CHUNK: usize = 1 << 20;
@@ -55,7 +55,8 @@ pub struct Record {
     pub stat: Stat,
     /// The SHA-256 of its bytes.
     pub sha256: Digest,
-    /// The key of the block it came from, when the wrapper produced or reused it.
+    /// The key of the block it came from, without its place, when the wrapper produced or
+    /// reused it and the block may move (B-6, B-10). A tied block's file is known by its bytes.
     pub produced_by: Option<Digest>,
     /// The first key of the block it came from, so a dependent that can't load it can suspend
     /// that key (B-15).
@@ -526,7 +527,7 @@ mod tests {
         let path = record_path(&file).unwrap();
         let text = fs::read_to_string(&path)
             .unwrap()
-            .replace(SCHEMA, "hushrun.build.sidecar/0");
+            .replace(SCHEMA, "hushrun.build.sidecar/1");
         fs::write(&path, text).unwrap();
         assert!(load(&file).is_none());
         assert_eq!(lookup(&file).unwrap().produced_by, None);

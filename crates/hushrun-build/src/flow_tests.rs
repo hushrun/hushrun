@@ -1697,3 +1697,48 @@ fn a_read_through_dots_after_a_linked_folder_is_not_stored() {
     assert_eq!(r.outcome(), not_stored(NotStored::Unkeyable));
     assert_eq!(w.blocks(), 0);
 }
+
+// covers: B-6, B-10
+#[test]
+fn only_a_block_that_may_move_names_its_origin_to_dependents() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            embed_var: Some("CARGO_MANIFEST_DIR".into()),
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    settle();
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    assert_eq!(known.produced_by, None, "a tied block named by its origin");
+    assert!(known.step.is_some());
+    // Reused in place: still not named by its origin.
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), REUSED);
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    assert_eq!(known.produced_by, None, "a tied block named by its origin");
+    assert!(known.reused);
+
+    // A block that may move is.
+    let w = world(Mode::On);
+    let one = w.checkout("one");
+    let two = w.checkout("two");
+    settle();
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    assert!(
+        crate::sidecar::lookup(&w.rlib(&one, "a"))
+            .unwrap()
+            .produced_by
+            .is_some()
+    );
+    assert_eq!(w.call(&two, "a", &[]).outcome(), REUSED);
+    assert!(
+        crate::sidecar::lookup(&w.rlib(&two, "a"))
+            .unwrap()
+            .produced_by
+            .is_some()
+    );
+}

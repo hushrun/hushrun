@@ -713,3 +713,48 @@ fn a_file_included_through_dots_and_a_link_is_keyed_by_what_the_link_names_here(
         "a wrong reuse: {printed}"
     );
 }
+
+/// A proc macro that names its own folder (so its block is tied) and reads a file from it
+/// when it runs, which no dep-info lists.
+const TIED_MACRO: &str = "use proc_macro::TokenStream;\n\nconst DIR: &str = env!(\"CARGO_MANIFEST_DIR\");\n\n#[proc_macro]\npub fn make(_: TokenStream) -> TokenStream {\n    let v = std::fs::read_to_string(format!(\"{DIR}/value.txt\")).unwrap();\n    format!(\"pub fn made() -> u32 {{ {} }}\", v.trim()).parse().unwrap()\n}\n";
+
+// covers: B-6, B-10, B-15
+#[test]
+fn a_dependent_of_a_tied_proc_macro_at_a_second_checkout_builds_against_its_own_macro() {
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("two-longer");
+    for (ws, value) in [(&one, "7"), (&two, "8")] {
+        fs::write(ws.join("m/src/lib.rs"), TIED_MACRO).unwrap();
+        fs::write(ws.join("m/value.txt"), value).unwrap();
+    }
+    let session = w.begin(Mode::On).unwrap();
+    build(&one, &session);
+    assert!(run_c(&one).starts_with("first text|set one|2|7|"));
+    let n = entries(&session).len();
+    let out = cargo(&two, &["build"], &session.env());
+    let second = entries(&session)[n..].to_vec();
+    assert!(
+        out.status.success(),
+        "{second:#?}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!reused(&last(&second, "b", Class::Library)), "{second:#?}");
+    let printed = run_c(&two);
+    assert!(
+        printed.starts_with("first text|set one|2|8|"),
+        "a wrong reuse: {printed}"
+    );
+    // Nothing healthy was suspended on the way: a third checkout like the first reuses b.
+    let three = w.checkout("three");
+    fs::write(three.join("m/src/lib.rs"), TIED_MACRO).unwrap();
+    fs::write(three.join("m/value.txt"), "7").unwrap();
+    let n = entries(&session).len();
+    build(&three, &session);
+    assert!(run_c(&three).starts_with("first text|set one|2|7|"));
+    assert!(
+        entries(&session)[n..].iter().all(|e| e.note.is_none()),
+        "{:#?}",
+        &entries(&session)[n..]
+    );
+}
