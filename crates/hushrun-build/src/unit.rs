@@ -1192,6 +1192,10 @@ mod tests {
     fn what_cargo_sees_itself_is_left_to_cargo() {
         let u = unit();
         assert!(settle(&u.out, "app-1", Some(&u.seen())));
+        // Linux dates files from a clock that lags the real one by up to a tick: an edit made
+        // right after the record's start can carry an older date, which the check takes, on the
+        // safe side, for a change cargo doesn't see. Wait for a date that is surely newer.
+        std::thread::sleep(Duration::from_millis(20));
         // An edit with a new date, and a file added: cargo builds the unit anyway.
         fs::write(u.src.join("lib.rs"), b"pub fn edited() {}\n").unwrap();
         fs::write(u.src.join("new.rs"), b"").unwrap();

@@ -659,6 +659,12 @@ mod tests {
             .unwrap();
     }
 
+    /// Waits out a tick of the clock Linux dates files from (1 to 10 ms), so that what was
+    /// written before is dated before what is written after.
+    fn settle() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     /// A rustup home with one toolchain: its real rustc and its compiler library.
     struct Rustup {
         _dir: tempfile::TempDir,
@@ -1045,6 +1051,9 @@ mod tests {
         let text = fs::read_to_string(&memo).unwrap();
         assert!(text.contains("librustc_driver-0a1b2c.dylib"), "{text}");
         let lib = setup.driver.parent().unwrap();
+        // Linux dates a folder from a clock that moves once a tick: a file added in the tick
+        // the setup wrote its last one leaves the folder's stamp as it was.
+        settle();
         write(&lib.join("other"), b"another file", 1_000);
         // Writing it moved the folder's stamp: put the memo back under the stamp it has now by
         // computing once, then point its listing at the other file.
@@ -1070,6 +1079,9 @@ mod tests {
         let other_meta = fs::metadata(&other).unwrap();
         value["drivers"] = serde_json::from_str(&swapped).unwrap();
         value["drivers"][0]["size"] = other_meta.len().to_string().into();
+        // Its creation date too: macOS moves it back with the modification date the test
+        // set, Linux keeps the real one.
+        value["drivers"][0]["created"] = other_meta.created().ok().map(super::nanos).into();
         fs::write(&memo, serde_json::to_vec(&value).unwrap()).unwrap();
         let listed = setup.identity(&setup.rustc, &fake).unwrap();
         assert_ne!(listed.digest, again.digest, "the folder was listed again");

@@ -844,6 +844,8 @@ fn an_env_read_going_from_set_to_unset_changes_the_key() {
     let other = w.checkout("ws2");
     assert_eq!(w.call_with(&other, "a", &[], set).outcome(), REUSED);
     let third = w.checkout("ws3");
+    // Written just now: on Linux, within the clock's slack of the compile (B-11).
+    settle();
     let unset = w.call(&third, "a", &[]);
     assert_eq!(unset.outcome(), STORED);
     assert!(!unset.entry.unwrap().found);
