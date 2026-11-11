@@ -111,8 +111,8 @@ jobs:
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
 
   # The independent Python references agree with the golden vectors (D-1 … D-8), the unit key
-  # vectors (C-31), the Ed25519 and DSSE test vectors (E-1, E-2) and the report vectors (C-27) on
-  # every OS.
+  # vectors (C-31), the hint vectors (C-38), the Ed25519 and DSSE test vectors (E-1, E-2) and the
+  # report vectors (C-27) on every OS.
   reference:
     name: refdigest.py (${{ matrix.os }})
     strategy:
@@ -128,6 +128,7 @@ jobs:
       - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
       - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
       - run: python3 -I tools/refdigest.py unit-keys testdata/digest/unit-keys.json
+      - run: python3 -I tools/refdigest.py unit-hints testdata/digest/unit-hints.json
       - run: python3 -I tools/refdsse.py selftest
       - run: python3 -I tools/reftlog.py selftest
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
@@ -196,6 +197,7 @@ jobs:
       - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
       - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
       - run: python3 -I tools/refdigest.py unit-keys testdata/digest/unit-keys.json
+      - run: python3 -I tools/refdigest.py unit-hints testdata/digest/unit-hints.json
       - run: python3 -I tools/refdsse.py selftest
       - run: python3 -I tools/reftlog.py selftest
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
