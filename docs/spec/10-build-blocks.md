@@ -92,7 +92,13 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
 - `generated`: every file under `OUT_DIR`, by path and SHA-256;
 - `declared`: for a package that is not from a registry or a git source, what its build script
   declared with `rerun-if-changed` (folders in full) and `rerun-if-env-changed`; and the inputs of
-  the macros known to read files the compiler doesn't list;
+  the macros known to read files the compiler doesn't list. A macro that reads the first file of
+  a name found walking up the folders (`.env` for sqlx, `dotenvy_macro` and `dotenv_codegen`) has
+  each place under a root or a shared folder as a read where it lies, and, from the first folder
+  above them all, one entry: the first regular file of that name found walking on up, by SHA-256,
+  or none. It is computed from the call's own folders before and after the compile, holds no
+  folder above the roots, and so doesn't tie the block (B-8); B-11 applies to each place it
+  looked at;
 - `link`: for a linked output, every library the linker was handed, by SHA-256; every place the
   linker may take a library named with `-l` from in its `-L` and `-F` folders, and every file an
   option names for it (a linker script, a symbol list), by SHA-256 or as absent; the linker and

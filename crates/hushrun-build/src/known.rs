@@ -28,11 +28,13 @@ pub enum Where {
     /// This path under the workspace folder (rustc's working directory under cargo).
     Workspace(&'static str),
     /// This name in the working directory and in each folder above it, up to the file system's
-    /// root. What `dotenvy::dotenv()` searches.
+    /// root. What `dotenvy::dotenv()` searches. For a file, the places under a root are each an
+    /// input where they lie, and above every root the input is the first file of that name
+    /// found, by its bytes, wherever it is (B-6 `declared`).
     Upward(&'static str),
     /// This name in the package folder and in each folder above it, up to the file system's
     /// root. Covers a search that starts at the package and stops at the workspace or at the first
-    /// one found.
+    /// one found. Keyed as [`Where::Upward`] is.
     UpwardFromPackage(&'static str),
 }
 

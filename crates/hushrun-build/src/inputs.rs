@@ -17,8 +17,8 @@ use hushrun_digest::cache::Stat;
 use crate::depinfo::{self, DepInfo};
 use crate::invocation::{Env, Invocation, NativeKind, SearchKind};
 use crate::key::{
-    Declared, EnvRead, ExternBy, ExternInput, Generated, Link, LinkLibrary, NativeDir, Observed,
-    Place, PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
+    Declared, EnvRead, ExternBy, ExternInput, FoundAbove, Generated, Link, LinkLibrary, NativeDir,
+    Observed, Place, PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
 };
 use crate::known::{self, Where};
 use crate::model::{Located, NotStored, RootName};
@@ -379,8 +379,21 @@ impl Context<'_> {
             .as_deref()
             .map(|dir| self.absolute(dir));
         let cwd = PathBuf::from(self.invocation.cwd());
+        let mut above = Vec::new();
         for place in &known.files {
-            files.extend(places(place, manifest.as_deref(), &cwd));
+            match place {
+                Where::Upward(name) => {
+                    self.upward(&cwd, name, &mut files, &mut above, watched)?;
+                }
+                Where::UpwardFromPackage(name) => {
+                    if let Some(package) = &manifest {
+                        self.upward(package, name, &mut files, &mut above, watched)?;
+                    }
+                }
+                Where::Package(_) | Where::Workspace(_) => {
+                    files.extend(places(place, manifest.as_deref(), &cwd));
+                }
+            }
         }
         for place in &known.folders {
             for path in places(place, manifest.as_deref(), &cwd) {
@@ -428,7 +441,53 @@ impl Context<'_> {
             .iter()
             .map(|name| self.env_now(name))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(Declared { files: reads, env }))
+        Ok(Some(Declared {
+            files: reads,
+            env,
+            above,
+        }))
+    }
+
+    /// An upward search for the file `name` from the folder `from` (B-6 `declared`), as a macro
+    /// that reads the first one it finds walking up does it. Each place under a root or a shared
+    /// folder goes into `files`, read where it lies as any other. From the first folder above
+    /// them all, one entry goes into `above`: the first file of that name found walking on up
+    /// from there, by its bytes, or none. That holds no folder outside the roots, so it doesn't
+    /// tie the block (B-8), and it is computed from this call's own folders, so it never opens
+    /// another checkout's path. Every place it looked at is watched, so a file that appears,
+    /// goes or changes there while compiling is caught (B-11).
+    ///
+    /// Cost: one `stat` per folder above the roots, up to the first file found.
+    fn upward(
+        &self,
+        from: &Path,
+        name: &str,
+        files: &mut Vec<PathBuf>,
+        above: &mut Vec<FoundAbove>,
+        watched: &mut Vec<Watched>,
+    ) -> Result<(), NotStored> {
+        let mut below = None;
+        for dir in from.ancestors() {
+            let candidate = dir.join(name);
+            if !matches!(self.located(&candidate)?, Located::Outside(_)) {
+                files.push(candidate);
+                below = Some(self.located(dir)?);
+                continue;
+            }
+            let Some(below) = below else {
+                // The search starts outside every root: each place is a read where it lies,
+                // which ties the block.
+                files.extend(from.ancestors().map(|dir| dir.join(name)));
+                return Ok(());
+            };
+            above.push(FoundAbove {
+                name: name.to_string(),
+                below,
+                state: first_found(dir, name, watched)?,
+            });
+            return Ok(());
+        }
+        Ok(())
     }
 
     /// B-6's `native`: for each `-l`, every name its file may have in every folder rustc and
@@ -875,6 +934,38 @@ fn is_linked_library(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("dylib" | "so" | "dll")
     )
+}
+
+/// The first regular file named `name` in `dir` or a folder above it, by SHA-256, or absent:
+/// what `dotenvy`'s search finds. A folder or other entry of that name is passed over, as that
+/// search passes over it. Each place looked at is added to `watched` as it was (B-11).
+fn first_found(dir: &Path, name: &str, watched: &mut Vec<Watched>) -> Result<ReadState, NotStored> {
+    for folder in dir.ancestors() {
+        let path = folder.join(name);
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                let (sha, stat) = hash_steady(&path).map_err(|err| hash_error(&err))?;
+                watched.push(Watched {
+                    path,
+                    stat: Some(stat),
+                    follow: true,
+                });
+                return Ok(ReadState::Present(sha));
+            }
+            Ok(meta) => watched.push(Watched {
+                path,
+                stat: Some(Stat::of(&meta)),
+                follow: true,
+            }),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => watched.push(Watched {
+                path,
+                stat: None,
+                follow: true,
+            }),
+            Err(_) => return Err(NotStored::Hash),
+        }
+    }
+    Ok(ReadState::Absent)
 }
 
 /// The paths a known macro's place names, in order. A search upward names the file in every

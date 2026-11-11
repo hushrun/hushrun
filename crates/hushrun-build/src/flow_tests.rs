@@ -1215,6 +1215,93 @@ fn low_free_space_stores_nothing() {
     assert_eq!(w.blocks(), 0);
 }
 
+/// A checkout at `rest` whose `--extern sqlx` file has the same bytes in every checkout. The
+/// table of known macros goes by the extern's name: sqlx's read the first `.env` found walking up
+/// from the package and from the working directory (B-6 `declared`).
+fn sqlx_checkout(w: &World, rest: &str) -> PathBuf {
+    let ws = w.checkout(rest);
+    fs::write(ws.join("target/debug/deps/libsqlx-s.rlib"), "the same sqlx").unwrap();
+    ws
+}
+
+fn sqlx_call(w: &World, ws: &Path, change: impl FnOnce(&mut Fake)) -> Result {
+    let ext = format!(
+        "sqlx={}",
+        ws.join("target/debug/deps/libsqlx-s.rlib").display()
+    );
+    w.call_with(ws, "a", &["--extern", &ext], change)
+}
+
+// covers: B-6, B-8
+#[test]
+fn a_dotenv_search_above_the_checkout_is_keyed_by_the_file_it_finds_not_by_where() {
+    let w = world(Mode::On);
+    w.plan("a", Plan::default());
+    let one = sqlx_checkout(&w, "first-parent/one");
+    let two = sqlx_checkout(&w, "the-second-parent/two");
+    settle();
+    assert_eq!(sqlx_call(&w, &one, |_| {}).outcome(), STORED);
+    // No `.env` above either checkout: the block moves.
+    assert_eq!(sqlx_call(&w, &two, |_| {}).outcome(), REUSED);
+
+    // A `.env` in a parent of one checkout: another key.
+    let three = sqlx_checkout(&w, "third/three");
+    fs::write(
+        w.dir.path().join("third/.env"),
+        "DATABASE_URL=postgres://x\n",
+    )
+    .unwrap();
+    settle();
+    let r = sqlx_call(&w, &three, |_| {});
+    assert_eq!(r.outcome(), STORED);
+    assert!(!r.entry.unwrap().found);
+
+    // The same bytes above another checkout, two folders up: that block, not where it lies.
+    let four = sqlx_checkout(&w, "fourth/and-deeper/four");
+    fs::write(
+        w.dir.path().join("fourth/.env"),
+        "DATABASE_URL=postgres://x\n",
+    )
+    .unwrap();
+    settle();
+    assert_eq!(sqlx_call(&w, &four, |_| {}).outcome(), REUSED);
+
+    // Other bytes: another key.
+    let five = sqlx_checkout(&w, "fifth/five");
+    fs::write(
+        w.dir.path().join("fifth/.env"),
+        "DATABASE_URL=postgres://y\n",
+    )
+    .unwrap();
+    settle();
+    let r = sqlx_call(&w, &five, |_| {});
+    assert_eq!(r.outcome(), STORED);
+    assert!(!r.entry.unwrap().found);
+
+    // A folder named `.env` is not what the search finds: it goes on up, as dotenvy's does.
+    let six = sqlx_checkout(&w, "sixth/six");
+    fs::create_dir_all(w.dir.path().join("sixth/.env")).unwrap();
+    settle();
+    assert_eq!(sqlx_call(&w, &six, |_| {}).outcome(), REUSED);
+}
+
+// covers: B-6, B-11
+#[test]
+fn a_dotenv_appearing_above_the_checkout_while_compiling_is_not_stored() {
+    let w = world(Mode::On);
+    w.plan("a", Plan::default());
+    let ws = sqlx_checkout(&w, "parent/ws");
+    settle();
+    let env = w.dir.path().join("parent/.env");
+    let r = sqlx_call(&w, &ws, move |fake| {
+        fake.during = Some(Box::new(move || {
+            fs::write(&env, "DATABASE_URL=postgres://late\n").unwrap();
+        }));
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed));
+    assert_eq!(w.blocks(), 0);
+}
+
 // covers: B-10
 #[test]
 fn an_output_holding_a_root_is_tied_to_its_checkout() {

@@ -882,6 +882,66 @@ fn a_static_library_bundled_from_a_dependencys_output_folder_is_keyed() {
     assert!(reused(&last(&third, "p", Class::Library)), "{third:#?}");
 }
 
+/// A workspace whose library `app` names an extern `sqlx`: a local stand-in, since the table of
+/// macros known to read unlisted files goes by the extern's name (B-6 `declared`), and sqlx's
+/// read the first `.env` found walking up from the package and the working directory.
+const SQLX: &[(&str, &str)] = &[
+    (
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"sqlx\", \"app\"]\nresolver = \"2\"\n",
+    ),
+    (
+        "sqlx/Cargo.toml",
+        "[package]\nname = \"sqlx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ),
+    ("sqlx/src/lib.rs", "pub fn n() -> u32 {\n    1\n}\n"),
+    (
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsqlx = { path = \"../sqlx\" }\n",
+    ),
+    (
+        "app/src/lib.rs",
+        "pub fn n() -> u32 {\n    sqlx::n() + 1\n}\n",
+    ),
+];
+
+// covers: B-6, B-8
+#[test]
+fn a_crate_that_uses_sqlx_moves_unless_a_dotenv_above_differs() {
+    let w = World::new();
+    let checkout = |rest: &str| {
+        let ws = w.path(rest);
+        for (file, text) in SQLX {
+            let path = ws.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        ws
+    };
+    let one = checkout("first-parent/one");
+    let two = checkout("a-second-parent/two");
+    let three = checkout("third/three");
+    fs::write(w.path("third").join(".env"), "DATABASE_URL=postgres://x\n").unwrap();
+    let session = w.begin(Mode::On).unwrap();
+    build(&one, &session);
+    let first = entries(&session);
+    assert_eq!(
+        last(&first, "app", Class::Library).outcome,
+        Outcome::BuiltAndStored
+    );
+    // Under another parent with no `.env` above it: reused.
+    build(&two, &session);
+    let second = entries(&session)[first.len()..].to_vec();
+    assert!(reused(&last(&second, "app", Class::Library)), "{second:#?}");
+    // A `.env` above the third: built again.
+    let n = entries(&session).len();
+    build(&three, &session);
+    let third = entries(&session)[n..].to_vec();
+    let app = last(&third, "app", Class::Library);
+    assert_eq!(app.outcome, Outcome::BuiltAndStored, "{third:#?}");
+    assert!(!app.found, "{third:#?}");
+}
+
 /// A workspace whose programs B-9 makes movable on Apple targets: `lib_a` panics three calls
 /// deep on a bad index (`lib_a/src/lib.rs:11:5`), and its unit test fails there; the bin `prog`
 /// calls it with its first argument; the bin `where` prints its package's folder, read at compile

@@ -163,6 +163,24 @@ pub struct Declared {
     pub files: Vec<Read>,
     /// `rerun-if-env-changed` variables.
     pub env: Vec<EnvRead>,
+    /// What each upward search found above every root (B-6 `declared`).
+    #[serde(default)]
+    pub above: Vec<FoundAbove>,
+}
+
+/// What a search for a file name walking up the folders found once it left every root and
+/// shared folder (B-6 `declared`): the first file of that name, by its bytes, or none. A macro
+/// that reads the first `.env` up from its folder depends on that file, not on where it is, so
+/// the entry holds no folder above the roots and does not tie the block (B-8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FoundAbove {
+    /// The file name searched for.
+    pub name: String,
+    /// The last folder of the search that lies under a root or a shared folder: the search went
+    /// on from the folder above it.
+    pub below: Located,
+    /// The first file of that name in the folders above `below`, by SHA-256, or absent.
+    pub state: ReadState,
 }
 
 /// One library the linker was handed (B-18).
@@ -282,6 +300,9 @@ impl Observed {
                     Ok(DeclaredBody {
                         files: normalize(&d.files, "declared files", |r| r.at.clone())?,
                         env: normalize(&d.env, "declared env", |e| e.name.clone())?,
+                        above: normalize(&d.above, "declared above", |a| {
+                            (a.name.clone(), a.below.clone())
+                        })?,
                     })
                 })
                 .transpose()?,
@@ -335,6 +356,7 @@ struct BlockBody {
 struct DeclaredBody {
     files: Vec<Read>,
     env: Vec<EnvRead>,
+    above: Vec<FoundAbove>,
 }
 
 #[derive(Serialize)]
@@ -597,6 +619,11 @@ mod tests {
                     name: "DATABASE_URL".into(),
                     value: None,
                 }],
+                above: vec![FoundAbove {
+                    name: ".env".into(),
+                    below: at(RootName::Workspace, ""),
+                    state: ReadState::Absent,
+                }],
             }),
             link: None,
             place: Place::Anywhere,
@@ -625,7 +652,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "56c46195a8397877a96897d4bdf20e289a9a7ee9b2a91bab30806c0acad5f3e3"
+            "36ea9ae1a0165d454ea90969638f453b04500d29b8c73c310e4bdca1a1a6e145"
         );
     }
 
@@ -711,6 +738,16 @@ mod tests {
             ("a declared variable", |o| {
                 if let Some(d) = o.declared.as_mut() {
                     d.env[0].value = Some("postgres://".into());
+                }
+            }),
+            ("a file found above the roots", |o| {
+                if let Some(declared) = o.declared.as_mut() {
+                    declared.above[0].state = ReadState::Present(d(99));
+                }
+            }),
+            ("a search above another folder", |o| {
+                if let Some(d) = o.declared.as_mut() {
+                    d.above[0].below = at(RootName::Package, "");
                 }
             }),
             ("declared not applying", |o| o.declared = None),
