@@ -10,7 +10,9 @@
 //! repository of its open-source program ([`FakeResults::answer_without_a_token`]). \[ADR 0069\]
 //! It keeps a run's test files' results with it (`POST {base}/v0/runs/{key}`), answers the batch
 //! lookup and a check's reuse state as hushrun cloud does (results-v0 §3), or, told to, answers
-//! them 404 as a server from before them does ([`FakeResults::forget_units`]).
+//! them 404 as a server from before them does ([`FakeResults::forget_units`]). What it recorded
+//! can be put back as it stood ([`FakeResults::recorded_so_far`], [`FakeResults::go_back_to`]),
+//! for tests that run two machines against the same server.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -72,6 +74,16 @@ struct State {
     reuse: BTreeMap<(String, String), Value>,
     /// It answers what a server from before test files' results does: 404.
     no_units: bool,
+}
+
+/// What a fake results server recorded at one moment: results, the runs that came with test
+/// files' results and theirs, and each check's reuse state.
+#[derive(Debug, Clone)]
+pub struct Recorded {
+    results: BTreeMap<String, Vec<Value>>,
+    runs: Vec<Value>,
+    units: Vec<(String, String, u64, usize)>,
+    reuse: BTreeMap<(String, String), Value>,
 }
 
 /// A running fake results server for the org [`FakeResults::ORG`].
@@ -166,6 +178,32 @@ impl FakeResults {
     /// \[ADR 0069\] How many test files' results it keeps.
     pub fn unit_results(&self) -> usize {
         self.state().units.len()
+    }
+
+    /// \[ADR 0069\] Every run that came with test files' results, oldest first.
+    pub fn runs(&self) -> Vec<Value> {
+        self.state().runs.clone()
+    }
+
+    /// What it has recorded so far, to put back with [`FakeResults::go_back_to`].
+    pub fn recorded_so_far(&self) -> Recorded {
+        let state = self.state();
+        Recorded {
+            results: state.results.clone(),
+            runs: state.runs.clone(),
+            units: state.units.clone(),
+            reuse: state.reuse.clone(),
+        }
+    }
+
+    /// Forgets everything recorded since `recorded`: a second machine then finds the server as
+    /// the first left it, whatever another machine recorded meanwhile. The requests it saw stay.
+    pub fn go_back_to(&self, recorded: &Recorded) {
+        let mut state = self.state();
+        state.results = recorded.results.clone();
+        state.runs = recorded.runs.clone();
+        state.units = recorded.units.clone();
+        state.reuse = recorded.reuse.clone();
     }
 
     /// \[ADR 0069\] Records a test file's result under `key` (64 hex) with a run of `run`, as a
