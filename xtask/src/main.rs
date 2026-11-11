@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod bench;
+mod build_replay;
 mod corpus;
 mod e2e;
 mod installer;
@@ -19,6 +20,10 @@ commands:
       Check that every normative rule of a started milestone is covered by a test.
   bench-digest [--files N] [--mb M] [--changed K] [--runs R] [--dir DIR]
       Time `hushrun digest` on a synthetic repository against the plan's budgets.
+  build-replay --repo PATH --work PATH [--hushrun PATH] [--mode observe|on|none] [...]
+      Replay a repository's commits through hushrun's rustc wrapper, each exported to its own
+      folder under --work, and report what was, or would have been, reused (build blocks).
+      Exits 1 when any compile differed from its block. --help lists every option.
   corpus [--hushrun PATH] [--only OWNER/NAME,...] [--update-baseline] [--refresh] [--jobs N]
       Measure `hushrun init` on the survey's 100 repositories (tools/corpus/README.md): one
       outcome per test job, assertions A1 to A10, and the delta against the baseline. Needs the
@@ -39,6 +44,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("trace") => trace::run(&workspace_root(), &args[1..]),
         Some("bench-digest") => bench::run(&workspace_root(), &args[1..]),
+        Some("build-replay") => build_replay::run(&args[1..]),
         Some("corpus") => corpus::run(&workspace_root(), &args[1..]),
         Some("e2e") => e2e::run(&workspace_root(), &args[1..]),
         Some("installer-pins") => installer::run(&workspace_root(), &args[1..]),
