@@ -206,9 +206,10 @@ jobs:
       - run: node --test recipes/agents/*.test.mjs
 
   # Envelope, statement and policy parsing under libFuzzer, 60 s each (M2), M10's
-  # certificates, timestamps, TUF metadata and trust roots, and test and coverage reports (C-27).
-  # The fuzzing runs on every push, since its inputs are random. One job builds the five targets
-  # once and fuzzes them in turn, each with the runner to itself, as when each had its own job.
+  # certificates, timestamps, TUF metadata and trust roots, test and coverage reports (C-27), and
+  # hints from a server (C-38). The fuzzing runs on every push, since its inputs are random. One
+  # job builds the six targets once and fuzzes them in turn, each with the runner to itself, as
+  # when each had its own job.
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest
@@ -244,6 +245,7 @@ jobs:
           cp testdata/sigstore/*.der crates/hushrun-attest/sigstore/*.json fuzz/corpus/sigstore/
           mkdir -p fuzz/corpus/reports
           for f in testdata/reports/*/*; do cp "$f" "fuzz/corpus/reports/$(basename "$(dirname "$f")")-$(basename "$f")"; done
+          python3 -I tools/refdigest.py unit-hints testdata/digest/unit-hints.json --corpus fuzz/corpus/hints
       # cargo-fuzz builds for the target it was itself built for unless given one, and the one
       # install-action installs is a musl build: musl links libc statically, which the sanitizer
       # can't work with. The fuzz targets build for the runner's own target.
@@ -269,6 +271,9 @@ jobs:
       - name: Fuzz reports
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo +nightly fuzz run --target "$FUZZ_HOST" reports fuzz/corpus/reports -- -max_total_time=60
+      - name: Fuzz hints
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo +nightly fuzz run --target "$FUZZ_HOST" hints fuzz/corpus/hints -- -max_total_time=60
       # cargo-fuzz writes each target's crashes under its own name in fuzz/artifacts.
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
