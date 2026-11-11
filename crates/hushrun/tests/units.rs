@@ -963,3 +963,62 @@ fn this_machine_forgets_unit_results_after_30_days() {
     );
     assert!(map.exists() && left.exists());
 }
+
+// covers: C-33
+#[test]
+fn two_repositories_with_one_check_keep_their_maps_apart() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let shop = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("lib.py", "X = 1\n"),
+        (
+            "test_lib.py",
+            "import lib\n\ndef test_x():\n    assert lib.X == 1\n",
+        ),
+    ]);
+    let other = Repo::new(&[
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/other\nchecks:\n  unit:\n    tests: observe\n",
+        ),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("lib.py", "X = 2\n"),
+        (
+            "test_lib.py",
+            "import lib\n\ndef test_x():\n    assert lib.X == 2\n",
+        ),
+    ]);
+    let python = python();
+    let args = [
+        "run",
+        "unit",
+        "--",
+        &python,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ];
+    // One cache directory, as one machine has, for both: same check, same command.
+    let cache = shop.cache();
+    let cache = cache.to_str().unwrap();
+    let first = shop.run(&args, &[("HUSHRUN_CACHE_DIR", cache)]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let second = other.run(&args, &[("HUSHRUN_CACHE_DIR", cache)]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    // The other repository's map isn't this one's: nothing of the first says why.
+    assert_eq!(
+        second.observe_line(),
+        "hushrun: unit: with `tests: reuse`, all 1 test file would have run: none had passed here yet on the files it read"
+    );
+    let maps = std::fs::read_dir(shop.cache().join("units"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".map.json"))
+        .count();
+    assert_eq!(maps, 2);
+}

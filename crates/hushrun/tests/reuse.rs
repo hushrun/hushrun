@@ -702,6 +702,54 @@ fn the_plugin_deselects_what_it_is_told_and_no_tests_collected_stays_its_own() {
     assert_eq!(facts[0]["removedItems"], 0);
 }
 
+// covers: C-32
+#[test]
+fn with_pytest_xdist_a_plan_that_deselects_every_test_left_still_passes() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let mut files = hidden("observe");
+    files.push((
+        "test_more.py".into(),
+        "def test_one():\n    pass\n\ndef test_two():\n    pass\n".into(),
+    ));
+    let r = repo_of(&files);
+    r.run(&pytest_args(&python(), &[]), &[]);
+    let units = r.root.join("units");
+    let every = ["test_hidden.py", "test_other.py", "test_more.py"];
+    // Every test file listed, no other deselection: the workers remove every test, and the
+    // process that claimed the directory reads their files and makes "no tests collected" a 0.
+    let (code, facts) = plugin_pytest(&r, &units, &every, &["-n", "2"]);
+    assert_eq!(code, 0, "{facts:?}");
+    let controller: Vec<&Value> = facts.iter().filter(|f| f["controller"] == true).collect();
+    assert_eq!(controller.len(), 1, "{facts:?}");
+    let removed: u64 = facts
+        .iter()
+        .filter(|f| f["controller"] != true)
+        .map(|f| f["removedItems"].as_u64().unwrap_or(0))
+        .sum();
+    // Each worker collects every test and removes them all: 4 tests, 2 workers.
+    assert_eq!(removed, 8, "{facts:?}");
+    for unit in every {
+        assert!(
+            facts
+                .iter()
+                .filter(|f| f["controller"] != true)
+                .all(|f| f["units"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|u| u["unit"] == unit)
+                    .all(|u| u["deselected"] == true)),
+            "{unit}: {facts:?}"
+        );
+    }
+    // What isn't on the list still runs, and its failure is pytest's status.
+    r.write("flag", "");
+    let (code, _) = plugin_pytest(&r, &units, &["test_other.py", "test_more.py"], &["-n", "2"]);
+    assert_eq!(code, 1);
+}
+
 fn with_server(results: &FakeResults) -> Vec<(&'static str, String)> {
     vec![
         ("HUSHRUN_BACKEND", results.url()),
@@ -802,6 +850,94 @@ fn a_server_keeps_the_suspension_and_a_person_resumes_it_there() {
     let resumed = r.run(&["tests", "resume", "unit"], &envs(&server));
     assert_eq!(resumed.code, 0, "{}", resumed.stderr);
     assert_eq!(results.reuse_state(REPOSITORY, "unit")["state"], "on");
+}
+
+// covers: C-34
+#[test]
+fn a_suspension_that_cant_reach_the_server_waits_and_nothing_is_reused_meanwhile() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let r = repo_of(&hidden("reuse"));
+    let python = python();
+    let outbox =
+        || std::fs::read_dir(r.cache.join("units/outbox")).map_or(0, |d| d.flatten().count());
+    let reuse_requests = || {
+        results
+            .requests()
+            .iter()
+            .filter(|s| s.path == "v0/units/reuse")
+            .count()
+    };
+    assert_eq!(r.run(&pytest_args(&python, &[]), &envs(&server)).code, 0);
+    // The server fails every request that would suspend, each time it is tried (L-4 retries).
+    results.answer("POST", "v0/units/reuse", 503, json!({}), 4);
+    r.write("flag", "");
+    r.write("libb.py", "Y = 1  # changed\n");
+    let caught = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(caught.code, 1, "{}", caught.stderr);
+    assert!(
+        caught.stderr.contains("couldn't be suspended")
+            && caught
+                .stderr
+                .contains("it is sent before the next run reuses anything"),
+        "{}",
+        caught.stderr
+    );
+    // It waits on this machine, and the server's state is as it was.
+    assert_eq!(outbox(), 1);
+    assert_eq!(results.reuse_state(REPOSITORY, "unit")["state"], "on");
+    // While it waits, nothing is reused, and the run says why.
+    let tries = reuse_requests();
+    results.answer("POST", "v0/units/reuse", 503, json!({}), tries);
+    r.write("libb.py", "Y = 1  # again\n");
+    let waiting = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(waiting.code, 1, "{}", waiting.stderr);
+    assert!(
+        waiting.plan_line().starts_with(
+            "hushrun: unit: every test file runs: can't read which passed (a suspension of unit's reuse hasn't reached"
+        ),
+        "{}",
+        waiting.stderr
+    );
+    assert_eq!(outbox(), 1);
+    assert!(
+        results
+            .recorded()
+            .iter()
+            .all(|r| r["units"]["reused"].as_u64().unwrap_or(0) == 0),
+        "{:?}",
+        results.recorded()
+    );
+    // The server answers again: the next plan sends the suspension before it reads anything.
+    assert_eq!(reuse_requests(), 2 * tries);
+    let before_plan = results.requests().len();
+    r.write("libb.py", "Y = 1  # once more\n");
+    let sent = r.run(&pytest_args(&python, &[]), &envs(&server));
+    let paths: Vec<String> = results.requests()[before_plan..]
+        .iter()
+        .map(|s| s.path.clone())
+        .collect();
+    let reuse_at = paths.iter().position(|p| p == "v0/units/reuse");
+    let lookup_at = paths.iter().position(|p| p == "v0/units/lookup");
+    assert!(
+        reuse_at.is_some() && reuse_at < lookup_at,
+        "{paths:?}\n{}",
+        sent.stderr
+    );
+    assert_eq!(outbox(), 0);
+    assert_eq!(
+        results.reuse_state(REPOSITORY, "unit")["state"],
+        "suspended"
+    );
+    assert!(
+        sent.plan_line()
+            .contains("reuse of its test files is suspended"),
+        "{}",
+        sent.stderr
+    );
 }
 
 // covers: C-33

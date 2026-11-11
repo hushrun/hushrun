@@ -643,14 +643,17 @@ struct RunObject {
 }
 
 /// The check id: the run key's fields but `digest`, hashed, so that a check's map and audit
-/// follow it across changes to its files.
-pub fn check_id(base: &hushrun_core::units::KeyBase) -> Digest {
+/// follow it across changes to its files, and the repository the run names (C-10, lowercase,
+/// `""` for none), so that two repositories with one check and one command on one machine keep
+/// their maps apart.
+pub fn check_id(base: &hushrun_core::units::KeyBase, repository: Option<&str>) -> Digest {
     let value = json!({
         "schema": "hushrun.unit-map-id/v0",
         "check": base.check,
         "command": base.command,
         "cwd": base.cwd,
         "scope": base.scope,
+        "repository": repository.unwrap_or_default().to_lowercase(),
     });
     hushrun_core::jcs::digest(&value).unwrap_or_else(|_| Digest::of(value.to_string().as_bytes()))
 }

@@ -213,7 +213,7 @@ impl Session {
             (None, None) => return Planned::Everything("no adapter".into()),
         };
         let keyer = Keyer::new(input.tree, &sets, &input.base);
-        let map = store::load_map(&self.map_path(&input.base));
+        let map = store::load_map(&self.map_path(&input.base, input.repository));
         // The test files the plan knows of, and the files each read, as far as it can tell.
         let known: Vec<(String, Option<BTreeSet<String>>)> = match &built {
             None => sets
@@ -355,8 +355,8 @@ impl Session {
         Planned::Plan(line)
     }
 
-    fn map_path(&self, base: &KeyBase) -> PathBuf {
-        store::file(&self.cache, &store::check_id(base), "map")
+    fn map_path(&self, base: &KeyBase, repository: Option<&str>) -> PathBuf {
+        store::file(&self.cache, &store::check_id(base, repository), "map")
     }
 
     /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
@@ -364,8 +364,12 @@ impl Session {
     /// unit is recorded.
     pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
         let files = facts::read_all(&self.dir)?;
-        let map_path = self.map_path(&end.base);
-        let audit_path = store::file(&self.cache, &store::check_id(&end.base), "audit");
+        let map_path = self.map_path(&end.base, end.repository);
+        let audit_path = store::file(
+            &self.cache,
+            &store::check_id(&end.base, end.repository),
+            "audit",
+        );
         let map = store::load_map(&map_path);
         let (seen, failures_by_unit, sets, from_this_run, executables) =
             match self.read(&files, end.root, end.cwd, end.tree, end.command_passed) {
@@ -607,6 +611,8 @@ impl Again {
 pub struct PlanInput<'a> {
     /// What every unit key holds of the run's key.
     pub base: KeyBase,
+    /// The repository the run names (C-10), which the check's map and audit are kept by.
+    pub repository: Option<&'a str>,
     /// The scope's files now, which COMMAND will run on.
     pub tree: &'a Tree,
     /// Where results are found, and the check's reuse state.
@@ -623,6 +629,8 @@ pub struct PlanInput<'a> {
 pub struct Finish<'a> {
     /// What every unit key holds of the run's key.
     pub base: KeyBase,
+    /// The repository the run names (C-10), which the check's map and audit are kept by.
+    pub repository: Option<&'a str>,
     /// The scope's files now, which COMMAND ran on.
     pub tree: &'a Tree,
     pub command_passed: bool,

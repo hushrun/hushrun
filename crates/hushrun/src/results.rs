@@ -1212,7 +1212,7 @@ pub enum UnitsCall {
     Conflict(serde_json::Value),
     /// 404 or 405: a server from before test files' results.
     Unsupported,
-    /// Anything else, in the server's words.
+    /// Anything else but a server's failure (5xx, 429), which is an error, in the server's words.
     Refused(String),
 }
 
@@ -1232,6 +1232,15 @@ impl Backend {
             .ledger
             .json_request_page("POST", &format!("v0/units/{what}"), Some(&bytes), None)
             .map_err(plain)?;
+        // \[ADR 0069\] A server that fails, or asks to be asked later, after L-4's retries: it
+        // wasn't reached, so a suspension waits in the outbox rather than being dropped.
+        if status == 429 || (500..600).contains(&status) {
+            return Err(anyhow!(
+                "{}: {}",
+                server.base,
+                error_message(&answer).unwrap_or_else(|| format!("answered {status}"))
+            ));
+        }
         Ok(match status {
             200 => UnitsCall::Answered(
                 serde_json::from_slice(&answer)

@@ -1389,8 +1389,10 @@ fn observed(
     let store = unit_store(backend, code, job)?;
     let variant = code.variant.as_ref().map(|v| v.key.as_str());
     let counts = |run: &RunResult| run.counts_in(job, variant);
+    let repository = code.repository_here();
     let end = units::Finish {
         base: key_base(code, command),
+        repository: repository.as_deref(),
         tree: &tree,
         command_passed: passed,
         counts: &counts,
@@ -1462,8 +1464,10 @@ fn plan_units(
     let variant = code.variant.as_ref().map(|v| v.key.as_str());
     let counts = |run: &RunResult| run.counts_in(job, variant);
     let started = started.to_string();
+    let repository = code.repository_here();
     let input = units::PlanInput {
         base: key_base(code, command),
+        repository: repository.as_deref(),
         tree: &tree,
         store: store.as_ref(),
         counts: &counts,
