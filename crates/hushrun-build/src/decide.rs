@@ -5,6 +5,10 @@
 //! suspended. [`passed_through`] is the outcome of a call that never reached a plan. No other
 //! code makes an `Outcome`.
 
+use std::collections::BTreeSet;
+
+use serde_json::Value;
+
 use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough};
 
 /// What the lookup before a compile found.
@@ -120,6 +124,75 @@ pub const CRATE_LOADING: [&str; 7] = [
 /// Whether a failed compile's error codes say it could not load a crate (B-15).
 pub fn could_not_load<'a>(codes: impl IntoIterator<Item = &'a str>) -> bool {
     codes.into_iter().any(|code| CRATE_LOADING.contains(&code))
+}
+
+/// What a failed compile's crate-loading errors name (B-15): the words in backticks of each
+/// such error's message and notes (E0463's "can't find crate for `x` which `y` depends on"
+/// names both), and those texts, which may name a file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotLoaded {
+    /// Every word written in backticks.
+    pub names: BTreeSet<String>,
+    /// The messages, the notes' and the rendered text.
+    pub texts: Vec<String>,
+}
+
+impl NotLoaded {
+    /// Whether the errors name the crate `name`.
+    pub fn names_crate(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Whether the errors name the file `path` (a non-empty path, as rustc was given it or
+    /// absolute).
+    pub fn names_file(&self, path: &str) -> bool {
+        !path.is_empty() && self.texts.iter().any(|text| text.contains(path))
+    }
+}
+
+/// The crates and files the crate-loading errors among `diagnostics` (rustc's JSON messages)
+/// name, or `None` when there is no such error (B-15). An error in the dependent's own code
+/// never gives one; one that names a crate no extern of the call is changes nothing either.
+pub fn not_loaded<'a>(diagnostics: impl IntoIterator<Item = &'a Value>) -> Option<NotLoaded> {
+    let mut out: Option<NotLoaded> = None;
+    for diagnostic in diagnostics {
+        let code = diagnostic
+            .get("code")
+            .and_then(|code| code.get("code"))
+            .and_then(Value::as_str);
+        if !code.is_some_and(|code| CRATE_LOADING.contains(&code)) {
+            continue;
+        }
+        let found = out.get_or_insert_with(NotLoaded::default);
+        let mut texts = Vec::new();
+        collect_texts(diagnostic, &mut texts);
+        for text in &texts {
+            for (i, part) in text.split('`').enumerate() {
+                if i % 2 == 1 && !part.is_empty() {
+                    found.names.insert(part.to_string());
+                }
+            }
+        }
+        found.texts.extend(texts);
+    }
+    out
+}
+
+/// A diagnostic's message and rendered text, and its children's, depth first.
+fn collect_texts(diagnostic: &Value, out: &mut Vec<String>) {
+    for field in ["message", "rendered"] {
+        if let Some(text) = diagnostic.get(field).and_then(Value::as_str) {
+            out.push(text.to_string());
+        }
+    }
+    for child in diagnostic
+        .get("children")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        collect_texts(child, out);
+    }
 }
 
 /// How rustc ended.
@@ -409,6 +482,37 @@ mod tests {
         assert!(!could_not_load(["E0425", "E0308"]));
         assert!(!could_not_load([]));
         assert!(could_not_load(["E0425", "E0463"]));
+    }
+
+    // covers: B-15
+    #[test]
+    fn a_crate_loading_error_names_its_crates_and_files() {
+        let error = |code: &str, message: &str, note: &str| {
+            serde_json::json!({
+                "message": message,
+                "code": {"code": code},
+                "children": [{"message": note, "children": []}],
+                "rendered": format!("error[{code}]: {message}"),
+            })
+        };
+        let typo = error("E0463", "can't find crate for `no_such_crate_typo`", "");
+        let named = not_loaded([&typo]).unwrap();
+        assert!(named.names_crate("no_such_crate_typo"));
+        assert!(!named.names_crate("a"));
+        let deps = error("E0463", "can't find crate for `m` which `b` depends on", "");
+        let named = not_loaded([&deps]).unwrap();
+        assert!(named.names_crate("m") && named.names_crate("b"));
+        let file = error(
+            "E0786",
+            "found invalid metadata files for crate `c`",
+            "failed to decompress metadata: /w/deps/libc-1.rlib",
+        );
+        let named = not_loaded([&file]).unwrap();
+        assert!(named.names_file("/w/deps/libc-1.rlib"));
+        assert!(!named.names_file(""));
+        let own = error("E0425", "cannot find value `b` in this scope", "");
+        assert_eq!(not_loaded([&own]), None);
+        assert_eq!(not_loaded([]), None);
     }
 
     /// What a row of the `after` table expects.

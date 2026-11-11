@@ -258,6 +258,56 @@ impl Call<'_> {
         self.as_asked(decide::passed_through(why))
     }
 
+    /// Whether a reuse put any of this call's externs in place (B-15). Cost: a stat and a small
+    /// read per extern, only for a call about to pass through as an incremental rebuild.
+    fn any_extern_reused(&self) -> bool {
+        self.invocation.externs().iter().any(|ext| {
+            ext.path
+                .as_ref()
+                .is_some_and(|path| sidecar::reused(&Path::new(self.invocation.cwd()).join(path)))
+        })
+    }
+
+    /// Runs rustc exactly as asked, as a child whose stderr goes on line by line, so that a
+    /// failure to load a reused extern suspends and removes it (B-15) as it does for a compile
+    /// the wrapper handles. The outcome stays `passed through`.
+    fn watched_as_asked(&mut self, store: &Store, why: PassedThrough) -> i32 {
+        let rustc = OsString::from(self.invocation.rustc());
+        let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
+        let mut recorder = Recorder::new(&mut *self.err, self.invocation.form().clone());
+        let ran = self.ports.compile(
+            &Run {
+                rustc: &rustc,
+                args: &args,
+                env: &[],
+                capture_stdout: false,
+            },
+            &mut |line| {
+                let _ = recorder.line(line);
+            },
+        );
+        let recorded = recorder.finish();
+        let mut log = entry(decide::passed_through(why), Some(self.invocation.class()));
+        let code = match ran {
+            Ok(ran) => {
+                if !ran.success {
+                    log.note = self.reject_reused(store, &recorded);
+                }
+                ran.code
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    self.err,
+                    "error: hushrun could not run {}: {err}",
+                    self.invocation.rustc()
+                );
+                1
+            }
+        };
+        self.log(log);
+        code
+    }
+
     fn run(mut self) -> i32 {
         let inv = self.invocation;
         let class = inv.class();
@@ -374,6 +424,10 @@ impl Call<'_> {
         });
 
         match plan {
+            // A rebuild against a reused extern runs as a child, so B-15 can heal it.
+            Plan::PassThrough(PassedThrough::Incremental) if self.any_extern_reused() => {
+                self.watched_as_asked(&store, PassedThrough::Incremental)
+            }
             Plan::PassThrough(why) => self.pass(why),
             Plan::AsAsked(why) => self.as_asked(Outcome::BuiltNotStored(why)),
             Plan::Reuse => {
@@ -1047,18 +1101,26 @@ impl Call<'_> {
     /// B-15: a dependent that could not load a reused crate suspends that crate's first key and
     /// removes its reused files, so cargo builds it. Any other error changes nothing.
     fn reject_reused(&self, store: &Store, recorded: &Recorded) -> Option<String> {
-        let codes = recorded.lines().iter().filter_map(|line| match line {
-            Line::Diagnostic(value) => value.get("code")?.get("code")?.as_str(),
+        let diagnostics = recorded.lines().iter().filter_map(|line| match line {
+            Line::Diagnostic(value) => Some(value),
             _ => None,
         });
-        if !decide::could_not_load(codes) {
-            return None;
-        }
+        let named = decide::not_loaded(diagnostics)?;
         let now = self.ports.now();
         let mut names = Vec::new();
         for ext in self.invocation.externs() {
-            let Some(path) = &ext.path else { continue };
-            let path = Path::new(self.invocation.cwd()).join(path);
+            let Some(given) = &ext.path else { continue };
+            let path = Path::new(self.invocation.cwd()).join(given);
+            // Only an extern the errors name: by its name, its crate's name or its file. A
+            // crate that is no extern of this call (a typo in this crate's own code) is none.
+            let file_crate = crate_of_file(&path);
+            let is_named = named.names_crate(&ext.name)
+                || file_crate.is_some_and(|name| named.names_crate(name))
+                || named.names_file(given)
+                || path.to_str().is_some_and(|text| named.names_file(text));
+            if !is_named {
+                continue;
+            }
             let Ok(known) = sidecar::lookup(&path) else {
                 continue;
             };
@@ -1087,6 +1149,13 @@ impl Call<'_> {
             names.join(", ")
         ))
     }
+}
+
+/// The crate a dependency's file holds, from its name: `lib<crate>-<extra>.<ext>`.
+fn crate_of_file(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    let name = stem.strip_prefix("lib").unwrap_or(stem);
+    Some(name.rsplit_once('-').map_or(name, |(name, _)| name))
 }
 
 /// What a linked output's compile gets besides the remaps: `--print=link-args` for its link

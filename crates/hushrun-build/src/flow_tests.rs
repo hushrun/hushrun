@@ -38,6 +38,8 @@ struct Plan {
     warn: bool,
     /// Fail with this error code.
     fail: Option<&'static str>,
+    /// The failure's message, `failed` when unset.
+    fail_message: Option<String>,
     /// What the compiler prints on stdout, with `{ws}` for the working directory: a proc
     /// macro's own printing, the linker command `--print=link-args` asks for.
     stdout: Option<String>,
@@ -155,8 +157,13 @@ impl Fake {
             .unwrap_or_default();
         let mut lines = Vec::new();
         if let Some(code) = plan.fail {
+            let message = serde_json::Value::from(plan.fail_message.as_deref().unwrap_or("failed"));
+            let rendered = serde_json::Value::from(format!(
+                "error[{code}]: {}\n",
+                message.as_str().unwrap_or("")
+            ));
             lines.push(format!(
-                r#"{{"$message_type":"diagnostic","message":"failed","code":{{"code":"{code}","explanation":null}},"level":"error","spans":[],"children":[],"rendered":"error[{code}]: failed\n"}}"#
+                r#"{{"$message_type":"diagnostic","message":{message},"code":{{"code":"{code}","explanation":null}},"level":"error","spans":[],"children":[],"rendered":{rendered}}}"#
             ));
             return (lines, 1);
         }
@@ -1091,6 +1098,7 @@ fn a_crate_loading_error_suspends_and_removes_the_reused_files_and_no_other_erro
             "b",
             Plan {
                 fail: Some(code),
+                fail_message: Some("can't find crate for `core` which `a` depends on".into()),
                 ..Plan::default()
             },
         );
@@ -1741,4 +1749,192 @@ fn only_a_block_that_may_move_names_its_origin_to_dependents() {
             .produced_by
             .is_some()
     );
+}
+
+/// Two checkouts where `a` and `z` were built in one and reused in two, and `b`'s source.
+fn two_reused(w: &World) -> (PathBuf, Digest, Digest) {
+    let one = w.checkout("one");
+    let two = w.checkout("two");
+    for ws in [&one, &two] {
+        fs::create_dir_all(ws.join("z/src")).unwrap();
+        fs::write(ws.join("z/src/lib.rs"), "pub fn z() {}\n").unwrap();
+        fs::create_dir_all(ws.join("b/src")).unwrap();
+        fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    }
+    settle();
+    let steps = |w: &World| -> std::collections::BTreeSet<Digest> {
+        walk(&w.session.current().store.join("steps"))
+            .iter()
+            .filter(|p| p.parent().unwrap().ends_with("hints"))
+            .map(|p| {
+                let hex = p.parent().unwrap().parent().unwrap().file_name().unwrap();
+                let hex = hex.to_str().unwrap();
+                Digest::parse(hex)
+                    .or_else(|_| Digest::parse(&format!("sha256:{hex}")))
+                    .unwrap()
+            })
+            .collect()
+    };
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    let a = *steps(w).iter().next().unwrap();
+    assert_eq!(w.call(&one, "z", &[]).outcome(), STORED);
+    let z = *steps(w).iter().find(|s| **s != a).unwrap();
+    assert_eq!(w.call(&two, "a", &[]).outcome(), REUSED);
+    assert_eq!(w.call(&two, "z", &[]).outcome(), REUSED);
+    (two, a, z)
+}
+
+fn externs(ws: &Path) -> Vec<String> {
+    let deps = ws.join("target/debug/deps");
+    vec![
+        "--extern".into(),
+        format!("a={}", deps.join("liba-xa.rmeta").display()),
+        "--extern".into(),
+        format!("z={}", deps.join("libz-xz.rmeta").display()),
+    ]
+}
+
+// covers: B-15
+#[test]
+fn a_crate_loading_error_suspends_only_the_reused_externs_it_names() {
+    let cases: [(&str, &str, bool, bool); 5] = [
+        // An error in the dependent's own code: a crate that is no extern at all.
+        (
+            "E0463",
+            "can't find crate for `no_such_crate_typo`",
+            false,
+            false,
+        ),
+        // A crate one of the externs depends on: that extern.
+        (
+            "E0463",
+            "can't find crate for `m` which `z` depends on",
+            false,
+            true,
+        ),
+        (
+            "E0460",
+            "found possibly newer version of crate `std` which `a` depends on",
+            true,
+            false,
+        ),
+        (
+            "E0464",
+            "multiple candidates for `rlib` dependency `z` found",
+            false,
+            true,
+        ),
+        (
+            "E0786",
+            "found invalid metadata files for crate `a`",
+            true,
+            false,
+        ),
+    ];
+    for (code, message, rejects_a, rejects_z) in cases {
+        let w = world(Mode::On);
+        let (two, a, z) = two_reused(&w);
+        w.plan(
+            "b",
+            Plan {
+                fail: Some(code),
+                fail_message: Some(message.into()),
+                ..Plan::default()
+            },
+        );
+        let more = externs(&two);
+        let more: Vec<&str> = more.iter().map(String::as_str).collect();
+        let r = w.call(&two, "b", &more);
+        assert_eq!(r.code, 1);
+        let deps = two.join("target/debug/deps");
+        assert_eq!(w.store().suspended(&a).is_some(), rejects_a, "{message}");
+        assert_eq!(!deps.join("liba-xa.rmeta").exists(), rejects_a, "{message}");
+        assert_eq!(w.store().suspended(&z).is_some(), rejects_z, "{message}");
+        assert_eq!(!deps.join("libz-xz.rlib").exists(), rejects_z, "{message}");
+        assert_eq!(
+            r.entry.unwrap().note.is_some(),
+            rejects_a || rejects_z,
+            "{message}"
+        );
+    }
+}
+
+// covers: B-15
+#[test]
+fn a_crate_loading_error_names_a_crate_that_was_not_reused_and_nothing_happens() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    settle();
+    // Built here, not reused.
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
+    let step = only_step(&w);
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `x` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    let ext = format!("a={}", ws.join("target/debug/deps/liba-xa.rmeta").display());
+    let r = w.call(&ws, "b", &["--extern", &ext]);
+    assert_eq!(r.code, 1);
+    assert!(w.store().suspended(&step).is_none());
+    assert!(w.rlib(&ws, "a").exists());
+    assert!(r.entry.unwrap().note.is_none());
+}
+
+// covers: B-9, B-15
+#[test]
+fn an_incremental_rebuild_against_a_reused_extern_still_heals_a_rejected_block() {
+    let w = world(Mode::On);
+    let (two, a, z) = two_reused(&w);
+    let incremental = format!(
+        "incremental={}",
+        two.join("target/debug/incremental").display()
+    );
+    // A warm target: b's dep-info is there, so b is an incremental rebuild.
+    fs::write(two.join("target/debug/deps/b-xb.d"), "").unwrap();
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `m` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    let mut more = externs(&two);
+    more.extend(["-C".to_string(), incremental.clone()]);
+    let more: Vec<&str> = more.iter().map(String::as_str).collect();
+    let r = w.call(&two, "b", &more);
+    assert_eq!(r.code, 1);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::Incremental)
+    );
+    // Run as asked, as a child: the same arguments, incremental kept, nothing added.
+    assert!(r.seen.execs.is_empty());
+    assert_eq!(r.seen.compiles.len(), 1);
+    let asked: Vec<String> = strings(&w.args(&two, "b", &more)[1..]);
+    assert_eq!(r.seen.compiles[0], asked);
+    assert!(r.stderr.contains("E0463"));
+    assert!(w.store().suspended(&a).is_some());
+    assert!(w.store().suspended(&z).is_none());
+    assert!(!two.join("target/debug/deps/liba-xa.rmeta").exists());
+    assert!(r.entry.unwrap().note.is_some());
+
+    // Without a reused extern, the rebuild replaces the process as before.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    fs::write(ws.join("target/debug/deps/a-xa.d"), "").unwrap();
+    let r = w.call(&ws, "a", &["-C", &incremental]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::Incremental)
+    );
+    assert_eq!(r.seen.execs.len(), 1);
+    assert!(r.seen.compiles.is_empty());
 }

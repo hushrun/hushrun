@@ -157,7 +157,11 @@ store's size.
 (B-16) or when a dependent fails to load a reused block (rustc's errors E0460, E0461, E0462,
 E0463, E0464, E0514 and E0786, never an error in the dependent's own code); in the second case
 the reused files are removed from the output folder so that cargo builds them, and one line says
-so. A
+so. Only the externs the error names are acted on: by their name, their crate's name or their
+file (E0463's "can't find crate for `x` which `y` depends on" names `x` and `y`); a crate that is
+not one of the call's `--extern`s, or one no reuse put in place, changes nothing. A call about to
+pass through as an incremental rebuild (B-9) while one of its externs was reused runs rustc as a
+child, with the same arguments and its stderr passed on line by line, so that this rule runs. A
 suspended key is never reused. `hushrun build clean` clears it.
 
 **B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,

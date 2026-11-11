@@ -758,3 +758,39 @@ fn a_dependent_of_a_tied_proc_macro_at_a_second_checkout_builds_against_its_own_
         &entries(&session)[n..]
     );
 }
+
+// covers: B-15
+#[test]
+fn a_typo_in_a_dependents_own_extern_crate_suspends_nothing() {
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("two-longer");
+    let session = w.begin(Mode::On).unwrap();
+    build(&one, &session);
+    let main = fs::read_to_string(two.join("c/src/main.rs")).unwrap();
+    fs::write(
+        two.join("c/src/main.rs"),
+        format!("extern crate no_such_crate_typo;\n{main}"),
+    )
+    .unwrap();
+    let n = entries(&session).len();
+    let out = cargo(&two, &["build"], &session.env());
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("E0463"));
+    let after = entries(&session)[n..].to_vec();
+    assert!(reused(&last(&after, "a", Class::Library)), "{after:#?}");
+    assert!(after.iter().all(|e| e.note.is_none()), "{after:#?}");
+    // a's and b's reused files are still there, and a third checkout reuses them.
+    let left: Vec<String> = fs::read_dir(two.join("target/debug/deps"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("liba-") || n.starts_with("libb-"))
+        .collect();
+    assert_eq!(left.len(), 4, "{left:?}");
+    let three = w.checkout("three");
+    let n = entries(&session).len();
+    build(&three, &session);
+    let third = entries(&session)[n..].to_vec();
+    assert!(reused(&last(&third, "a", Class::Library)), "{third:#?}");
+    assert!(reused(&last(&third, "b", Class::Library)), "{third:#?}");
+}

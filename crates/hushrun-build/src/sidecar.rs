@@ -242,6 +242,15 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
     })
 }
 
+/// Whether a reuse put `file` there: its record says so and still holds for the file as it is
+/// (B-15). Never reads the file itself.
+pub fn reused(file: &Path) -> bool {
+    let Ok(meta) = fs::metadata(file) else {
+        return false;
+    };
+    load(file).is_some_and(|record| record.reused && same_file(&record.stat, &Stat::of(&meta)))
+}
+
 /// Removes the record of `file`. A missing record is fine.
 pub fn forget(file: &Path) -> io::Result<()> {
     let path = record_path(file).ok_or_else(|| no_name(file))?;
