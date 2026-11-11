@@ -139,6 +139,9 @@ pub enum Command {
     /// hushrun's skill for coding agents: update the copies agents read.
     #[command(subcommand)]
     Skill(SkillCommand),
+    /// A check's test files, with `tests: reuse` in hushrun.yaml: turn their reuse on again.
+    #[command(subcommand)]
+    Tests(TestsCommand),
     /// Run a check's command, unless this exact code already passed it.
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
@@ -259,6 +262,21 @@ pub struct SkillUpdateArgs {
     /// Replace a copy edited by hand, or one a newer hushrun wrote.
     #[arg(long)]
     pub force: bool,
+}
+
+/// \[ADR 0069\] `hushrun tests` (C-34).
+#[derive(Debug, Subcommand)]
+pub enum TestsCommand {
+    /// Turn a check's reuse of its test files on again, after an audit run suspended it: a test
+    /// file failed twice though it had passed on the same files it read. For people: a coding
+    /// agent can't.
+    Resume(TestsResumeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TestsResumeArgs {
+    /// The check, as `hushrun run NAME` names it.
+    pub check: CheckName,
 }
 
 /// `hushrun hook` (C-23).

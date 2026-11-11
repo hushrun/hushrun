@@ -316,6 +316,20 @@ impl HttpLedger {
         self.json_call(method, path, None, body, header)
     }
 
+    /// [`HttpLedger::json_request_with`] for an answer of up to a page (4 MiB), such as a batch
+    /// lookup of a check's test files (results-v0 §3).
+    pub fn json_request_page(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        header: Option<(&'static str, String)>,
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        let method = Method::from_bytes(method.as_bytes())
+            .map_err(|_| LedgerError::Invalid(format!("{method} isn't an HTTP method")))?;
+        self.json_call_sized(method, path, None, body, header, MAX_PAGE_BYTES)
+    }
+
     fn json_call(
         &self,
         method: Method,
@@ -323,6 +337,18 @@ impl HttpLedger {
         query: Option<String>,
         body: Option<&[u8]>,
         header: Option<(&'static str, String)>,
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        self.json_call_sized(method, path, query, body, header, MAX_SMALL_BYTES)
+    }
+
+    fn json_call_sized(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<String>,
+        body: Option<&[u8]>,
+        header: Option<(&'static str, String)>,
+        max: usize,
     ) -> Result<(u16, Vec<u8>), LedgerError> {
         if path.contains(['?', '#', '\\'])
             || path
@@ -335,7 +361,7 @@ impl HttpLedger {
             )));
         }
         self.io.run(async {
-            let mut call = Call::new(method, path, path, MAX_SMALL_BYTES);
+            let mut call = Call::new(method, path, path, max);
             if let Some(body) = body {
                 call.body = Some((body, JSON));
             }

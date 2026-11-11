@@ -277,17 +277,13 @@ fn with_tests_off_command_gets_nothing_new() {
 // covers: C-32
 #[cfg(unix)]
 #[test]
-fn a_run_a_signal_stops_leaves_no_directory_and_reuse_says_it_observes() {
+fn a_run_a_signal_stops_leaves_no_directory() {
     let yaml = "version: 1\nrepository: example.com/acme/shop\nchecks:\n  unit:\n    tests: {mode: reuse}\n";
     let r = Repo::new(&[("src/a.txt", "a\n"), ("hushrun.yaml", yaml)]);
     let ran = r.run(&["run", "unit", "--", "sh", "-c", "kill -TERM $$"], &[]);
     assert_eq!(ran.code, 128 + 15, "{}", ran.stderr);
-    assert!(
-        ran.stderr
-            .contains("unit: `tests: reuse` isn't in this version, so it observes"),
-        "{}",
-        ran.stderr
-    );
+    // \[ADR 0069\] Reuse is in this version: with no test file, it says nothing of them.
+    assert!(!ran.stderr.contains("test file"), "{}", ran.stderr);
     assert_eq!(r.run_dirs(), 0);
 }
 

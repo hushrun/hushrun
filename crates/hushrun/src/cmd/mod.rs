@@ -24,6 +24,7 @@ pub mod sigstore;
 pub mod skill;
 pub mod stats;
 pub mod status;
+pub mod tests;
 pub mod token;
 pub mod update;
 pub mod usage;

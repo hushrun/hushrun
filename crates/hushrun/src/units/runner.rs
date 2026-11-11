@@ -1,8 +1,13 @@
 //! \[ADR 0068\] hushrun's target runner: what Cargo and nextest start every test binary through
-//! when a check's `tests` isn't off (C-32). It selects nothing in this version: it starts the
-//! binary as the runner it stands in for would have, with the environment that runner would have
-//! given it, passes stdio, signals and the exit status through untouched, and writes one file of
-//! facts per start: the binary, its arguments, the tests a `--list` listed, and how it ended.
+//! when a check's `tests` isn't off (C-32). It starts the binary as the runner it stands in for
+//! would have, with the environment that runner would have given it, passes stdio, signals and
+//! the exit status through untouched, and writes one file of facts per start: the binary, its
+//! arguments, the tests a `--list` listed, and how it ended.
+//!
+//! \[ADR 0069\] It selects too: a binary `hushrun.json`'s `binaries` lists, by its path and the
+//! SHA-256 of its bytes, isn't started. nextest's `--list` of it lists no test, so nextest runs
+//! none of its tests; and plain `cargo test`'s one start of it exits 0. Any doubt (a file that
+//! can't be read, another path, other bytes) starts it.
 //!
 //! Its command line is `hushrun __hushrun-test-runner <VARIABLE> <N> <runner word>… <binary>
 //! <argument>…`: `CARGO_TARGET_<VARIABLE>_RUNNER` is the variable hushrun set, and the `N` words
@@ -11,7 +16,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Instant;
 
@@ -85,6 +90,28 @@ fn run(args: &[OsString]) -> ExitCode {
     }
     command.env_remove(UNITS_VAR);
     let listing = told.args.iter().any(|a| a == "--list");
+    // \[ADR 0069\] A binary the plan reuses: what the run would have said of its passing tests.
+    if let Some(dir) = &dir
+        && reused(dir, Path::new(&told.binary))
+    {
+        record(
+            dir,
+            Invocation {
+                binary: PathBuf::from(&told.binary),
+                args: told
+                    .args
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+                listed: listing.then(Vec::new),
+                exit: Some(0),
+                signal: None,
+                duration_ms: 0,
+                reused: true,
+            },
+        );
+        return ExitCode::SUCCESS;
+    }
     if listing {
         command.stdout(Stdio::piped());
     }
@@ -149,6 +176,7 @@ fn run(args: &[OsString]) -> ExitCode {
                 exit,
                 signal,
                 duration_ms,
+                reused: false,
             },
         );
     }
@@ -157,6 +185,29 @@ fn run(args: &[OsString]) -> ExitCode {
         (None, Some(signal)) => end_as(signal),
         (None, None) => ExitCode::from(1),
     }
+}
+
+/// \[ADR 0069\] Whether the run's `hushrun.json` reuses `binary`: it lists a binary at the same
+/// real path whose SHA-256 is that of `binary`'s bytes now. Anything that can't be read is no.
+fn reused(dir: &Path, binary: &Path) -> bool {
+    let Some(run) = std::fs::read(dir.join(facts::RUN_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<facts::RunFile>(&bytes).ok())
+        .filter(|run| run.schema == facts::RUN_SCHEMA)
+    else {
+        return false;
+    };
+    let Ok(real) = std::fs::canonicalize(binary) else {
+        return false;
+    };
+    let Some(listed) = run
+        .binaries
+        .iter()
+        .find(|b| std::fs::canonicalize(&b.path).is_ok_and(|p| p == real))
+    else {
+        return false;
+    };
+    std::fs::read(&real).is_ok_and(|bytes| hushrun_core::Digest::of(&bytes).hex() == listed.sha256)
 }
 
 /// The tests a libtest `--list --format terse` printed: `name: test` lines.

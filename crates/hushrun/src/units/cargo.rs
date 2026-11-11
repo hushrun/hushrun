@@ -313,6 +313,35 @@ pub struct Observed {
     pub unit_files: BTreeSet<String>,
     /// The files any dep-info of the build names: of these, `.rs` files are sources (C-30).
     pub named: BTreeSet<String>,
+    /// \[ADR 0069\] Each test binary's executable, by its unit.
+    pub executables: BTreeMap<String, PathBuf>,
+}
+
+/// \[ADR 0069\] What a build says of its test binaries before any runs: the plan's.
+#[derive(Debug, Default)]
+pub struct Built {
+    /// Each test binary, by its root file: its executable, what it read, and what can't be told.
+    pub units: BTreeMap<String, BuiltUnit>,
+    pub unit_files: BTreeSet<String>,
+    pub named: BTreeSet<String>,
+}
+
+/// One test binary of a build.
+#[derive(Debug, Clone)]
+pub struct BuiltUnit {
+    pub executable: PathBuf,
+    pub reads: BTreeSet<String>,
+    pub not_followed: BTreeSet<NotFollowed>,
+}
+
+/// \[ADR 0069\] The plan's build (RFC 0003 §3.9): the build COMMAND makes, made first, so that
+/// COMMAND's own finds it done and the binaries' dep-info is there before any test runs. Cargo's
+/// progress goes to stderr as COMMAND's would. `Err` when it fails: then nothing is reused, and
+/// COMMAND says why.
+pub fn plan_build(recognized: &Recognized, root: &Path, cwd: &Path) -> Result<Built, String> {
+    let metadata = metadata(recognized, cwd)?;
+    let artifacts = build(recognized, cwd, true)?;
+    Ok(read_build(&metadata, artifacts, root))
 }
 
 #[derive(Debug, Deserialize)]
@@ -395,7 +424,57 @@ pub fn observe(
         .filter_map(|f| f.invocation.as_ref())
         .collect();
     let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd)?;
+    let artifacts = build(recognized, cwd, false)?;
+    let built = read_build(&metadata, artifacts, root);
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // How each binary the runner started ended, by its real path.
+    let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
+    for invocation in &invocations {
+        started
+            .entry(real(&invocation.binary))
+            .or_default()
+            .push(invocation);
+    }
+    let mut units = BTreeMap::new();
+    let mut executables = BTreeMap::new();
+    for (unit, b) in built.units {
+        let facts_of = started.get(&real(&b.executable)).map(Vec::as_slice);
+        let starts = facts_of.unwrap_or(&[]);
+        let (complete, failed, duration_ms) = ended(starts, recognized, command_passed);
+        units.insert(
+            unit.clone(),
+            super::Seen {
+                facts: Facts {
+                    complete,
+                    failed,
+                    not_followed: b.not_followed,
+                    deselected: deselected(starts),
+                },
+                reads: b.reads,
+                duration_ms,
+            },
+        );
+        executables.insert(unit, b.executable);
+    }
+    Ok(Observed {
+        units,
+        unit_files: built.unit_files,
+        named: built.named,
+        executables,
+    })
+}
+
+/// \[ADR 0069\] Whether the target runner reused a binary every time it was asked to start it:
+/// then none of its tests ran, as the plan said.
+fn deselected(starts: &[&Invocation]) -> bool {
+    !starts.is_empty() && starts.iter().all(|s| s.reused)
+}
+
+/// The test binaries of a build, what each read and what can't be told of it, from its artifacts:
+/// a test binary read what its own dep-info names, what the dep-info of every workspace library
+/// it may link names, and for an integration test, a bench or an example, what every target of
+/// its package was built from (C-31).
+fn read_build(metadata: &Metadata, artifacts: Vec<Artifact>, root: &Path) -> Built {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
     let relative = |path: &Path| -> Option<String> {
@@ -473,15 +552,6 @@ pub fn observe(
         }
     }
 
-    // How each binary the runner started ended, by its real path.
-    let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
-    for invocation in &invocations {
-        started
-            .entry(real(&invocation.binary))
-            .or_default()
-            .push(invocation);
-    }
-
     let mut units = BTreeMap::new();
     for artifact in artifacts.iter().filter(|a| a.test) {
         let Some(executable) = &artifact.executable else {
@@ -532,28 +602,20 @@ pub fn observe(
         for d in &depinfos {
             reads.extend(read_depinfo(d).iter().filter_map(|p| relative(p)));
         }
-        let facts_of = started.get(&real(executable)).map(Vec::as_slice);
-        let (complete, failed, duration_ms) =
-            ended(facts_of.unwrap_or(&[]), recognized, command_passed);
         units.insert(
             unit,
-            super::Seen {
-                facts: Facts {
-                    complete,
-                    failed,
-                    not_followed,
-                    deselected: false,
-                },
+            BuiltUnit {
+                executable: executable.clone(),
                 reads,
-                duration_ms,
+                not_followed,
             },
         );
     }
-    Ok(Observed {
+    Built {
         units,
         unit_files,
         named,
-    })
+    }
 }
 
 /// Whether a test binary ran whole, whether a test of it failed, and how long its tests took,
@@ -570,6 +632,9 @@ fn ended(
     recognized: &Recognized,
     command_passed: bool,
 ) -> (bool, bool, u64) {
+    // \[ADR 0069\] What the runner reused ran nothing: only real starts say how it ended.
+    let starts: Vec<&Invocation> = starts.iter().copied().filter(|s| !s.reused).collect();
+    let starts = starts.as_slice();
     let duration: u64 = starts
         .iter()
         .filter(|s| s.listed.is_none())
@@ -642,8 +707,9 @@ fn cargo(recognized: &Recognized, cwd: &Path) -> Command {
 
 /// The build COMMAND made, as Cargo names it: `cargo test --no-run --message-format=json` with
 /// COMMAND's build options and `--locked`. Every artifact must be fresh, or this isn't COMMAND's
-/// build: then Cargo is stopped at once, and nothing is read.
-fn build(recognized: &Recognized, cwd: &Path) -> Result<Vec<Artifact>, String> {
+/// build: then Cargo is stopped at once, and nothing is read. \[ADR 0069\] For the plan (`plan`),
+/// the build COMMAND will make, made now: whatever it builds, with Cargo's progress on stderr.
+fn build(recognized: &Recognized, cwd: &Path, plan: bool) -> Result<Vec<Artifact>, String> {
     let mut command = cargo(recognized, cwd);
     command.args(["test", "--no-run", "--message-format=json"]);
     if !recognized
@@ -657,7 +723,11 @@ fn build(recognized: &Recognized, cwd: &Path) -> Result<Vec<Artifact>, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(if plan {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .spawn()
         .map_err(|err| format!("can't run cargo test --no-run: {err}"))?;
     let started = Instant::now();
@@ -666,7 +736,7 @@ fn build(recognized: &Recognized, cwd: &Path) -> Result<Vec<Artifact>, String> {
     let mut refused = None;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
-        if started.elapsed() > BUILD_BUDGET {
+        if !plan && started.elapsed() > BUILD_BUDGET {
             refused = Some("Cargo took too long to say what it built".to_string());
             break;
         }
@@ -676,7 +746,7 @@ fn build(recognized: &Recognized, cwd: &Path) -> Result<Vec<Artifact>, String> {
         if message.reason != "compiler-artifact" {
             continue;
         }
-        if !message.fresh {
+        if !plan && !message.fresh {
             refused = Some(
                 "Cargo would build something COMMAND didn't, so hushrun can't tell what it built"
                     .to_string(),
@@ -705,7 +775,11 @@ fn build(recognized: &Recognized, cwd: &Path) -> Result<Vec<Artifact>, String> {
         return Err(why);
     }
     if !status.success() {
-        return Err("cargo test --no-run failed".into());
+        return Err(if plan {
+            "the build failed".into()
+        } else {
+            "cargo test --no-run failed".into()
+        });
     }
     Ok(artifacts)
 }
@@ -919,6 +993,7 @@ mod tests {
             exit: Some(exit),
             signal: None,
             duration_ms: 5,
+            reused: false,
         }
     }
 
@@ -963,5 +1038,15 @@ mod tests {
         assert_eq!(ended(&[], &plain, false), (false, false, 0));
         let failed = start("", None, 101);
         assert_eq!(ended(&[&failed], &plain, false), (true, true, 5));
+        // \[ADR 0069\] What the runner reused ran nothing: a binary every start of which it
+        // reused is deselected, and a reused start says nothing of how one ran.
+        let reused_list = Invocation {
+            reused: true,
+            ..start("--list --format terse", Some(&[]), 0)
+        };
+        assert!(deselected(&[&reused_list, &reused_list]));
+        assert!(!deselected(&[&reused_list, &x]));
+        assert!(!deselected(&[]));
+        assert_eq!(ended(&[&reused_list], &plain, false), (false, false, 0));
     }
 }

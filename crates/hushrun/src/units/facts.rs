@@ -2,8 +2,9 @@
 //! write back, each file whole.
 //!
 //! - `hushrun.json`, hushrun's, written before COMMAND starts: `{"schema": "hushrun.units/v0",
-//!   "root": <the repository's root>, "reuse": [<units the plan lets adapters deselect>]}`.
-//!   `reuse` is always empty in this version.
+//!   "root": <the repository's root>, "reuse": [<units the plan lets adapters deselect>]}`, and
+//!   \[ADR 0069\] what an adapter checks before it deselects any: `pythonFiles`, pytest's unit rule
+//!   as hushrun read it, and `binaries`, each reused test binary's path and SHA-256.
 //! - `<anything>.json`, an adapter's, one per process: `{"schema": "hushrun.unit-facts/v0", …}`,
 //!   [`FactsFile`]. A name that starts with `.` is a file being written, and is never read.
 
@@ -25,11 +26,31 @@ pub const MOST_FILES: usize = 100_000;
 
 /// `hushrun.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunFile {
     pub schema: String,
     pub root: PathBuf,
-    /// Units the plan lets an adapter deselect: none in this version (C-32).
+    /// \[ADR 0069\] Units the plan lets an adapter deselect (C-32): those whose newest result that
+    /// counts here passed on the files they read, but the audited ones.
     pub reuse: Vec<String>,
+    /// \[ADR 0069\] pytest's `python_files` as hushrun read it: a plugin whose pytest uses another
+    /// deselects nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_files: Option<Vec<String>>,
+    /// \[ADR 0069\] The test binaries of `reuse`, each by the path and the SHA-256 of the build
+    /// whose dep-info its key holds: the target runner reuses only a binary that is that one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<Binary>,
+}
+
+/// \[ADR 0069\] A test binary the plan reuses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Binary {
+    pub unit: String,
+    /// Its path, as the build named it.
+    pub path: PathBuf,
+    /// The SHA-256 of its bytes, lowercase hex.
+    pub sha256: String,
 }
 
 /// Something an adapter couldn't follow, as its file writes it.
@@ -75,6 +96,9 @@ pub struct FactsFile {
     /// The adapter's own errors: with any, nothing of this file's units is recorded.
     #[serde(default)]
     pub errors: Vec<String>,
+    /// \[ADR 0069\] How many tests this process deselected, as `hushrun.json` listed their units.
+    #[serde(default)]
+    pub removed_items: u64,
 }
 
 /// What an observed adapter saw of one unit in one process.
@@ -120,6 +144,10 @@ pub struct Invocation {
     /// The signal that stopped it, when one did.
     pub signal: Option<i32>,
     pub duration_ms: u64,
+    /// \[ADR 0069\] The runner didn't start it: `hushrun.json` lists it, and it is the binary the
+    /// plan's key was for. A list answered with no test, a run with exit 0.
+    #[serde(default)]
+    pub reused: bool,
 }
 
 /// Every adapter file of a run's directory, in name order, with those that don't parse or have
@@ -153,8 +181,8 @@ pub fn read_all(dir: &Path) -> Option<Vec<FactsFile>> {
 }
 
 /// What every process of an observed adapter saw of one unit, merged: the most tests any process
-/// selected, since each collects them all; the tests every process finished; and the union of
-/// everything else.
+/// selected, since each collects them all; the tests every process finished; deselected only when
+/// every process that saw it deselected it; and the union of everything else.
 #[derive(Debug, Clone, Default)]
 pub struct Merged {
     pub selected: u64,
@@ -184,12 +212,15 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
         for unit in &file.units {
             let merged = out.entry(unit.unit.clone()).or_insert_with(|| Merged {
                 failures_by_unit: true,
+                deselected: true,
                 ..Merged::default()
             });
             merged.selected = merged.selected.max(unit.selected);
             merged.finished = merged.finished.saturating_add(unit.finished);
             merged.failed |= unit.failed;
-            merged.deselected |= unit.deselected;
+            // \[ADR 0069\] A process that ran it, as one the plan doesn't speak for may, outweighs one
+            // that deselected it.
+            merged.deselected &= unit.deselected;
             merged.duration_ms = merged.duration_ms.saturating_add(unit.duration_ms);
             merged.reads.extend(unit.reads.iter().cloned());
             merged
@@ -302,6 +333,32 @@ mod tests {
                 .iter()
                 .any(|n| n.why == "adapter-error")
         );
+    }
+
+    // covers: C-32
+    #[test]
+    fn a_unit_is_deselected_only_when_every_process_that_saw_it_deselected_it() {
+        let mut gone = unit("tests/test_a.py", 0, 0, &[]);
+        gone.deselected = true;
+        let mut ran = unit("tests/test_a.py", 2, 2, &["app/x.py"]);
+        ran.failed = true;
+        let merged = merged(
+            &[
+                file("pytest", vec![gone.clone()]),
+                file("pytest", vec![ran]),
+            ],
+            "pytest",
+        );
+        let m = &merged["tests/test_a.py"];
+        assert!(!m.deselected && m.failed && m.finished == 2);
+        let both = super::merged(
+            &[
+                file("pytest", vec![gone.clone()]),
+                file("pytest", vec![gone]),
+            ],
+            "pytest",
+        );
+        assert!(both["tests/test_a.py"].deselected);
     }
 
     // covers: C-32

@@ -365,7 +365,7 @@ pub struct RunResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_anyway: Option<String>,
     /// \[ADR 0068\] A run's test files, when its check's `tests` isn't off (C-10, C-33): how many
-    /// it had, ran and reused. Kept on this machine: a server isn't sent it in this version.
+    /// it had, ran and reused, and \[ADR 0069\] why none was reused when something stopped it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1169,12 +1169,8 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
-                // \[ADR 0068\] A run's test files stay on this machine in this version (C-10).
-                let sent = RunResult {
-                    units: None,
-                    ..result.clone()
-                };
-                let body = serde_json::to_vec(&sent)?;
+                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10).
+                let body = serde_json::to_vec(result)?;
                 // ADR 0028: a person's or an agent's result carries this machine's signature,
                 // and without a key to sign with it isn't sent.
                 let machine = server.machine().map_err(|why| {
@@ -1205,6 +1201,124 @@ impl Backend {
         Ok(())
     }
 }
+
+/// \[ADR 0069\] What a server answered one of the requests about a check's test files (results-v0
+/// §3).
+#[derive(Debug)]
+pub enum UnitsCall {
+    /// 200, and its body.
+    Answered(serde_json::Value),
+    /// 409, and its body: a stale write, with what the state is now.
+    Conflict(serde_json::Value),
+    /// 404 or 405: a server from before test files' results.
+    Unsupported,
+    /// Anything else, in the server's words.
+    Refused(String),
+}
+
+impl Backend {
+    /// \[ADR 0069\] `POST {base}/v0/units/<what>` with `body`: the batch lookup (`lookup`), or a
+    /// check's reuse state (`reuse`). A directory, or a server asked with no credential, answers
+    /// nothing (an error); a server that can't be reached is an error too.
+    pub fn units_request(&self, what: &str, body: &serde_json::Value) -> anyhow::Result<UnitsCall> {
+        let Store::Server(server) = &self.store else {
+            return Err(anyhow!("this machine's directory has no server to ask"));
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: {NO_ID_TOKEN}", server.base));
+        }
+        let bytes = serde_json::to_vec(body)?;
+        let (status, answer) = server
+            .ledger
+            .json_request_page("POST", &format!("v0/units/{what}"), Some(&bytes), None)
+            .map_err(plain)?;
+        Ok(match status {
+            200 => UnitsCall::Answered(
+                serde_json::from_slice(&answer)
+                    .map_err(|e| anyhow!("{}: the answer isn't JSON: {e}", server.base))?,
+            ),
+            409 => UnitsCall::Conflict(serde_json::from_slice(&answer).unwrap_or_default()),
+            404 | 405 => UnitsCall::Unsupported,
+            _ => UnitsCall::Refused(
+                error_message(&answer)
+                    .unwrap_or_else(|| format!("{} answered {status}", server.base)),
+            ),
+        })
+    }
+
+    /// \[ADR 0069\] Whether results go to a server, where a run's test files go with it in one
+    /// request ([`Backend::record_with_units`]), rather than this machine's directory.
+    pub fn is_server(&self) -> bool {
+        matches!(self.store, Store::Server(_))
+    }
+
+    /// \[ADR 0069\] Records `result` under `key` with `units`, the results of the test files that
+    /// ran, in one request to a server: `POST {base}/v0/runs/{key}` (results-v0 §3), signed as a
+    /// result is. A server from before it (404, 405) records the result alone, as
+    /// [`Backend::record`] does, and keeps no test file: `Ok(false)`. A directory records the
+    /// result; the caller keeps the units beside it.
+    pub fn record_with_units(
+        &self,
+        key: &Digest,
+        result: &RunResult,
+        units: &[crate::units::store::UnitRecord],
+    ) -> anyhow::Result<bool> {
+        let server = match &self.store {
+            Store::Server(server) if !units.is_empty() => server,
+            _ => return self.record(key, result).map(|()| true),
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
+        }
+        // Keys as the protocol has them: 64 lowercase hex characters.
+        let units: Vec<serde_json::Value> = units
+            .iter()
+            .map(|unit| {
+                json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+            })
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "schema": RUN_UNITS_SCHEMA,
+            "result": result,
+            "units": units,
+        }))?;
+        let machine = server.machine().map_err(|why| {
+            *server.refusal.borrow_mut() = Some(Refusal::Machine(why.clone()));
+            anyhow!("{}: not recorded: {why}", server.base)
+        })?;
+        let signature = machine.map(|machine| {
+            (
+                "Hushrun-Signature",
+                machine.result_signature(&key.hex(), &body),
+            )
+        });
+        let (status, answer) = server
+            .ledger
+            .json_request_with(
+                "POST",
+                &format!("v0/runs/{}", key.hex()),
+                Some(&body),
+                signature,
+            )
+            .map_err(plain)?;
+        if status == 404 || status == 405 {
+            return self.record(key, result).map(|()| false);
+        }
+        if !(200..300).contains(&status) {
+            let err = server.refused(status, &answer, "recording the result");
+            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                ));
+            }
+            return Err(err);
+        }
+        Ok(true)
+    }
+}
+
+/// \[ADR 0069\] The schema of a run's result with its test files' results (results-v0 §3).
+pub const RUN_UNITS_SCHEMA: &str = "hushrun.run-units/v0";
 
 impl Server {
     /// \[ADR 0067\] Whether nothing here could be sent with its requests: no token goes there,

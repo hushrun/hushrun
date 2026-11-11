@@ -29,9 +29,21 @@ file when none was: `subprocess` (anything a child process reads), `fork` (a for
 nothing) and `native` (a repository extension module or a ctypes library, whose own reads are
 invisible).
 
-It decides nothing: hushrun decides each test file's state from these facts. It selects nothing
-either, in this version. It never changes pytest's outcome: every hook is guarded, and any error of
-its own is reported, which makes hushrun record nothing for the test files this process saw.
+It decides nothing: hushrun decides each test file's state from these facts.
+
+How it selects (ADR 0069): `hushrun.json`'s `reuse` lists the test files that already passed on the
+files they read. After collection and every other deselection (-k, -m, other plugins), the process
+that may deselect removes their tests, tells pytest they were deselected, and reports exactly which
+test files it deselected. Only one pytest may: the first to start with this directory (it claims
+it), or a pytest-xdist worker that this one started. A nested pytest, or a second pytest of the same
+COMMAND, deselects nothing. Neither does one whose `python_files` isn't what hushrun read. When
+everything left was deselected by it, pytest's "no tests collected" (exit 5) would turn a pass into
+a fail, so that process's exit status becomes 0, and only then: any failure or error gives pytest
+another status first.
+
+It never changes pytest's outcome on its own error: every hook is guarded, any error of its own is
+reported, which makes hushrun record nothing for the test files this process saw, and an error
+while selecting deselects nothing.
 
 Output: one file per process in $HUSHRUN_UNITS, written whole when the session ends (a temporary
 file, then a rename). With pytest-xdist each worker writes its own, and the controller one with no
@@ -51,6 +63,7 @@ __all__ = [
     "pytest_collectstart",
     "pytest_itemcollected",
     "pytest_collectreport",
+    "pytest_collection_modifyitems",
     "pytest_collection_finish",
     "pytest_runtest_protocol",
     "pytest_runtest_logreport",
@@ -86,6 +99,8 @@ PYTEST_DIRS = ()
 NATIVE_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 PYTEST_OUTSIDE = "loaded by pytest outside any test file"
 MOST_ERRORS = 20
+CLAIM_FILE = "claim"
+NO_TESTS_COLLECTED = 5
 
 
 def _own(fn):
@@ -119,6 +134,12 @@ class Observer(object):
         self.collection_finished = False
         self.errors = []
         self.done = False
+        self.reuse = frozenset()      # test files hushrun.json lets this run deselect
+        self.python_files = None      # pytest's python_files as hushrun read it
+        self.claimed = False          # this process claimed the directory
+        self.claimant = None          # the pid of the process that did
+        self.removed = 0              # tests this process deselected
+        self.deselected = {}          # unit -> tests of it this process deselected
         self._rel_cache = {}
         self._import_seen = set()
         self._scanned = 0
@@ -484,6 +505,7 @@ class Observer(object):
                 "selected": selected,
                 "finished": info["finished"],
                 "failed": bool(info["failed"]),
+                "deselected": unit in self.deselected,
                 "durationMs": int(round(info["duration"] * 1000)),
                 "reads": sorted(reads),
                 "notFollowed": not_followed,
@@ -560,6 +582,25 @@ def _pytest_dirs():
     return tuple(sorted(dirs))
 
 
+def _claim(directory):
+    """Claims the run's directory for this process when no other pytest did: (claimed, the pid of
+    the process that holds it, or None when that can't be read)."""
+    path = os.path.join(directory, CLAIM_FILE)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return False, int(f.read().strip())
+        except Exception:
+            return False, None
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+    return True, os.getpid()
+
+
 def _install():
     global OBSERVER, PYTEST_DIRS
     directory = os.environ.get(ENV_DIR)
@@ -572,6 +613,13 @@ def _install():
     import _pytest  # noqa: F401  (loaded already: pytest is importing this plugin)
     PYTEST_DIRS = _pytest_dirs()
     observer = Observer(run["root"], directory)
+    reuse = run.get("reuse") or []
+    if isinstance(reuse, list) and all(isinstance(u, str) for u in reuse):
+        observer.reuse = frozenset(reuse)
+    python_files = run.get("pythonFiles")
+    if isinstance(python_files, list) and all(isinstance(p, str) for p in python_files):
+        observer.python_files = list(python_files)
+    observer.claimed, observer.claimant = _claim(directory)
     # Repository modules loaded before the adapter (a .pth file, sitecustomize) are ambient.
     for name, module in list(sys.modules.items()):
         if module is not None and observer.module_file(module):
@@ -687,6 +735,58 @@ def _protocol_end(obs, unit):
     obs.stop()
 
 
+def _may_deselect(obs, config):
+    """Whether this process may deselect what hushrun.json lists: the one that claimed the run's
+    directory, or a pytest-xdist worker it started; and only when pytest's python_files is the one
+    hushrun read, so that the plan's test files are pytest's."""
+    if not obs.reuse or obs.python_files is None:
+        return False
+    worker = getattr(config, "workerinput", None)
+    if worker is None:
+        allowed = obs.claimed
+    else:
+        allowed = obs.claimant is not None and os.getppid() == obs.claimant
+    return allowed and list(config.getini("python_files")) == obs.python_files
+
+
+def _modifyitems(obs, config, items):
+    if not _may_deselect(obs, config):
+        return
+    keep, gone, by_unit = [], [], {}
+    for item in items:
+        unit = _unit_of(item)
+        if unit is not None and unit in obs.reuse:
+            gone.append(item)
+            by_unit[unit] = by_unit.get(unit, 0) + 1
+        else:
+            keep.append(item)
+    if not gone:
+        return
+    # pytest is told first: if that fails, nothing was deselected.
+    config.hook.pytest_deselected(items=gone)
+    items[:] = keep
+    obs.removed += len(gone)
+    for unit, n in by_unit.items():
+        obs.deselected[unit] = obs.deselected.get(unit, 0) + n
+
+
+def _workers_removed(obs):
+    """What the pytest-xdist workers of this process deselected, from the files they wrote as
+    their sessions ended, which is before this one's."""
+    removed = 0
+    for name in os.listdir(obs.directory):
+        if not name.endswith(".json") or name.startswith(".") or name == "hushrun.json":
+            continue
+        try:
+            with open(os.path.join(obs.directory, name), encoding="utf-8") as f:
+                facts = json.load(f)
+        except Exception:
+            continue
+        if facts.get("adapter") == "pytest" and facts.get("parent") == os.getpid():
+            removed += int(facts.get("removedItems") or 0)
+    return removed
+
+
 def pytest_collectstart(collector):
     _call(_collectstart, collector)
 
@@ -697,6 +797,11 @@ def pytest_itemcollected(item):
 
 def pytest_collectreport(report):
     _call(_collectreport, report)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(session, config, items):
+    _call(_modifyitems, config, items)
 
 
 def pytest_collection_finish(session):
@@ -739,6 +844,15 @@ def pytest_sessionfinish(session, exitstatus):
                 obs.errors.append("results: %r" % (err,))
                 units = []
             obs.done = True
+            # pytest says no test ran only because this process, or its workers, deselected every
+            # test that was left: the tests hushrun.json listed already passed on the files they
+            # read, so the session passed. Any failure or error makes pytest's status another.
+            try:
+                if worker is None and obs.claimed and int(session.exitstatus) == NO_TESTS_COLLECTED:
+                    if obs.removed + _workers_removed(obs) > 0:
+                        session.exitstatus = 0
+            except Exception as err:
+                obs.errors.append("exitstatus: %r" % (err,))
             try:
                 python_files = list(config.getini("python_files"))
             except Exception:
@@ -757,6 +871,8 @@ def pytest_sessionfinish(session, exitstatus):
                  for d in sorted(v)],
                 "units": units,
                 "errors": obs.errors,
+                "removedItems": obs.removed,
+                "parent": os.getppid(),
             }
             name = "pytest-%d%s.json" % (os.getpid(), ("-" + facts["worker"]) if facts["worker"] else "")
             tmp = os.path.join(obs.directory, "." + name + ".tmp")
