@@ -476,8 +476,10 @@ fn pytest_test_files_are_observed_as_the_spec_reads_them() {
     );
 
     // The constant changes: the four test files that read it run, and fail. pytest's exit code is
-    // hushrun's, and the seven that passed are recorded all the same.
-    r.write("app/settings.py", "LIMIT = 4\n");
+    // hushrun's, and the seven that passed are recorded all the same. The new text has another
+    // length: Python trusts a module's cached bytecode while its file's size and mtime, in whole
+    // seconds, are as they were, and on Linux the change and its undoing can share a second.
+    r.write("app/settings.py", "LIMIT = 40\n");
     let changed = pytest(&[], false);
     assert_eq!(changed.code, 1, "{}", changed.stderr);
     assert!(
