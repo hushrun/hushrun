@@ -122,7 +122,14 @@ jobs:
             exit 1
           fi
           # The release's files, and nothing else: what was there and isn't in the bundle goes.
-          rsync -a --delete --exclude .git "$RUNNER_TEMP/bundle/" ./
+          # Not rsync: it takes a file of the same size and the same second as unchanged, and
+          # v0.11.1 kept 0.11.0 in every manifest that way.
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R "$RUNNER_TEMP/bundle/." ./
+          if ! diff -r --exclude=.git "$RUNNER_TEMP/bundle" .; then
+            echo "::error title=skills::the files to commit aren't the bundle's"
+            exit 1
+          fi
           git add -A
           git -c user.name=hushrun -c user.email=support@hushrun.com \
             commit --quiet --allow-empty -m "release: hushrun $VERSION" \
