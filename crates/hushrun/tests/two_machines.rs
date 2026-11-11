@@ -1,4 +1,4 @@
-//! Test by test across machines, phase 0 (C-31, C-33, C-34): what a machine with an empty cache
+//! Test by test across machines (C-31, C-33, C-34, C-38): what a machine with an empty cache
 //! reuses, against the same results server as a machine that ran the check before.
 //!
 //! Each scenario runs a check in `tests: reuse` on a first machine, which records every test file's
@@ -8,11 +8,19 @@
 //! has the first machine's store, copied into its cache. The second is the bar: **parity** is the
 //! fresh machine reusing exactly the test files it reuses.
 //!
-//! Each runner has two tests. One says what happens today, and passes: Cargo reuses all it could,
-//! since its keys come from the build; Go reuses a package whose tests opened no file the key
-//! holds; pytest and Vitest reuse nothing, since what a test file read comes from the map alone.
-//! The other is parity, which phases 3 and 4 of test-by-test-across-machines make pass for pytest,
-//! Vitest and Go, and which passes for Cargo already.
+//! Each runner has two tests. One is a server without hints, as one from before them answers
+//! (404): Cargo reuses all it could, since its keys come from the build; Go reuses a package whose
+//! tests opened no file the key holds; pytest and Vitest reuse nothing, since what a test file
+//! read comes from the map alone. The other is parity, with a server that keeps hints (C-38): the
+//! first machine sends what its test files read, and the fresh machine reuses exactly what the
+//! one with the store reuses, says the same, and `hushrun ready` says the same counts. No request
+//! for hints holds a path of the repository.
+//!
+//! The rest are Go's, which runs on any machine: `observe` says the same on both; hints that are
+//! wrong, made of random tokens or written under another key run what they would key; two lists
+//! that disagree run the test file; a hint that couldn't be sent is sent by the next run, and the
+//! same hint isn't sent twice; a server from before hints changes nothing and is said once; and
+//! `counts_from` reads the hints of the systems it names.
 //!
 //! Which test files ran is read from the runner's own output, not from hushrun's store. Which of
 //! the reusable test files runs as a check (C-34) depends on the run's start, so a machine is held
@@ -30,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hushrun_core::hints;
 use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::git;
 use serde_json::Value;
@@ -151,10 +160,28 @@ fn set(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|n| n.to_string()).collect()
 }
 
+const REPOSITORY: &str = "example.com/acme/shop";
+
 fn yaml(check: &str) -> String {
-    format!(
-        "version: 1\nrepository: example.com/acme/shop\nchecks:\n  {check}:\n    tests: reuse\n"
-    )
+    format!("version: 1\nrepository: {REPOSITORY}\nchecks:\n  {check}:\n    tests: reuse\n")
+}
+
+/// The scenario with its check in `tests: observe`.
+fn observing(mut s: Scenario) -> Scenario {
+    for (path, text) in &mut s.files {
+        if path == "hushrun.yaml" {
+            *text = text.replace("tests: reuse", "tests: observe");
+        }
+    }
+    s
+}
+
+/// What the line after COMMAND says `tests: reuse` would have done, in `observe`.
+fn observe_line(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|l| l.contains("with `tests: reuse`"))
+        .map(str::to_string)
 }
 
 /// One runner's scenario: a repository, its check's COMMAND, the change, and what each machine
@@ -179,6 +206,9 @@ struct Scenario {
     not_followed: BTreeSet<String>,
     /// The test files that ran, from the runner's output.
     ran: fn(&Ran) -> BTreeSet<String>,
+    /// \[C-22\] Whether `hushrun ready` can say how many test files a run would run: its
+    /// `package.json` names the check's command.
+    ready: bool,
 }
 
 impl Scenario {
@@ -209,6 +239,7 @@ impl Ran {
 }
 
 /// One machine: a clone of the repository and its own cache.
+#[derive(Debug)]
 struct Machine {
     root: PathBuf,
     repo: PathBuf,
@@ -232,6 +263,12 @@ impl Machine {
     }
 
     fn run(&self, s: &Scenario, results: &FakeResults) -> Ran {
+        let mut args = vec!["run".to_string(), s.check.to_string(), "--".to_string()];
+        args.extend(s.command.iter().cloned());
+        self.hushrun(s, results, &args)
+    }
+
+    fn hushrun(&self, s: &Scenario, results: &FakeResults, args: &[String]) -> Ran {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
         cmd.current_dir(&self.repo)
             .env("HUSHRUN_CACHE_DIR", &self.cache)
@@ -262,11 +299,7 @@ impl Machine {
         for (name, value) in &s.env {
             cmd.env(name, value);
         }
-        let output = cmd
-            .args(["run", s.check, "--"])
-            .args(&s.command)
-            .output()
-            .expect("hushrun");
+        let output = cmd.args(args).output().expect("hushrun");
         Ran {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -283,20 +316,38 @@ struct Outcome {
     /// The run's `units`, as the server recorded it: `{total, ran, reused}`.
     units: Value,
     stderr: String,
+    /// \[C-22\] What `hushrun ready` said of the check's test files before the run.
+    ready: Option<String>,
+    /// \[C-38\] Where each test file's row of the machine's store came from after the run.
+    origins: BTreeMap<String, String>,
+    machine: Option<Machine>,
 }
 
 /// What the fresh machine and the machine with the first machine's store did.
 struct Measured {
     fresh: Outcome,
     copied: Outcome,
+    results: FakeResults,
+    _dir: tempfile::TempDir,
+}
+
+/// What the results server keeps of hints (C-38).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hints {
+    Kept,
+    /// It answers this status to them, as a server from before them does.
+    Older(u16),
 }
 
 /// Runs `s` on three machines: the first records, then the fresh one and the one with the
 /// first's store each run on the server as the first left it.
-fn two_machines(s: &Scenario) -> Measured {
+fn two_machines(s: &Scenario, server: Hints) -> Measured {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("real path");
     let results = FakeResults::start();
+    if let Hints::Older(status) = server {
+        results.forget_hints(status);
+    }
 
     let first = Machine::at(root.join("first"));
     std::fs::create_dir_all(&first.repo).expect("mkdir");
@@ -343,6 +394,16 @@ fn two_machines(s: &Scenario) -> Measured {
         }
         machine.write(s.change.0, s.change.1);
         results.go_back_to(&left);
+        let ready = s.ready.then(|| {
+            git::commit_all(&machine.repo, "change");
+            let ready = machine.hushrun(s, &results, &["ready".to_string()]);
+            ready
+                .stdout
+                .lines()
+                .find(|l| l.contains("would run") && l.contains("test file"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_else(|| format!("nothing: {}\n{}", ready.stdout, ready.stderr))
+        });
         let ran = machine.run(s, &results);
         assert_eq!(ran.code, 0, "{name}:\n{}\n{}", ran.stdout, ran.stderr);
         let runs = results.runs();
@@ -351,16 +412,98 @@ fn two_machines(s: &Scenario) -> Measured {
             2,
             "{name}: the first run and this one: {runs:?}"
         );
+        let origins = if store::stores(&machine.cache).len() == 1 {
+            store::origins(&machine.cache)
+        } else {
+            BTreeMap::new()
+        };
         Outcome {
             plan: ran.plan_line(),
             ran: (s.ran)(&ran),
             units: runs[1]["units"].clone(),
             stderr: ran.stderr,
+            ready,
+            origins,
+            machine: Some(machine),
         }
     };
     let fresh = outcome("fresh", false);
     let copied = outcome("copied", true);
-    Measured { fresh, copied }
+    if server == Hints::Kept {
+        assert_private(s, &results);
+    }
+    Measured {
+        fresh,
+        copied,
+        results,
+        _dir: dir,
+    }
+}
+
+/// \[C-38\] No request for hints holds a path of the repository: not in its query, nor in its
+/// body as sent, inflated or read as base64. Each file's path and each directory's is looked for.
+fn assert_private(s: &Scenario, results: &FakeResults) {
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    for (path, _) in &s.files {
+        paths.insert(path.clone());
+        let mut dir = path.as_str();
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            paths.insert(parent.to_string());
+            dir = parent;
+        }
+    }
+    paths.extend(s.all.iter().cloned());
+    // A path that is part of a word every hint holds, such as `test` of `vitest`, says nothing.
+    let words = format!("{} pytest vitest go cargo", hints::SCHEMA);
+    paths.retain(|p| p.len() >= 3 && !words.contains(p.as_str()));
+    let requests: Vec<_> = results
+        .raw_requests()
+        .into_iter()
+        .filter(|r| r.path.contains("/v0/units/hints/"))
+        .collect();
+    // Cargo needs no hint: its keys come from the build.
+    assert_eq!(
+        requests.is_empty(),
+        s.check == "test",
+        "requests for hints: {}",
+        requests.len()
+    );
+    for request in requests {
+        let mut seen: Vec<Vec<u8>> = vec![
+            request.path.clone().into_bytes(),
+            request.body.clone(),
+            request
+                .query
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+                .into_bytes(),
+        ];
+        if let Ok(content) = hints::inflate(&request.body) {
+            seen.push(content);
+        }
+        if let Ok(json) = serde_json::from_slice::<Value>(&request.body) {
+            for value in json.as_object().into_iter().flat_map(|o| o.values()) {
+                if let Some(decoded) = value.as_str().and_then(|text| {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.decode(text).ok()
+                }) {
+                    seen.push(decoded);
+                }
+            }
+        }
+        for path in &paths {
+            for bytes in &seen {
+                assert!(
+                    !bytes.windows(path.len()).any(|w| w == path.as_bytes()),
+                    "{} {} holds {path}",
+                    request.method,
+                    request.path
+                );
+            }
+        }
+    }
 }
 
 /// Asserts that `o`'s plan could reuse exactly `could` of the scenario's test files (C-34): it
@@ -395,12 +538,31 @@ fn assert_could_reuse(what: &str, s: &Scenario, o: &Outcome, could: &BTreeSet<St
 }
 
 /// Asserts parity: the fresh machine's plan could reuse what the one with the first machine's
-/// store could, and says so in the same words.
+/// store could, and says so in the same words, as `hushrun ready` does before it; and \[C-38\]
+/// the fresh machine keeps each test file it reused on another machine's list as `shared`.
 fn assert_parity(s: &Scenario, m: &Measured) {
     let could = s.reusable();
     assert_could_reuse("with the first machine's store", s, &m.copied, &could);
     assert_could_reuse("on a fresh machine", s, &m.fresh, &could);
     assert_eq!(m.fresh.plan, m.copied.plan, "{}", m.fresh.stderr);
+    assert_eq!(m.fresh.ready, m.copied.ready, "{}", m.fresh.stderr);
+    if let Some(ready) = &m.copied.ready {
+        assert!(ready.contains("already passed"), "{ready}");
+    }
+    let reused: BTreeSet<String> = s.all.difference(&m.fresh.ran).cloned().collect();
+    for (unit, origin) in &m.fresh.origins {
+        let want = if reused.contains(unit) {
+            "shared"
+        } else {
+            "seen here"
+        };
+        assert_eq!(origin, want, "{unit}: {:?}", m.fresh.origins);
+    }
+    assert!(
+        m.copied.origins.values().all(|o| o == "seen here"),
+        "{:?}",
+        m.copied.origins
+    );
 }
 
 // pytest
@@ -414,6 +576,13 @@ fn pytest_scenario() -> Scenario {
         file(
             "pytest.ini",
             "[pytest]\ntestpaths = tests\npythonpath = .\n",
+        ),
+        file(
+            "package.json",
+            &format!(
+                "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"hushrun run unit -- {}\"}}}}\n",
+                pytest_command().join(" ")
+            ),
         ),
         file("app/__init__.py", ""),
         file("app/pricing.py", "def price(x):\n    return x * 2\n"),
@@ -451,17 +620,7 @@ fn pytest_scenario() -> Scenario {
     Scenario {
         check: "unit",
         files,
-        command: [
-            &python(),
-            "-m",
-            "pytest",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "-rA",
-        ]
-        .map(str::to_string)
-        .to_vec(),
+        command: pytest_command(),
         env: vec![],
         prepare: |_| {},
         change: (
@@ -472,7 +631,23 @@ fn pytest_scenario() -> Scenario {
         must_run: set(&["tests/test_cart.py", "tests/test_child.py"]),
         not_followed: set(&["tests/test_child.py"]),
         ran: pytest_ran,
+        ready: true,
     }
+}
+
+/// pytest's command.
+fn pytest_command() -> Vec<String> {
+    [
+        &python(),
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-rA",
+    ]
+    .map(str::to_string)
+    .to_vec()
 }
 
 /// The test files of pytest's `-rA` summary.
@@ -500,12 +675,12 @@ fn has_pytest() -> bool {
 
 // covers: C-33, C-34
 #[test]
-fn pytest_on_a_fresh_machine_today_runs_every_test_file_and_says_nothing_of_them() {
+fn pytest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
         return;
     }
     let s = pytest_scenario();
-    let m = two_machines(&s);
+    let m = two_machines(&s, Hints::Older(404));
     assert_could_reuse(
         "with the first machine's store",
         &s,
@@ -523,15 +698,33 @@ fn pytest_on_a_fresh_machine_today_runs_every_test_file_and_says_nothing_of_them
     assert_eq!(m.fresh.plan, None, "{}", m.fresh.stderr);
 }
 
-// covers: C-33, C-34
+// covers: C-33, C-34, C-38, C-22
 #[test]
-#[ignore = "phase 3 and 4 of test-by-test-across-machines: a fresh machine has no map of what test files read, which the server's hints will give it"]
 fn pytest_on_a_fresh_machine_reuses_what_the_first_machines_store_would() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
         return;
     }
     let s = pytest_scenario();
-    assert_parity(&s, &two_machines(&s));
+    assert_parity(&s, &two_machines(&s, Hints::Kept));
+}
+
+// covers: C-33, C-38
+#[test]
+fn pytest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let s = observing(pytest_scenario());
+    let m = two_machines(&s, Hints::Kept);
+    let copied = observe_line(&m.copied.stderr);
+    assert!(
+        copied
+            .as_deref()
+            .is_some_and(|l| l.contains("2 of 8 test files would have run")),
+        "{}",
+        m.copied.stderr
+    );
+    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
 }
 
 // Vitest
@@ -542,7 +735,7 @@ fn vitest_scenario() -> Scenario {
         file(".gitignore", "node_modules\n"),
         file(
             "package.json",
-            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"hushrun run unit -- node_modules/.bin/vitest run --reporter=verbose\"}}\n",
         ),
         file(
             "vitest.config.ts",
@@ -600,6 +793,7 @@ fn vitest_scenario() -> Scenario {
         must_run: set(&["test/cart.test.ts"]),
         not_followed: BTreeSet::new(),
         ran: vitest_ran,
+        ready: true,
     }
 }
 
@@ -641,12 +835,12 @@ fn has_vitest() -> bool {
 
 // covers: C-33, C-34
 #[test]
-fn vitest_on_a_fresh_machine_today_runs_every_test_file() {
+fn vitest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() {
     if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
         return;
     }
     let s = vitest_scenario();
-    let m = two_machines(&s);
+    let m = two_machines(&s, Hints::Older(405));
     assert_could_reuse(
         "with the first machine's store",
         &s,
@@ -667,15 +861,33 @@ fn vitest_on_a_fresh_machine_today_runs_every_test_file() {
     );
 }
 
-// covers: C-33, C-34
+// covers: C-33, C-34, C-38, C-22
 #[test]
-#[ignore = "phase 3 and 4 of test-by-test-across-machines: a fresh machine has no map of what test files read, which the server's hints will give it"]
 fn vitest_on_a_fresh_machine_reuses_what_the_first_machines_store_would() {
     if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
         return;
     }
     let s = vitest_scenario();
-    assert_parity(&s, &two_machines(&s));
+    assert_parity(&s, &two_machines(&s, Hints::Kept));
+}
+
+// covers: C-33, C-38
+#[test]
+fn vitest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let s = observing(vitest_scenario());
+    let m = two_machines(&s, Hints::Kept);
+    let copied = observe_line(&m.copied.stderr);
+    assert!(
+        copied
+            .as_deref()
+            .is_some_and(|l| l.contains("1 of 7 test files would have run")),
+        "{}",
+        m.copied.stderr
+    );
+    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
 }
 
 // Go
@@ -770,6 +982,7 @@ fn go_scenario() -> Scenario {
         must_run: set(&["greet"]),
         not_followed: BTreeSet::new(),
         ran: go_ran,
+        ready: false,
     }
 }
 
@@ -797,12 +1010,13 @@ fn go_ran(ran: &Ran) -> BTreeSet<String> {
 
 // covers: C-33, C-34, C-35
 #[test]
-fn go_on_a_fresh_machine_today_reuses_a_package_whose_tests_opened_no_source() {
+fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_tests_opened_no_source()
+{
     if !tools("Go", succeeds("go", &["version"])) {
         return;
     }
     let s = go_scenario();
-    let m = two_machines(&s);
+    let m = two_machines(&s, Hints::Older(404));
     assert_could_reuse(
         "with the first machine's store",
         &s,
@@ -832,15 +1046,58 @@ fn go_on_a_fresh_machine_today_reuses_a_package_whose_tests_opened_no_source() {
     );
 }
 
-// covers: C-33, C-34, C-35
+// covers: C-33, C-34, C-35, C-38
 #[test]
-#[ignore = "phase 3 and 4 of test-by-test-across-machines: a fresh machine has no map of what test files read, which the server's hints will give it"]
 fn go_on_a_fresh_machine_reuses_what_the_first_machines_store_would() {
     if !tools("Go", succeeds("go", &["version"])) {
         return;
     }
     let s = go_scenario();
-    assert_parity(&s, &two_machines(&s));
+    let m = two_machines(&s, Hints::Kept);
+    assert_parity(&s, &m);
+    // \[C-37\] `hushrun why` says which list it was, for a package the fresh machine reused on
+    // another machine's: `data` opened pricing's source, which only the first machine saw.
+    if m.fresh.origins.get("data").map(String::as_str) == Some("shared") {
+        let why = m.fresh.machine.as_ref().expect("the machine").hushrun(
+            &s,
+            &m.results,
+            &["why".into(), "unit".into(), "data".into()],
+        );
+        assert!(
+            why.stdout.contains("another machine saw it read"),
+            "{}\n{}",
+            why.stdout,
+            why.stderr
+        );
+        // The next run of it here replaces that row with what it saw.
+        let fresh = m.fresh.machine.as_ref().expect("the machine");
+        fresh.write(
+            "data/data.go",
+            "package data\n\nconst Name = \"data, again\"\n",
+        );
+        let ran = fresh.run(&s, &m.results);
+        assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+        assert_eq!(store::origins(&fresh.cache)["data"], "seen here");
+    }
+}
+
+// covers: C-33, C-38
+#[test]
+fn go_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    let s = observing(go_scenario());
+    let m = two_machines(&s, Hints::Kept);
+    let copied = observe_line(&m.copied.stderr);
+    assert!(
+        copied
+            .as_deref()
+            .is_some_and(|l| l.contains("1 of 5 test files would have run")),
+        "{}",
+        m.copied.stderr
+    );
+    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
 }
 
 // Cargo
@@ -916,6 +1173,7 @@ fn cargo_scenario() -> Scenario {
         must_run: set(&["crates/other/src/lib.rs"]),
         not_followed: BTreeSet::new(),
         ran: cargo_ran,
+        ready: false,
     }
 }
 
@@ -950,7 +1208,7 @@ fn cargo_ran(ran: &Ran) -> BTreeSet<String> {
 
 // covers: C-33, C-34
 #[test]
-fn cargo_on_a_fresh_machine_today_reuses_all_it_could() {
+fn cargo_on_a_fresh_machine_with_a_server_without_hints_reuses_all_it_could() {
     if !tools(
         "cargo-nextest",
         succeeds("cargo", &["nextest", "--version"]),
@@ -958,7 +1216,7 @@ fn cargo_on_a_fresh_machine_today_reuses_all_it_could() {
         return;
     }
     let s = cargo_scenario();
-    let m = two_machines(&s);
+    let m = two_machines(&s, Hints::Older(404));
     // Keys come from the build's dep-info, made on this machine before COMMAND: no map needed.
     assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
     assert_eq!(
@@ -979,5 +1237,344 @@ fn cargo_on_a_fresh_machine_reuses_what_the_first_machines_store_would() {
         return;
     }
     let s = cargo_scenario();
-    assert_parity(&s, &two_machines(&s));
+    assert_parity(&s, &two_machines(&s, Hints::Kept));
+}
+
+// Go, with what a server keeps of hints (C-38)
+
+/// What a server says when it keeps no hints, once in a run.
+const NO_HINTS: &str = "doesn't keep what other machines saw its test files read";
+
+/// A repository on a first machine, against one results server, and the machines that clone it.
+struct Lab {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    results: FakeResults,
+    first: Machine,
+}
+
+impl Lab {
+    fn new(s: &Scenario) -> Lab {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("real path");
+        let first = Machine::at(root.join("first"));
+        std::fs::create_dir_all(&first.repo).expect("mkdir");
+        git::init(&first.repo, "sha1");
+        for (path, text) in &s.files {
+            first.write(path, text);
+        }
+        (s.prepare)(&first.repo);
+        git::commit_all(&first.repo, "init");
+        Lab {
+            _dir: dir,
+            root,
+            results: FakeResults::start(),
+            first,
+        }
+    }
+
+    /// A machine with an empty cache, on a clone of the first machine's commit.
+    fn fresh(&self, name: &str, s: &Scenario) -> Machine {
+        let machine = Machine::at(self.root.join(name));
+        git::run(
+            &self.root,
+            &[
+                "clone",
+                "-q",
+                &self.first.repo.to_string_lossy(),
+                &machine.repo.to_string_lossy(),
+            ],
+            None,
+        );
+        (s.prepare)(&machine.repo);
+        machine
+    }
+
+    /// The hint requests the server got: (method, path), oldest first.
+    fn hint_requests(&self) -> Vec<(String, String)> {
+        self.results
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.starts_with("v0/units/hints/"))
+            .map(|r| (r.method, r.path))
+            .collect()
+    }
+
+    fn puts(&self) -> usize {
+        self.hint_requests()
+            .iter()
+            .filter(|(m, _)| m == "PUT")
+            .count()
+    }
+}
+
+/// The go list sources of [`go_scenario`], which its hints' key is derived from (C-38).
+const GO_SOURCES: [&str; 5] = [
+    "cart/cart.go",
+    "data/data.go",
+    "fixtures/fixtures.go",
+    "greet/greet.go",
+    "pricing/pricing.go",
+];
+
+fn go_files(s: &Scenario) -> Vec<&str> {
+    s.files.iter().map(|(p, _)| p.as_str()).collect()
+}
+
+/// Runs the Go scenario on its first machine, which sends its hint; and returns the hint, read.
+fn go_with_its_hint(s: &Scenario) -> (Lab, hints::Read) {
+    let lab = Lab::new(s);
+    let ran = lab.first.run(s, &lab.results);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    let kept = lab.results.hints();
+    assert_eq!(kept.len(), 1, "the first run sends one hint: {kept:?}");
+    let key = hints::Key::derive(GO_SOURCES);
+    let read = hints::read(&kept[0].body, &key, go_files(s)).expect("the hint reads");
+    assert_eq!(read.dropped, 0, "{read:?}");
+    assert_eq!(
+        read.hint.units.keys().cloned().collect::<BTreeSet<_>>(),
+        s.all
+    );
+    assert!(
+        read.hint.units["data"].reads.contains("pricing/pricing.go"),
+        "{read:?}"
+    );
+    assert_eq!(kept[0].os, hints::Os::this().expect("a system").word());
+    assert_eq!(kept[0].repository, REPOSITORY);
+    (lab, read)
+}
+
+/// Replaces the server's hints with `hint`, at the first one's place, written under `key`.
+fn only_hint(lab: &Lab, hint: &hints::Hint, key: &hints::Key) {
+    let place = lab.results.hints()[0].clone();
+    lab.results.drop_hints();
+    let written = hints::write(hint, key).expect("a hint");
+    lab.results.add_hint(
+        &place.repository,
+        &place.check_id,
+        &place.address,
+        &place.os,
+        &written.bytes,
+    );
+}
+
+// covers: C-38, C-34
+#[test]
+fn a_hint_that_is_wrong_random_or_under_another_key_runs_what_it_would_key() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    let s = go_scenario();
+    let (lab, honest) = go_with_its_hint(&s);
+    let left = lab.results.recorded_so_far();
+    // What a fresh machine reuses with no hint at all: what go list tells it alone.
+    let alone = set(&["cart", "fixtures", "pricing"]);
+    let run = |name: &str, change: Option<(&str, &str)>| -> BTreeSet<String> {
+        let machine = lab.fresh(name, &s);
+        if let Some((path, text)) = change {
+            machine.write(path, text);
+        }
+        let ran = machine.run(&s, &lab.results);
+        assert_eq!(ran.code, 0, "{name}:\n{}\n{}", ran.stdout, ran.stderr);
+        let ran = (s.ran)(&ran);
+        lab.results.go_back_to(&left);
+        ran
+    };
+
+    // A hint that leaves out pricing's source, which `data`'s test opened, when it changed.
+    let mut wrong = honest.hint.clone();
+    wrong
+        .units
+        .get_mut("data")
+        .expect("data")
+        .reads
+        .remove("pricing/pricing.go");
+    only_hint(&lab, &wrong, &hints::Key::derive(GO_SOURCES));
+    let ran = run(
+        "wrong",
+        Some((
+            "pricing/pricing.go",
+            "package pricing\n\nfunc Price(x int) int { return x + x }\n",
+        )),
+    );
+    assert!(ran.contains("data"), "{ran:?}");
+
+    // A hint whose every file read is a token of a path that isn't there.
+    let mut random = honest.hint.clone();
+    for (n, unit) in random.units.values_mut().enumerate() {
+        unit.reads = (0..3).map(|i| format!("nowhere/{n}/{i}.go")).collect();
+    }
+    only_hint(&lab, &random, &hints::Key::derive(GO_SOURCES));
+    let ran = run("random", Some(s.change));
+    assert!(ran.contains("data"), "{ran:?}");
+    assert!(s.all.difference(&ran).all(|u| alone.contains(u)), "{ran:?}");
+
+    // The honest hint, under a key another list of sources gives.
+    only_hint(&lab, &honest.hint, &hints::Key::derive(["another/list.go"]));
+    let ran = run("another-key", Some(s.change));
+    assert!(ran.contains("data"), "{ran:?}");
+    assert!(s.all.difference(&ran).all(|u| alone.contains(u)), "{ran:?}");
+}
+
+/// [`go_scenario`] with `data`'s test opening pricing's source only when `HUSHRUN_TEST_OPEN` is
+/// 1, and failing otherwise: two machines see it read two lists, and it passes on one only.
+fn go_disagreeing(open: bool) -> Scenario {
+    let mut s = go_scenario();
+    for (path, text) in &mut s.files {
+        if path == "data/data_test.go" {
+            *text = "package data\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestIt(t *testing.T) {\n\tif os.Getenv(\"HUSHRUN_TEST_OPEN\") != \"1\" {\n\t\tt.Fatal(\"not opened\")\n\t}\n\tif _, err := os.ReadFile(\"../pricing/pricing.go\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n".to_string();
+        }
+    }
+    s.env
+        .push(("HUSHRUN_TEST_OPEN", if open { "1" } else { "0" }.into()));
+    s
+}
+
+// covers: C-38, C-34
+#[test]
+fn a_pass_on_one_list_and_a_fail_on_another_runs_the_test_file() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    let closed = go_disagreeing(false);
+    let open = go_disagreeing(true);
+    let lab = Lab::new(&open);
+    // A machine where `data` opens nothing and fails: a fail under the key of what go list says.
+    let ran = lab.fresh("closed", &closed).run(&closed, &lab.results);
+    assert_ne!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // One where it opens pricing's source and passes: a pass under that list's key.
+    let ran = lab.fresh("open", &open).run(&open, &lab.results);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!((open.ran)(&ran).contains("data"), "{}", ran.stderr);
+    assert_eq!(lab.results.hints().len(), 2, "{:?}", lab.results.hints());
+    // A third, with greet's source changed: one list has a pass, another a fail. It runs `data`.
+    let third = lab.fresh("third", &open);
+    third.write(open.change.0, open.change.1);
+    let ran = third.run(&open, &lab.results);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    let runs = lab.results.runs();
+    let o = Outcome {
+        plan: ran.plan_line(),
+        ran: (open.ran)(&ran),
+        units: runs[runs.len() - 1]["units"].clone(),
+        stderr: ran.stderr,
+        ready: None,
+        origins: BTreeMap::new(),
+        machine: None,
+    };
+    assert!(o.ran.contains("data"), "{}", o.stderr);
+    assert_could_reuse(
+        "with two lists that disagree",
+        &open,
+        &o,
+        &set(&["cart", "fixtures", "pricing"]),
+    );
+}
+
+// covers: C-38
+#[test]
+fn a_hint_that_couldnt_be_sent_is_sent_by_the_next_run_and_never_twice() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    let s = go_scenario();
+    let lab = Lab::new(&s);
+    lab.results.answer(
+        "PUT",
+        "v0/units/hints/",
+        403,
+        serde_json::json!({"error": {"code": "forbidden", "message": "not now"}}),
+        1,
+    );
+    let ran = lab.first.run(&s, &lab.results);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(lab.puts(), 1, "{:?}", lab.hint_requests());
+    assert!(lab.results.hints().is_empty());
+    // Sending it failing changes nothing a person reads.
+    assert!(!ran.stderr.contains("hint"), "{}", ran.stderr);
+    // The next run sends the same hint again, from what this machine kept, and nothing else.
+    for (n, text) in ["\"h\" + \"i\"", "\"hi\" + \"\""].iter().enumerate() {
+        lab.first.write(
+            "greet/greet.go",
+            &format!("package greet\n\nfunc Hello() string {{ return {text} }}\n"),
+        );
+        let ran = lab.first.run(&s, &lab.results);
+        assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+        // Then the hint is the server's, and a run that would send the same sends nothing.
+        assert_eq!(lab.puts(), 2, "run {n}: {:?}", lab.hint_requests());
+        assert_eq!(lab.results.hints().len(), 1);
+    }
+}
+
+// covers: C-38
+#[test]
+fn a_server_from_before_hints_changes_nothing_and_is_said_once() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    for status in [404, 405] {
+        let s = go_scenario();
+        let lab = Lab::new(&s);
+        lab.results.forget_hints(status);
+        let ran = lab.first.run(&s, &lab.results);
+        assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+        assert_eq!(ran.stderr.matches(NO_HINTS).count(), 1, "{}", ran.stderr);
+        let fresh = lab.fresh("fresh", &s);
+        fresh.write(s.change.0, s.change.1);
+        let ran = fresh.run(&s, &lab.results);
+        assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+        assert_eq!(ran.stderr.matches(NO_HINTS).count(), 1, "{}", ran.stderr);
+        // As before hints: what go list tells a fresh machine alone.
+        assert_eq!(
+            ran.plan_line().as_deref(),
+            Some(
+                "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            ),
+            "{status}: {}",
+            ran.stderr
+        );
+        // One lookup a run, and nothing sent after the first said no.
+        assert_eq!(
+            lab.hint_requests(),
+            vec![
+                ("POST".to_string(), "v0/units/hints/lookup".to_string()),
+                ("POST".to_string(), "v0/units/hints/lookup".to_string()),
+            ],
+            "{status}"
+        );
+    }
+}
+
+// covers: C-38, C-25
+#[test]
+fn counts_from_an_os_reads_that_systems_hints_and_a_run_that_doesnt_meet_it_sends_none() {
+    if !tools("Go", succeeds("go", &["version"])) {
+        return;
+    }
+    let here = hints::Os::this().expect("a system");
+    let other = if here == hints::Os::Linux {
+        hints::Os::Macos
+    } else {
+        hints::Os::Linux
+    };
+    let mut s = go_scenario();
+    for (path, text) in &mut s.files {
+        if path == "hushrun.yaml" {
+            *text = format!("{text}counts_from:\n  os: {}\n", other.word());
+        }
+    }
+    let lab = Lab::new(&s);
+    let ran = lab.first.run(&s, &lab.results);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(ran.stderr.contains("won't count"), "{}", ran.stderr);
+    let asked: Vec<Value> = lab
+        .results
+        .raw_requests()
+        .into_iter()
+        .filter(|r| r.path.ends_with("/v0/units/hints/lookup"))
+        .map(|r| serde_json::from_slice(&r.body).expect("JSON"))
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0]["os"], other.word(), "{asked:?}");
+    assert_eq!(lab.puts(), 0, "{:?}", lab.hint_requests());
 }

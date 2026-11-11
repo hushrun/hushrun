@@ -15,6 +15,8 @@
 //! - \[ADR 0072\] **The map** ([`Map`]) and **the audit** ([`Disagreement`]) are in this machine's
 //!   store, [`super::db`]: hints and explanations, which no decision reads that a recorded result
 //!   doesn't confirm. The two above are what decides, and stay files.
+//! - \[C-38\] **Hints**, what other machines saw a check's test files read: a server keeps them
+//!   ([`UnitResults::hints`], [`UnitResults::put_hint`]); this machine's directory keeps none.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -140,6 +142,26 @@ pub trait UnitResults {
     /// Turns the check's reuse on again, for a person, when it is still the suspension of
     /// `generation`.
     fn resume(&self, generation: i64, by: &str) -> Result<Resumed, String>;
+    /// \[C-38\] The bytes of the newest hints at `place`, newest first: none where results stay
+    /// on this machine (ADR 0067). `Err` says why the server didn't answer; a server from before
+    /// hints answers none, and the run says so once ([`crate::results::Backend::keeps_no_hints`]).
+    fn hints(&self, place: &HintPlace) -> Result<Vec<Vec<u8>>, String> {
+        let _ = place;
+        Ok(Vec::new())
+    }
+    /// \[C-38\] Sends a hint's `bytes` to `place`: `Ok` once the server keeps it.
+    fn put_hint(&self, place: &HintPlace, bytes: &[u8]) -> Result<(), String> {
+        let _ = (place, bytes);
+        Err("results stay on this machine, which shares no hint".into())
+    }
+}
+
+/// \[C-38\] Where a hint is: the check's id (C-33), its address, and the system that saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HintPlace {
+    pub check_id: Digest,
+    pub address: Digest,
+    pub os: hushrun_core::hints::Os,
 }
 
 /// This machine's unit results, in its results directory, and \[ADR 0069\] the check's reuse
@@ -641,6 +663,58 @@ impl UnitResults for Server<'_> {
             Err(err) => Err(format!("{err:#}")),
         }
     }
+
+    fn hints(&self, place: &HintPlace) -> Result<Vec<Vec<u8>>, String> {
+        let body = json!({
+            "repository": self.repository,
+            "checkId": place.check_id.hex(),
+            "address": place.address.hex(),
+            "os": place.os.word(),
+        });
+        let answer = match self.backend.hints_lookup(&body) {
+            Ok(crate::results::UnitsCall::Answered(answer)) => answer,
+            Ok(crate::results::UnitsCall::Unsupported) => return Ok(Vec::new()),
+            Ok(crate::results::UnitsCall::Refused(why)) => return Err(why),
+            Ok(crate::results::UnitsCall::Conflict(_)) => return Err("409".into()),
+            Err(err) => return Err(format!("{err:#}")),
+        };
+        // Bytes whose SHA-256 isn't the one named came apart on the way: left out.
+        let found = answer["hints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|hint| {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(hint["body"].as_str()?)
+                    .ok()?;
+                (hint["sha256"].as_str() == Some(Digest::of(&bytes).hex().as_str()))
+                    .then_some(bytes)
+            })
+            .collect();
+        Ok(found)
+    }
+
+    fn put_hint(&self, place: &HintPlace, bytes: &[u8]) -> Result<(), String> {
+        let query = [
+            (
+                "repository",
+                self.repository.clone().unwrap_or_default().to_lowercase(),
+            ),
+            ("checkId", place.check_id.hex()),
+            ("address", place.address.hex()),
+            ("os", place.os.word().to_string()),
+        ];
+        match self.backend.hint_put(&Digest::of(bytes), &query, bytes) {
+            Ok(crate::results::UnitsCall::Answered(_)) => Ok(()),
+            Ok(crate::results::UnitsCall::Unsupported) => {
+                Err("its server doesn't keep them".into())
+            }
+            Ok(crate::results::UnitsCall::Refused(why)) => Err(why),
+            Ok(crate::results::UnitsCall::Conflict(_)) => Err("409".into()),
+            Err(err) => Err(format!("{err:#}")),
+        }
+    }
 }
 
 /// Why a server from before test files' results reuses none.
@@ -705,6 +779,32 @@ impl Map {
     }
 }
 
+/// \[C-38\] Where a test file's row of the map came from: what it read when it ran here, or a list
+/// another machine saw it read whose key had a pass that counted here, which reused it. The next
+/// run of it here replaces a shared row with what it sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Origin {
+    #[default]
+    SeenHere,
+    Shared,
+}
+
+impl Origin {
+    /// The word the store's CHECK takes.
+    pub fn word(self) -> &'static str {
+        match self {
+            Origin::SeenHere => "seen here",
+            Origin::Shared => "shared",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Origin> {
+        [Origin::SeenHere, Origin::Shared]
+            .into_iter()
+            .find(|o| o.word() == word)
+    }
+}
+
 /// What a test file read the last time it ran here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mapped {
@@ -716,6 +816,8 @@ pub struct Mapped {
     pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
     /// \[ADR 0070\] Directories it listed then: a plan adds every file below each.
     pub dirs: BTreeSet<String>,
+    /// \[C-38\] Whether it ran here, or another machine saw it read these files.
+    pub origin: Origin,
 }
 
 /// One test file that would have been reused and failed.

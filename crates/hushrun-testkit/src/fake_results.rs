@@ -231,6 +231,11 @@ impl FakeResults {
         hints
     }
 
+    /// \[C-38\] Forgets every hint it keeps, as if none had been sent.
+    pub fn drop_hints(&self) {
+        self.state().hints.clear();
+    }
+
     /// \[C-38\] Keeps `body` as a hint at a place, as `PUT {base}/v0/units/hints/{sha256}` would:
     /// what a test sends that no machine saw, such as a hint written to mislead.
     pub fn add_hint(&self, repository: &str, check_id: &str, address: &str, os: &str, body: &[u8]) {

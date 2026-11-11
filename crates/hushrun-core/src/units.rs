@@ -174,6 +174,10 @@ pub fn classify<'p>(
     Sets { by_path }
 }
 
+/// \[ADR 0069\] The most test files a plan looks up and a run records, and a hint holds (C-38):
+/// past it, nothing is reused (results-v0 §3).
+pub const MOST_UNITS: usize = 5_000;
+
 /// \[C-31\] `shape`: the SHA-256 of the sources set's paths, their names and not their contents:
 /// each path's UTF-8 bytes followed by one NUL byte, sorted by bytes as D-4 sorts them.
 pub fn shape<'a>(sources: impl IntoIterator<Item = &'a str>) -> Digest {

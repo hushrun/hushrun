@@ -524,6 +524,9 @@ struct Server {
     reads_as: Option<String>,
     /// Whether such a lookup was answered.
     answered: Cell<bool>,
+    /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
+    /// this run asks nothing more of them, and says so once.
+    keeps_no_hints: Cell<bool>,
 }
 
 /// Who signs the results a server records (ADR 0028).
@@ -880,6 +883,7 @@ impl Backend {
                 in_ci,
                 reads_as,
                 answered: Cell::new(false),
+                keeps_no_hints: Cell::new(false),
             })),
         })
     }
@@ -1329,7 +1333,99 @@ impl Backend {
 /// \[ADR 0069\] The schema of a run's result with its test files' results (results-v0 §3).
 pub const RUN_UNITS_SCHEMA: &str = "hushrun.run-units/v0";
 
+/// \[C-38\] The most bytes a lookup of hints answers: 3 hints of 2 MiB each, in base64, and room.
+const MOST_HINTS_ANSWER: usize = 12 << 20;
+
+impl Backend {
+    /// \[C-38\] `POST {base}/v0/units/hints/lookup` with `body` (results-v0, Hints): the newest
+    /// hints at a place. A directory, a server asked with no credential, or one that can't be
+    /// reached is an error; one that said it keeps no hints this run isn't asked again.
+    pub fn hints_lookup(&self, body: &serde_json::Value) -> anyhow::Result<UnitsCall> {
+        let server = self.hint_server()?;
+        if server.keeps_no_hints.get() {
+            return Ok(UnitsCall::Unsupported);
+        }
+        let bytes = serde_json::to_vec(body)?;
+        let (status, answer) = server
+            .ledger
+            .json_request_sized(
+                "POST",
+                "v0/units/hints/lookup",
+                Some(&bytes),
+                MOST_HINTS_ANSWER,
+            )
+            .map_err(plain)?;
+        server.hints_answer(status, &answer)
+    }
+
+    /// \[C-38\] `PUT {base}/v0/units/hints/{sha256}?repository=&checkId=&address=&os=` with a
+    /// hint's bytes, `query` its four values (results-v0, Hints). Never signed: a hint is never
+    /// trusted.
+    pub fn hint_put(
+        &self,
+        sha256: &Digest,
+        query: &[(&str, String)],
+        bytes: &[u8],
+    ) -> anyhow::Result<UnitsCall> {
+        let server = self.hint_server()?;
+        if server.keeps_no_hints.get() {
+            return Ok(UnitsCall::Unsupported);
+        }
+        let query = query
+            .iter()
+            .map(|(name, value)| format!("{name}={}", query_value(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let (status, answer) = server
+            .ledger
+            .put_bytes(&format!("v0/units/hints/{}", sha256.hex()), &query, bytes)
+            .map_err(plain)?;
+        server.hints_answer(status, &answer)
+    }
+
+    /// \[C-38\] Whether the server said, this run, that it keeps no hints: what the run says once.
+    pub fn keeps_no_hints(&self) -> bool {
+        matches!(&self.store, Store::Server(server) if server.keeps_no_hints.get())
+    }
+
+    /// The server hints are asked of, which has a credential to ask with.
+    fn hint_server(&self) -> anyhow::Result<&Server> {
+        let Store::Server(server) = &self.store else {
+            return Err(anyhow!("this machine's directory has no server to ask"));
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: {NO_ID_TOKEN}", server.base));
+        }
+        Ok(server)
+    }
+}
+
 impl Server {
+    /// \[C-38\] What an answer to a request about hints is: as [`Backend::units_request`]'s, and
+    /// 404 or 405 marks the server as keeping none, for the rest of the run.
+    fn hints_answer(&self, status: u16, answer: &[u8]) -> anyhow::Result<UnitsCall> {
+        if status == 429 || (500..600).contains(&status) {
+            return Err(anyhow!(
+                "{}: {}",
+                self.base,
+                error_message(answer).unwrap_or_else(|| format!("answered {status}"))
+            ));
+        }
+        Ok(match status {
+            200 | 201 => UnitsCall::Answered(
+                serde_json::from_slice(answer)
+                    .map_err(|e| anyhow!("{}: the answer isn't JSON: {e}", self.base))?,
+            ),
+            404 | 405 => {
+                self.keeps_no_hints.set(true);
+                UnitsCall::Unsupported
+            }
+            _ => UnitsCall::Refused(
+                error_message(answer).unwrap_or_else(|| format!("{} answered {status}", self.base)),
+            ),
+        })
+    }
+
     /// \[ADR 0067\] Whether nothing here could be sent with its requests: no token goes there,
     /// none is withheld from it, no login and no ID token, and it asks as no repository's CI.
     fn signed_out(&self) -> bool {

@@ -85,6 +85,7 @@ fn write_run(path: &Path, r: &Run<'_>) -> Result<(), Unread> {
             unit_files: Some(&listed),
             edges: &r.edges,
             disagreements: &r.disagreements,
+            hints: &[],
             now_ms: r.now_ms,
         },
     )
@@ -354,6 +355,7 @@ fn a_store_another_hushrun_holds_is_busy_and_nothing_is_written() {
         unit_files: None,
         edges: &BTreeSet::new(),
         disagreements: &[],
+        hints: &[],
         now_ms: r.now_ms,
     };
     assert_eq!(

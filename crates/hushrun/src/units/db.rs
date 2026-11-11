@@ -10,7 +10,13 @@
 //!   \[ADR 0071\] Vitest's list of test files, of its last run;
 //! - **the edges** adapters saw (a file imports, opens or reads another), which `hushrun why`
 //!   walks to show a path, and no key ever reads;
-//! - **the audit**: each test file that would have been reused and failed.
+//! - **the audit**: each test file that would have been reused and failed;
+//! - \[C-38\] **hints known**: the content id of each hint this machine sent or received, by its
+//!   address and system, so that the same hint isn't sent twice.
+//!
+//! \[C-38\] A test file's row is `seen here`, what it read when it ran here, or `shared`, a list
+//! another machine saw it read whose key had a pass that counted here, which reused it; the next
+//! run of the test file here replaces it.
 //!
 //! A map is a hint: it chooses which files a key hashes, and a wrong one makes a key no run
 //! recorded, which runs the test file (RFC 0003 §3.4). So a store that is missing, busy, broken or
@@ -32,7 +38,7 @@ use serde_json::json;
 use hushrun_core::digest::Digest;
 use hushrun_core::units::{KeyBase, NotFollowed};
 
-use super::store::{Disagreement, Map, Mapped};
+use super::store::{Disagreement, Map, Mapped, Origin};
 
 /// The schema this hushrun reads and writes, in the file's name and its `user_version`. A
 /// hushrun with another schema keeps another file.
@@ -45,6 +51,8 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const KEEP_DAYS: i64 = 30;
 /// How many disagreements the audit keeps of a check.
 const MOST_DISAGREEMENTS: i64 = 200;
+/// \[C-38\] How many hints known a check keeps.
+const MOST_HINTS_KNOWN: i64 = 200;
 
 /// The tables, in a fresh store. `STRICT`: a value of another type is refused.
 const TABLES: &str = "
@@ -92,12 +100,14 @@ CREATE TABLE check_listed (
     PRIMARY KEY (check_ref, path_ref)
 ) STRICT, WITHOUT ROWID;
 
--- Each test file of a check, as it last ran here.
+-- Each test file of a check, as it last ran here, or [C-38] as another machine saw it read the
+-- files of a pass that reused it here.
 CREATE TABLE unit (
     id        INTEGER PRIMARY KEY,
     check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
     path_ref  INTEGER NOT NULL REFERENCES path (id),
     ran_at    INTEGER NOT NULL,
+    origin    TEXT NOT NULL CHECK (origin IN ('seen here', 'shared')),
     UNIQUE (check_ref, path_ref)
 ) STRICT;
 -- What it read that its key holds, each file as it was then.
@@ -131,6 +141,18 @@ CREATE TABLE edge (
     PRIMARY KEY (check_ref, from_ref, to_ref, kind)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX edge_to ON edge (to_ref);
+
+-- [C-38] Each hint this machine sent or received for a check, by its address and system: one it
+-- already knows isn't sent again. The newest 200 of a check.
+CREATE TABLE hint_known (
+    check_ref  INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    address    TEXT NOT NULL CHECK (length(address) = 64),
+    os         TEXT NOT NULL CHECK (os IN ('linux', 'macos', 'windows')),
+    content_id TEXT NOT NULL CHECK (length(content_id) = 64),
+    how        TEXT NOT NULL CHECK (how IN ('sent', 'received')),
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (check_ref, address, os, content_id)
+) STRICT, WITHOUT ROWID;
 
 -- [C-34] Each test file that would have been reused and failed: the newest 200 of a check.
 CREATE TABLE disagreement (
@@ -369,11 +391,16 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     };
     let mut names: HashMap<i64, String> = HashMap::new();
     let mut units = conn.prepare(
-        "SELECT u.id, p.path FROM unit u JOIN path p ON p.id = u.path_ref WHERE u.check_ref = ?1",
+        "SELECT u.id, p.path, u.origin FROM unit u JOIN path p ON p.id = u.path_ref
+         WHERE u.check_ref = ?1",
     )?;
-    for row in units.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
-        let (id, name): (i64, String) = row?;
-        map.units.insert(name.clone(), Mapped::default());
+    for row in units.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))? {
+        let (id, name, origin): (i64, String, String) = row?;
+        let mapped = Mapped {
+            origin: Origin::from_word(&origin).unwrap_or_default(),
+            ..Mapped::default()
+        };
+        map.units.insert(name.clone(), mapped);
         names.insert(id, name);
     }
     let mut reads = conn.prepare(
@@ -498,8 +525,35 @@ pub struct Write<'a> {
     /// The edges this run saw.
     pub edges: &'a BTreeSet<Edge>,
     pub disagreements: &'a [Disagreement],
+    /// \[C-38\] The hints this run received.
+    pub hints: &'a [HintKnown],
     /// This run's clock, in milliseconds since 1970.
     pub now_ms: i64,
+}
+
+/// \[C-38\] A hint this machine sent or received, where it is: its content id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HintKnown {
+    pub address: Digest,
+    pub os: hushrun_core::hints::Os,
+    pub content_id: Digest,
+    pub how: HintHow,
+}
+
+/// \[C-38\] How this machine knows a hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintHow {
+    Sent,
+    Received,
+}
+
+impl HintHow {
+    fn word(self) -> &'static str {
+        match self {
+            HintHow::Sent => "sent",
+            HintHow::Received => "received",
+        }
+    }
 }
 
 /// Writes what a run learned into the store at `path`, in one transaction: each test file it saw
@@ -619,8 +673,8 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     for (name, mapped) in w.seen {
         let path_ref = ids.path(name)?;
         tx.execute(
-            "INSERT INTO unit (check_ref, path_ref, ran_at) VALUES (?1, ?2, ?3)",
-            params![check, path_ref, w.now_ms],
+            "INSERT INTO unit (check_ref, path_ref, ran_at, origin) VALUES (?1, ?2, ?3, ?4)",
+            params![check, path_ref, w.now_ms, mapped.origin.word()],
         )?;
         let unit = tx.last_insert_rowid();
         for (read, entry) in &mapped.reads {
@@ -708,6 +762,7 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             params![check, MOST_DISAGREEMENTS],
         )?;
     }
+    note_in(tx, check, w.hints, w.now_ms)?;
     // What no row needs any more: versions of files that changed, and the paths of files gone.
     let _ = pruned;
     tx.execute_batch(
@@ -721,6 +776,87 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
              AND NOT EXISTS (SELECT 1 FROM edge e WHERE e.from_ref = path.id OR e.to_ref = path.id);",
     )?;
     Ok(())
+}
+
+/// \[C-38\] Notes each hint of `hints` as known for the check `check`, and keeps its newest
+/// [`MOST_HINTS_KNOWN`].
+fn note_in(
+    tx: &Transaction<'_>,
+    check: i64,
+    hints: &[HintKnown],
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    for hint in hints {
+        tx.execute(
+            "INSERT INTO hint_known (check_ref, address, os, content_id, how, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (check_ref, address, os, content_id) DO UPDATE SET at = excluded.at",
+            params![
+                check,
+                hint.address.hex(),
+                hint.os.word(),
+                hint.content_id.hex(),
+                hint.how.word(),
+                now_ms
+            ],
+        )?;
+    }
+    if !hints.is_empty() {
+        tx.execute(
+            "DELETE FROM hint_known WHERE check_ref = ?1 AND content_id NOT IN
+                 (SELECT content_id FROM hint_known WHERE check_ref = ?1 ORDER BY at DESC LIMIT ?2)",
+            params![check, MOST_HINTS_KNOWN],
+        )?;
+    }
+    Ok(())
+}
+
+/// \[C-38\] Notes `hints` as known for the check `check_id`, in one transaction: a hint sent.
+/// Nothing when the store doesn't hold the check, whose run wrote nothing.
+pub fn note_hints(
+    path: &Path,
+    check_id: &Digest,
+    hints: &[HintKnown],
+    now_ms: i64,
+) -> Result<(), Unread> {
+    let mut conn = open_to_write(path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| unread(&e))?;
+    let check: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM checks WHERE check_id = ?1",
+            [check_id.hex()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| unread(&e))?;
+    if let Some(check) = check {
+        note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
+    }
+    tx.commit().map_err(|e| unread(&e))
+}
+
+/// \[C-38\] Whether this machine sent or received the hint `content_id` at `address` for `os`, for
+/// the check `check_id`. A store that can't be read knows none.
+pub fn hint_known(
+    path: &Path,
+    check_id: &Digest,
+    address: &Digest,
+    os: hushrun_core::hints::Os,
+    content_id: &Digest,
+) -> bool {
+    let Ok(Some(conn)) = open_to_read(path) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT 1 FROM hint_known h JOIN checks c ON c.id = h.check_ref
+         WHERE c.check_id = ?1 AND h.address = ?2 AND h.os = ?3 AND h.content_id = ?4",
+        params![check_id.hex(), address.hex(), os.word(), content_id.hex()],
+        |_| Ok(()),
+    )
+    .optional()
+    .is_ok_and(|found| found.is_some())
 }
 
 /// Whether a test file the map has is still in the scope: its file, or \[ADR 0070\] for a Go

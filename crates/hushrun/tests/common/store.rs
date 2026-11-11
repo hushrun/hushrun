@@ -121,3 +121,21 @@ pub fn disagreements(cache: &Path) -> Vec<String> {
         .map(Result::unwrap)
         .collect()
 }
+
+/// \[C-38\] Each test file of the one store in `cache`, with where its row came from: `seen here`
+/// or `shared`.
+#[allow(dead_code)]
+pub fn origins(cache: &Path) -> std::collections::BTreeMap<String, String> {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open_with_flags(&stores[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("the store opens");
+    let mut query = conn
+        .prepare("SELECT p.path, u.origin FROM unit u JOIN path p ON p.id = u.path_ref")
+        .unwrap();
+    query
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}

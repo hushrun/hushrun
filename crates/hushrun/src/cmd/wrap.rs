@@ -751,10 +751,12 @@ fn skip_or_run(
     // request, else beside the run's result on this machine, once it was recorded (C-33).
     let unit_records: &[units::store::UnitRecord] =
         observed.as_ref().map_or(&[], |(o, _)| o.records());
+    let mut units_kept = false;
     let recorded = if backend.is_server() {
         backend
             .record_with_units(&code.key, &result, unit_records)
             .map(|kept| {
+                units_kept = kept;
                 if !kept {
                     say.line(format_args!(
                         "{check}: test files' results weren't kept: {} {}",
@@ -775,6 +777,20 @@ fn skip_or_run(
             && let Err(err) = store.record(&code.key, &result, o.records())
         {
             tracing::debug!("the test files' results weren't kept: {err:#}");
+        }
+        // \[C-38\] What this machine saw its test files read goes to the server that kept their
+        // results, for a machine with an empty cache; a server from before hints is said once.
+        if recorded.is_ok() && units_kept {
+            if backend.keeps_no_hints() {
+                say.line(format_args!(
+                    "{check}: {} doesn't keep what other machines saw its test files read yet, so this machine goes by what it saw itself",
+                    backend.org().unwrap_or_default()
+                ));
+            } else if let Some(store) = unit_store(backend, code, job.as_deref())
+                && let Some(line) = o.share(store.as_ref(), now(global))
+            {
+                say.line(format_args!("{line}"));
+            }
         }
     }
     let mark = match (&recorded, verdict) {

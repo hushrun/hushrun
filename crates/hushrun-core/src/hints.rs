@@ -93,7 +93,7 @@ pub const MOST_BYTES: usize = 2 * 1024 * 1024;
 pub const MOST_CONTENT: usize = 16 * 1024 * 1024;
 
 /// The most units, and unit files, a hint holds: as many as a run records (C-33).
-pub const MOST_UNITS: usize = 5_000;
+pub use crate::units::MOST_UNITS;
 
 /// The most distinct paths a hint holds.
 pub const MOST_TOKENS: usize = 1_000_000;
@@ -768,8 +768,9 @@ fn compress(content: &[u8]) -> Result<Vec<u8>, Unwritable> {
     }
 }
 
-/// The content of a zlib stream, bounded by [`MOST_CONTENT`] as it inflates.
-fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Unread> {
+/// The content of a hint's zlib stream, bounded by [`MOST_CONTENT`] as it inflates: what [`read`]
+/// parses, and what a test searches for a path in the clear.
+pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Unread> {
     if bytes.len() > MOST_BYTES {
         return Err(Unread::TooLarge(bytes.len()));
     }

@@ -24,6 +24,7 @@ pub mod facts;
 pub mod gotest;
 pub mod pytest;
 pub mod runner;
+pub mod shared;
 pub mod store;
 pub mod vitest;
 pub mod why;
@@ -38,11 +39,10 @@ use hushrun_core::time::Time;
 use hushrun_core::units::{self, Facts, KeyBase, Mode, RunFacts, Set, Sources, State, Tests, Tree};
 
 use crate::results::RunResult;
-use store::{Disagreement, Found, Mapped, UnitRecord, UnitResults};
+use shared::{Asker, Choice, List, Shared};
+use store::{Disagreement, Found, Mapped, Origin, UnitRecord, UnitResults};
 
-/// \[ADR 0069\] The most test files a plan looks up, and a run records: past it, nothing is reused
-/// (results-v0 §3).
-pub const MOST_UNITS: usize = 5_000;
+pub use hushrun_core::units::MOST_UNITS;
 
 /// What an adapter saw of one unit, merged over its processes.
 #[derive(Debug, Clone, Default)]
@@ -93,13 +93,18 @@ impl Drop for Session {
 /// \[ADR 0069\] What a plan decided before COMMAND (RFC 0003 §3.5 step 1).
 #[derive(Debug, Default)]
 pub struct Plan {
-    /// The key each unit the plan could compute one for has.
+    /// \[C-38\] Each unit that may be reused: the key of the first of its lists whose key passed.
     keys: BTreeMap<String, Digest>,
-    /// Of those, the ones whose newest result that counts here passed: what reuse stands on.
+    /// Of those, the newest result that counts here, a pass: what reuse stands on.
     passed: BTreeMap<String, Found>,
     /// What `hushrun.json` lists for adapters to deselect: `passed` but the audited, which run
     /// anyway (C-34).
     reuse: BTreeSet<String>,
+    /// \[C-38\] The list whose key passed, of each of `passed`: one from another machine is
+    /// kept here as `shared` when the test file is reused.
+    chosen: BTreeMap<String, List>,
+    /// \[C-38\] The hints this plan read, which this machine won't send back.
+    received: Vec<db::HintKnown>,
 }
 
 /// \[ADR 0069\] What a plan came to: the list adapters deselect from, or why every test file runs.
@@ -190,18 +195,18 @@ impl Session {
     /// observed`, one whose newest result is a fail or none, and an audited one: runs.
     pub fn plan(&mut self, input: &PlanInput<'_>) -> Planned {
         let started = input.started.to_string();
-        let loaded = db::load(
-            &db::path(&self.cache, input.repository),
-            &store::check_id(&input.base, input.repository),
-        );
+        let check_id = store::check_id(&input.base, input.repository);
+        let loaded = db::load(&db::path(&self.cache, input.repository), &check_id);
         // \[ADR 0072\] A store there that can't be read: no map, so nothing is reused, said once.
         if let Some(unread) = &loaded.unread {
             return Planned::Everything(unread.why());
         }
         let map = loaded.map;
+        let asker = self.asker(input.store, check_id, &input.base);
         let mut patterns = None;
         let mut built = None;
         let mut listed_files: Option<Vec<String>> = None;
+        let mut received = Vec::new();
         let (sets, known): (units::Sets, Known) = match &self.adapter {
             Adapter::Pytest | Adapter::Vitest(_) => {
                 match observed_plan(
@@ -210,11 +215,13 @@ impl Session {
                     input.root,
                     input.cwd,
                     &map,
+                    asker.as_ref(),
                     &self.tests.ignore,
                 ) {
                     Ok(Some(found)) => {
                         patterns = found.python_files;
                         listed_files = found.listed;
+                        received = found.shared.received;
                         (found.sets, found.known)
                     }
                     // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
@@ -237,9 +244,9 @@ impl Session {
                     .units
                     .iter()
                     .map(|(unit, b)| {
-                        let reads = (b.not_followed.is_empty() && input.tree.contains(unit))
-                            .then(|| b.reads.clone());
-                        (unit.clone(), reads)
+                        let lists = (b.not_followed.is_empty() && input.tree.contains(unit))
+                            .then(|| vec![built_list(&b.reads)]);
+                        (unit.clone(), lists)
                     })
                     .collect();
                 built = Some(b);
@@ -256,18 +263,28 @@ impl Session {
                     Sources::Named(&listed.named, gotest::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
+                let shared = fetch(asker.as_ref(), false, &sets, input.tree, &self.tests.ignore);
                 let known = listed
                     .units
                     .iter()
                     .map(|(unit, u)| {
                         let whole = u.not_followed.is_empty()
                             && u.own.iter().all(|f| input.tree.contains(f));
-                        let reads = whole
-                            .then(|| go_reads(&u.reads, map.units.get(unit), input.tree))
+                        let lists = whole
+                            .then(|| {
+                                shared::lists(
+                                    unit,
+                                    map.units.get(unit),
+                                    &shared,
+                                    input.tree,
+                                    Some(&u.reads),
+                                )
+                            })
                             .flatten();
-                        (unit.clone(), reads)
+                        (unit.clone(), lists)
                     })
                     .collect();
+                received = shared.received;
                 (sets, known)
             }
         };
@@ -282,30 +299,29 @@ impl Session {
                 "it has {total} test files, and this version reuses them in checks of {MOST_UNITS} at most"
             ));
         }
-        let mut keys = BTreeMap::new();
-        for (unit, reads) in &known {
-            if self.tests.always_runs(unit) {
-                continue;
-            }
-            if let Some(key) = reads.as_ref().and_then(|reads| keyer.key(unit, reads)) {
-                keys.insert(unit.clone(), key);
-            }
-        }
-        let asked: Vec<Digest> = keys.values().copied().collect();
-        let lookup = match input.store.lookup(&asked, input.counts) {
+        let keyed = keyed(&keyer, &known, &self.tests);
+        let lookup = match shared::lookup(input.store, all_keys(&keyed), input.counts) {
             Ok(lookup) => lookup,
             Err(why) => return Planned::Everything(format!("can't read which passed ({why})")),
         };
         if !lookup.reuse.allows_reuse() {
             return Planned::Everything(suspended(&input.base.check, &lookup.reuse));
         }
-        let passed: BTreeMap<String, Found> = keys
-            .iter()
-            .filter_map(|(unit, key)| {
-                let found = lookup.found.get(key)?;
-                found.passed.then(|| (unit.clone(), found.clone()))
-            })
-            .collect();
+        let mut keys = BTreeMap::new();
+        let mut passed: BTreeMap<String, Found> = BTreeMap::new();
+        let mut chosen = BTreeMap::new();
+        for (unit, lists) in keyed {
+            let lists_keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
+            if let Choice::Passed(at, key) = shared::choose(&lists_keys, &lookup.found)
+                && let Some(found) = lookup.found.get(&key)
+            {
+                passed.insert(unit.clone(), found.clone());
+                keys.insert(unit.clone(), key);
+                if let Some((_, list)) = lists.into_iter().nth(at) {
+                    chosen.insert(unit, list);
+                }
+            }
+        }
         let audited = units::audited(
             passed.keys().map(|unit| (unit.as_str(), &keys[unit])),
             &started,
@@ -387,18 +403,36 @@ impl Session {
             keys,
             passed,
             reuse,
+            chosen,
+            received,
         });
         Planned::Plan(line)
     }
 
+    /// \[C-38\] What this run asks hints with, when they can change something: `tests` is on,
+    /// here, and the adapter isn't Cargo's, whose keys come from its build. Results that stay on
+    /// this machine have none ([`UnitResults::hints`]), and a system that shares none asks none.
+    fn asker<'s>(
+        &self,
+        store: &'s dyn UnitResults,
+        check_id: Digest,
+        base: &KeyBase,
+    ) -> Option<Asker<'s>> {
+        let systems = shared::systems(base);
+        if matches!(self.adapter, Adapter::Cargo(_)) || systems.is_empty() || !self.tests.is_on() {
+            return None;
+        }
+        Some(Asker {
+            store,
+            check_id,
+            systems,
+            adapter: self.adapter_word().word(),
+        })
+    }
+
     /// The adapter, as the store names it.
     fn adapter_word(&self) -> db::AdapterWord {
-        match self.adapter {
-            Adapter::Pytest => db::AdapterWord::Pytest,
-            Adapter::Cargo(_) => db::AdapterWord::Cargo,
-            Adapter::Go(_) => db::AdapterWord::Go,
-            Adapter::Vitest(_) => db::AdapterWord::Vitest,
-        }
+        adapter_word(&self.adapter)
     }
 
     /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
@@ -414,6 +448,15 @@ impl Session {
         };
         let loaded = db::load(&at.path, &at.check_id);
         let map = loaded.map;
+        let how = match (end.mode, &self.plan) {
+            (Mode::Reuse, Some(plan)) => How::Plan(plan),
+            (Mode::Reuse, None) => How::Quiet,
+            _ => How::Observe,
+        };
+        // \[C-38\] In `observe`, what reuse would have done reads the hints a plan would have.
+        let asker = matches!(how, How::Observe)
+            .then(|| self.asker(end.store, at.check_id, &end.base))
+            .flatten();
         let read = match self.read(
             &files,
             end.root,
@@ -421,15 +464,11 @@ impl Session {
             end.tree,
             end.command_passed,
             &map,
+            asker.as_ref(),
         ) {
             Ok(Some(read)) => read,
             Ok(None) => return None,
             Err(why) => return Observed::unread(&end.base.check, &why),
-        };
-        let how = match (end.mode, &self.plan) {
-            (Mode::Reuse, Some(plan)) => How::Plan(plan),
-            (Mode::Reuse, None) => How::Quiet,
-            _ => How::Observe,
         };
         let mut observed = decide(end, &self.tests, read, &map, at, how);
         // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
@@ -445,8 +484,10 @@ impl Session {
     }
 
     /// What the adapter wrote in `dir`, read: each unit as seen, whether failures are reported by
-    /// unit, the four sets, what a plan would have keyed each unit by, and what the map keeps.
-    /// `Ok(None)` when it wrote nothing; `Err` why it couldn't be read.
+    /// unit, the four sets, the lists a plan would have keyed each unit by, with \[C-38\] the
+    /// hints `asker` fetches, and what the map keeps. `Ok(None)` when it wrote nothing; `Err` why
+    /// it couldn't be read.
+    #[allow(clippy::too_many_arguments)]
     fn read(
         &self,
         files: &[facts::FactsFile],
@@ -455,7 +496,9 @@ impl Session {
         tree: &Tree,
         command_passed: bool,
         map: &store::Map,
+        asker: Option<&Asker<'_>>,
     ) -> Result<Option<Read>, String> {
+        let ignore = &self.tests.ignore;
         match &self.adapter {
             Adapter::Pytest => {
                 let merged = facts::merged(files, "pytest");
@@ -499,9 +542,13 @@ impl Session {
                     Sources::Kinds(pytest::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
+                let shared = fetch(asker, false, &sets, tree, ignore);
                 let planned = seen
                     .keys()
-                    .filter_map(|unit| Some((unit.clone(), mapped_reads(map, unit, tree)?)))
+                    .filter_map(|unit| {
+                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
+                        Some((unit.clone(), lists))
+                    })
                     .collect();
                 Ok(Some(Read {
                     seen,
@@ -509,6 +556,7 @@ impl Session {
                     sets,
                     planned,
                     edges: facts::edges_of(files, "pytest"),
+                    received: shared.received,
                     ..Read::default()
                 }))
             }
@@ -526,7 +574,7 @@ impl Session {
                 let planned = observed
                     .units
                     .iter()
-                    .map(|(unit, seen)| (unit.clone(), seen.reads.clone()))
+                    .map(|(unit, seen)| (unit.clone(), vec![built_list(&seen.reads)]))
                     .collect();
                 Ok(Some(Read {
                     seen: observed.units,
@@ -548,11 +596,15 @@ impl Session {
                     Sources::Named(&observed.named, gotest::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
+                let unit_files = Some(observed.unit_files.clone());
+                let shared = fetch(asker, false, &sets, tree, ignore);
                 let planned = observed
                     .compiled
                     .iter()
                     .filter_map(|(unit, compiled)| {
-                        Some((unit.clone(), go_reads(compiled, map.units.get(unit), tree)?))
+                        let own = map.units.get(unit);
+                        let lists = shared::lists(unit, own, &shared, tree, Some(compiled))?;
+                        Some((unit.clone(), lists))
                     })
                     .collect();
                 Ok(Some(Read {
@@ -563,6 +615,8 @@ impl Session {
                     own: observed.own,
                     dirs: observed.dirs,
                     edges: observed.edges,
+                    unit_files,
+                    received: shared.received,
                     ..Read::default()
                 }))
             }
@@ -576,10 +630,14 @@ impl Session {
                     Sources::Kinds(vitest::SOURCE_KINDS),
                     &self.tests.ignore,
                 );
+                let shared = fetch(asker, true, &sets, tree, ignore);
                 let planned = observed
                     .units
                     .keys()
-                    .filter_map(|unit| Some((unit.clone(), mapped_reads(map, unit, tree)?)))
+                    .filter_map(|unit| {
+                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
+                        Some((unit.clone(), lists))
+                    })
                     .collect();
                 Ok(Some(Read {
                     seen: observed.units,
@@ -590,6 +648,7 @@ impl Session {
                     unit_files: Some(observed.unit_files),
                     refused: observed.refused,
                     edges: observed.edges,
+                    received: shared.received,
                     ..Read::default()
                 }))
             }
@@ -671,6 +730,7 @@ impl Session {
                 tree,
                 passed,
                 &store::Map::default(),
+                None,
             )
             .ok()
             .flatten();
@@ -695,6 +755,16 @@ impl Session {
                 (unit.clone(), state)
             })
             .collect()
+    }
+}
+
+/// An adapter, as the store and a hint name it.
+fn adapter_word(adapter: &Adapter) -> db::AdapterWord {
+    match adapter {
+        Adapter::Pytest => db::AdapterWord::Pytest,
+        Adapter::Cargo(_) => db::AdapterWord::Cargo,
+        Adapter::Go(_) => db::AdapterWord::Go,
+        Adapter::Vitest(_) => db::AdapterWord::Vitest,
     }
 }
 
@@ -728,30 +798,34 @@ struct ObservedPlan {
     known: Known,
     /// pytest's unit rule as hushrun read it.
     python_files: Option<Vec<String>>,
-    /// \[ADR 0071\] Vitest's test files as the map lists them.
+    /// \[ADR 0071\] Vitest's test files as the map, or a hint, lists them.
     listed: Option<Vec<String>>,
+    /// \[C-38\] The hints read.
+    shared: Shared,
 }
 
-/// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the files each would be
-/// keyed by, from the scope's files and the check's map alone: no tool starts. The plan and
-/// `hushrun ready` both read it. `Err` says why nothing can be reused; \[ADR 0074\] `None` that
-/// there is nothing to say: pytest, the adapter of any COMMAND hushrun doesn't recognize, never
-/// reported for this check here ([`speaks_of_test_files`]).
+/// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the lists of files each
+/// might be keyed by, from the scope's files, the check's map and \[C-38\] the hints `asker`
+/// fetches: no tool starts. The plan and `hushrun ready` both read it. `Err` says why nothing can
+/// be reused; \[ADR 0074\] `None` that there is nothing to say: pytest, the adapter of any COMMAND
+/// hushrun doesn't recognize, never reported for this check, here or on a machine whose hint
+/// this one read ([`speaks_of_test_files`]).
 fn observed_plan(
     adapter: &Adapter,
     tree: &Tree,
     root: &Path,
     cwd: &Path,
     map: &store::Map,
+    asker: Option<&Asker<'_>>,
     ignore: &[hushrun_core::glob::Pattern],
 ) -> Result<Option<ObservedPlan>, String> {
-    if !speaks_of_test_files(adapter, map) {
-        return Ok(None);
-    }
     match adapter {
         Adapter::Pytest => {
             let found = pytest::python_files(root, cwd);
             if pytest::is_test_file(&found, "x.py").is_none() {
+                if !speaks_of_test_files(adapter, map, &Shared::default()) {
+                    return Ok(None);
+                }
                 return Err(
                     "pytest's python_files names a directory, which this version doesn't read"
                         .into(),
@@ -763,15 +837,23 @@ fn observed_plan(
                 Sources::Kinds(pytest::SOURCE_KINDS),
                 ignore,
             );
+            let shared = fetch(asker, false, &sets, tree, ignore);
+            if !speaks_of_test_files(adapter, map, &shared) {
+                return Ok(None);
+            }
             let known = sets
                 .files(Set::Units)
-                .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
+                .map(|unit| {
+                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
+                    (unit.to_string(), lists)
+                })
                 .collect();
             Ok(Some(ObservedPlan {
                 sets,
                 known,
                 python_files: Some(found),
                 listed: None,
+                shared,
             }))
         }
         Adapter::Vitest(recognized) => {
@@ -781,12 +863,16 @@ fn observed_plan(
                         .into(),
                 );
             }
-            let listed: BTreeSet<String> = map
+            let shared = fetch(asker, true, &units::Sets::default(), tree, ignore);
+            let mut listed: BTreeSet<String> = map
                 .unit_files
                 .iter()
                 .filter(|f| tree.contains(f))
                 .cloned()
                 .collect();
+            if listed.is_empty() {
+                listed = shared.unit_files();
+            }
             if listed.is_empty() {
                 return Err("no run here has listed Vitest's test files yet".into());
             }
@@ -798,13 +884,17 @@ fn observed_plan(
             );
             let known = sets
                 .files(Set::Units)
-                .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
+                .map(|unit| {
+                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
+                    (unit.to_string(), lists)
+                })
                 .collect();
             Ok(Some(ObservedPlan {
                 sets,
                 known,
                 python_files: None,
                 listed: Some(listed.into_iter().collect()),
+                shared,
             }))
         }
         Adapter::Cargo(_) | Adapter::Go(_) => {
@@ -813,14 +903,29 @@ fn observed_plan(
     }
 }
 
+/// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (for Vitest, every file of
+/// a source kind), read against `tree`; none without one.
+fn fetch(
+    asker: Option<&Asker<'_>>,
+    vitest: bool,
+    sets: &units::Sets,
+    tree: &Tree,
+    ignore: &[hushrun_core::glob::Pattern],
+) -> Shared {
+    asker.map_or_else(Shared::default, |asker| {
+        asker.fetch(&shared::sources(vitest, sets, tree, ignore), tree)
+    })
+}
+
 /// \[ADR 0074\] Whether a plan, and `hushrun ready`, say anything of a check's test files before
 /// it runs: always for an adapter its COMMAND was recognized for, and for pytest, which any other
-/// COMMAND gets, only once pytest reported this check's test files here, as its map says. A check
-/// that runs `npm test` or `make test` never started pytest, and its Python-looking files are no
-/// test files of it. The one rule both read.
-fn speaks_of_test_files(adapter: &Adapter, map: &store::Map) -> bool {
+/// COMMAND gets, only once pytest reported this check's test files here, as its map says, or
+/// \[C-38\] on another machine, as a hint read says. A check that runs `npm test` or `make test`
+/// never started pytest, and its Python-looking files are no test files of it. The one rule both
+/// read.
+fn speaks_of_test_files(adapter: &Adapter, map: &store::Map, shared: &Shared) -> bool {
     match adapter {
-        Adapter::Pytest => map.reported(),
+        Adapter::Pytest => map.reported() || shared.hints.iter().any(|h| !h.units.is_empty()),
         Adapter::Cargo(_) | Adapter::Go(_) | Adapter::Vitest(_) => true,
     }
 }
@@ -861,37 +966,48 @@ pub enum Previewed {
 pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     let adapter = choose(p.command, p.cwd).ok()?;
     let cache = crate::context::cache_dir()?;
-    let loaded = db::load(
-        &db::path(&cache, p.repository),
-        &store::check_id(&p.base, p.repository),
-    );
+    let check_id = store::check_id(&p.base, p.repository);
+    let loaded = db::load(&db::path(&cache, p.repository), &check_id);
     if loaded.unread.is_some() {
         return None;
     }
     let map = loaded.map;
-    let found = observed_plan(&adapter, p.tree, p.root, p.cwd, &map, &p.tests.ignore).ok()??;
+    let systems = shared::systems(&p.base);
+    let asker = (!systems.is_empty()).then(|| Asker {
+        store: p.store,
+        check_id,
+        systems,
+        adapter: adapter_word(&adapter).word(),
+    });
+    let found = observed_plan(
+        &adapter,
+        p.tree,
+        p.root,
+        p.cwd,
+        &map,
+        asker.as_ref(),
+        &p.tests.ignore,
+    )
+    .ok()??;
     let total = found.known.len();
     if total == 0 || total > MOST_UNITS {
         return None;
     }
     let keyer = Keyer::new(p.tree, &found.sets, &p.base);
-    let keys: BTreeMap<String, Digest> = found
-        .known
-        .iter()
-        .filter(|(unit, _)| !p.tests.always_runs(unit))
-        .filter_map(|(unit, reads)| Some((unit.clone(), keyer.key(unit, reads.as_ref()?)?)))
-        .collect();
-    let asked: Vec<Digest> = keys.values().copied().collect();
-    let lookup = p.store.lookup(&asked, p.counts).ok()?;
+    let keyed = keyed(&keyer, &found.known, p.tests);
+    let lookup = shared::lookup(p.store, all_keys(&keyed), p.counts).ok()?;
     if !lookup.reuse.allows_reuse() {
         return Some(Previewed::Suspended(suspended(
             &p.base.check,
             &lookup.reuse,
         )));
     }
-    let passed = keys
+    let passed = keyed
         .values()
-        .filter(|key| lookup.found.get(*key).is_some_and(|f| f.passed))
+        .filter(|lists| {
+            let keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
+            matches!(shared::choose(&keys, &lookup.found), Choice::Passed(..))
+        })
         .count();
     let audited = units::audit_share(passed);
     let reused = passed - audited;
@@ -903,9 +1019,44 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     })
 }
 
-/// The test files a plan knows of, each with the files it would be keyed by, as far as it can
-/// tell: `None` when it can't, and it runs.
-type Known = Vec<(String, Option<BTreeSet<String>>)>;
+/// The test files a plan knows of, each with the lists of files it might be keyed by (C-38), as
+/// far as it can tell: `None` when it can't, and it runs.
+type Known = Vec<(String, Option<Vec<List>>)>;
+
+/// Each test file's lists with the key of each for the files on disk now (C-31): those
+/// `tests.always` names and those no list is known for left out.
+type Keyed = BTreeMap<String, Vec<(Option<Digest>, List)>>;
+
+fn keyed(keyer: &Keyer<'_>, known: &Known, tests: &Tests) -> Keyed {
+    known
+        .iter()
+        .filter(|(unit, _)| !tests.always_runs(unit))
+        .filter_map(|(unit, lists)| {
+            let lists = lists
+                .as_ref()?
+                .iter()
+                .map(|list| (keyer.key(unit, &list.files), list.clone()))
+                .collect();
+            Some((unit.clone(), lists))
+        })
+        .collect()
+}
+
+/// Every key of `keyed`.
+fn all_keys(keyed: &Keyed) -> impl Iterator<Item = Digest> + '_ {
+    keyed.values().flatten().filter_map(|(key, _)| *key)
+}
+
+/// \[ADR 0069\] The one list a Cargo test binary is keyed by: what its dep-info says it is built
+/// from.
+fn built_list(reads: &BTreeSet<String>) -> List {
+    List {
+        files: reads.clone(),
+        reads: reads.clone(),
+        dirs: BTreeSet::new(),
+        from: shared::From::Build,
+    }
+}
 
 /// What an adapter's files came to, before any state is decided.
 #[derive(Debug, Default)]
@@ -916,9 +1067,9 @@ struct Read {
     failures_by_unit: bool,
     /// The four sets (C-30), by the adapter's rule for this run.
     sets: units::Sets,
-    /// For each unit a plan of this run would have keyed, the files it would have keyed it by:
-    /// what `observe` says reuse would have done. A unit not here would have run.
-    planned: BTreeMap<String, BTreeSet<String>>,
+    /// For each unit a plan of this run would have keyed, the lists it would have keyed it by
+    /// (C-38): what `observe` says reuse would have done. A unit not here would have run.
+    planned: BTreeMap<String, Vec<List>>,
     /// \[ADR 0069\] Each test binary's executable, by its unit.
     executables: BTreeMap<String, PathBuf>,
     /// \[ADR 0070\] The files each unit is made of, when they aren't its own path: a Go package's
@@ -926,43 +1077,15 @@ struct Read {
     own: BTreeMap<String, Vec<String>>,
     /// \[ADR 0070\] The directories each unit listed, which the map keeps for the plan.
     dirs: BTreeMap<String, BTreeSet<String>>,
-    /// \[ADR 0071\] The test files the runner listed, which the map keeps as the unit rule.
+    /// \[ADR 0071\] The test files the runner listed, which the map keeps as the unit rule; \[C-38\]
+    /// for Go, `go list`'s, which `hushrun why` reads on a machine whose map lacks a package.
     unit_files: Option<BTreeSet<String>>,
     /// \[ADR 0071\] Why the adapter deselected nothing the plan listed.
     refused: Option<String>,
     /// \[ADR 0072\] The direct edges the adapter saw, for `hushrun why`.
     edges: BTreeSet<db::Edge>,
-}
-
-/// \[C-34\] What the map says `unit` read, for a key: its reads, and every file now below a
-/// directory it listed; `None` when the map doesn't have it, or something of it wasn't followed.
-fn mapped_reads(map: &store::Map, unit: &str, tree: &Tree) -> Option<BTreeSet<String>> {
-    let mapped = map.units.get(unit)?;
-    if !mapped.not_followed.is_empty() {
-        return None;
-    }
-    let mut reads: BTreeSet<String> = mapped.reads.keys().cloned().collect();
-    reads.extend(gotest::under(tree, &mapped.dirs));
-    Some(reads)
-}
-
-/// \[ADR 0070\] What a Go package's tests are keyed by in a plan: what its test binary is built
-/// from now, `go list` says, with what the map says it opened last time it ran (a hint); `None`
-/// when the map says something of it wasn't followed then.
-fn go_reads(
-    compiled: &BTreeSet<String>,
-    mapped: Option<&Mapped>,
-    tree: &Tree,
-) -> Option<BTreeSet<String>> {
-    let mut reads = compiled.clone();
-    if let Some(mapped) = mapped {
-        if !mapped.not_followed.is_empty() {
-            return None;
-        }
-        reads.extend(mapped.reads.keys().cloned());
-        reads.extend(gotest::under(tree, &mapped.dirs));
-    }
-    Some(reads)
+    /// \[C-38\] The hints read for `planned`.
+    received: Vec<db::HintKnown>,
 }
 
 /// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root, what adapters may
@@ -1091,6 +1214,10 @@ pub struct Observed {
     cwd: PathBuf,
     /// \[ADR 0071\] The test files the runner listed, for the map and a second run.
     unit_files: BTreeSet<String>,
+    /// \[C-38\] The hints this run read, which it notes as known.
+    received: Vec<db::HintKnown>,
+    /// \[C-38\] Where this run's hint goes, and its key.
+    share: Option<shared::Place>,
 }
 
 impl Observed {
@@ -1141,11 +1268,110 @@ impl Observed {
             unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
             edges: &self.edges,
             disagreements: &found,
+            hints: &self.received,
             now_ms: now.millis(),
         };
         if let Err(err) = db::write(&at.path, &write) {
             tracing::debug!("what the test files read wasn't kept: {}", err.why());
         }
+    }
+
+    /// \[C-38\] Sends what this machine's store now says this run's test files read, as a hint
+    /// under this machine's system: every test file it executed and fully observed, and every one
+    /// it reused, with the list whose key hit. After [`Observed::keep`], for a run recorded on a
+    /// server that keeps test files' results. One `PUT`, and none when this machine already sent
+    /// or received a hint with its content id for the address and system. A `PUT` that fails
+    /// leaves no note, so the next run of the check sends it again; it is said for debug only, as
+    /// the store's errors are. `Some` line to say once when the hint is too large to send.
+    pub fn share(&self, results: &dyn UnitResults, now: Time) -> Option<String> {
+        let (Some(at), Some(place), Some(os)) =
+            (&self.store, &self.share, hushrun_core::hints::Os::this())
+        else {
+            return None;
+        };
+        let loaded = db::load(&at.path, &at.check_id);
+        if let Some(unread) = loaded.unread {
+            tracing::debug!("no hint sent: {}", unread.why());
+            return None;
+        }
+        let map = loaded.map;
+        let units: BTreeMap<String, hushrun_core::hints::Unit> = self
+            .units
+            .iter()
+            .filter(|(_, (state, _))| state.recorded().is_some() || *state == State::Reused)
+            .filter_map(|(unit, _)| {
+                let mapped = map.units.get(unit)?;
+                mapped.not_followed.is_empty().then(|| {
+                    let unit_seen = hushrun_core::hints::Unit {
+                        reads: mapped.reads.keys().cloned().collect(),
+                        dirs: mapped.dirs.clone(),
+                    };
+                    (unit.clone(), unit_seen)
+                })
+            })
+            .collect();
+        if units.is_empty() {
+            return None;
+        }
+        // \[ADR 0071\] Only Vitest's list of test files is its runner's own.
+        let unit_files = match at.adapter {
+            db::AdapterWord::Vitest => map.unit_files,
+            _ => BTreeSet::new(),
+        };
+        let hint = hushrun_core::hints::Hint {
+            adapter: at.adapter.word().to_string(),
+            units,
+            unit_files,
+        };
+        let written = match hushrun_core::hints::write(&hint, &place.key) {
+            Ok(written) => written,
+            Err(hushrun_core::hints::Unwritable::TooLarge { what, size, most }) => {
+                let what = match what {
+                    "unit files" => "test files listed",
+                    "entries" => "files read",
+                    "paths" => "files",
+                    "bytes of content" | "bytes compressed" => "bytes",
+                    other => other,
+                };
+                return Some(format!(
+                    "{}: what its test files read wasn't shared with other machines: it is too large ({size} {what}, more than {most})",
+                    at.base.check
+                ));
+            }
+            Err(err) => {
+                tracing::debug!("no hint sent: {err}");
+                return None;
+            }
+        };
+        if db::hint_known(
+            &at.path,
+            &at.check_id,
+            &place.address,
+            os,
+            &written.content_id,
+        ) {
+            return None;
+        }
+        let to = store::HintPlace {
+            check_id: at.check_id,
+            address: place.address,
+            os,
+        };
+        match results.put_hint(&to, &written.bytes) {
+            Ok(()) => {
+                let sent = db::HintKnown {
+                    address: place.address,
+                    os,
+                    content_id: written.content_id,
+                    how: db::HintHow::Sent,
+                };
+                if let Err(err) = db::note_hints(&at.path, &at.check_id, &[sent], now.millis()) {
+                    tracing::debug!("the hint sent wasn't noted: {}", err.why());
+                }
+            }
+            Err(why) => tracing::debug!("the hint wasn't sent: {why}"),
+        }
+        None
     }
 }
 
@@ -1247,17 +1473,34 @@ fn decide(
         unit_files,
         refused,
         edges,
+        received,
     } = read;
     let sets = &sets;
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base);
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
+    // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
+    // that shares none.
+    let share = (at.adapter != db::AdapterWord::Cargo && hushrun_core::hints::Os::this().is_some())
+        .then(|| {
+            let vitest = at.adapter == db::AdapterWord::Vitest;
+            shared::Place::new(
+                &at.check_id,
+                &shared::sources(vitest, sets, tree, &tests.ignore),
+            )
+        });
+    let received = match &how {
+        How::Plan(plan) => plan.received.clone(),
+        How::Observe | How::Quiet => received,
+    };
     let mut out = Observed {
         store: Some(at),
         edges,
         cwd: end.cwd.to_path_buf(),
         executables,
         unit_files: unit_files.unwrap_or_default(),
+        received,
+        share,
         ..Observed::default()
     };
     if let (How::Plan(plan), Some(why)) = (&how, &refused)
@@ -1269,19 +1512,22 @@ fn decide(
         ));
     }
     // What the plan would have done, in `observe`: from what was recorded before this run, a unit
-    // the plan would have keyed (from the map, or for a compiler-given adapter this build's list)
-    // whose key has a pass that counts here, unless `tests.always` names it. One batch.
+    // the plan would have keyed (by the lists \[C-38\] gives, or for Cargo this build's) that the
+    // one rule would reuse, unless `tests.always` names it. One batch, in pages.
     let mut would: BTreeMap<String, (Digest, Found)> = BTreeMap::new();
     if matches!(how, How::Observe) {
-        let keyed: BTreeMap<String, Digest> = planned
+        let known: Known = planned
             .iter()
-            .filter(|(unit, _)| seen.contains_key(*unit) && !tests.always_runs(unit))
-            .filter_map(|(unit, reads)| Some((unit.clone(), keyer.key(unit, reads)?)))
+            .filter(|(unit, _)| seen.contains_key(*unit))
+            .map(|(unit, lists)| (unit.clone(), Some(lists.clone())))
             .collect();
-        let keys: Vec<Digest> = keyed.values().copied().collect();
-        if let Ok(lookup) = end.store.lookup(&keys, end.counts) {
-            for (unit, key) in keyed {
-                if let Some(found) = lookup.found.get(&key).filter(|f| f.passed) {
+        let keyed = keyed(&keyer, &known, tests);
+        if let Ok(lookup) = shared::lookup(end.store, all_keys(&keyed), end.counts) {
+            for (unit, lists) in keyed {
+                let keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
+                if let Choice::Passed(_, key) = shared::choose(&keys, &lookup.found)
+                    && let Some(found) = lookup.found.get(&key)
+                {
                     would.insert(unit, (key, found.clone()));
                 }
             }
@@ -1339,6 +1585,14 @@ fn decide(
                     if let Some(found) = plan.passed.get(unit) {
                         saved_ms = saved_ms.saturating_add(found.duration_ms);
                     }
+                    // \[C-38\] Reused on a list another machine saw: this machine keeps it, as
+                    // `shared`, until it runs here.
+                    if let Some(list) = plan.chosen.get(unit)
+                        && list.from == shared::From::Hint
+                    {
+                        out.mapped
+                            .insert(unit.clone(), shared_row(list, sets, tree));
+                    }
                 }
                 // \[C-34\] Audited, or listed and run all the same: it had a pass that counted on
                 // what the map said it read, and failed. A second run tells a flaky test file from
@@ -1374,6 +1628,7 @@ fn decide(
                         .collect(),
                     not_followed: facts.not_followed.clone(),
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
+                    origin: Origin::SeenHere,
                 },
             );
         }
@@ -1446,6 +1701,24 @@ fn decide(
     }
     out.counts = Some(counts);
     out
+}
+
+/// \[C-38\] The row a test file reused on another machine's list gets in this machine's store: the
+/// files of the list its key holds, as they are now, which are as they were when it passed.
+fn shared_row(list: &List, sets: &units::Sets, tree: &Tree) -> Mapped {
+    Mapped {
+        reads: sets
+            .keyed(list.reads.iter().map(String::as_str))
+            .into_iter()
+            .filter_map(|path| {
+                let (kind, hash) = tree.entry(path)?;
+                Some((path.to_string(), format!("{kind} {hash}")))
+            })
+            .collect(),
+        not_followed: BTreeSet::new(),
+        dirs: list.dirs.clone(),
+        origin: Origin::Shared,
+    }
 }
 
 /// A word an adapter wrote for what it couldn't follow, for people.
@@ -1523,3 +1796,6 @@ pub fn local_store(repository: Option<&str>, check: &str) -> Option<store::Local
         store::reuse_file(&cache, repository, check),
     ))
 }
+
+#[cfg(test)]
+mod tests;

@@ -330,6 +330,57 @@ impl HttpLedger {
         self.json_call_sized(method, path, None, body, header, MAX_PAGE_BYTES)
     }
 
+    /// [`HttpLedger::json_request`] for an answer of up to `max` bytes, past which it is cut off:
+    /// a lookup of hints, which holds their bytes (results-v0, Hints).
+    pub fn json_request_sized(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        max: usize,
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        let method = Method::from_bytes(method.as_bytes())
+            .map_err(|_| LedgerError::Invalid(format!("{method} isn't an HTTP method")))?;
+        self.json_call_sized(method, path, None, body, None, max)
+    }
+
+    /// `PUT` of `bytes` as `application/octet-stream` at `path` with `query`, already encoded,
+    /// as [`HttpLedger::json_request`] sends a request: a hint (results-v0, Hints). The status
+    /// and the JSON answer are the caller's to read.
+    pub fn put_bytes(
+        &self,
+        path: &str,
+        query: &str,
+        bytes: &[u8],
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        self.check_path(path)?;
+        self.io.run(async {
+            let mut call = Call::new(Method::PUT, path, path, MAX_SMALL_BYTES);
+            call.body = Some((bytes, OCTET_STREAM));
+            call.query = Some(query.to_string());
+            let answer = self.call(&call).await?;
+            if answer.status.is_redirection() {
+                return Err(self.failure(&answer, path));
+            }
+            Ok((answer.status.as_u16(), answer.body))
+        })
+    }
+
+    /// Whether `path` is a path under the base, which a request to another endpoint may name.
+    fn check_path(&self, path: &str) -> Result<(), LedgerError> {
+        if path.contains(['?', '#', '\\'])
+            || path
+                .split('/')
+                .any(|s| s.is_empty() || s == "." || s == "..")
+        {
+            return Err(LedgerError::Invalid(format!(
+                "{path:?} isn't a path under {}",
+                self.base
+            )));
+        }
+        Ok(())
+    }
+
     fn json_call(
         &self,
         method: Method,
@@ -350,16 +401,7 @@ impl HttpLedger {
         header: Option<(&'static str, String)>,
         max: usize,
     ) -> Result<(u16, Vec<u8>), LedgerError> {
-        if path.contains(['?', '#', '\\'])
-            || path
-                .split('/')
-                .any(|s| s.is_empty() || s == "." || s == "..")
-        {
-            return Err(LedgerError::Invalid(format!(
-                "{path:?} isn't a path under {}",
-                self.base
-            )));
-        }
+        self.check_path(path)?;
         self.io.run(async {
             let mut call = Call::new(method, path, path, max);
             if let Some(body) = body {
