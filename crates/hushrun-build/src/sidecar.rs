@@ -27,7 +27,7 @@
 //! treated as absent, never as an error.
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -322,7 +322,7 @@ fn write(file: &Path, record: &Record) -> io::Result<()> {
 /// The SHA-256 of `file` and its stat when it was opened. An error when the file changed while
 /// it was read.
 fn hash(file: &Path) -> io::Result<(Digest, Stat)> {
-    let mut input = File::open(file)?;
+    let mut input = crate::regular::open(file)?;
     let before = Stat::of(&input.metadata()?);
     let mut hasher = Hasher::new();
     let mut buf = vec![
@@ -359,7 +359,7 @@ mod tests {
     }
 
     fn set_mtime(path: &Path, time: SystemTime) {
-        File::options()
+        fs::File::options()
             .write(true)
             .open(path)
             .unwrap()

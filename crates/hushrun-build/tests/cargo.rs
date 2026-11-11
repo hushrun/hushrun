@@ -564,3 +564,126 @@ fn check_after_build_and_build_after_check_both_work() {
             .any(|e| e.crate_name == "a" && e.class == Some(Class::Library) && reused(e))
     );
 }
+
+/// Makes a named pipe at `path`: opening it for reading blocks until a writer comes.
+#[cfg(unix)]
+fn fifo(path: &Path) {
+    let _ = fs::remove_file(path);
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+/// How a cargo run that may hang ended: its status and stderr, and whether a reader had to be
+/// let go from one of `pipes` after `secs` (then cargo is killed by its PID).
+#[cfg(unix)]
+struct Bounded {
+    status: Option<std::process::ExitStatus>,
+    stderr: String,
+    hung: bool,
+}
+
+#[cfg(unix)]
+fn cargo_within(
+    ws: &Path,
+    args: &[&str],
+    env: &[(OsString, OsString)],
+    pipes: &[PathBuf],
+    secs: u64,
+) -> Bounded {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::Stdio;
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command.args(args).arg("--offline").current_dir(ws);
+    for (name, _) in std::env::vars_os() {
+        let Some(name) = name.to_str() else { continue };
+        if (name.starts_with("CARGO_") && name != "CARGO_HOME")
+            || name.starts_with("RUSTC")
+            || name.starts_with("HUSHRUN_BUILD")
+            || name.starts_with("DYLD_")
+            || matches!(name, "RUSTFLAGS" | "OUT_DIR")
+        {
+            command.env_remove(name);
+        }
+    }
+    command.env("A_VAR", "set one");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = err.read_to_string(&mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let mut hung = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if started.elapsed() > std::time::Duration::from_secs(secs) {
+            hung = true;
+            // Let every blocked reader go, then stop cargo by its own PID.
+            for pipe in pipes {
+                let flags = rustix::fs::OFlags::NONBLOCK.bits();
+                let _ = fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(i32::try_from(flags).unwrap())
+                    .open(pipe);
+            }
+            if started.elapsed() > std::time::Duration::from_secs(secs + 30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    Bounded {
+        status,
+        stderr: reader.join().unwrap_or_default(),
+        hung,
+    }
+}
+
+// covers: B-19
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_in_a_package_and_in_out_dir_never_hangs_the_build() {
+    let w = World::new();
+    let ws = w.checkout("one");
+    // d's build script declares nothing: the whole package is its input. b's build script
+    // leaves a pipe in its output folder.
+    fs::write(ws.join("d/build.rs"), "fn main() {}\n").unwrap();
+    fifo(&ws.join("d/pipe"));
+    let b_script = fs::read_to_string(ws.join("b/build.rs")).unwrap().replace(
+        "    let out = std::env::var(\"OUT_DIR\").unwrap();\n",
+        "    let out = std::env::var(\"OUT_DIR\").unwrap();\n    let _ = std::process::Command::new(\"mkfifo\").arg(format!(\"{out}/pipe\")).status();\n",
+    );
+    fs::write(ws.join("b/build.rs"), b_script).unwrap();
+    let session = w.begin(Mode::On).unwrap();
+    let mut pipes = vec![ws.join("d/pipe")];
+    for entry in fs::read_dir(ws.join("target/debug/build"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        pipes.push(entry.path().join("out/pipe"));
+    }
+    let run = cargo_within(&ws, &["build"], &session.env(), &pipes, 60);
+    // The pipe under b's output folder is only known once its script ran.
+    assert!(!run.hung, "the build hung:\n{}", run.stderr);
+    assert!(run.status.is_some_and(|s| s.success()), "{}", run.stderr);
+    assert!(run_c(&ws).starts_with("first text|set one|2|7|generated one|"));
+    let all = entries(&session);
+    assert_eq!(
+        last(&all, "d", Class::Library).outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::NotAFile)
+    );
+    assert_eq!(
+        last(&all, "b", Class::Library).outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::NotAFile)
+    );
+}

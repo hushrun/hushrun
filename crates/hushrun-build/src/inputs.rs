@@ -24,7 +24,7 @@ use crate::known::{self, Where};
 use crate::model::{Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
-use crate::{link, shape, sidecar};
+use crate::{link, regular, shape, sidecar};
 
 /// What every gathering needs: the call, its roots and variables, and the build script's
 /// saved output when it has one.
@@ -101,28 +101,16 @@ pub fn dated_after(stat: &Stat, start: SystemTime) -> bool {
     stat.mtime_ns >= floor || stat.ctime_ns >= floor
 }
 
-/// Whether two stats are the same file, unchanged: size, both dates, inode and device (B-11).
-pub fn same(a: &Stat, b: &Stat) -> bool {
-    a.size == b.size
-        && a.mtime_ns == b.mtime_ns
-        && a.ctime_ns == b.ctime_ns
-        && a.inode == b.inode
-        && a.device == b.device
-}
+pub use crate::regular::{hash_steady, same};
 
-/// The SHA-256 of a file, stat'ed before and after: an error when it changed while it was read,
-/// so the hash describes one version of it.
-pub fn hash_steady(path: &Path) -> io::Result<(Digest, Stat)> {
-    let before = Stat::of(&fs::metadata(path)?);
-    let (sha, _) = hushrun_digest::hash::hash_file(path)?;
-    let after = Stat::of(&fs::metadata(path)?);
-    if !same(&before, &after) {
-        return Err(io::Error::other(format!(
-            "{} changed while it was hashed",
-            path.display()
-        )));
+/// Why hashing an input failed, as the outcome says it: a path that is not a regular file is
+/// never opened (B-19), anything else is a failed hash.
+fn hash_error(err: &io::Error) -> NotStored {
+    if regular::is_not_regular(err) {
+        NotStored::NotAFile
+    } else {
+        NotStored::Hash
     }
-    Ok((Digest::from_bytes(sha), after))
 }
 
 impl Context<'_> {
@@ -235,7 +223,10 @@ impl Context<'_> {
         out_dir: &Path,
         watched: &mut Vec<Watched>,
     ) -> Result<Vec<Generated>, NotStored> {
-        let files = script::tree(out_dir).map_err(|_| NotStored::Hash)?;
+        let files = script::tree(out_dir).map_err(|err| match err {
+            script::Error::Special { .. } => NotStored::NotAFile,
+            _ => NotStored::Hash,
+        })?;
         let mut out = Vec::with_capacity(files.len());
         for file in files {
             let path = out_dir.join(&file.rest);
@@ -333,7 +324,7 @@ impl Context<'_> {
                 Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
                 Err(_) => return Err(NotStored::Hash),
                 Ok(_) => {
-                    let (sha, stat) = hash_steady(&path).map_err(|_| NotStored::Hash)?;
+                    let (sha, stat) = hash_steady(&path).map_err(|err| hash_error(&err))?;
                     (ReadState::Present(sha), Some(stat))
                 }
             };
@@ -408,7 +399,7 @@ impl Context<'_> {
             Err(err) if err.kind() == io::ErrorKind::NotFound => (ReadState::Absent, None),
             Err(_) => return Err(NotStored::Hash),
             Ok(meta) => {
-                let sha = library_digest(path).map_err(|_| NotStored::Hash)?;
+                let sha = library_digest(path).map_err(|err| hash_error(&err))?;
                 (ReadState::Present(sha), Some(Stat::of(&meta)))
             }
         };
@@ -541,6 +532,7 @@ impl Context<'_> {
                         state: ReadState::Present(sha),
                     });
                 }
+                Err(err) if regular::is_not_regular(&err) => return Err(NotStored::NotAFile),
                 Err(_) => {
                     // Gone or changing since rustc read it: what it read can't be recorded.
                     changed = true;
@@ -566,7 +558,7 @@ impl Context<'_> {
                 Err(err) if err.kind() == io::ErrorKind::NotFound => ReadState::Absent,
                 Err(_) => return Err(NotStored::Hash),
                 Ok(_) => {
-                    let (sha, stat) = hash_steady(&path).map_err(|_| NotStored::Hash)?;
+                    let (sha, stat) = hash_steady(&path).map_err(|err| hash_error(&err))?;
                     changed |= dated_after(&stat, start);
                     ReadState::Present(sha)
                 }

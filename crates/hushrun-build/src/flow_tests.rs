@@ -112,7 +112,7 @@ impl Fake {
             match arg {
                 "--crate-name" => crate_name = value(),
                 "--out-dir" => out_dir = value(),
-                "--crate-type" | "-L" | "--json" | "--color" | "--target" => {
+                "--crate-type" | "-L" | "-l" | "--json" | "--color" | "--target" => {
                     value();
                 }
                 "-C" => {
@@ -1489,4 +1489,146 @@ fn each_entry_names_its_package() {
         fake.vars.remove("CARGO_PKG_VERSION");
     });
     assert_eq!(r.entry.unwrap().package, "a");
+}
+
+/// Makes a named pipe at `path`: opening it for reading blocks until a writer comes.
+#[cfg(unix)]
+fn fifo(path: &Path) {
+    let _ = fs::remove_file(path);
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(made.success());
+}
+
+/// Opens each pipe for writing once `secs` have passed without [`Watchdog::finish`]: a reader
+/// blocked on one goes on, and the test says it hung instead of hanging.
+#[cfg(unix)]
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hung: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl Watchdog {
+    fn new(pipes: Vec<PathBuf>, secs: u64) -> Watchdog {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::Ordering;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hung = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (d, h) = (done.clone(), hung.clone());
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !d.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+                if start.elapsed() < Duration::from_secs(secs) {
+                    continue;
+                }
+                h.store(true, Ordering::SeqCst);
+                // Non-blocking: succeeds only while a reader waits on the pipe.
+                for pipe in &pipes {
+                    let flags = rustix::fs::OFlags::NONBLOCK.bits();
+                    let _ = fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(i32::try_from(flags).unwrap())
+                        .open(pipe);
+                }
+            }
+        });
+        Watchdog { done, hung }
+    }
+
+    /// Stops watching; whether a reader had to be let go.
+    fn finish(self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.done.store(true, Ordering::SeqCst);
+        self.hung.load(Ordering::SeqCst)
+    }
+}
+
+// covers: B-19
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_in_a_package_whose_script_declares_nothing_is_never_opened() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let run = ws.join("target/debug/build/a-1");
+    fs::create_dir_all(run.join("out")).unwrap();
+    // The build script declared nothing: the whole package is its input (cargo's rule).
+    fs::write(run.join("output"), "").unwrap();
+    let pipe = ws.join("a/pipe");
+    fifo(&pipe);
+    settle();
+    let out = run.join("out");
+    let dog = Watchdog::new(vec![pipe], 5);
+    let r = w.call_with(&ws, "a", &[], |f| {
+        f.vars
+            .insert("OUT_DIR".into(), out.to_str().unwrap().into());
+    });
+    assert!(!dog.finish(), "the wrapper opened a named pipe");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.outcome(), not_stored(NotStored::NotAFile));
+    assert_eq!(w.blocks(), 0);
+}
+
+// covers: B-19
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_under_out_dir_or_where_a_native_library_may_be_is_never_opened() {
+    // In the build script's output.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let out = with_script(&ws).1;
+    fifo(&Path::new(&out).join("pipe"));
+    settle();
+    let dog = Watchdog::new(vec![Path::new(&out).join("pipe")], 5);
+    let r = w.call_with(&ws, "a", &[], |f| {
+        f.vars.insert("OUT_DIR".into(), out.clone());
+    });
+    assert!(!dog.finish(), "the wrapper opened a named pipe");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.outcome(), not_stored(NotStored::NotAFile));
+
+    // Where `-l static=foo` may be found.
+    let ws = w.checkout("ws2");
+    fs::create_dir_all(ws.join("vendor")).unwrap();
+    let pipe = ws.join("vendor/libfoo.a");
+    fifo(&pipe);
+    settle();
+    let native = format!("native={}", ws.join("vendor").display());
+    let dog = Watchdog::new(vec![pipe], 5);
+    let r = w.call(&ws, "a", &["-L", &native, "-l", "static=foo"]);
+    assert!(!dog.finish(), "the wrapper opened a named pipe");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.outcome(), not_stored(NotStored::NotAFile));
+    assert_eq!(w.blocks(), 0);
+}
+
+// covers: B-7, B-19
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_at_a_hinted_place_is_never_opened() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/src/foo.rs".into()],
+            ..Plan::default()
+        },
+    );
+    let one = w.checkout("one");
+    let two = w.checkout("two");
+    settle();
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    // The hint names `a/src/foo/mod.rs` as absent; in two it is a named pipe.
+    fs::create_dir_all(two.join("a/src/foo")).unwrap();
+    let pipe = two.join("a/src/foo/mod.rs");
+    fifo(&pipe);
+    settle();
+    let dog = Watchdog::new(vec![pipe], 5);
+    let r = w.call(&two, "a", &[]);
+    assert!(!dog.finish(), "the wrapper opened a named pipe");
+    assert_eq!(r.code, 0);
+    assert_eq!(r.outcome(), not_stored(NotStored::NotAFile));
 }

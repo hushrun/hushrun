@@ -4,7 +4,6 @@
 //! A cold build writes a few gigabytes of libraries, so a file is read in chunks, never whole,
 //! and the same pass can give its SHA-256 and size for the store.
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -111,7 +110,7 @@ impl Needles {
         path: &Path,
         mut hasher: Option<&mut Hasher>,
     ) -> io::Result<(Option<Found>, u64)> {
-        let mut file = File::open(path)?;
+        let mut file = crate::regular::open(path)?;
         let keep = self.longest.saturating_sub(1);
         let chunk = self.chunk.max(1);
         let mut buf = vec![0u8; keep + chunk];

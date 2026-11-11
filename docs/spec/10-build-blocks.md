@@ -182,7 +182,9 @@ with the debug objects it names.
 **B-19 Every failure runs rustc.** An error computing a key, reading the store, or putting files
 in place MUST end in rustc running as asked with nothing stored. A settings file that can't be
 read, a store that can't be written, CI and Windows are `passed through`. A kill at any point
-leaves nothing that a later build takes for a block.
+leaves nothing that a later build takes for a block. Where a file is expected, the wrapper opens
+only a regular file: a named pipe, a socket or a device is never opened, the compile that reads
+one is `built, not stored`, and a hint that names one is skipped.
 
 **B-20 What a run says.** Each compile appends one line to the run's log with its outcome, its
 crate and its package. After COMMAND exits, `hushrun run` writes one line: how many crates were

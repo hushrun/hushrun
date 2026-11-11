@@ -54,6 +54,7 @@ pub mod known;
 pub mod link;
 pub mod messages;
 pub mod model;
+pub mod regular;
 pub mod restore;
 pub mod roots;
 pub mod scan;

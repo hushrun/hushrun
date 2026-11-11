@@ -225,10 +225,15 @@ fn walk(dir: &Path, prefix: &str, files: &mut Vec<TreeFile>) -> Result<(), Error
         } else if kind.is_dir() {
             walk(&path, &rest, files)?;
         } else if kind.is_file() {
-            let (sha, size) = hushrun_digest::hash::hash_file(&path).map_err(io_at(&path))?;
+            let (sha256, size) = match crate::regular::hash_file(&path) {
+                Err(err) if crate::regular::is_not_regular(&err) => {
+                    return Err(Error::Special { path });
+                }
+                other => other.map_err(io_at(&path))?,
+            };
             files.push(TreeFile {
                 rest,
-                sha256: Digest::from_bytes(sha),
+                sha256,
                 size,
                 symlink: false,
             });

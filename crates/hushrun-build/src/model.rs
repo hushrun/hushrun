@@ -265,11 +265,14 @@ pub enum NotStored {
     /// A read lies at a path that can't be keyed: not UTF-8, or not under the working
     /// directory's forms.
     Unkeyable,
+    /// An input is not a regular file (a named pipe, a socket, a device): it is never opened,
+    /// since opening one may block for ever (B-19).
+    NotAFile,
 }
 
 impl NotStored {
     /// Every reason, for tests and tables.
-    pub const ALL: [NotStored; 22] = [
+    pub const ALL: [NotStored; 23] = [
         NotStored::RustcFailed,
         NotStored::Changed,
         NotStored::LowSpace,
@@ -292,6 +295,7 @@ impl NotStored {
         NotStored::Outputs,
         NotStored::DebugFiles,
         NotStored::Unkeyable,
+        NotStored::NotAFile,
     ];
 
     /// The reason as the run's log writes it. Stable: change it only with the log's readers.
@@ -319,6 +323,7 @@ impl NotStored {
             NotStored::Outputs => "outputs",
             NotStored::DebugFiles => "debug-files",
             NotStored::Unkeyable => "unkeyable",
+            NotStored::NotAFile => "not-a-file",
         }
     }
 }

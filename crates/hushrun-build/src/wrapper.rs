@@ -301,7 +301,7 @@ impl Call<'_> {
         let script: Option<Script> = inv.package().out_dir.as_ref().and_then(|out| {
             let out = Path::new(inv.cwd()).join(out);
             let saved = script::saved_output(&out)?;
-            Some(script::parse_bytes(&std::fs::read(saved).ok()?))
+            Some(script::parse_bytes(&crate::regular::read(&saved).ok()?))
         });
         let mut unstorable = (inv.package().out_dir.is_some() && script.is_none())
             .then_some(NotStored::ScriptOutputMissing);
@@ -889,7 +889,8 @@ impl Call<'_> {
                 if read.state != crate::key::ReadState::Absent {
                     found = true;
                     if script {
-                        let text = std::fs::read(place).map_err(|_| NotStored::LinkInputs)?;
+                        let text =
+                            crate::regular::read(place).map_err(|_| NotStored::LinkInputs)?;
                         if link::script_names_files(&text) {
                             return Err(NotStored::LinkInputs);
                         }
