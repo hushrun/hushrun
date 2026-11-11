@@ -31,8 +31,12 @@ facts: `reused`, `built and stored`, `built, not stored` (with the reason) or `p
 
 **B-4 Passed through.** The wrapper MUST run rustc exactly as asked, storing nothing, when any of
 these holds: the first argument is not rustc (clippy's driver); no `--crate-name`; `--print`,
-`-vV` or a source of `-`; an `@file` argument; a `--target` that names a file; a
-`--remap-path-prefix` of the caller's; `-C instrument-coverage` or `-C profile-generate|use`;
+`-vV` or a source of `-`; an `@file` argument; a `--target` that names a file or is not one of
+the compiler's built-in targets (B-17); a `--sysroot`; a `-Z` flag other than
+`unstable-options`, `threads`, `share-generics`, `macro-backtrace` and `debuginfo-compression`;
+an `--extern` with no path, other than `proc_macro`; a `--remap-path-prefix`,
+`-Z remap-cwd-prefix` or `-Z remap-path-scope` of the caller's; `-C instrument-coverage` or
+`-C profile-generate|use`;
 an `--emit` kind other than `dep-info`, `metadata` and `link`; more than one `--crate-type`; a
 crate type of `cdylib`, `dylib` or `staticlib`; no `--out-dir` or no `-C extra-filename`; no
 `--json` with `artifacts`; the package is on the person's never-store list; the compiler's
@@ -41,11 +45,20 @@ identity can't be established (B-17).
 **B-5 What was asked.** The first key is the SHA-256 of the JCS form of: a schema name; the
 compiler's identity (B-17); the arguments in order, with roots replaced by placeholders (B-8) and
 without `--out-dir`, `-L dependency=`, `-C incremental=`, `--error-format`, `--json`, `--color`,
-`--diagnostic-width`, and with each `--extern` reduced to its name and options; every variable
-whose name starts with `CARGO_` except `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`,
-`CARGO_SBOM_PATH` and `CARGO_RUSTC_CURRENT_DIR`, with roots replaced; the variables the build
-script set with `cargo:rustc-env`; `RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TARGET`, `SDKROOT` and
-the person's extra variables. It holds no machine, user, branch, commit or time.
+`--diagnostic-width`, and with each `--extern` reduced to its name and options; the variables
+cargo sets for a crate's compile, with roots replaced: those whose name starts with
+`CARGO_PKG_`, `CARGO_MANIFEST_` or `CARGO_BIN_EXE_`, and `CARGO_CRATE_NAME`, `CARGO_BIN_NAME` and
+`CARGO_TARGET_TMPDIR`; the variables the build script set with `cargo:rustc-env`; the variables
+rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TARGET`,
+`IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
+`XROS_DEPLOYMENT_TARGET`, `SDKROOT`, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
+`RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
+`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); and the person's extra variables. No other
+`CARGO_` variable is keyed: cargo's own configuration (`CARGO_TARGET_DIR`, `CARGO_HOME`,
+`CARGO_TERM_*`, `CARGO_PROFILE_*`, tokens) reaches rustc only through arguments already keyed,
+and outputs are searched for the target folder `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR`
+names (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CARGO_SBOM_PATH` and
+`CARGO_RUSTC_CURRENT_DIR` are not keyed. It holds no machine, user, branch, commit or time.
 
 **B-6 What was read.** The second key is the SHA-256 of the JCS form of the first key and:
 
@@ -54,21 +67,30 @@ the person's extra variables. It holds no machine, user, branch, commit or time.
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
 - `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro is named by
   the key of the block that produced it, without its place;
+- `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
+  `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
+  `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A
+  file under `OUT_DIR` is in `generated` already. A name found in none of them is a system
+  library, covered by the SDK and the linker. A `-l` whose file can't be found with certainty
+  (`+verbatim`, a rename or `:file`, a kind this crate doesn't know) is `built, not stored`;
 - `shape`: the names of the entries of every folder that directly holds a read file;
 - `generated`: every file under `OUT_DIR`, by path and SHA-256;
 - `declared`: for a package that is not from a registry or a git source, what its build script
   declared with `rerun-if-changed` (folders in full) and `rerun-if-env-changed`; and the inputs of
   the macros known to read files the compiler doesn't list;
-- `link`: for a program, every library the linker was handed, by SHA-256, the linker and the SDK
-  (B-18);
+- `link`: for a linked output, every library the linker was handed, by SHA-256; every place the
+  linker may take a library named with `-l` from in its `-L` and `-F` folders, and every file an
+  option names for it (a linker script, a symbol list), by SHA-256 or as absent; the linker and
+  the SDK (B-18);
 - `place`: `anywhere`, or the roots themselves (B-10).
 
 **B-7 Hints.** To compute the second key before compiling, the wrapper needs the list of what to
 hash. It comes from the lists earlier compiles of the same first key recorded. A list is a hint
 and MUST NOT be trusted: the wrapper hashes the files as they are now, and a block exists under a
-key only because a compile read exactly those bytes. A list that names a file that is gone is
-skipped. The result of a compile is always recorded under the key computed from what that compile
-read, never from a hint.
+key only because a compile read exactly those bytes. A file the list names that is gone is
+hashed as absent, so the key differs and the compile runs. A list that names a root this call
+doesn't have is skipped. The result of a compile is always recorded under the key computed from
+what that compile read, never from a hint.
 
 **B-8 Roots.** A path that lies under a root, in the root's given form or its resolved form, is
 recorded as the root's name and the rest, and looked up under the current root. A path recorded
@@ -140,22 +162,34 @@ proc macros are not compared.
 
 **B-17 The compiler.** The compiler's identity is: the path given, resolved; its size and
 modification time; `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; under rustup, the size and modification
-time of the toolchain's own `rustc` and of its `librustc_driver`; and the output of `rustc -vV`.
-A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
+time of the toolchain's own `rustc` and of its `librustc_driver`; the output of `rustc -vV`; and
+the standard library: the names, sizes and modification times of the files in
+`<sysroot>/lib/rustlib/<triple>/lib/` for the host and for the call's `--target`. The compiler's
+built-in targets are the output of `rustc --print target-list`. `-vV`, the target list and the
+standard library's listing are kept per compiler and target, and computed again when a standard
+library folder changes. A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
-reports with `--print=link-args`, the linker's path, size and modification time, and the SDK.
-Where that list can't be read, the outcome is `built, not stored`. A program is stored with the
-debug objects it names.
+reports with `--print=link-args`; the libraries named with `-l` and the files options name, as
+B-6's `link` says; the linker's path, size and modification time, and the same for the linker
+`-fuse-ld` names (found as `ld.<name>` or `<name>` in the `-B` folders, then on `PATH`); and the
+SDK. Where that list can't be read, where a file it names is gone or can't be found, or where a
+linker script names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`, `STARTUP`), the
+outcome is `built, not stored`. Files in rustc's own temporary folder are not inputs. What rustc
+prints on stdout goes on to the wrapper's stdout, but the linker command. A program is stored
+with the debug objects it names.
 
 **B-19 Every failure runs rustc.** An error computing a key, reading the store, or putting files
 in place MUST end in rustc running as asked with nothing stored. A settings file that can't be
 read, a store that can't be written, CI and Windows are `passed through`. A kill at any point
 leaves nothing that a later build takes for a block.
 
-**B-20 What a run says.** Each compile appends one line to the run's log with its outcome. After
-COMMAND exits, `hushrun run` writes one line: how many crates were reused and built, and the time
-reuse saved; in `observe`, how many would have been reused and how many differed.
+**B-20 What a run says.** Each compile appends one line to the run's log with its outcome, its
+crate and its package. After COMMAND exits, `hushrun run` writes one line: how many crates were
+reused and built, and the time reuse saved; in `observe`, how many would have been reused and
+how many differed. A call passed through for no `--crate-name`, a probe, no `-C extra-filename`,
+no `--out-dir`, an `-o` or no `--json` with `artifacts` is not one of the build's crates and
+counts nowhere: those are cargo's probes and the ones a build script runs.
 
 **B-21 Settings.** One file per user, `build.json` beside the credentials, written whole under a
 lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable names) and
