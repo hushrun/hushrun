@@ -1,15 +1,15 @@
 ---
 name: hushrun
-description: Use before every git push in a repository that uses hushrun, when hushrun's pre-push hook refuses a push, when a line starts with "hushrun:", and when asked to set hushrun up. hushrun skips CI checks that this exact code already passed, so running them here first means CI doesn't run them again.
+description: Use before every git push in a repository that uses hushrun, when hushrun's pre-push hook refuses a push, when a line starts with "hushrun:", and when asked to set hushrun up. hushrun skips a check that this exact code already passed, here and, once the repository shares its results, in CI, so running checks here first means CI doesn't run them again.
 compatibility: hushrun 0.11.0 or newer for `hushrun guide`; everything else here works with any hushrun.
 metadata:
-  hushrun-skill: "1"
+  hushrun-skill: "2"
 ---
 
 # hushrun
 
-hushrun remembers which checks passed on which files. A pass here skips the same check in CI, on
-any branch or commit with the same files.
+hushrun remembers which checks passed on which files. A pass here skips the same check here, on
+any branch or commit with the same files, and in CI too once the repository shares its results.
 
 This skill holds what every hushrun does the same way. **Run `hushrun guide` once per session.**
 It prints the rest for the hushrun installed here, such as what each of its lines means, and says
@@ -22,14 +22,14 @@ In these commands, `hushrun` is `npx hushrun` where hushrun is a dev dependency 
 ## Is hushrun here?
 
 A repository uses hushrun when its `package.json` has scripts that start with `hushrun run`, or a
-`"hushrun"` key that names a backend; in another language, when it has a `hushrun.yaml` that
-names a `backend`.
+`"hushrun"` key that names a backend; in another language, when it has a `hushrun.yaml`, or its
+CI's files run checks as `hushrun run …`.
 
 ## Before you push
 
 1. Commit your work.
-2. Run `hushrun ready`. It lists what CI would still run on this exact code, and the commands that
-   run it here, each in full, with the directory it runs in.
+2. Run `hushrun ready`. It lists the checks this exact code hasn't passed yet, which CI would
+   still run, and the commands that run them here, each in full, with the directory each runs in.
 3. Run those commands as printed, each on its own, so that each is the check CI looks for. If a
    check fails, fix the code, not the check.
 4. Run `hushrun ready` again until it says the code is ready, then push.
@@ -37,6 +37,14 @@ names a `backend`.
 `hushrun ready --format json` gives the same answer as data: `next` holds the commands to run, and
 exit code 10 means they are still to run. A check in state `ci` is one nothing here changes: CI or
 another machine runs it, and `why` says what it needs.
+
+## Where results stay on this machine
+
+Results are shared only where hushrun has a backend and a sign-in or a token for it. Anywhere else
+they stay on this machine: a check that passed here skips here, and CI runs every check.
+`hushrun ready` says when that is so. The steps above are the same. Sharing is the person's to
+decide: tell them what `hushrun ready` said, and don't sign in or run `hushrun init` for it unless
+they ask.
 
 ## When a push is refused
 
@@ -61,14 +69,15 @@ is the repository's, the binary is theirs, and an update changes the tool you ar
 ## Reporting back
 
 Say which checks hushrun skipped because this code passed them before, which `hushrun ready` left
-to CI (`ci`), and anything hushrun said is out of date.
+to CI (`ci`), whether it said results stay on this machine, and anything hushrun said is out of
+date.
 
 ## Setting hushrun up
 
 When a person asks you to add hushrun to a repository, run `npx hushrun init --yes` at its root.
 It prints a sign-in link and a code: show both to the person and wait, since only they can approve
-it. Then show them the diff. `hushrun guide` covers the rest, such as a person in several
-organizations, and sandboxes with no browser.
+it. Then show them the diff. `hushrun guide` covers the rest, such as setting up with no account,
+a person in several organizations, and sandboxes with no browser.
 
 ## Never
 

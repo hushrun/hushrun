@@ -515,6 +515,31 @@ proptest! {
     }
 }
 
+// covers: C-27 (a fuzz run found the first: two blocks whose statements don't fit a u64 together)
+#[test]
+fn counts_too_big_to_add_read_without_a_panic() {
+    let most = u64::MAX;
+    let go = format!("mode: set\na.go:1.1,2.2 {most} 1\nb.go:1.1,2.2 {most} 0\n");
+    let Ok((Format::Go, Read::Coverage(counts))) = read(go.as_bytes()) else {
+        panic!("a coverprofile");
+    };
+    let statements = counts.statements.expect("statements");
+    assert_eq!((statements.covered, statements.total), (most, most));
+
+    // Cobertura with no totals on its root: each line's branches are added up.
+    let cobertura = format!(
+        r#"<coverage line-rate="1"><packages><package><classes><class filename="a.py"><lines>
+<line number="1" hits="1" branch="true" condition-coverage="100% ({most}/{most})"/>
+<line number="2" hits="1" branch="true" condition-coverage="100% ({most}/{most})"/>
+</lines></class></classes></package></packages></coverage>"#
+    );
+    let Ok((Format::Cobertura, Read::Coverage(counts))) = read(cobertura.as_bytes()) else {
+        panic!("a Cobertura report");
+    };
+    let branches = counts.branches.expect("branches");
+    assert_eq!((branches.covered, branches.total), (most, most));
+}
+
 // covers: C-27
 #[test]
 fn a_reports_record_from_a_newer_hushrun_reads() {
