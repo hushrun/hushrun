@@ -1,0 +1,693 @@
+{
+  "version": 1,
+  "description": "Hint vectors (C-38). Each vector gives a check id, its sources set, a scope's files and a hint with paths; `expect` holds the hint's key (hex), the shape, the address, each path's token (hex), the content (hex) and its id, and what reading `bytes` (base64, as hushrun's writer wrote them) against the scope gives, with how many test files were dropped. `unread` lists bytes no reader takes. `tools/refdigest.py unit-hints` computes them independently; the Rust code must agree.",
+  "vectors": [
+    {
+      "name": "pytest",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Two test files, each with what it read; a lockfile in the scope that no test file read.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "hint": {
+        "adapter": "pytest",
+        "units": {
+          "tests/test_cart.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/cart.py",
+              "shop/pricing.py",
+              "tests/test_cart.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          },
+          "tests/test_pricing.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/pricing.py",
+              "tests/test_pricing.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          }
+        },
+        "unitFiles": []
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pQ==",
+      "expect": {
+        "key": "9e8d6fb464addd0be91bc5670211868d81d950e53b965a82966fa060478ebc2a",
+        "shape": "sha256:b8576a7cf32b9a99dd5aae7ce08294ffa442ce3d1f09f66b92a1d14f436dd51e",
+        "address": "sha256:2330293381c14a28cf29a32ead861cafa543eea38ca5c5ec5f8bb4f69f782316",
+        "tokens": {
+          "shop/__init__.py": "d851facb8cdb6750be0ea7b0026f870b",
+          "shop/cart.py": "c6b496783e01d6c3e0da9c48a376e9a4",
+          "shop/pricing.py": "075f35931176129402a491e3ec39e788",
+          "tests/conftest.py": "6657188571147dcdadb1a4537e956c71",
+          "tests/test_cart.py": "9c878a30d2851123140b74de489d3a64",
+          "tests/test_pricing.py": "4d86598d21589a60a73d7c7f718bb439"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76300a0670797465737400000006075f35931176129402a491e3ec39e7884d86598d21589a60a73d7c7f718bb4396657188571147dcdadb1a4537e956c719c878a30d2851123140b74de489d3a64c6b496783e01d6c3e0da9c48a376e9a4d851facb8cdb6750be0ea7b0026f870b0000000000000002000000010000000400000000000000010000000200000005000000000000000300000005000000000000000200000003000000040000000500000000",
+        "contentId": "sha256:a8e7db6266a905ceba76386a27223d0f223607715f6940e776310eb584e94d05",
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "pytest-file-gone",
+      "covers": [
+        "C-38"
+      ],
+      "description": "The same hint, read where shop/cart.py is gone: test_cart.py, which read it, is dropped and runs.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "hint": {
+        "adapter": "pytest",
+        "units": {
+          "tests/test_cart.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/cart.py",
+              "shop/pricing.py",
+              "tests/test_cart.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          },
+          "tests/test_pricing.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/pricing.py",
+              "tests/test_pricing.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          }
+        },
+        "unitFiles": []
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pQ==",
+      "expect": {
+        "key": "9e8d6fb464addd0be91bc5670211868d81d950e53b965a82966fa060478ebc2a",
+        "shape": "sha256:b8576a7cf32b9a99dd5aae7ce08294ffa442ce3d1f09f66b92a1d14f436dd51e",
+        "address": "sha256:2330293381c14a28cf29a32ead861cafa543eea38ca5c5ec5f8bb4f69f782316",
+        "tokens": {
+          "shop/__init__.py": "d851facb8cdb6750be0ea7b0026f870b",
+          "shop/cart.py": "c6b496783e01d6c3e0da9c48a376e9a4",
+          "shop/pricing.py": "075f35931176129402a491e3ec39e788",
+          "tests/conftest.py": "6657188571147dcdadb1a4537e956c71",
+          "tests/test_cart.py": "9c878a30d2851123140b74de489d3a64",
+          "tests/test_pricing.py": "4d86598d21589a60a73d7c7f718bb439"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76300a0670797465737400000006075f35931176129402a491e3ec39e7884d86598d21589a60a73d7c7f718bb4396657188571147dcdadb1a4537e956c719c878a30d2851123140b74de489d3a64c6b496783e01d6c3e0da9c48a376e9a4d851facb8cdb6750be0ea7b0026f870b0000000000000002000000010000000400000000000000010000000200000005000000000000000300000005000000000000000200000003000000040000000500000000",
+        "contentId": "sha256:a8e7db6266a905ceba76386a27223d0f223607715f6940e776310eb584e94d05",
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 1
+      }
+    },
+    {
+      "name": "go",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Go packages, named by their directories, `.` for the root; one listed cart/testdata, the other the root (`\"\"`).",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "main.go",
+        "main_test.go",
+        "cart/cart.go",
+        "cart/cart_test.go"
+      ],
+      "scope": [
+        "go.mod",
+        "main.go",
+        "main_test.go",
+        "cart/cart.go",
+        "cart/cart_test.go",
+        "cart/testdata/prices.json"
+      ],
+      "hint": {
+        "adapter": "go",
+        "units": {
+          "cart": {
+            "reads": [
+              "cart/cart.go",
+              "cart/cart_test.go",
+              "cart/testdata/prices.json"
+            ],
+            "dirs": [
+              "cart/testdata"
+            ]
+          },
+          ".": {
+            "reads": [
+              "main.go",
+              "main_test.go"
+            ],
+            "dirs": [
+              ""
+            ]
+          }
+        },
+        "unitFiles": []
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYkrPZ2Bg4OR/GvQyal73zRMfPLd0XJA3VqyY4Lg5fW7qRsbfm/0CPP/YH2vfIW3QrDrn9WqNtseHrwavypbe06SqWvTprta9rYbVmfmfzvXryrm5hPzh06qs6VgQ5vDRWbyBeV+VTqAiR3nZcstE3nw5znlb/dSXHq8wW37zLSf/1dyN83bN+9J7xztp1+fGxI0Bm67u7+U2fn0ic7kuAwQwATELlGYFYg4gZgRidiBmA2JmqDpGKBtEMwEAeoRP1Q==",
+      "expect": {
+        "key": "5a291335cffcac05c6d5cf7c9fdae271da2a7ea2caee920e6685e4815eee2a87",
+        "shape": "sha256:35d08a7303300451dd5bc64f080da7566206151e690cdea5a0d0f8d796c1f658",
+        "address": "sha256:515715fc4951b67646f5dc7bad7d0e7c31a7c23410af0630a0fce66f16cbf40c",
+        "tokens": {
+          "": "d9ed090fd56db19eba9ef48ddc4b62ba",
+          ".": "696ff2ce8f2d1e464454fc0e2a797c88",
+          "cart": "a739610d6f1e099eb54e27a5c77836a7",
+          "cart/cart.go": "0fe552e95a9e8bd9c8f049b488d01f33",
+          "cart/cart_test.go": "21789041b3679d65b101fbb34e5049fc",
+          "cart/testdata": "3fc687b81b3083259cebab2886e3c3d5",
+          "cart/testdata/prices.json": "53aa6b1bbc82252572f2dd2adeb5317b",
+          "main.go": "f38161b150b2d5bf8d0b33ebc869a72d",
+          "main_test.go": "a05640f143178003be7a2c5121087776"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76300a02676f000000090fe552e95a9e8bd9c8f049b488d01f3321789041b3679d65b101fbb34e5049fc3fc687b81b3083259cebab2886e3c3d553aa6b1bbc82252572f2dd2adeb5317b696ff2ce8f2d1e464454fc0e2a797c88a05640f143178003be7a2c5121087776a739610d6f1e099eb54e27a5c77836a7d9ed090fd56db19eba9ef48ddc4b62baf38161b150b2d5bf8d0b33ebc869a72d000000000000000200000004000000020000000500000008000000010000000700000006000000030000000000000001000000030000000100000002",
+        "contentId": "sha256:ddbc1b5e3038526e1b9c6c34fb453b1537f330a6aa73e5f2cbf2e7ba4e2e1d87",
+        "read": {
+          "adapter": "go",
+          "units": {
+            ".": {
+              "reads": [
+                "main.go",
+                "main_test.go"
+              ],
+              "dirs": [
+                ""
+              ]
+            },
+            "cart": {
+              "reads": [
+                "cart/cart.go",
+                "cart/cart_test.go",
+                "cart/testdata/prices.json"
+              ],
+              "dirs": [
+                "cart/testdata"
+              ]
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "vitest",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Vitest's list of test files, of which src/old.test.ts is gone and leaves the list; non-ASCII paths.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "src/café.test.ts",
+        "src/café.ts",
+        "src/日本.test.ts",
+        "src/日本.ts",
+        "vitest.config.ts"
+      ],
+      "scope": [
+        "package.json",
+        "src/café.test.ts",
+        "src/café.ts",
+        "src/日本.test.ts",
+        "src/日本.ts",
+        "vitest.config.ts"
+      ],
+      "hint": {
+        "adapter": "vitest",
+        "units": {
+          "src/café.test.ts": {
+            "reads": [
+              "src/café.test.ts",
+              "src/café.ts",
+              "vitest.config.ts"
+            ],
+            "dirs": []
+          },
+          "src/日本.test.ts": {
+            "reads": [
+              "src/日本.test.ts",
+              "src/日本.ts",
+              "vitest.config.ts"
+            ],
+            "dirs": []
+          }
+        },
+        "unitFiles": [
+          "src/café.test.ts",
+          "src/old.test.ts",
+          "src/日本.test.ts"
+        ]
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYivLLEktLmFgYGBjcew5m5Lj8ls0LyFx94+1LpySvmWFp2Tz9c9xcZqnC2lJ+Np3pl3cIGu8Mb5T5a26hsS72Z2Nrts+GwQoBm+fbiveJL+kwIahbPPrp393RPG2Sf++87Lit1Rwxh+uCQtLZh3oBNrBDMRMUJoFyobxGaFsVgYIYIZiBqgcmA0Av0418g==",
+      "expect": {
+        "key": "6b24b8f79539f3db7abc2b9b0e0261a402416b4cbf1516e6d87e98b837ce8216",
+        "shape": "sha256:71ea2d586302b84199435187575909542bc8dfa99da8acab51b678652c71222a",
+        "address": "sha256:d9924ff251a396cb4b490eed43625b792c4246e24adf147e3d09495ec0774673",
+        "tokens": {
+          "src/café.test.ts": "184d3f8966d1b01d33b15f8924ed2728",
+          "src/café.ts": "fbdce978fb1a5368fc0a90a1749ac089",
+          "src/old.test.ts": "821fa4703c0076b3ebe5fdb85a0d861b",
+          "src/日本.test.ts": "18ee9b898145b6f330502153b7973d17",
+          "src/日本.ts": "04418ccd646c44fb156e6061bbf8ad44",
+          "vitest.config.ts": "09194d7671ca1d6f2fce0a093767122a"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76300a067669746573740000000604418ccd646c44fb156e6061bbf8ad4409194d7671ca1d6f2fce0a093767122a184d3f8966d1b01d33b15f8924ed272818ee9b898145b6f330502153b7973d17821fa4703c0076b3ebe5fdb85a0d861bfbdce978fb1a5368fc0a90a1749ac0890000000300000002000000030000000400000002000000020000000300000001000000020000000500000000000000030000000300000000000000010000000300000000",
+        "contentId": "sha256:45b9688675f7d6e2b80b47e4ab648201380c3e48649759d7bec1dc8a2842e6f5",
+        "read": {
+          "adapter": "vitest",
+          "units": {
+            "src/café.test.ts": {
+              "reads": [
+                "src/café.test.ts",
+                "src/café.ts",
+                "vitest.config.ts"
+              ],
+              "dirs": []
+            },
+            "src/日本.test.ts": {
+              "reads": [
+                "src/日本.test.ts",
+                "src/日本.ts",
+                "vitest.config.ts"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": [
+            "src/café.test.ts",
+            "src/日本.test.ts"
+          ]
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "empty",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A hint of no test file.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "a.py"
+      ],
+      "scope": [
+        "a.py"
+      ],
+      "hint": {
+        "adapter": "pytest",
+        "units": {},
+        "unitFiles": []
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFAAgAq8grd",
+      "expect": {
+        "key": "bc8b12c3a294f58e3e32da7ae80d6dd60b28f3f711210791f652daf11d21ae85",
+        "shape": "sha256:2cbcde7b94d62f3b1845f3fd7c819f62920c7f9277f5f4aebc27db5733c767ba",
+        "address": "sha256:c34b3a34f21096cac03bf354a4ba10ce7c382246d2025fca3e3b3552a03a10f5",
+        "tokens": {},
+        "content": "6875736872756e2e756e69742d68696e74732f76300a06707974657374000000000000000000000000",
+        "contentId": "sha256:665790343fba58a2e42b014bab0a8ee622cee8535be01cb3e50da6a657071860",
+        "read": {
+          "adapter": "pytest",
+          "units": {},
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    }
+  ],
+  "unread": [
+    {
+      "name": "empty",
+      "covers": [
+        "C-38"
+      ],
+      "description": "No bytes.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": ""
+    },
+    {
+      "name": "not-zlib",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Bytes that aren't a zlib stream.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "aHVzaHJ1bi51bml0LWhpbnRzL3YwCg=="
+    },
+    {
+      "name": "truncated",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A hint cut one byte short: its Adler-32 is incomplete.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4"
+    },
+    {
+      "name": "trailing",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A hint with a byte after its zlib stream.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pQA="
+    },
+    {
+      "name": "bad-adler",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A hint whose Adler-32 is wrong.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pA=="
+    },
+    {
+      "name": "schema",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Another schema's content.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ/s4pg=="
+    },
+    {
+      "name": "cut-content",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A content cut inside its token table.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmBAAnNgyq"
+    },
+    {
+      "name": "after-its-end",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A content with a byte after its end.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CFwMAX+84pQ=="
+    },
+    {
+      "name": "tokens-out-of-order",
+      "covers": [
+        "C-38"
+      ],
+      "description": "Its tokens not ascending.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGA6tmVahR3jtcMPbs3xWFz2csmc9i6DS62CyiLcJfc85lqlMEAAIxINZgMA2B4a4g=="
+    },
+    {
+      "name": "token-unused",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A token no index names.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGCa095lcKlVUFmEu+Sex1yrlGNbplXYMV47/ODWHI/FZS+XMEAAIwMSAAA4EBrg"
+    },
+    {
+      "name": "index-past-tokens",
+      "covers": [
+        "C-38"
+      ],
+      "description": "An index past the token table.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGCa095lcKlVUFmEu+Sex1yrlGNbplXYMV47/ODWHI/FZS+XMEAAIxLNBGIAAKOjGuM="
+    },
+    {
+      "name": "count-past-bytes",
+      "covers": [
+        "C-38"
+      ],
+      "description": "A token count larger than the bytes left, which a reader must refuse before allocating.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmHg3b1gTnuXwaVWQWUR7pJ7HnOtUo5tmVZhx3jt8INbczwWl71cwgABjEg0mA0A9CkcSA=="
+    },
+    {
+      "name": "bomb",
+      "covers": [
+        "C-38"
+      ],
+      "description": "17 MiB of zeros in a few KiB: inflating stops at 16 MiB.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrswbEBgCAMADBmfwE9qywdhHI/jySJWvFXjsq5e8zc6z3f0wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAue3AgAAAAAADk/9oIqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqKuzBgQAAAAAAkP9rI6iqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwBwcCAAAAAED+r42gqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0h4cEgAAAAAI+v/aD2YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJgCyoMILg=="
+    }
+  ]
+}

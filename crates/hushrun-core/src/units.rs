@@ -177,6 +177,11 @@ pub fn classify<'p>(
 /// \[C-31\] `shape`: the SHA-256 of the sources set's paths, their names and not their contents:
 /// each path's UTF-8 bytes followed by one NUL byte, sorted by bytes as D-4 sorts them.
 pub fn shape<'a>(sources: impl IntoIterator<Item = &'a str>) -> Digest {
+    Digest::of(&shape_bytes(sources))
+}
+
+/// The bytes [`shape`] hashes, which a hint's key is derived from too (C-38).
+pub(crate) fn shape_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
     let mut paths: Vec<&[u8]> = sources.into_iter().map(str::as_bytes).collect();
     paths.sort_unstable();
     paths.dedup();
@@ -185,7 +190,7 @@ pub fn shape<'a>(sources: impl IntoIterator<Item = &'a str>) -> Digest {
         bytes.extend_from_slice(path);
         bytes.push(0);
     }
-    Digest::of(&bytes)
+    bytes
 }
 
 /// The files of a scope with their kinds and content hashes, as a source manifest (D-4) lists

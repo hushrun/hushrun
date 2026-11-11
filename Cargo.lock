@@ -1906,12 +1906,14 @@ version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "jiff",
+ "proptest",
  "regex-automata",
  "serde",
  "serde-saphyr",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
+ "zlib-rs",
 ]
 
 [[package]]

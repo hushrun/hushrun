@@ -9,6 +9,7 @@ pub mod counts_from;
 pub mod digest;
 pub mod event;
 pub mod glob;
+pub mod hints;
 pub mod jcs;
 pub mod ledger_url;
 pub mod names;
