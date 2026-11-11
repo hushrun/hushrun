@@ -108,7 +108,10 @@ CREATE TABLE unit (
     path_ref  INTEGER NOT NULL REFERENCES path (id),
     ran_at    INTEGER NOT NULL,
     origin    TEXT NOT NULL CHECK (origin IN ('seen here', 'shared')),
-    UNIQUE (check_ref, path_ref)
+    -- The system whose machine saw a shared list: one for `shared`, none for `seen here`.
+    shared_os TEXT CHECK (shared_os IN ('linux', 'macos', 'windows')),
+    UNIQUE (check_ref, path_ref),
+    CHECK ((origin = 'seen here') = (shared_os IS NULL))
 ) STRICT;
 -- What it read that its key holds, each file as it was then.
 CREATE TABLE unit_read (
@@ -391,13 +394,15 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     };
     let mut names: HashMap<i64, String> = HashMap::new();
     let mut units = conn.prepare(
-        "SELECT u.id, p.path, u.origin FROM unit u JOIN path p ON p.id = u.path_ref
+        "SELECT u.id, p.path, u.origin, u.shared_os FROM unit u JOIN path p ON p.id = u.path_ref
          WHERE u.check_ref = ?1",
     )?;
-    for row in units.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))? {
-        let (id, name, origin): (i64, String, String) = row?;
+    for row in units.query_map([check], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })? {
+        let (id, name, origin, os): (i64, String, String, Option<String>) = row?;
         let mapped = Mapped {
-            origin: Origin::from_word(&origin).unwrap_or_default(),
+            origin: Origin::from_row(&origin, os.as_deref()).unwrap_or_default(),
             ..Mapped::default()
         };
         map.units.insert(name.clone(), mapped);
@@ -673,8 +678,15 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     for (name, mapped) in w.seen {
         let path_ref = ids.path(name)?;
         tx.execute(
-            "INSERT INTO unit (check_ref, path_ref, ran_at, origin) VALUES (?1, ?2, ?3, ?4)",
-            params![check, path_ref, w.now_ms, mapped.origin.word()],
+            "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                check,
+                path_ref,
+                w.now_ms,
+                mapped.origin.word(),
+                mapped.origin.system().map(|os| os.word())
+            ],
         )?;
         let unit = tx.last_insert_rowid();
         for (read, entry) in &mapped.reads {

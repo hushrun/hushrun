@@ -925,7 +925,7 @@ fn fetch(
 /// read.
 fn speaks_of_test_files(adapter: &Adapter, map: &store::Map, shared: &Shared) -> bool {
     match adapter {
-        Adapter::Pytest => map.reported() || shared.hints.iter().any(|h| !h.units.is_empty()),
+        Adapter::Pytest => map.reported() || shared.names_any(),
         Adapter::Cargo(_) | Adapter::Go(_) | Adapter::Vitest(_) => true,
     }
 }
@@ -1306,7 +1306,12 @@ impl Observed {
                 let Some(mapped) = map.units.get(unit) else {
                     return Some((unit.clone(), self.built.get(unit)?.clone()));
                 };
-                mapped.not_followed.is_empty().then(|| {
+                // Another system's list stays that system's: never sent as this one's.
+                let ours = match mapped.origin {
+                    Origin::SeenHere => true,
+                    Origin::Shared(from) => from == os,
+                };
+                (ours && mapped.not_followed.is_empty()).then(|| {
                     let unit_seen = hushrun_core::hints::Unit {
                         reads: mapped.reads.keys().cloned().collect(),
                         dirs: mapped.dirs.clone(),
@@ -1591,15 +1596,15 @@ fn decide(
                         saved_ms = saved_ms.saturating_add(found.duration_ms);
                     }
                     // \[C-38\] Reused on a list another machine saw: this machine keeps it, as
-                    // `shared`, until it runs here.
-                    // Reused on what its build is made of alone (Go with no entry here): what this
-                    // run's hint says of it, which no row holds.
-                    match plan.chosen.get(unit) {
-                        Some(list) if list.from == shared::From::Hint => {
+                    // `shared` with that machine's system, until it runs here. Reused on what its
+                    // build is made of alone (Go with no entry here): what this run's hint says
+                    // of it, which no row holds.
+                    match plan.chosen.get(unit).map(|list| (list, list.from)) {
+                        Some((list, shared::From::Hint(os))) => {
                             out.mapped
-                                .insert(unit.clone(), shared_row(list, sets, tree));
+                                .insert(unit.clone(), shared_row(list, os, sets, tree));
                         }
-                        Some(list) if list.from == shared::From::Build => {
+                        Some((list, shared::From::Build)) => {
                             let seen = hushrun_core::hints::Unit {
                                 reads: sets
                                     .keyed(list.files.iter().map(String::as_str))
@@ -1724,7 +1729,7 @@ fn decide(
 
 /// \[C-38\] The row a test file reused on another machine's list gets in this machine's store: the
 /// files of the list its key holds, as they are now, which are as they were when it passed.
-fn shared_row(list: &List, sets: &units::Sets, tree: &Tree) -> Mapped {
+fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree: &Tree) -> Mapped {
     Mapped {
         reads: sets
             .keyed(list.reads.iter().map(String::as_str))
@@ -1736,7 +1741,7 @@ fn shared_row(list: &List, sets: &units::Sets, tree: &Tree) -> Mapped {
             .collect(),
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
-        origin: Origin::Shared,
+        origin: Origin::Shared(os),
     }
 }
 

@@ -134,3 +134,37 @@ fn a_hint_too_large_to_send_isnt_sent_and_is_said_once() {
     );
     assert!(results.sent.borrow().is_empty());
 }
+
+// covers: C-38, C-36
+#[test]
+fn a_test_file_reused_on_another_systems_list_isnt_in_this_machines_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut o, tree) = observed(dir.path(), 3);
+    let this = hushrun_core::hints::Os::this().unwrap();
+    let other = if this == hushrun_core::hints::Os::Linux {
+        hushrun_core::hints::Os::Macos
+    } else {
+        hushrun_core::hints::Os::Linux
+    };
+    // tests/test_0.py was reused on a list a machine of another system saw, kept here as such;
+    // tests/test_1.py on one of this system's.
+    o.units
+        .insert("tests/test_0.py".into(), (State::Reused, None));
+    o.units
+        .insert("tests/test_1.py".into(), (State::Reused, None));
+    o.mapped.get_mut("tests/test_0.py").unwrap().origin = Origin::Shared(other);
+    o.mapped.get_mut("tests/test_1.py").unwrap().origin = Origin::Shared(this);
+    let now = Time::parse("2026-11-11T12:00:00Z").unwrap();
+    o.keep(&Digest::of(b"run"), &tree, now);
+    let results = Hints {
+        refuse: Cell::new(false),
+        sent: RefCell::new(Vec::new()),
+    };
+    assert_eq!(o.share(&results, now), None);
+    let sent = results.sent.borrow();
+    assert_eq!(sent.len(), 1);
+    let place = o.share.as_ref().unwrap();
+    let read = hushrun_core::hints::read(&sent[0], &place.key, tree.paths()).unwrap();
+    let units: Vec<&str> = read.hint.units.keys().map(String::as_str).collect();
+    assert_eq!(units, ["tests/test_1.py", "tests/test_2.py"]);
+}

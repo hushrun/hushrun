@@ -448,6 +448,15 @@ fn impossible_rows_cant_be_written() {
     write_run(&path, &r).unwrap();
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    conn.execute_batch("INSERT INTO path (path) VALUES ('other.py');")
+        .unwrap();
+    // What may be written: a shared row with its system.
+    conn.execute_batch(
+        "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os)
+         VALUES (1, (SELECT id FROM path WHERE path = 'other.py'), 0, 'shared', 'linux');
+         DELETE FROM unit WHERE path_ref = (SELECT id FROM path WHERE path = 'other.py');",
+    )
+    .unwrap();
     for bad in [
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES ('x', 'a', '[]', '', 'default', 'pytest', 0)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '\"pytest\"', '', 'default', 'pytest', 0)",
@@ -456,6 +465,11 @@ fn impossible_rows_cant_be_written() {
         "INSERT INTO version (path_ref, entry) VALUES (1, 'not a hash')",
         "INSERT INTO edge (check_ref, from_ref, to_ref, kind) VALUES (1, 1, 1, 'calls')",
         "INSERT INTO unit (check_ref, path_ref, ran_at) VALUES (999, 1, 0)",
+        // [C-38] A shared row names the system that saw it; a row seen here names none.
+        "INSERT INTO unit (check_ref, path_ref, ran_at, origin) VALUES (1, (SELECT id FROM path WHERE path = 'other.py'), 0, 'shared')",
+        "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os) VALUES (1, (SELECT id FROM path WHERE path = 'other.py'), 0, 'seen here', 'linux')",
+        "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os) VALUES (1, (SELECT id FROM path WHERE path = 'other.py'), 0, 'shared', 'beos')",
+        "INSERT INTO hint_known (check_ref, address, os, content_id, how, at) VALUES (1, printf('%064d', 1), 'linux', printf('%064d', 1), 'guessed', 0)",
     ] {
         assert!(conn.execute_batch(bad).is_err(), "{bad}");
     }

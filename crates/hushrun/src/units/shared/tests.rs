@@ -18,8 +18,13 @@ fn tree(paths: &[&str]) -> Tree {
     Tree::from_manifest(&bytes).expect("a manifest")
 }
 
-fn hint(units: &[(&str, &[&str])]) -> hints::Hint {
-    hints::Hint {
+fn this() -> Os {
+    Os::this().expect("a system")
+}
+
+/// A hint of this machine's system.
+fn hint(units: &[(&str, &[&str])]) -> (Os, hints::Hint) {
+    let hint = hints::Hint {
         adapter: "pytest".into(),
         units: units
             .iter()
@@ -34,7 +39,8 @@ fn hint(units: &[(&str, &[&str])]) -> hints::Hint {
             })
             .collect(),
         unit_files: BTreeSet::new(),
-    }
+    };
+    (this(), hint)
 }
 
 fn mapped(reads: &[&str], origin: Origin) -> Mapped {
@@ -67,6 +73,7 @@ fn a_test_files_lists_are_its_own_then_the_hints_newest_first_each_once_three_at
             hint(&[("t.py", &["t.py", "d.py"])]),
         ],
         received: Vec::new(),
+        systems: vec![this()],
     };
     let own = mapped(&["t.py", "a.py"], Origin::SeenHere);
     let lists = lists("t.py", Some(&own), &shared, &t, None).expect("lists");
@@ -81,7 +88,7 @@ fn a_test_files_lists_are_its_own_then_the_hints_newest_first_each_once_three_at
     );
     assert_eq!(lists[0].from, From::Here(Origin::SeenHere));
     assert!(!lists[0].seen_elsewhere());
-    assert_eq!(lists[1].from, From::Hint);
+    assert_eq!(lists[1].from, From::Hint(this()));
     // No entry here: the hints alone; none either: nothing to key it by.
     let lists_alone = super::lists("t.py", None, &shared, &t, None).expect("lists");
     assert_eq!(lists_alone[0].files, set(&["t.py", "b.py"]));
@@ -90,7 +97,7 @@ fn a_test_files_lists_are_its_own_then_the_hints_newest_first_each_once_three_at
         Some(Vec::new())
     );
     // A row another machine's list made is that machine's word.
-    let kept = mapped(&["t.py", "b.py"], Origin::Shared);
+    let kept = mapped(&["t.py", "b.py"], Origin::Shared(this()));
     assert!(super::lists("t.py", Some(&kept), &shared, &t, None).unwrap()[0].seen_elsewhere());
 }
 
@@ -101,6 +108,7 @@ fn an_entry_here_that_wasnt_followed_runs_whatever_the_hints_say() {
     let shared = Shared {
         hints: vec![hint(&[("t.py", &["t.py", "a.py"])])],
         received: Vec::new(),
+        systems: vec![this()],
     };
     let mut own = mapped(&["t.py"], Origin::SeenHere);
     own.not_followed.insert(units::NotFollowed {
@@ -121,10 +129,11 @@ fn for_go_every_list_holds_what_the_build_is_made_of_which_alone_stands_for_no_e
     ]);
     let compiled = set(&["data/data.go", "data/data_test.go"]);
     let mut seen = hint(&[("data", &["pricing/pricing.go"])]);
-    seen.units.get_mut("data").unwrap().dirs = set(&["d"]);
+    seen.1.units.get_mut("data").unwrap().dirs = set(&["d"]);
     let shared = Shared {
         hints: vec![seen],
         received: Vec::new(),
+        systems: vec![this()],
     };
     let lists = lists("data", None, &shared, &t, Some(&compiled)).expect("lists");
     assert_eq!(lists.len(), 2);
@@ -243,4 +252,38 @@ fn a_machine_reads_its_own_systems_hints_or_those_counts_from_names() {
         systems(&base(Some(serde_json::json!({ "os": words })))),
         others
     );
+}
+
+// covers: C-38, C-36
+#[test]
+fn another_systems_list_kept_here_keys_nothing_once_no_rule_names_that_system() {
+    let t = tree(&["t.py", "a.py", "b.py"]);
+    let other = if this() == Os::Linux {
+        Os::Macos
+    } else {
+        Os::Linux
+    };
+    let kept = mapped(&["t.py", "a.py"], Origin::Shared(other));
+    // A rule named that system: its list is this machine's first.
+    let reading_it = Shared {
+        systems: vec![other],
+        ..Shared::default()
+    };
+    let lists_then = lists("t.py", Some(&kept), &reading_it, &t, None).expect("lists");
+    assert_eq!(lists_then.len(), 1);
+    assert_eq!(lists_then[0].from, From::Here(Origin::Shared(other)));
+    // The rule is gone: this machine reads its own system's, and the entry is as if it weren't.
+    let own_system = Shared {
+        hints: vec![hint(&[("t.py", &["t.py", "b.py"])])],
+        received: Vec::new(),
+        systems: vec![this()],
+    };
+    let lists_now = lists("t.py", Some(&kept), &own_system, &t, None).expect("lists");
+    assert_eq!(lists_now.len(), 1, "{lists_now:?}");
+    assert_eq!(lists_now[0].files, set(&["t.py", "b.py"]));
+    assert_eq!(lists_now[0].from, From::Hint(this()));
+    // This system's own shared list still counts.
+    let ours = mapped(&["t.py", "a.py"], Origin::Shared(this()));
+    let lists_ours = lists("t.py", Some(&ours), &own_system, &t, None).expect("lists");
+    assert_eq!(lists_ours[0].from, From::Here(Origin::Shared(this())));
 }

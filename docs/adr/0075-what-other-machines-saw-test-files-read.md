@@ -41,10 +41,12 @@ using and sending.
    {base}/v0/units/hints/lookup` per system whose hints it reads.
 3. **Whose.** This machine's own system's (S3, the owner's: its own OS's). A test file that reads
    `_darwin.py` on a Mac and `_linux.py` on Linux has two true lists; keying it on Linux by the
-   Mac's would let a change to `_linux.py` leave the key as it was. Where the check's `counts_from`
-   names `os` (C-25), a machine reads the hints of the systems it names instead, one lookup each:
-   only those systems leave results for the check, and a pass under a key skips on any machine
-   (ADR 0045). A machine always writes under its own system.
+   Mac's would let a change to `_linux.py` leave the key as it was. So a machine never reads one
+   pool of several: with no rule, and with a `counts_from` (C-25) that names its own system, among
+   others or alone, it reads its own system's. Only where the rule names `os` and this machine's
+   system isn't among them does it read the systems it names, one lookup each: only those leave
+   results for the check, and a pass under a key skips on any machine (ADR 0045). A machine always
+   writes under its own system.
 4. **Where.** A hint's address and key, for pytest and Go, come from the sources set, the files
    `shape` hashes (C-31). For Vitest, whose list of test files is in the hint (ADR 0071), from
    every file of a source kind with no test file named: a new test file then gives a new address,
@@ -52,7 +54,8 @@ using and sending.
    list of test files, else the newest hint's.
 5. **One function gives the lists**, and the plan, `hushrun ready`, `observe`'s "would have run"
    and `hushrun why` all call it (`units::shared::lists`): this machine's own entry when it has one
-   (one `not observed` runs, whatever the hints say), or for Go with none, what its test binary is
+   (one `not observed` runs, whatever the hints say; a `shared` one only when its system is one
+   this run reads, item 7), or for Go with none, what its test binary is
    built from now; then each hint's list, newest first; the same list once, and 3 at most. Then, as
    before, a key for each list from the files on disk now, and one batch lookup, in pages of 5,000
    keys.
@@ -61,9 +64,15 @@ using and sending.
    fail**. Two runs that saw it read different files and disagree is a reason to run. The audit
    share, `tests.always`, `not observed`, suspension and the 5,000 test files stay as ADR 0069 has
    them.
-7. **Kept here, marked.** A test file reused on a hint's list is kept in this machine's store as
-   that list, `shared`, in a column whose `CHECK` takes `seen here` or `shared` (C-36); the next run
-   of it here replaces it with what it saw. So this machine's next hint carries it on, and `hushrun
+7. **Kept here, marked with its system.** A test file reused on a hint's list is kept in this
+   machine's store as that list, `shared`, in a column whose `CHECK` takes `seen here` or `shared`,
+   with the system the hint was asked for in a second column a `CHECK` ties to the first: one for
+   `shared`, none for `seen here` (C-36). The next run of it here replaces it with what it saw. The
+   system is part of the state because the check id holds no `counts_from`: a Mac whose rule named
+   `linux` kept Linux's list, and without its system that list would be the Mac's first once the
+   rule went, its key could hit, and the Mac would send it as macOS's. So a `shared` entry counts
+   for a key only while its system is one the run reads, and a hint this machine writes holds a
+   reused test file's list only when the list was seen here or came from its own system. So this machine's next hint carries it on, and `hushrun
    why` says which it was: `it passed on the files another machine saw it read`, with `another
    machine saw it read <files>`. The store never shipped in a release, so its schema changed in
    place.

@@ -107,12 +107,15 @@ pub struct Asker<'a> {
     pub adapter: &'static str,
 }
 
-/// \[C-38\] The hints a run read, newest first, each with only the test files every path of which
-/// is a file of the scope; and the content id of each it read, which it won't send back.
+/// \[C-38\] The hints a run read, newest first, each with the system it was asked for and only the
+/// test files every path of which is a file of the scope; the content id of each it read, which
+/// it won't send back; and the systems this run reads, which a `shared` entry of this machine's
+/// must be from to count ([`lists`]).
 #[derive(Debug, Clone, Default)]
 pub struct Shared {
-    pub hints: Vec<hints::Hint>,
+    pub hints: Vec<(Os, hints::Hint)>,
     pub received: Vec<HintKnown>,
+    pub systems: Vec<Os>,
 }
 
 impl Shared {
@@ -120,7 +123,7 @@ impl Shared {
     pub fn unit_files(&self) -> BTreeSet<String> {
         self.hints
             .iter()
-            .map(|hint| &hint.unit_files)
+            .map(|(_, hint)| &hint.unit_files)
             .find(|files| !files.is_empty())
             .cloned()
             .unwrap_or_default()
@@ -128,7 +131,14 @@ impl Shared {
 
     /// Whether another machine saw `unit` read anything.
     pub fn knows(&self, unit: &str) -> bool {
-        self.hints.iter().any(|hint| hint.units.contains_key(unit))
+        self.hints
+            .iter()
+            .any(|(_, hint)| hint.units.contains_key(unit))
+    }
+
+    /// Whether any hint read names a test file.
+    pub fn names_any(&self) -> bool {
+        self.hints.iter().any(|(_, hint)| !hint.units.is_empty())
     }
 }
 
@@ -138,7 +148,10 @@ impl Asker<'_> {
     /// for debug only: no hint costs only what it would have spared.
     pub fn fetch(&self, sources: &[String], tree: &Tree) -> Shared {
         let place = Place::new(&self.check_id, sources);
-        let mut out = Shared::default();
+        let mut out = Shared {
+            systems: self.systems.clone(),
+            ..Shared::default()
+        };
         for os in &self.systems {
             let at = HintPlace {
                 check_id: self.check_id,
@@ -162,7 +175,7 @@ impl Asker<'_> {
                             how: HintHow::Received,
                         });
                         if read.hint.adapter == self.adapter {
-                            out.hints.push(read.hint);
+                            out.hints.push((*os, read.hint));
                         }
                     }
                     Err(why) => tracing::debug!("a hint was left out: {why}"),
@@ -177,13 +190,13 @@ impl Asker<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum From {
     /// This machine's own entry: what the test file read when it ran here, or a list another
-    /// machine saw that reused it here.
+    /// machine of a system saw that reused it here.
     Here(Origin),
     /// \[ADR 0069, 0070\] What a build says it is made of alone: Cargo's dep-info, or for Go,
     /// with no entry here, what `go list` says.
     Build,
-    /// A hint read in this run.
-    Hint,
+    /// A hint read in this run, of the system it was asked for.
+    Hint(Os),
 }
 
 /// One list of files a test file's key might be made from.
@@ -202,7 +215,7 @@ pub struct List {
 impl List {
     /// Whether another machine saw the test file read these files.
     pub fn seen_elsewhere(&self) -> bool {
-        matches!(self.from, From::Hint | From::Here(Origin::Shared))
+        matches!(self.from, From::Hint(_) | From::Here(Origin::Shared(_)))
     }
 }
 
@@ -210,8 +223,11 @@ impl List {
 /// this machine's own entry, `own`, when it has one; then the lists of the hints, newest first;
 /// the same list once, and [`MOST_LISTS`] at most. For Go, `compiled` is what its test binary is
 /// built from now, which every list holds, and alone stands for the entry this machine lacks.
-/// `None` when this machine's entry says something of it wasn't followed: it runs, and records
-/// nothing (C-34). An empty list of lists: nothing to key it by, and it runs.
+/// An entry here that is another system's list (`shared`) counts only when that system is one
+/// this run reads (`shared.systems`, [`systems`]); otherwise it is as if there were none, so a
+/// list a rule borrowed stops keying anything once the rule is gone. `None` when this machine's
+/// entry says something of it wasn't followed: it runs, and records nothing (C-34). An empty
+/// list of lists: nothing to key it by, and it runs.
 pub fn lists(
     unit: &str,
     own: Option<&Mapped>,
@@ -236,6 +252,10 @@ pub fn lists(
             out.push(list);
         }
     };
+    let own = own.filter(|mapped| match mapped.origin {
+        Origin::SeenHere => true,
+        Origin::Shared(os) => shared.systems.contains(&os),
+    });
     match own {
         Some(mapped) if !mapped.not_followed.is_empty() => return None,
         Some(mapped) => {
@@ -245,9 +265,9 @@ pub fn lists(
         None if compiled.is_some() => add(make(&BTreeSet::new(), &BTreeSet::new(), From::Build)),
         None => {}
     }
-    for hint in &shared.hints {
+    for (os, hint) in &shared.hints {
         if let Some(seen) = hint.units.get(unit) {
-            add(make(&seen.reads, &seen.dirs, From::Hint));
+            add(make(&seen.reads, &seen.dirs, From::Hint(*os)));
         }
     }
     Some(out)

@@ -780,28 +780,40 @@ impl Map {
 }
 
 /// \[C-38\] Where a test file's row of the map came from: what it read when it ran here, or a list
-/// another machine saw it read whose key had a pass that counted here, which reused it. The next
-/// run of it here replaces a shared row with what it sees.
+/// another machine of a system saw it read whose key had a pass that counted here, which reused
+/// it. The next run of it here replaces a shared row with what it sees.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Origin {
     #[default]
     SeenHere,
-    Shared,
+    /// The system whose machine saw the list.
+    Shared(hushrun_core::hints::Os),
 }
 
 impl Origin {
-    /// The word the store's CHECK takes.
+    /// The word the store's `origin` column takes.
     pub fn word(self) -> &'static str {
         match self {
             Origin::SeenHere => "seen here",
-            Origin::Shared => "shared",
+            Origin::Shared(_) => "shared",
         }
     }
 
-    pub fn from_word(word: &str) -> Option<Origin> {
-        [Origin::SeenHere, Origin::Shared]
-            .into_iter()
-            .find(|o| o.word() == word)
+    /// The system the store's `shared_os` column holds: one for `shared`, none for `seen here`.
+    pub fn system(self) -> Option<hushrun_core::hints::Os> {
+        match self {
+            Origin::SeenHere => None,
+            Origin::Shared(os) => Some(os),
+        }
+    }
+
+    /// The origin a row's two columns say, `None` for a pair the store's CHECK refuses.
+    pub fn from_row(word: &str, os: Option<&str>) -> Option<Origin> {
+        match (word, os) {
+            ("seen here", None) => Some(Origin::SeenHere),
+            ("shared", Some(os)) => hushrun_core::hints::Os::from_word(os).map(Origin::Shared),
+            _ => None,
+        }
     }
 }
 

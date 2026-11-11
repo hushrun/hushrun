@@ -166,7 +166,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         (Ok(results), _) if !systems.is_empty() => Some(Asker {
             store: *results,
             check_id,
-            systems,
+            systems: systems.clone(),
             adapter: adapter_word(&adapter).word(),
         }),
         _ => None,
@@ -218,7 +218,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             &tests.ignore,
         ),
     };
-    let shared = match &adapter {
+    let mut shared = match &adapter {
         Adapter::Vitest(_) => vitest_shared,
         Adapter::Cargo(_) => Shared::default(),
         // Go's sources are those of its last run here: with none, there is no address to ask.
@@ -227,6 +227,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             fetch(asker.as_ref(), false, &sets, input.tree, &tests.ignore)
         }
     };
+    // A `shared` entry here counts only when its system is one a run reads (C-38).
+    shared.systems = systems;
     let known_from_last_run = match &adapter {
         Adapter::Pytest => None,
         Adapter::Vitest(_) => Some("Vitest's list of test files is the one of its last run here"),
