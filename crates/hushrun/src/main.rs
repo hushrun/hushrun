@@ -23,6 +23,7 @@ mod releases;
 mod results;
 mod signing;
 mod skill;
+mod units;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -37,6 +38,12 @@ use exit::{Exit, Failure};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
+    // of its own: it runs the binary and passes everything through, before anything else.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(code) = units::runner::from_args(&args) {
+        return code;
+    }
     hushrun_core::set_release(env!("CARGO_PKG_VERSION"));
     // \[ADR 0046\] Before clap, which quotes what it can't read, and before a run, which records
     // its command: a string on the command line goes no further than this.
@@ -127,6 +134,10 @@ fn run(cli: &Cli) -> ExitCode {
         // C-28, C-29: neither needs hushrun.yaml, nor a repository.
         Command::Guide => cmd::guide::run(&cli.global),
         Command::Skill(command) => cmd::skill::run(&cli.global, command),
+        // C-34: a check's reuse state, where results live; no hushrun.yaml needed.
+        Command::Tests(command) => cmd::tests::run(&cli.global, command),
+        // C-37: what a run would do with a test file; no hushrun.yaml needed, nothing written.
+        Command::Why(args) => cmd::why::run(&cli.global, args),
         // C-15: setting up `hushrun run` needs no hushrun.yaml.
         Command::Init(args) if !args.pipeline() => cmd::setup::run(&cli.global, args),
         command => app::App::new(&cli.global).and_then(|app| match command {
@@ -155,6 +166,8 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Hook(_)
             | Command::Guide
             | Command::Skill(_)
+            | Command::Tests(_)
+            | Command::Why(_)
             | Command::Approve(_) => {
                 unreachable!("handled above")
             }

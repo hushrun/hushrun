@@ -43,6 +43,9 @@ pub struct Policy {
     pub counts_from: Rules,
     /// \[ADR 0047\] Each check's `reports` (C-5, C-26). Not part of its definition (E-6).
     pub reports: BTreeMap<CheckName, Reports>,
+    /// \[ADR 0068\] Each check's `tests` that isn't `off` (C-5, C-30). Not part of its definition
+    /// (E-6).
+    pub tests: BTreeMap<CheckName, crate::units::Tests>,
     /// `sha256:` of the file's bytes (`policyDigest`, E-4).
     pub digest: Digest,
     /// \[M18\] `transparency_log`: the server's log key, as the repository pins it (T-9).
@@ -284,6 +287,9 @@ struct RawCheck {
     /// \[ADR 0047\]
     #[serde(default)]
     reports: Option<RawReports>,
+    /// \[ADR 0068\] `off`, `observe` or `reuse`, or `{mode, ignore, always}`.
+    #[serde(default = "counts_from::absent")]
+    tests: Spanned<Raw>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,6 +472,7 @@ impl Policy {
         // C-5
         let mut checks = BTreeMap::new();
         let mut reports = BTreeMap::new();
+        let mut tests = BTreeMap::new();
         for (name, pos, check) in raw.checks.iter() {
             if let Some(kind) = &check.kind {
                 retired.push(Retired {
@@ -480,6 +487,9 @@ impl Policy {
             }
             if let Some(raw) = &check.reports {
                 reports.insert(name.clone(), validate_reports(name, raw, &mut errors));
+            }
+            if let Some(on) = validate_tests(name, &check.tests, &mut errors) {
+                tests.insert(name.clone(), on);
             }
         }
         check_env_collisions(
@@ -584,6 +594,7 @@ impl Policy {
             deploy,
             counts_from: rules,
             reports,
+            tests,
             digest: Digest::of(bytes),
             transparency_log,
             retired,
@@ -795,6 +806,98 @@ fn validate_reports(name: &CheckName, raw: &RawReports, errors: &mut Errors) -> 
         }
     }
     Reports { files, ci: raw.ci }
+}
+
+/// \[ADR 0068\] A check's `tests` (C-5): a mode, short, or `{mode, ignore, always}`, with globs
+/// from the repository root. `None` when it is absent or `off`, or written wrongly, which
+/// `errors` says.
+fn validate_tests(
+    name: &CheckName,
+    node: &Spanned<Raw>,
+    errors: &mut Errors,
+) -> Option<crate::units::Tests> {
+    use crate::units::{Mode, Tests};
+    let mode_of = |raw: &Raw, pos: Pos, errors: &mut Errors| match raw {
+        Raw::Text(word) => Mode::from_word(word).or_else(|| {
+            errors.push(
+                pos,
+                format!("check `{name}`'s `tests` is off, observe or reuse, not {word:?}"),
+            );
+            None
+        }),
+        _ => {
+            errors.push(
+                pos,
+                format!("check `{name}`'s `tests` is off, observe or reuse"),
+            );
+            None
+        }
+    };
+    let globs = |raw: &Spanned<Raw>, key: &str, errors: &mut Errors| -> Vec<Pattern> {
+        let Raw::List(items) = &raw.value else {
+            errors.push(
+                raw.pos,
+                format!(
+                    "check `{name}`'s `tests.{key}` is a list of globs from the repository root"
+                ),
+            );
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|item| match &item.value {
+                Raw::Text(text) => match Pattern::new(text) {
+                    Ok(pattern) => Some(pattern),
+                    Err(err) => {
+                        errors.push(item.pos, err.to_string());
+                        None
+                    }
+                },
+                _ => {
+                    errors.push(
+                        item.pos,
+                        format!("check `{name}`'s `tests.{key}` holds a glob, as a string"),
+                    );
+                    None
+                }
+            })
+            .collect()
+    };
+    let tests = match &node.value {
+        Raw::Absent => return None,
+        Raw::Map(keys) => {
+            let mut tests = Tests::default();
+            let mut mode = None;
+            for (key, pos, value) in keys.iter() {
+                match key.as_str() {
+                    "mode" => mode = mode_of(&value.value, value.pos, errors),
+                    "ignore" => tests.ignore = globs(value, "ignore", errors),
+                    "always" => tests.always = globs(value, "always", errors),
+                    other => errors.push(
+                        pos,
+                        format!("check `{name}`'s `tests` has no key `{other}`: it takes mode, ignore and always"),
+                    ),
+                }
+            }
+            match mode {
+                Some(mode) => tests.mode = mode,
+                None if keys.get("mode").is_none() => {
+                    errors.push(
+                        node.pos,
+                        format!("check `{name}`'s `tests` needs a `mode`: off, observe or reuse"),
+                    );
+                    return None;
+                }
+                None => return None,
+            }
+            tests
+        }
+        raw => Tests {
+            mode: mode_of(raw, node.pos, errors)?,
+            ..Tests::default()
+        },
+    };
+    tests.is_on().then_some(tests)
 }
 
 fn validate_check(name: &CheckName, _pos: Pos, check: &RawCheck, errors: &mut Errors) -> CheckDef {

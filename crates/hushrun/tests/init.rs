@@ -65,6 +65,9 @@ struct Fake {
     initech: Mutex<Option<Initech>>,
     /// What `GET /cli/orgs` answers; without it, a backend from before that list.
     my_orgs: Mutex<Option<(u16, Value)>>,
+    /// \[C-38\] It keeps hints: `POST /o/acme/v0/units/hints/lookup` answers; without it, 404, a
+    /// backend from before them.
+    hints: AtomicBool,
 }
 
 /// What the fake keeps of initech.
@@ -224,6 +227,9 @@ impl Fake {
                     ("POST", Some(key)) if key.starts_with("/results/") => {
                         self.results.lock().unwrap().push((key.to_string(), body()));
                         send(201, json!({}))
+                    }
+                    ("POST", Some("/units/hints/lookup")) if self.hints.load(Ordering::SeqCst) => {
+                        send(200, json!({"hints": []}))
                     }
                     _ => send(404, error("not_found", "no such endpoint")),
                 }
@@ -6394,4 +6400,126 @@ fn a_script_through_turborepo_with_a_remote_cache_stays_as_it_is() {
     let plan = json_plan(r.hushrun(&fake));
     assert_eq!(wrapped(&plan), ["test", "lint"]);
     assert_eq!(plan["scripts"]["left"], json!([]), "{plan:#}");
+}
+
+// covers: C-15, C-35 (ADR 0071: init proposes the line Vitest's config needs, and writes none)
+#[test]
+fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files() {
+    let (_server, fake) = Fake::start(true);
+    let r = Repo::new(&[
+        ("package.json", PACKAGE),
+        ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        ("vitest.config.ts", "export default { test: {} }\n"),
+    ]);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let line = "vitest.config.ts: add `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`, so that hushrun can look at Vitest's test files for test (tests in hushrun.yaml)";
+    assert!(
+        out.stdout.contains("Change by hand:") && out.stdout.contains(line),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(r.read("vitest.config.ts"), "export default { test: {} }\n");
+    // With the line there, or no check that looks at its test files, it proposes nothing.
+    r.write(
+        "vitest.config.ts",
+        "export default { plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())] }\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+    r.write("vitest.config.ts", "export default { test: {} }\n");
+    r.write(
+        "hushrun.yaml",
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: off\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+}
+
+/// \[C-38\] What init says a GitHub job needs, for a backend that keeps no hints.
+const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.v1.sqlite`";
+
+/// A shop whose `test` check reuses test files.
+fn shop_with_tests() -> Repo {
+    Repo::new(&[
+        ("package.json", PACKAGE),
+        ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        (".github/workflows/ci.yml", WORKFLOW),
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+    ])
+}
+
+fn asked_for_hints(fake: &Fake) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|(_, path)| path == "/o/acme/v0/units/hints/lookup")
+        .count()
+}
+
+// covers: C-15, C-38 (ADR 0075: CI's cache step, for a backend that keeps no hints)
+#[test]
+fn init_says_the_cache_step_ci_needs_when_the_backend_keeps_no_hints() {
+    let (_server, fake) = Fake::start(true);
+    let r = shop_with_tests();
+    r.sign_in(&fake);
+    let out = ran(r.hushrun(&fake), &["init", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(asked_for_hints(&fake), 1, "{:?}", fake.requests());
+    assert!(
+        out.stdout.contains("Change by hand:") && out.stdout.contains(CACHE_STEP_GITHUB),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("key: hushrun-units-${{ runner.os }}-${{ github.sha }}"),
+        "{}",
+        out.stdout
+    );
+    // A repository with GitHub workflows and no GitLab pipeline: GitHub's line only.
+    assert!(!out.stdout.contains("GitLab CI:"), "{}", out.stdout);
+    // init edits no CI file for it.
+    assert!(!r.read(".github/workflows/ci.yml").contains("actions/cache"));
+    // Set up already, it says so again, as it reads the backend once more.
+    let out = ran(r.hushrun(&fake), &["init", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains(CACHE_STEP_GITHUB), "{}", out.stdout);
+}
+
+// covers: C-15, C-38
+#[test]
+fn init_says_no_cache_step_where_the_backend_keeps_hints_nor_with_local_or_a_dry_run() {
+    // The backend keeps hints: the step would carry what it gives already.
+    let (_server, fake) = Fake::start(true);
+    fake.hints.store(true, Ordering::SeqCst);
+    let r = shop_with_tests();
+    r.sign_in(&fake);
+    let out = ran(r.hushrun(&fake), &["init", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(asked_for_hints(&fake), 1, "{:?}", fake.requests());
+    assert!(!out.stdout.contains("actions/cache"), "{}", out.stdout);
+
+    // --local: CI keeps no results, so the step would spare nothing; nothing is asked.
+    let (_server, fake) = Fake::start(true);
+    let r = shop_with_tests();
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--yes", "--no-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(fake.requests(), []);
+    assert!(!out.stdout.contains("actions/cache"), "{}", out.stdout);
+
+    // --dry-run sends nothing, and says nothing of the step.
+    let (_server, fake) = Fake::start(true);
+    let r = shop_with_tests();
+    r.sign_in(&fake);
+    let out = ran(r.hushrun(&fake), &["init", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}\n{}", out.stdout, out.stderr);
+    assert_eq!(asked_for_hints(&fake), 0, "{:?}", fake.requests());
+    assert!(!out.stdout.contains("actions/cache"), "{}", out.stdout);
 }

@@ -71,7 +71,19 @@
           "propertyNames": {"$ref": "#/$defs/name"},
           "additionalProperties": {"$ref": "#/$defs/count"}
         },
-        "savedMs": {"description": "The time the skips saved: the sum of their savedMs (C-10).", "$ref": "#/$defs/count"}
+        "savedMs": {"description": "The time the skips saved: the sum of their savedMs (C-10).", "$ref": "#/$defs/count"},
+        "testFiles": {
+          "description": "[ADR 0074] What the runs whose check looks at its test files said of them (C-10's units), when any did: how many runs, test files they ran and reused, and the time reusing saved, the sum of their units.savedMs.",
+          "type": "object",
+          "required": ["runs", "ran", "reused", "savedMs"],
+          "additionalProperties": false,
+          "properties": {
+            "runs": {"$ref": "#/$defs/count"},
+            "ran": {"$ref": "#/$defs/count"},
+            "reused": {"$ref": "#/$defs/count"},
+            "savedMs": {"$ref": "#/$defs/count"}
+          }
+        }
       }
     }
   }

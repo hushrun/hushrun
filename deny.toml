@@ -47,8 +47,9 @@ wildcards = "deny"
 # Workspace crates refer to each other by path; they are never published.
 allow-wildcard-paths = true
 highlight = "all"
-# The only C code allowed is the TLS crypto provider (ring) and the allocator (mimalloc).
-# Anything else needs an ADR first (plan §0.2).
+# The only C code allowed is the TLS crypto provider (ring), the allocator (mimalloc) and, by
+# ADR 0072, SQLite's amalgamation (libsqlite3-sys, bundled) for the local store of what test files
+# read. Anything else needs an ADR first (plan §0.2).
 deny = [
   { crate = "openssl-sys", reason = "C code; use rustls with ring" },
   { crate = "openssl", reason = "C code; use rustls with ring" },

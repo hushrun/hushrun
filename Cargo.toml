@@ -51,6 +51,10 @@ mimalloc = { version = "0.1.48", default-features = false }
 # Test and coverage reports (C-27), read as a stream: no DTD, no entity expansion.
 quick-xml = { version = "0.42", default-features = false }
 rayon = "1.10"
+# \[ADR 0072\] This machine's store of what test files read, for `hushrun why` and the plan: SQLite,
+# built from its amalgamation (bundled), so every release target has the same SQLite and no
+# system library is needed. The second C code after ring and mimalloc, by that ADR.
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 regex-automata = "0.4.9"
 # Release versions, for `hushrun update` and the newer-release notice (ADR 0035). The binary
 # already built it, as a build dependency of curve25519-dalek.
@@ -70,6 +74,9 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["env-filter", "fmt", "ansi", "std"] }
 unicode-normalization = "0.1.24"
 zeroize = "1.8"
+# \[C-38\] A hint's bytes are a zlib stream: pure Rust, which the binary already builds for gix
+# (gix-zlib), so the release targets gain no crate and no C code.
+zlib-rs = { version = "0.6.8", default-features = false, features = ["std"] }
 
 # HTTP ledgers (M18): reqwest and rustls without a crypto provider. hushrun installs ring's
 # (plan §12.3), so no aws-lc C code is built.

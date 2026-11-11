@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8).
+"""Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8), of the
+unit key (C-31), and of hints (C-38): their key, tokens, address, content id and reader.
 
 Written from docs/spec/04-source-digest.md, not from the Rust code, so the two can check each
 other on the golden vectors. Standard library only; Python 3.9 or later.
@@ -9,6 +10,10 @@ Usage:
   refdigest.py dir  PATH                     [SCOPE OPTIONS] [--manifest-out FILE]
   refdigest.py vectors FILE [--update]   check (or rewrite) the expected digests of every vector
   refdigest.py globs FILE                check every case of a glob vector file
+  refdigest.py unit-keys FILE            check every unit key vector (C-31)
+  refdigest.py unit-hints FILE [--corpus DIR]
+                                         check every hint vector (C-38); with --corpus, also write
+                                         each vector's bytes and content there, for the fuzzer
 
 Scope options (one scope; the default includes everything):
   --include PATTERN    repeatable; default "**"
@@ -21,12 +26,14 @@ The digest is printed as sha256:<hex>. Errors print their code (E_EMPTY_SCOPE, .
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unicodedata
+import zlib
 
 CANONICALIZATION = "hushrun-source-v1"
 VCS_METADATA = {".git", ".hg", ".svn", ".bzr", "_darcs"}
@@ -519,6 +526,319 @@ def check_globs(path):
     return failures
 
 
+# --- Unit keys (C-31) -------------------------------------------------------------------------
+
+UNIT_KEY_SCHEMA = "hushrun.unit-key/v0"
+
+
+def files_digest(paths, files):
+    """Source digest of those of paths that files ({path: (kind, content bytes)}) holds. Unlike a
+    scope's, it may be of no file: an empty set digests the header line alone (C-31)."""
+    chosen = sorted((p.encode("utf-8"), files[p][0], files[p][1]) for p in set(paths) if p in files)
+    out = bytearray(CANONICALIZATION.encode() + b"\n")
+    for path, kind, content in chosen:
+        out += kind.encode() + b" " + sha256_hex(content).encode() + b" " + path + b"\0"
+    return digest(bytes(out))
+
+
+def shape_digest(paths):
+    """SHA-256 of the sources set's paths: each path's UTF-8 bytes and a NUL, sorted by bytes."""
+    data = b"".join(p + b"\0" for p in sorted({p.encode("utf-8") for p in paths}))
+    return "sha256:" + sha256_hex(data)
+
+
+def jcs(value):
+    """RFC 8785 for what a unit key holds: strings, lists and objects, no numbers."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def evaluate_unit_key(vector):
+    files = {f["path"]: (f["kind"], f["text"].encode("utf-8")) for f in vector["files"]}
+    keyed = [p for p in vector["reads"] if p in set(vector["units"]) | set(vector["sources"])]
+    reads = files_digest(keyed, files)
+    rest = files_digest(vector["rest"], files)
+    shape = shape_digest(vector["sources"])
+    base = vector["base"]
+    key = {"schema": UNIT_KEY_SCHEMA, "check": base["check"], "command": base["command"],
+           "cwd": base["cwd"], "scope": base["scope"], "unit": vector["unit"],
+           "reads": reads, "rest": rest, "shape": shape}
+    for optional in ("external", "counts_from"):
+        if optional in base:
+            key[optional] = base[optional]
+    return {"reads": reads, "rest": rest, "shape": shape, "key": "sha256:" + sha256_hex(jcs(key))}
+
+
+def check_unit_keys(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    failures = 0
+    for vector in data["vectors"]:
+        got = evaluate_unit_key(vector)
+        if got != vector["expect"]:
+            print("FAIL %s: got %s, expected %s" % (vector["name"], got, vector["expect"]))
+            failures += 1
+        else:
+            print("ok   %s" % vector["name"])
+    return failures
+
+
+# --- Hints (C-38) -----------------------------------------------------------------------------
+
+HINT_SCHEMA = b"hushrun.unit-hints/v0\n"
+HINT_KEY_DOMAIN = b"hushrun.unit-hints-key/v0"
+HINT_ADDRESS_SCHEMA = "hushrun.unit-hints-address/v0"
+HINT_MOST_BYTES = 2 * 1024 * 1024
+HINT_MOST_CONTENT = 16 * 1024 * 1024
+HINT_MOST_UNITS = 5000
+HINT_MOST_TOKENS = 1000000
+HINT_MOST_ENTRIES = 2000000
+
+
+class Unread(Exception):
+    pass
+
+
+def shape_bytes(paths):
+    """What shape hashes: each source path's UTF-8 bytes and a NUL, sorted by bytes, each once."""
+    return b"".join(p + b"\0" for p in sorted({p.encode("utf-8") for p in paths}))
+
+
+def hint_key(sources):
+    """HMAC-SHA-256 under the key domain of the bytes shape hashes, not of the shape digest."""
+    return hmac.new(HINT_KEY_DOMAIN, shape_bytes(sources), hashlib.sha256).digest()
+
+
+def hint_token(key, path):
+    return hmac.new(key, path.encode("utf-8"), hashlib.sha256).digest()[:16]
+
+
+def hint_address(check_id, shape):
+    """SHA-256 of the JCS form of {schema, check, shape}, both written sha256:<hex>."""
+    return "sha256:" + sha256_hex(jcs({"schema": HINT_ADDRESS_SCHEMA, "check": check_id, "shape": shape}))
+
+
+def hint_content(hint, key):
+    """The canonical content of a hint ({adapter, units: {path: {reads, dirs}}, unitFiles})."""
+    def tokens_of(paths):
+        return {hint_token(key, p) for p in paths}
+
+    # Each unit by its own token; of two with one token, the first by path stays.
+    kept = {}
+    for own in sorted(hint["units"], key=lambda p: p.encode("utf-8")):
+        unit = hint["units"][own]
+        kept.setdefault(hint_token(key, own), (tokens_of(unit["reads"]), tokens_of(unit["dirs"])))
+    unit_files = tokens_of(hint["unitFiles"])
+    table = set(unit_files)
+    for own, (reads, dirs) in kept.items():
+        table |= {own} | reads | dirs
+    tokens = sorted(table)
+    index = {t: i for i, t in enumerate(tokens)}
+
+    def indices(items):
+        return sorted(index[t] for t in items)
+
+    units = {index[own]: (indices(reads), indices(dirs)) for own, (reads, dirs) in kept.items()}
+
+    def u32(n):
+        return n.to_bytes(4, "big")
+
+    def lst(items):
+        return u32(len(items)) + b"".join(u32(i) for i in items)
+
+    word = hint["adapter"].encode("ascii")
+    out = bytearray(HINT_SCHEMA + bytes([len(word)]) + word + u32(len(tokens)) + b"".join(tokens))
+    out += lst(indices(unit_files))
+    out += u32(len(units))
+    for own in sorted(units):
+        reads, dirs = units[own]
+        out += u32(own) + lst(reads) + lst(dirs)
+    return bytes(out)
+
+
+def hint_inflate(data):
+    """One zlib stream, nothing after it, inflating to at most HINT_MOST_CONTENT bytes."""
+    if len(data) > HINT_MOST_BYTES:
+        raise Unread("too large")
+    if not data:
+        raise Unread("empty")
+    inflater = zlib.decompressobj(15)
+    try:
+        out = inflater.decompress(data, HINT_MOST_CONTENT + 1)
+    except zlib.error as err:
+        raise Unread("not a zlib stream: %s" % err)
+    if len(out) > HINT_MOST_CONTENT:
+        raise Unread("inflates too large")
+    if not inflater.eof:
+        raise Unread("truncated")
+    if inflater.unused_data or inflater.unconsumed_tail:
+        raise Unread("trailing bytes")
+    return out
+
+
+def hint_parse(content):
+    """The content's structure: (adapter, tokens, unit files, [(own, reads, dirs)])."""
+    if len(content) > HINT_MOST_CONTENT:
+        raise Unread("inflates too large")
+    pos = [0]
+
+    def take(n):
+        if pos[0] + n > len(content):
+            raise Unread("truncated")
+        chunk = content[pos[0]:pos[0] + n]
+        pos[0] += n
+        return chunk
+
+    def u32():
+        return int.from_bytes(take(4), "big")
+
+    def count(most, each):
+        n = u32()
+        if n > most:
+            raise Unread("too many")
+        if n * each > len(content) - pos[0]:
+            raise Unread("truncated")
+        return n
+
+    if content[:len(HINT_SCHEMA)] != HINT_SCHEMA:
+        raise Unread("schema")
+    take(len(HINT_SCHEMA))
+    word = take(take(1)[0])
+    if not 1 <= len(word) <= 32 or any(chr(b) not in "abcdefghijklmnopqrstuvwxyz0123456789-" for b in word):
+        raise Unread("adapter")
+    tokens = [take(16) for _ in range(count(HINT_MOST_TOKENS, 16))]
+    if any(a >= b for a, b in zip(tokens, tokens[1:])):
+        raise Unread("tokens out of order")
+    used = set()
+    entries = [0]
+
+    def index():
+        i = u32()
+        if i >= len(tokens):
+            raise Unread("index past the tokens")
+        used.add(i)
+        return i
+
+    def lst(most):
+        n = count(most, 4)
+        entries[0] += n
+        if entries[0] > HINT_MOST_ENTRIES:
+            raise Unread("too many entries")
+        items = [index() for _ in range(n)]
+        if any(a >= b for a, b in zip(items, items[1:])):
+            raise Unread("indices out of order")
+        return items
+
+    unit_files = lst(HINT_MOST_UNITS)
+    units = []
+    for _ in range(count(HINT_MOST_UNITS, 12)):
+        own = index()
+        if units and units[-1][0] >= own:
+            raise Unread("units out of order")
+        units.append((own, lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS)))
+    if pos[0] != len(content):
+        raise Unread("bytes after its end")
+    if len(used) != len(tokens):
+        raise Unread("a token no index names")
+    return word.decode("ascii"), tokens, unit_files, units
+
+
+def hint_read(data, key, scope, inflated=False):
+    """The hint data holds, tokens matched against scope's files and the directories holding them
+    ("" and "." the root); a unit any token of which matches nothing, or two paths, is dropped."""
+    content = data if inflated else hint_inflate(data)
+    adapter, tokens, unit_files, units = hint_parse(content)
+    candidates = [(p, "file") for p in scope]
+    dirs = {"", "."}
+    for p in scope:
+        raw = p.encode("utf-8")
+        dirs.update(raw[:i].decode("utf-8") for i, b in enumerate(raw) if b == ord("/"))
+    candidates += [(d, "dir") for d in dirs]
+    found = {}
+    position = {t: i for i, t in enumerate(tokens)}
+    for path, kind in candidates:
+        i = position.get(hint_token(key, path))
+        if i is None:
+            continue
+        if found.get(i, (path, kind)) != (path, kind):
+            found[i] = (None, "two")
+        else:
+            found[i] = (path, kind)
+
+    def match(i, kinds):
+        path, kind = found.get(i, (None, None))
+        return path if kind in kinds else None
+
+    read_units = {}
+    for own, reads, dirs_ in units:
+        own_path = match(own, ("file", "dir"))
+        read_paths = [match(i, ("file",)) for i in reads]
+        dir_paths = [match(i, ("dir",)) for i in dirs_]
+        if own_path is None or None in read_paths or None in dir_paths:
+            continue
+        read_units[own_path] = {"reads": sorted(read_paths), "dirs": sorted(dir_paths)}
+    files = sorted(p for p in (match(i, ("file",)) for i in unit_files) if p is not None)
+    return {"hint": {"adapter": adapter, "units": read_units, "unitFiles": files},
+            "contentId": "sha256:" + sha256_hex(content), "dropped": len(units) - len(read_units)}
+
+
+def normalized_hint(hint):
+    return {"adapter": hint["adapter"],
+            "units": {p: {"reads": sorted(u["reads"]), "dirs": sorted(u["dirs"])} for p, u in hint["units"].items()},
+            "unitFiles": sorted(hint["unitFiles"])}
+
+
+def check_unit_hints(path, corpus=None):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    failures = 0
+    if corpus:
+        os.makedirs(corpus, exist_ok=True)
+    for vector in data["vectors"]:
+        name, expect = vector["name"], vector["expect"]
+        key = hint_key(vector["sources"])
+        shape = shape_digest(vector["sources"])
+        content = hint_content(vector["hint"], key)
+        raw = base64.b64decode(vector["bytes"])
+        got = {
+            "key": key.hex(),
+            "shape": shape,
+            "address": hint_address(vector["checkId"], shape),
+            "tokens": {p: hint_token(key, p).hex() for p in expect["tokens"]},
+            "content": content.hex(),
+            "contentId": "sha256:" + sha256_hex(content),
+        }
+        want = {k: expect[k] for k in got}
+        try:
+            read = hint_read(raw, key, vector["scope"])
+            got["read"], got["dropped"] = read["hint"], read["dropped"]
+            got["readContentId"] = read["contentId"]
+            got["inflated"] = hint_inflate(raw) == content
+        except Unread as err:
+            got["read"] = "unread: %s" % err
+        want.update(read=normalized_hint(expect["read"]), dropped=expect["dropped"],
+                    readContentId=expect["contentId"], inflated=True)
+        if got != want:
+            print("FAIL %s: got %s, expected %s" % (name, got, want))
+            failures += 1
+        else:
+            print("ok   %s" % name)
+        if corpus:
+            with open(os.path.join(corpus, "vector-%s.zlib" % name), "wb") as f:
+                f.write(raw)
+            with open(os.path.join(corpus, "vector-%s.content" % name), "wb") as f:
+                f.write(content)
+    for vector in data["unread"]:
+        name = vector["name"]
+        raw = base64.b64decode(vector["bytes"])
+        try:
+            hint_read(raw, hint_key(vector["sources"]), vector["scope"])
+            print("FAIL %s: read, expected unread" % name)
+            failures += 1
+        except Unread as err:
+            print("ok   %s (unread: %s)" % (name, err))
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -538,12 +858,21 @@ def main():
     p.add_argument("--update", action="store_true")
     p = sub.add_parser("globs")
     p.add_argument("file")
+    p = sub.add_parser("unit-keys")
+    p.add_argument("file")
+    p = sub.add_parser("unit-hints")
+    p.add_argument("file")
+    p.add_argument("--corpus")
     args = parser.parse_args()
 
     if args.command == "vectors":
         return 1 if check_vectors(args.file, args.update) else 0
     if args.command == "globs":
         return 1 if check_globs(args.file) else 0
+    if args.command == "unit-keys":
+        return 1 if check_unit_keys(args.file) else 0
+    if args.command == "unit-hints":
+        return 1 if check_unit_hints(args.file, args.corpus) else 0
     try:
         scope = Scope(args.include, args.exclude, args.global_exclude)
         entries = git_entries(args.repo, args.rev) if args.command == "git" else dir_entries(args.path)

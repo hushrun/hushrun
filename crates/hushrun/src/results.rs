@@ -364,6 +364,14 @@ pub struct RunResult {
     /// and of a skip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_anyway: Option<String>,
+    /// \[ADR 0068\] A run's test files, when its check's `tests` isn't off (C-10, C-33): how many
+    /// it had, ran and reused, and \[ADR 0069\] why none was reused when something stopped it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "unit_counts"
+    )]
+    pub units: Option<crate::units::Counts>,
 }
 
 /// Why a run ran although a pass of its key would have skipped it (`ranAnyway`): what the
@@ -422,6 +430,14 @@ fn variant<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<V
 fn summary<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<hushrun_reports::Reports>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// A result's `units`, or none when they don't read, as another client's might not.
+fn unit_counts<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::units::Counts>, D::Error> {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
@@ -508,6 +524,9 @@ struct Server {
     reads_as: Option<String>,
     /// Whether such a lookup was answered.
     answered: Cell<bool>,
+    /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
+    /// this run asks nothing more of them, and says so once.
+    keeps_no_hints: Cell<bool>,
 }
 
 /// Who signs the results a server records (ADR 0028).
@@ -864,6 +883,7 @@ impl Backend {
                 in_ci,
                 reads_as,
                 answered: Cell::new(false),
+                keeps_no_hints: Cell::new(false),
             })),
         })
     }
@@ -1153,6 +1173,7 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
+                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10).
                 let body = serde_json::to_vec(result)?;
                 // ADR 0028: a person's or an agent's result carries this machine's signature,
                 // and without a key to sign with it isn't sent.
@@ -1185,7 +1206,226 @@ impl Backend {
     }
 }
 
+/// \[ADR 0069\] What a server answered one of the requests about a check's test files (results-v0
+/// §3).
+#[derive(Debug)]
+pub enum UnitsCall {
+    /// 200, and its body.
+    Answered(serde_json::Value),
+    /// 409, and its body: a stale write, with what the state is now.
+    Conflict(serde_json::Value),
+    /// 404 or 405: a server from before test files' results.
+    Unsupported,
+    /// Anything else but a server's failure (5xx, 429), which is an error, in the server's words.
+    Refused(String),
+}
+
+impl Backend {
+    /// \[ADR 0069\] `POST {base}/v0/units/<what>` with `body`: the batch lookup (`lookup`), or a
+    /// check's reuse state (`reuse`). A directory, or a server asked with no credential, answers
+    /// nothing (an error); a server that can't be reached is an error too.
+    pub fn units_request(&self, what: &str, body: &serde_json::Value) -> anyhow::Result<UnitsCall> {
+        let Store::Server(server) = &self.store else {
+            return Err(anyhow!("this machine's directory has no server to ask"));
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: {NO_ID_TOKEN}", server.base));
+        }
+        let bytes = serde_json::to_vec(body)?;
+        let (status, answer) = server
+            .ledger
+            .json_request_page("POST", &format!("v0/units/{what}"), Some(&bytes), None)
+            .map_err(plain)?;
+        // \[ADR 0069\] A server that fails, or asks to be asked later, after L-4's retries: it
+        // wasn't reached, so a suspension waits in the outbox rather than being dropped.
+        if status == 429 || (500..600).contains(&status) {
+            return Err(anyhow!(
+                "{}: {}",
+                server.base,
+                error_message(&answer).unwrap_or_else(|| format!("answered {status}"))
+            ));
+        }
+        Ok(match status {
+            200 => UnitsCall::Answered(
+                serde_json::from_slice(&answer)
+                    .map_err(|e| anyhow!("{}: the answer isn't JSON: {e}", server.base))?,
+            ),
+            409 => UnitsCall::Conflict(serde_json::from_slice(&answer).unwrap_or_default()),
+            404 | 405 => UnitsCall::Unsupported,
+            _ => UnitsCall::Refused(
+                error_message(&answer)
+                    .unwrap_or_else(|| format!("{} answered {status}", server.base)),
+            ),
+        })
+    }
+
+    /// \[ADR 0069\] Whether results go to a server, where a run's test files go with it in one
+    /// request ([`Backend::record_with_units`]), rather than this machine's directory.
+    pub fn is_server(&self) -> bool {
+        matches!(self.store, Store::Server(_))
+    }
+
+    /// \[ADR 0069\] Records `result` under `key` with `units`, the results of the test files that
+    /// ran, in one request to a server: `POST {base}/v0/runs/{key}` (results-v0 §3), signed as a
+    /// result is. A server from before it (404, 405) records the result alone, as
+    /// [`Backend::record`] does, and keeps no test file: `Ok(false)`. A directory records the
+    /// result; the caller keeps the units beside it.
+    pub fn record_with_units(
+        &self,
+        key: &Digest,
+        result: &RunResult,
+        units: &[crate::units::store::UnitRecord],
+    ) -> anyhow::Result<bool> {
+        let server = match &self.store {
+            Store::Server(server) if !units.is_empty() => server,
+            _ => return self.record(key, result).map(|()| true),
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
+        }
+        // Keys as the protocol has them: 64 lowercase hex characters.
+        let units: Vec<serde_json::Value> = units
+            .iter()
+            .map(|unit| {
+                json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+            })
+            .collect();
+        let body = serde_json::to_vec(&json!({
+            "schema": RUN_UNITS_SCHEMA,
+            "result": result,
+            "units": units,
+        }))?;
+        let machine = server.machine().map_err(|why| {
+            *server.refusal.borrow_mut() = Some(Refusal::Machine(why.clone()));
+            anyhow!("{}: not recorded: {why}", server.base)
+        })?;
+        let signature = machine.map(|machine| {
+            (
+                "Hushrun-Signature",
+                machine.result_signature(&key.hex(), &body),
+            )
+        });
+        let (status, answer) = server
+            .ledger
+            .json_request_with(
+                "POST",
+                &format!("v0/runs/{}", key.hex()),
+                Some(&body),
+                signature,
+            )
+            .map_err(plain)?;
+        if status == 404 || status == 405 {
+            return self.record(key, result).map(|()| false);
+        }
+        if !(200..300).contains(&status) {
+            let err = server.refused(status, &answer, "recording the result");
+            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                ));
+            }
+            return Err(err);
+        }
+        Ok(true)
+    }
+}
+
+/// \[ADR 0069\] The schema of a run's result with its test files' results (results-v0 §3).
+pub const RUN_UNITS_SCHEMA: &str = "hushrun.run-units/v0";
+
+/// \[C-38\] The most bytes a lookup of hints answers: 3 hints of 2 MiB each, in base64, and room.
+const MOST_HINTS_ANSWER: usize = 12 << 20;
+
+impl Backend {
+    /// \[C-38\] `POST {base}/v0/units/hints/lookup` with `body` (results-v0, Hints): the newest
+    /// hints at a place. A directory, a server asked with no credential, or one that can't be
+    /// reached is an error; one that said it keeps no hints this run isn't asked again.
+    pub fn hints_lookup(&self, body: &serde_json::Value) -> anyhow::Result<UnitsCall> {
+        let server = self.hint_server()?;
+        if server.keeps_no_hints.get() {
+            return Ok(UnitsCall::Unsupported);
+        }
+        let bytes = serde_json::to_vec(body)?;
+        let (status, answer) = server
+            .ledger
+            .json_request_sized(
+                "POST",
+                "v0/units/hints/lookup",
+                Some(&bytes),
+                MOST_HINTS_ANSWER,
+            )
+            .map_err(plain)?;
+        server.hints_answer(status, &answer)
+    }
+
+    /// \[C-38\] `PUT {base}/v0/units/hints/{sha256}?repository=&checkId=&address=&os=` with a
+    /// hint's bytes, `query` its four values (results-v0, Hints). Never signed: a hint is never
+    /// trusted.
+    pub fn hint_put(
+        &self,
+        sha256: &Digest,
+        query: &[(&str, String)],
+        bytes: &[u8],
+    ) -> anyhow::Result<UnitsCall> {
+        let server = self.hint_server()?;
+        if server.keeps_no_hints.get() {
+            return Ok(UnitsCall::Unsupported);
+        }
+        let query = query
+            .iter()
+            .map(|(name, value)| format!("{name}={}", query_value(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let (status, answer) = server
+            .ledger
+            .put_bytes(&format!("v0/units/hints/{}", sha256.hex()), &query, bytes)
+            .map_err(plain)?;
+        server.hints_answer(status, &answer)
+    }
+
+    /// \[C-38\] Whether the server said, this run, that it keeps no hints: what the run says once.
+    pub fn keeps_no_hints(&self) -> bool {
+        matches!(&self.store, Store::Server(server) if server.keeps_no_hints.get())
+    }
+
+    /// The server hints are asked of, which has a credential to ask with.
+    fn hint_server(&self) -> anyhow::Result<&Server> {
+        let Store::Server(server) = &self.store else {
+            return Err(anyhow!("this machine's directory has no server to ask"));
+        };
+        if server.reads_as.is_some() {
+            return Err(anyhow!("{}: {NO_ID_TOKEN}", server.base));
+        }
+        Ok(server)
+    }
+}
+
 impl Server {
+    /// \[C-38\] What an answer to a request about hints is: as [`Backend::units_request`]'s, and
+    /// 404 or 405 marks the server as keeping none, for the rest of the run.
+    fn hints_answer(&self, status: u16, answer: &[u8]) -> anyhow::Result<UnitsCall> {
+        if status == 429 || (500..600).contains(&status) {
+            return Err(anyhow!(
+                "{}: {}",
+                self.base,
+                error_message(answer).unwrap_or_else(|| format!("answered {status}"))
+            ));
+        }
+        Ok(match status {
+            200 | 201 => UnitsCall::Answered(
+                serde_json::from_slice(answer)
+                    .map_err(|e| anyhow!("{}: the answer isn't JSON: {e}", self.base))?,
+            ),
+            404 | 405 => {
+                self.keeps_no_hints.set(true);
+                UnitsCall::Unsupported
+            }
+            _ => UnitsCall::Refused(
+                error_message(answer).unwrap_or_else(|| format!("{} answered {status}", self.base)),
+            ),
+        })
+    }
+
     /// \[ADR 0067\] Whether nothing here could be sent with its requests: no token goes there,
     /// none is withheld from it, no login and no ID token, and it asks as no repository's CI.
     fn signed_out(&self) -> bool {
@@ -1381,7 +1621,13 @@ fn sweep(dir: &Path, now: Time) {
     }
     let cutoff = now.millis().saturating_sub(KEPT_FOR_MS);
     let mut gone = 0usize;
-    for prefix in [PREFIX, SKIP_PREFIX] {
+    // \[ADR 0068\] Unit results, and the runs they went with, are this machine's too (C-33).
+    for prefix in [
+        PREFIX,
+        SKIP_PREFIX,
+        crate::units::store::ENTRIES,
+        crate::units::store::RUNS,
+    ] {
         let top = dir.join(prefix);
         let Ok(keys) = std::fs::read_dir(&top) else {
             continue;
@@ -1502,6 +1748,7 @@ mod tests {
             environment: None,
             reports: None,
             ran_anyway: None,
+            units: None,
         }
     }
 

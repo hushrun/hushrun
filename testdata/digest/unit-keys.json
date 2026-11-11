@@ -1,0 +1,267 @@
+{
+  "version": 1,
+  "description": "Unit key vectors (C-31). Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
+  "vectors": [
+    {
+      "name": "pytest-unit",
+      "covers": [
+        "C-31"
+      ],
+      "description": "A test file that read one module and its package; a lockfile in the rest set.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "pytest"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "tests/test_cart.py",
+      "files": [
+        {
+          "path": "shop/__init__.py",
+          "kind": "f",
+          "text": ""
+        },
+        {
+          "path": "shop/cart.py",
+          "kind": "f",
+          "text": "from shop.pricing import price\n"
+        },
+        {
+          "path": "shop/pricing.py",
+          "kind": "f",
+          "text": "def price():\n    return 3\n"
+        },
+        {
+          "path": "tests/test_cart.py",
+          "kind": "f",
+          "text": "from shop import cart\n"
+        },
+        {
+          "path": "uv.lock",
+          "kind": "f",
+          "text": "version = 1\n"
+        }
+      ],
+      "units": [
+        "tests/test_cart.py"
+      ],
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py"
+      ],
+      "rest": [
+        "uv.lock"
+      ],
+      "reads": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/test_cart.py"
+      ],
+      "expect": {
+        "reads": "sha256:f9ff6a0b6c0010a2e5de57c58f0b4486a0860ceaaf568ad9b7d5e484b9bb7f55",
+        "rest": "sha256:0e5dd440aedb46c67c94ada9bb16a1ab071611b9d309798387b00287cafcecbc",
+        "shape": "sha256:bc9bfee412d783a547d7a117a5c8f0c6ca2bf2a10a75ed71ee934f07149dc8e5",
+        "key": "sha256:e1356f6ee33ab0c42b7c0b0df486822f5d96fc46a341f8f7f9ee9fd21c959f1c"
+      }
+    },
+    {
+      "name": "empty-rest",
+      "covers": [
+        "C-31"
+      ],
+      "description": "No file in the rest set: rest digests the manifest's header line alone.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "python",
+          "-m",
+          "pytest",
+          "-q"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "test_one.py",
+      "files": [
+        {
+          "path": "lib.py",
+          "kind": "f",
+          "text": "X = 1\n"
+        },
+        {
+          "path": "test_one.py",
+          "kind": "f",
+          "text": "import lib\n"
+        }
+      ],
+      "units": [
+        "test_one.py"
+      ],
+      "sources": [
+        "lib.py"
+      ],
+      "rest": [],
+      "reads": [
+        "lib.py",
+        "test_one.py"
+      ],
+      "expect": {
+        "reads": "sha256:a7dbdb8fdafc7428af090e1df8e96c2d08abfca7043b03f93b4d676c2d8b86bd",
+        "rest": "sha256:0bc5283b0122b17c7afdfc307dd1ff1f27206b60b07097e1652bfa3e5b008a2d",
+        "shape": "sha256:cfe421a3d4036c4e5e1138501214553ce85b794b68185f8da1e83c15f62544cf",
+        "key": "sha256:52bff2276d5a818f6ad98fa5e981321d9453564720146ff429765a63396d2769"
+      }
+    },
+    {
+      "name": "rust-binary-with-external-and-rule",
+      "covers": [
+        "C-31"
+      ],
+      "description": "A Rust test binary in a subdirectory, with the run key's external and counts_from; an executable file in the rest set.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "cli",
+        "scope": "cli",
+        "external": [
+          {
+            "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "path": "../shared"
+          }
+        ],
+        "counts_from": {
+          "os": [
+            "linux"
+          ],
+          "rust": [
+            "1.94"
+          ]
+        }
+      },
+      "unit": "cli/crates/app/tests/runs_binary.rs",
+      "files": [
+        {
+          "path": "cli/Cargo.lock",
+          "kind": "f",
+          "text": "# lock\n"
+        },
+        {
+          "path": "cli/crates/app/src/main.rs",
+          "kind": "f",
+          "text": "fn main() {}\n"
+        },
+        {
+          "path": "cli/crates/app/tests/runs_binary.rs",
+          "kind": "f",
+          "text": "#[test]\nfn t() {}\n"
+        },
+        {
+          "path": "cli/crates/core/src/lib.rs",
+          "kind": "f",
+          "text": "pub fn a() {}\n"
+        },
+        {
+          "path": "cli/run.sh",
+          "kind": "x",
+          "text": "#!/bin/sh\n"
+        },
+        {
+          "path": "cli/testdata/x.rs",
+          "kind": "f",
+          "text": "// data\n"
+        }
+      ],
+      "units": [
+        "cli/crates/app/src/main.rs",
+        "cli/crates/app/tests/runs_binary.rs",
+        "cli/crates/core/src/lib.rs"
+      ],
+      "sources": [],
+      "rest": [
+        "cli/Cargo.lock",
+        "cli/run.sh",
+        "cli/testdata/x.rs"
+      ],
+      "reads": [
+        "cli/crates/app/src/main.rs",
+        "cli/crates/app/tests/runs_binary.rs",
+        "cli/crates/core/src/lib.rs"
+      ],
+      "expect": {
+        "reads": "sha256:a8f9b22195375615e72f702c134395701bd23bed2fcd378cfea267fde931d693",
+        "rest": "sha256:aac6cc5bb09651cb2dc5d42693f91b347df27a078e626bc7d0fa4c7dc6d80d69",
+        "shape": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "key": "sha256:8d6b1e25a84f27f76282c0535e0981e73c39a5e75b4f618c108e663d76b10fa8"
+      }
+    },
+    {
+      "name": "non-ascii-paths",
+      "covers": [
+        "C-31"
+      ],
+      "description": "Paths sort by their UTF-8 bytes in reads and in shape: Z before a before é.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "pytest",
+          "tests/"
+        ],
+        "cwd": "app",
+        "scope": "default"
+      },
+      "unit": "tests/test_é.py",
+      "files": [
+        {
+          "path": "Z.py",
+          "kind": "f",
+          "text": "z = 1\n"
+        },
+        {
+          "path": "a.py",
+          "kind": "f",
+          "text": "a = 1\n"
+        },
+        {
+          "path": "tests/test_é.py",
+          "kind": "f",
+          "text": "import a, Z, é\n"
+        },
+        {
+          "path": "é.py",
+          "kind": "f",
+          "text": "e = 1\n"
+        }
+      ],
+      "units": [
+        "tests/test_é.py"
+      ],
+      "sources": [
+        "é.py",
+        "a.py",
+        "Z.py"
+      ],
+      "rest": [],
+      "reads": [
+        "tests/test_é.py",
+        "é.py",
+        "a.py",
+        "Z.py"
+      ],
+      "expect": {
+        "reads": "sha256:e0c2af0123ac06d1d7f3e9c4fdc50fd6bd0461aae2a80455f92293d494c90cde",
+        "rest": "sha256:0bc5283b0122b17c7afdfc307dd1ff1f27206b60b07097e1652bfa3e5b008a2d",
+        "shape": "sha256:7baf000fc1f953b9d78d7616b282046399188bbd46027c439e1c659101600e82",
+        "key": "sha256:46a344ecdd295e9179f9a514591c823a9d6ac3ccd91057cef4dba5e6d660f851"
+      }
+    }
+  ]
+}

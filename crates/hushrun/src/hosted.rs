@@ -769,6 +769,31 @@ pub fn repository_ledger(base: &str, ask: LedgerAsk<'_>) -> anyhow::Result<Ledge
     }
 }
 
+/// \[C-38\] Whether the org's backend at `base` keeps what machines saw test files read (hints),
+/// asked once with the saved login: `POST {base}/v0/units/hints/lookup` at a place no check has.
+/// `Some(false)` when it answers 404 or 405, a server from before them; `Some(true)` when it
+/// answers; `None` when it can't tell (unreachable, refused), and then init says nothing of them.
+pub fn keeps_hints(base: &str, repository: Option<&str>) -> Option<bool> {
+    let (client, _) = signed_client(base).ok()?;
+    let nowhere = "0".repeat(64);
+    let body = json!({
+        "repository": repository,
+        "checkId": nowhere,
+        "address": nowhere,
+        "os": hushrun_core::hints::Os::this().map_or("linux", hushrun_core::hints::Os::word),
+    });
+    let bytes = serde_json::to_vec(&body).ok()?;
+    let (status, _) = client
+        .json_request("POST", "v0/units/hints/lookup", Some(&bytes))
+        .map_err(|e| tracing::debug!("asking for hints: {e}"))
+        .ok()?;
+    match status {
+        200..=299 => Some(true),
+        404 | 405 => Some(false),
+        _ => None,
+    }
+}
+
 /// A client for `base` that carries the login saved for its origin.
 fn signed_client(base: &str) -> anyhow::Result<(HttpLedger, String)> {
     let url = LedgerUrl::parse(base.trim()).map_err(|e| anyhow!("{base}: {e}"))?;

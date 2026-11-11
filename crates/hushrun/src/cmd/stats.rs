@@ -165,6 +165,26 @@ struct Counted {
     result: Verdict,
     #[serde(default, rename = "savedMs")]
     saved_ms: Option<u64>,
+    /// \[ADR 0074\] What a run whose check looks at its test files said of them (C-10).
+    #[serde(default, deserialize_with = "unit_counts")]
+    units: Option<UnitCounts>,
+}
+
+/// A run's `units`, as far as counting goes.
+#[derive(Deserialize)]
+struct UnitCounts {
+    ran: u64,
+    reused: u64,
+    #[serde(default, rename = "savedMs")]
+    saved_ms: Option<u64>,
+}
+
+/// A result's `units`, or none when they don't read: a result is counted all the same.
+fn unit_counts<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<UnitCounts>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// This machine's results, counted by verdict, run key and check.
@@ -177,6 +197,12 @@ struct Results {
     keys: BTreeSet<String>,
     by_check: BTreeMap<String, u64>,
     saved_ms: u64,
+    /// \[ADR 0074\] Runs that said how many test files they ran and reused, those counts, and the
+    /// time reusing saved.
+    test_file_runs: u64,
+    test_files_ran: u64,
+    test_files_reused: u64,
+    reuse_saved_ms: u64,
 }
 
 impl Results {
@@ -189,6 +215,16 @@ impl Results {
                 self.skip += 1;
                 self.saved_ms = self.saved_ms.saturating_add(result.saved_ms.unwrap_or(0));
             }
+        }
+        if let Some(units) = &result.units
+            && result.result != Verdict::Skip
+        {
+            self.test_file_runs += 1;
+            self.test_files_ran = self.test_files_ran.saturating_add(units.ran);
+            self.test_files_reused = self.test_files_reused.saturating_add(units.reused);
+            self.reuse_saved_ms = self
+                .reuse_saved_ms
+                .saturating_add(units.saved_ms.unwrap_or(0));
         }
         self.keys.insert(key.to_string());
         *self.by_check.entry(result.check.clone()).or_default() += 1;
@@ -232,19 +268,32 @@ fn on_this_machine(app: &App<'_>, window: &Window) -> CmdResult {
     }
     let directory = dir.as_ref().map(|d| d.display().to_string());
     match app.global.format {
-        Format::Json => output::print_json(&json!({
-            "schema": SCHEMA,
-            "source": "local",
-            "directory": directory,
-            "since": window.since.to_string(),
-            "from": window.from,
-            "until": window.until,
-            "results": results.total,
-            "byVerdict": {"pass": results.pass, "fail": results.fail, "skip": results.skip},
-            "keys": results.keys.len(),
-            "byCheck": results.by_check,
-            "savedMs": results.saved_ms,
-        }))?,
+        Format::Json => {
+            let mut doc = json!({
+                "schema": SCHEMA,
+                "source": "local",
+                "directory": directory,
+                "since": window.since.to_string(),
+                "from": window.from,
+                "until": window.until,
+                "results": results.total,
+                "byVerdict": {"pass": results.pass, "fail": results.fail, "skip": results.skip},
+                "keys": results.keys.len(),
+                "byCheck": results.by_check,
+                "savedMs": results.saved_ms,
+            });
+            // \[ADR 0074\] Only where some run said: a repository that never looked at its test
+            // files sees nothing new.
+            if results.test_file_runs > 0 {
+                doc["testFiles"] = json!({
+                    "runs": results.test_file_runs,
+                    "ran": results.test_files_ran,
+                    "reused": results.test_files_reused,
+                    "savedMs": results.reuse_saved_ms,
+                });
+            }
+            output::print_json(&doc)?
+        }
         _ => {
             let place = match &directory {
                 Some(dir) => format!("in {dir}"),
@@ -272,6 +321,26 @@ fn on_this_machine(app: &App<'_>, window: &Window) -> CmdResult {
             line("run keys", results.keys.len().to_string());
             line("by check", listed(results.by_check.clone().into_iter()));
             line("saved by skips", crate::cmd::wrap::took(results.saved_ms));
+            if results.test_file_runs > 0 {
+                line(
+                    "test files",
+                    format!(
+                        "{} ran, {} reused, in {} {}",
+                        results.test_files_ran,
+                        results.test_files_reused,
+                        results.test_file_runs,
+                        if results.test_file_runs == 1 {
+                            "run"
+                        } else {
+                            "runs"
+                        }
+                    ),
+                );
+                line(
+                    "saved by reuse",
+                    crate::cmd::wrap::took(results.reuse_saved_ms),
+                );
+            }
             output::print(&text)?;
         }
     }

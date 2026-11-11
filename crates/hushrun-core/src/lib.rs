@@ -9,6 +9,7 @@ pub mod counts_from;
 pub mod digest;
 pub mod event;
 pub mod glob;
+pub mod hints;
 pub mod jcs;
 pub mod ledger_url;
 pub mod names;
@@ -19,6 +20,7 @@ pub mod scope;
 pub mod signers;
 pub mod time;
 pub mod transparency;
+pub mod units;
 pub mod yaml;
 
 pub use digest::Digest;

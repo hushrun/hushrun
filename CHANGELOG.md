@@ -6,6 +6,100 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Test by test ([ADR 0068](docs/adr/0068-test-files-observed.md) to
+[ADR 0074](docs/adr/0074-test-files-on-the-dashboard-and-milestone-4s-loose-ends.md)): inside a
+check that has to run, the test files that already passed on the files they read aren't run again.
+It is off unless a check asks for it, with `tests: observe` (every test file runs, and hushrun says
+what reuse would have done) or `tests: reuse`. Observed for pytest, Cargo (`cargo nextest`, `cargo
+test`), `go test` and Vitest; audited as it goes; and explained, one test file at a time, by
+`hushrun why`.
+
+### Added
+
+- Contract: **`checks.<name>.tests`** in `hushrun.yaml`: `off` (the default, as if absent),
+  `observe` or `reuse`, or `{mode, ignore, always}`. Not part of the check's definition: turning it
+  on keeps every key and every piece of evidence, and with it off nothing changes at all.
+- Contract: **`observe`**: every test file runs as before; hushrun records what each read and how it
+  ended, and says before its last line ``with `tests: reuse`, 12 of 340 test files would have run;
+  328 already passed on the files they read``, or which changed file would have run them all. A
+  test file that would have been reused and failed is said, and kept in the audit. Nothing changes
+  COMMAND's outcome or exit code.
+- Contract: **`reuse`**: before COMMAND, `hushrun: unit: 12 of 340 test files run; 328 already
+  passed on the files they read, and 7 more that did run as a check`, or why every test file runs;
+  the last line adds `; reusing 328 test files saved about 3m 05s`. A run that passed with reused
+  test files is a pass, and the same files skip the whole check next time. COMMAND stays byte for
+  byte as written.
+- Contract: **audit runs**: 2% of the test files that could be reused, at least one, run anyway. One
+  that fails runs once more: passing then, it may be flaky; failing again, the check's reuse is
+  suspended for the repository until a person runs **`hushrun tests resume NAME`**, which a coding
+  agent can't.
+- Contract: **the adapters**, each keeping COMMAND as written: pytest through a plugin hushrun loads
+  with `PYTHONPATH` and `PYTEST_ADDOPTS` (xdist included); Cargo through a target runner chained to
+  one the environment sets, and the build's dep-info; `go test` through `-exec` added to `GOFLAGS`,
+  `go list -deps -test` and Go's own test log, with Go's test cache off for the check; Vitest 4
+  through one line in the repository's Vitest config,
+  `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`,
+  which `hushrun init` proposes under "Change by hand" and never writes. A test file whose reads an
+  adapter can't follow (a process it started, a fork, native code, a `TestMain`, a worker thread, a
+  plugin hushrun doesn't know, …) is `not observed` and always runs. Any other COMMAND gets the
+  pytest adapter, which does nothing where pytest never starts, and says nothing of test files
+  until pytest has reported them.
+- Contract: **`hushrun why NAME UNIT [-- COMMAND]`**: what a run of the check would do with one test
+  file, for the files on disk now, and why, in one sentence: `tests/test_cart.py runs: it read
+  shop/pricing.py, which changed`, with the imports between them when the adapter saw them; or
+  that it would be reused (and that an audit may still run it), was never seen run here, wasn't
+  observed, is named by `tests.always`, failed last time, is suspended, or isn't a test file of the
+  check. It says when the answer is as far as this machine knows, writes nothing, and has
+  `--format json` (`hushrun.why/v1`).
+- Contract: **`hushrun ready`** and the pre-push hook add, for a check with `tests: reuse` it would
+  run, `unit: CI would run 12 of 340 test files; 328 already passed on the files they read` (with
+  results on this machine, what a run here would), or that its reuse is suspended: for pytest and
+  Vitest, whose plans read files, with one read-only batch lookup.
+- Contract: **`units`** in a run's result, wherever the result goes, a server included:
+  `{total, ran, reused}`, `ranAnyway` when nothing could be reused (`force`, `reports`,
+  `suspended`, …), and `savedMs`, the time the reused test files took when they last ran.
+  **`hushrun-results/v0`** gains `POST {base}/v0/runs/{key}` (a run with its test files' results,
+  by key, never a name or a path), `POST {base}/v0/units/lookup` and `POST {base}/v0/units/reuse`.
+  A server without them records the run alone, and nothing is reused, said once. A suspension that
+  can't reach the server waits on this machine, and nothing is reused until it gets there.
+- Contract: **`hushrun repository stats`** counts, beside what skips saved, the test files this
+  machine's runs ran and reused and the time reuse saved (`testFiles` in JSON).
+- Contract: **`HUSHRUN_UNITS`**, the directory where an adapter writes what it saw
+  (`hushrun.units/v0`, `hushrun.unit-facts/v0`): what to deselect, pytest's `pythonFiles`, the
+  reused binaries, Vitest's `testFiles`; per process, each test file's outcome, reads, listed
+  directories, and the direct edges between files it saw.
+- This machine's store of what test files read: one SQLite file per repository in the cache
+  directory, `units/<id>.v1.sqlite`, holding each check's map, audit and edges, written in one
+  transaction per run and forgotten 30 days after a run last wrote it. One that can't be read costs
+  one full run and one line, and is made again. A cache step that keeps it between CI runs saves
+  `<cache dir>/units/*.v1.sqlite`. SQLite is built into hushrun (`rusqlite`, bundled).
+- The unit key's vectors, `testdata/digest/unit-keys.json`, and `tools/refdigest.py unit-keys`.
+- **A machine with an empty cache reuses what a warm one would**
+  ([ADR 0075](docs/adr/0075-what-other-machines-saw-test-files-read.md)): a CI runner or an agent's
+  sandbox asks the server for what other machines saw its test files read, keys each test file by
+  this machine's list and theirs, newest first, three at most, and reuses it when some list's key
+  has a pass that counts here and none has a fail. What a run saw goes back to the server once it
+  is recorded, in `observe` too, and not again while it is the same. Every file path in it is a
+  keyed hash under a key the server never has, derived from the names of the check's sources.
+  Lists are kept per system (Linux, macOS, Windows), and a check whose `counts_from` names `os`
+  reads those systems'. A test file reused on another machine's list is kept in this machine's
+  store as `shared` until it runs here, and `hushrun why` says `another machine saw it read …`.
+  Never in local mode, for Cargo, or for a run that recorded nothing. Contract:
+  **`hushrun-results/v0`** gains `PUT {base}/v0/units/hints/{sha256}` and `POST
+  {base}/v0/units/hints/lookup`; a server without them changes nothing, said once,
+  `hushrun: unit: acme doesn't keep what other machines saw its test files read yet, so this
+  machine goes by what it saw itself`. One too large to send isn't sent, said once. A check whose
+  `counts_from` names this machine's system among others reads this system's lists only, and a
+  list borrowed from another system keys nothing once no rule reads it, and is never sent as this
+  system's. With a backend that keeps none, `hushrun init` says under "Change by hand" the cache
+  step a CI job needs to keep what its test files read between runs, for GitHub Actions and
+  GitLab, and edits no CI file for it.
+
+### Changed
+
+- In CI where a later step reads a check's reports, no test file is reused, as no check is
+  skipped; a summary of a run with reused test files leaves its coverage out.
+
 ## [0.12.0] - 2026-11-11
 
 Results stay on this machine until someone shares them ([ADR 0067](docs/adr/0067-results-stay-on-this-machine-until-someone-shares-them.md)):

@@ -41,6 +41,8 @@ hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
 rayon.workspace = true
+# \[ADR 0072\] The local store of what test files read.
+rusqlite.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 tracing.workspace = true
@@ -58,6 +60,8 @@ tokio.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+# \[ADR 0072\] Tests read and break the local store as hushrun leaves it.
+rusqlite.workspace = true
 # Seeding images for the registry integration tests (`--features it`).
 oci-client.workspace = true
 rustls.workspace = true
