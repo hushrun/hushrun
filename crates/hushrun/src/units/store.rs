@@ -394,6 +394,69 @@ mod tests {
         assert_eq!(load_map(&path).units.len(), 8);
     }
 
+    fn run(provider: hushrun_core::run::Provider, job: Option<&str>) -> RunResult {
+        serde_json::from_value(json!({
+            "schema": crate::results::RESULT_SCHEMA,
+            "check": "unit",
+            "result": "pass",
+            "exitCode": 0,
+            "command": ["pytest"],
+            "cwd": "",
+            "scope": "default",
+            "digest": Digest::of(b"x"),
+            "startedAt": "2026-11-10T12:00:00Z",
+            "durationMs": 10,
+            "provider": provider,
+            "job": job,
+            "tool": "hushrun test",
+            "units": {"total": 2, "ran": 2, "reused": 0},
+        }))
+        .unwrap()
+    }
+
+    // covers: C-33, C-10
+    #[test]
+    fn a_units_pass_counts_where_its_runs_result_would() {
+        use hushrun_core::run::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Local::new(dir.path());
+        let key = Digest::of(b"unit");
+        let other = Digest::of(b"other unit");
+        let ci = run(Provider::Github, Some("test@linux/amd64"));
+        assert_eq!(ci.units.unwrap().total, 2);
+        store
+            .record(
+                &Digest::of(b"run"),
+                &ci,
+                &[
+                    UnitRecord {
+                        key,
+                        result: "pass".into(),
+                        duration_ms: 4,
+                    },
+                    UnitRecord {
+                        key: other,
+                        result: "fail".into(),
+                        duration_ms: 5,
+                    },
+                ],
+            )
+            .unwrap();
+        // The one rule a check's pass is held to: in its own CI job, or for a run outside CI.
+        let found = |job: Option<&'static str>| {
+            store.newest(&key, &move |r: &RunResult| r.counts_in(job, None))
+        };
+        assert!(found(Some("test@linux/amd64")).is_some_and(|f| f.passed && f.duration_ms == 4));
+        assert!(found(None).is_some());
+        assert!(found(Some("lint@linux/amd64")).is_none());
+        // A fail is the newest result under its key.
+        assert!(store.newest(&other, &|_| true).is_some_and(|f| !f.passed));
+        assert!(store.newest(&Digest::of(b"never"), &|_| true).is_none());
+        // Nothing is written for a run without units.
+        store.record(&Digest::of(b"run2"), &ci, &[]).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path().join(RUNS)).unwrap().count(), 1);
+    }
+
     // covers: C-33
     #[test]
     fn an_audit_keeps_the_newest_disagreements() {

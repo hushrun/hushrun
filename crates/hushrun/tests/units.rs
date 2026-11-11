@@ -914,3 +914,59 @@ fn the_target_runner_passes_everything_through() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
 }
+
+/// The first 10 characters of a ULID: its milliseconds.
+fn ulid_time(ms: i64) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    (0..10)
+        .rev()
+        .map(|i| ALPHABET[((ms >> (5 * i)) & 31) as usize] as char)
+        .collect()
+}
+
+// covers: C-33 (ADR 0067: unit results are swept as this machine's results are)
+#[test]
+fn this_machine_forgets_unit_results_after_30_days() {
+    let r = Repo::new(&[("src/a.txt", "a\n")]);
+    let old = ulid_time(
+        "2026-01-01T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_millisecond(),
+    );
+    let results = r.cache().join("results");
+    let entry = results.join(format!(
+        "units/v0/{}/{old}0000000000000000.json",
+        "a".repeat(64)
+    ));
+    let run = results.join(format!(
+        "unit-runs/v0/{}/{old}0000000000000000.json",
+        "b".repeat(64)
+    ));
+    let map = r.cache().join("units/stale.map.json");
+    let left = r.cache().join("units/runs/01OLD");
+    for file in [&entry, &run, &map] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "{}").unwrap();
+    }
+    std::fs::create_dir_all(&left).unwrap();
+    // The files' own times are now: the map and a stopped run's directory go by them, so they stay.
+    let ran = r.run(
+        &[
+            "run",
+            "--now",
+            "2026-02-01T00:00:00Z",
+            "unit",
+            "--",
+            "git",
+            "--version",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        !entry.exists() && !run.exists(),
+        "unit results older than 30 days go"
+    );
+    assert!(map.exists() && left.exists());
+}
