@@ -4,6 +4,7 @@
 //! [`main`] wires the real ones; tests drive [`call`] with a fake compiler. Every error of this
 //! machinery is a value that ends in rustc running as asked (rule 1).
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -11,13 +12,14 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
+use hushrun_digest::cache::Stat;
 
 use crate::decide::{self, Before, Compared, Facts, Keep, Lookup, Plan, Rustc, Stored};
 use crate::depinfo;
 use crate::description::{Description, Output, OutputKind, SCHEMA, StoredDepInfo};
 use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
-use crate::key::{Asked, Observed, Place, PlaceKind, ReadList};
+use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
 use crate::model::{Class, NotStored, Outcome, PassedThrough};
 use crate::restore::Restore;
@@ -26,7 +28,7 @@ use crate::scan::Needles;
 use crate::script::{self, Script};
 use crate::session::{self, Current, Entry};
 use crate::store::{Block, NewFile, Published, Store};
-use crate::{audit, compiler, sidecar};
+use crate::{audit, compiler, inputs, link, sidecar};
 
 /// Whether the binary was called by the wrapper's name (B-2). `main` asks this first, before it
 /// reads any setting.
@@ -139,6 +141,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         invocation: &invocation,
         env: &env,
         start,
+        link_extra: Vec::new(),
     }
     .run()
 }
@@ -189,6 +192,8 @@ struct Call<'a> {
     invocation: &'a Invocation,
     env: &'a Env,
     start: SystemTime,
+    /// What a linked output's compile gets besides the remaps (B-9, B-18).
+    link_extra: Vec<OsString>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -245,9 +250,6 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::NeverStore);
         }
-        if class != Class::Library {
-            return self.pass(PassedThrough::Linked);
-        }
         let store = Store::new(&self.current.store);
         let identity = {
             let ports = &*self.ports;
@@ -272,8 +274,20 @@ impl Call<'_> {
             let saved = script::saved_output(&out)?;
             Some(script::parse_bytes(&std::fs::read(saved).ok()?))
         });
-        let unstorable = (inv.package().out_dir.is_some() && script.is_none())
+        let mut unstorable = (inv.package().out_dir.is_some() && script.is_none())
             .then_some(NotStored::ScriptOutputMissing);
+        if class != Class::Library {
+            let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+            self.link_extra = linked_args(inv, apple);
+            // Debug info packed beside the output is not something a block carries.
+            let packed = inv
+                .args()
+                .iter()
+                .any(|arg| arg.ends_with("split-debuginfo=packed"));
+            if packed {
+                unstorable = unstorable.or(Some(NotStored::DebugFiles));
+            }
+        }
 
         let mut extra: Vec<String> = self.current.env.clone();
         if let Some(script) = &script {
@@ -453,9 +467,16 @@ impl Call<'_> {
         found: Option<&Found>,
     ) -> i32 {
         let inv = self.invocation;
-        let extra = roots.remap_args();
+        let linked = inv.class() != Class::Library;
+        let mut extra = roots.remap_args();
+        extra.extend(self.link_extra.iter().cloned());
         let args = inv.command(&extra);
         let rustc = OsString::from(inv.rustc());
+        let before = if inv.class() == Class::Program {
+            debug_objects(&self.out_dir(), &inv.file_stem())
+        } else {
+            BTreeMap::new()
+        };
         let compile_start = self.ports.now();
         let mut recorder = Recorder::new(&mut *self.err, inv.form().clone());
         let ran = self.ports.compile(
@@ -463,7 +484,7 @@ impl Call<'_> {
                 rustc: &rustc,
                 args: &args,
                 env: &[],
-                capture_stdout: false,
+                capture_stdout: linked,
             },
             &mut |line| {
                 let _ = recorder.line(line);
@@ -513,6 +534,7 @@ impl Call<'_> {
                 compile_start,
                 store,
                 &mut facts,
+                (&ran.stdout, &before),
             )
         });
         match produced {
@@ -576,6 +598,7 @@ impl Call<'_> {
         compile_start: SystemTime,
         store: &Store,
         facts: &mut Facts,
+        (stdout, before): (&[u8], &BTreeMap<String, Stat>),
     ) -> Result<Produced, NotStored> {
         let inv = self.invocation;
         let dep_path = inv.dep_info_path();
@@ -584,13 +607,20 @@ impl Call<'_> {
         info.check().map_err(|_| NotStored::DepInfo)?;
         let gathered = cx.after(&info, common, compile_start)?;
         facts.changed = gathered.changed;
-        let outputs = self.outputs(recorded, roots)?;
+        let mut outputs = self.outputs(recorded, roots)?;
+        let mut outside = gathered.outside;
+        let mut observed = gathered.observed;
+        if inv.class() != Class::Library {
+            let (link, link_outside) = self.link(cx, stdout)?;
+            observed.link = Some(link);
+            outside |= link_outside;
+            outputs.extend(self.debug_outputs(roots, before)?);
+        }
 
         let tied_by_bytes = outputs.iter().any(|o| o.1);
         let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.0).collect();
-        let mut observed = gathered.observed;
         let origin = observed.key().map_err(|_| NotStored::Key)?;
-        let mut tied = !inv.searchable() || tied_by_bytes || gathered.outside;
+        let mut tied = !inv.searchable() || tied_by_bytes || outside;
         if !tied && !gathered.changed {
             let through_vars: Vec<(String, String)> = info
                 .env
@@ -710,6 +740,7 @@ impl Call<'_> {
         let scratch_out = scratch.join("out");
         std::fs::create_dir_all(&scratch_out).map_err(|_| NotStored::PlaceCheck)?;
         let mut extra = roots.remap_args();
+        extra.extend(self.link_extra.iter().cloned());
         let mut env = Vec::with_capacity(vars.len());
         for (i, (name, value)) in vars.iter().enumerate() {
             let target = Path::new(inv.cwd()).join(value);
@@ -753,6 +784,106 @@ impl Call<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// The output folder as an absolute path.
+    fn out_dir(&self) -> PathBuf {
+        Path::new(self.invocation.cwd()).join(self.invocation.out_dir())
+    }
+
+    /// B-18: what the linker was handed, from rustc's `--print=link-args` line. Whether a
+    /// library lies outside every root comes back too: that ties the block (B-8).
+    fn link(&self, cx: &Context<'_>, stdout: &[u8]) -> Result<(Link, bool), NotStored> {
+        let text = std::str::from_utf8(stdout).map_err(|_| NotStored::LinkInputs)?;
+        let args = link::parse(text).map_err(|_| NotStored::LinkInputs)?;
+        let cwd = args
+            .cwd
+            .as_ref()
+            .map_or_else(|| PathBuf::from(self.invocation.cwd()), PathBuf::from);
+        let inputs = args.inputs(&cwd);
+        // Arguments hidden in a file can't be keyed.
+        if !inputs.response_files.is_empty() {
+            return Err(NotStored::LinkInputs);
+        }
+        let path_var = args
+            .set_var("PATH")
+            .map(OsString::from)
+            .or_else(|| self.env.get("PATH").map(OsStr::to_os_string));
+        let linker =
+            link::linker(&args.linker, path_var.as_deref(), &cwd).ok_or(NotStored::LinkInputs)?;
+        let linker_path = linker
+            .path
+            .to_str()
+            .ok_or(NotStored::LinkInputs)?
+            .to_string();
+        let mut outside = false;
+        let mut libraries = Vec::with_capacity(inputs.libraries.len());
+        for library in &inputs.libraries {
+            let at = cx.located_path(library)?;
+            outside |= matches!(at, crate::model::Located::Outside(_));
+            let sha256 = inputs::library_digest(library).map_err(|_| NotStored::LinkInputs)?;
+            libraries.push(LinkLibrary { at, sha256 });
+        }
+        let sdk_path = match &inputs.sdk {
+            Some(sdk) => Some(sdk.to_str().ok_or(NotStored::LinkInputs)?.to_string()),
+            None => None,
+        };
+        Ok((
+            Link {
+                libraries,
+                linker: inputs::linker_text(&linker.path).ok_or(NotStored::LinkInputs)?,
+                sdk: inputs::sdk_text(sdk_path.as_deref()),
+                linker_path,
+                sdk_path,
+            },
+            outside,
+        ))
+    }
+
+    /// A program's debug objects (B-18): the `<crate><extra>.*.o` files in the output folder
+    /// the compile wrote. Debug files a block doesn't carry (`.dSYM`, `.dwp`) refuse the store.
+    fn debug_outputs(
+        &self,
+        roots: &Roots,
+        before: &BTreeMap<String, Stat>,
+    ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+        let inv = self.invocation;
+        let stem = inv.file_stem();
+        let out_dir = self.out_dir();
+        let entries = std::fs::read_dir(&out_dir).map_err(|_| NotStored::Outputs)?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&stem) && (name.ends_with(".dSYM") || name.ends_with(".dwp")) {
+                return Err(NotStored::DebugFiles);
+            }
+        }
+        if inv.class() != Class::Program {
+            return Ok(Vec::new());
+        }
+        let needles = Needles::new(roots.needles());
+        let mut out = Vec::new();
+        for (name, stat) in debug_objects(&out_dir, &stem) {
+            if before
+                .get(&name)
+                .is_some_and(|old| inputs::same(old, &stat))
+            {
+                continue;
+            }
+            let path = out_dir.join(&name);
+            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
+            out.push((
+                OutputFile {
+                    path,
+                    name,
+                    kind: OutputKind::DebugObject,
+                    sha256,
+                    size,
+                },
+                hit.is_some(),
+            ));
+        }
+        Ok(out)
     }
 
     /// Step 13: the block, its hint and its last use.
@@ -862,6 +993,53 @@ impl Call<'_> {
             names.join(", ")
         ))
     }
+}
+
+/// What a linked output's compile gets besides the remaps: `--print=link-args` for its link
+/// inputs (B-18) and, on Apple targets, an install name and debug-map prefix that don't hold
+/// the folder it was linked in (B-9). Programs get neither: their debug info must work.
+fn linked_args(inv: &Invocation, apple: bool) -> Vec<OsString> {
+    let mut out = vec![OsString::from("--print=link-args")];
+    if !apple {
+        return out;
+    }
+    let class = inv.class();
+    if class == Class::ProcMacro {
+        out.push("-C".into());
+        out.push(
+            format!(
+                "link-arg=-Wl,-install_name,@rpath/lib{}.dylib",
+                inv.file_stem()
+            )
+            .into(),
+        );
+    }
+    if matches!(class, Class::ProcMacro | Class::BuildScript)
+        && let Some(deps) = inv.dependency_dirs().next()
+    {
+        out.push("-C".into());
+        out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
+    }
+    out
+}
+
+/// The loose objects named `<stem>.*.o` in a folder, by name, with their stats.
+fn debug_objects(dir: &Path, stem: &str) -> BTreeMap<String, Stat> {
+    let prefix = format!("{stem}.");
+    let mut out = BTreeMap::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with(&prefix)
+            && name.ends_with(".o")
+            && let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            out.insert(name, Stat::of(&meta));
+        }
+    }
+    out
 }
 
 /// Step 14: the fresh outputs' bytes against the block's, by name (B-1, B-16).

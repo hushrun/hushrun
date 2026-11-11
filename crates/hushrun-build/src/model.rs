@@ -131,14 +131,11 @@ pub enum PassedThrough {
     Incremental,
     /// The call's roots can't be used (B-8): a relative working directory, a root of `/`.
     Roots,
-    /// A linked output (proc macro, build-script binary, program) on a platform or with a
-    /// debug-info layout this crate doesn't store.
-    Linked,
 }
 
 impl PassedThrough {
     /// Every reason, for tests and tables.
-    pub const ALL: [PassedThrough; 28] = [
+    pub const ALL: [PassedThrough; 27] = [
         PassedThrough::NotRustc,
         PassedThrough::NoCrateName,
         PassedThrough::Probe,
@@ -166,7 +163,6 @@ impl PassedThrough {
         PassedThrough::Store,
         PassedThrough::Incremental,
         PassedThrough::Roots,
-        PassedThrough::Linked,
     ];
 
     /// The reason as the run's log writes it. Stable: change it only with the log's readers.
@@ -199,7 +195,6 @@ impl PassedThrough {
             PassedThrough::Store => "store",
             PassedThrough::Incremental => "incremental",
             PassedThrough::Roots => "roots",
-            PassedThrough::Linked => "linked",
         }
     }
 }

@@ -1268,3 +1268,38 @@ fn a_compile_the_audit_picks_runs_and_is_compared_in_on() {
     let entry = r.entry.unwrap();
     assert!(entry.found && !entry.differed);
 }
+
+// covers: B-18
+#[test]
+fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    let mut args = w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let mut fake = Fake {
+        vars: w.vars(&ws, "a"),
+        cwd: ws.clone(),
+        plans: w.plans.clone(),
+        during: None,
+        seen: seen.clone(),
+        version_fails: false,
+        audit: false,
+    };
+    let code = call(&mut fake, &mut Vec::new(), &args);
+    assert_eq!(code, 0);
+    let entries = w.session.current().entries();
+    assert_eq!(
+        entries.last().unwrap().outcome,
+        not_stored(NotStored::LinkInputs)
+    );
+    // The compile was asked for its link line.
+    assert!(
+        seen.borrow().compiles[0]
+            .iter()
+            .any(|a| a == "--print=link-args")
+    );
+    assert_eq!(w.blocks(), 0);
+}

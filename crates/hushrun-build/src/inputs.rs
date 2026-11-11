@@ -143,7 +143,25 @@ impl Context<'_> {
         }
     }
 
+    /// Where a path lies (B-8). A path with a `..` in it is first resolved on disk, so
+    /// `a/src/../data/x.txt` (as rustc writes an `include_str!("../data/x.txt")`) is the file
+    /// under the package it names, and a `..` that leaves through a symlink lands where the link
+    /// points.
+    pub fn located_path(&self, path: &Path) -> Result<Located, NotStored> {
+        self.located(path)
+    }
+
     fn located(&self, path: &Path) -> Result<Located, NotStored> {
+        let resolved;
+        let path = if path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            resolved = resolve_dots(path);
+            resolved.as_path()
+        } else {
+            path
+        };
         let text = path.to_str().ok_or(NotStored::Unkeyable)?;
         Ok(self.roots.locate(text))
     }
@@ -504,6 +522,36 @@ impl Context<'_> {
             changed,
             outside,
         })
+    }
+}
+
+/// `path` with its `..` parts resolved on disk: the longest part of it that exists is resolved
+/// (symlinks followed), and the rest joined to it. A path where nothing can be resolved is kept,
+/// and its `..` makes it lie outside every root.
+fn resolve_dots(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut head = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(head) {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            if out
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
+                return path.to_path_buf();
+            }
+            return out;
+        }
+        match (head.parent(), head.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                head = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 
