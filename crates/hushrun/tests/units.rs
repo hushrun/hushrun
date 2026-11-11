@@ -234,6 +234,13 @@ fn with_tests_off_command_gets_nothing_new() {
         for line in ran.stdout.lines() {
             let runner = line.starts_with("CARGO_TARGET_") && line.contains("_RUNNER=");
             assert!(!line.starts_with("HUSHRUN_UNITS=") && !runner, "{line}");
+            // \[ADR 0070, 0071\] Nor what loads the Go and Vitest adapters.
+            assert!(
+                !line.starts_with("HUSHRUN_VITEST=")
+                    && !line.starts_with("HUSHRUN_GOFLAGS=")
+                    && !line.starts_with("GOFLAGS="),
+                "{line}"
+            );
         }
         // What the environment said, as it said it.
         assert!(

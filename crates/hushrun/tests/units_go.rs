@@ -976,3 +976,20 @@ fn a_package_whose_test_links_the_repositorys_cgo_is_not_observed() {
     );
     assert!(map["units"]["greet"]["notFollowed"].is_null(), "{map:#}");
 }
+
+// covers: C-5, C-32
+#[test]
+fn with_tests_off_go_test_gets_nothing_new() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let mut files = shop("off");
+    files.push(file(
+        "greet/env_test.go",
+        "package greet\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestEnv(t *testing.T) {\n\tfor _, name := range []string{\"GOFLAGS\", \"HUSHRUN_UNITS\", \"HUSHRUN_GOFLAGS\"} {\n\t\tif v, ok := os.LookupEnv(name); ok {\n\t\t\tt.Fatalf(\"%s=%q\", name, v)\n\t\t}\n\t}\n}\n",
+    ));
+    let r = Repo::new(&files);
+    let ran = r.run(GO_TEST, &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(!r.cache.join("units").exists());
+}

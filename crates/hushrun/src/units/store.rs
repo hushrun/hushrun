@@ -676,6 +676,10 @@ pub struct Map {
     /// The sources set's paths then.
     #[serde(default)]
     pub sources: BTreeSet<String>,
+    /// \[ADR 0071\] The test files the adapter listed then, for an adapter whose unit rule is its
+    /// runner's own list: Vitest's.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unit_files: BTreeSet<String>,
 }
 
 /// What a test file read the last time it ran here.
@@ -763,6 +767,7 @@ pub fn update_map(
     tree: &hushrun_core::units::Tree,
     rest: BTreeMap<String, String>,
     sources: BTreeSet<String>,
+    unit_files: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<()> {
     locked::<Map>(path, |map| {
         if map.schema != MAP_SCHEMA {
@@ -775,6 +780,9 @@ pub fn update_map(
         }
         map.rest = rest;
         map.sources = sources;
+        if let Some(files) = unit_files {
+            map.unit_files = files.clone();
+        }
     })
 }
 

@@ -21,6 +21,7 @@ pub mod gotest;
 pub mod pytest;
 pub mod runner;
 pub mod store;
+pub mod vitest;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -53,6 +54,8 @@ enum Adapter {
     Cargo(cargo::Recognized),
     /// \[ADR 0070\]
     Go(gotest::Recognized),
+    /// \[ADR 0071\]
+    Vitest(vitest::Recognized),
 }
 
 /// What starting to observe a run came to.
@@ -144,6 +147,21 @@ impl Session {
                     Err(why) => return Start::Not(why),
                 }
             }
+            None if vitest::recognize(command).is_some() => {
+                let recognized = match vitest::recognize(command) {
+                    Some(Ok(recognized)) => recognized,
+                    Some(Err(why)) => return Start::Not(why),
+                    None => return Start::Off,
+                };
+                if let Some(why) = vitest::unloadable(&recognized, cwd) {
+                    return Start::Not(why);
+                }
+                let dir = match vitest::install(&cache) {
+                    Ok(dir) => dir,
+                    Err(err) => return Start::Not(format!("can't write its Vitest plugin: {err}")),
+                };
+                (Adapter::Vitest(recognized), vitest::variables(&dir))
+            }
             None => {
                 if let Some(why) = pytest::unsafe_for(command) {
                     return Start::Not(why.into());
@@ -164,8 +182,8 @@ impl Session {
         };
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
-        let written =
-            std::fs::create_dir_all(&dir).and_then(|()| write_run_file(&dir, root, &[], None, &[]));
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|()| write_run_file(&dir, root, &[], None, &[], None));
         if let Err(err) = written {
             let _ = std::fs::remove_dir_all(&dir);
             return Start::Not(format!("can't make {}: {err}", dir.display()));
@@ -200,6 +218,7 @@ impl Session {
         let map = store::load_map(&self.map_path(&input.base, input.repository));
         let mut patterns = None;
         let mut built = None;
+        let mut listed_files: Option<Vec<String>> = None;
         let (sets, known): (units::Sets, Known) = match &self.adapter {
             Adapter::Pytest => {
                 let found = pytest::python_files(input.root, input.cwd);
@@ -268,6 +287,37 @@ impl Session {
                         (unit.clone(), reads)
                     })
                     .collect();
+                (sets, known)
+            }
+            Adapter::Vitest(recognized) => {
+                if recognized.coverage {
+                    return Planned::Everything(
+                        "Vitest's coverage is on, and a partial run's coverage would read as a drop"
+                            .into(),
+                    );
+                }
+                let listed: BTreeSet<String> = map
+                    .unit_files
+                    .iter()
+                    .filter(|f| input.tree.contains(f))
+                    .cloned()
+                    .collect();
+                if listed.is_empty() {
+                    return Planned::Everything(
+                        "no run here has listed Vitest's test files yet".into(),
+                    );
+                }
+                let sets = units::classify(
+                    input.tree.paths(),
+                    &|path| listed.contains(path),
+                    Sources::Kinds(vitest::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let known = sets
+                    .files(Set::Units)
+                    .map(|unit| (unit.to_string(), mapped_reads(&map, unit, input.tree)))
+                    .collect();
+                listed_files = Some(listed.into_iter().collect::<Vec<_>>());
                 (sets, known)
             }
         };
@@ -341,6 +391,7 @@ impl Session {
             &reuse.iter().cloned().collect::<Vec<_>>(),
             patterns.as_deref(),
             &binaries,
+            listed_files.as_deref(),
         ) {
             return Planned::Everything(format!("can't write the plan ({err})"));
         }
@@ -554,6 +605,32 @@ impl Session {
                     ..Read::default()
                 }))
             }
+            Adapter::Vitest(_) => {
+                let Some(observed) = vitest::observe(files, root, tree)? else {
+                    return Ok(None);
+                };
+                let sets = units::classify(
+                    tree.paths(),
+                    &|path| observed.unit_files.contains(path),
+                    Sources::Kinds(vitest::SOURCE_KINDS),
+                    &self.tests.ignore,
+                );
+                let planned = observed
+                    .units
+                    .keys()
+                    .filter_map(|unit| Some((unit.clone(), mapped_reads(map, unit, tree)?)))
+                    .collect();
+                Ok(Some(Read {
+                    seen: observed.units,
+                    failures_by_unit: observed.failures_by_unit,
+                    sets,
+                    planned,
+                    dirs: observed.dirs,
+                    unit_files: Some(observed.unit_files),
+                    refused: observed.refused,
+                    ..Read::default()
+                }))
+            }
         }
     }
 
@@ -588,9 +665,19 @@ impl Session {
                 }
                 (None, binaries)
             }
-            Adapter::Go(_) => (None, Vec::new()),
+            Adapter::Go(_) | Adapter::Vitest(_) => (None, Vec::new()),
         };
-        write_run_file(&dir, &self.root, &others, patterns.as_deref(), &binaries).ok()?;
+        let listed: Option<Vec<String>> = matches!(self.adapter, Adapter::Vitest(_))
+            .then(|| observed.unit_files.iter().cloned().collect());
+        write_run_file(
+            &dir,
+            &self.root,
+            &others,
+            patterns.as_deref(),
+            &binaries,
+            listed.as_deref(),
+        )
+        .ok()?;
         let mut variables = self.variables.clone();
         for (name, value) in &mut variables {
             if name == runner::UNITS_VAR {
@@ -672,6 +759,10 @@ struct Read {
     own: BTreeMap<String, Vec<String>>,
     /// \[ADR 0070\] The directories each unit listed, which the map keeps for the plan.
     dirs: BTreeMap<String, BTreeSet<String>>,
+    /// \[ADR 0071\] The test files the runner listed, which the map keeps as the unit rule.
+    unit_files: Option<BTreeSet<String>>,
+    /// \[ADR 0071\] Why the adapter deselected nothing the plan listed.
+    refused: Option<String>,
 }
 
 /// \[C-34\] What the map says `unit` read, for a key: its reads, and every file now below a
@@ -713,6 +804,7 @@ fn write_run_file(
     reuse: &[String],
     python_files: Option<&[String]>,
     binaries: &[facts::Binary],
+    test_files: Option<&[String]>,
 ) -> std::io::Result<()> {
     let run = facts::RunFile {
         schema: facts::RUN_SCHEMA.into(),
@@ -720,6 +812,7 @@ fn write_run_file(
         reuse: reuse.to_vec(),
         python_files: python_files.map(<[String]>::to_vec),
         binaries: binaries.to_vec(),
+        test_files: test_files.map(<[String]>::to_vec),
     };
     let bytes = serde_json::to_vec(&run).map_err(std::io::Error::other)?;
     facts::write_whole(&dir.join(facts::RUN_FILE), &bytes)
@@ -823,6 +916,8 @@ pub struct Observed {
     audit_path: Option<PathBuf>,
     executables: BTreeMap<String, PathBuf>,
     cwd: PathBuf,
+    /// \[ADR 0071\] The test files the runner listed, for the map and a second run.
+    unit_files: BTreeSet<String>,
 }
 
 impl Observed {
@@ -854,6 +949,7 @@ impl Observed {
                 tree,
                 self.rest.clone(),
                 self.sources.clone(),
+                (!self.unit_files.is_empty()).then_some(&self.unit_files),
             )
         {
             tracing::debug!("the map wasn't kept: {err:#}");
@@ -962,6 +1058,8 @@ fn decide(
         executables,
         own,
         dirs,
+        unit_files,
+        refused,
     } = read;
     let sets = &sets;
     let tree = end.tree;
@@ -972,8 +1070,17 @@ fn decide(
         audit_path: Some(audit_path),
         cwd: end.cwd.to_path_buf(),
         executables,
+        unit_files: unit_files.unwrap_or_default(),
         ..Observed::default()
     };
+    if let (How::Plan(plan), Some(why)) = (&how, &refused)
+        && !plan.reuse.is_empty()
+    {
+        out.lines.push(format!(
+            "{}: no test file was reused: {why}",
+            end.base.check
+        ));
+    }
     // What the plan would have done, in `observe`: from what was recorded before this run, a unit
     // the plan would have keyed (from the map, or for a compiler-given adapter this build's list)
     // whose key has a pass that counts here, unless `tests.always` names it. One batch.
@@ -1162,6 +1269,14 @@ fn describe(why: &str) -> String {
         "test-main" => "a TestMain".into(),
         "go-list" => "what go list couldn't load".into(),
         "test-log" => "a test log Go didn't write whole".into(),
+        "virtual" => "a module a Vite plugin made".into(),
+        "worker" => "a worker thread".into(),
+        "unseen" => "what hushrun's setup file didn't see".into(),
+        "pool" | "isolate" => "test files that share a worker".into(),
+        "plugin" => "a Vite plugin hushrun doesn't know".into(),
+        "global-setup" => "a globalSetup".into(),
+        "environment" | "runner" => "an environment or runner of the repository's".into(),
+        "browser" | "typecheck" | "css" => "what Vitest does outside its workers".into(),
         other => other.to_string(),
     }
 }

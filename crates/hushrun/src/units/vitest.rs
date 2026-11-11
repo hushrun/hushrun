@@ -1,0 +1,554 @@
+//! \[ADR 0071\] The Vitest adapter, observed (C-30, C-32): a unit is a test file, as Vitest's own
+//! `include` and `exclude` name it, and what it read is what Vitest's workers ran and opened while
+//! it ran, with the config files every test file reads.
+//!
+//! - Loading: a Vite plugin, embedded in this binary and written to `<cache dir>/adapters/`, that
+//!   the repository's Vitest config loads from `HUSHRUN_VITEST` with one line `hushrun init`
+//!   proposes ([`CONFIG_LINE`]). Vitest has no documented way to take a plugin, a reporter or a
+//!   setup file from the environment, so without the line hushrun observes nothing, and says so.
+//! - The unit rule: the test files the adapter listed with Vitest's own matcher in the run that
+//!   wrote the check's map. A file no run listed yet is a source until one does; the adapter
+//!   deselects nothing when Vitest's list isn't the one the plan had.
+//! - Selection: after Vitest's own filters and `--shard`, in its sequencer, before any worker
+//!   imports a test file.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use hushrun_core::units::{Facts, NotFollowed, Tree};
+
+use super::facts::{FactsFile, Unfollowed};
+
+/// The adapter's name in its main process's facts file.
+pub const ADAPTER: &str = "vitest";
+/// The adapter's name in a worker's facts file.
+pub const WORKER: &str = "vitest-worker";
+/// What the adapter observes being read: its sources (C-30). Vue, Svelte and other kinds a
+/// plugin compiles are in the rest set.
+pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+/// The variable the config line loads the plugin from.
+pub const VARIABLE: &str = "HUSHRUN_VITEST";
+/// The line a repository's Vitest config needs, in its `plugins`.
+pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]";
+/// The plugin, in Vitest's own process.
+const PLUGIN: &str = include_str!("hushrun_vitest.mjs");
+/// The setup file the plugin puts first, in each worker.
+const SETUP: &str = include_str!("hushrun_vitest_setup.mjs");
+/// The config files Vitest looks for, in the order it does.
+const CONFIG_NAMES: &[&str] = &[
+    "vitest.config.ts",
+    "vitest.config.mts",
+    "vitest.config.cts",
+    "vitest.config.js",
+    "vitest.config.mjs",
+    "vitest.config.cjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "vite.config.cts",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+];
+
+/// COMMAND, when it starts one run of Vitest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recognized {
+    /// `--config`'s file, as COMMAND names it.
+    pub config: Option<String>,
+    /// `--root`'s directory, as COMMAND names it.
+    pub root: Option<String>,
+    /// COMMAND turns coverage on.
+    pub coverage: bool,
+}
+
+/// Programs that start the program after them, with the options of theirs that come first.
+const LAUNCHERS: &[(&str, &[&str])] = &[
+    (
+        "npx",
+        &["--no-install", "--no", "-y", "--yes", "--quiet", "-q"],
+    ),
+    ("bunx", &["--bun"]),
+    ("pnpx", &[]),
+];
+
+/// What `command` is for the Vitest adapter: `None` when it doesn't start Vitest; `Some(Err(why))`
+/// when it does, in a way hushrun doesn't observe, which the run says.
+pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
+    let name = |word: &str| {
+        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        file.strip_suffix(".cmd")
+            .or_else(|| file.strip_suffix(".exe"))
+            .unwrap_or(file)
+            .to_string()
+    };
+    let mut rest = command;
+    loop {
+        let first = name(rest.first()?);
+        match first.as_str() {
+            "vitest" => break,
+            "pnpm" | "yarn" | "bun" | "npm" => {
+                // `pnpm vitest`, `pnpm exec vitest`, `yarn exec vitest`, `bun x vitest`,
+                // `npm exec vitest`, `npm exec -- vitest`.
+                let mut next = &rest[1..];
+                if matches!(next.first().map(String::as_str), Some("exec" | "x" | "dlx")) {
+                    next = &next[1..];
+                }
+                if next.first().map(String::as_str) == Some("--") {
+                    next = &next[1..];
+                }
+                if next.first().map(|w| name(w)) != Some("vitest".to_string()) {
+                    return None;
+                }
+                rest = next;
+            }
+            other => {
+                let (_, options) = LAUNCHERS.iter().find(|(n, _)| *n == other)?;
+                let mut next = &rest[1..];
+                while next.first().is_some_and(|w| options.contains(&w.as_str())) {
+                    next = &next[1..];
+                }
+                if next.first().map(|w| name(w)) != Some("vitest".to_string()) {
+                    return None;
+                }
+                rest = next;
+            }
+        }
+    }
+    let args = &rest[1..];
+    let mut out = Recognized {
+        config: None,
+        root: None,
+        coverage: false,
+    };
+    let mut run = false;
+    let mut words = args.iter().enumerate();
+    while let Some((i, word)) = words.next() {
+        let (flag, inline) = match word.split_once('=') {
+            Some((flag, value)) if flag.starts_with('-') => (flag, Some(value.to_string())),
+            _ => (word.as_str(), None),
+        };
+        match flag {
+            "run" if i == 0 => run = true,
+            "watch" | "dev" | "bench" | "list" | "init" | "related" if i == 0 => {
+                return Some(Err(format!(
+                    "vitest {flag} isn't one run of the test files"
+                )));
+            }
+            "--run" => run = true,
+            "--watch" | "-w" => {
+                if inline.as_deref() != Some("false") {
+                    return Some(Err("vitest --watch reruns as files change".into()));
+                }
+            }
+            "--typecheck" | "--browser" | "--ui" => {
+                if inline.as_deref() != Some("false") {
+                    return Some(Err(format!(
+                        "vitest {flag} runs test files hushrun doesn't observe"
+                    )));
+                }
+            }
+            "--coverage" | "--coverage.enabled" => {
+                out.coverage = inline.as_deref() != Some("false");
+            }
+            "--config" | "-c" => {
+                out.config = inline.or_else(|| words.next().map(|(_, w)| w.clone()));
+            }
+            "--root" | "-r" => {
+                out.root = inline.or_else(|| words.next().map(|(_, w)| w.clone()));
+            }
+            _ => {}
+        }
+    }
+    if !run {
+        return Some(Err(
+            "vitest without run watches files when a terminal is attached: hushrun observes `vitest run`"
+                .into(),
+        ));
+    }
+    Some(Ok(out))
+}
+
+/// The config file Vitest loads for `recognized` in `cwd`, when there is one.
+pub fn config_file(recognized: &Recognized, cwd: &Path) -> Option<PathBuf> {
+    if let Some(config) = &recognized.config {
+        return Some(cwd.join(config));
+    }
+    let root = recognized
+        .root
+        .as_ref()
+        .map_or_else(|| cwd.to_path_buf(), |r| cwd.join(r));
+    CONFIG_NAMES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Why the adapter can't load for `recognized` in `cwd`: no config, or one without the line.
+pub fn unloadable(recognized: &Recognized, cwd: &Path) -> Option<String> {
+    let Some(config) = config_file(recognized, cwd) else {
+        return Some(format!(
+            "Vitest loads hushrun's adapter from one line in its config, and there is none here: `hushrun init` proposes vitest.config.ts with `{CONFIG_LINE}`"
+        ));
+    };
+    let text = std::fs::read_to_string(&config).unwrap_or_default();
+    if text.contains(VARIABLE) {
+        return None;
+    }
+    let shown = config
+        .strip_prefix(cwd)
+        .unwrap_or(&config)
+        .display()
+        .to_string();
+    Some(format!(
+        "Vitest loads hushrun's adapter from one line in {shown}, which `hushrun init` proposes: `{CONFIG_LINE}`"
+    ))
+}
+
+/// The directory that holds the plugin and its setup file for this binary, written whole when
+/// they aren't there yet: `<cache dir>/adapters/vitest-<first 16 hex of their SHA-256>`.
+pub fn install(cache: &Path) -> std::io::Result<PathBuf> {
+    let digest = hushrun_core::Digest::of(format!("{PLUGIN}\0{SETUP}").as_bytes()).hex();
+    let dir = cache
+        .join("adapters")
+        .join(format!("vitest-{}", &digest[..16]));
+    for (name, text) in [
+        ("hushrun-vitest.mjs", PLUGIN),
+        ("hushrun-vitest-setup.mjs", SETUP),
+    ] {
+        let path = dir.join(name);
+        if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
+            super::facts::write_whole(&path, text.as_bytes())?;
+        }
+    }
+    Ok(dir)
+}
+
+/// The variable that names the plugin, a `file:` URL, as `import()` takes one on every system.
+pub fn variables(dir: &Path) -> Vec<(String, OsString)> {
+    let path = dir.join("hushrun-vitest.mjs");
+    let text = path.to_string_lossy().replace('\\', "/");
+    let url = if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    };
+    vec![(VARIABLE.to_string(), OsString::from(url))]
+}
+
+/// What the Vitest adapter observed of a run, before hushrun decides any state.
+#[derive(Debug, Default)]
+pub struct Observed {
+    pub units: BTreeMap<String, super::Seen>,
+    pub failures_by_unit: bool,
+    /// The unit rule: the test files Vitest listed, from the root.
+    pub unit_files: BTreeSet<String>,
+    /// The directories each unit listed, from the root.
+    pub dirs: BTreeMap<String, BTreeSet<String>>,
+    /// Why the adapter deselected nothing, when the plan had listed something.
+    pub refused: Option<String>,
+}
+
+/// What the workers that ran one test file saw of it.
+#[derive(Debug, Default)]
+struct WorkerSaw {
+    /// Files it ran or opened, from the root.
+    files: BTreeSet<String>,
+    /// Directories it listed, from the root.
+    dirs: BTreeSet<String>,
+    not_followed: BTreeSet<NotFollowed>,
+}
+
+/// How one test file ended, by Vitest's main process, over the projects that ran it.
+#[derive(Debug, Default)]
+struct Ended {
+    selected: u64,
+    finished: u64,
+    failed: bool,
+    deselected: bool,
+    duration_ms: u64,
+    issues: BTreeSet<NotFollowed>,
+}
+
+/// A path from the repository root, `/`-separated, when `path` is in it.
+fn relative(root: &Path, path: &Path) -> Option<String> {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let inside = real.strip_prefix(root).ok()?;
+    let parts: Vec<String> = inside
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// What a module id a worker ran says: a file, by its path without a query; nothing, for Vite's
+/// own helpers (`\0vite/…`); or a module some plugin made from no one file, `Err`.
+fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
+    if id.starts_with("\0vite/") {
+        return Ok(None);
+    }
+    let id = id.split('?').next().unwrap_or(id);
+    let path = Path::new(id);
+    if id.starts_with('\0') || id.starts_with("virtual:") || !path.is_absolute() {
+        return Err(id.trim_start_matches('\0').chars().take(200).collect());
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+/// Reads what the Vitest adapter wrote in a run's directory, for the repository at `root` whose
+/// files are `tree`. `Ok(None)` when it wrote nothing; `Err` says why nothing can be told.
+pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<Observed>, String> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mains: Vec<&FactsFile> = files.iter().filter(|f| f.adapter == ADAPTER).collect();
+    let workers: Vec<&FactsFile> = files.iter().filter(|f| f.adapter == WORKER).collect();
+    let main = match mains.as_slice() {
+        [] if workers.is_empty() => return Ok(None),
+        [] => return Err("Vitest's run ended before hushrun's reporter wrote".into()),
+        [main] => *main,
+        _ => return Err("more than one Vitest wrote for this run".into()),
+    };
+    if let Some(error) = main.errors.first() {
+        return Err(error.chars().take(300).collect());
+    }
+    let setting = |key: &str| -> Vec<PathBuf> {
+        main.settings
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(PathBuf::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let unit_files: BTreeSet<String> = setting("testFiles")
+        .iter()
+        .filter_map(|p| relative(&root, p))
+        .collect();
+    let config_files: BTreeSet<String> = setting("configFiles")
+        .iter()
+        .filter_map(|p| relative(&root, p))
+        .collect();
+    let whole: BTreeSet<NotFollowed> = main.not_followed.iter().map(Into::into).collect();
+    // What each worker saw of the test file it ran.
+    let mut seen_by: BTreeMap<String, WorkerSaw> = BTreeMap::new();
+    for worker in &workers {
+        for unit in &worker.units {
+            let Some(name) = relative(&root, Path::new(&unit.unit)) else {
+                continue;
+            };
+            let entry = seen_by.entry(name).or_default();
+            for id in &unit.reads {
+                match module_path(id) {
+                    Ok(Some(path)) => entry.files.extend(relative(&root, &path)),
+                    Ok(None) => {}
+                    Err(virtual_id) => {
+                        entry.not_followed.insert(NotFollowed {
+                            why: "virtual".into(),
+                            detail: virtual_id,
+                        });
+                    }
+                }
+            }
+            for dir in &unit.dirs {
+                match relative(&root, Path::new(dir)) {
+                    Some(dir) => {
+                        entry.dirs.insert(dir);
+                    }
+                    // Listing the root itself reads every file.
+                    None if std::fs::canonicalize(dir).is_ok_and(|d| d == root) => {
+                        entry.dirs.insert(".".into());
+                    }
+                    None => {}
+                }
+            }
+            entry
+                .not_followed
+                .extend(unit.not_followed.iter().map(NotFollowed::from));
+            if let Some(error) = worker.errors.first() {
+                entry.not_followed.insert(NotFollowed {
+                    why: "adapter-error".into(),
+                    detail: error.chars().take(200).collect(),
+                });
+            }
+        }
+    }
+    let mut out = Observed {
+        failures_by_unit: main.failures_by_unit,
+        unit_files,
+        refused: main
+            .settings
+            .get("refused")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        ..Observed::default()
+    };
+    // The main process's word on how each test file ended, merged over the projects that ran it.
+    let mut ended: BTreeMap<String, Ended> = BTreeMap::new();
+    for unit in &main.units {
+        let Some(name) = relative(&root, Path::new(&unit.unit)) else {
+            continue;
+        };
+        let entry = ended.entry(name).or_insert_with(|| Ended {
+            deselected: true,
+            ..Ended::default()
+        });
+        entry.selected = entry.selected.saturating_add(unit.selected);
+        entry.finished = entry.finished.saturating_add(unit.finished);
+        entry.failed |= unit.failed;
+        entry.deselected &= unit.deselected;
+        entry.duration_ms = entry.duration_ms.saturating_add(unit.duration_ms);
+        entry
+            .issues
+            .extend(unit.not_followed.iter().map(|u: &Unfollowed| u.into()));
+    }
+    for (unit, end) in ended {
+        let Ended {
+            selected,
+            finished,
+            failed,
+            deselected,
+            duration_ms,
+            issues,
+        } = end;
+        let mut not_followed = whole.clone();
+        not_followed.extend(issues);
+        let mut reads: BTreeSet<String> = config_files.clone();
+        reads.insert(unit.clone());
+        let mut dirs = BTreeSet::new();
+        match seen_by.remove(&unit) {
+            Some(saw) => {
+                reads.extend(saw.files);
+                not_followed.extend(saw.not_followed);
+                dirs = saw.dirs;
+            }
+            None if !deselected => {
+                not_followed.insert(NotFollowed {
+                    why: "unseen".into(),
+                    detail: "hushrun's setup file didn't see it run".into(),
+                });
+            }
+            None => {}
+        }
+        reads.extend(super::gotest::under(tree, &dirs));
+        out.dirs.insert(unit.clone(), dirs);
+        out.units.insert(
+            unit,
+            super::Seen {
+                facts: Facts {
+                    complete: finished >= selected,
+                    failed,
+                    not_followed,
+                    deselected,
+                },
+                reads,
+                duration_ms,
+            },
+        );
+    }
+    Ok(Some(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(text: &str) -> Vec<String> {
+        text.split(' ').map(str::to_string).collect()
+    }
+
+    // covers: C-32
+    #[test]
+    fn one_run_of_vitest_is_recognized_however_it_starts() {
+        for command in [
+            "vitest run",
+            "vitest --run",
+            "npx vitest run --shard=1/2",
+            "npx --no-install vitest run",
+            "pnpm vitest run",
+            "pnpm exec vitest run",
+            "yarn exec vitest run",
+            "bunx vitest run",
+            "bun x vitest run",
+            "npm exec -- vitest run",
+            "node_modules/.bin/vitest run --pool=threads",
+        ] {
+            assert!(
+                matches!(recognize(&words(command)), Some(Ok(_))),
+                "{command}"
+            );
+        }
+        let r = recognize(&words("vitest run -c conf/vitest.config.ts --coverage")).unwrap();
+        let r = r.unwrap();
+        assert_eq!(r.config.as_deref(), Some("conf/vitest.config.ts"));
+        assert!(r.coverage);
+        for watching in [
+            "vitest",
+            "vitest watch",
+            "vitest run --watch",
+            "vitest bench",
+            "vitest run --typecheck",
+            "vitest run --browser",
+        ] {
+            assert!(
+                matches!(recognize(&words(watching)), Some(Err(_))),
+                "{watching}"
+            );
+        }
+        for other in [
+            "npm test",
+            "jest",
+            "pnpm test",
+            "npx jest",
+            "node vitest.js run",
+        ] {
+            assert!(recognize(&words(other)).is_none(), "{other}");
+        }
+    }
+
+    // covers: C-32
+    #[test]
+    fn a_config_without_the_line_loads_nothing_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = recognize(&words("vitest run")).unwrap().unwrap();
+        assert!(
+            unloadable(&r, dir.path())
+                .unwrap()
+                .contains("there is none here")
+        );
+        std::fs::write(
+            dir.path().join("vite.config.ts"),
+            "export default { test: {} }\n",
+        )
+        .unwrap();
+        assert!(
+            unloadable(&r, dir.path())
+                .unwrap()
+                .contains("one line in vite.config.ts")
+        );
+        // vitest.config.ts comes first, as Vitest looks for it first.
+        std::fs::write(
+            dir.path().join("vitest.config.ts"),
+            format!("export default {{ {CONFIG_LINE} }}\n"),
+        )
+        .unwrap();
+        assert!(unloadable(&r, dir.path()).is_none());
+    }
+
+    // covers: C-32
+    #[test]
+    fn a_module_some_plugin_made_is_not_a_file() {
+        assert_eq!(
+            module_path("/repo/src/a.ts?raw").unwrap(),
+            Some(PathBuf::from("/repo/src/a.ts"))
+        );
+        assert_eq!(
+            module_path("\0vite/dynamic-import-helper.js").unwrap(),
+            None
+        );
+        assert!(module_path("\0virtual:routes").is_err());
+        assert!(module_path("virtual:routes").is_err());
+        assert!(module_path("src/relative.ts").is_err());
+    }
+}

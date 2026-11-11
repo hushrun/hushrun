@@ -41,6 +41,10 @@ pub struct RunFile {
     /// whose dep-info its key holds: the target runner reuses only a binary that is that one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<Binary>,
+    /// \[ADR 0071\] The test files the plan classified as such, from the root: Vitest's adapter
+    /// deselects nothing when its own list isn't this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_files: Option<Vec<String>>,
 }
 
 /// \[ADR 0069\] A test binary the plan reuses.
