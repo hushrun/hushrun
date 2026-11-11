@@ -17,15 +17,24 @@ pub const SKILL: &str = include_str!("../../../recipes/agents/SKILL.md");
 /// What `hushrun guide` prints, before what is true here.
 pub const GUIDE: &str = include_str!("../../../recipes/agents/GUIDE.md");
 /// This hushrun's revision of the skill: [`SKILL`] says it too.
-pub const REVISION: u32 = 1;
+pub const REVISION: u32 = 2;
 
 /// Each revision's text, by its SHA-256, with CRLF read as LF, as git may check it out on
 /// Windows. Append only: a copy of an older revision is `older` only while its hash is here. A
 /// test fails when [`SKILL`] changes and this doesn't.
-const REVISIONS: &[(u32, &str)] = &[(
-    1,
-    "53a2c8f9cb5fd8427907b33985c044a05d6b40c7eeaf30c5b5f5dc0d08e7043f",
-)];
+/// The text a revision replaces goes to `testdata/skills/revisions/<n>.md`, which a test reads.
+const REVISIONS: &[(u32, &str)] = &[
+    // 0.11.0 and 0.11.1.
+    (
+        1,
+        "53a2c8f9cb5fd8427907b33985c044a05d6b40c7eeaf30c5b5f5dc0d08e7043f",
+    ),
+    // [ADR 0067] It holds where results stay on this machine.
+    (
+        2,
+        "8f423c6899f84a19638317f9904b69a578183797ea31923444e33ab63e810ac8",
+    ),
+];
 
 /// The texts hushrun wrote before revisions, 0.3.0 to 0.10.1: revision 0. Their texts are in
 /// `testdata/skills/before-revisions`, which a test hashes.
@@ -288,6 +297,28 @@ mod tests {
         let mut known: Vec<String> = BEFORE.iter().map(|h| (*h).to_string()).collect();
         known.sort();
         assert_eq!(hashes, known);
+    }
+
+    // covers: C-24
+    #[test]
+    fn every_earlier_revision_is_older() {
+        // [ADR 0065] A revision's text stays in testdata/skills/revisions/<n>.md when the next one
+        // replaces it: the copy a repository still has of it reads as older, never as edited, so
+        // `skill update` and `init` rewrite it.
+        let dir = hushrun_testkit::testdata("skills/revisions");
+        let mut kept: Vec<u32> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let n: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert_eq!(stamp(&text), Some(Ok(n)), "{}", path.display());
+                assert_eq!(state_of(Some(&text)), State::Older(n), "{}", path.display());
+                n
+            })
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, (1..REVISION).collect::<Vec<_>>());
     }
 
     // covers: C-24

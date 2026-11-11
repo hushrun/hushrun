@@ -90,10 +90,12 @@ Plain `repository stats` failed with `no repository URL` in a repository with on
    note says so. Without a terminal it needs `--yes`. It doesn't go with `--org` or the pipeline's
    flags, and in a repository whose files name a backend it exits 2: that repository shares
    already, and a run there keeps results here until someone signs in (item 2).
-   The agents' files are one text either way: AGENTS.md's block says that a pass skips "on this
-   machine, and in CI once the repository shares its results", so it holds after `--local`, after
-   the plain init that follows, and for a member who isn't signed in. Which of the two is true here
-   is `hushrun ready`'s to say, not a second copy of it in a file.
+   The agents' files are one text either way: AGENTS.md's block and the skill, at its revision 2
+   (ADR 0065), say that a pass skips on this machine, and in CI once the repository shares its
+   results, so they hold after `--local`, after the plain init that follows, and for a member who
+   isn't signed in. Which of the two is true here is `hushrun ready`'s to say, not a second copy
+   of it in a file. The skill names no `--local`: an older hushrun may read it, so `hushrun guide`
+   says how to set up with no account.
 8. **One question, before any sign-in** (C-15). At a terminal, without `--local`, `--yes`,
    `--dry-run` or `--org`, with no login saved for the origin, no agent set, and a repository that
    names no backend, init asks `Share results with CI and teammates (signs in), or keep them on

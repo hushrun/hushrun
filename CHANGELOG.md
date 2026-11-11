@@ -41,6 +41,11 @@ hushrun works with no account, and `ready` and the pre-push hook go by what pass
 - The block `hushrun init` writes in AGENTS.md holds with or without shared results: hushrun skips
   a check "on this machine, and in CI once the repository shares its results", where it said "in
   CI". init replaces an older block where it is.
+- **The skill is revision 2.** It says that a pass skips here, and in CI once the repository
+  shares its results, has a section on results that stay on this machine, tells a repository in
+  another language by its `hushrun.yaml` or by CI's `hushrun run` lines, and leaves setting up
+  with no account to `hushrun guide`. `hushrun ready` notes a repository's copy of revision 1 as
+  older, and `hushrun skill update` or `hushrun init` updates it, to commit.
 
 ## [0.11.1] - 2026-11-10
 
