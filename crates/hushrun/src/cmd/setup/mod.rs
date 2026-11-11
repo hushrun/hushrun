@@ -33,6 +33,7 @@ mod scripts;
 mod started;
 mod suggestions;
 mod turbo;
+mod unit_cache;
 pub(crate) mod variants;
 pub(crate) mod workflows;
 mod workspaces;
@@ -156,7 +157,14 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
         }
         register_machine(&session.backend);
         let tools = AgentTools::of(&look);
-        let ci = CiEdits::of(&look);
+        let mut ci = CiEdits::of(&look);
+        // \[C-38\] CI's cache step for what test files read, for a backend that keeps none.
+        ci.manual.extend(unit_cache::notes(
+            look.tests_on,
+            &look.workflows,
+            &session.backend,
+            look.repository.as_deref(),
+        ));
         if promotion.writes() || tools.writes() || ci.writes() {
             println!("\nhushrun init can also write:");
             if promotion.writes() {
@@ -270,6 +278,13 @@ pub fn run(global: &GlobalOpts, args: &InitArgs) -> CmdResult {
     }
     if session.member {
         plan.promotion = promotion.blocks();
+        // \[C-38\] CI's cache step for what test files read, for a backend that keeps none.
+        plan.manual.extend(unit_cache::notes(
+            look.tests_on,
+            &look.workflows,
+            &session.backend,
+            look.repository.as_deref(),
+        ));
     } else {
         // Nothing of the org's, nor hushrun.yaml, which needs the URL the org gives: sign_in said
         // who can let the person in.
@@ -372,6 +387,8 @@ struct Look {
     turbo: turbo::Edit,
     /// \[ADR 0071\] The line Vitest's config needs for a check whose `tests` are on.
     vitest_line: Option<String>,
+    /// \[C-38\] Some check of hushrun.yaml has `tests` on (`observe` or `reuse`).
+    tests_on: bool,
 }
 
 /// The scripts each CI job starts, by its file's index and its id.
@@ -430,6 +447,9 @@ impl Look {
         let reports_skip = reports_skip(policy.as_ref());
         // \[ADR 0071\] A check that looks at its test files, in a repository with Vitest, needs
         // one line in Vitest's config, which init proposes and never writes.
+        let tests_on = policy
+            .as_ref()
+            .is_some_and(|p| p.tests.values().any(|t| t.is_on()));
         let vitest_line = policy
             .as_ref()
             .filter(|p| p.tests.values().any(|t| t.is_on()))
@@ -520,6 +540,7 @@ impl Look {
             backend: hosted::repository_backend(root),
             reports_skip,
             vitest_line,
+            tests_on,
             members,
             job_runs: BTreeMap::new(),
             turbo_runs: BTreeMap::new(),

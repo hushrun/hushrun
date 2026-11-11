@@ -88,7 +88,12 @@ test`), `go test` and Vitest; audited as it goes; and explained, one test file a
   **`hushrun-results/v0`** gains `PUT {base}/v0/units/hints/{sha256}` and `POST
   {base}/v0/units/hints/lookup`; a server without them changes nothing, said once,
   `hushrun: unit: acme doesn't keep what other machines saw its test files read yet, so this
-  machine goes by what it saw itself`. One too large to send isn't sent, said once.
+  machine goes by what it saw itself`. One too large to send isn't sent, said once. A check whose
+  `counts_from` names this machine's system among others reads this system's lists only, and a
+  list borrowed from another system keys nothing once no rule reads it, and is never sent as this
+  system's. With a backend that keeps none, `hushrun init` says under "Change by hand" the cache
+  step a CI job needs to keep what its test files read between runs, for GitHub Actions and
+  GitLab, and edits no CI file for it.
 
 ### Changed
 
