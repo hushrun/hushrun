@@ -423,3 +423,186 @@ fn cargo_builds_through_the_wrapper() {
         .count();
     assert_eq!(links, 1);
 }
+
+/// A check that says the wrapper it gets, as `wrapper=[…]` on a line of its own, then exits
+/// with `code`.
+fn wrapper_check(code: i32) -> String {
+    format!("{{run: 'echo \"wrapper=[$RUSTC_WRAPPER]\"; exit {code}'}}")
+}
+
+/// A world whose hushrun.yaml has `checks`, each `name: definition`.
+fn with_checks(checks: &[(&str, String)]) -> World {
+    let w = World::new("acme-api.yaml");
+    let listed: String = checks
+        .iter()
+        .map(|(name, def)| format!("  {name}: {def}\n"))
+        .collect();
+    w.write(
+        "hushrun.yaml",
+        &format!(
+            "version: 1\nrepository: github.com/Acme/api\n{}\nchecks:\n{listed}deploy:\n  branch: develop\n  require: [{}]\n",
+            w.ledger_lines(),
+            checks[0].0
+        ),
+    );
+    w.commit("checks");
+    w
+}
+
+/// `hushrun run CHECK… --force --format json`, signing as a member's machine: hushrun.yaml's
+/// checks, whatever evidence exists.
+fn run_checks(cmd: &mut assert_cmd::Command, checks: &[&str]) -> (Ran, Value) {
+    let ran = Ran::of(
+        cmd.arg("run")
+            .args(checks)
+            .args(["--force", "--format", "json"]),
+    );
+    let value = serde_json::from_str(&ran.stdout).unwrap_or(Value::Null);
+    (ran, value)
+}
+
+fn member(w: &World) -> assert_cmd::Command {
+    let mut cmd = w.hushrun_as(1);
+    cmd.env("HUSHRUN_HOST", NO_HOST);
+    cmd
+}
+
+/// What each `wrapper_check` that ran said it got, in order.
+fn wrappers(ran: &Ran) -> Vec<String> {
+    ran.stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("wrapper=[")?.strip_suffix(']'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The session folders left in the world's store.
+fn sessions_left(w: &World) -> usize {
+    std::fs::read_dir(w.cache.join("build/sessions")).map_or(0, Iterator::count)
+}
+
+// covers: B-2
+#[cfg(unix)]
+#[test]
+fn run_check_sets_the_wrapper_only_when_reuse_is_on_here() {
+    let w = with_checks(&[("w", wrapper_check(0))]);
+    let tested = std::fs::canonicalize(assert_cmd::cargo::cargo_bin("hushrun")).unwrap();
+
+    // Off: nothing set.
+    let (off, _) = run_checks(&mut member(&w), &["w"]);
+    assert_eq!(off.code, 0, "{}", off.stderr);
+    assert_eq!(wrappers(&off), [""], "{}", off.stderr);
+
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let (on, value) = run_checks(&mut member(&w), &["w"]);
+    assert_eq!(on.code, 0, "{}", on.stderr);
+    assert_eq!(value["checks"][0]["result"], "pass", "{}", on.stdout);
+    let found = wrappers(&on);
+    assert_eq!(found.len(), 1, "{}", on.stderr);
+    let wrapper = PathBuf::from(&found[0]);
+    assert_eq!(
+        wrapper.file_name().and_then(|n| n.to_str()),
+        Some("hushrun-rustc"),
+        "{}",
+        on.stderr
+    );
+    assert!(wrapper.starts_with(w.cache.join("build")), "{}", on.stderr);
+    assert_eq!(std::fs::canonicalize(&wrapper).unwrap(), tested);
+    // The session the wrapper reads is gone once the check is over.
+    assert_eq!(sessions_left(&w), 0);
+
+    // A wrapper the person set stays.
+    let (set, _) = run_checks(member(&w).env("RUSTC_WRAPPER", "sccache"), &["w"]);
+    assert_eq!(set.code, 0, "{}", set.stderr);
+    assert_eq!(wrappers(&set), ["sccache"], "{}", set.stderr);
+
+    // One command can turn it off.
+    let (one, _) = run_checks(member(&w).env("HUSHRUN_BUILD", "off"), &["w"]);
+    assert_eq!(wrappers(&one), [""], "{}", one.stderr);
+    assert_eq!(one.lines_with("build reuse"), 0, "{}", one.stderr);
+}
+
+// covers: B-2, B-19
+#[cfg(unix)]
+#[test]
+fn a_check_that_fails_keeps_its_exit_code_with_reuse_on() {
+    let w = with_checks(&[("fails", wrapper_check(5)), ("ok", wrapper_check(0))]);
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let (ran, value) = run_checks(&mut member(&w), &["fails", "ok"]);
+    // hushrun's code for a failed check, and the check's own in the result.
+    assert_eq!(ran.code, 8, "{}", ran.stderr);
+    assert_eq!(value["checks"][0]["result"], "fail", "{}", ran.stdout);
+    assert_eq!(value["checks"][0]["exitCode"], 5, "{}", ran.stdout);
+    assert_eq!(value["checks"][1]["result"], "pass", "{}", ran.stdout);
+    // Each check got the wrapper, through a session of its own, and none is left.
+    let found = wrappers(&ran);
+    assert_eq!(found.len(), 2, "{}", ran.stderr);
+    assert!(
+        found.iter().all(|w| w.ends_with("/hushrun-rustc")),
+        "{}",
+        ran.stderr
+    );
+    assert_eq!(sessions_left(&w), 0);
+}
+
+// covers: B-19
+#[cfg(unix)]
+#[test]
+fn run_check_with_settings_that_cant_be_used_says_so_once_and_runs_every_check() {
+    let w = with_checks(&[("fails", wrapper_check(5)), ("ok", wrapper_check(0))]);
+    let (ran, value) = run_checks(
+        member(&w).env("HUSHRUN_BUILD", "nonsense"),
+        &["fails", "ok"],
+    );
+    assert_eq!(ran.code, 8, "{}", ran.stderr);
+    assert_eq!(value["checks"][0]["exitCode"], 5, "{}", ran.stdout);
+    assert_eq!(value["checks"][1]["result"], "pass", "{}", ran.stdout);
+    assert_eq!(wrappers(&ran), ["", ""], "{}", ran.stderr);
+    assert_eq!(
+        ran.lines_with(
+            "hushrun run: build reuse is off for this run: HUSHRUN_BUILD=\"nonsense\" is not valid: expected off, observe or on"
+        ),
+        1,
+        "{}",
+        ran.stderr
+    );
+    assert_eq!(ran.lines_with("build reuse"), 1, "{}", ran.stderr);
+
+    // -q keeps it quiet.
+    let (quiet, _) = run_checks(
+        member(&w).env("HUSHRUN_BUILD", "nonsense").arg("-q"),
+        &["fails", "ok"],
+    );
+    assert_eq!(quiet.code, 8, "{}", quiet.stderr);
+    assert_eq!(quiet.lines_with("build reuse"), 0, "{}", quiet.stderr);
+}
+
+// covers: B-2
+#[cfg(unix)]
+#[test]
+fn an_isolated_check_never_gets_the_wrapper() {
+    use hushrun_testkit::container::FakeRuntime;
+    const IMAGE: &str =
+        "golang@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let w = with_checks(&[(
+        "unit",
+        format!(
+            "{{image: \"{IMAGE}\", platform: linux/amd64, run: 'echo \"wrapper=[$RUSTC_WRAPPER$HUSHRUN_BUILD_SESSION]\"'}}"
+        ),
+    )]);
+    let rt = FakeRuntime::install(&w.root);
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let mut cmd = member(&w);
+    cmd.env("HUSHRUN_CONTAINER_RUNTIME", &rt.path)
+        .env("HUSHRUN_EXPORT_DIR", w.root.join("exports"));
+    let (ran, value) = run_checks(&mut cmd, &["unit", "--isolated"]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(value["checks"][0]["result"], "pass", "{}", ran.stdout);
+    assert_eq!(wrappers(&ran), [""], "{}", ran.stderr);
+    // No session was begun and nothing was linked: the container has neither.
+    assert!(!w.cache.join("build").exists(), "{}", ran.stderr);
+    let runs = rt.runs();
+    assert_eq!(runs.len(), 1);
+    // The check declares no variables, so none goes in.
+    assert!(!runs[0].iter().any(|a| a == "--env"), "{:?}", runs[0]);
+}
