@@ -1,0 +1,154 @@
+# 10. Spec: build blocks
+
+> Normative. MUST, SHOULD and MAY follow RFC 2119.
+>
+> hushrun skips a check that already passed (§7.6). Build blocks are a finer level under a check
+> that runs: a crate the compiler already built from the same inputs is not compiled again, in
+> this worktree or in another one on the same machine. Nothing here changes what a check's result
+> is, and nothing leaves the machine.
+
+A **block** is what one compiler call produced: one crate built one way. The **store** holds
+blocks for every repository on the machine. A **root** is a folder a compile's paths start from:
+the workspace (rustc's working directory), the package (`CARGO_MANIFEST_DIR`), the build script's
+output (`OUT_DIR`), the output folder (`--out-dir`) and each dependency search folder
+(`-L dependency=`).
+
+**B-1 Mode.** Reuse has one mode per user: `off`, `observe` or `on`. It is `off` until the person
+turns it on. In `observe` every compile runs as in `off`, blocks are stored, and a compile whose
+block already exists is compared with it. In `on` a compile whose block exists is not run.
+`hushrun build on|observe|off` sets it; `HUSHRUN_BUILD` overrides it for one command.
+
+**B-2 The wrapper.** When the mode is not `off`, `hushrun run NAME -- COMMAND` runs COMMAND with
+`RUSTC_WRAPPER` set to a link named `hushrun-rustc` that points at the hushrun binary. It MUST NOT
+set it when `RUSTC_WRAPPER` is set already, in CI (C-14's detection), or on Windows. A binary
+called by that name is the wrapper and does nothing else; it MUST decide that from its own name,
+before reading any setting. A build outside `hushrun run` neither reads nor fills the store.
+Cargo's own fingerprints don't count the wrapper, so changing the mode never forces a rebuild.
+
+**B-3 Outcomes.** Every compiler call ends in exactly one outcome, decided by one function from
+facts: `reused`, `built and stored`, `built, not stored` (with the reason) or `passed through`
+(with the reason). The wrapper's exit code is rustc's, or 0 for `reused`.
+
+**B-4 Passed through.** The wrapper MUST run rustc exactly as asked, storing nothing, when any of
+these holds: the first argument is not rustc (clippy's driver); no `--crate-name`; `--print`,
+`-vV` or a source of `-`; an `@file` argument; a `--target` that names a file; a
+`--remap-path-prefix` of the caller's; `-C instrument-coverage` or `-C profile-generate|use`;
+an `--emit` kind other than `dep-info`, `metadata` and `link`; more than one `--crate-type`; a
+crate type of `cdylib`, `dylib` or `staticlib`; no `--out-dir` or no `-C extra-filename`; no
+`--json` with `artifacts`; the package is on the person's never-store list; the compiler's
+identity can't be established (B-17).
+
+**B-5 What was asked.** The first key is the SHA-256 of the JCS form of: a schema name; the
+compiler's identity (B-17); the arguments in order, with roots replaced by placeholders (B-8) and
+without `--out-dir`, `-L dependency=`, `-C incremental=`, `--error-format`, `--json`, `--color`,
+`--diagnostic-width`, and with each `--extern` reduced to its name and options; every variable
+whose name starts with `CARGO_` except `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`,
+`CARGO_SBOM_PATH` and `CARGO_RUSTC_CURRENT_DIR`, with roots replaced; the variables the build
+script set with `cargo:rustc-env`; `RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TARGET`, `SDKROOT` and
+the person's extra variables. It holds no machine, user, branch, commit or time.
+
+**B-6 What was read.** The second key is the SHA-256 of the JCS form of the first key and:
+
+- `reads`: each file rustc's dep-info lists, as a path from its root with its SHA-256, and each
+  place a module of a read `.rs` file could also have been, as absent;
+- `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
+- `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro is named by
+  the key of the block that produced it, without its place;
+- `shape`: the names of the entries of every folder that directly holds a read file;
+- `generated`: every file under `OUT_DIR`, by path and SHA-256;
+- `declared`: for a package that is not from a registry or a git source, what its build script
+  declared with `rerun-if-changed` (folders in full) and `rerun-if-env-changed`; and the inputs of
+  the macros known to read files the compiler doesn't list;
+- `link`: for a program, every library the linker was handed, by SHA-256, the linker and the SDK
+  (B-18);
+- `place`: `anywhere`, or the roots themselves (B-10).
+
+**B-7 Hints.** To compute the second key before compiling, the wrapper needs the list of what to
+hash. It comes from the lists earlier compiles of the same first key recorded. A list is a hint
+and MUST NOT be trusted: the wrapper hashes the files as they are now, and a block exists under a
+key only because a compile read exactly those bytes. A list that names a file that is gone is
+skipped. The result of a compile is always recorded under the key computed from what that compile
+read, never from a hint.
+
+**B-8 Roots.** A path that lies under a root, in the root's given form or its resolved form, is
+recorded as the root's name and the rest, and looked up under the current root. A path recorded
+under another checkout MUST NOT be opened. Replacing roots in arguments and values MUST be
+reversible: two different inputs never give one text. A read at an absolute path outside every
+root, the cargo home, the toolchain and the system folders ties the block to its roots.
+
+**B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
+adds `--remap-path-prefix` for each root, the workspace first as `.`, the more specific roots
+after it, with the scope left whole; and it leaves `-C incremental` out. It changes nothing else.
+No block comes from an incremental compile.
+
+**B-10 Place.** After a compile, every output is searched for each root as raw bytes, in its
+given and resolved forms. None found: the block's place is `anywhere`. Any found, or an output
+that can't be searched (`-C lto`, `-C linker-plugin-lto`, `-C embed-bitcode=yes`, compressed debug
+sections): the place is the roots, and the block is reused only where they are the same. A
+compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
+only if a second compile, with that variable naming a link to the same folder, gives the same
+bytes.
+
+**B-11 Changed while compiling.** The wrapper records each read file's size, dates, inode and
+device around the compile and around its hashing. A compile is stored only if no read file
+changed and none carries a date at or after the compile's start. Otherwise the outcome is
+`built, not stored`.
+
+**B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
+a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
+new file the owner can write. All get one modification time, the wrapper's start. The dep-info
+file is written with this folder's paths. Then the recorded messages are written to stderr with
+this folder's paths, the notices that an output is ready last. If any step fails before the first
+message is written, rustc runs. Messages are kept per form (`--error-format`, `--json`, colour);
+a block whose compile wrote only notices serves every form, and otherwise a missing form is a
+build.
+
+**B-13 The store.** `<cache directory>/build`, or `HUSHRUN_BUILD_DIR`. A block is written under
+`tmp/`, synced, and published by renaming its folder to `blocks/<key>`: the first writer wins and
+a second, identical block is dropped. Nothing rewrites a published block. Each block records the
+repository that built it.
+
+**B-14 Expiry.** A reuse sets the block's last use to the command's time; so does its creation.
+After a run, at most once a day, `hushrun run` deletes every block whose last use is more than
+`keep_days` old (15 unless set; `HUSHRUN_BUILD_KEEP_DAYS` overrides it), by renaming it into
+`trash/` and deleting it there, and deletes what is more than a day old under `tmp/` and
+`trash/`. The stamp of the sweep is written before anything is deleted. There is no limit on the
+store's size.
+
+**B-15 Suspension.** A first key is `ok` or `suspended`. It is suspended when an audit disagrees
+(B-16) or when a dependent fails to compile against a reused block; in the second case the reused
+files are removed from the output folder so that cargo builds them, and one line says so. A
+suspended key is never reused. `hushrun build clean` clears it.
+
+**B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
+chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the
+block's. A difference serves the fresh outputs, suspends the key and is reported. Programs and
+proc macros are not compared.
+
+**B-17 The compiler.** The compiler's identity is: the path given, resolved; its size and
+modification time; `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; under rustup, the size and modification
+time of the toolchain's own `rustc` and of its `librustc_driver`; and the output of `rustc -vV`.
+A rustup proxy with no `RUSTUP_TOOLCHAIN` is passed through.
+
+**B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
+reports with `--print=link-args`, the linker's path, size and modification time, and the SDK.
+Where that list can't be read, the outcome is `built, not stored`. A program is stored with the
+debug objects it names.
+
+**B-19 Every failure runs rustc.** An error computing a key, reading the store, or putting files
+in place MUST end in rustc running as asked with nothing stored. A settings file that can't be
+read, a store that can't be written, CI and Windows are `passed through`. A kill at any point
+leaves nothing that a later build takes for a block.
+
+**B-20 What a run says.** Each compile appends one line to the run's log with its outcome. After
+COMMAND exits, `hushrun run` writes one line: how many crates were reused and built, and the time
+reuse saved; in `observe`, how many would have been reused and how many differed.
+
+**B-21 Settings.** One file per user, `build.json` beside the credentials, written whole under a
+lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable names) and
+`min_free_gb`. `hushrun build status` shows the mode, the store's folder, its size and its blocks
+by age and by repository. `hushrun build clean` empties the store.
+
+**B-22 Free space.** Nothing is stored while the store's volume has less than `min_free_gb` free
+(10 unless set; 0 turns the rule off). The outcome is `built, not stored`, and the run's line
+says so once.
