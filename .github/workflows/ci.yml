@@ -86,13 +86,26 @@ jobs:
         with:
           tool: cargo-nextest
       # pytest and pytest-xdist for the tests of `tests: observe` (ADR 0068), which fail rather
-      # than pass without them when HUSHRUN_TEST_TOOLS is `required`.
+      # than pass without them when HUSHRUN_TEST_TOOLS is `required`; then Go and Vitest.
       - name: Install pytest for the test-file tests
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
           "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
+      # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those
+      # tests fail rather than pass without them when HUSHRUN_TEST_TOOLS is `required`.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20.20.2"
+      - name: Install Vitest for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -163,6 +176,19 @@ jobs:
           "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
+      # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those
+      # tests fail rather than pass without them when HUSHRUN_TEST_TOOLS is `required`.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20.20.2"
+      - name: Install Vitest for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass

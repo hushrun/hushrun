@@ -9,6 +9,11 @@
 //! none of its tests; and plain `cargo test`'s one start of it exits 0. Any doubt (a file that
 //! can't be read, another path, other bytes) starts it.
 //!
+//! \[ADR 0070\] `go test` starts its test binaries through it too, from `GOFLAGS`'s `-exec`, with
+//! `go` in place of the variable: it starts each in its package's directory with Go's test log
+//! (`-test.testlogfile`), gives the test `GOFLAGS` as COMMAND's environment had it, and doesn't
+//! start one whose package `hushrun.json` lists.
+//!
 //! Its command line is `hushrun __hushrun-test-runner <VARIABLE> <N> <runner word>… <binary>
 //! <argument>…`: `CARGO_TARGET_<VARIABLE>_RUNNER` is the variable hushrun set, and the `N` words
 //! after it are the runner the environment had set there, which it chains to and gives back to

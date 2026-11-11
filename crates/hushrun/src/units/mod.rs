@@ -8,6 +8,9 @@
 //!   key, one batch lookup, the audited ones (C-34), and the list adapters deselect from. Every
 //!   failure of the machinery ends in "ran everything".
 //!
+//! Four adapters: pytest and \[ADR 0071\] Vitest, observed (a plugin inside the runner); Cargo and
+//! \[ADR 0070\] `go test`, compiler-given (the toolchain says what a test binary is built from).
+//!
 //! A [`Session`] starts before COMMAND: it makes the run's `HUSHRUN_UNITS` directory and the
 //! variables that load an adapter, and nothing at all when `tests` is off. After COMMAND,
 //! [`Session::finish`] reads what the adapter wrote and decides each test file's state with the

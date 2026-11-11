@@ -6,6 +6,42 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+More runners for test files ([ADR 0070](docs/adr/0070-go-test-packages.md),
+[ADR 0071](docs/adr/0071-vitest-test-files.md)): `go test`'s packages and Vitest's test files are
+observed and reused as pytest's and Cargo's are, and `hushrun ready` says how many test files a run
+would run.
+
+### Added
+
+- Contract: **`go test`** with `tests` on: a unit is a package's tests, named by its directory, read
+  from `go list -deps -test` and from Go's own test log (what the tests opened, listed and started).
+  hushrun adds `-exec` to `GOFLAGS`, chained to one there, keeping the rest; with it Go's test cache
+  stores and finds nothing. A `TestMain`, the repository's cgo, or a process a test starts makes a
+  package `not observed`. `-c`, `-exec`, `-fuzz`, `-overlay`, cross-compiling and unknown flags
+  load nothing, and say so.
+- Contract: **Vitest** (4) with `tests` on, through one line in the repository's Vitest config,
+  `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`,
+  which `hushrun init` proposes under "Change by hand" and never writes: a unit is a test file of
+  Vitest's own list, read from what its worker ran and opened, with the config files. Only
+  `vitest run` (however started) loads it; a child process, a worker thread, a native addon, a
+  module a plugin made, a pool that shares workers, a `globalSetup` or a Vite plugin hushrun doesn't
+  know makes a test file `not observed`. Every test file left reused passes, as Vitest's "no test
+  files" wouldn't.
+- Contract: **`hushrun ready`** adds, for a check with `tests: reuse` it would run, `unit: CI would
+  run 12 of 340 test files; 328 already passed on the files they read` (with results on this
+  machine, what a run here would), or that reuse is suspended: for pytest and Vitest, whose plans
+  read files, with one batch lookup, and nothing written.
+- Contract: `hushrun.json` gains `testFiles`; facts gain a start's `dir`, `testlog` and
+  `testlogTruncated`, and a unit's `dirs`; the map keeps the directories a test file listed and
+  Vitest's list.
+
+### Fixed
+
+- The map and the audit are kept per repository too: two repositories with one check and one
+  command on one machine shared one, which said a misleading reason for running every test file.
+- A suspension a server answered with a 5xx or 429 waits in the outbox, and nothing is reused until
+  it gets there: it was dropped.
+
 A check's test files, reused ([ADR 0069](docs/adr/0069-test-files-reused.md)): with
 `tests: reuse`, a run whose check missed doesn't run again the test files that already passed on
 the files they read, audit runs check that it holds, and a disagreement suspends reuse until a
