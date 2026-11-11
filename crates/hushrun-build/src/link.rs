@@ -122,6 +122,24 @@ pub fn parse(stdout: &str) -> Result<LinkArgs, Error> {
     }
 }
 
+/// rustc's stdout as it goes on to the wrapper's stdout: every line, byte for byte, but the
+/// linker command `--print=link-args` added, which is the last line that reads as one (rustc
+/// links after every macro ran). A proc macro's own printing gets through (B-18).
+pub fn without_command(stdout: &[u8]) -> Vec<u8> {
+    let lines: Vec<&[u8]> = stdout.split_inclusive(|&b| b == b'\n').collect();
+    let command = lines.iter().rposition(|line| {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        std::str::from_utf8(line).is_ok_and(|text| parse_line(text).is_ok())
+    });
+    let mut out = Vec::with_capacity(stdout.len());
+    for (i, line) in lines.iter().enumerate() {
+        if Some(i) != command {
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+
 /// A cursor over one line.
 struct Line<'a> {
     rest: &'a str,
@@ -716,6 +734,21 @@ mod tests {
         // A proc macro that prints a quoted word makes two candidates: an error, not a guess.
         let quoted = format!("\"hello\"\n{LINUX_BIN}\n");
         assert_eq!(parse(&quoted), Err(Error::Several(2)));
+    }
+
+    #[test]
+    // covers: B-18
+    fn stdout_goes_on_without_the_linker_command() {
+        let mut bytes = format!("hello from a proc macro\n{LINUX_BIN}\nmore\n").into_bytes();
+        bytes.extend_from_slice(b"\xfe no newline");
+        let mut expected = b"hello from a proc macro\nmore\n".to_vec();
+        expected.extend_from_slice(b"\xfe no newline");
+        assert_eq!(without_command(&bytes), expected);
+        // Two lines that read as commands: the last is rustc's.
+        let quoted = format!("\"hello\"\n{LINUX_BIN}\n");
+        assert_eq!(without_command(quoted.as_bytes()), b"\"hello\"\n");
+        assert_eq!(without_command(b""), b"");
+        assert_eq!(without_command(b"only text\n"), b"only text\n");
     }
 
     #[test]

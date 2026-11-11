@@ -101,6 +101,10 @@ pub struct Entry {
     pub class: Option<Class>,
     /// The crate's name, or empty.
     pub crate_name: String,
+    /// The package's `name-version`, or empty when unknown: every build script's crate is
+    /// `build_script_build`, and this tells them apart.
+    #[serde(default)]
+    pub package: String,
     /// How long rustc ran, in milliseconds. 0 when it didn't.
     pub rustc_ms: u64,
     /// For a reuse: how long rustc took when the block was built, less what the reuse took.
@@ -194,13 +198,15 @@ fn shared_folders(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<String> {
     shared
 }
 
-/// What a run's compiles came to, counted from its log (B-20). Cargo's probes (`--print`, `-vV`,
-/// no `--crate-name`) are not compiles and count nowhere.
+/// What a run's compiles came to, counted from its log (B-20). Calls that compile none of the
+/// build's own crates count nowhere: cargo's probes (`--print`, `-vV`, no `--crate-name`), and
+/// the probes a build script runs through the wrapper (autocfg's, with `-o`, or without
+/// `-C extra-filename`, `--out-dir` or `--json=artifacts`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Counts {
     /// The run's mode.
     pub mode: Mode,
-    /// Compiles: every call but cargo's probes.
+    /// Compiles: every call but the probes.
     pub compiles: u64,
     /// Compiles whose block was put in place, with rustc not started.
     pub reused: u64,
@@ -267,11 +273,20 @@ impl Counts {
     }
 }
 
-/// Cargo's probes: calls that compile no crate.
+/// Probes: calls that compile none of the build's own crates. Cargo always passes a crate of
+/// the build `--crate-name`, `-C extra-filename`, `--out-dir` and `--json=artifacts`, and never
+/// `-o`; a call without them is cargo's probe or a build script's own.
 fn is_probe(outcome: Outcome) -> bool {
     matches!(
         outcome,
-        Outcome::PassedThrough(PassedThrough::Probe | PassedThrough::NoCrateName)
+        Outcome::PassedThrough(
+            PassedThrough::Probe
+                | PassedThrough::NoCrateName
+                | PassedThrough::NoExtraFilename
+                | PassedThrough::NoOutDir
+                | PassedThrough::OutputFile
+                | PassedThrough::NoArtifacts
+        )
     )
 }
 
@@ -629,6 +644,7 @@ mod tests {
             outcome: crate::decide::passed_through(crate::model::PassedThrough::Probe),
             class: None,
             crate_name: String::new(),
+            package: String::new(),
             rustc_ms: 0,
             saved_ms: 0,
             stored_bytes: 0,
@@ -681,6 +697,7 @@ mod tests {
             outcome,
             class: Some(Class::Library),
             crate_name: "c".into(),
+            package: String::new(),
             rustc_ms: 0,
             saved_ms: 0,
             stored_bytes: 0,
@@ -849,6 +866,25 @@ mod tests {
             probe(PassedThrough::NoCrateName),
             built(),
             probe(PassedThrough::Probe),
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(summary.lines(), ["build: 1 of 2 crates reused, 1 built"]);
+        assert_eq!(summary.counts().compiles, 2);
+        assert_eq!(summary.counts().passed_through, 0);
+    }
+
+    // covers: B-20
+    #[test]
+    fn a_build_scripts_own_rustc_probes_are_not_crates() {
+        // autocfg and friends call rustc through the wrapper with `-o`, or without
+        // `-C extra-filename`, `--out-dir` or `--json=artifacts`: not the build's own crates.
+        let entries = [
+            reused(0),
+            built(),
+            entry(Outcome::PassedThrough(PassedThrough::NoExtraFilename)),
+            entry(Outcome::PassedThrough(PassedThrough::NoOutDir)),
+            entry(Outcome::PassedThrough(PassedThrough::OutputFile)),
+            entry(Outcome::PassedThrough(PassedThrough::NoArtifacts)),
         ];
         let summary = Summary::of(Mode::On, 10, &entries);
         assert_eq!(summary.lines(), ["build: 1 of 2 crates reused, 1 built"]);

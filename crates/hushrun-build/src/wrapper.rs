@@ -75,6 +75,8 @@ pub trait Ports {
     fn pid(&self) -> u32;
     /// What `<rustc> -vV` prints (B-17).
     fn rustc_version(&self, rustc: &Path) -> io::Result<String>;
+    /// Writes to the wrapper's stdout what rustc printed there (B-18).
+    fn stdout(&mut self, bytes: &[u8]);
     /// Runs rustc exactly as asked and returns its exit code. The real one replaces the process
     /// on unix, so a pass-through costs one process.
     fn exec(&mut self, rustc: &OsStr, args: &[OsString]) -> i32;
@@ -123,8 +125,10 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         }
         Parsed::PassedThrough(why) => {
             if let Some(current) = session::current(&|name| ports.var(name)) {
+                let var = |name: &str| env.get(name).and_then(OsStr::to_str).map(str::to_string);
                 current.log(&Entry {
                     crate_name: crate_name_of(args).unwrap_or_default(),
+                    package: package_id(var("CARGO_PKG_NAME"), var("CARGO_PKG_VERSION")),
                     ..entry(decide::passed_through(why), None)
                 });
             }
@@ -152,12 +156,23 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         outcome,
         class,
         crate_name: String::new(),
+        package: String::new(),
         rustc_ms: 0,
         saved_ms: 0,
         stored_bytes: 0,
         found: false,
         differed: false,
         note: None,
+    }
+}
+
+/// The package as the log names it: `name-version`, the name alone without a version, empty
+/// when unknown. It tells apart two build scripts, whose crates are all `build_script_build`.
+fn package_id(name: Option<String>, version: Option<String>) -> String {
+    match (name, version) {
+        (Some(name), Some(version)) => format!("{name}-{version}"),
+        (Some(name), None) => name,
+        (None, _) => String::new(),
     }
 }
 
@@ -221,8 +236,10 @@ struct OutputFile {
 
 impl Call<'_> {
     fn log(&self, entry: Entry) {
+        let package = self.invocation.package();
         self.current.log(&Entry {
             crate_name: self.invocation.crate_name().to_string(),
+            package: package_id(package.name.clone(), package.version.clone()),
             ..entry
         });
     }
@@ -517,6 +534,11 @@ impl Call<'_> {
                 }
             }
         };
+        // What rustc printed goes on, but the linker command the wrapper asked for (B-18).
+        let printed = link::without_command(&ran.stdout);
+        if !printed.is_empty() {
+            self.ports.stdout(&printed);
+        }
         if !ran.success {
             log.note = self.reject_reused(store, &recorded);
             log.outcome = decide::after(plan, &Facts::ran(Rustc::Failed)).outcome;
@@ -1166,6 +1188,12 @@ impl Ports for Real {
             success: status.success(),
             stdout,
         })
+    }
+
+    fn stdout(&mut self, bytes: &[u8]) {
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
     }
 }
 

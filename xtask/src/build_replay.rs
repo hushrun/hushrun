@@ -1139,6 +1139,16 @@ fn differs(entry: &Entry) -> bool {
     entry.differed || entry.outcome == Outcome::BuiltNotStored(NotStored::Differed)
 }
 
+/// A crate as the report names it: `crate (package)`, the crate alone when the log doesn't name
+/// the package, empty when it names no crate. Every build script is `build_script_build`.
+fn named(entry: &Entry) -> String {
+    match (entry.crate_name.is_empty(), entry.package.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => entry.crate_name.clone(),
+        (false, false) => format!("{} ({})", entry.crate_name, entry.package),
+    }
+}
+
 fn class_name(class: Option<Class>) -> &'static str {
     class.map_or(UNKNOWN_CLASS, Class::as_str)
 }
@@ -1153,7 +1163,7 @@ impl Counts {
             if let Some(reason) = entry.outcome.reason() {
                 let key = (entry.outcome.as_str(), reason);
                 *counts.by_reason.entry(key).or_default() += 1;
-                add_example(counts.examples.entry(key).or_default(), &entry.crate_name);
+                add_example(counts.examples.entry(key).or_default(), &named(entry));
             }
             if entry.found {
                 counts.found += 1;
@@ -1162,7 +1172,7 @@ impl Counts {
                 counts.differed.push(if entry.crate_name.is_empty() {
                     UNNAMED.to_string()
                 } else {
-                    entry.crate_name.clone()
+                    named(entry)
                 });
             }
             counts.rustc_ms = counts.rustc_ms.saturating_add(entry.rustc_ms);
@@ -1968,6 +1978,7 @@ mod tests {
             outcome,
             class,
             crate_name: name.to_string(),
+            package: String::new(),
             rustc_ms: 0,
             saved_ms: 0,
             stored_bytes: 0,
@@ -2091,6 +2102,37 @@ mod tests {
         );
         assert!(t.examples[&("passed-through", "probe")].is_empty());
         assert_eq!(totals.failed, 1);
+        // Two build scripts, told apart by their packages.
+        let scripts = |package: &str| Entry {
+            package: package.to_string(),
+            differed: true,
+            ..entry(
+                Outcome::BuiltNotStored(NotStored::Changed),
+                Some(Class::BuildScript),
+                "build_script_build",
+            )
+        };
+        let c = Counts::of(&[
+            scripts("libc-0.2.190"),
+            scripts("serde-1.0.229"),
+            scripts(""),
+        ]);
+        assert_eq!(
+            c.differed,
+            [
+                "build_script_build (libc-0.2.190)",
+                "build_script_build (serde-1.0.229)",
+                "build_script_build",
+            ]
+        );
+        assert_eq!(
+            c.examples[&("built-not-stored", "changed")],
+            [
+                "build_script_build (libc-0.2.190)",
+                "build_script_build (serde-1.0.229)",
+                "build_script_build",
+            ]
+        );
         assert_eq!(totals.wall_ms, 3_000);
         assert_eq!(totals.cpu_ms, Some(2_500));
 

@@ -38,6 +38,9 @@ struct Plan {
     warn: bool,
     /// Fail with this error code.
     fail: Option<&'static str>,
+    /// What the compiler prints on stdout, with `{ws}` for the working directory: a proc
+    /// macro's own printing, the linker command `--print=link-args` asks for.
+    stdout: Option<String>,
 }
 
 type During = Box<dyn FnMut()>;
@@ -47,6 +50,8 @@ type During = Box<dyn FnMut()>;
 struct Seen {
     compiles: Vec<Vec<String>>,
     execs: Vec<Vec<String>>,
+    /// What the wrapper wrote to its stdout.
+    stdout: Vec<u8>,
 }
 
 struct Fake {
@@ -244,6 +249,24 @@ impl Fake {
     }
 }
 
+impl Fake {
+    /// The planned stdout of the crate `args` compile, when it asked for one.
+    fn planned_stdout(&self, args: &[String]) -> Vec<u8> {
+        let name = args
+            .iter()
+            .position(|a| a == "--crate-name")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .unwrap_or_default();
+        let plans = self.plans.borrow();
+        let Some(text) = plans.get(&name).and_then(|p| p.stdout.clone()) else {
+            return Vec::new();
+        };
+        text.replace("{ws}", self.cwd.to_str().unwrap())
+            .into_bytes()
+    }
+}
+
 fn strings(args: &[OsString]) -> Vec<String> {
     args.iter()
         .map(|a| a.to_str().unwrap().to_string())
@@ -284,6 +307,10 @@ impl Ports for Fake {
         )
     }
 
+    fn stdout(&mut self, bytes: &[u8]) {
+        self.seen.borrow_mut().stdout.extend_from_slice(bytes);
+    }
+
     fn exec(&mut self, _rustc: &OsStr, args: &[OsString]) -> i32 {
         let args = strings(args);
         self.seen.borrow_mut().execs.push(args.clone());
@@ -302,10 +329,11 @@ impl Ports for Fake {
         for l in &lines {
             line(l);
         }
+        let stdout = self.planned_stdout(&args);
         Ok(Ran {
             code,
             success: code == 0,
-            stdout: Vec::new(),
+            stdout,
         })
     }
 
@@ -1302,4 +1330,62 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
             .any(|a| a == "--print=link-args")
     );
     assert_eq!(w.blocks(), 0);
+}
+// covers: B-18
+#[test]
+fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let tools = w.dir.path().join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("cc"), b"driver").unwrap();
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!(
+                "printed by a proc macro\n\"{}\" \"-o\" \"{{ws}}/x\"\nand after\n",
+                tools.join("cc").display()
+            )),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let mut fake = Fake {
+        vars: w.vars(&ws, "a"),
+        cwd: ws.clone(),
+        plans: w.plans.clone(),
+        during: None,
+        seen: seen.clone(),
+        version_fails: false,
+        audit: false,
+    };
+    assert_eq!(call(&mut fake, &mut Vec::new(), &args), 0);
+    assert_eq!(
+        String::from_utf8(seen.borrow().stdout.clone()).unwrap(),
+        "printed by a proc macro\nand after\n"
+    );
+    assert_eq!(
+        w.session.current().entries().last().unwrap().outcome,
+        STORED
+    );
+}
+
+// covers: B-20
+#[test]
+fn each_entry_names_its_package() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let r = w.call(&ws, "a", &[]);
+    assert_eq!(r.entry.unwrap().package, "a-0.1.0");
+    // Refused by the parser: still named.
+    let r = w.call(&ws, "a", &["--remap-path-prefix=/x=/y"]);
+    assert_eq!(r.entry.unwrap().package, "a-0.1.0");
+    let r = w.call_with(&ws, "a", &[], |fake| {
+        fake.vars.remove("CARGO_PKG_VERSION");
+    });
+    assert_eq!(r.entry.unwrap().package, "a");
 }
