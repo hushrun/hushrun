@@ -304,10 +304,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
                 );
                 out.detail.insert(
                     0,
-                    format!(
-                        "an audit run may still run it: in each run, {} of the test files that could be reused run anyway, chosen by their keys and the run's start",
-                        "2%, and at least one,"
-                    ),
+                    "an audit run may still run it: each run runs 2% of the test files that could be reused, at least one, chosen by their keys and the run's start".into(),
                 );
             }
             Some(_) => says(

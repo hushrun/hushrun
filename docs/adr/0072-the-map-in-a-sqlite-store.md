@@ -63,8 +63,9 @@ recorded, which runs the test file (RFC 0003 §3.4). Nothing about where it live
    the scope goes (for a Go package, named by its directory, when no file is below it); the check's
    sets are this run's; the edges from every file a test file that ran read are this run's, since a
    module's imports are seen whole when it loads, and the others stay; disagreements join the
-   audit. Creating the file takes a lock file beside it, so two hushrun making it at once make it
-   once. WAL lets readers go on while one writes. A write that can't happen (busy, a disk that
+   audit. Then it checkpoints the WAL into the file when no reader holds it. Creating the file
+   takes a lock file beside it, so two hushrun making it at once make it once. WAL lets readers go
+   on while one writes. A write that can't happen (busy, a disk that
    refuses) is dropped, logged, and costs the next run its reuse, nothing else.
 6. **What can't be read is never trusted.** A store missing, busy past the wait, broken (SQLite
    says it isn't a database, or damaged), or of another schema reads as an empty map: every test
@@ -82,7 +83,8 @@ recorded, which runs the test file (RFC 0003 §3.4). Nothing about where it live
    days, a store of another schema included.
 9. **CI's own cache** (RFC 0003 D3). `hushrun init` writes no cache step for the map today, and
    still doesn't: a job that wants the map between runs caches `<cache dir>/units/*.v1.sqlite`
-   after hushrun exits, when its last connection has checkpointed the WAL into that one file. Before,
+   after hushrun exits, its last write checkpointed into that one file (item 5); a `-wal` left by
+   runs at once holds only what a later run would write again. Before,
    it was `*.map.json`. A missing store costs one full run, as a missing map did.
 10. **The dependency** is `rusqlite` 0.41.1 with `bundled` (MIT), which builds SQLite's
     amalgamation (public domain) with the C compiler `cc` finds, as `ring` already does on every

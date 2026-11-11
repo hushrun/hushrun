@@ -518,7 +518,13 @@ fn write_waiting(path: &Path, w: &Write<'_>, busy: Duration) -> Result<(), Unrea
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| unread(&e))?;
     write_in(&tx, w).map_err(|e| unread(&e))?;
-    tx.commit().map_err(|e| unread(&e))
+    tx.commit().map_err(|e| unread(&e))?;
+    // Into the one file, when no reader holds the WAL: what a cache of the file alone keeps (CI's,
+    // RFC 0003 D3). One that can't now is done by a later write, or the last connection's close.
+    if let Err(err) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
+        tracing::debug!("the store's WAL wasn't checkpointed: {err}");
+    }
+    Ok(())
 }
 
 /// Path and version ids, made as needed within one transaction.
