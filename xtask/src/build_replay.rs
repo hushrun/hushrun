@@ -50,12 +50,14 @@ options:
   --work PATH          scratch folder for exports, targets, the store and the report
                        (required; not inside --repo)
   --target KIND        fresh: a new target folder per commit; shared: one for all of them, as a
-                       gate has (default: fresh)
+                       gate has; inside: cargo's own, <export>[/<dir>]/target, with
+                       CARGO_TARGET_DIR not set, as in a worktree (default: fresh)
   --paths KIND         rotate: each commit exported to a new, empty path of another length;
                        fixed: one path, updated in place as a checkout is (unchanged files keep
                        their date) (default: rotate)
   --keep               keep the exports and fresh targets (default: delete each after its
-                       commit's run, a fixed export after the last; the store is always kept)
+                       commit's run, a fixed export after the last, a target inside an export
+                       with the export; the store is always kept)
   -h, --help           this text
 
 Exported files are dated when they are written, never with the commit's date, so a shared target
@@ -67,7 +69,8 @@ Commands run without what cargo hands its children or what changes how rustc is 
 CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR, CARGO_MAKEFLAGS, CARGO_INCREMENTAL, CARGO_PKG_*,
 CARGO_MANIFEST_*, CARGO_CRATE_*, CARGO_BIN_*, CARGO_PRIMARY_PACKAGE, OUT_DIR), without
 RUSTUP_TOOLCHAIN (the export's own rust-toolchain.toml decides) and without any HUSHRUN_*
-variable, with CARGO_TARGET_DIR set to the commit's target folder.
+variable, with CARGO_TARGET_DIR set to the commit's target folder (not set with --target
+inside). A fixed export keeps a target inside it from one commit to the next, as a worktree does.
 
 Writes, rewritten whole after each commit:
   WORK/replay.jsonl    one object per commit: its counts by outcome, reason and class, times,
@@ -187,8 +190,12 @@ enum Selection {
 /// Where each commit's build writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Targets {
+    /// A new folder beside each export, named by `CARGO_TARGET_DIR`.
     Fresh,
+    /// One folder for every commit, named by `CARGO_TARGET_DIR`, as a gate has.
     Shared,
+    /// Cargo's own, `target` in the folder it builds in, with no `CARGO_TARGET_DIR`: a worktree.
+    Inside,
 }
 
 impl Targets {
@@ -196,6 +203,7 @@ impl Targets {
         match self {
             Targets::Fresh => "fresh",
             Targets::Shared => "shared",
+            Targets::Inside => "inside",
         }
     }
 }
@@ -327,7 +335,8 @@ fn parse(args: &[String]) -> Result<Parsed> {
                 targets = match value()?.as_str() {
                     "fresh" => Targets::Fresh,
                     "shared" => Targets::Shared,
-                    other => bail!("--target is fresh or shared, not {other:?}"),
+                    "inside" => Targets::Inside,
+                    other => bail!("--target is fresh, shared or inside, not {other:?}"),
                 }
             }
             "--paths" => {
@@ -628,6 +637,7 @@ impl Plan {
         let target = match o.targets {
             Targets::Fresh => root.join("target"),
             Targets::Shared => o.work.join("target"),
+            Targets::Inside => build_dir.join("target"),
         };
         let stem = format!("c{index:03}-{}", &sha[..sha.len().min(12)]);
         let mut run = CommitRun {
@@ -645,8 +655,8 @@ impl Plan {
             store: None,
         };
 
-        // A fresh target starts empty. A rotated export starts empty; a fixed one is updated in
-        // place, as a checkout is.
+        // A fresh target starts empty. A rotated export starts empty, with any target inside it;
+        // a fixed one is updated in place, as a checkout is, and keeps a target inside it.
         if o.targets == Targets::Fresh {
             remove_under(&o.work, &target)?;
         }
@@ -658,8 +668,9 @@ impl Plan {
             Paths::Fixed => {
                 let staging = o.work.join("exports").join("staging");
                 remove_under(&o.work, &staging)?;
+                let keep = (o.targets == Targets::Inside).then_some(target.as_path());
                 let result = export_commit(&o.repo, sha, o.dir.as_deref(), &staging)
-                    .and_then(|()| sync_tree(&staging, &export));
+                    .and_then(|()| sync_tree(&staging, &export, keep));
                 remove_under(&o.work, &staging)?;
                 result
             }
@@ -707,7 +718,9 @@ impl Plan {
         if let Some(session) = &session {
             child_env.extend(session.env());
         }
-        child_env.insert("CARGO_TARGET_DIR".into(), target.clone().into_os_string());
+        if o.targets != Targets::Inside {
+            child_env.insert("CARGO_TARGET_DIR".into(), target.clone().into_os_string());
+        }
 
         let ran = run_command(
             &o.command,
@@ -749,9 +762,9 @@ impl Plan {
         Ok(run)
     }
 
-    /// After a commit, unless `--keep`: a rotated export goes with its fresh target; a fixed
-    /// export stays for the next commit to update ([`Plan::finish`] removes it) and only its
-    /// fresh target goes.
+    /// After a commit, unless `--keep`: a rotated export goes with its fresh target or the
+    /// target inside it; a fixed export stays for the next commit to update ([`Plan::finish`]
+    /// removes it, with a target inside it) and only its fresh target goes.
     fn clean_up(&self, root: &Path, target: &Path) -> Result<()> {
         let o = &self.options;
         if o.keep {
@@ -801,8 +814,9 @@ fn remove_under(work: &Path, path: &Path) -> Result<()> {
 
 /// Makes `dest` hold exactly what `src` holds, as a checkout does: an entry whose bytes and
 /// permissions (or link target) are unchanged keeps its date; every other one is moved in from
-/// `src`, with the date it was extracted with, and what `src` doesn't have is removed.
-fn sync_tree(src: &Path, dest: &Path) -> Result<()> {
+/// `src`, with the date it was extracted with, and what `src` doesn't have is removed, but
+/// `keep`, a folder git doesn't track (a target inside the checkout).
+fn sync_tree(src: &Path, dest: &Path, keep: Option<&Path>) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
     let mut names = BTreeSet::new();
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
@@ -815,7 +829,7 @@ fn sync_tree(src: &Path, dest: &Path) -> Result<()> {
             if existing.as_ref().is_some_and(|meta| !meta.is_dir()) {
                 std::fs::remove_file(&to)?;
             }
-            sync_tree(&from, &to)?;
+            sync_tree(&from, &to, keep)?;
             continue;
         }
         if same_entry(&from, &to)? {
@@ -828,7 +842,7 @@ fn sync_tree(src: &Path, dest: &Path) -> Result<()> {
     }
     for entry in std::fs::read_dir(dest)? {
         let entry = entry?;
-        if names.contains(&entry.file_name()) {
+        if names.contains(&entry.file_name()) || keep == Some(entry.path().as_path()) {
             continue;
         }
         if entry.file_type()?.is_dir() {
@@ -1687,6 +1701,13 @@ mod tests {
         assert_eq!(o.command, "cargo build");
         assert_eq!(
             options(&[
+                "--repo", "r", "--work", "w", "--mode", "none", "--target", "inside"
+            ])
+            .targets,
+            Targets::Inside
+        );
+        assert_eq!(
+            options(&[
                 "--repo",
                 "r",
                 "--work",
@@ -1721,7 +1742,7 @@ mod tests {
         assert!(with(&["--mode", "none", "--dir", "../x"]).contains("inside the repository"));
         assert!(with(&["--mode", "none", "--dir", "/abs"]).contains("inside the repository"));
         assert!(with(&["--mode", "sometimes", "--hushrun", "h"]).contains("observe, on or none"));
-        assert!(with(&["--mode", "none", "--target", "x"]).contains("fresh or shared"));
+        assert!(with(&["--mode", "none", "--target", "x"]).contains("fresh, shared or inside"));
         assert!(with(&["--mode", "none", "--paths", "x"]).contains("rotate or fixed"));
         assert!(with(&["--mode", "none", "--command", " "]).contains("empty"));
         assert!(with(&["--mode", "none", "--bogus"]).contains("unexpected argument"));
@@ -1922,7 +1943,15 @@ mod tests {
             .unwrap();
         write(&src.join("was-file/inner"), "d");
 
-        sync_tree(&src, &dest).unwrap();
+        write(&dest.join("target/debug/x"), "built");
+        write(&dest.join("new/target/y"), "not kept");
+        sync_tree(&src, &dest, Some(&dest.join("target"))).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("target/debug/x")).unwrap(),
+            "built",
+            "the folder kept is left as it is"
+        );
+        assert!(!dest.join("new/target").exists());
         let modified = |name: &str| {
             std::fs::metadata(dest.join(name))
                 .unwrap()
@@ -1952,7 +1981,14 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["changed.rs", "mode.sh", "new", "same.rs", "was-file"]
+            vec![
+                "changed.rs",
+                "mode.sh",
+                "new",
+                "same.rs",
+                "target",
+                "was-file"
+            ]
         );
     }
 
@@ -2283,6 +2319,81 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("- mode: none; targets: fresh; paths: rotate"));
+    }
+
+    // `--target inside`: no CARGO_TARGET_DIR, so cargo writes `target` in the folder it builds
+    // in, as in a worktree; the target goes with its export, and a fixed export keeps it from one
+    // commit to the next.
+    #[test]
+    fn a_replay_with_the_target_inside_builds_as_a_worktree_does() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let shas = tiny_repo(&repo);
+        let replay = |work: &Path, paths: &str, keep: bool| {
+            let mut list = vec![
+                "--repo",
+                repo.to_str().unwrap(),
+                "--dir",
+                "app",
+                "--commit",
+                &shas[0],
+                "--commit",
+                &shas[1],
+                "--mode",
+                "none",
+                "--work",
+                work.to_str().unwrap(),
+                "--target",
+                "inside",
+                "--paths",
+                paths,
+                "--command",
+                "cargo build --offline --quiet && env > seen-env.txt && ls target > seen-target.txt",
+            ];
+            if keep {
+                list.push("--keep");
+            }
+            assert!(run(&args(&list)).unwrap());
+            read_jsonl(&work.join("replay.jsonl"))
+        };
+
+        // Rotated and kept: each export holds its own target, and cargo was given no other.
+        let work = temp.path().join("kept");
+        let lines = replay(&work, "rotate", true);
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert_eq!(line["exit_code"], 0, "{line}");
+            let export = PathBuf::from(line["export"].as_str().unwrap());
+            let target = PathBuf::from(line["target"].as_str().unwrap());
+            assert_eq!(target, export.join("target"));
+            assert!(target.join("debug/replay-probe").is_file());
+            let env = std::fs::read_to_string(export.join("seen-env.txt")).unwrap();
+            assert!(
+                !env.lines().any(|l| l.starts_with("CARGO_TARGET_DIR=")),
+                "{env}"
+            );
+        }
+        let md = std::fs::read_to_string(work.join("replay.md")).unwrap();
+        assert!(
+            md.contains("- mode: none; targets: inside; paths: rotate"),
+            "{md}"
+        );
+
+        // Rotated, not kept: each export goes with its target.
+        let work = temp.path().join("rotated");
+        replay(&work, "rotate", false);
+        let work = resolve(&work).unwrap();
+        assert_eq!(std::fs::read_dir(work.join("exports")).unwrap().count(), 0);
+
+        // Fixed: the second commit builds in the first one's target, updated in place, which
+        // goes with the export after the last commit.
+        let work = temp.path().join("fixed");
+        let lines = replay(&work, "fixed", false);
+        assert_eq!(lines[0]["target"], lines[1]["target"]);
+        let work = resolve(&work).unwrap();
+        assert!(!work.join("exports/fixed").exists());
+        assert!(!work.join("target").exists());
     }
 
     // A fake wrapper, as cargo calls it through the session's link: it logs one entry per
