@@ -106,6 +106,13 @@ fn a_hint_is_sent_once_and_again_after_a_send_that_failed() {
     // Kept: the same hint isn't sent again.
     assert_eq!(o.share(&results, now), None);
     assert_eq!(results.sent.borrow().len(), 2);
+    // The note of it is in the store's one file, which is all a CI cache keeps (C-15).
+    let wal = dir.path().join("store.v1.sqlite-wal");
+    assert!(
+        std::fs::metadata(&wal).map_or(true, |m| m.len() == 0),
+        "{} holds what the file doesn't",
+        wal.display()
+    );
     // It is what the store says, under the check's key, with no path in the clear.
     let place = o.share.as_ref().unwrap();
     let read = hushrun_core::hints::read(&sent, &place.key, tree.paths()).unwrap();

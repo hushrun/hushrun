@@ -106,11 +106,15 @@ using and sending.
 13. **CI's cache step, where the server keeps no hints** (S1's other half, the plan's §2.8). When
     a check has `tests` on and init talks to the repository's backend, signed in, it asks the hint
     lookup once; a 404 or 405 adds to init's `Change by hand` the cache step a CI job needs: for
-    GitHub Actions, `actions/cache` of `~/.cache/hushrun/units/` (the macOS and Windows paths
-    beside it) with a key of `runner.os` and the commit; for GitLab, whose cache holds paths below
-    the project only, `HUSHRUN_CACHE_DIR: .hushrun-cache` and a cache of `.hushrun-cache/units/`
-    keyed by `CI_RUNNER_EXECUTABLE_ARCH`. The key holds the runner's system, so item 3 holds for a
-    cache too. init edits no CI file for it, as it proposes Vitest's config line and writes none
+    GitHub Actions, `actions/cache` of `~/.cache/hushrun/units/*.v1.sqlite` (the macOS and
+    Windows paths beside it) with a key of `runner.os` and the commit; for GitLab, whose cache holds paths below
+    the project only, `HUSHRUN_CACHE_DIR: .hushrun-cache` and a cache of
+    `.hushrun-cache/units/*.v1.sqlite` keyed by `CI_RUNNER_EXECUTABLE_ARCH`. The key holds the runner's system, so item 3 holds for a
+    cache too. Only the store travels, as RFC 0003 §3.11 has it: never the outbox of suspensions
+    or the local reuse state beside it in `units/`, since a cache is restored by its key's prefix
+    and an old one would bring back a suspension a person had since resumed. The one file is
+    enough, since every write to the store, the note of a hint sent included, checkpoints its WAL
+    into it. init edits no CI file for it, as it proposes Vitest's config line and writes none
     (ADR 0071). Nothing where the server keeps hints, which carry the same lists to more machines;
     nothing with `--local` or no backend, where CI keeps no results (ADR 0067 item 3), so the step
     would spare nothing; and `--dry-run`, which sends nothing, says nothing of it.

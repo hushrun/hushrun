@@ -578,12 +578,18 @@ fn write_waiting(path: &Path, w: &Write<'_>, busy: Duration) -> Result<(), Unrea
         .map_err(|e| unread(&e))?;
     write_in(&tx, w).map_err(|e| unread(&e))?;
     tx.commit().map_err(|e| unread(&e))?;
-    // Into the one file, when no reader holds the WAL: what a cache of the file alone keeps (CI's,
-    // RFC 0003 D3). One that can't now is done by a later write, or the last connection's close.
+    checkpoint(&conn);
+    Ok(())
+}
+
+/// Moves what a write committed into the one file, when no reader holds the WAL: what a cache of
+/// the file alone keeps (CI's, C-15, RFC 0003 §3.11). Every write ends with it, so a run that ends
+/// leaves the store whole in `<id>.v1.sqlite`. One that can't now is done by a later write, or the
+/// last connection's close.
+fn checkpoint(conn: &Connection) {
     if let Err(err) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
         tracing::debug!("the store's WAL wasn't checkpointed: {err}");
     }
-    Ok(())
 }
 
 /// Path and version ids, made as needed within one transaction.
@@ -846,7 +852,9 @@ pub fn note_hints(
     if let Some(check) = check {
         note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
     }
-    tx.commit().map_err(|e| unread(&e))
+    tx.commit().map_err(|e| unread(&e))?;
+    checkpoint(&conn);
+    Ok(())
 }
 
 /// \[C-38\] Whether this machine sent or received the hint `content_id` at `address` for `os`, for
