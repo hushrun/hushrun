@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8).
+"""Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8), and of the
+unit key (C-31).
 
 Written from docs/spec/04-source-digest.md, not from the Rust code, so the two can check each
 other on the golden vectors. Standard library only; Python 3.9 or later.
@@ -9,6 +10,7 @@ Usage:
   refdigest.py dir  PATH                     [SCOPE OPTIONS] [--manifest-out FILE]
   refdigest.py vectors FILE [--update]   check (or rewrite) the expected digests of every vector
   refdigest.py globs FILE                check every case of a glob vector file
+  refdigest.py unit-keys FILE            check every unit key vector (C-31)
 
 Scope options (one scope; the default includes everything):
   --include PATTERN    repeatable; default "**"
@@ -519,6 +521,62 @@ def check_globs(path):
     return failures
 
 
+# --- Unit keys (C-31) -------------------------------------------------------------------------
+
+UNIT_KEY_SCHEMA = "hushrun.unit-key/v0"
+
+
+def files_digest(paths, files):
+    """Source digest of those of paths that files ({path: (kind, content bytes)}) holds. Unlike a
+    scope's, it may be of no file: an empty set digests the header line alone (C-31)."""
+    chosen = sorted((p.encode("utf-8"), files[p][0], files[p][1]) for p in set(paths) if p in files)
+    out = bytearray(CANONICALIZATION.encode() + b"\n")
+    for path, kind, content in chosen:
+        out += kind.encode() + b" " + sha256_hex(content).encode() + b" " + path + b"\0"
+    return digest(bytes(out))
+
+
+def shape_digest(paths):
+    """SHA-256 of the sources set's paths: each path's UTF-8 bytes and a NUL, sorted by bytes."""
+    data = b"".join(p + b"\0" for p in sorted({p.encode("utf-8") for p in paths}))
+    return "sha256:" + sha256_hex(data)
+
+
+def jcs(value):
+    """RFC 8785 for what a unit key holds: strings, lists and objects, no numbers."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def evaluate_unit_key(vector):
+    files = {f["path"]: (f["kind"], f["text"].encode("utf-8")) for f in vector["files"]}
+    keyed = [p for p in vector["reads"] if p in set(vector["units"]) | set(vector["sources"])]
+    reads = files_digest(keyed, files)
+    rest = files_digest(vector["rest"], files)
+    shape = shape_digest(vector["sources"])
+    base = vector["base"]
+    key = {"schema": UNIT_KEY_SCHEMA, "check": base["check"], "command": base["command"],
+           "cwd": base["cwd"], "scope": base["scope"], "unit": vector["unit"],
+           "reads": reads, "rest": rest, "shape": shape}
+    for optional in ("external", "counts_from"):
+        if optional in base:
+            key[optional] = base[optional]
+    return {"reads": reads, "rest": rest, "shape": shape, "key": "sha256:" + sha256_hex(jcs(key))}
+
+
+def check_unit_keys(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    failures = 0
+    for vector in data["vectors"]:
+        got = evaluate_unit_key(vector)
+        if got != vector["expect"]:
+            print("FAIL %s: got %s, expected %s" % (vector["name"], got, vector["expect"]))
+            failures += 1
+        else:
+            print("ok   %s" % vector["name"])
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -538,12 +596,16 @@ def main():
     p.add_argument("--update", action="store_true")
     p = sub.add_parser("globs")
     p.add_argument("file")
+    p = sub.add_parser("unit-keys")
+    p.add_argument("file")
     args = parser.parse_args()
 
     if args.command == "vectors":
         return 1 if check_vectors(args.file, args.update) else 0
     if args.command == "globs":
         return 1 if check_globs(args.file) else 0
+    if args.command == "unit-keys":
+        return 1 if check_unit_keys(args.file) else 0
     try:
         scope = Scope(args.include, args.exclude, args.global_exclude)
         entries = git_entries(args.repo, args.rev) if args.command == "git" else dir_entries(args.path)

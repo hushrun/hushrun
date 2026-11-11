@@ -19,6 +19,7 @@ pub mod scope;
 pub mod signers;
 pub mod time;
 pub mod transparency;
+pub mod units;
 pub mod yaml;
 
 pub use digest::Digest;

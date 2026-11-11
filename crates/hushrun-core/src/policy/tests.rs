@@ -839,3 +839,52 @@ fn a_file_that_holds_a_string_is_refused_and_doesnt_quote_it() {
         Vec::<String>::new()
     );
 }
+
+// covers: C-5, E-6 (ADR 0068: `tests`, short or long, isn't part of a check's definition)
+#[test]
+fn a_checks_tests_are_a_mode_or_a_mode_with_globs() {
+    use crate::units::Mode;
+    let unit = CheckName::new("unit").unwrap();
+    let plain = parsed("checks:\n  unit: {run: pytest}\n");
+    assert!(plain.tests.is_empty());
+    // `off` is as good as absent.
+    assert!(parsed("checks:\n  unit: {tests: off}\n").tests.is_empty());
+    let short = parsed("checks:\n  unit: {run: pytest, tests: observe}\n");
+    assert_eq!(short.tests[&unit].mode, Mode::Observe);
+    assert!(short.tests[&unit].ignore.is_empty());
+    assert_eq!(
+        short.checks[&unit].definition_digest,
+        plain.checks[&unit].definition_digest
+    );
+    let reuse = parsed("checks:\n  unit: {tests: reuse}\n");
+    assert_eq!(reuse.tests[&unit].mode, Mode::Reuse);
+    let long = parsed(
+        "checks:\n  unit:\n    tests:\n      mode: observe\n      ignore: [\"docs/adr/**\", \"**/*.md\"]\n      always: [tests/test_lint.py]\n",
+    );
+    let tests = &long.tests[&unit];
+    assert_eq!(tests.mode, Mode::Observe);
+    assert!(tests.ignore.iter().any(|g| g.is_match("docs/adr/0001.md")));
+    assert!(tests.ignore.iter().any(|g| g.is_match("README.md")));
+    assert!(tests.always_runs("tests/test_lint.py"));
+    // What it refuses.
+    let check = |tests: &str| format!("{HEAD}checks:\n  unit:\n    tests:{tests}");
+    assert_error(&check(" sometimes\n"), 5, "off, observe or reuse");
+    assert_error(&check(" true\n"), 5, "off, observe or reuse");
+    assert_error(&check("\n      ignore: [docs/**]\n"), 6, "needs a `mode`");
+    assert_error(
+        &check("\n      mode: observe\n      only: [a]\n"),
+        7,
+        "no key `only`",
+    );
+    assert_error(
+        &check("\n      mode: observe\n      ignore: docs/**\n"),
+        7,
+        "list of globs",
+    );
+    assert_error(
+        &check("\n      mode: observe\n      always: [\"[\"]\n"),
+        7,
+        "",
+    );
+    assert_error(&check("\n      mode: maybe\n"), 6, "maybe");
+}
