@@ -18,7 +18,7 @@ use crate::model::{Located, RootName};
 pub const STEP_SCHEMA: &str = "hushrun.build-step/v3";
 
 /// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v3";
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v4";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -652,7 +652,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "36ea9ae1a0165d454ea90969638f453b04500d29b8c73c310e4bdca1a1a6e145"
+            "3a8ea260bb4d6fc29c751ab5ecc5de8b2675433f00393eccda649a12325f21f9"
         );
     }
 

@@ -882,6 +882,138 @@ fn a_static_library_bundled_from_a_dependencys_output_folder_is_keyed() {
     assert!(reused(&last(&third, "p", Class::Library)), "{third:#?}");
 }
 
+/// The shape of `libmimalloc-sys` and `mimalloc`: `x`'s build script compiles `x.c` into
+/// `libx.a` in its output folder, names that folder with `rustc-link-search`, and `x` bundles the
+/// library by attribute; `w` wraps `x`. `bundles` is another library that bundles `libx.a` by
+/// attribute from `x`'s folder. The package `c` has two programs: `uses` calls `w`, `plain`
+/// doesn't. The package `l` has one program, `linked`, which its build script links with
+/// `-l static=x`. Cargo passes `x`'s folder with `-L native=` to every compile of `w`,
+/// `bundles`, `c` and `l`.
+const NATIVE: &[(&str, &str)] = &[
+    (
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"x\", \"w\", \"bundles\", \"c\", \"l\"]\nresolver = \"2\"\n",
+    ),
+    (
+        "x/Cargo.toml",
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ),
+    (
+        "x/build.rs",
+        "use std::process::Command;\n\nfn main() {\n    println!(\"cargo:rerun-if-changed=x.c\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    assert!(Command::new(\"cc\").args([\"-c\", \"x.c\", \"-o\"]).arg(format!(\"{out}/x.o\")).status().unwrap().success());\n    assert!(Command::new(\"ar\").arg(\"rcs\").arg(format!(\"{out}/libx.a\")).arg(format!(\"{out}/x.o\")).status().unwrap().success());\n    std::fs::remove_file(format!(\"{out}/x.o\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}\");\n}\n",
+    ),
+    (
+        "x/src/lib.rs",
+        "#[link(name = \"x\", kind = \"static\")]\nextern \"C\" {\n    fn x_value() -> u32;\n}\n\npub fn value() -> u32 {\n    unsafe { x_value() }\n}\n",
+    ),
+    ("x/x.c", "unsigned x_value(void) { return 7; }\n"),
+    (
+        "w/Cargo.toml",
+        "[package]\nname = \"w\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nx = { path = \"../x\" }\n",
+    ),
+    (
+        "w/src/lib.rs",
+        "pub fn value() -> u32 {\n    x::value()\n}\n",
+    ),
+    (
+        "bundles/Cargo.toml",
+        "[package]\nname = \"bundles\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nx = { path = \"../x\" }\n",
+    ),
+    (
+        "bundles/src/lib.rs",
+        "#[link(name = \"x\", kind = \"static\")]\nextern \"C\" {\n    fn x_value() -> u32;\n}\n\npub fn again() -> u32 {\n    unsafe { x_value() }\n}\n",
+    ),
+    (
+        "c/Cargo.toml",
+        "[package]\nname = \"c\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"uses\"\npath = \"src/uses.rs\"\n\n[[bin]]\nname = \"plain\"\npath = \"src/plain.rs\"\n\n[dependencies]\nw = { path = \"../w\" }\n",
+    ),
+    (
+        "c/src/uses.rs",
+        "fn main() {\n    println!(\"{}\", w::value());\n}\n",
+    ),
+    (
+        "c/src/plain.rs",
+        "fn main() {\n    println!(\"plain\");\n}\n",
+    ),
+    (
+        "l/Cargo.toml",
+        "[package]\nname = \"l\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"linked\"\npath = \"src/main.rs\"\n\n[dependencies]\nx = { path = \"../x\" }\n",
+    ),
+    (
+        "l/build.rs",
+        "fn main() {\n    println!(\"cargo:rustc-link-lib=static=x\");\n}\n",
+    ),
+    (
+        "l/src/main.rs",
+        "extern \"C\" {\n    fn x_value() -> u32;\n}\n\nfn main() {\n    println!(\"{}\", unsafe { x_value() });\n}\n",
+    ),
+];
+
+/// What the program `<ws>/target/debug/<name>` prints, trimmed.
+fn printed(ws: &Path, name: &str) -> String {
+    let out = Command::new(ws.join("target/debug").join(name))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{name} failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+// covers: B-6, B-18
+#[test]
+fn a_static_library_that_changes_rebuilds_only_what_links_or_bundles_it() {
+    let w = World::new();
+    let ws = w.path("one");
+    for (file, text) in NATIVE {
+        let path = ws.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let session = w.begin(Mode::On).unwrap();
+    // `w` stands for a crate from a registry, which cargo never builds incrementally: an
+    // incremental compile's bytes are not reproducible, and `plain` depends on `w`'s.
+    let mut env = session.env();
+    env.push(("CARGO_INCREMENTAL".into(), "0".into()));
+    let build = |ws: &Path| {
+        let out = cargo(ws, &["build"], &env);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    build(&ws);
+    for (name, says) in [("uses", "7"), ("plain", "plain"), ("linked", "7")] {
+        assert_eq!(printed(&ws, name), says, "{name}");
+    }
+
+    // The library's bytes change, as libmimalloc-sys's do in every build (its C compiler bakes
+    // in the date). Cargo builds every dependent of `x` again.
+    fs::write(ws.join("x/x.c"), "unsigned x_value(void) { return 8; }\n").unwrap();
+    let n = entries(&session).len();
+    build(&ws);
+    let after = entries(&session)[n..].to_vec();
+    // A program that links nothing from the folder is reused: its link line doesn't name the
+    // library, and the folder is not its input.
+    assert_eq!(
+        last(&after, "plain", Class::Program).outcome,
+        Outcome::Reused,
+        "{after:#?}"
+    );
+    // One that links it through the rlib that bundles it, or by `-l`, is built again.
+    for name in ["uses", "linked"] {
+        let entry = last(&after, name, Class::Program);
+        assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{name}: {after:#?}");
+        assert!(!entry.found, "{name}: {after:#?}");
+    }
+    // A library that bundles it by attribute is built again: nothing but the folder says so.
+    let bundles = last(&after, "bundles", Class::Library);
+    assert_eq!(bundles.outcome, Outcome::BuiltAndStored, "{after:#?}");
+    assert!(!bundles.found, "{after:#?}");
+    for (name, says) in [("uses", "8"), ("plain", "plain"), ("linked", "8")] {
+        assert_eq!(printed(&ws, name), says, "{name}");
+    }
+}
+
 /// A workspace whose library `app` names an extern `sqlx`: a local stand-in, since the table of
 /// macros known to read unlisted files goes by the extern's name (B-6 `declared`), and sqlx's
 /// read the first `.env` found walking up from the package and the working directory.

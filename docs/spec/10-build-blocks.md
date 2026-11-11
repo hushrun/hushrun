@@ -82,12 +82,14 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
   file under `OUT_DIR` is in `generated` already. A name found in none of them is a system
   library, covered by the SDK and the linker. A `-l` whose file can't be found with certainty
   (`+verbatim`, a rename or `:file`, a kind this crate doesn't know) is `built, not stored`;
-- `native folders`: every `-L native=`, `all=` and bare folder, whether or not a `-l` names
-  anything in it (a `#[link(kind = "static")]` in the source bundles a static library found
-  there, and the dep-info doesn't say so): the names of its entries, and each `*.a` and `*.lib`
-  directly in it by SHA-256. These folders are usually other packages' `OUT_DIR`s: no record is
-  written there, and digests are remembered for the run under its session's folder, by path and
-  stat;
+- `native folders`: for a library, every `-L native=`, `all=` and bare folder, whether or not a
+  `-l` names anything in it (a `#[link(kind = "static")]` in the source bundles a static library
+  found there into the `.rlib`, and nothing reports it): the names of its entries, and each `*.a`
+  and `*.lib` directly in it by SHA-256. These folders are usually other packages' `OUT_DIR`s: no
+  record is written there, and digests are remembered for the run under its session's folder, by
+  path and stat. A linked output (a program, a proc macro, a build-script binary) has none:
+  cargo hands it every dependency's folders whether it links anything from them or not, and its
+  link line names every library it takes, which `link` keys;
 - `shape`: the names of the entries of every folder that directly holds a read file;
 - `generated`: every file under `OUT_DIR`, by path and SHA-256;
 - `declared`: for a package that is not from a registry or a git source, what its build script

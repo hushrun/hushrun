@@ -21,7 +21,7 @@ use crate::key::{
     Observed, Place, PlaceKind, Read, ReadList, ReadState, Shape, roots_digest,
 };
 use crate::known::{self, Where};
-use crate::model::{Located, NotStored, RootName};
+use crate::model::{Class, Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
 use crate::{link, memo, regular, shape, sidecar};
@@ -141,7 +141,8 @@ pub struct Common {
     pub externs: Vec<ExternInput>,
     /// Each place a library named with `-l` may be in the `-L` folders (B-6).
     pub native: Vec<Read>,
-    /// Every `-L native=`, `all=` and bare folder: its names and static libraries (B-6).
+    /// For a library compile, every `-L native=`, `all=` and bare folder: its names and static
+    /// libraries (B-6). Empty for a linked output, whose link line says what it takes.
     pub native_dirs: Vec<NativeDir>,
     /// Every file under `OUT_DIR`, when it is set.
     pub generated: Option<Vec<Generated>>,
@@ -292,7 +293,13 @@ impl Context<'_> {
         let mut outside = false;
         let declared = self.declared(&mut watched, &mut outside)?;
         let native = self.native(generated.is_some(), &mut watched, &mut outside)?;
-        let native_dirs = self.native_dirs(generated.is_some(), &mut watched)?;
+        // Only a library bundles what it finds there unseen. A linked output's link line names
+        // every library it takes, and `link` keys those (B-6, B-18).
+        let native_dirs = if self.invocation.class() == Class::Library {
+            self.native_dirs(generated.is_some(), &mut watched)?
+        } else {
+            Vec::new()
+        };
         Ok(Common {
             externs: self.externs()?,
             native,
