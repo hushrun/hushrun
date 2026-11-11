@@ -1595,3 +1595,287 @@ fn a_truncated_file_in_a_stored_bundle_gives_a_green_build() {
     let found = uuids(&[&t, &PathBuf::from(format!("{}.dSYM", t.display()))]);
     assert_eq!(found[0], found[1]);
 }
+
+/// A workspace whose changes cargo can't see (B-23). `embed` stands in for sqlx's `migrate!`: it
+/// lists a folder when it runs and puts each file in an `include_str!`, so the files are in the
+/// dep-info and the listing is not. `app` embeds every file of `app/data` and its program prints
+/// them. `db` names an extern `sqlx` (a local stand-in: the known macros go by the extern's
+/// name, B-6) and has a `migrations` folder.
+const UNSEEN: &[(&str, &str)] = &[
+    (
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"embed\", \"app\", \"sqlx\", \"db\"]\nresolver = \"2\"\n",
+    ),
+    (
+        "embed/Cargo.toml",
+        "[package]\nname = \"embed\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    ),
+    (
+        "embed/src/lib.rs",
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn embed_dir(input: TokenStream) -> TokenStream {\n    let dir = input.to_string().trim_matches('\"').to_string();\n    let root = std::env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n    let mut names: Vec<String> = std::fs::read_dir(format!(\"{root}/{dir}\"))\n        .unwrap()\n        .map(|e| e.unwrap().file_name().into_string().unwrap())\n        .collect();\n    names.sort();\n    let parts: Vec<String> = names\n        .iter()\n        .map(|n| format!(\"include_str!({:?})\", format!(\"{root}/{dir}/{n}\")))\n        .collect();\n    format!(\"pub fn all() -> String {{ [{}].concat() }}\", parts.join(\", \"))\n        .parse()\n        .unwrap()\n}\n",
+    ),
+    (
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nembed = { path = \"../embed\" }\n",
+    ),
+    ("app/src/lib.rs", "embed::embed_dir!(\"data\");\n"),
+    (
+        "app/src/main.rs",
+        "fn main() {\n    println!(\"{}\", app::all());\n}\n",
+    ),
+    ("app/data/1.txt", "one;"),
+    (
+        "sqlx/Cargo.toml",
+        "[package]\nname = \"sqlx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ),
+    ("sqlx/src/lib.rs", "pub fn n() -> u32 {\n    1\n}\n"),
+    (
+        "db/Cargo.toml",
+        "[package]\nname = \"db\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nsqlx = { path = \"../sqlx\" }\n",
+    ),
+    (
+        "db/src/lib.rs",
+        "pub fn n() -> u32 {\n    sqlx::n() + 1\n}\n",
+    ),
+    ("db/migrations/0001_first.sql", "create table a (x int);\n"),
+];
+
+impl World {
+    /// A fresh copy of [`UNSEEN`] at `rest`.
+    fn unseen(&self, rest: &str) -> PathBuf {
+        let ws = self.path(rest);
+        for (file, text) in UNSEEN {
+            let path = ws.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        ws
+    }
+}
+
+/// What one `hushrun run NAME -- cargo build` did: the check before COMMAND, the compiles, and
+/// the summary's lines.
+struct HushrunRun {
+    checked: hushrun_build::unit::Checked,
+    compiled: Vec<Entry>,
+    lines: Vec<String>,
+}
+
+/// `hushrun run NAME -- cargo build` in `ws`, as the CLI runs it: a session, the check, cargo,
+/// the summary.
+fn hushrun_run(w: &World, ws: &Path) -> HushrunRun {
+    let mut session = w.begin(Mode::On).unwrap();
+    let checked = session.check(ws, None);
+    build(ws, &session);
+    let compiled = entries(&session);
+    let lines = session.finish(SystemTime::now()).lines().to_vec();
+    HushrunRun {
+        checked,
+        compiled,
+        lines,
+    }
+}
+
+/// Plain cargo, as cargo alone decides: it compiles nothing.
+fn plain_cargo_compiles_nothing(ws: &Path) {
+    let out = cargo(ws, &["build"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("Compiling"), "{stderr}");
+}
+
+/// What the program `app` prints.
+fn app_says(ws: &Path) -> String {
+    printed(ws, "app")
+}
+
+/// A file's modification time set back a minute before `before`.
+fn date_back(path: &Path, before: SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(before - std::time::Duration::from_secs(60))
+        .unwrap();
+}
+
+/// The first build, through the wrapper; the files are dated before it, so a later change
+/// within the same second is a change.
+fn first_build(w: &World, ws: &Path) -> SystemTime {
+    let built = SystemTime::now();
+    for file in ["app/src/lib.rs", "app/data/1.txt", "db/src/lib.rs"] {
+        date_back(&ws.join(file), built);
+    }
+    let first = hushrun_run(w, ws);
+    assert!(first.lines[0].contains("built"), "{:?}", first.lines);
+    assert_eq!(app_says(ws), "one;");
+    built
+}
+
+// covers: B-23
+#[test]
+fn a_file_added_to_a_folder_a_macro_lists_is_rebuilt_transparently() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    fs::write(ws.join("app/data/2.txt"), "two;").unwrap();
+    // The bug: cargo says Fresh, and the program is stale.
+    plain_cargo_compiles_nothing(&ws);
+    assert_eq!(app_says(&ws), "one;");
+    let run = hushrun_run(&w, &ws);
+    assert_eq!(app_says(&ws), "one;two;");
+    assert!(
+        run.compiled
+            .iter()
+            .any(|e| e.crate_name == "app" && e.class == Some(Class::Library)),
+        "{:#?}",
+        run.compiled
+    );
+    assert!(
+        run.lines.contains(
+            &"build: app is rebuilt: a file was added to app/data, which cargo doesn't watch"
+                .to_string()
+        ),
+        "{:?}",
+        run.lines
+    );
+}
+
+// covers: B-6, B-23
+#[test]
+fn a_migration_added_beside_a_known_macro_is_rebuilt() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    fs::write(
+        ws.join("db/migrations/0002_second.sql"),
+        "create table b (y int);\n",
+    )
+    .unwrap();
+    plain_cargo_compiles_nothing(&ws);
+    let run = hushrun_run(&w, &ws);
+    let db = last(&run.compiled, "db", Class::Library);
+    assert!(!reused(&db), "{:#?}", run.compiled);
+    assert!(
+        run.lines.contains(
+            &"build: db is rebuilt: a file was added to db/migrations, which cargo doesn't watch"
+                .to_string()
+        ),
+        "{:?}",
+        run.lines
+    );
+}
+
+// covers: B-11, B-23
+#[test]
+fn other_bytes_under_an_older_date_are_rebuilt() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    let built = first_build(&w, &ws);
+    // An archive extracted with its original dates: other bytes, a date before the last build.
+    let data = ws.join("app/data/1.txt");
+    fs::write(&data, "ONE;").unwrap();
+    date_back(&data, built);
+    plain_cargo_compiles_nothing(&ws);
+    assert_eq!(app_says(&ws), "one;");
+    let run = hushrun_run(&w, &ws);
+    assert_eq!(app_says(&ws), "ONE;");
+    assert!(
+        run.lines.iter().any(|l| l.starts_with(
+            "build: app is rebuilt: app/data/1.txt changed but kept a date older than the last build"
+        )),
+        "{:?}",
+        run.lines
+    );
+}
+
+// covers: B-9, B-23
+#[test]
+fn after_an_incremental_rebuild_a_file_added_is_still_seen() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    let lib = ws.join("app/src/lib.rs");
+    fs::write(&lib, "embed::embed_dir!(\"data\");\n// edited\n").unwrap();
+    let edit = hushrun_run(&w, &ws);
+    assert_eq!(
+        last(&edit.compiled, "app", Class::Library).outcome,
+        Outcome::PassedThrough(hushrun_build::model::PassedThrough::Incremental),
+        "{:#?}",
+        edit.compiled
+    );
+    assert!(edit.checked.rebuilt.is_empty());
+    fs::write(ws.join("app/data/3.txt"), "three;").unwrap();
+    plain_cargo_compiles_nothing(&ws);
+    let run = hushrun_run(&w, &ws);
+    assert_eq!(app_says(&ws), "one;three;");
+    assert_eq!(run.checked.rebuilt.len(), 1, "{:?}", run.checked);
+}
+
+// covers: B-20, B-23
+#[test]
+fn nothing_changed_removes_nothing_compiles_nothing_and_says_nothing() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    let run = hushrun_run(&w, &ws);
+    assert!(run.checked.units > 0, "{:?}", run.checked);
+    assert!(run.checked.rebuilt.is_empty(), "{:?}", run.checked);
+    assert_eq!(run.checked.stale, 0, "{:?}", run.checked);
+    assert!(run.compiled.is_empty(), "{:#?}", run.compiled);
+    assert!(run.lines.is_empty(), "{:?}", run.lines);
+}
+
+// covers: B-23
+#[test]
+fn a_unit_plain_cargo_built_since_loses_its_record_and_keeps_its_outputs() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    // Plain cargo builds app again: new outputs the record doesn't describe.
+    let lib = ws.join("app/src/lib.rs");
+    fs::write(&lib, "embed::embed_dir!(\"data\");\n// plain\n").unwrap();
+    let out = cargo(&ws, &["build"], &[]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Compiling app"));
+    let units = ws.join("target/debug/deps/.hushrun/units");
+    let records = || -> Vec<String> {
+        fs::read_dir(&units)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("app-"))
+            .collect()
+    };
+    let before = records();
+    assert!(!before.is_empty());
+    // A file added now: the stale record is dropped, plain cargo's outputs stay, nothing is
+    // compiled and nothing said; no run after it finds anything to do either.
+    fs::write(ws.join("app/data/2.txt"), "two;").unwrap();
+    let run = hushrun_run(&w, &ws);
+    assert!(run.checked.stale >= 1, "{:?}", run.checked);
+    assert!(run.checked.rebuilt.is_empty(), "{:?}", run.checked);
+    assert!(run.compiled.is_empty(), "{:#?}", run.compiled);
+    assert!(run.lines.is_empty(), "{:?}", run.lines);
+    assert!(records().len() < before.len(), "{:?}", records());
+    let again = hushrun_run(&w, &ws);
+    assert_eq!(again.checked.stale, 0, "{:?}", again.checked);
+    assert!(again.checked.rebuilt.is_empty() && again.compiled.is_empty());
+}
+
+// covers: B-1, B-23
+#[test]
+fn mode_off_checks_and_removes_nothing() {
+    let w = World::new();
+    let ws = w.unseen("one");
+    first_build(&w, &ws);
+    fs::write(ws.join("app/data/2.txt"), "two;").unwrap();
+    // Off: no session, so no check; cargo alone decides.
+    assert_eq!(w.begin(Mode::Off).unwrap_err(), NotBegun::Off);
+    plain_cargo_compiles_nothing(&ws);
+    assert_eq!(app_says(&ws), "one;");
+    let units = ws.join("target/debug/deps/.hushrun/units");
+    assert!(fs::read_dir(&units).unwrap().count() > 0);
+    // Turned on again, the next run sees it.
+    let run = hushrun_run(&w, &ws);
+    assert_eq!(run.checked.rebuilt.len(), 1, "{:?}", run.checked);
+    assert_eq!(app_says(&ws), "one;two;");
+}

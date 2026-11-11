@@ -27,7 +27,7 @@ use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,10 @@ const USED: &str = "used";
 const FILES: &str = "files";
 const HINTS: &str = "hints";
 const SUSPENDED: &str = "suspended";
+/// The registry of output folders the wrapper wrote unit records in (B-23): one file each.
+const OUT_DIRS: &str = "out-dirs";
+/// The schema name of an entry of that registry.
+const OUT_DIR_SCHEMA: &str = "hushrun.build.out-dir/1";
 /// How many times a step is tried when a name is taken or a folder vanished under it.
 const ATTEMPTS: usize = 8;
 
@@ -186,6 +190,24 @@ struct RecordFile {
     name: String,
     size: u64,
     sha256: Digest,
+}
+
+/// An output folder the wrapper wrote unit records in (B-23), as the registry holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutDir {
+    /// The output folder (`--out-dir`), resolved.
+    pub out_dir: PathBuf,
+    /// The working directory of its compiles (the workspace), resolved.
+    pub cwd: PathBuf,
+    /// When a run last saw a compile there, in milliseconds since the epoch.
+    pub seen_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OutDirFile {
+    schema: String,
+    #[serde(flatten)]
+    entry: OutDir,
 }
 
 /// The store's folder (B-13). Cheap to make: nothing is read or written until asked.
@@ -586,6 +608,98 @@ impl Store {
             // Only an empty one goes: one a block was just published into stays.
             let _ = fs::remove_dir(&shard);
         }
+    }
+
+    /// Remembers an output folder the wrapper wrote a unit record in, and the working directory
+    /// of its compiles (B-23): one small file named by a digest of the folder, written whole.
+    /// Both paths are resolved, so that the check finds them from any form of the folder it
+    /// runs in.
+    pub fn register_out_dir(
+        &self,
+        out_dir: &Path,
+        cwd: &Path,
+        now: SystemTime,
+    ) -> Result<(), StoreError> {
+        let resolve = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let entry = OutDir {
+            out_dir: resolve(out_dir),
+            cwd: resolve(cwd),
+            seen_ms: now.duration_since(UNIX_EPOCH).map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            }),
+        };
+        let name = Digest::of(entry.out_dir.as_os_str().as_encoded_bytes()).hex();
+        let dir = self.root.join(OUT_DIRS);
+        fs::create_dir_all(&dir).map_err(at(&dir))?;
+        let bytes = serde_json::to_vec(&OutDirFile {
+            schema: OUT_DIR_SCHEMA.to_string(),
+            entry,
+        })
+        .map_err(|err| StoreError::Io {
+            path: dir.clone(),
+            source: io::Error::other(err),
+        })?;
+        let dest = dir.join(format!("{}.json", &name[..32]));
+        let temp = dir.join(format!(".{}.tmp", unique(&name[..16])));
+        fs::write(&temp, bytes)
+            .and_then(|()| fs::rename(&temp, &dest))
+            .map_err(|err| {
+                let _ = fs::remove_file(&temp);
+                StoreError::Io {
+                    path: dest.clone(),
+                    source: err,
+                }
+            })
+    }
+
+    /// The output folders the registry holds (B-23). An entry that can't be read is left out.
+    pub fn out_dirs(&self) -> Vec<OutDir> {
+        let Ok(entries) = fs::read_dir(self.root.join(OUT_DIRS)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<OutDir> = entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .filter_map(|entry| {
+                let bytes = fs::read(entry.path()).ok()?;
+                let file: OutDirFile = serde_json::from_slice(&bytes).ok()?;
+                (file.schema == OUT_DIR_SCHEMA).then_some(file.entry)
+            })
+            .collect();
+        out.sort_by(|a, b| a.out_dir.cmp(&b.out_dir));
+        out
+    }
+
+    /// Drops the registry's entries whose output folder is gone or that no run saw since
+    /// `before` (B-23), and entries that can't be read.
+    pub(crate) fn remove_stale_out_dirs(&self, before: SystemTime) -> Tally {
+        let mut tally = Tally::default();
+        let Ok(entries) = fs::read_dir(self.root.join(OUT_DIRS)) else {
+            return tally;
+        };
+        let cutoff = before.duration_since(UNIX_EPOCH).map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let entry = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<OutDirFile>(&bytes).ok())
+                .filter(|file| file.schema == OUT_DIR_SCHEMA)
+                .map(|file| file.entry);
+            let stale = match entry {
+                None => true,
+                Some(entry) => entry.seen_ms < cutoff || !entry.out_dir.is_dir(),
+            };
+            if stale {
+                count(&mut tally, fs::remove_file(&path).map(|()| true));
+            }
+        }
+        tally
     }
 
     /// Removes everything under `tmp/` and `trash/` last changed before `before`: what a crash
@@ -1039,7 +1153,6 @@ fn at(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
-    use std::time::UNIX_EPOCH;
 
     /// Midnight UTC on day `n` after 2026-01-01.
     fn day(n: u64) -> SystemTime {

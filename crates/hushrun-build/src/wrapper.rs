@@ -28,6 +28,7 @@ use crate::scan::Needles;
 use crate::script::{self, Script};
 use crate::session::{self, Current, Entry};
 use crate::store::{Block, NewFile, Published, Store};
+use crate::unit::{self, Seen};
 use crate::{audit, compiler, inputs, link, sidecar};
 
 /// Whether the binary was called by the wrapper's name (B-2). `main` asks this first, before it
@@ -111,11 +112,14 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         );
         return 2;
     };
-    // No session: the cheapest pass-through, before anything is read (B-2).
+    // No session: the cheapest pass-through, before anything is read (B-2). A record of the
+    // unit it names would no longer describe what rustc writes now (B-23).
     if ports.var(session::SESSION).is_none_or(|v| v.is_empty()) {
+        unit::forget_for_args(args, None);
         return ports.exec(rustc, args);
     }
     let Ok(cwd) = ports.cwd() else {
+        unit::forget_for_args(args, None);
         return ports.exec(rustc, args);
     };
     let env = Env::from_vars(ports.vars());
@@ -126,6 +130,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
             return ports.exec(rustc, args);
         }
         Parsed::PassedThrough(why) => {
+            unit::forget_for_args(args, Some(&cwd));
             if let Some(current) = session::current(&|name| ports.var(name)) {
                 let var = |name: &str| env.get(name).and_then(OsStr::to_str).map(str::to_string);
                 current.log(&Entry {
@@ -138,6 +143,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         }
     };
     let Some(current) = session::current(&|name| ports.var(name)) else {
+        unit::forget_for_args(args, Some(&cwd));
         return ports.exec(rustc, args);
     };
     Call {
@@ -228,6 +234,8 @@ struct Call<'a> {
 struct Found {
     block: Block,
     description: Description,
+    /// What the hint that found it hashed, as the key holds it: the unit record's digests.
+    observed: Observed,
     /// The files the hint that found it hashed, at the stats they were hashed at: a compile
     /// that follows must find them unchanged (B-11).
     watched: Vec<inputs::Watched>,
@@ -282,13 +290,101 @@ impl Call<'_> {
     /// calls with no session or working directory never get here: [`call`] replaces the
     /// process for them, since there are no externs to look at and no store to suspend in.
     fn as_asked(&mut self, outcome: Outcome) -> i32 {
-        if self.any_extern_reused() {
-            return self.watched_as_asked(outcome);
+        // A crate with something local to watch runs as a child too, so that its unit record
+        // is written once rustc is done (B-23).
+        let record = self.local();
+        if record || self.any_extern_reused() {
+            return self.watched_as_asked(outcome, record);
         }
+        self.forget_unit();
         self.log(entry(outcome, Some(self.invocation.class())));
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
         self.ports.exec(&rustc, &args)
+    }
+
+    /// Whether the crate may have something local to watch (B-23): its package folder (or, with
+    /// none, its source) lies outside the shared folders. A registry or git crate has nothing.
+    fn local(&self) -> bool {
+        let inv = self.invocation;
+        let place = inv
+            .package()
+            .manifest_dir
+            .as_deref()
+            .unwrap_or(inv.source());
+        let path = Path::new(inv.cwd()).join(place);
+        !unit::Shared::new(&self.current.shared).holds(&path)
+    }
+
+    /// Removes this unit's record, before rustc runs or anything is put in place (B-23).
+    fn forget_unit(&self) {
+        unit::settle(&self.out_dir(), &self.invocation.file_stem(), None);
+    }
+
+    /// The outputs rustc announced: what `link` and `metadata` produced.
+    fn announced(&self, recorded: &Recorded) -> Vec<PathBuf> {
+        recorded
+            .lines()
+            .iter()
+            .filter_map(|line| match line {
+                Line::Notice { artifact, emit } if emit == "link" || emit == "metadata" => {
+                    Some(Path::new(self.invocation.cwd()).join(artifact))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Writes this unit's record after a compile or a reuse ended well (B-23), from the
+    /// dep-info now in the output folder, and remembers the output folder for the check. Any
+    /// failure leaves no record.
+    fn record_unit(
+        &self,
+        since: SystemTime,
+        outputs: Vec<PathBuf>,
+        digests: &BTreeMap<PathBuf, Digest>,
+    ) {
+        let inv = self.invocation;
+        let info = std::fs::read_to_string(inv.dep_info_path())
+            .ok()
+            .and_then(|text| depinfo::parse(&text).ok());
+        let seen = info.map(|info| Seen {
+            crate_name: inv.crate_name().to_string(),
+            package: inv.package().name.clone(),
+            cwd: PathBuf::from(inv.cwd()),
+            outputs,
+            items: unit::items(
+                inv,
+                &info,
+                &unit::Shared::new(&self.current.shared),
+                digests,
+            ),
+            since,
+        });
+        let out_dir = self.out_dir();
+        if unit::settle(&out_dir, &inv.file_stem(), seen.as_ref()) {
+            self.register_out_dir(&out_dir);
+        }
+    }
+
+    /// Remembers the output folder in the store's registry, once per run (B-23): a marker in
+    /// the session's folder says it was done. Cost: one failed `open` after the first time.
+    fn register_out_dir(&self, out_dir: &Path) {
+        let name = Digest::of(out_dir.as_os_str().as_encoded_bytes()).hex();
+        let marks = self.current.folder.join("out-dirs");
+        let _ = std::fs::create_dir_all(&marks);
+        let first = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marks.join(&name[..32]))
+            .is_ok();
+        if first {
+            let _ = Store::new(&self.current.store).register_out_dir(
+                out_dir,
+                Path::new(self.invocation.cwd()),
+                self.ports.now(),
+            );
+        }
     }
 
     fn pass(&mut self, why: PassedThrough) -> i32 {
@@ -309,8 +405,10 @@ impl Call<'_> {
     /// Runs rustc exactly as asked, as a child whose stderr goes on line by line and whose
     /// stdout is left alone, so that a failure to load a reused extern suspends and removes it
     /// (B-15) as it does for a compile the wrapper handles. The outcome stays the one asked.
-    fn watched_as_asked(&mut self, outcome: Outcome) -> i32 {
+    fn watched_as_asked(&mut self, outcome: Outcome, record: bool) -> i32 {
         let store = Store::new(&self.current.store);
+        self.forget_unit();
+        let since = self.ports.now();
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
         let mut recorder = Recorder::new(&mut *self.err, self.invocation.form().clone());
@@ -331,6 +429,9 @@ impl Call<'_> {
             Ok(ran) => {
                 if !ran.success {
                     log.note = self.reject_reused(&store, &recorded);
+                } else if record {
+                    let outputs = self.announced(&recorded);
+                    self.record_unit(since, outputs, &BTreeMap::new());
                 }
                 ran.code
             }
@@ -482,7 +583,7 @@ impl Call<'_> {
                         decide::after(decide::restore_failed(), &Facts::ran(Rustc::NotRun)).outcome,
                     );
                 };
-                self.reuse(&store, &roots, found)
+                self.reuse(&store, &roots, found, cx.as_ref())
             }
             Plan::Compile { keep, compare } => {
                 let Some(cx) = &cx else {
@@ -547,6 +648,7 @@ impl Call<'_> {
                     *found = Some(Found {
                         block,
                         description,
+                        observed,
                         watched,
                     });
                     return Lookup::Found { audit, serves_form };
@@ -558,7 +660,14 @@ impl Call<'_> {
 
     /// B-12: the block's files in place, then its messages; rustc doesn't start. Any failure
     /// before the first message runs rustc as asked.
-    fn reuse(&mut self, store: &Store, roots: &Roots, found: &Found) -> i32 {
+    fn reuse(
+        &mut self,
+        store: &Store,
+        roots: &Roots,
+        found: &Found,
+        cx: Option<&Context<'_>>,
+    ) -> i32 {
+        self.forget_unit();
         let restored = Restore {
             block: &found.block,
             description: &found.description,
@@ -576,6 +685,18 @@ impl Call<'_> {
                 return self.as_asked(outcome);
             }
         };
+        if let Some(cx) = cx {
+            let out_dir = self.out_dir();
+            let outputs = found
+                .description
+                .outputs
+                .iter()
+                .filter(|o| matches!(o.kind, OutputKind::Link | OutputKind::Metadata))
+                .map(|o| out_dir.join(&o.name))
+                .collect();
+            let digests = unit::digests(cx, &found.observed);
+            self.record_unit(self.start, outputs, &digests);
+        }
         let _ = self.err.write_all(&restored.messages);
         let _ = self.err.flush();
         let now = self.ports.now();
@@ -619,6 +740,7 @@ impl Call<'_> {
         let stale_bundle = self.clear_bundle
             && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
                 .is_err();
+        self.forget_unit();
         let compile_start = self.ports.now();
         let mut recorder = Recorder::new(&mut *self.err, inv.form().clone());
         let ran = self.ports.compile(
@@ -712,6 +834,18 @@ impl Call<'_> {
                             false,
                         );
                     }
+                }
+                // What it read, for the check before a later run (B-23): only when nothing
+                // changed while compiling, or the record would describe other bytes.
+                if !facts.changed {
+                    let outputs = produced
+                        .outputs
+                        .iter()
+                        .filter(|o| matches!(o.kind, OutputKind::Link | OutputKind::Metadata))
+                        .map(|o| o.path.clone())
+                        .collect();
+                    let digests = unit::digests(cx, &produced.observed);
+                    self.record_unit(compile_start, outputs, &digests);
                 }
                 if trusted && keep == Keep::Store {
                     let min_free = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);

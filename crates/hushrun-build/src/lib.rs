@@ -1,4 +1,4 @@
-//! Build blocks (B-1 … B-22): compiled Rust reused between worktrees and runs.
+//! Build blocks (B-1 … B-23): compiled Rust reused between worktrees and runs.
 //!
 //! `hushrun run` sets `RUSTC_WRAPPER` to a link named `hushrun-rustc` that points at the hushrun
 //! binary. Cargo then calls it for every `rustc` it would run. For each call [`wrapper`] ends in
@@ -42,6 +42,10 @@
 //!    pass a time in, so tests set it.
 //! 10. **This is a hot path.** No `unsafe`, no new dependency, no work at start that a
 //!     pass-through doesn't need. Variables are read with `std::env`, once.
+//! 11. **A unit record describes its outputs or doesn't exist** (B-23). [`unit::settle`] is the
+//!     only code that writes or removes one: removed before rustc runs, written after a compile
+//!     or a reuse ends well, never left for a call the wrapper can't see through. The check
+//!     before a run removes only files a record names, under cargo's own lock.
 #![forbid(unsafe_code)]
 
 pub mod audit;
@@ -68,6 +72,7 @@ pub mod shape;
 pub mod sidecar;
 pub mod store;
 pub mod sweep;
+pub mod unit;
 pub mod wrapper;
 
 #[cfg(test)]

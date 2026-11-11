@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs};
 use crate::settings::{self, Overrides, Settings};
 use crate::store::{DAY, Store};
+use crate::unit::Checked;
 
 /// The variable that names the session's folder for the wrapper.
 pub const SESSION: &str = "HUSHRUN_BUILD_SESSION";
@@ -63,6 +64,8 @@ pub enum NotBegun {
 pub struct Session {
     current: Current,
     link: PathBuf,
+    /// What the check before COMMAND removed, as the summary says it (B-23).
+    rebuilt: Vec<String>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -303,8 +306,13 @@ pub struct Summary {
 impl Summary {
     /// The summary of a run's log.
     pub fn of(mode: Mode, min_free_gb: u32, entries: &[Entry]) -> Summary {
+        Summary::of_run(mode, min_free_gb, entries, &[])
+    }
+
+    /// The summary of a run's log, with what the check before COMMAND removed (B-23).
+    pub fn of_run(mode: Mode, min_free_gb: u32, entries: &[Entry], rebuilt: &[String]) -> Summary {
         let counts = Counts::of(mode, min_free_gb, entries);
-        let lines = lines(&counts);
+        let lines = lines(&counts, rebuilt);
         Summary { counts, lines }
     }
 
@@ -320,10 +328,12 @@ impl Summary {
     }
 }
 
-/// B-20's lines: the totals, then at most [`MAX_NOTES`] notes, then low space once (B-22).
-fn lines(counts: &Counts) -> Vec<String> {
+/// B-20's lines: the totals, then what the check before COMMAND removed (B-23), then at most
+/// [`MAX_NOTES`] notes, then low space once (B-22).
+fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
+    let rebuilt = rebuilt.iter().map(|line| format!("build: {line}"));
     if counts.compiles == 0 {
-        return Vec::new();
+        return rebuilt.collect();
     }
     let all = crates(counts.compiles);
     let mut first = match counts.mode {
@@ -355,6 +365,7 @@ fn lines(counts: &Counts) -> Vec<String> {
         first.push_str(&format!(", saving about {}", took(counts.saved_ms)));
     }
     let mut lines = vec![first];
+    lines.extend(rebuilt);
     lines.extend(
         counts
             .notes
@@ -458,7 +469,11 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         .map_err(std::io::Error::other)
         .and_then(|bytes| std::fs::write(&file, bytes))
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", file.display())))?;
-    Ok(Session { current, link })
+    Ok(Session {
+        current,
+        link,
+        rebuilt: Vec::new(),
+    })
 }
 
 impl Session {
@@ -480,6 +495,16 @@ impl Session {
         &self.current
     }
 
+    /// Before COMMAND starts (B-23): removes the outputs of every crate the wrapper saw compiled
+    /// in the target folders of `folder` (the folder `hushrun run` runs in) whose inputs changed
+    /// in a way cargo can't see, so that cargo builds them. What it removed goes into the run's
+    /// summary. It stops at `deadline`, leaving the rest unchecked.
+    pub fn check(&mut self, folder: &Path, deadline: Option<std::time::Instant>) -> Checked {
+        let checked = crate::unit::check(&Store::new(&self.current.store), folder, deadline);
+        self.rebuilt = checked.lines();
+        checked
+    }
+
     /// After COMMAND: reads the log, removes the session's folder and, at most once a day,
     /// sweeps the store (B-14). Then it removes what other runs left: sessions untouched for
     /// more than two days (a run that was killed) and wrapper links whose binary is gone. Nothing
@@ -487,7 +512,12 @@ impl Session {
     /// same at once.
     pub fn finish(self, now: SystemTime) -> Summary {
         let current = &self.current;
-        let summary = Summary::of(current.mode, current.min_free_gb, &current.entries());
+        let summary = Summary::of_run(
+            current.mode,
+            current.min_free_gb,
+            &current.entries(),
+            &self.rebuilt,
+        );
         let _ = remove_dir(&current.folder);
         let _ = crate::sweep::sweep(&Store::new(&current.store), now, current.keep_days);
         remove_stale_sessions(&current.store, now);
@@ -948,6 +978,28 @@ mod tests {
             ]
         );
         assert_eq!(summary.counts().notes, ["a", "b", "c", "d", "e", "f"]);
+    }
+
+    // covers: B-20, B-23
+    #[test]
+    fn what_the_check_removed_comes_after_the_totals() {
+        let rebuilt = [
+            "app is rebuilt: a file was added to migrations, which cargo doesn't watch".to_string(),
+        ];
+        assert_eq!(
+            Summary::of_run(Mode::On, 10, &[built(), noted("a")], &rebuilt).lines(),
+            [
+                "build: 2 crates built, none reused",
+                "build: app is rebuilt: a file was added to migrations, which cargo doesn't watch",
+                "build: a",
+            ]
+        );
+        // Said even when COMMAND compiled nothing.
+        assert_eq!(
+            Summary::of_run(Mode::On, 10, &[], &rebuilt).lines().len(),
+            1
+        );
+        assert!(Summary::of_run(Mode::On, 10, &[], &[]).lines().is_empty());
     }
 
     // covers: B-22

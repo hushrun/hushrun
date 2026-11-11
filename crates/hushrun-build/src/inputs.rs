@@ -977,7 +977,7 @@ fn first_found(dir: &Path, name: &str, watched: &mut Vec<Watched>) -> Result<Rea
 
 /// The paths a known macro's place names, in order. A search upward names the file in every
 /// folder from the start to the file system's root.
-fn places(place: &Where, package: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn places(place: &Where, package: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
     let upward = |from: &Path, name: &str| -> Vec<PathBuf> {
         from.ancestors().map(|dir| dir.join(name)).collect()
     };
@@ -993,7 +993,7 @@ fn places(place: &Where, package: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
 /// `skip` or holding one of them: cargo leaves those out of a package's files too, and they
 /// hold this build's own outputs. A symlink is listed, not followed. A missing `dir` gives
 /// nothing.
-fn walk(dir: &Path, skip: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+pub(crate) fn walk(dir: &Path, skip: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(folder) = stack.pop() {

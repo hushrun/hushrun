@@ -578,6 +578,24 @@ impl World {
     }
 }
 
+/// rustc ran once, exactly as asked: as a child (a crate with something local to watch,
+/// B-23) or replacing the process. Its arguments, without the compiler's path.
+fn ran_as_asked(r: &Result) -> Vec<String> {
+    let runs: Vec<&Vec<String>> = r.seen.execs.iter().chain(&r.seen.compiles).collect();
+    assert_eq!(runs.len(), 1, "{:?}", runs);
+    assert!(!runs[0].iter().any(|a| a.starts_with("--remap-path-prefix")));
+    runs[0].clone()
+}
+
+/// A crate whose package lies in a shared folder, as one from a registry does: nothing local to
+/// watch (B-23).
+fn from_a_registry(fake: &mut Fake) {
+    fake.vars.insert(
+        "CARGO_MANIFEST_DIR".into(),
+        "/usr/registry/src/a-0.1.0".into(),
+    );
+}
+
 const STORED: Outcome = Outcome::BuiltAndStored;
 const REUSED: Outcome = Outcome::Reused;
 
@@ -650,7 +668,7 @@ fn calls_the_wrapper_cant_key_pass_through_and_are_logged() {
 
     let r = w.call_with(&ws, "a", &[], |fake| fake.version_fails = true);
     assert_eq!(r.outcome(), Outcome::PassedThrough(PassedThrough::Compiler));
-    assert_eq!(r.seen.execs.len(), 1);
+    ran_as_asked(&r);
     assert_eq!(w.blocks(), 0);
 }
 
@@ -1034,13 +1052,9 @@ fn a_first_build_drops_incremental_and_a_rebuild_keeps_it() {
         rebuild.outcome(),
         Outcome::PassedThrough(PassedThrough::Incremental)
     );
-    assert_eq!(rebuild.seen.execs.len(), 1);
-    assert!(rebuild.seen.execs[0].contains(&incremental));
-    assert!(
-        !rebuild.seen.execs[0]
-            .iter()
-            .any(|a| a.starts_with("--remap"))
-    );
+    let asked = ran_as_asked(&rebuild);
+    assert!(asked.contains(&incremental));
+    assert!(!asked.iter().any(|a| a.starts_with("--remap")));
     // Back to the stored version: reused even with incremental asked.
     fs::write(ws.join("a/src/lib.rs"), "mod foo;\n").unwrap();
     settle();
@@ -1126,7 +1140,7 @@ fn a_block_that_cant_be_put_in_place_runs_rustc_as_asked() {
     fs::write(&json, text.replace("{hushrun:out-dir}", "{hushrun:deps-9}")).unwrap();
     let r = w.call(&two, "a", &[]);
     assert_eq!(r.outcome(), not_stored(NotStored::Restore));
-    assert_eq!(r.seen.execs.len(), 1);
+    ran_as_asked(&r);
     assert!(!r.stderr.contains("hushrun:"));
 }
 
@@ -1565,7 +1579,7 @@ fn a_target_that_is_not_one_of_the_compilers_own_passes_through() {
         r.outcome(),
         Outcome::PassedThrough(PassedThrough::TargetFile)
     );
-    assert_eq!(r.seen.execs.len(), 1);
+    ran_as_asked(&r);
     settle();
     let r = w.call(&ws, "a", &["--target", "aarch64-apple-ios"]);
     assert_eq!(r.outcome(), STORED);
@@ -2057,12 +2071,13 @@ fn an_incremental_rebuild_against_a_reused_extern_still_heals_a_rejected_block()
     assert!(!two.join("target/debug/deps/liba-xa.rmeta").exists());
     assert!(r.entry.unwrap().note.is_some());
 
-    // Without a reused extern, the rebuild replaces the process as before.
+    // Without a reused extern, the rebuild of a crate with nothing local to watch replaces the
+    // process as before (B-23).
     let w = world(Mode::On);
     let ws = w.checkout("ws");
     settle();
     fs::write(ws.join("target/debug/deps/a-xa.d"), "").unwrap();
-    let r = w.call(&ws, "a", &["-C", &incremental]);
+    let r = w.call_with(&ws, "a", &["-C", &incremental], from_a_registry);
     assert_eq!(
         r.outcome(),
         Outcome::PassedThrough(PassedThrough::Incremental)
@@ -2160,7 +2175,7 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
     assert!(w.store().suspended(&a).is_some());
     assert!(!two.join("target/debug/deps/liba-xa.rmeta").exists());
 
-    // No reused extern: the process is replaced as before.
+    // No reused extern, and nothing local to watch: the process is replaced as before.
     let w = world_with(Mode::On, |s| s.never_store = vec!["b".into()]);
     let ws = w.checkout("ws");
     fs::create_dir_all(ws.join("b/src")).unwrap();
@@ -2168,7 +2183,7 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
     settle();
     assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
     let ext = format!("a={}", ws.join("target/debug/deps/liba-xa.rmeta").display());
-    let r = w.call(&ws, "b", &["--extern", &ext]);
+    let r = w.call_with(&ws, "b", &["--extern", &ext], from_a_registry);
     assert_eq!(
         r.outcome(),
         Outcome::PassedThrough(PassedThrough::NeverStore)
@@ -3067,4 +3082,61 @@ fn the_dsymutil_that_writes_a_programs_bundle_is_keyed() {
     let r = call_program(&w, &three, &[]);
     assert_eq!(r.outcome(), STORED, "another dsymutil wrote this bundle");
     assert!(!r.entry.unwrap().found);
+}
+
+/// Where the unit record of `a` lies in `ws`.
+fn unit_record(ws: &Path) -> PathBuf {
+    crate::unit::record_path(&ws.join("target/debug/deps"), "a-xa")
+}
+
+// covers: B-23
+#[test]
+fn every_call_leaves_a_record_of_its_unit_or_none() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    // A compile seen through: a record, and the output folder registered once.
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
+    let text = fs::read_to_string(unit_record(&ws)).unwrap();
+    assert!(
+        text.contains("\"sha256\":\"sha256:"),
+        "a digest for what was hashed: {text}"
+    );
+    assert_eq!(w.store().out_dirs().len(), 1);
+    // A call the parser refuses: rustc runs as asked unseen, so the record goes first.
+    let r = w.call(&ws, "a", &["@more-args"]);
+    assert_eq!(r.seen.execs.len(), 1);
+    assert!(!unit_record(&ws).exists());
+    // A reuse writes one too.
+    settle();
+    assert_eq!(w.call(&ws, "a", &[]).outcome(), REUSED);
+    assert!(unit_record(&ws).is_file());
+    // An incremental rebuild runs as a child and writes one.
+    fs::write(ws.join("a/src/lib.rs"), "mod foo;\nfn edited() {}\n").unwrap();
+    settle();
+    let r = w.call(&ws, "a", &["-C", "incremental=/tmp/inc"]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::Incremental)
+    );
+    assert_eq!(r.seen.compiles.len(), 1);
+    let text = fs::read_to_string(unit_record(&ws)).unwrap();
+    // Stats only: the rebuild hashes nothing.
+    assert!(text.contains("a/src/lib.rs\",\"stat\":{"), "{text}");
+    assert!(text.contains("\"sha256\":null"), "{text}");
+    // A crate with nothing local to watch replaces the process and has none.
+    let r = w.call_with(&ws, "a", &["-C", "incremental=/tmp/inc"], from_a_registry);
+    assert_eq!(r.seen.execs.len(), 1);
+    assert!(!unit_record(&ws).exists());
+    // A failed compile leaves none.
+    w.plan(
+        "a",
+        Plan {
+            fail: Some("E0308"),
+            ..Plan::default()
+        },
+    );
+    assert_eq!(w.call(&ws, "a", &[]).code, 1);
+    assert!(!unit_record(&ws).exists());
+    assert_eq!(w.store().out_dirs().len(), 1);
 }

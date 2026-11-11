@@ -26,6 +26,8 @@ pub struct SweepReport {
     pub leftovers: u64,
     /// Hints removed for not being refreshed for the kept days.
     pub hints: u64,
+    /// Output folders the registry forgot: gone, or not seen for the kept days (B-23).
+    pub out_dirs: u64,
     /// Steps that failed and were skipped. Another process removing the same thing first is
     /// not one.
     pub errors: u64,
@@ -65,6 +67,9 @@ pub fn force(store: &Store, now: SystemTime, keep_days: u32) -> SweepReport {
         let hints = store.remove_stale_hints(cutoff);
         report.hints = hints.removed;
         report.errors += hints.errors;
+        let out_dirs = store.remove_stale_out_dirs(cutoff);
+        report.out_dirs = out_dirs.removed;
+        report.errors += out_dirs.errors;
     }
     if let Some(before) = now.checked_sub(DAY) {
         let leftovers = store.remove_leftovers(before);

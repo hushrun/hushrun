@@ -211,7 +211,8 @@ runs rustc as asked after its arguments were read (`passed through` for a reason
 reading them, such as the never-store list, a compiler of unknown identity or an incremental rebuild
 (B-9), or `built, not stored` because a key, the store or a reuse failed) runs rustc as a child
 when a reuse put at least one of its externs in place, with the same arguments, its stderr passed
-on line by line and its stdout untouched, so that this rule runs. Otherwise rustc replaces the
+on line by line and its stdout untouched, so that this rule runs; so does a call whose package
+lies outside the shared folders, for its unit record (B-23). Otherwise rustc replaces the
 wrapper, and so does it for a call whose arguments can't be read (B-4). A suspended key is never
 reused. `hushrun build clean` clears it.
 
@@ -276,3 +277,62 @@ empties the store.
 **B-22 Free space.** Nothing is stored while the store's volume has less than `min_free_gb` free
 (10 unless set; 0 turns the rule off). The outcome is `built, not stored`, and the run's line
 says so once.
+
+**B-23 What cargo can't see.** Cargo decides whether to call rustc by dates and by the files
+rustc listed last time, so some changes never reach the wrapper: a file added to a folder a macro
+lists (sqlx's `migrate!` puts each migration in an `include_str!` but lists the folder unseen), a
+file a known macro reads (B-6 `declared`), a module that appears where one could have been, a
+file whose bytes changed under a date older than the last build (an archive extracted with its
+own dates). The keys cover all four; this rule makes them count. Inside `hushrun run`, with the
+mode `observe` or `on`, before COMMAND starts, hushrun removes the outputs of every crate whose
+inputs changed in one of those ways, so that cargo finds them missing and calls rustc, and the
+wrapper answers by content as usual. Nothing is asked of the person.
+
+- *The record.* Every compile the wrapper sees through to a successful end, a reuse among them,
+  leaves a record of its unit in its output folder's `.hushrun/units/`, named by the crate and
+  its `-C extra-filename`, so that it dies with `cargo clean`: the unit's outputs (what `link`
+  and `metadata` produced) by inode, device and size; and what to watch, with what was seen: each
+  file the dep-info lists, each place a module of a listed `.rs` file could also have been, the
+  folder that holds each listed file, the inputs of the known macros (folders walked in full),
+  for a library each native folder and the static libraries in it, and each place a `-l` may be
+  found; for a file its size, both dates, inode, device and, when the compile hashed it, its
+  SHA-256; for a place, absent; for a folder, its entry names. Nothing under a shared folder
+  (B-8) or in the unit's own output folder is watched, and a crate with nothing to watch has no
+  record. It is written whole, under a temporary name that begins with a dot, after the outputs
+  are in place. A watched file or folder dated at or after the start of the compile (or the
+  reuse) means it changed meanwhile: no record is written then.
+- *One record or none.* The record is removed before rustc runs and before a reuse puts files in
+  place, and written after. A call passed through after its arguments were read runs rustc as a
+  child, exactly as asked with its stderr passed on line by line, whenever its package lies
+  outside the shared folders, and writes the record from the dep-info rustc left, with stats and
+  no digests. A call whose arguments the wrapper doesn't read (a parser's pass-through, no
+  session) removes the record of the unit its `--crate-name`, `-C extra-filename` and `--out-dir`
+  name before rustc runs. A failed compile leaves none.
+- *The registry.* The store keeps one file per output folder the wrapper wrote a record in,
+  `out-dirs/<digest of its path>.json`: the folder and the working directory of its compiles,
+  both resolved, and when a run last saw it, written at most once per run per folder. The sweep
+  (B-14) drops an entry whose folder is gone or that no run saw for `keep_days`.
+- *The check.* It takes the registered output folders whose working directory is the folder
+  `hushrun run` runs in, inside it or above it, and for each takes the lock cargo holds on its
+  target folder (`.cargo-lock` in the profile folder), skipping a folder a build holds or one
+  with no such lock. For each record there: an output that is gone or isn't the file the record
+  names means the record no longer describes the unit (plain cargo built it since) and only the
+  record is removed. A listed file gone or dated at or after the record's start is one cargo sees
+  itself: nothing is done. Otherwise a watched file whose stat differs is changed unless a digest
+  on record says its bytes are the same; a place that was absent and isn't, or the reverse, is
+  changed; a folder whose stat differs is changed if its names differ. For a changed unit, its
+  outputs that are still the files the record names are removed with their records (B-6), then
+  the unit record; the dep-info stays, so the rebuild of a crate cargo builds incrementally stays
+  incremental (B-9), and a program's debug bundle stays for the next compile to replace (B-9). It
+  reads no file but to settle a differing stat, never touches a source file or a file no record
+  names, and stops at a deadline (two seconds), leaving the rest for the next run. A record that
+  can't be read is ignored.
+- *What it says.* For each crate it removed, one line in the run's summary after the totals, at
+  most three: `build: <crate> is rebuilt: <what changed>, which cargo doesn't watch`, the path
+  from the folder `hushrun run` runs in. When nothing was removed it says nothing.
+- *Limits.* Only crates the wrapper saw compiled are checked, and only in the output folders
+  registered for the folder `hushrun run` runs in: a script that builds into a folder elsewhere
+  is not covered, and neither is a crate last built by plain cargo. A macro that reads a file the
+  table of known macros doesn't name, and a file the link line names (B-18), are not watched. A
+  name added to a watched folder that a fresh compile would also see as an input (an editor's
+  swap file beside a source) rebuilds the crate, as its key says.

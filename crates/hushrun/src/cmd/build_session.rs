@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use hushrun_build::session::{self, NotBegun, Session};
 use hushrun_ci::Env;
@@ -13,6 +13,10 @@ use hushrun_core::time::Time;
 
 use crate::context;
 use crate::credentials::Credentials;
+
+/// The longest the check before COMMAND may take (B-23): past it, the crates left are not
+/// checked this run.
+const CHECK_BUDGET: Duration = Duration::from_secs(2);
 
 /// What every line that says why a run has no session starts with.
 const OFF: &str = "build reuse is off for this run";
@@ -37,6 +41,7 @@ pub(crate) fn begin(now: SystemTime, repository: Option<&str>) -> Result<Session
         repository,
         env: &env,
         now,
+        folder: std::env::current_dir().ok(),
     };
     begin_with(&here, std::env::current_exe())
 }
@@ -56,6 +61,9 @@ struct Here<'a> {
     repository: Option<&'a str>,
     env: &'a dyn Fn(&str) -> Option<OsString>,
     now: SystemTime,
+    /// The folder `hushrun run` runs in: the check before COMMAND looks at the target folders
+    /// of its crates (B-23).
+    folder: Option<PathBuf>,
 }
 
 impl<'a> Here<'a> {
@@ -95,7 +103,13 @@ fn begin_with(here: &Here<'_>, exe: std::io::Result<PathBuf>) -> Result<Session,
             };
         }
     };
-    session::begin(&here.start(&exe, here.cache_dir, here.env)).or_else(said)
+    let mut session = session::begin(&here.start(&exe, here.cache_dir, here.env)).or_else(said)?;
+    // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
+    // outputs, so that cargo builds them. What it removed is said with the run's summary.
+    if let Some(folder) = &here.folder {
+        session.check(folder, Some(Instant::now() + CHECK_BUDGET));
+    }
+    Ok(session)
 }
 
 /// What the person reads of a run with no session: only settings or a variable that can't be
@@ -129,6 +143,7 @@ mod tests {
             repository: None,
             env,
             now: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
+            folder: None,
         }
     }
 
@@ -192,5 +207,58 @@ mod tests {
         let session = begin_with(&here(dir.path(), &settings, &none), Ok(exe)).unwrap();
         assert!(store.join("sessions").is_dir());
         session.finish(SystemTime::UNIX_EPOCH);
+    }
+
+    // covers: B-23
+    #[test]
+    fn a_run_checks_the_crates_of_its_folder_before_command_and_says_what_it_removed() {
+        use hushrun_build::unit::{self, Item, Seen};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let settings = root.join("build.json");
+        settings::update(&settings, |s| s.mode = Mode::On).unwrap();
+        let exe = root.join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        // A crate the wrapper saw compiled: its output, its record, its folder registered.
+        let ws = root.join("ws");
+        let out = ws.join("target/debug/deps");
+        let data = ws.join("app/data");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(ws.join("target/debug/.cargo-lock"), b"").unwrap();
+        let rlib = out.join("libapp-1.rlib");
+        std::fs::write(&rlib, b"rlib").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let seen = Seen {
+            crate_name: "app".into(),
+            package: Some("app".into()),
+            cwd: ws.clone(),
+            outputs: vec![rlib.clone()],
+            items: vec![Item::Dir(data.clone())],
+            since: SystemTime::now(),
+        };
+        assert!(unit::settle(&out, "app-1", Some(&seen)));
+        hushrun_build::store::Store::new(&root.join("build"))
+            .register_out_dir(&out, &ws, SystemTime::now())
+            .unwrap();
+        // A file added where cargo doesn't look.
+        std::fs::write(data.join("2.sql"), b"").unwrap();
+
+        let none = |_: &str| None;
+        let mut elsewhere = here(&root, &settings, &none);
+        elsewhere.folder = Some(root.join("elsewhere"));
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        let session = begin_with(&elsewhere, Ok(exe.clone())).unwrap();
+        assert!(rlib.exists(), "another folder's crates are not checked");
+        assert!(session.finish(SystemTime::UNIX_EPOCH).lines().is_empty());
+
+        let mut in_ws = here(&root, &settings, &none);
+        in_ws.folder = Some(ws.join("app"));
+        let session = begin_with(&in_ws, Ok(exe)).unwrap();
+        assert!(!rlib.exists());
+        assert_eq!(
+            session.finish(SystemTime::UNIX_EPOCH).lines(),
+            ["build: app is rebuilt: a file was added to data, which cargo doesn't watch"]
+        );
     }
 }
