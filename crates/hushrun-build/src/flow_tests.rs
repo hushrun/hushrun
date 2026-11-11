@@ -1632,3 +1632,68 @@ fn a_named_pipe_at_a_hinted_place_is_never_opened() {
     assert_eq!(r.code, 0);
     assert_eq!(r.outcome(), not_stored(NotStored::NotAFile));
 }
+
+// covers: B-6, B-8
+#[cfg(unix)]
+#[test]
+fn a_read_through_dots_whose_last_part_is_a_link_is_keyed_by_what_the_path_names_now() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            // As rustc writes `include_str!("../data/text.txt")` from `a/src/lib.rs`.
+            reads: vec!["a/src/../data/text.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let link_to = |ws: &Path, target: &str| {
+        fs::create_dir_all(ws.join("shared")).unwrap();
+        fs::write(ws.join("shared/A.txt"), "AAA\n").unwrap();
+        fs::write(ws.join("shared/B.txt"), "BBB\n").unwrap();
+        fs::remove_file(ws.join("a/data/text.txt")).unwrap();
+        std::os::unix::fs::symlink(format!("../../shared/{target}"), ws.join("a/data/text.txt"))
+            .unwrap();
+    };
+    let one = w.checkout("one");
+    let two = w.checkout("two-longer");
+    link_to(&one, "A.txt");
+    link_to(&two, "B.txt");
+    settle();
+    assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
+    let r = w.call(&two, "a", &[]);
+    assert_eq!(r.outcome(), STORED, "a wrong reuse");
+    assert!(
+        fs::read_to_string(w.rlib(&two, "a"))
+            .unwrap()
+            .contains("BBB")
+    );
+    // The same link target elsewhere is reused.
+    let three = w.checkout("three");
+    link_to(&three, "A.txt");
+    settle();
+    assert_eq!(w.call(&three, "a", &[]).outcome(), REUSED);
+}
+
+// covers: B-8
+#[cfg(unix)]
+#[test]
+fn a_read_through_dots_after_a_linked_folder_is_not_stored() {
+    let w = world(Mode::On);
+    w.plan(
+        "a",
+        Plan {
+            reads: vec!["a/src/../data/text.txt".into()],
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    // `a/src` is a link to another package's folder: `a/src/..` is not `a`.
+    fs::create_dir_all(ws.join("lib/data")).unwrap();
+    fs::write(ws.join("lib/data/text.txt"), "lib\n").unwrap();
+    fs::rename(ws.join("a/src"), ws.join("lib/src")).unwrap();
+    std::os::unix::fs::symlink("../lib/src", ws.join("a/src")).unwrap();
+    settle();
+    let r = w.call(&ws, "a", &[]);
+    assert_eq!(r.outcome(), not_stored(NotStored::Unkeyable));
+    assert_eq!(w.blocks(), 0);
+}

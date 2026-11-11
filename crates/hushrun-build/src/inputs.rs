@@ -133,10 +133,11 @@ impl Context<'_> {
         }
     }
 
-    /// Where a path lies (B-8). A path with a `..` in it is first resolved on disk, so
-    /// `a/src/../data/x.txt` (as rustc writes an `include_str!("../data/x.txt")`) is the file
-    /// under the package it names, and a `..` that leaves through a symlink lands where the link
-    /// points.
+    /// Where a path lies (B-8). A path with a `..` in it is resolved up to its last `..` and
+    /// the rest kept as it is, so `a/src/../data/x.txt` (as rustc writes an
+    /// `include_str!("../data/x.txt")`) is the file under the package it names, read through
+    /// whatever is at that path now. A `..` after a linked folder can't be placed with
+    /// certainty: [`NotStored::Unkeyable`].
     pub fn located_path(&self, path: &Path) -> Result<Located, NotStored> {
         self.located(path)
     }
@@ -147,7 +148,7 @@ impl Context<'_> {
             .components()
             .any(|c| c == std::path::Component::ParentDir)
         {
-            resolved = resolve_dots(path);
+            resolved = resolve_dots(&Path::new(self.invocation.cwd()).join(path))?;
             resolved.as_path()
         } else {
             path
@@ -608,34 +609,47 @@ impl Context<'_> {
     }
 }
 
-/// `path` with its `..` parts resolved on disk: the longest part of it that exists is resolved
-/// (symlinks followed), and the rest joined to it. A path where nothing can be resolved is kept,
-/// and its `..` makes it lie outside every root.
-fn resolve_dots(path: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut head = path;
-    loop {
-        if let Ok(real) = fs::canonicalize(head) {
-            let mut out = real;
-            for part in rest.iter().rev() {
-                out.push(part);
+/// An absolute `path` with its `..` parts gone (B-8): the part up to and including its last
+/// `..` is resolved on disk, and the parts after it are appended as they are, so a symlink at
+/// the end stays the path the source named and is hashed through whatever it points at now.
+///
+/// That resolved part must be what removing the `..` without the file system gives, once
+/// resolved too: a linked folder before a `..` makes it something else (`a/src/..` is not `a`
+/// when `a/src` is a link), and such a read can't be placed under a root with certainty. That,
+/// and a part that can't be resolved, is [`NotStored::Unkeyable`].
+///
+/// Cost: two `realpath` calls, only for a path that has a `..`.
+fn resolve_dots(path: &Path) -> Result<PathBuf, NotStored> {
+    use std::path::Component;
+    let parts: Vec<Component<'_>> = path.components().collect();
+    let Some(last) = parts.iter().rposition(|c| *c == Component::ParentDir) else {
+        return Ok(path.to_path_buf());
+    };
+    let head: PathBuf = parts[..=last].iter().collect();
+    let mut lexical = PathBuf::new();
+    for part in &parts[..=last] {
+        match part {
+            Component::ParentDir => {
+                if !lexical.pop() || lexical.as_os_str().is_empty() {
+                    return Err(NotStored::Unkeyable);
+                }
             }
-            if out
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-            {
-                return path.to_path_buf();
-            }
-            return out;
-        }
-        match (head.parent(), head.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_os_string());
-                head = parent;
-            }
-            _ => return path.to_path_buf(),
+            Component::CurDir => {}
+            other => lexical.push(other),
         }
     }
+    let resolved = fs::canonicalize(&head).map_err(|_| NotStored::Unkeyable)?;
+    let expected = fs::canonicalize(&lexical).map_err(|_| NotStored::Unkeyable)?;
+    if resolved != expected {
+        return Err(NotStored::Unkeyable);
+    }
+    let mut out = lexical;
+    for part in &parts[last + 1..] {
+        if *part != Component::CurDir {
+            out.push(part);
+        }
+    }
+    Ok(out)
 }
 
 /// Whether a file is a linked library a proc macro can be: never an `.rlib` or `.rmeta`.

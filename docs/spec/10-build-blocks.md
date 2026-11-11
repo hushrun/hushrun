@@ -97,7 +97,11 @@ recorded as the root's name and the rest, and looked up under the current root. 
 under another checkout MUST NOT be opened. Replacing roots in arguments and values MUST be
 reversible up to a root's two forms: inputs that differ in anything but which form of a root they
 use never give one text. A read at an absolute path outside every
-root, the cargo home, the toolchain and the system folders ties the block to its roots.
+root, the cargo home, the toolchain and the system folders ties the block to its roots. A path
+with a `..` is resolved on disk up to its last `..`, and the parts after it are kept as written,
+so a symlink at its end is hashed through whatever it points at now; when that resolved part is
+not what removing the `..` gives (a linked folder before it), the read can't be placed and the
+compile is `built, not stored`.
 
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
 adds `--remap-path-prefix` for the workspace, as `.`, and for the build script's output, as a

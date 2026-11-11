@@ -687,3 +687,29 @@ fn a_named_pipe_in_a_package_and_in_out_dir_never_hangs_the_build() {
         Outcome::BuiltNotStored(hushrun_build::model::NotStored::NotAFile)
     );
 }
+
+// covers: B-6, B-8
+#[cfg(unix)]
+#[test]
+fn a_file_included_through_dots_and_a_link_is_keyed_by_what_the_link_names_here() {
+    let w = World::new();
+    let one = w.checkout("one");
+    let two = w.checkout("two-longer");
+    for (ws, target) in [(&one, "A.txt"), (&two, "B.txt")] {
+        fs::create_dir_all(ws.join("shared")).unwrap();
+        fs::write(ws.join("shared/A.txt"), "first text").unwrap();
+        fs::write(ws.join("shared/B.txt"), "OTHER TEXT").unwrap();
+        fs::remove_file(ws.join("a/data/text.txt")).unwrap();
+        std::os::unix::fs::symlink(format!("../../shared/{target}"), ws.join("a/data/text.txt"))
+            .unwrap();
+    }
+    let session = w.begin(Mode::On).unwrap();
+    build(&one, &session);
+    assert!(run_c(&one).starts_with("first text|"));
+    build(&two, &session);
+    let printed = run_c(&two);
+    assert!(
+        printed.starts_with("OTHER TEXT|"),
+        "a wrong reuse: {printed}"
+    );
+}
