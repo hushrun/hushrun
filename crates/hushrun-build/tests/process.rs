@@ -98,6 +98,32 @@ impl World {
         PathBuf::from(hushrun_build::roots::resolve_on_disk(ws.to_str().unwrap()).unwrap())
     }
 
+    /// Moves the run's start to one at which the audit picks none of the stored blocks. The audit
+    /// runs one reusable compile in fifty anyway, chosen by a hash of the block's key and the
+    /// run's start (B-16), so a test that expects a reuse must not leave that to luck.
+    fn keep_the_audit_away(&self) {
+        let mut current = self.session.current().clone();
+        let mut keys = Vec::new();
+        for shard in fs::read_dir(current.store.join("blocks")).unwrap() {
+            for block in fs::read_dir(shard.unwrap().path()).unwrap() {
+                let name = block.unwrap().file_name();
+                keys.push(hushrun_core::Digest::from_hex(name.to_str().unwrap()).unwrap());
+            }
+        }
+        assert!(!keys.is_empty(), "nothing is stored yet");
+        while keys
+            .iter()
+            .any(|key| hushrun_build::audit::picked(key, current.started_ms))
+        {
+            current.started_ms += 1;
+        }
+        fs::write(
+            current.folder.join("session.json"),
+            serde_json::to_vec(&current).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// Runs the wrapper as cargo would, through the link named `hushrun-rustc`.
     fn run(&self, ws: &Path, session: bool, exit: &str) -> std::process::Output {
         let env = self.session.env();
@@ -165,6 +191,7 @@ fn the_wrapper_process_keeps_rustcs_exit_code_and_passes_its_messages_on() {
         w.session.current().entries().last().unwrap().outcome,
         Outcome::BuiltAndStored
     );
+    w.keep_the_audit_away();
     let out = w.run(&two, true, "7");
     assert_eq!(
         out.status.code(),
