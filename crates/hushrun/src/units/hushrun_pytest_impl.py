@@ -143,6 +143,7 @@ class Observer(object):
         self._rel_cache = {}
         self._import_seen = set()
         self._scanned = 0
+        self.unit_roots = {}          # unit -> the files it read directly, as results() found them
 
     # --- paths -------------------------------------------------------------------------
 
@@ -462,6 +463,27 @@ class Observer(object):
             pending.extend(file_edges.get(f, ()))
         return seen
 
+    def edge_list(self):
+        """[ADR 0072] The direct edges seen, for `hushrun why` to show a path: a file opened
+        another, a file imported another, or a test file read another while it ran through no edge
+        of its own (pytest collecting it, a conftest.py above it, a module code outside the
+        repository loaded). Explanations only: hushrun keys nothing by them."""
+        out = set()
+        for f, targets in self.edges.items():
+            for t in targets:
+                if t != f:
+                    out.add((f, t, "open"))
+        for f, names in self.name_edges.items():
+            for t in self.resolve(names):
+                if t != f:
+                    out.add((f, t, "import"))
+        direct = {(f, t) for f, t, _ in out}
+        for unit, roots in self.unit_roots.items():
+            for r in roots:
+                if r != unit and (unit, r) not in direct:
+                    out.add((unit, r, "read"))
+        return [list(e) for e in sorted(out)]
+
     def results(self):
         self.scan_modules()
         file_edges = {}
@@ -492,6 +514,7 @@ class Observer(object):
                             files = [x for x in files
                                      if x.rsplit("/", 1)[-1] not in ("conftest.py", "__init__.py")]
                         roots.update(files)
+            self.unit_roots[unit] = roots
             reads = self.closure(roots, file_edges)
             info = self.units.get(unit) or self.unit_entry(unit)
             not_followed = [{"why": k, "detail": d}
@@ -857,6 +880,12 @@ def pytest_sessionfinish(session, exitstatus):
                 python_files = list(config.getini("python_files"))
             except Exception:
                 python_files = None
+            # [ADR 0072] What explains a path, never what decides: a failure here costs only the
+            # path `hushrun why` would show.
+            try:
+                edges = [] if is_controller else obs.edge_list()
+            except Exception:
+                edges = []
             facts = {
                 "schema": SCHEMA,
                 "adapter": "pytest",
@@ -870,6 +899,7 @@ def pytest_sessionfinish(session, exitstatus):
                 [{"why": k, "detail": d} for k, v in sorted(obs.session_not_followed.items())
                  for d in sorted(v)],
                 "units": units,
+                "edges": edges,
                 "errors": obs.errors,
                 "removedItems": obs.removed,
                 "parent": os.getppid(),

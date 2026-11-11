@@ -103,6 +103,36 @@ pub struct FactsFile {
     /// \[ADR 0069\] How many tests this process deselected, as `hushrun.json` listed their units.
     #[serde(default)]
     pub removed_items: u64,
+    /// \[ADR 0072\] Direct edges between files of the repository it saw, `[from, to, kind]`,
+    /// `kind` `import`, `open` or `read`: what `hushrun why` shows a path with, never a key.
+    #[serde(default, deserialize_with = "edges")]
+    pub edges: Vec<(String, String, String)>,
+}
+
+/// A file's `edges`, or none when they don't read: they explain, and never stop a run.
+fn edges<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<(String, String, String)>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
+}
+
+/// \[ADR 0072\] The edges `adapter`'s files report, those of a kind the store knows.
+pub fn edges_of(files: &[FactsFile], adapter: &str) -> BTreeSet<super::db::Edge> {
+    files
+        .iter()
+        .filter(|f| f.adapter == adapter && !f.controller)
+        .flat_map(|f| f.edges.iter())
+        .filter_map(|(from, to, kind)| {
+            Some((
+                from.clone(),
+                to.clone(),
+                super::db::EdgeKind::from_word(kind)?,
+            ))
+        })
+        .collect()
 }
 
 /// What an observed adapter saw of one unit in one process.

@@ -1,5 +1,5 @@
-//! \[ADR 0068\] What this machine keeps of test files (C-33): unit results, the map and the audit's
-//! disagreements.
+//! \[ADR 0068\] What this machine keeps of test files (C-33), apart from the map: unit results and
+//! the reuse state.
 //!
 //! - **Unit results** go with the run that executed them: one object per run, its key, its result
 //!   and the list of `{key, result, durationMs}`, in `<cache dir>/results/unit-runs/v0/<run key>/`,
@@ -8,16 +8,13 @@
 //!   a server, they go with the run's result instead (`POST {base}/v0/runs/{key}`), and
 //!   [`UnitResults`] asks it in one batch ([`Server`]).
 //! - \[ADR 0069\] **The reuse state** of a check, `on` or `suspended`, with who and when: in local
-//!   mode, `<cache dir>/units/reuse/<id>.json` ([`reuse_file`]); with a server, the server's, and a
-//!   suspension that can't reach it waits in `<cache dir>/units/outbox/` until it does.
-//! - **The map**, one file per check, `<cache dir>/units/<check id>.map.json`: for each test file,
-//!   the files it read the last time it ran here, and what the rest and sources sets were then. A
-//!   hint: it chooses which files a key hashes, and a wrong one costs a run, never a reuse.
-//! - **The audit**, `<cache dir>/units/<check id>.audit.json`: each test file that would have been
-//!   reused and failed, for suspending reuse later.
-//!
-//! The map and the audit are each read, changed and written whole while a lock file beside them is
-//! held, as credentials are (ADR 0061).
+//!   mode, `<cache dir>/units/reuse/<id>.json` ([`reuse_file`]), read, changed and written whole
+//!   while a lock file beside it is held, as credentials are (ADR 0061); with a server, the
+//!   server's, and a suspension that can't reach it waits in `<cache dir>/units/outbox/` until it
+//!   does.
+//! - \[ADR 0072\] **The map** ([`Map`]) and **the audit** ([`Disagreement`]) are in this machine's
+//!   store, [`super::db`]: hints and explanations, which no decision reads that a recorded result
+//!   doesn't confirm. The two above are what decides, and stay files.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -43,8 +40,6 @@ pub const ENTRIES: &str = "units/v0";
 pub const RUNS: &str = "unit-runs/v0";
 /// How many of a key's newest entries a lookup reads.
 const LOOKUP_LIMIT: usize = 10;
-/// How many disagreements an audit file keeps.
-const MOST_DISAGREEMENTS: usize = 200;
 
 /// One unit's result, as it goes with its run (C-33).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,48 +681,40 @@ pub fn check_id(base: &hushrun_core::units::KeyBase, repository: Option<&str>) -
     hushrun_core::jcs::digest(&value).unwrap_or_else(|_| Digest::of(value.to_string().as_bytes()))
 }
 
-/// The schema of a map file.
-pub const MAP_SCHEMA: &str = "hushrun.unit-map/v0";
-/// The schema of an audit file.
-pub const AUDIT_SCHEMA: &str = "hushrun.unit-audit/v0";
-
-/// A check's map: a hint, never trusted (C-33).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// \[ADR 0072\] A check's map, as this machine's store holds it: a hint, never trusted (C-33).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Map {
-    pub schema: String,
+    /// Some run of the check here had its adapter report test files: the store holds the check.
+    pub reported: bool,
     /// Each test file: what it read the last time it ran here.
     pub units: BTreeMap<String, Mapped>,
     /// The rest set then, by path: each file's kind and content hash, as a manifest writes them.
-    #[serde(default)]
     pub rest: BTreeMap<String, String>,
     /// The sources set's paths then.
-    #[serde(default)]
     pub sources: BTreeSet<String>,
     /// \[ADR 0071\] The test files the adapter listed then, for an adapter whose unit rule is its
     /// runner's own list: Vitest's.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unit_files: BTreeSet<String>,
 }
 
 impl Map {
-    /// \[ADR 0074\] Whether some run of the check here had its adapter report test files: a map
-    /// is written only then.
+    /// \[ADR 0074\] Whether some run of the check here had its adapter report test files: the
+    /// store holds a check only then.
     pub fn reported(&self) -> bool {
-        self.schema == MAP_SCHEMA
+        self.reported
     }
 }
 
 /// What a test file read the last time it ran here.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mapped {
-    pub reads: BTreeSet<String>,
-    /// What the adapter couldn't follow then, by its word.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub not_followed: BTreeSet<String>,
-    /// \[ADR 0070\] Directories it listed then: a plan adds every file below each now.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    /// \[ADR 0072\] The files it read that its key holds (units and sources), each with its kind
+    /// and content hash then, as a manifest writes them: which files a plan's key hashes, and
+    /// what `hushrun why` compares with the files now.
+    pub reads: BTreeMap<String, String>,
+    /// What the adapter couldn't follow then.
+    pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
+    /// \[ADR 0070\] Directories it listed then: a plan adds every file below each.
     pub dirs: BTreeSet<String>,
 }
 
@@ -741,29 +728,6 @@ pub struct Disagreement {
     /// The run that found it.
     pub run_key: Digest,
     pub at: Time,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Audit {
-    schema: String,
-    disagreements: Vec<Disagreement>,
-}
-
-/// Where a check's files are: `<cache dir>/units/<check id>.<what>.json`.
-pub fn file(cache: &Path, id: &Digest, what: &str) -> PathBuf {
-    cache
-        .join("units")
-        .join(format!("{}.{what}.json", id.hex()))
-}
-
-/// A check's map, or an empty one when there is none or it doesn't read.
-pub fn load_map(path: &Path) -> Map {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Map>(&bytes).ok())
-        .filter(|map| map.schema == MAP_SCHEMA)
-        .unwrap_or_default()
 }
 
 /// Changes the file at `path` with `change` and writes it whole, while no other hushrun does.
@@ -794,60 +758,10 @@ fn locked<T: Serialize + for<'de> Deserialize<'de> + Default>(
     super::facts::write_whole(path, &bytes).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Writes what this run learned into the check's map: each unit it saw replaces its entry, the
-/// others stay as long as their file is still in `tree`; and the rest and sources sets are this
-/// run's.
-pub fn update_map(
-    path: &Path,
-    seen: &BTreeMap<String, Mapped>,
-    tree: &hushrun_core::units::Tree,
-    rest: BTreeMap<String, String>,
-    sources: BTreeSet<String>,
-    unit_files: Option<&BTreeSet<String>>,
-) -> anyhow::Result<()> {
-    locked::<Map>(path, |map| {
-        if map.schema != MAP_SCHEMA {
-            *map = Map::default();
-        }
-        map.schema = MAP_SCHEMA.into();
-        map.units.retain(|unit, _| tree.contains(unit));
-        for (unit, mapped) in seen {
-            map.units.insert(unit.clone(), mapped.clone());
-        }
-        map.rest = rest;
-        map.sources = sources;
-        if let Some(files) = unit_files {
-            map.unit_files = files.clone();
-        }
-    })
-}
-
-/// Adds `found` to the check's audit, keeping the newest.
-pub fn add_disagreements(path: &Path, found: &[Disagreement]) -> anyhow::Result<()> {
-    if found.is_empty() {
-        return Ok(());
-    }
-    locked::<Audit>(path, |audit| {
-        audit.schema = AUDIT_SCHEMA.into();
-        audit.disagreements.extend(found.iter().cloned());
-        let extra = audit.disagreements.len().saturating_sub(MOST_DISAGREEMENTS);
-        audit.disagreements.drain(..extra);
-    })
-}
-
-/// The disagreements a check's audit holds: what suspending reuse reads.
-#[cfg(test)]
-pub fn disagreements(path: &Path) -> Vec<Disagreement> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Audit>(&bytes).ok())
-        .map(|audit| audit.disagreements)
-        .unwrap_or_default()
-}
-
 /// \[ADR 0067\] Forgets this machine's unit state that nothing needs: a run's directory a hushrun
-/// that stopped left behind, a day after it began, and a map or an audit no run touched for 30
-/// days. Unit results go with the results sweep. It never fails.
+/// that stopped left behind, a day after it began, and a file of `units/` no run touched for 30
+/// days, \[ADR 0072\] but this schema's stores, which forget what is 30 days old themselves.
+/// Unit results go with the results sweep. It never fails.
 pub fn sweep(cache: &Path, now: std::time::SystemTime) {
     let dir = cache.join("units");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -862,7 +776,8 @@ pub fn sweep(cache: &Path, now: std::time::SystemTime) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && older(&path, 30) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_file() && !super::db::is_store_file(&name) && older(&path, 30) {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -878,32 +793,6 @@ pub fn sweep(cache: &Path, now: std::time::SystemTime) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // covers: C-33
-    #[test]
-    fn two_runs_writing_the_map_at_once_keep_each_others_units() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("units/x.map.json");
-        let tree = hushrun_core::units::Tree::default();
-        let _ = tree;
-        let threads: Vec<_> = (0..8)
-            .map(|n| {
-                let path = path.clone();
-                std::thread::spawn(move || {
-                    locked::<Map>(&path, |map| {
-                        std::thread::sleep(std::time::Duration::from_millis(3));
-                        map.schema = MAP_SCHEMA.into();
-                        map.units.insert(format!("t{n}.py"), Mapped::default());
-                    })
-                    .unwrap();
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().unwrap();
-        }
-        assert_eq!(load_map(&path).units.len(), 8);
-    }
 
     fn run(provider: hushrun_core::run::Provider, job: Option<&str>) -> RunResult {
         serde_json::from_value(json!({
@@ -966,22 +855,5 @@ mod tests {
         // Nothing is written for a run without units.
         store.record(&Digest::of(b"run2"), &ci, &[]).unwrap();
         assert_eq!(std::fs::read_dir(dir.path().join(RUNS)).unwrap().count(), 1);
-    }
-
-    // covers: C-33
-    #[test]
-    fn an_audit_keeps_the_newest_disagreements() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("units/x.audit.json");
-        let one = Disagreement {
-            unit: "tests/test_a.py".into(),
-            key: Digest::of(b"k"),
-            run_key: Digest::of(b"r"),
-            at: Time::parse("2026-11-10T12:00:00Z").unwrap(),
-        };
-        let many: Vec<Disagreement> = (0..MOST_DISAGREEMENTS + 5).map(|_| one.clone()).collect();
-        add_disagreements(&path, &many).unwrap();
-        add_disagreements(&path, &[]).unwrap();
-        assert_eq!(disagreements(&path).len(), MOST_DISAGREEMENTS);
     }
 }

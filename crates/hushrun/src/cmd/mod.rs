@@ -30,4 +30,5 @@ pub mod update;
 pub mod usage;
 pub mod verify;
 pub mod whoami;
+pub mod why;
 pub mod wrap;

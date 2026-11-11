@@ -334,6 +334,20 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     );
     // Reuse never chains: a reused test file records nothing.
     assert_eq!(r.unit_results(), 7 + 3 - 1, "{}", changed.stderr);
+    // \[ADR 0074\] This machine's stats say it, beside what skips saved.
+    let stats = r.run(&["repository", "stats", "--local", "--format", "json"], &[]);
+    assert_eq!(stats.code, 0, "{}", stats.stderr);
+    let stats: Value = serde_json::from_str(&stats.stdout).unwrap();
+    assert_eq!(
+        stats["testFiles"],
+        json!({"runs": 2, "ran": 8 + 3, "reused": 5, "savedMs": saved}),
+        "{stats:#}"
+    );
+    let text = r.run(&["repository", "stats", "--local"], &[]).stdout;
+    assert!(
+        text.contains("test files       11 ran, 5 reused, in 2 runs\nsaved by reuse   "),
+        "{text}"
+    );
     // The same code again skips the whole check (C-10).
     let again = pytest(&[]);
     assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
@@ -795,7 +809,8 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
     std::fs::create_dir_all(ci.cache.join("units")).unwrap();
     for entry in std::fs::read_dir(r.cache.join("units")).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".map.json") {
+        // \[ADR 0072\] The store, as a cache step saves it once hushrun has exited.
+        if name.ends_with(".v1.sqlite") {
             std::fs::copy(entry.path(), ci.cache.join("units").join(name)).unwrap();
         }
     }
@@ -1118,6 +1133,24 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(
         units,
         json!({"total": 5, "ran": 2, "reused": 3, "savedMs": units["savedMs"]})
+    );
+    // \[ADR 0073\] Why, for a test binary: what it is built from, without a path of edges.
+    r.write(
+        "crates/core/src/lib.rs",
+        "pub fn answer() -> u32 { 40 + 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn answer_is_42() { assert_eq!(super::answer(), 42); }\n}\n",
+    );
+    let why = r.run(&["why", "test", "crates/app/tests/runs_binary.rs"], &[]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(
+            "crates/app/tests/runs_binary.rs runs: it read crates/core/src/lib.rs, which changed\n  its test binary is built from it: rustc's dep-info for the build names it\n  as far as this machine knows: its test binaries"
+        ),
+        "{}",
+        why.stdout
+    );
+    r.write(
+        "crates/core/src/lib.rs",
+        "pub fn answer() -> u32 { 42 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn answer_is_42() { assert_eq!(super::answer(), 42); }\n}\n",
     );
     // Plain `cargo test` goes through the same runner.
     let plain = [

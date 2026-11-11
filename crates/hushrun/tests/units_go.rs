@@ -5,6 +5,9 @@
 //! The fixtures use the standard library only, and need Go. They say so and pass where it is
 //! missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets.
 
+#[path = "common/store.rs"]
+mod store;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
@@ -165,15 +168,9 @@ impl Repo {
             .collect()
     }
 
+    /// The check's map, as this cache's store holds it (ADR 0072).
     fn map(&self) -> Value {
-        let dir = self.cache.join("units");
-        let file = std::fs::read_dir(&dir)
-            .expect("units")
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.to_string_lossy().ends_with(".map.json"))
-            .expect("a map");
-        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        store::map(&self.cache)
     }
 
     /// The newest result this machine recorded for the check.
@@ -570,6 +567,30 @@ fn go_reuses_what_already_passed_and_audits_it() {
         second.stderr.contains("4 test files reused"),
         "{}",
         second.stderr
+    );
+    // A reused package stays in the map, though its name is a directory: what it opened is the
+    // next plan's hint.
+    assert!(r.map()["units"]["greet"].is_object(), "{:#}", r.map());
+    // \[ADR 0073\] Why, for a package: by its directory or a test file of it, with the imports
+    // between it and what changed, as far as this machine knows without go list.
+    r.write(
+        "pricing/pricing.go",
+        "package pricing\n\nfunc Price(x int) int { return 2 * x }\n",
+    );
+    let why = r.run(&["why", "unit", "cart/cart_test.go"], &[]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(
+            "cart runs: it read pricing/pricing.go, which changed\n  cart imports pricing\n  as far as this machine knows: its packages"
+        ),
+        "{}",
+        why.stdout
+    );
+    let why = r.run(&["why", "unit", "greet"], &[]);
+    assert!(
+        why.stdout.starts_with("greet would be reused: "),
+        "{}",
+        why.stdout
     );
 }
 

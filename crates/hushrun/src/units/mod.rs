@@ -19,12 +19,14 @@
 //! on every outcome.
 
 pub mod cargo;
+pub mod db;
 pub mod facts;
 pub mod gotest;
 pub mod pytest;
 pub mod runner;
 pub mod store;
 pub mod vitest;
+pub mod why;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -119,69 +121,39 @@ impl Session {
             return Start::Not("there is no cache directory".into());
         };
         let env = |name: &str| std::env::var(name).ok();
-        let (adapter, mut variables) = match cargo::recognize(command) {
-            None if gotest::recognize(command).is_some() => {
-                let recognized = match gotest::recognize(command) {
-                    Some(Ok(recognized)) => recognized,
-                    Some(Err(why)) => return Start::Not(why),
-                    None => return Start::Off,
-                };
-                let exe = match std::env::current_exe() {
-                    Ok(exe) => exe,
-                    Err(err) => return Start::Not(format!("can't tell where hushrun is: {err}")),
-                };
-                match gotest::variables(&recognized, &exe, cwd, std::env::var_os("GOFLAGS")) {
-                    Ok(vars) => (Adapter::Go(recognized), vars),
-                    Err(why) => return Start::Not(why),
-                }
-            }
-            Some(recognized) => {
-                let exe = match std::env::current_exe() {
-                    Ok(exe) => exe,
-                    Err(err) => return Start::Not(format!("can't tell where hushrun is: {err}")),
-                };
-                match cargo::runner_variables(&recognized, &exe, cwd, &env) {
-                    Ok(vars) => (
-                        Adapter::Cargo(recognized),
-                        vars.into_iter()
-                            .map(|(name, value)| (name, OsString::from(value)))
-                            .collect::<Vec<_>>(),
-                    ),
-                    Err(why) => return Start::Not(why),
-                }
-            }
-            None if vitest::recognize(command).is_some() => {
-                let recognized = match vitest::recognize(command) {
-                    Some(Ok(recognized)) => recognized,
-                    Some(Err(why)) => return Start::Not(why),
-                    None => return Start::Off,
-                };
-                if let Some(why) = vitest::unloadable(&recognized, cwd) {
-                    return Start::Not(why);
-                }
-                let dir = match vitest::install(&cache) {
-                    Ok(dir) => dir,
-                    Err(err) => return Start::Not(format!("can't write its Vitest plugin: {err}")),
-                };
-                (Adapter::Vitest(recognized), vitest::variables(&dir))
-            }
-            None => {
-                if let Some(why) = pytest::unsafe_for(command) {
-                    return Start::Not(why.into());
-                }
-                let dir = match pytest::install(&cache) {
-                    Ok(dir) => dir,
-                    Err(err) => return Start::Not(format!("can't write its pytest plugin: {err}")),
-                };
-                (
-                    Adapter::Pytest,
+        let adapter = match choose(command, cwd) {
+            Ok(adapter) => adapter,
+            Err(why) => return Start::Not(why),
+        };
+        let exe =
+            || std::env::current_exe().map_err(|err| format!("can't tell where hushrun is: {err}"));
+        let variables = match &adapter {
+            Adapter::Go(recognized) => exe().and_then(|exe| {
+                gotest::variables(recognized, &exe, cwd, std::env::var_os("GOFLAGS"))
+            }),
+            Adapter::Cargo(recognized) => exe().and_then(|exe| {
+                cargo::runner_variables(recognized, &exe, cwd, &env).map(|vars| {
+                    vars.into_iter()
+                        .map(|(name, value)| (name, OsString::from(value)))
+                        .collect::<Vec<_>>()
+                })
+            }),
+            Adapter::Vitest(_) => vitest::install(&cache)
+                .map(|dir| vitest::variables(&dir))
+                .map_err(|err| format!("can't write its Vitest plugin: {err}")),
+            Adapter::Pytest => pytest::install(&cache)
+                .map(|dir| {
                     pytest::variables(
                         &dir,
                         std::env::var_os("PYTHONPATH"),
                         std::env::var_os("PYTEST_ADDOPTS"),
-                    ),
-                )
-            }
+                    )
+                })
+                .map_err(|err| format!("can't write its pytest plugin: {err}")),
+        };
+        let mut variables = match variables {
+            Ok(variables) => variables,
+            Err(why) => return Start::Not(why),
         };
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
@@ -218,7 +190,15 @@ impl Session {
     /// observed`, one whose newest result is a fail or none, and an audited one: runs.
     pub fn plan(&mut self, input: &PlanInput<'_>) -> Planned {
         let started = input.started.to_string();
-        let map = store::load_map(&self.map_path(&input.base, input.repository));
+        let loaded = db::load(
+            &db::path(&self.cache, input.repository),
+            &store::check_id(&input.base, input.repository),
+        );
+        // \[ADR 0072\] A store there that can't be read: no map, so nothing is reused, said once.
+        if let Some(unread) = &loaded.unread {
+            return Planned::Everything(unread.why());
+        }
+        let map = loaded.map;
         let mut patterns = None;
         let mut built = None;
         let mut listed_files: Option<Vec<String>> = None;
@@ -411,8 +391,14 @@ impl Session {
         Planned::Plan(line)
     }
 
-    fn map_path(&self, base: &KeyBase, repository: Option<&str>) -> PathBuf {
-        store::file(&self.cache, &store::check_id(base, repository), "map")
+    /// The adapter, as the store names it.
+    fn adapter_word(&self) -> db::AdapterWord {
+        match self.adapter {
+            Adapter::Pytest => db::AdapterWord::Pytest,
+            Adapter::Cargo(_) => db::AdapterWord::Cargo,
+            Adapter::Go(_) => db::AdapterWord::Go,
+            Adapter::Vitest(_) => db::AdapterWord::Vitest,
+        }
     }
 
     /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
@@ -420,13 +406,14 @@ impl Session {
     /// unit is recorded.
     pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
         let files = facts::read_all(&self.dir)?;
-        let map_path = self.map_path(&end.base, end.repository);
-        let audit_path = store::file(
-            &self.cache,
-            &store::check_id(&end.base, end.repository),
-            "audit",
-        );
-        let map = store::load_map(&map_path);
+        let at = StoreAt {
+            path: db::path(&self.cache, end.repository),
+            check_id: store::check_id(&end.base, end.repository),
+            base: end.base.clone(),
+            adapter: self.adapter_word(),
+        };
+        let loaded = db::load(&at.path, &at.check_id);
+        let map = loaded.map;
         let read = match self.read(
             &files,
             end.root,
@@ -444,15 +431,17 @@ impl Session {
             (Mode::Reuse, None) => How::Quiet,
             _ => How::Observe,
         };
-        Some(decide(
-            end,
-            &self.tests,
-            read,
-            &map,
-            map_path,
-            audit_path,
-            how,
-        ))
+        let mut observed = decide(end, &self.tests, read, &map, at, how);
+        // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
+        // was none. A plan said it already.
+        if let (Some(unread), Mode::Observe) = (&loaded.unread, end.mode) {
+            observed.lines.push(format!(
+                "{}: with `tests: reuse`, every test file would have run: {}",
+                end.base.check,
+                unread.why()
+            ));
+        }
+        Some(observed)
     }
 
     /// What the adapter wrote in `dir`, read: each unit as seen, whether failures are reported by
@@ -519,6 +508,7 @@ impl Session {
                     failures_by_unit,
                     sets,
                     planned,
+                    edges: facts::edges_of(files, "pytest"),
                     ..Read::default()
                 }))
             }
@@ -572,6 +562,7 @@ impl Session {
                     planned,
                     own: observed.own,
                     dirs: observed.dirs,
+                    edges: observed.edges,
                     ..Read::default()
                 }))
             }
@@ -598,6 +589,7 @@ impl Session {
                     dirs: observed.dirs,
                     unit_files: Some(observed.unit_files),
                     refused: observed.refused,
+                    edges: observed.edges,
                     ..Read::default()
                 }))
             }
@@ -703,6 +695,30 @@ impl Session {
                 (unit.clone(), state)
             })
             .collect()
+    }
+}
+
+/// The one adapter a run of `command` in `cwd` gets (C-32, C-35): Cargo's for `cargo test` and
+/// `cargo nextest run`, Go's for `go test`, Vitest's for one run of Vitest, and pytest's for any
+/// other COMMAND; `Err` says why the one it would get can't load safely. The run, `hushrun ready`
+/// and `hushrun why` all ask it.
+fn choose(command: &[String], cwd: &Path) -> Result<Adapter, String> {
+    if let Some(recognized) = cargo::recognize(command) {
+        return Ok(Adapter::Cargo(recognized));
+    }
+    if let Some(recognized) = gotest::recognize(command) {
+        return recognized.map(Adapter::Go);
+    }
+    if let Some(recognized) = vitest::recognize(command) {
+        let recognized = recognized?;
+        if let Some(why) = vitest::unloadable(&recognized, cwd) {
+            return Err(why);
+        }
+        return Ok(Adapter::Vitest(recognized));
+    }
+    match pytest::unsafe_for(command) {
+        Some(why) => Err(why.into()),
+        None => Ok(Adapter::Pytest),
     }
 }
 
@@ -843,30 +859,16 @@ pub enum Previewed {
 /// build (Cargo, Go), when no adapter would load, or when the lookup fails. It writes nothing,
 /// and sends nothing but the lookup.
 pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
-    let adapter = match (
-        cargo::recognize(p.command),
-        gotest::recognize(p.command),
-        vitest::recognize(p.command),
-    ) {
-        (Some(_), _, _) | (None, Some(_), _) => return None,
-        (None, None, Some(Ok(recognized))) => {
-            if vitest::unloadable(&recognized, p.cwd).is_some() {
-                return None;
-            }
-            Adapter::Vitest(recognized)
-        }
-        (None, None, Some(Err(_))) => return None,
-        (None, None, None) => {
-            pytest::unsafe_for(p.command).is_none().then_some(())?;
-            Adapter::Pytest
-        }
-    };
+    let adapter = choose(p.command, p.cwd).ok()?;
     let cache = crate::context::cache_dir()?;
-    let map = store::load_map(&store::file(
-        &cache,
+    let loaded = db::load(
+        &db::path(&cache, p.repository),
         &store::check_id(&p.base, p.repository),
-        "map",
-    ));
+    );
+    if loaded.unread.is_some() {
+        return None;
+    }
+    let map = loaded.map;
     let found = observed_plan(&adapter, p.tree, p.root, p.cwd, &map, &p.tests.ignore).ok()??;
     let total = found.known.len();
     if total == 0 || total > MOST_UNITS {
@@ -928,6 +930,8 @@ struct Read {
     unit_files: Option<BTreeSet<String>>,
     /// \[ADR 0071\] Why the adapter deselected nothing the plan listed.
     refused: Option<String>,
+    /// \[ADR 0072\] The direct edges the adapter saw, for `hushrun why`.
+    edges: BTreeSet<db::Edge>,
 }
 
 /// \[C-34\] What the map says `unit` read, for a key: its reads, and every file now below a
@@ -937,7 +941,7 @@ fn mapped_reads(map: &store::Map, unit: &str, tree: &Tree) -> Option<BTreeSet<St
     if !mapped.not_followed.is_empty() {
         return None;
     }
-    let mut reads = mapped.reads.clone();
+    let mut reads: BTreeSet<String> = mapped.reads.keys().cloned().collect();
     reads.extend(gotest::under(tree, &mapped.dirs));
     Some(reads)
 }
@@ -955,7 +959,7 @@ fn go_reads(
         if !mapped.not_followed.is_empty() {
             return None;
         }
-        reads.extend(mapped.reads.iter().cloned());
+        reads.extend(mapped.reads.keys().cloned());
         reads.extend(gotest::under(tree, &mapped.dirs));
     }
     Some(reads)
@@ -1080,8 +1084,9 @@ pub struct Observed {
     rest: BTreeMap<String, String>,
     sources: BTreeSet<String>,
     disagreements: Vec<(String, Digest)>,
-    map_path: Option<PathBuf>,
-    audit_path: Option<PathBuf>,
+    /// \[ADR 0072\] Where what this run learned goes: this machine's store, and the check in it.
+    store: Option<StoreAt>,
+    edges: BTreeSet<db::Edge>,
     executables: BTreeMap<String, PathBuf>,
     cwd: PathBuf,
     /// \[ADR 0071\] The test files the runner listed, for the map and a second run.
@@ -1107,35 +1112,39 @@ impl Observed {
         self.disagreements.push((unit.to_string(), key));
     }
 
-    /// Writes what this run learned for the next: the map, and the audit's disagreements. Only
-    /// when the files didn't change while COMMAND ran, which the caller checked.
+    /// Writes what this run learned for the next into this machine's store, in one transaction
+    /// (ADR 0072): the map, the edges and the audit's disagreements. Only when the files didn't
+    /// change while COMMAND ran, which the caller checked. A store that can't be written costs the
+    /// next run its reuse, and nothing else.
     pub fn keep(&self, run_key: &Digest, tree: &Tree, now: Time) {
-        if let Some(path) = &self.map_path
-            && let Err(err) = store::update_map(
-                path,
-                &self.mapped,
-                tree,
-                self.rest.clone(),
-                self.sources.clone(),
-                (!self.unit_files.is_empty()).then_some(&self.unit_files),
-            )
-        {
-            tracing::debug!("the map wasn't kept: {err:#}");
-        }
-        if let Some(path) = &self.audit_path {
-            let found: Vec<Disagreement> = self
-                .disagreements
-                .iter()
-                .map(|(unit, key)| Disagreement {
-                    unit: unit.clone(),
-                    key: *key,
-                    run_key: *run_key,
-                    at: now,
-                })
-                .collect();
-            if let Err(err) = store::add_disagreements(path, &found) {
-                tracing::debug!("the audit wasn't kept: {err:#}");
-            }
+        let Some(at) = &self.store else {
+            return;
+        };
+        let found: Vec<Disagreement> = self
+            .disagreements
+            .iter()
+            .map(|(unit, key)| Disagreement {
+                unit: unit.clone(),
+                key: *key,
+                run_key: *run_key,
+                at: now,
+            })
+            .collect();
+        let write = db::Write {
+            check_id: at.check_id,
+            base: &at.base,
+            adapter: at.adapter,
+            seen: &self.mapped,
+            tree,
+            rest: &self.rest,
+            sources: &self.sources,
+            unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
+            edges: &self.edges,
+            disagreements: &found,
+            now_ms: now.millis(),
+        };
+        if let Err(err) = db::write(&at.path, &write) {
+            tracing::debug!("what the test files read wasn't kept: {}", err.why());
         }
     }
 }
@@ -1209,13 +1218,22 @@ fn rest_of(sets: &units::Sets, tree: &Tree) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// \[ADR 0072\] Where a run's map goes: the repository's store, the check's id in it, and what the
+/// store says of the check.
+#[derive(Debug)]
+struct StoreAt {
+    path: PathBuf,
+    check_id: Digest,
+    base: KeyBase,
+    adapter: db::AdapterWord,
+}
+
 fn decide(
     end: &Finish<'_>,
     tests: &Tests,
     read: Read,
     map: &store::Map,
-    map_path: PathBuf,
-    audit_path: PathBuf,
+    at: StoreAt,
     how: How<'_>,
 ) -> Observed {
     let Read {
@@ -1228,14 +1246,15 @@ fn decide(
         dirs,
         unit_files,
         refused,
+        edges,
     } = read;
     let sets = &sets;
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base);
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     let mut out = Observed {
-        map_path: Some(map_path),
-        audit_path: Some(audit_path),
+        store: Some(at),
+        edges,
         cwd: end.cwd.to_path_buf(),
         executables,
         unit_files: unit_files.unwrap_or_default(),
@@ -1348,9 +1367,12 @@ fn decide(
                     reads: sets
                         .keyed(seen.reads.iter().map(String::as_str))
                         .into_iter()
-                        .map(str::to_string)
+                        .filter_map(|path| {
+                            let (kind, hash) = tree.entry(path)?;
+                            Some((path.to_string(), format!("{kind} {hash}")))
+                        })
                         .collect(),
-                    not_followed: facts.not_followed.iter().map(|n| n.why.clone()).collect(),
+                    not_followed: facts.not_followed.clone(),
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
                 },
             );
@@ -1380,7 +1402,7 @@ fn decide(
             );
             match why_all(map, &out.rest, &out.sources) {
                 Some(why) => format!("{all}: {why}"),
-                None if map.schema.is_empty() => {
+                None if !map.reported() => {
                     format!("{all}: none had passed here yet on the files it read")
                 }
                 None => all,
@@ -1458,7 +1480,7 @@ fn why_all(
     rest: &BTreeMap<String, String>,
     sources: &BTreeSet<String>,
 ) -> Option<String> {
-    if map.schema.is_empty() {
+    if !map.reported() {
         return None;
     }
     let changed = rest

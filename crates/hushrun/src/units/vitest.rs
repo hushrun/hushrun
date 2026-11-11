@@ -281,6 +281,8 @@ pub struct Observed {
     pub dirs: BTreeMap<String, BTreeSet<String>>,
     /// Why the adapter deselected nothing, when the plan had listed something.
     pub refused: Option<String>,
+    /// \[ADR 0072\] Which module imports which, from the root, for `hushrun why`.
+    pub edges: BTreeSet<super::db::Edge>,
 }
 
 /// What the workers that ran one test file saw of it.
@@ -416,6 +418,17 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             .get("refused")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        edges: main
+            .edges
+            .iter()
+            .filter_map(|(from, to, kind)| {
+                Some((
+                    relative(&root, Path::new(from))?,
+                    relative(&root, Path::new(to))?,
+                    super::db::EdgeKind::from_word(kind)?,
+                ))
+            })
+            .collect(),
         ..Observed::default()
     };
     // The main process's word on how each test file ended, merged over the projects that ran it.

@@ -142,6 +142,14 @@ pub enum Command {
     /// A check's test files, with `tests: reuse` in hushrun.yaml: turn their reuse on again.
     #[command(subcommand)]
     Tests(TestsCommand),
+    /// Say what a run of a check would do with one of its test files, and why.
+    ///
+    /// For the files on disk now: whether the test file runs or is reused, and why, such as a file
+    /// it read that changed, with the files between them that hushrun saw. From what this machine
+    /// knows: the check's newest run here, its results, and one lookup of the results that count.
+    /// It changes nothing.
+    #[command(after_long_help = WHY_HELP)]
+    Why(WhyArgs),
     /// Run a check's command, unless this exact code already passed it.
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
@@ -278,6 +286,35 @@ pub struct TestsResumeArgs {
     /// The check, as `hushrun run NAME` names it.
     pub check: CheckName,
 }
+
+/// \[ADR 0073\] `hushrun why` (C-37).
+#[derive(Debug, Args)]
+pub struct WhyArgs {
+    /// The check, as `hushrun run NAME` names it.
+    pub check: CheckName,
+
+    /// The test file, from here or the repository's root; for go test, a package's directory or
+    /// one of its test files.
+    #[arg(value_name = "TEST_FILE")]
+    pub unit: String,
+
+    /// With COMMAND, the check's scope [default: the only one].
+    #[command(flatten)]
+    pub scopes: ScopeOpts,
+
+    /// The check's command [default: the one its newest run here had].
+    #[arg(last = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
+}
+
+const WHY_HELP: &str = "Examples:
+  hushrun why unit tests/test_cart.py
+      tests/test_cart.py runs: it read shop/pricing.py, which changed
+        tests/test_cart.py imports shop/cart.py imports shop/pricing.py
+  hushrun why unit tests/test_cart.py -- pytest -q
+                                    For the run of this command, not the newest run here
+  hushrun why unit tests/test_cart.py --format json
+                                    The same as data (hushrun.why/v1)";
 
 /// `hushrun hook` (C-23).
 #[derive(Debug, Subcommand)]

@@ -51,6 +51,10 @@ mimalloc = { version = "0.1.48", default-features = false }
 # Test and coverage reports (C-27), read as a stream: no DTD, no entity expansion.
 quick-xml = { version = "0.42", default-features = false }
 rayon = "1.10"
+# \[ADR 0072\] This machine's store of what test files read, for `hushrun why` and the plan: SQLite,
+# built from its amalgamation (bundled), so every release target has the same SQLite and no
+# system library is needed. The second C code after ring and mimalloc, by that ADR.
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 regex-automata = "0.4.9"
 # Release versions, for `hushrun update` and the newer-release notice (ADR 0035). The binary
 # already built it, as a build dependency of curve25519-dalek.

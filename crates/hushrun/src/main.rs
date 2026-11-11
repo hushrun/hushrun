@@ -136,6 +136,8 @@ fn run(cli: &Cli) -> ExitCode {
         Command::Skill(command) => cmd::skill::run(&cli.global, command),
         // C-34: a check's reuse state, where results live; no hushrun.yaml needed.
         Command::Tests(command) => cmd::tests::run(&cli.global, command),
+        // C-37: what a run would do with a test file; no hushrun.yaml needed, nothing written.
+        Command::Why(args) => cmd::why::run(&cli.global, args),
         // C-15: setting up `hushrun run` needs no hushrun.yaml.
         Command::Init(args) if !args.pipeline() => cmd::setup::run(&cli.global, args),
         command => app::App::new(&cli.global).and_then(|app| match command {
@@ -165,6 +167,7 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Guide
             | Command::Skill(_)
             | Command::Tests(_)
+            | Command::Why(_)
             | Command::Approve(_) => {
                 unreachable!("handled above")
             }

@@ -6,6 +6,9 @@
 //! `HUSHRUN_TEST_VITEST` naming its `node_modules` (CI: `npm install --prefix <dir>
 //! vitest@4.1.12`). They say so and pass where it is missing, unless `HUSHRUN_TEST_TOOLS=required`.
 
+#[path = "common/store.rs"]
+mod store;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -188,15 +191,9 @@ impl Repo {
         failed_files(&report, &self.repo)
     }
 
+    /// The check's map, as this cache's store holds it (ADR 0072).
     fn map(&self) -> Value {
-        let dir = self.cache.join("units");
-        let file = std::fs::read_dir(&dir)
-            .expect("units")
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.to_string_lossy().ends_with(".map.json"))
-            .expect("a map");
-        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        store::map(&self.cache)
     }
 
     fn reads(&self, unit: &str) -> Vec<String> {
@@ -454,6 +451,20 @@ fn vitest_reuses_what_already_passed() {
         second.stderr.contains("4 test files reused"),
         "{}",
         second.stderr
+    );
+    // \[ADR 0073\] Why, with the imports Vite's module graph saw.
+    r.write(
+        "src/pricing.ts",
+        "export const price = (x: number) => 2 * x\n",
+    );
+    let why = r.run(&["why", "unit", "test/cart.test.ts"]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(
+            "test/cart.test.ts runs: it read src/pricing.ts, which changed\n  test/cart.test.ts imports src/cart.ts imports src/pricing.ts\n  as far as this machine knows: Vitest's list"
+        ),
+        "{}",
+        why.stdout
     );
 }
 

@@ -6,6 +6,9 @@
 //! say so and pass where those are missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets:
 //! then a missing tool fails them. `HUSHRUN_TEST_PYTHON` names the Python, `python3` by default.
 
+#[path = "common/store.rs"]
+mod store;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -114,16 +117,9 @@ impl Repo {
         }
     }
 
-    /// The check's map, the one this cache holds.
+    /// The check's map, as this cache's store holds it (ADR 0072).
     fn map(&self) -> Value {
-        let dir = self.cache().join("units");
-        let file = std::fs::read_dir(&dir)
-            .expect("units")
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.to_string_lossy().ends_with(".map.json"))
-            .expect("a map");
-        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        store::map(&self.cache())
     }
 
     fn reads(&self, unit: &str) -> Vec<String> {
@@ -615,14 +611,8 @@ fn a_test_file_that_would_have_been_reused_and_fails_is_a_disagreement() {
         "{}",
         failed.stderr
     );
-    let audit = std::fs::read_dir(r.cache().join("units"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with(".audit.json"))
-        .expect("an audit");
-    let audit: Value = serde_json::from_slice(&std::fs::read(audit).unwrap()).unwrap();
-    assert_eq!(audit["disagreements"][0]["unit"], "test_flaky.py");
+    // \[ADR 0072\] The audit, in this machine's store.
+    assert_eq!(store::disagreements(&r.cache()), ["test_flaky.py"]);
 }
 
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
@@ -1022,10 +1012,6 @@ fn two_repositories_with_one_check_keep_their_maps_apart() {
         second.observe_line(),
         "hushrun: unit: with `tests: reuse`, all 1 test file would have run: none had passed here yet on the files it read"
     );
-    let maps = std::fs::read_dir(shop.cache().join("units"))
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".map.json"))
-        .count();
-    assert_eq!(maps, 2);
+    // \[ADR 0072\] One store per repository.
+    assert_eq!(store::stores(&shop.cache()).len(), 2);
 }

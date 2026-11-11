@@ -300,6 +300,7 @@ function report(state, vitest, modules, errors, reason) {
   }
   const bail = Number(vitest.config.bail || 0) > 0;
   writeWhole(path.join(state.dir, `vitest-${process.pid}.json`), {
+    edges: importEdges(vitest),
     schema: SCHEMA,
     adapter: 'vitest',
     failuresByUnit: errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed'),
@@ -314,4 +315,37 @@ function report(state, vitest, modules, errors, reason) {
     errors: state.errors,
     removedItems: state.removed.size,
   });
+}
+
+// [ADR 0072] Which module imports which, from each project's Vite module graph, for `hushrun why`
+// to show a path: `[from, to, 'import']`, absolute paths, outside node_modules. Explanations only:
+// nothing keys by them, so what can't be read here is left out and costs only the path.
+function importEdges(vitest) {
+  const edges = new Map();
+  const own = (file) => typeof file === 'string' && path.isAbsolute(file) && !/[\\/]node_modules[\\/]/.test(file);
+  try {
+    for (const project of vitest.projects || []) {
+      const server = project.vite;
+      if (!server) continue;
+      const graphs = [];
+      for (const environment of Object.values(server.environments || {})) {
+        if (environment && environment.moduleGraph) graphs.push(environment.moduleGraph);
+      }
+      if (graphs.length === 0 && server.moduleGraph) graphs.push(server.moduleGraph);
+      for (const graph of graphs) {
+        const nodes = graph.idToModuleMap ? graph.idToModuleMap.values() : [];
+        for (const node of nodes) {
+          if (!own(node.file)) continue;
+          for (const imported of node.importedModules || []) {
+            if (!own(imported.file) || imported.file === node.file) continue;
+            const key = `${node.file}\0${imported.file}`;
+            edges.set(key, [node.file, imported.file, 'import']);
+          }
+        }
+      }
+    }
+  } catch {
+    return [...edges.values()];
+  }
+  return [...edges.values()];
 }

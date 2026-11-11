@@ -371,6 +371,8 @@ struct Package {
     error: Option<serde_json::Value>,
     deps_errors: Vec<serde_json::Value>,
     deps: Vec<String>,
+    /// \[ADR 0072\] What it imports, for `hushrun why`'s path.
+    imports: Vec<String>,
     go_files: Vec<String>,
     cgo_files: Vec<String>,
     c_files: Vec<String>,
@@ -390,7 +392,7 @@ struct Package {
 }
 
 /// The fields hushrun asks `go list` for.
-const FIELDS: &str = "ImportPath,Dir,ForTest,Standard,Incomplete,Error,DepsErrors,Deps,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles,TestGoFiles,XTestGoFiles,TestEmbedFiles,XTestEmbedFiles";
+const FIELDS: &str = "ImportPath,Dir,ForTest,Standard,Incomplete,Error,DepsErrors,Deps,Imports,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles,TestGoFiles,XTestGoFiles,TestEmbedFiles,XTestEmbedFiles";
 
 /// What `go list -deps -test` says of COMMAND's packages, read: each package's tests, what its
 /// test binary is built from, and what can't be told of it.
@@ -403,6 +405,8 @@ pub struct Listed {
     /// The `.go` files `go list` says a listed package of the repository is built from: the
     /// sources (C-30).
     pub named: BTreeSet<String>,
+    /// \[ADR 0072\] Which package of the repository imports which, by their directories.
+    pub edges: BTreeSet<super::db::Edge>,
 }
 
 /// One package's tests.
@@ -509,9 +513,27 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
     };
 
     let mut out = Listed::default();
+    let unit_of = |dir: String| if dir.is_empty() { ".".to_string() } else { dir };
     for p in packages.iter().filter(|p| in_repo(p)) {
         for name in p.go_files.iter().chain(&p.cgo_files) {
             out.named.extend(relative(&p.dir.join(name)));
+        }
+        let Some(from) = relative(&p.dir).map(unit_of) else {
+            continue;
+        };
+        for import in &p.imports {
+            let Some(to) = by_path
+                .get(import.as_str())
+                .filter(|q| in_repo(q))
+                .and_then(|q| relative(&q.dir))
+                .map(unit_of)
+            else {
+                continue;
+            };
+            if to != from {
+                out.edges
+                    .insert((from.clone(), to, super::db::EdgeKind::Import));
+            }
         }
     }
     // Each test main, `<package>.test`, of a package some variant is for.
@@ -629,6 +651,8 @@ pub struct Observed {
     /// What each unit's test binary is built from, `go list` says: what a plan keys it by, with
     /// the map's hint (C-34).
     pub compiled: BTreeMap<String, BTreeSet<String>>,
+    /// \[ADR 0072\] Which package imports which, and what each package's tests opened.
+    pub edges: BTreeSet<super::db::Edge>,
 }
 
 /// Reads what the Go adapter saw: `files`' starts, and `go list` asked after COMMAND, in `cwd`,
@@ -669,6 +693,7 @@ pub fn observe(
     let mut out = Observed {
         unit_files: listed.unit_files,
         named: listed.named,
+        edges: listed.edges,
         ..Observed::default()
     };
     for (unit, listed_unit) in listed.units {
@@ -719,6 +744,11 @@ pub fn observe(
             }
         }
         out.compiled.insert(unit.clone(), reads.clone());
+        out.edges.extend(
+            opened
+                .iter()
+                .map(|file| (unit.clone(), file.clone(), super::db::EdgeKind::Open)),
+        );
         reads.extend(opened);
         reads.extend(under(tree, &dirs));
         out.own.insert(unit.clone(), listed_unit.own);

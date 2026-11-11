@@ -1500,7 +1500,7 @@ fn ran_anyway_word(no: &variants::NoSkip, inside: bool) -> &'static str {
 
 /// The scope's digest and files in the worktree now, as `git add -A && git commit` would record
 /// them (D-10).
-fn scope_tree(
+pub(crate) fn scope_tree(
     global: &GlobalOpts,
     scope: &ScopeName,
 ) -> anyhow::Result<(Digest, hushrun_core::units::Tree)> {
@@ -1699,7 +1699,7 @@ fn elapsed(start: Instant) -> u64 {
 }
 
 /// `dir` relative to the repository's `root`, `/`-separated: `""` at the root.
-fn relative(root: &Path, dir: &Path) -> anyhow::Result<String> {
+pub(crate) fn relative(root: &Path, dir: &Path) -> anyhow::Result<String> {
     let real = |path: &Path| {
         std::fs::canonicalize(path).with_context(|| format!("reading {}", path.display()))
     };
