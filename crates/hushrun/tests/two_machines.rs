@@ -563,6 +563,15 @@ fn assert_parity(s: &Scenario, m: &Measured) {
         "{:?}",
         m.copied.origins
     );
+    // \[C-38\] The first machine sent its hint; the other two saw their test files read what it
+    // said, so neither sent one.
+    let puts = m
+        .results
+        .requests()
+        .iter()
+        .filter(|r| r.method == "PUT" && r.path.starts_with("v0/units/hints/"))
+        .count();
+    assert_eq!(puts, usize::from(s.check != "test"), "{}", m.fresh.stderr);
 }
 
 // pytest

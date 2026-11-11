@@ -1218,6 +1218,9 @@ pub struct Observed {
     received: Vec<db::HintKnown>,
     /// \[C-38\] Where this run's hint goes, and its key.
     share: Option<shared::Place>,
+    /// \[C-38\] What this run's hint says of each test file reused on what its build is made of
+    /// alone, which no row of the store holds.
+    built: BTreeMap<String, hushrun_core::hints::Unit>,
 }
 
 impl Observed {
@@ -1300,7 +1303,9 @@ impl Observed {
             .iter()
             .filter(|(_, (state, _))| state.recorded().is_some() || *state == State::Reused)
             .filter_map(|(unit, _)| {
-                let mapped = map.units.get(unit)?;
+                let Some(mapped) = map.units.get(unit) else {
+                    return Some((unit.clone(), self.built.get(unit)?.clone()));
+                };
                 mapped.not_followed.is_empty().then(|| {
                     let unit_seen = hushrun_core::hints::Unit {
                         reads: mapped.reads.keys().cloned().collect(),
@@ -1587,11 +1592,25 @@ fn decide(
                     }
                     // \[C-38\] Reused on a list another machine saw: this machine keeps it, as
                     // `shared`, until it runs here.
-                    if let Some(list) = plan.chosen.get(unit)
-                        && list.from == shared::From::Hint
-                    {
-                        out.mapped
-                            .insert(unit.clone(), shared_row(list, sets, tree));
+                    // Reused on what its build is made of alone (Go with no entry here): what this
+                    // run's hint says of it, which no row holds.
+                    match plan.chosen.get(unit) {
+                        Some(list) if list.from == shared::From::Hint => {
+                            out.mapped
+                                .insert(unit.clone(), shared_row(list, sets, tree));
+                        }
+                        Some(list) if list.from == shared::From::Build => {
+                            let seen = hushrun_core::hints::Unit {
+                                reads: sets
+                                    .keyed(list.files.iter().map(String::as_str))
+                                    .into_iter()
+                                    .map(str::to_string)
+                                    .collect(),
+                                dirs: BTreeSet::new(),
+                            };
+                            out.built.insert(unit.clone(), seen);
+                        }
+                        _ => {}
                     }
                 }
                 // \[C-34\] Audited, or listed and run all the same: it had a pass that counted on

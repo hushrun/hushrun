@@ -221,6 +221,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     let shared = match &adapter {
         Adapter::Vitest(_) => vitest_shared,
         Adapter::Cargo(_) => Shared::default(),
+        // Go's sources are those of its last run here: with none, there is no address to ask.
+        Adapter::Go(_) if map.sources.is_empty() => Shared::default(),
         Adapter::Pytest | Adapter::Go(_) => {
             fetch(asker.as_ref(), false, &sets, input.tree, &tests.ignore)
         }
