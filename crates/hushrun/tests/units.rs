@@ -232,11 +232,8 @@ fn with_tests_off_command_gets_nothing_new() {
             .filter_map(|l| l.split_once('=').map(|(n, _)| n))
             .collect();
         for line in ran.stdout.lines() {
-            assert!(
-                !line.starts_with("HUSHRUN_UNITS=")
-                    && !(line.starts_with("CARGO_TARGET_") && line.contains("_RUNNER=")),
-                "{line}"
-            );
+            let runner = line.starts_with("CARGO_TARGET_") && line.contains("_RUNNER=");
+            assert!(!line.starts_with("HUSHRUN_UNITS=") && !runner, "{line}");
         }
         // What the environment said, as it said it.
         assert!(
