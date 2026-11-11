@@ -267,6 +267,29 @@ fn skill_update_writes_the_repositorys_copies() {
     assert!(!place.repo.join("src/.claude").exists());
 }
 
+// covers: C-24, C-29 (revision 1, as 0.11.0 to 0.11.1 wrote it, once revision 2 is out)
+#[test]
+fn a_copy_of_revision_1_is_older_and_skill_update_rewrites_it() {
+    let place = Place::new();
+    let one = std::fs::read_to_string(hushrun_testkit::testdata("skills/revisions/1.md")).unwrap();
+    place.write(COPIES[0], &one);
+    place.write(COPIES[1], &one);
+    let guide = place.guide();
+    assert!(guide["skillRevision"].as_u64().unwrap() >= 2, "{guide:#}");
+    assert_eq!(states(&guide)[0].1, "older");
+    assert_eq!(guide["skills"][0]["revision"], 1);
+    let ran = place.in_repo(&["skill", "update"]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout,
+        "Wrote .claude/skills/hushrun/SKILL.md.\nWrote .agents/skills/hushrun/SKILL.md.\n"
+    );
+    assert_ne!(place.read(COPIES[0]), one);
+    let guide = place.guide();
+    assert_eq!(states(&guide)[0].1, "current");
+    assert_eq!(states(&guide)[1].1, "current");
+}
+
 // covers: C-29
 #[test]
 fn skill_update_leaves_an_edited_copy_and_a_newer_one() {

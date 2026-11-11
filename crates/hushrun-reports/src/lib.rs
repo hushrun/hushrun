@@ -157,6 +157,12 @@ impl Ratio {
     }
 }
 
+/// The sum of counts a report gives, which stops at the most a `u64` holds: a report can say
+/// any number, and a sum that wrapped would be a count nobody wrote (C-27).
+pub(crate) fn sum<'a>(counts: impl Iterator<Item = &'a u64>) -> u64 {
+    counts.fold(0, |sum, count| sum.saturating_add(*count))
+}
+
 /// A format hushrun reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Format {

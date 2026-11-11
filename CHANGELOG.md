@@ -99,6 +99,8 @@ have run.
   isn't sent it.
 - The unit key's vectors, `testdata/digest/unit-keys.json`, and `tools/refdigest.py unit-keys`.
 
+## [0.12.0] - 2026-11-11
+
 Results stay on this machine until someone shares them ([ADR 0067](docs/adr/0067-results-stay-on-this-machine-until-someone-shares-them.md)):
 hushrun works with no account, and `ready` and the pre-push hook go by what passed here.
 
@@ -131,6 +133,20 @@ hushrun works with no account, and `ready` and the pre-push hook go by what pass
   still runs every check and what shares results with it.
 - `hushrun repository stats` counts this machine's results where they stay here and no repository
   URL is set, instead of failing with `no repository URL`.
+- The block `hushrun init` writes in AGENTS.md holds with or without shared results: hushrun skips
+  a check "on this machine, and in CI once the repository shares its results", where it said "in
+  CI". init replaces an older block where it is.
+- **The skill is revision 2.** It says that a pass skips here, and in CI once the repository
+  shares its results, has a section on results that stay on this machine, tells a repository in
+  another language by its `hushrun.yaml` or by CI's `hushrun run` lines, and leaves setting up
+  with no account to `hushrun guide`. `hushrun ready` notes a repository's copy of revision 1 as
+  older, and `hushrun skill update` or `hushrun init` updates it, to commit.
+
+### Fixed
+
+- A coverage report whose counts don't fit together no longer wraps them, or stops a debug build:
+  the statements of a Go coverprofile and a Cobertura report's branches stop at the largest count
+  there is. A fuzz run in CI found it.
 
 ## [0.11.1] - 2026-11-10
 

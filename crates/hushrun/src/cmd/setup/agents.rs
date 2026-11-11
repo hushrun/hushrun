@@ -187,6 +187,44 @@ mod tests {
         );
     }
 
+    // covers: C-24 (ADR 0067: the skill is one text too, and init --local writes it)
+    #[test]
+    fn the_skill_holds_where_results_stay_on_this_machine() {
+        let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for gone in [
+            // After init --local, and for a member who isn't signed in, CI skips nothing.
+            "hushrun skips CI checks that this exact code already passed",
+            "A pass here skips the same check in CI,",
+            // In another language, a repository set up with --local names no backend.
+            "when it has a `hushrun.yaml` that names a `backend`",
+        ] {
+            assert!(!skill.contains(gone), "{gone:?}");
+        }
+        for says in [
+            "in CI too once the repository shares its results",
+            "## Where results stay on this machine",
+            "CI runs every check",
+            "setting up with no account",
+        ] {
+            assert!(skill.contains(says), "{says:?}");
+        }
+    }
+
+    // covers: C-24 (ADR 0067: init writes one block, with or without --local, so it says
+    // nothing that only holds where results are shared)
+    #[test]
+    fn the_block_holds_where_results_stay_on_this_machine() {
+        let block = BLOCK.split_whitespace().collect::<Vec<_>>().join(" ");
+        // After init --local, CI skips nothing.
+        assert!(!block.contains("skips a check in CI when"), "{block}");
+        for says in [
+            "skips a check when this exact code already passed it: on this machine, and in CI once the repository shares its results",
+            "which `hushrun ready` said CI still runs",
+        ] {
+            assert!(block.contains(says), "{says:?} in {block}");
+        }
+    }
+
     // covers: C-24
     #[test]
     fn agents_md_keeps_what_it_has() {

@@ -340,8 +340,8 @@ fn cobertura(walk: &mut Walk<'_>, root: &BytesStart<'_>, empty: bool) -> Result<
         (covered, total)
     });
     let branches = attrs("branches-covered", "branches-valid").unwrap_or_else(|| {
-        let total: u64 = seen.values().map(|(_, _, total)| total).sum();
-        let covered: u64 = seen.values().map(|(_, covered, _)| covered).sum();
+        let total = crate::sum(seen.values().map(|(_, _, total)| total));
+        let covered = crate::sum(seen.values().map(|(_, covered, _)| covered));
         (covered, total)
     });
     Ok(Counts {

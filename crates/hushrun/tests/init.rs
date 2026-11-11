@@ -889,7 +889,14 @@ fn init_local_sets_up_this_machine_and_signs_in_to_nothing() {
     // CI's job gets no ID token: nothing names where it would record.
     assert_eq!(r.read(".github/workflows/ci.yml"), WORKFLOW);
     assert!(!r.repo.join("hushrun.yaml").exists());
-    assert!(r.read("AGENTS.md").contains("hushrun ready"));
+    let agents = r.read("AGENTS.md");
+    assert!(agents.contains("hushrun ready"), "{agents}");
+    // Nothing here is shared, so the block doesn't tell an agent that CI skips what passed here.
+    assert!(!agents.contains("skips a check in CI when"), "{agents}");
+    assert!(
+        agents.contains("in CI once the repository shares"),
+        "{agents}"
+    );
     assert!(r.repo.join(".claude/skills/hushrun/SKILL.md").exists());
     assert!(r.repo.join(".git/hooks/pre-push").exists());
     assert!(
