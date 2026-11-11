@@ -85,12 +85,21 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
+      # pytest and pytest-xdist for the tests of `tests: observe` (ADR 0068), which fail rather
+      # than pass without them when HUSHRUN_TEST_TOOLS is `required`.
+      - name: Install pytest for the test-file tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
 
-  # The independent Python references agree with the golden vectors (D-1 … D-8), the
-  # Ed25519 and DSSE test vectors (E-1, E-2) and the report vectors (C-27) on every OS.
+  # The independent Python references agree with the golden vectors (D-1 … D-8), the unit key
+  # vectors (C-31), the Ed25519 and DSSE test vectors (E-1, E-2) and the report vectors (C-27) on
+  # every OS.
   reference:
     name: refdigest.py (${{ matrix.os }})
     strategy:
@@ -105,6 +114,7 @@ jobs:
           persist-credentials: false
       - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
       - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
+      - run: python3 -I tools/refdigest.py unit-keys testdata/digest/unit-keys.json
       - run: python3 -I tools/refdsse.py selftest
       - run: python3 -I tools/reftlog.py selftest
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json
@@ -147,12 +157,19 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
+      - name: Install pytest for the test-file tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest-macos -- cargo test --workspace --doc --locked
       - run: python3 -I tools/refdigest.py vectors testdata/digest/vectors.json
       - run: python3 -I tools/refdigest.py globs testdata/digest/globs.json
+      - run: python3 -I tools/refdigest.py unit-keys testdata/digest/unit-keys.json
       - run: python3 -I tools/refdsse.py selftest
       - run: python3 -I tools/reftlog.py selftest
       - run: python3 -I tools/reftlog.py check testdata/tlog/vectors.json

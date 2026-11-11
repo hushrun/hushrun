@@ -6,6 +6,28 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+A check's test files, observed ([ADR 0068](docs/adr/0068-test-files-observed.md)): with
+`tests: observe`, every test file runs as before, and hushrun says how many `tests: reuse` would
+have run.
+
+### Added
+
+- Contract: **`checks.<name>.tests`** in `hushrun.yaml`: `off` (the default), `observe` or `reuse`,
+  or `{mode, ignore, always}`. With `observe`, `hushrun run NAME -- COMMAND` records what each test
+  file read and how it ended, keeps the results on this machine, and says before its last line
+  ``with `tests: reuse`, 12 of 340 test files would have run``, or which changed file would have run
+  them all. A test file that would have been reused and failed is said, and kept. `reuse` observes
+  in this version, and says so. Nothing changes COMMAND's outcome or exit code, and with `tests` off
+  nothing changes at all.
+- Contract: **`HUSHRUN_UNITS`**, the directory where an adapter writes what it saw
+  (`hushrun.units/v0`, `hushrun.unit-facts/v0`). For pytest, a plugin hushrun loads through
+  `PYTHONPATH` and `PYTEST_ADDOPTS`, xdist included; for `cargo nextest` and `cargo test`, a target
+  runner (`CARGO_TARGET_<TRIPLE>_RUNNER`) chained to one the environment sets, and the build's
+  dep-info files.
+- Contract: **`units`** in a run's result kept on this machine, `{total, ran, reused}`. A server
+  isn't sent it.
+- The unit key's vectors, `testdata/digest/unit-keys.json`, and `tools/refdigest.py unit-keys`.
+
 Results stay on this machine until someone shares them ([ADR 0067](docs/adr/0067-results-stay-on-this-machine-until-someone-shares-them.md)):
 hushrun works with no account, and `ready` and the pre-push hook go by what passed here.
 
