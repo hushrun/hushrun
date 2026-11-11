@@ -317,19 +317,51 @@ impl Roots {
         Ok(out)
     }
 
-    /// `--remap-path-prefix=<root>=<stand-in>` for each root in each distinct form (B-9). rustc
-    /// applies remaps last to first, so they go shortest first: a folder always comes before the
-    /// roots inside it, and the workspace, as `.`, before the more specific roots.
-    pub fn remap_args(&self) -> Vec<OsString> {
-        let mut forms = self.forms.clone();
-        forms.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
-        forms
-            .into_iter()
-            .map(|(text, name)| {
+    /// The remaps of the measured recipe (B-9), in the order rustc is given them: the workspace
+    /// as `.`, when the working directory is a root (not under a shared folder), then the build
+    /// script's output as its stand-in; each in its given and, when it differs, its resolved
+    /// form. rustc applies remaps last to first, so the general one comes first. Nothing else is
+    /// remapped: the search of the outputs decides what may move (B-10).
+    pub fn remaps(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for name in [RootName::Workspace, RootName::ScriptOut] {
+            if let Some(root) = self.root(name) {
                 let to = stand_in(name, &self.package_id);
-                OsString::from(format!("--remap-path-prefix={text}={to}"))
-            })
+                out.push((root.given.clone(), to.clone()));
+                if root.resolved != root.given {
+                    out.push((root.resolved.clone(), to));
+                }
+            }
+        }
+        out
+    }
+
+    /// `--remap-path-prefix=<from>=<to>` for each of [`Roots::remaps`], in order.
+    pub fn remap_args(&self) -> Vec<OsString> {
+        self.remaps()
+            .into_iter()
+            .map(|(from, to)| OsString::from(format!("--remap-path-prefix={from}={to}")))
             .collect()
+    }
+
+    /// What rustc writes for `path` under [`Roots::remaps`]: the last remap whose folder holds
+    /// it, by whole parts, replaces that folder; a path no remap holds is unchanged.
+    pub fn remapped(&self, path: &str) -> String {
+        for (from, to) in self.remaps().iter().rev() {
+            if let Some(rest) = under(path, from) {
+                return if rest.is_empty() {
+                    to.clone()
+                } else {
+                    format!("{to}/{rest}")
+                };
+            }
+        }
+        path.to_string()
+    }
+
+    /// The given form of a root this call has.
+    pub fn given(&self, name: RootName) -> Option<&str> {
+        self.root(name).map(|root| root.given.as_str())
     }
 
     /// What outputs are searched for (B-10): every root in every distinct form, as raw bytes.
@@ -772,7 +804,7 @@ mod tests {
 
     // covers: B-9
     #[test]
-    fn remaps_go_from_the_workspace_to_the_most_specific() {
+    fn remaps_are_the_workspace_then_the_script_output() {
         let roots = roots("/w/ws");
         let remaps: Vec<String> = roots
             .remap_args()
@@ -784,29 +816,37 @@ mod tests {
             [
                 "--remap-path-prefix=/w/ws=.",
                 "--remap-path-prefix=/R/w/ws=.",
-                "--remap-path-prefix=/w/ws/crates/app=/hushrun/package/app-0.1.0",
-                "--remap-path-prefix=/w/ws/vendor/deps=/hushrun/dependency/1",
-                "--remap-path-prefix=/R/w/ws/crates/app=/hushrun/package/app-0.1.0",
-                "--remap-path-prefix=/R/w/ws/vendor/deps=/hushrun/dependency/1",
-                "--remap-path-prefix=/w/ws/target/debug/deps=/hushrun/out-dir",
-                "--remap-path-prefix=/R/w/ws/target/debug/deps=/hushrun/out-dir",
                 "--remap-path-prefix=/w/ws/target/debug/build/app-1/out=/hushrun/out/app-0.1.0",
                 "--remap-path-prefix=/R/w/ws/target/debug/build/app-1/out=/hushrun/out/app-0.1.0",
             ]
         );
-        // Every root comes after each root that holds it, since rustc lets the last one win.
-        for (i, earlier) in remaps.iter().enumerate() {
-            let from = earlier.split('=').nth(1).unwrap();
-            for later in &remaps[..i] {
-                let inner = later.split('=').nth(1).unwrap();
-                assert!(
-                    under(inner, from).is_none() || inner == from,
-                    "{later} before {earlier}"
-                );
-            }
-        }
+        // The last remap that holds a path wins, as in rustc.
+        assert_eq!(
+            roots.remapped("/w/ws/crates/app/src/lib.rs"),
+            "./crates/app/src/lib.rs"
+        );
+        assert_eq!(
+            roots.remapped("/R/w/ws/target/debug/build/app-1/out/gen.rs"),
+            "/hushrun/out/app-0.1.0/gen.rs"
+        );
+        assert_eq!(roots.remapped("/w/ws"), ".");
+        assert_eq!(roots.remapped("/w/ws2/x"), "/w/ws2/x");
         let one_form = Roots::new(&paths("/w/ws"), &shared(), |_| None).unwrap();
-        assert_eq!(one_form.remap_args().len(), 5);
+        assert_eq!(one_form.remap_args().len(), 2);
+        // No script output: only the workspace.
+        let plain = Roots::new(
+            &RootPaths {
+                script_out: None,
+                ..paths("/w/ws")
+            },
+            &shared(),
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            plain.remap_args(),
+            [OsString::from("--remap-path-prefix=/w/ws=.")]
+        );
     }
 
     // covers: B-10

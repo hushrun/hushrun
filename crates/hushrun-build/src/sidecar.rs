@@ -57,6 +57,9 @@ pub struct Record {
     pub sha256: Digest,
     /// The key of the block it came from, when the wrapper produced or reused it.
     pub produced_by: Option<Digest>,
+    /// The first key of the block it came from, so a dependent that can't load it can suspend
+    /// that key (B-15).
+    pub step: Option<Digest>,
     /// Whether a reuse put it there. These are the files removed when a dependent fails to
     /// compile against them (B-15).
     pub reused: bool,
@@ -69,6 +72,8 @@ pub struct Known {
     pub sha256: Digest,
     /// The key of the block it came from, if its record still holds.
     pub produced_by: Option<Digest>,
+    /// The first key of the block it came from, if its record still holds.
+    pub step: Option<Digest>,
     /// Whether a reuse put it there, if its record still holds.
     pub reused: bool,
     /// Whether the file had to be hashed to answer.
@@ -87,6 +92,8 @@ struct Stored {
     mode: u32,
     sha256: Digest,
     produced_by: Option<Digest>,
+    #[serde(default)]
+    step: Option<Digest>,
     reused: bool,
 }
 
@@ -102,6 +109,7 @@ impl From<&Record> for Stored {
             mode: record.stat.mode,
             sha256: record.sha256,
             produced_by: record.produced_by,
+            step: record.step,
             reused: record.reused,
         }
     }
@@ -120,6 +128,7 @@ impl Stored {
             },
             sha256: self.sha256,
             produced_by: self.produced_by,
+            step: self.step,
             reused: self.reused,
         })
     }
@@ -165,6 +174,17 @@ pub fn record(
     produced_by: Option<Digest>,
     reused: bool,
 ) -> io::Result<()> {
+    record_block(file, sha256, produced_by, None, reused)
+}
+
+/// [`record`], with the first key of the block the file came from.
+pub fn record_block(
+    file: &Path,
+    sha256: Digest,
+    produced_by: Option<Digest>,
+    step: Option<Digest>,
+    reused: bool,
+) -> io::Result<()> {
     let stat = Stat::of(&fs::metadata(file)?);
     write(
         file,
@@ -172,6 +192,7 @@ pub fn record(
             stat,
             sha256,
             produced_by,
+            step,
             reused,
         },
     )
@@ -193,6 +214,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
         return Ok(Known {
             sha256: old.sha256,
             produced_by: old.produced_by,
+            step: old.step,
             reused: old.reused,
             read: false,
         });
@@ -204,6 +226,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
             stat,
             sha256,
             produced_by: None,
+            step: None,
             reused: false,
         },
     };
@@ -212,6 +235,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
     Ok(Known {
         sha256: fresh.sha256,
         produced_by: fresh.produced_by,
+        step: fresh.step,
         reused: fresh.reused,
         read: true,
     })
@@ -390,6 +414,7 @@ mod tests {
             Known {
                 sha256: recorded,
                 produced_by: Some(key(1)),
+                step: None,
                 reused: true,
                 read: false,
             }
@@ -440,6 +465,7 @@ mod tests {
             Known {
                 sha256: Digest::of(b"version two"),
                 produced_by: None,
+                step: None,
                 reused: false,
                 read: true,
             }
@@ -481,6 +507,7 @@ mod tests {
                 Known {
                     sha256: Digest::of(b"metadata"),
                     produced_by: None,
+                    step: None,
                     reused: false,
                     read: true,
                 }
@@ -517,6 +544,7 @@ mod tests {
             Known {
                 sha256: Digest::of(b"no record yet"),
                 produced_by: None,
+                step: None,
                 reused: false,
                 read: true,
             }

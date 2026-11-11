@@ -171,6 +171,21 @@ pub struct Link {
     pub linker: String,
     /// The SDK, as one text.
     pub sdk: String,
+    /// Where the linker is. Kept for the hint; the key holds only `linker`.
+    pub linker_path: String,
+    /// Where the SDK is. Kept for the hint; the key holds only `sdk`.
+    pub sdk_path: Option<String>,
+}
+
+/// The link part of a hint (B-18): what to hash and stat again before a lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkList {
+    /// The libraries the linker was handed.
+    pub libraries: Vec<Located>,
+    /// The linker's path.
+    pub linker: String,
+    /// The SDK's path, if any.
+    pub sdk: Option<String>,
 }
 
 /// Where a block may be reused (B-10).
@@ -376,8 +391,8 @@ pub struct ReadList {
     pub generated: bool,
     /// What the build script declared, when that part applies.
     pub declared: Option<DeclaredList>,
-    /// For a program, the libraries the linker was handed.
-    pub link: Option<Vec<Located>>,
+    /// For a linked output, what the linker was handed.
+    pub link: Option<LinkList>,
     /// How the block was placed.
     pub place: PlaceKind,
 }
@@ -399,10 +414,11 @@ impl ReadList {
                 files: sorted(d.files.iter().map(|r| r.at.clone()).collect()),
                 env: sorted(d.env.iter().map(|e| e.name.clone()).collect()),
             }),
-            link: observed
-                .link
-                .as_ref()
-                .map(|l| sorted(l.libraries.iter().map(|lib| lib.at.clone()).collect())),
+            link: observed.link.as_ref().map(|l| LinkList {
+                libraries: sorted(l.libraries.iter().map(|lib| lib.at.clone()).collect()),
+                linker: l.linker_path.clone(),
+                sdk: l.sdk_path.clone(),
+            }),
             place: match observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
                 Place::Tied(_) => PlaceKind::Tied,
@@ -608,6 +624,8 @@ mod tests {
                     libraries: vec![],
                     linker: "cc".into(),
                     sdk: String::new(),
+                    linker_path: "cc".into(),
+                    sdk_path: None,
                 })
             }),
             ("place", |o| {
@@ -633,6 +651,8 @@ mod tests {
                 libraries,
                 linker: linker.into(),
                 sdk: sdk.into(),
+                linker_path: "cc".into(),
+                sdk_path: None,
             });
             o.key().unwrap()
         };
@@ -809,6 +829,8 @@ mod tests {
             }],
             linker: "cc".into(),
             sdk: String::new(),
+            linker_path: "/usr/bin/cc".into(),
+            sdk_path: Some("/sdk".into()),
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);
@@ -826,7 +848,14 @@ mod tests {
                 env: vec!["DATABASE_URL".into()],
             })
         );
-        assert_eq!(hint.link, Some(vec![at(RootName::OutDir, "liba.rlib")]));
+        assert_eq!(
+            hint.link,
+            Some(LinkList {
+                libraries: vec![at(RootName::OutDir, "liba.rlib")],
+                linker: "/usr/bin/cc".into(),
+                sdk: Some("/sdk".into()),
+            })
+        );
         assert_eq!(hint.place, PlaceKind::Tied);
         let json = serde_json::to_string(&hint).unwrap();
         assert!(!json.contains("/w/ws"), "{json}");

@@ -16,14 +16,42 @@ pub enum Lookup {
     StoreFailed,
     /// The first key is suspended (B-15): nothing was looked up.
     Suspended,
+    /// The key can't be complete, or nothing this compile gives can be stored, for this
+    /// reason: the build script's output can't be read, the program writes debug files a block
+    /// doesn't carry. Nothing was looked up.
+    Unstorable(NotStored),
     /// No block under the second key.
     Missing,
-    /// A block exists under the second key. `audit` is whether the audit picked this compile
-    /// (B-16).
+    /// A block exists under the second key.
     Found {
-        /// The audit's pick.
+        /// Whether the audit picked this compile (B-16).
         audit: bool,
+        /// Whether the block's messages serve this call's form (B-12).
+        serves_form: bool,
     },
+}
+
+/// The facts [`before`] plans from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Before {
+    /// The run's mode.
+    pub mode: Mode,
+    /// What the call produces.
+    pub class: Class,
+    /// What the lookup found.
+    pub lookup: Lookup,
+    /// The call asks for `-C incremental` and its dep-info file is in the output folder
+    /// already: a rebuild in a warm target, not a first build there (B-9).
+    pub incremental_rebuild: bool,
+}
+
+/// Whether a compile's block is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Keep {
+    /// Store the block.
+    Store,
+    /// Store nothing, for this reason.
+    Not(NotStored),
 }
 
 /// What to do with a compile.
@@ -35,49 +63,63 @@ pub enum Plan {
     AsAsked(NotStored),
     /// Put the block's files in place; rustc doesn't start.
     Reuse,
-    /// Run rustc with the wrapper's changes (B-9). `store`: keep the block; it is false only
-    /// for a suspended key. `compare`: compare the outputs with the block found (B-1, B-16).
+    /// Run rustc with the wrapper's changes (B-9). `keep`: whether to store the block.
+    /// `compare`: compare the outputs with the block found (B-1, B-16).
     Compile {
         /// Whether to store the block.
-        store: bool,
+        keep: Keep,
         /// Whether to compare the outputs with the block found.
         compare: bool,
     },
 }
 
-/// Plans a compile (B-1, B-15, B-16). In `observe` nothing is reused and a library whose block
-/// exists is compared with it. In `on` a found block is reused, except a library the audit
-/// picked, which is compiled and compared. A suspended key is never reused and not stored.
-/// Programs, build scripts and proc macros are never compared: their bytes are not stable.
-pub fn before(mode: Mode, class: Class, lookup: Lookup) -> Plan {
-    let comparable = class == Class::Library;
-    match (mode, lookup) {
+/// Plans a compile (B-1, B-9, B-12, B-15, B-16). In `observe` nothing is reused and a library
+/// whose block exists is compared with it. In `on` a found block is reused, except a library the
+/// audit picked, which is compiled and compared, and a block whose messages don't serve this
+/// call's form, which is compiled. A suspended key is never reused and not stored. A rebuild in
+/// a warm target that finds no block stays incremental and runs as asked. Programs, build
+/// scripts and proc macros are never compared: their bytes are not stable.
+pub fn before(facts: &Before) -> Plan {
+    let comparable = facts.class == Class::Library;
+    let compile = |keep, compare| Plan::Compile { keep, compare };
+    match (facts.mode, facts.lookup) {
         (Mode::Off, _) => Plan::PassThrough(PassedThrough::Off),
         (_, Lookup::KeyFailed) => Plan::AsAsked(NotStored::Key),
         (_, Lookup::StoreFailed) => Plan::AsAsked(NotStored::StoreRead),
-        (_, Lookup::Suspended) => Plan::Compile {
-            store: false,
-            compare: false,
-        },
-        (_, Lookup::Missing) => Plan::Compile {
-            store: true,
-            compare: false,
-        },
-        (Mode::Observe, Lookup::Found { .. }) => Plan::Compile {
-            store: true,
-            compare: comparable,
-        },
-        (Mode::On, Lookup::Found { audit }) => {
-            if audit && comparable {
-                Plan::Compile {
-                    store: true,
-                    compare: true,
-                }
+        (_, Lookup::Missing | Lookup::Suspended | Lookup::Unstorable(_))
+            if facts.incremental_rebuild =>
+        {
+            Plan::PassThrough(PassedThrough::Incremental)
+        }
+        (_, Lookup::Suspended) => compile(Keep::Not(NotStored::Suspended), false),
+        (_, Lookup::Unstorable(why)) => compile(Keep::Not(why), false),
+        (_, Lookup::Missing) => compile(Keep::Store, false),
+        (Mode::Observe, Lookup::Found { .. }) => compile(Keep::Store, comparable),
+        (Mode::On, Lookup::Found { audit, serves_form }) => {
+            if (audit && comparable) || !serves_form {
+                compile(Keep::Store, comparable)
             } else {
                 Plan::Reuse
             }
         }
     }
+}
+
+/// The plan when putting a block in place failed before any message was written (B-12, B-19):
+/// rustc runs as asked and nothing is stored.
+pub const fn restore_failed() -> Plan {
+    Plan::AsAsked(NotStored::Restore)
+}
+
+/// rustc's codes for a crate it could not load (B-15): only these, never an error in the
+/// dependent's own code, suspend a reused block.
+pub const CRATE_LOADING: [&str; 7] = [
+    "E0460", "E0461", "E0462", "E0463", "E0464", "E0514", "E0786",
+];
+
+/// Whether a failed compile's error codes say it could not load a crate (B-15).
+pub fn could_not_load<'a>(codes: impl IntoIterator<Item = &'a str>) -> bool {
+    codes.into_iter().any(|code| CRATE_LOADING.contains(&code))
 }
 
 /// How rustc ended.
@@ -166,7 +208,8 @@ pub const fn passed_through(why: PassedThrough) -> Outcome {
 /// a plan that ran as asked keeps its reason; a reuse that rustc didn't follow is reused, and
 /// one it did follow is not stored for the error that stopped it; then rustc failing; a read
 /// that changed (no comparison is trusted after that); a failed step; outputs that differ from
-/// the block (the key is suspended); a suspended key; low free space; the store's answer.
+/// the block (the key is suspended); a plan that keeps nothing; low free space; the store's
+/// answer.
 pub fn after(plan: Plan, facts: &Facts) -> Verdict {
     let outcome = match plan {
         Plan::PassThrough(why) => Outcome::PassedThrough(why),
@@ -176,7 +219,7 @@ pub fn after(plan: Plan, facts: &Facts) -> Verdict {
             (_, Some(why)) => Outcome::BuiltNotStored(why),
             (_, None) => Outcome::BuiltNotStored(NotStored::Restore),
         },
-        Plan::Compile { store, compare } => {
+        Plan::Compile { keep, compare } => {
             if facts.rustc != Rustc::Succeeded {
                 Outcome::BuiltNotStored(NotStored::RustcFailed)
             } else if facts.changed {
@@ -188,8 +231,8 @@ pub fn after(plan: Plan, facts: &Facts) -> Verdict {
                     outcome: Outcome::BuiltNotStored(NotStored::Differed),
                     suspend: true,
                 };
-            } else if !store {
-                Outcome::BuiltNotStored(NotStored::Suspended)
+            } else if let Keep::Not(why) = keep {
+                Outcome::BuiltNotStored(why)
             } else if facts.low_space {
                 Outcome::BuiltNotStored(NotStored::LowSpace)
             } else {
@@ -212,135 +255,160 @@ mod tests {
     use super::*;
 
     const MODES: [Mode; 3] = [Mode::Off, Mode::Observe, Mode::On];
-    const LOOKUPS: [Lookup; 6] = [
+    const LOOKUPS: [Lookup; 10] = [
         Lookup::KeyFailed,
         Lookup::StoreFailed,
         Lookup::Suspended,
+        Lookup::Unstorable(NotStored::ScriptOutputMissing),
         Lookup::Missing,
-        Lookup::Found { audit: false },
-        Lookup::Found { audit: true },
+        Lookup::Found {
+            audit: false,
+            serves_form: true,
+        },
+        Lookup::Found {
+            audit: true,
+            serves_form: true,
+        },
+        Lookup::Found {
+            audit: false,
+            serves_form: false,
+        },
+        Lookup::Found {
+            audit: true,
+            serves_form: false,
+        },
+        Lookup::Unstorable(NotStored::DebugFiles),
     ];
-    const LIB: &[Class] = &[Class::Library];
-    const NOT_LIB: &[Class] = &[Class::ProcMacro, Class::BuildScript, Class::Program];
-    const ANY: &[Class] = &Class::ALL;
 
-    const fn compile(store: bool, compare: bool) -> Plan {
-        Plan::Compile { store, compare }
+    const fn compile(keep: Keep, compare: bool) -> Plan {
+        Plan::Compile { keep, compare }
     }
 
-    // covers: B-1, B-15, B-16, B-19
+    /// The plan the rules give, written out case by case.
+    fn expected(mode: Mode, class: Class, lookup: Lookup, rebuild: bool) -> Plan {
+        let lib = class == Class::Library;
+        if mode == Mode::Off {
+            return Plan::PassThrough(PassedThrough::Off);
+        }
+        match lookup {
+            Lookup::KeyFailed => Plan::AsAsked(NotStored::Key),
+            Lookup::StoreFailed => Plan::AsAsked(NotStored::StoreRead),
+            Lookup::Missing | Lookup::Suspended | Lookup::Unstorable(_) if rebuild => {
+                Plan::PassThrough(PassedThrough::Incremental)
+            }
+            Lookup::Suspended => compile(Keep::Not(NotStored::Suspended), false),
+            Lookup::Unstorable(why) => compile(Keep::Not(why), false),
+            Lookup::Missing => compile(Keep::Store, false),
+            Lookup::Found { .. } if mode == Mode::Observe => compile(Keep::Store, lib),
+            Lookup::Found {
+                serves_form: false, ..
+            } => compile(Keep::Store, lib),
+            Lookup::Found { audit: true, .. } if lib => compile(Keep::Store, true),
+            Lookup::Found { .. } => Plan::Reuse,
+        }
+    }
+
+    // covers: B-1, B-9, B-12, B-15, B-16, B-19
     #[test]
     fn before_over_every_combination() {
-        let off = Plan::PassThrough(PassedThrough::Off);
-        let table: &[(Mode, Lookup, &[Class], Plan)] = &[
-            (Mode::Off, Lookup::KeyFailed, ANY, off),
-            (Mode::Off, Lookup::StoreFailed, ANY, off),
-            (Mode::Off, Lookup::Suspended, ANY, off),
-            (Mode::Off, Lookup::Missing, ANY, off),
-            (Mode::Off, Lookup::Found { audit: false }, ANY, off),
-            (Mode::Off, Lookup::Found { audit: true }, ANY, off),
-            (
-                Mode::Observe,
-                Lookup::KeyFailed,
-                ANY,
-                Plan::AsAsked(NotStored::Key),
-            ),
-            (
-                Mode::Observe,
-                Lookup::StoreFailed,
-                ANY,
-                Plan::AsAsked(NotStored::StoreRead),
-            ),
-            (Mode::Observe, Lookup::Suspended, ANY, compile(false, false)),
-            (Mode::Observe, Lookup::Missing, ANY, compile(true, false)),
-            (
-                Mode::Observe,
-                Lookup::Found { audit: false },
-                LIB,
-                compile(true, true),
-            ),
-            (
-                Mode::Observe,
-                Lookup::Found { audit: false },
-                NOT_LIB,
-                compile(true, false),
-            ),
-            (
-                Mode::Observe,
-                Lookup::Found { audit: true },
-                LIB,
-                compile(true, true),
-            ),
-            (
-                Mode::Observe,
-                Lookup::Found { audit: true },
-                NOT_LIB,
-                compile(true, false),
-            ),
-            (
-                Mode::On,
-                Lookup::KeyFailed,
-                ANY,
-                Plan::AsAsked(NotStored::Key),
-            ),
-            (
-                Mode::On,
-                Lookup::StoreFailed,
-                ANY,
-                Plan::AsAsked(NotStored::StoreRead),
-            ),
-            (Mode::On, Lookup::Suspended, ANY, compile(false, false)),
-            (Mode::On, Lookup::Missing, ANY, compile(true, false)),
-            (Mode::On, Lookup::Found { audit: false }, ANY, Plan::Reuse),
-            (
-                Mode::On,
-                Lookup::Found { audit: true },
-                LIB,
-                compile(true, true),
-            ),
-            (
-                Mode::On,
-                Lookup::Found { audit: true },
-                NOT_LIB,
-                Plan::Reuse,
-            ),
-        ];
         let mut checked = 0;
         for mode in MODES {
             for lookup in LOOKUPS {
                 for class in Class::ALL {
-                    let rows: Vec<_> = table
-                        .iter()
-                        .filter(|(m, l, c, _)| *m == mode && *l == lookup && c.contains(&class))
-                        .collect();
-                    assert_eq!(rows.len(), 1, "{mode:?} {lookup:?} {class:?}");
-                    assert_eq!(
-                        before(mode, class, lookup),
-                        rows[0].3,
-                        "{mode:?} {lookup:?} {class:?}"
-                    );
-                    checked += 1;
+                    for rebuild in [false, true] {
+                        let facts = Before {
+                            mode,
+                            class,
+                            lookup,
+                            incremental_rebuild: rebuild,
+                        };
+                        assert_eq!(
+                            before(&facts),
+                            expected(mode, class, lookup, rebuild),
+                            "{facts:?}"
+                        );
+                        checked += 1;
+                    }
                 }
             }
         }
-        assert_eq!(checked, 72);
+        assert_eq!(checked, 3 * 10 * 4 * 2);
     }
 
-    // covers: B-1
+    // covers: B-1, B-15
     #[test]
     fn observe_never_reuses_and_a_suspended_key_is_never_reused_or_stored() {
         for class in Class::ALL {
-            for lookup in LOOKUPS {
-                assert_ne!(before(Mode::Observe, class, lookup), Plan::Reuse);
+            for rebuild in [false, true] {
+                for lookup in LOOKUPS {
+                    let facts = Before {
+                        mode: Mode::Observe,
+                        class,
+                        lookup,
+                        incremental_rebuild: rebuild,
+                    };
+                    assert_ne!(before(&facts), Plan::Reuse);
+                }
                 for mode in MODES {
-                    let plan = before(mode, class, Lookup::Suspended);
+                    let plan = before(&Before {
+                        mode,
+                        class,
+                        lookup: Lookup::Suspended,
+                        incremental_rebuild: rebuild,
+                    });
                     assert!(
-                        !matches!(plan, Plan::Reuse | Plan::Compile { store: true, .. }),
+                        !matches!(
+                            plan,
+                            Plan::Reuse
+                                | Plan::Compile {
+                                    keep: Keep::Store,
+                                    ..
+                                }
+                        ),
                         "{mode:?} {class:?}"
                     );
                 }
             }
         }
+    }
+
+    // covers: B-9
+    #[test]
+    fn an_edit_in_a_warm_target_stays_incremental_and_a_first_build_is_stored() {
+        let first = Before {
+            mode: Mode::On,
+            class: Class::Library,
+            lookup: Lookup::Missing,
+            incremental_rebuild: false,
+        };
+        assert_eq!(before(&first), compile(Keep::Store, false));
+        let rebuild = Before {
+            incremental_rebuild: true,
+            ..first
+        };
+        assert_eq!(
+            before(&rebuild),
+            Plan::PassThrough(PassedThrough::Incremental)
+        );
+        let found = Before {
+            lookup: Lookup::Found {
+                audit: false,
+                serves_form: true,
+            },
+            ..rebuild
+        };
+        assert_eq!(before(&found), Plan::Reuse);
+    }
+
+    // covers: B-15
+    #[test]
+    fn only_crate_loading_errors_reject_a_reused_block() {
+        for code in CRATE_LOADING {
+            assert!(could_not_load([code]));
+        }
+        assert!(!could_not_load(["E0425", "E0308"]));
+        assert!(!could_not_load([]));
+        assert!(could_not_load(["E0425", "E0463"]));
     }
 
     /// What a row of the `after` table expects.
@@ -361,7 +429,7 @@ mod tests {
         AsAsked,
         Reuse,
         Compile {
-            store: Option<bool>,
+            keep: Option<Keep>,
             compare: Option<bool>,
         },
     }
@@ -374,11 +442,11 @@ mod tests {
                 | (PlanIs::Reuse, Plan::Reuse) => true,
                 (
                     PlanIs::Compile {
-                        store: s,
+                        keep: k,
                         compare: c,
                     },
-                    Plan::Compile { store, compare },
-                ) => s.is_none_or(|s| s == store) && c.is_none_or(|c| c == compare),
+                    Plan::Compile { keep, compare },
+                ) => k.is_none_or(|k| k == keep) && c.is_none_or(|c| c == compare),
                 _ => false,
             }
         }
@@ -398,7 +466,7 @@ mod tests {
 
     const ROW: Row = Row {
         plan: PlanIs::Compile {
-            store: None,
+            keep: None,
             compare: None,
         },
         rustc: None,
@@ -467,7 +535,7 @@ mod tests {
             },
             Row {
                 plan: PlanIs::Compile {
-                    store: None,
+                    keep: None,
                     compare: Some(true),
                 },
                 rustc: BUILT,
@@ -477,11 +545,20 @@ mod tests {
             },
             Row {
                 plan: PlanIs::Compile {
-                    store: Some(false),
+                    keep: Some(Keep::Not(NotStored::Suspended)),
                     compare: None,
                 },
                 rustc: BUILT,
                 expect: not_stored(NotStored::Suspended),
+                ..ROW
+            },
+            Row {
+                plan: PlanIs::Compile {
+                    keep: Some(Keep::Not(NotStored::ScriptOutputMissing)),
+                    compare: None,
+                },
+                rustc: BUILT,
+                expect: not_stored(NotStored::ScriptOutputMissing),
                 ..ROW
             },
             Row {
@@ -515,10 +592,11 @@ mod tests {
             Plan::AsAsked(NotStored::Key),
             Plan::AsAsked(NotStored::StoreRead),
             Plan::Reuse,
-            compile(true, true),
-            compile(true, false),
-            compile(false, false),
-            compile(false, true),
+            compile(Keep::Store, true),
+            compile(Keep::Store, false),
+            compile(Keep::Not(NotStored::Suspended), false),
+            compile(Keep::Not(NotStored::Suspended), true),
+            compile(Keep::Not(NotStored::ScriptOutputMissing), false),
         ];
         let rustcs = [Rustc::NotRun, Rustc::Succeeded, Rustc::Failed];
         let errors = [None, Some(NotStored::Hash), Some(NotStored::Restore)];
@@ -590,7 +668,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 8 * 3 * 2 * 2 * 3 * 4 * 3);
+        assert_eq!(checked, 9 * 3 * 2 * 2 * 3 * 4 * 3);
     }
 
     // covers: B-3
@@ -611,7 +689,7 @@ mod tests {
             ..Facts::ran(Rustc::Succeeded)
         };
         assert_eq!(
-            after(compile(true, false), &stored).outcome,
+            after(compile(Keep::Store, false), &stored).outcome,
             Outcome::BuiltAndStored
         );
         assert_eq!(
@@ -628,14 +706,14 @@ mod tests {
             stored: Stored::AlreadyHad,
             ..Facts::ran(Rustc::Succeeded)
         };
-        assert!(after(compile(true, true), &differed).suspend);
-        assert!(!after(compile(true, false), &differed).suspend);
+        assert!(after(compile(Keep::Store, true), &differed).suspend);
+        assert!(!after(compile(Keep::Store, false), &differed).suspend);
         let changed = Facts {
             changed: true,
             ..differed
         };
         assert_eq!(
-            after(compile(true, true), &changed),
+            after(compile(Keep::Store, true), &changed),
             Verdict {
                 outcome: Outcome::BuiltNotStored(NotStored::Changed),
                 suspend: false,
@@ -646,7 +724,7 @@ mod tests {
             ..differed
         };
         assert_eq!(
-            after(compile(true, true), &same).outcome,
+            after(compile(Keep::Store, true), &same).outcome,
             Outcome::BuiltAndStored
         );
     }

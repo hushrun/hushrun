@@ -126,11 +126,19 @@ pub enum PassedThrough {
     Settings,
     /// The store can't be written.
     Store,
+    /// A compile that asks for `-C incremental`, finds no block and already has its dep-info
+    /// file: an edit in a warm target, kept incremental (B-9).
+    Incremental,
+    /// The call's roots can't be used (B-8): a relative working directory, a root of `/`.
+    Roots,
+    /// A linked output (proc macro, build-script binary, program) on a platform or with a
+    /// debug-info layout this crate doesn't store.
+    Linked,
 }
 
 impl PassedThrough {
     /// Every reason, for tests and tables.
-    pub const ALL: [PassedThrough; 25] = [
+    pub const ALL: [PassedThrough; 28] = [
         PassedThrough::NotRustc,
         PassedThrough::NoCrateName,
         PassedThrough::Probe,
@@ -156,6 +164,9 @@ impl PassedThrough {
         PassedThrough::Windows,
         PassedThrough::Settings,
         PassedThrough::Store,
+        PassedThrough::Incremental,
+        PassedThrough::Roots,
+        PassedThrough::Linked,
     ];
 
     /// The reason as the run's log writes it. Stable: change it only with the log's readers.
@@ -186,6 +197,9 @@ impl PassedThrough {
             PassedThrough::Windows => "windows",
             PassedThrough::Settings => "settings",
             PassedThrough::Store => "store",
+            PassedThrough::Incremental => "incremental",
+            PassedThrough::Roots => "roots",
+            PassedThrough::Linked => "linked",
         }
     }
 }
@@ -232,11 +246,19 @@ pub enum NotStored {
     Differed,
     /// Storing was planned and nothing stopped it, but it was not tried.
     StoreSkipped,
+    /// The outputs rustc announced are not the ones this call names, or lie outside the output
+    /// folder.
+    Outputs,
+    /// A program wrote debug files beside it that a block doesn't carry (`.dSYM`, `.dwp`).
+    DebugFiles,
+    /// A read lies at a path that can't be keyed: not UTF-8, or not under the working
+    /// directory's forms.
+    Unkeyable,
 }
 
 impl NotStored {
     /// Every reason, for tests and tables.
-    pub const ALL: [NotStored; 19] = [
+    pub const ALL: [NotStored; 22] = [
         NotStored::RustcFailed,
         NotStored::Changed,
         NotStored::LowSpace,
@@ -256,6 +278,9 @@ impl NotStored {
         NotStored::Compare,
         NotStored::Differed,
         NotStored::StoreSkipped,
+        NotStored::Outputs,
+        NotStored::DebugFiles,
+        NotStored::Unkeyable,
     ];
 
     /// The reason as the run's log writes it. Stable: change it only with the log's readers.
@@ -280,6 +305,9 @@ impl NotStored {
             NotStored::Compare => "compare",
             NotStored::Differed => "differed",
             NotStored::StoreSkipped => "store-skipped",
+            NotStored::Outputs => "outputs",
+            NotStored::DebugFiles => "debug-files",
+            NotStored::Unkeyable => "unkeyable",
         }
     }
 }

@@ -167,6 +167,7 @@ pub struct Invocation {
     target: Option<String>,
     searchable: bool,
     message_form: String,
+    form: crate::messages::Form,
     cwd: String,
     package: Package,
     env: BTreeMap<String, String>,
@@ -181,6 +182,8 @@ struct Token {
     key: Option<String>,
     /// Whether the compile the wrapper runs keeps it (B-9).
     in_command: bool,
+    /// Whether it is the `--out-dir`.
+    out_dir: bool,
 }
 
 /// The `CARGO_*` variables B-5 leaves out of the first key.
@@ -240,6 +243,13 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
     }
 
     let (keyed_env, package) = read_env(env)?;
+    let form = crate::messages::Form::new(
+        seen.error_format.as_deref(),
+        (!seen.json.is_empty())
+            .then(|| seen.json.join(","))
+            .as_deref(),
+        seen.color.as_deref(),
+    );
     let message_form = serde_json::Value::Array(
         [
             seen.error_format,
@@ -269,6 +279,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         target: seen.target,
         searchable: seen.searchable,
         message_form,
+        form,
         cwd,
         package,
         env: keyed_env,
@@ -356,6 +367,28 @@ impl Invocation {
         &self.message_form
     }
 
+    /// The form messages are kept and served in (B-12): `--error-format`, `--json` and
+    /// `--color`, without the width.
+    pub fn form(&self) -> &crate::messages::Form {
+        &self.form
+    }
+
+    /// The name every output of the call shares: the crate name and `-C extra-filename`.
+    pub fn file_stem(&self) -> String {
+        format!("{}{}", self.crate_name, self.extra_filename)
+    }
+
+    /// The dep-info file rustc writes for the call: `<out dir>/<crate name><extra>.d`.
+    pub fn dep_info_path(&self) -> std::path::PathBuf {
+        let dir = Path::new(&self.out_dir);
+        let dir = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            Path::new(&self.cwd).join(dir)
+        };
+        dir.join(format!("{}.d", self.file_stem()))
+    }
+
     /// rustc's working directory.
     pub fn cwd(&self) -> &str {
         &self.cwd
@@ -408,6 +441,22 @@ impl Invocation {
         let mut out = Vec::with_capacity(self.args.len() + extra.len());
         for token in self.tokens.iter().filter(|token| token.in_command) {
             out.extend(self.args[token.span.clone()].iter().map(OsString::from));
+        }
+        out.extend(extra.iter().cloned());
+        out
+    }
+
+    /// [`Invocation::command`], with the outputs written to `out_dir` instead (B-10's second
+    /// compile).
+    pub fn command_in(&self, extra: &[OsString], out_dir: &Path) -> Vec<OsString> {
+        let mut out = Vec::with_capacity(self.args.len() + extra.len() + 1);
+        for token in self.tokens.iter().filter(|token| token.in_command) {
+            if token.out_dir {
+                out.push(OsString::from("--out-dir"));
+                out.push(out_dir.as_os_str().to_os_string());
+            } else {
+                out.extend(self.args[token.span.clone()].iter().map(OsString::from));
+            }
         }
         out.extend(extra.iter().cloned());
         out
@@ -772,6 +821,7 @@ impl Seen {
             span,
             key,
             in_command,
+            out_dir: flag == Flag::OutDir,
         })
     }
 }

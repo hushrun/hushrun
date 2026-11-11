@@ -46,6 +46,8 @@ pub mod audit;
 pub mod compiler;
 pub mod decide;
 pub mod depinfo;
+pub mod description;
+pub mod inputs;
 pub mod invocation;
 pub mod key;
 pub mod known;
@@ -63,6 +65,9 @@ pub mod sidecar;
 pub mod store;
 pub mod sweep;
 pub mod wrapper;
+
+#[cfg(test)]
+mod flow_tests;
 
 /// The name the binary is called by when it stands in for rustc (B-2). `main` looks at its own
 /// name before anything else.
