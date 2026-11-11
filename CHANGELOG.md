@@ -100,6 +100,45 @@ test`), `go test` and Vitest; audited as it goes; and explained, one test file a
 - In CI where a later step reads a check's reports, no test file is reused, as no check is
   skipped; a summary of a run with reused test files leaves its coverage out.
 
+Build blocks ([ADR 0070](docs/adr/0070-compiled-crates-are-reused-between-worktrees.md)): a crate
+the compiler already built from the same inputs is reused, in this worktree or another on the same
+machine, through a rustc wrapper that `hushrun run` sets. New, and off until a person turns it on.
+
+### Added
+
+- Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
+  mode for this user: `observe` compiles everything, stores blocks and says what would have been
+  reused, and `on` reuses. `status`, also `hushrun build` alone, shows the mode, the store's
+  folder, its size and its blocks by age and by repository. `clean` empties the store and clears
+  suspended keys. `--format json` gives each as an object.
+- Contract: **`HUSHRUN_BUILD`** (`off`, `observe` or `on`) sets the mode for one command and leaves
+  the saved one; **`HUSHRUN_BUILD_KEEP_DAYS`**, at least 1, how long an unused block is kept;
+  **`HUSHRUN_BUILD_DIR`**, an absolute folder, the store instead of `<cache directory>/build`. A
+  value that can't be used turns reuse off for the run, and `hushrun run` says so in one line.
+  **`HUSHRUN_BUILD_SESSION`** is set by `hushrun run` for the wrapper, not for people.
+- Contract: **`hushrun run` sets `RUSTC_WRAPPER`** for the command it runs, in both forms, when
+  the mode is not `off`: to a link named `hushrun-rustc` that points at the hushrun binary. It
+  doesn't when `RUSTC_WRAPPER` is set already, in CI, on Windows, for an isolated check, or with
+  no cache directory. A `cargo` outside `hushrun run` is untouched, and cargo's configuration is
+  never edited.
+- Contract: **`build.json`**, beside the credentials file, holds the mode, `keep_days` (15),
+  `never_store` (package names), `env` (more variable names for the key) and `min_free_gb` (10),
+  written whole under a lock. A file `hushrun run` can't read means it reuses nothing and says why;
+  `hushrun build status` exits 2.
+- Contract: **the `build` folder in the cache directory** is the store: `blocks/`, the hints and
+  suspensions under `steps/`, `tmp/`, `trash/`, the runs' `sessions/`, the wrapper's link under
+  `bin/` and the sweep's `swept` stamp. One store serves every repository on the machine.
+- After its command, `hushrun run` writes one line of what the compiles came to:
+  `build: 331 of 372 crates reused, 41 built, saving about 2m 40s`, `build: 41 crates built, none
+  reused`, or in `observe`, `build: observing: 2 of 3 crates would have been reused, 1 differed
+  from what a reuse would have given`. Then at most five notes, such as a key suspended, and once
+  `build: nothing was stored because the disk has less than 10 GB free`.
+- Inside `hushrun run` with reuse on, debug info names workspace files from the workspace root,
+  so a debugger shows source from there, and the first build in an output folder is not
+  incremental. Rebuilds after an edit stay incremental.
+- `hushrun run` deletes blocks unused for 15 days, at most once a day. There is no size limit.
+  Nothing leaves the machine.
+
 ## [0.12.0] - 2026-11-11
 
 Results stay on this machine until someone shares them ([ADR 0067](docs/adr/0067-results-stay-on-this-machine-until-someone-shares-them.md)):
