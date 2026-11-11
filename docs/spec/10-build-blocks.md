@@ -73,13 +73,22 @@ read, never from a hint.
 **B-8 Roots.** A path that lies under a root, in the root's given form or its resolved form, is
 recorded as the root's name and the rest, and looked up under the current root. A path recorded
 under another checkout MUST NOT be opened. Replacing roots in arguments and values MUST be
-reversible: two different inputs never give one text. A read at an absolute path outside every
+reversible up to a root's two forms: inputs that differ in anything but which form of a root they
+use never give one text. A read at an absolute path outside every
 root, the cargo home, the toolchain and the system folders ties the block to its roots.
 
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
-adds `--remap-path-prefix` for each root, the workspace first as `.`, the more specific roots
-after it, with the scope left whole; and it leaves `-C incremental` out. It changes nothing else.
-No block comes from an incremental compile.
+adds `--remap-path-prefix` for the workspace, as `.`, and for the build script's output, as a
+fixed stand-in that names the package; each in its given and its resolved form, the workspace
+first, with the scope left whole. It leaves `-C incremental` out. On Apple targets it also gives
+a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
+gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
+debugs those, and without it each holds the folder it was linked in. It changes nothing else.
+
+No block comes from an incremental compile, and an edit never loses incremental compilation: a
+compile that asks for `-C incremental`, finds no block, and already has its dep-info file in the
+output folder (so this is a rebuild, not a first build there) is `passed through`, exactly as
+asked. A first build there is compiled without `-C incremental` and stored.
 
 **B-10 Place.** After a compile, every output is searched for each root as raw bytes, in its
 given and resolved forms. None found: the block's place is `anywhere`. Any found, or an output
@@ -104,20 +113,24 @@ a block whose compile wrote only notices serves every form, and otherwise a miss
 build.
 
 **B-13 The store.** `<cache directory>/build`, or `HUSHRUN_BUILD_DIR`. A block is written under
-`tmp/`, synced, and published by renaming its folder to `blocks/<key>`: the first writer wins and
+`tmp/`, synced, and published by renaming its folder to `blocks/<two hex digits>/<key>`: the first
+writer wins and
 a second, identical block is dropped. Nothing rewrites a published block. Each block records the
 repository that built it.
 
 **B-14 Expiry.** A reuse sets the block's last use to the command's time; so does its creation.
 After a run, at most once a day, `hushrun run` deletes every block whose last use is more than
 `keep_days` old (15 unless set; `HUSHRUN_BUILD_KEEP_DAYS` overrides it), by renaming it into
-`trash/` and deleting it there, and deletes what is more than a day old under `tmp/` and
-`trash/`. The stamp of the sweep is written before anything is deleted. There is no limit on the
+`trash/` and deleting it there, deletes the hints not refreshed for as long, and deletes what is
+more than a day old under `tmp/` and `trash/`. The stamp of the sweep is written before anything
+is deleted. There is no limit on the
 store's size.
 
 **B-15 Suspension.** A first key is `ok` or `suspended`. It is suspended when an audit disagrees
-(B-16) or when a dependent fails to compile against a reused block; in the second case the reused
-files are removed from the output folder so that cargo builds them, and one line says so. A
+(B-16) or when a dependent fails to load a reused block (rustc's errors E0460, E0461, E0462,
+E0463, E0464, E0514 and E0786, never an error in the dependent's own code); in the second case
+the reused files are removed from the output folder so that cargo builds them, and one line says
+so. A
 suspended key is never reused. `hushrun build clean` clears it.
 
 **B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
