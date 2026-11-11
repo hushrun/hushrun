@@ -220,26 +220,22 @@ impl Session {
         let mut built = None;
         let mut listed_files: Option<Vec<String>> = None;
         let (sets, known): (units::Sets, Known) = match &self.adapter {
-            Adapter::Pytest => {
-                let found = pytest::python_files(input.root, input.cwd);
-                if pytest::is_test_file(&found, "x.py").is_none() {
-                    return Planned::Everything(
-                        "pytest's python_files names a directory, which this version doesn't read"
-                            .into(),
-                    );
-                }
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| pytest::is_test_file(&found, path) == Some(true),
-                    Sources::Kinds(pytest::SOURCE_KINDS),
+            Adapter::Pytest | Adapter::Vitest(_) => {
+                match observed_plan(
+                    &self.adapter,
+                    input.tree,
+                    input.root,
+                    input.cwd,
+                    &map,
                     &self.tests.ignore,
-                );
-                let known = sets
-                    .files(Set::Units)
-                    .map(|unit| (unit.to_string(), mapped_reads(&map, unit, input.tree)))
-                    .collect();
-                patterns = Some(found);
-                (sets, known)
+                ) {
+                    Ok(found) => {
+                        patterns = found.python_files;
+                        listed_files = found.listed;
+                        (found.sets, found.known)
+                    }
+                    Err(why) => return Planned::Everything(why),
+                }
             }
             Adapter::Cargo(recognized) => {
                 let b = match cargo::plan_build(recognized, input.root, input.cwd) {
@@ -287,37 +283,6 @@ impl Session {
                         (unit.clone(), reads)
                     })
                     .collect();
-                (sets, known)
-            }
-            Adapter::Vitest(recognized) => {
-                if recognized.coverage {
-                    return Planned::Everything(
-                        "Vitest's coverage is on, and a partial run's coverage would read as a drop"
-                            .into(),
-                    );
-                }
-                let listed: BTreeSet<String> = map
-                    .unit_files
-                    .iter()
-                    .filter(|f| input.tree.contains(f))
-                    .cloned()
-                    .collect();
-                if listed.is_empty() {
-                    return Planned::Everything(
-                        "no run here has listed Vitest's test files yet".into(),
-                    );
-                }
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| listed.contains(path),
-                    Sources::Kinds(vitest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let known = sets
-                    .files(Set::Units)
-                    .map(|unit| (unit.to_string(), mapped_reads(&map, unit, input.tree)))
-                    .collect();
-                listed_files = Some(listed.into_iter().collect::<Vec<_>>());
                 (sets, known)
             }
         };
@@ -734,6 +699,184 @@ impl Session {
             })
             .collect()
     }
+}
+
+/// What an observed adapter's plan reads from files alone, before any key.
+struct ObservedPlan {
+    sets: units::Sets,
+    known: Known,
+    /// pytest's unit rule as hushrun read it.
+    python_files: Option<Vec<String>>,
+    /// \[ADR 0071\] Vitest's test files as the map lists them.
+    listed: Option<Vec<String>>,
+}
+
+/// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the files each would be
+/// keyed by, from the scope's files and the check's map alone: no tool starts. The plan and
+/// `hushrun ready` both read it. `Err` says why nothing can be reused.
+fn observed_plan(
+    adapter: &Adapter,
+    tree: &Tree,
+    root: &Path,
+    cwd: &Path,
+    map: &store::Map,
+    ignore: &[hushrun_core::glob::Pattern],
+) -> Result<ObservedPlan, String> {
+    match adapter {
+        Adapter::Pytest => {
+            let found = pytest::python_files(root, cwd);
+            if pytest::is_test_file(&found, "x.py").is_none() {
+                return Err(
+                    "pytest's python_files names a directory, which this version doesn't read"
+                        .into(),
+                );
+            }
+            let sets = units::classify(
+                tree.paths(),
+                &|path| pytest::is_test_file(&found, path) == Some(true),
+                Sources::Kinds(pytest::SOURCE_KINDS),
+                ignore,
+            );
+            let known = sets
+                .files(Set::Units)
+                .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
+                .collect();
+            Ok(ObservedPlan {
+                sets,
+                known,
+                python_files: Some(found),
+                listed: None,
+            })
+        }
+        Adapter::Vitest(recognized) => {
+            if recognized.coverage {
+                return Err(
+                    "Vitest's coverage is on, and a partial run's coverage would read as a drop"
+                        .into(),
+                );
+            }
+            let listed: BTreeSet<String> = map
+                .unit_files
+                .iter()
+                .filter(|f| tree.contains(f))
+                .cloned()
+                .collect();
+            if listed.is_empty() {
+                return Err("no run here has listed Vitest's test files yet".into());
+            }
+            let sets = units::classify(
+                tree.paths(),
+                &|path| listed.contains(path),
+                Sources::Kinds(vitest::SOURCE_KINDS),
+                ignore,
+            );
+            let known = sets
+                .files(Set::Units)
+                .map(|unit| (unit.to_string(), mapped_reads(map, unit, tree)))
+                .collect();
+            Ok(ObservedPlan {
+                sets,
+                known,
+                python_files: None,
+                listed: Some(listed.into_iter().collect()),
+            })
+        }
+        Adapter::Cargo(_) | Adapter::Go(_) => {
+            Err("its test files are known from a build, which this doesn't make".into())
+        }
+    }
+}
+
+/// \[C-22\] What `hushrun ready` needs to say how many test files a run would run.
+pub struct Preview<'a> {
+    pub base: KeyBase,
+    pub repository: Option<&'a str>,
+    pub command: &'a [String],
+    pub tests: &'a Tests,
+    /// The scope's files looked at.
+    pub tree: &'a Tree,
+    pub store: &'a dyn UnitResults,
+    pub counts: &'a dyn Fn(&RunResult) -> bool,
+    pub root: &'a Path,
+    pub cwd: &'a Path,
+}
+
+/// \[C-22\] What a run's plan would come to, as far as `hushrun ready` can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Previewed {
+    /// `run` of `total` test files would run, `reused` would be reused, and `audited` of those
+    /// that could be would run as a check.
+    Plan {
+        total: usize,
+        run: usize,
+        reused: usize,
+        audited: usize,
+    },
+    /// The check's reuse is suspended: why, as a run says it.
+    Suspended(String),
+}
+
+/// \[C-22\] The plan a run of `command` would make (C-34), for `hushrun ready`, from what is on
+/// this machine and one batch lookup: `None` when it can't tell without starting a tool or a
+/// build (Cargo, Go), when no adapter would load, or when the lookup fails. It writes nothing,
+/// and sends nothing but the lookup.
+pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
+    let adapter = match (
+        cargo::recognize(p.command),
+        gotest::recognize(p.command),
+        vitest::recognize(p.command),
+    ) {
+        (Some(_), _, _) | (None, Some(_), _) => return None,
+        (None, None, Some(Ok(recognized))) => {
+            if vitest::unloadable(&recognized, p.cwd).is_some() {
+                return None;
+            }
+            Adapter::Vitest(recognized)
+        }
+        (None, None, Some(Err(_))) => return None,
+        (None, None, None) => {
+            pytest::unsafe_for(p.command).is_none().then_some(())?;
+            Adapter::Pytest
+        }
+    };
+    let cache = crate::context::cache_dir()?;
+    let map = store::load_map(&store::file(
+        &cache,
+        &store::check_id(&p.base, p.repository),
+        "map",
+    ));
+    let found = observed_plan(&adapter, p.tree, p.root, p.cwd, &map, &p.tests.ignore).ok()?;
+    let total = found.known.len();
+    if total == 0 || total > MOST_UNITS {
+        return None;
+    }
+    let keyer = Keyer::new(p.tree, &found.sets, &p.base);
+    let keys: BTreeMap<String, Digest> = found
+        .known
+        .iter()
+        .filter(|(unit, _)| !p.tests.always_runs(unit))
+        .filter_map(|(unit, reads)| Some((unit.clone(), keyer.key(unit, reads.as_ref()?)?)))
+        .collect();
+    let asked: Vec<Digest> = keys.values().copied().collect();
+    let lookup = p.store.lookup(&asked, p.counts).ok()?;
+    if !lookup.reuse.allows_reuse() {
+        return Some(Previewed::Suspended(suspended(
+            &p.base.check,
+            &lookup.reuse,
+        )));
+    }
+    let passed = keys
+        .values()
+        .filter(|key| lookup.found.get(*key).is_some_and(|f| f.passed))
+        .count();
+    let audited = units::audit_share(passed);
+    let reused = passed - audited;
+    Some(Previewed::Plan {
+        total,
+        run: total - reused,
+        reused,
+        audited,
+    })
 }
 
 /// The test files a plan knows of, each with the files it would be keyed by, as far as it can

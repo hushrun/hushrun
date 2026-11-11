@@ -205,6 +205,40 @@ pub fn unloadable(recognized: &Recognized, cwd: &Path) -> Option<String> {
     ))
 }
 
+/// \[ADR 0071\] What `hushrun init` proposes, in its "Change by hand" list, for a repository at
+/// `root` that runs Vitest, when `checks` look at their test files: the one line in Vitest's
+/// config that loads hushrun's adapter. `None` when Vitest isn't here or the line is.
+pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
+    let package = std::fs::read_to_string(root.join("package.json")).unwrap_or_default();
+    let config = CONFIG_NAMES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file());
+    let uses = package.contains("\"vitest\"")
+        || config
+            .as_ref()
+            .is_some_and(|c| c.to_string_lossy().contains("vitest.config"));
+    if !uses || checks.is_empty() {
+        return None;
+    }
+    let names = checks.join(", ");
+    match config {
+        Some(config) => {
+            let text = std::fs::read_to_string(&config).unwrap_or_default();
+            if text.contains(VARIABLE) {
+                return None;
+            }
+            let name = config.file_name()?.to_string_lossy().into_owned();
+            Some(format!(
+                "{name}: add `{CONFIG_LINE}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml); without HUSHRUN_VITEST, which hushrun sets, it adds nothing"
+            ))
+        }
+        None => Some(format!(
+            "vitest.config.ts: write `export default {{ {CONFIG_LINE} }}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml)"
+        )),
+    }
+}
+
 /// The directory that holds the plugin and its setup file for this binary, written whole when
 /// they aren't there yet: `<cache dir>/adapters/vitest-<first 16 hex of their SHA-256>`.
 pub fn install(cache: &Path) -> std::io::Result<PathBuf> {

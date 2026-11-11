@@ -370,6 +370,8 @@ struct Look {
     /// \[ADR 0051\] What turbo.json needs so that the wrapped scripts turbo runs in CI get
     /// hushrun's variables.
     turbo: turbo::Edit,
+    /// \[ADR 0071\] The line Vitest's config needs for a check whose `tests` are on.
+    vitest_line: Option<String>,
 }
 
 /// The scripts each CI job starts, by its file's index and its id.
@@ -426,6 +428,20 @@ impl Look {
             .and_then(|bytes| Policy::parse(POLICY_FILE, &bytes).ok());
         let unreadable_policy = policy.is_none() && root.join(POLICY_FILE).exists();
         let reports_skip = reports_skip(policy.as_ref());
+        // \[ADR 0071\] A check that looks at its test files, in a repository with Vitest, needs
+        // one line in Vitest's config, which init proposes and never writes.
+        let vitest_line = policy
+            .as_ref()
+            .filter(|p| p.tests.values().any(|t| t.is_on()))
+            .and_then(|p| {
+                let checks: Vec<String> = p
+                    .tests
+                    .iter()
+                    .filter(|(_, t)| t.is_on())
+                    .map(|(name, _)| name.to_string())
+                    .collect();
+                crate::units::vitest::proposal(root, &checks)
+            });
         let mut members = Vec::new();
         let mut package = package;
         if let (Some(root_package), Some(workspace)) = (&mut package, &workspace) {
@@ -503,6 +519,7 @@ impl Look {
             unreadable_policy,
             backend: hosted::repository_backend(root),
             reports_skip,
+            vitest_line,
             members,
             job_runs: BTreeMap::new(),
             turbo_runs: BTreeMap::new(),
@@ -1392,6 +1409,7 @@ impl Plan {
         if in_ci || (wraps && !scripts_wrap) {
             plan.left_in_ci = look.proposal.left.iter().map(|left| left.text()).collect();
         }
+        plan.manual.extend(look.vitest_line.clone());
         if look.unreadable_policy && !look.proposal.is_empty() {
             plan.manual.push(format!(
                 "{POLICY_FILE} doesn't parse, so init leaves it and CI's files as they are: fix it, then run hushrun init again"

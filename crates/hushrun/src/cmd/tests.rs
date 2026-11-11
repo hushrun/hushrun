@@ -64,6 +64,8 @@ fn resume(global: &GlobalOpts, args: &TestsResumeArgs) -> CmdResult {
             variant: None,
             cache: cache
                 .ok_or_else(|| Failure::new(Exit::Usage, anyhow!("there is no cache directory")))?,
+            // A suspension waiting to reach the server is sent first: it is what a person resumes.
+            read_only: false,
         }),
         Place::Directory { .. } => Box::new(
             crate::units::local_store(repository.as_deref(), check)

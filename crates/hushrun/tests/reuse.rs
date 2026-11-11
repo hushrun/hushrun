@@ -1161,3 +1161,155 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
         suspended.stderr
     );
 }
+
+/// Every file under `dir` with its length and time, to tell that nothing was written.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                out.push((path, meta.len(), meta.modified().unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// covers: C-22, C-34
+#[test]
+fn ready_says_how_many_test_files_a_run_would_run_and_writes_nothing() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let python = python();
+    let script = format!("hushrun run unit -- {python} -m pytest -q -p no:cacheprovider");
+    let mut files = shop("reuse");
+    files.push((
+        "package.json".into(),
+        format!(
+            "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"{script}\"}}}}\n"
+        ),
+    ));
+    let r = repo_of(&files);
+    let ran = r.run(&pytest_args(&python, &[]), &[]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    r.write("app/cart.py", "from app.pricing import price\n\ndef total(xs):\n    return sum(price(x) for x in xs)  # changed\n");
+    git::commit_all(&r.repo, "cart");
+    let before = [
+        snapshot(&r.cache.join("units")),
+        snapshot(&r.cache.join("results")),
+    ]
+    .concat();
+    let ready = r.run(&["ready"], &[]);
+    assert_eq!(ready.code, 10, "{}\n{}", ready.stdout, ready.stderr);
+    // Results on this machine: what a run here would do, in local mode's words.
+    assert!(
+        ready.stdout.contains(
+            "unit: a run here would run 3 of 8 test files; 5 already passed here on the files they read"
+        ),
+        "{}",
+        ready.stdout
+    );
+    assert_eq!(
+        [
+            snapshot(&r.cache.join("units")),
+            snapshot(&r.cache.join("results"))
+        ]
+        .concat(),
+        before,
+        "ready wrote to the cache's units or results"
+    );
+    let json = r.run(&["ready", "--format", "json"], &[]);
+    let doc: Value = serde_json::from_str(&json.stdout).unwrap();
+    assert!(
+        doc["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .starts_with("unit: a run here would run 3 of 8")),
+        "{doc:#}"
+    );
+    // Its files said otherwise: not the files a plan reads, so nothing is said.
+    r.write(
+        "app/greet.py",
+        "def hello():\n    return 'hi'  # not committed\n",
+    );
+    let ready = r.run(&["ready"], &[]);
+    assert!(!ready.stdout.contains("test files"), "{}", ready.stdout);
+}
+
+// covers: C-22, C-34
+#[test]
+fn ready_asks_the_server_as_ci_counts_and_says_a_suspension() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    let server = with_server(&results);
+    let python = python();
+    let script = format!("hushrun run unit -- {python} -m pytest -q -p no:cacheprovider");
+    let mut files = hidden("reuse");
+    files.push((
+        "package.json".into(),
+        format!(
+            "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"{script}\"}}}}\n"
+        ),
+    ));
+    for n in 1..=3 {
+        files.push((
+            format!("test_more_{n}.py"),
+            "import libb\n\ndef test_more():\n    assert libb.Y == 1\n".into(),
+        ));
+    }
+    let r = repo_of(&files);
+    assert_eq!(r.run(&pytest_args(&python, &[]), &envs(&server)).code, 0);
+    r.write("liba.py", "X = 1  # changed\n");
+    git::commit_all(&r.repo, "liba");
+    let before = results.requests().len();
+    let ready = r.run(&["ready"], &envs(&server));
+    assert!(
+        ready.stdout.contains(
+            "unit: CI would run 2 of 5 test files; 3 already passed on the files they read"
+        ),
+        "{}\n{}",
+        ready.stdout,
+        ready.stderr
+    );
+    // One batch lookup, and nothing written to the server.
+    let asked: Vec<String> = results.requests()[before..]
+        .iter()
+        .map(|s| s.path.clone())
+        .filter(|p| p.starts_with("v0/units/"))
+        .collect();
+    assert_eq!(asked, ["v0/units/lookup"]);
+    // Suspended by an audit's disagreement: ready says so, as a run does. test_hidden.py passes
+    // on what it reads now, then the flag it can't see makes it fail when it is the one audited.
+    assert_eq!(r.run(&pytest_args(&python, &[]), &envs(&server)).code, 0);
+    r.write("flag", "");
+    r.write("libb.py", "Y = 1  # changed\n");
+    git::commit_all(&r.repo, "libb");
+    let caught = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(caught.code, 1, "{}", caught.stderr);
+    assert_eq!(
+        results.reuse_state(REPOSITORY, "unit")["state"],
+        "suspended"
+    );
+    r.write("liba.py", "X = 1  # again\n");
+    git::commit_all(&r.repo, "liba again");
+    let ready = r.run(&["ready"], &envs(&server));
+    assert!(
+        ready
+            .stdout
+            .contains("unit: every test file runs: reuse of its test files is suspended"),
+        "{}",
+        ready.stdout
+    );
+}

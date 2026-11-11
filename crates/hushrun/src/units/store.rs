@@ -385,6 +385,9 @@ pub struct Server<'a> {
     pub job: Option<String>,
     pub variant: Option<String>,
     pub cache: PathBuf,
+    /// \[C-22, ADR 0061\] Only read: a lookup sends nothing that waits in the outbox, and reads
+    /// the check as suspended while something does, as `hushrun ready` must.
+    pub read_only: bool,
 }
 
 /// An answer of the server's batch lookup.
@@ -428,6 +431,21 @@ impl Server<'_> {
             fields.extend(more.clone());
         }
         body
+    }
+
+    /// Whether a suspension of this check waits in the outbox.
+    fn waiting(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(self.outbox()) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            std::fs::read(entry.path())
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Pending>(&b).ok())
+                .is_some_and(|p| {
+                    p.base == self.base && p.check == self.check && p.repository == self.repository
+                })
+        })
     }
 
     /// Sends what waits in the outbox for this check: `Ok(true)` when nothing waits any more.
@@ -487,7 +505,17 @@ impl UnitResults for Server<'_> {
         keys: &[Digest],
         counts: &dyn Fn(&RunResult) -> bool,
     ) -> Result<Lookup, String> {
-        if !self.flush() {
+        if self.read_only && self.waiting() {
+            return Ok(Lookup {
+                found: BTreeMap::new(),
+                reuse: ReuseState {
+                    state: Reuse::Suspended,
+                    generation: -1,
+                    ..ReuseState::default()
+                },
+            });
+        }
+        if !self.read_only && !self.flush() {
             return Err(format!(
                 "a suspension of {}'s reuse hasn't reached {} yet",
                 self.check, self.base

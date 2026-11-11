@@ -6388,3 +6388,41 @@ fn a_script_through_turborepo_with_a_remote_cache_stays_as_it_is() {
     assert_eq!(wrapped(&plan), ["test", "lint"]);
     assert_eq!(plan["scripts"]["left"], json!([]), "{plan:#}");
 }
+
+// covers: C-15, C-35 (ADR 0071: init proposes the line Vitest's config needs, and writes none)
+#[test]
+fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files() {
+    let (_server, fake) = Fake::start(true);
+    let r = Repo::new(&[
+        ("package.json", PACKAGE),
+        ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        ("vitest.config.ts", "export default { test: {} }\n"),
+    ]);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let line = "vitest.config.ts: add `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`, so that hushrun can look at Vitest's test files for test (tests in hushrun.yaml)";
+    assert!(
+        out.stdout.contains("Change by hand:") && out.stdout.contains(line),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(r.read("vitest.config.ts"), "export default { test: {} }\n");
+    // With the line there, or no check that looks at its test files, it proposes nothing.
+    r.write(
+        "vitest.config.ts",
+        "export default { plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())] }\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+    r.write("vitest.config.ts", "export default { test: {} }\n");
+    r.write(
+        "hushrun.yaml",
+        "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: off\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+}

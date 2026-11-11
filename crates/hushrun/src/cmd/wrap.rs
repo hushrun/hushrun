@@ -1437,6 +1437,7 @@ fn unit_store<'a>(
             job: job.map(str::to_string),
             variant: code.variant.as_ref().map(|v| v.key.clone()),
             cache: context::cache_dir()?,
+            read_only: false,
         }));
     }
     units::local_store(repository.as_deref(), code.check.as_str())

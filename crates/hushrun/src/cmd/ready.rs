@@ -311,7 +311,13 @@ pub fn evaluate(global: &GlobalOpts, target: &Target<'_>) -> Result<Report, Fail
     if let Some(policy) = content.policy.as_ref().filter(|p| p.deploy.is_some()) {
         in_place |= required(global, &content, policy, target, &mut report)?;
     }
-    in_place |= runs(&content, branch.as_deref(), &mut report);
+    // \[C-22\] A plan of a check's test files reads files here: only when they are the ones looked
+    // at.
+    let files_here = match target.snapshot {
+        Snapshot::Worktree => true,
+        _ => target.flag.is_none() && !uncommitted(&root),
+    };
+    in_place |= runs(&content, branch.as_deref(), files_here, &mut report);
     let ready = report.missing().next().is_none();
     report.ready = ready;
     if in_place && target.snapshot != Snapshot::Worktree {
@@ -526,6 +532,8 @@ struct Scoped {
     scope: ScopeName,
     digest: Digest,
     external: Vec<ExternalInput>,
+    /// \[C-22\] Its files, with their kinds and content hashes, for a plan of its test files.
+    tree: Option<hushrun_core::units::Tree>,
 }
 
 /// The code of the scope `name`, `None` for the only one: what `hushrun run` would key this run
@@ -549,11 +557,12 @@ fn scoped(content: &Content, name: Option<&str>) -> Result<Scoped, String> {
         false,
     )
     .map_err(|err| format!("can't read its code: {err}"))?;
-    let digest = digests
+    let found = digests
         .scopes
         .first()
-        .map(|found| found.digest)
         .ok_or_else(|| "can't read its code".to_string())?;
+    let digest = found.digest;
+    let tree = hushrun_core::units::Tree::from_manifest(&found.manifest);
     let external = content
         .external(&scope.name)
         .map_err(|err| format!("{err:#}"))?;
@@ -561,12 +570,13 @@ fn scoped(content: &Content, name: Option<&str>) -> Result<Scoped, String> {
         scope: scope.name.clone(),
         digest,
         external,
+        tree,
     })
 }
 
 /// How the `hushrun run`s of package.json's scripts and of CI's files stand. Whether there is a
 /// command to run.
-fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
+fn runs(content: &Content, branch: Option<&str>, files_here: bool, report: &mut Report) -> bool {
     let root = content.vcs.root();
     let read = |path: &str| {
         content
@@ -818,6 +828,21 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
             }
         }
         any = true;
+        // \[C-22\] How many of its test files a run would run, where that can be told cheaply.
+        if files_here {
+            let told = TestsTold {
+                content,
+                label: &label,
+                parts,
+                code,
+                rule: rule.as_ref(),
+                backend: &backend,
+                here: here.is_some(),
+                jobs: &run.jobs,
+                repository: repository.as_deref(),
+            };
+            report.notes.extend(tests_note(&told));
+        }
         report.checks.push(Item {
             check: label,
             state,
@@ -834,6 +859,103 @@ fn runs(content: &Content, branch: Option<&str>, report: &mut Report) -> bool {
         report.notes.push(local_note(here));
     }
     any
+}
+
+/// \[C-22\] What `ready` knows of a check CI would run, for a plan of its test files.
+struct TestsTold<'a> {
+    content: &'a Content,
+    label: &'a str,
+    parts: &'a setup::RunKey,
+    code: &'a Scoped,
+    rule: Option<&'a hushrun_core::counts_from::Rule>,
+    backend: &'a Backend,
+    here: bool,
+    jobs: &'a [String],
+    repository: Option<&'a str>,
+}
+
+/// \[C-22\] For a check with `tests: reuse`, how many of its test files a run would run, from
+/// what is on this machine and one batch lookup asked as CI's runs are counted: `unit: CI would
+/// run 12 of 340 test files; 328 already passed on the files they read`, or, with results on this
+/// machine, what a run here would. A suspended check says so. Nothing when it can't be told
+/// without starting a tool or a build. It changes no local state (ADR 0061).
+fn tests_note(told: &TestsTold<'_>) -> Option<String> {
+    let parts = told.parts;
+    let tests = told
+        .content
+        .policy
+        .as_ref()?
+        .tests
+        .get(&parts.check)
+        .filter(|t| t.mode == hushrun_core::units::Mode::Reuse)?;
+    let tree = told.code.tree.as_ref()?;
+    let root = told.content.vcs.root();
+    let base = hushrun_core::units::KeyBase {
+        check: parts.check.clone(),
+        command: parts.command.clone(),
+        cwd: parts.cwd.clone(),
+        scope: told.code.scope.clone(),
+        external: (!told.code.external.is_empty()).then(|| serde_json::json!(told.code.external)),
+        counts_from: told.rule.map(hushrun_core::counts_from::Rule::normal),
+    };
+    let local;
+    let server;
+    let store: &dyn crate::units::store::UnitResults = if told.here {
+        local = crate::units::local_store(told.repository, parts.check.as_str())?;
+        &local
+    } else {
+        let results::Place::Server { base: url, .. } = told.backend.place() else {
+            return None;
+        };
+        server = crate::units::store::Server {
+            backend: told.backend,
+            base: url,
+            check: parts.check.to_string(),
+            repository: told.repository.map(str::to_string),
+            job: None,
+            variant: None,
+            cache: crate::context::cache_dir()?,
+            read_only: true,
+        };
+        &server
+    };
+    let jobs = told.jobs;
+    let here = told.here;
+    let counts = |run: &RunResult| here || ci_takes(run, jobs);
+    let previewed = crate::units::preview(&crate::units::Preview {
+        base,
+        repository: told.repository,
+        command: &parts.command,
+        tests,
+        tree,
+        store,
+        counts: &counts,
+        root,
+        cwd: &root.join(&parts.cwd),
+    })?;
+    let label = told.label;
+    Some(match previewed {
+        crate::units::Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
+        crate::units::Previewed::Plan {
+            total, run, reused, ..
+        } => {
+            let who = if here { "a run here would" } else { "CI would" };
+            let passed = if here { "passed here" } else { "passed" };
+            let files = if total == 1 {
+                "test file"
+            } else {
+                "test files"
+            };
+            if reused == 0 {
+                format!("{label}: {who} run all {total} {files}")
+            } else {
+                let they = if reused == 1 { "it" } else { "they" };
+                format!(
+                    "{label}: {who} run {run} of {total} {files}; {reused} already {passed} on the files {they} read"
+                )
+            }
+        }
+    })
 }
 
 /// \[ADR 0067\] What `ready` and the hook say when results stay on this machine: CI runs every
