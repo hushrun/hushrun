@@ -949,6 +949,45 @@ fn an_in_source_build_says_why_nothing_is_reused() {
 
 // covers: C-49, C-32
 #[test]
+fn a_skipped_test_in_a_run_that_failed_records_no_pass() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    let p = Project::new(
+        &cmake,
+        generator,
+        &[
+            file("hushrun.yaml", &yaml("reuse")),
+            file(".gitignore", "build/\n"),
+            file(
+                "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.19)\nproject(skip C)\nenable_testing()\n\
+                 add_executable(t_skip tests/t_skip.c)\nadd_executable(t_fail tests/t_fail.c)\n\
+                 add_executable(t_ok tests/t_ok.c)\n\
+                 add_test(NAME skip COMMAND t_skip)\nadd_test(NAME fail COMMAND t_fail)\nadd_test(NAME ok COMMAND t_ok)\n\
+                 set_tests_properties(skip PROPERTIES SKIP_RETURN_CODE 77)\n",
+            ),
+            file("tests/t_skip.c", "int main(void) { return 77; }\n"),
+            file("tests/t_fail.c", "int main(void) { return 1; }\n"),
+            file("tests/t_ok.c", "int main(void) { return 0; }\n"),
+        ],
+    );
+    let ran = p.run(CTEST, &[]);
+    assert_ne!(ran.code, 0, "{}", ran.stdout);
+    // t_fail failed and t_ok passed; t_skip's test was skipped in a run that failed, which
+    // proves nothing: it records no pass.
+    assert_eq!(
+        unit_results(&p.cache),
+        ["fail", "pass"],
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+}
+
+// covers: C-49, C-32
+#[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
     let Some(cmake) = with_cmake().into_iter().next() else {
         return;

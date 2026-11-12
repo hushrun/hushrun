@@ -368,6 +368,7 @@ impl Adapter for Recognized {
                 failed: m.failed,
                 not_followed: m.not_followed,
                 deselected: m.deselected,
+                skipped: m.skipped > 0,
                 ..Facts::default()
             };
             seen.insert(

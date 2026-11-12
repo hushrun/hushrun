@@ -668,9 +668,15 @@ fn record(p: &Pending) {
         }
         // A whole unit is deselected when `reuse` listed it and every test of it was left out.
         unit.deselected &= left && p.reuse.contains(&test.unit);
+        // \[C-32\] Its body didn't run: CTest skipped it (`SKIP_RETURN_CODE`,
+        // `SKIP_REGULAR_EXPRESSION`), or it is disabled. In a run that failed, it proves nothing.
+        let skipped = !left && (disabled || matches!(outcome, Outcome::Skipped));
         if !left && !disabled {
             unit.selected += 1;
             unit.finished += u64::from(finished);
+        }
+        if unit.tests.is_none() {
+            unit.skipped += u64::from(skipped);
         }
         unit.failed |= failed;
         unit.duration_ms = unit.duration_ms.saturating_add(duration_ms);
@@ -682,6 +688,7 @@ fn record(p: &Pending) {
                 deselected: left,
                 duration_ms,
                 not_followed,
+                skipped,
                 ..TestFacts::default()
             }),
             None => {
