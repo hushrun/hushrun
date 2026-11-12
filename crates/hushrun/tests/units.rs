@@ -825,6 +825,37 @@ fn a_session_fixture_whose_end_fails_keeps_every_file_it_served_from_a_pass() {
     assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
 }
 
+// covers: C-32
+#[test]
+fn a_test_file_skipped_whole_as_it_loads_records_no_pass_in_a_run_that_failed() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_mod.py skips itself as it loads, test_imp.py skips for a module that isn't there, and
+    // test_fail.py fails: in that run a skip proves nothing, of a whole file too.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_mod.py",
+            "import pytest\npytest.skip('module level', allow_module_level=True)\n\ndef test_m():\n    pass\n",
+        ),
+        (
+            "test_imp.py",
+            "import pytest\npytest.importorskip('numpy_not_here')\n\ndef test_np():\n    pass\n",
+        ),
+        ("test_fail.py", "def test_fail():\n    assert False\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // test_fail.py's fail, and nothing else.
+    assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

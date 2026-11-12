@@ -1178,6 +1178,10 @@ def _collectreport(obs, report):
         entry["duration"] += time.perf_counter() - t0
         if report.failed:
             entry["failed"] = True
+        # [C-32] Skipped whole as it loaded (`pytest.skip(allow_module_level=True)`,
+        # `pytest.importorskip`): a skip of its unit, which in a run that failed proves nothing.
+        if report.skipped:
+            entry["skipped"] = entry.get("skipped", 0) + 1
     if report.failed and not started:
         unit = obs.rel(str(report.fspath)) if getattr(report, "fspath", None) else None
         if unit and os.path.isfile(os.path.join(obs.root, unit)):

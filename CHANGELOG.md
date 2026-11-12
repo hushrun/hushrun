@@ -152,6 +152,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - A pytest fixture of a wider scope whose teardown fails keeps every test it served from a pass,
   in every file it served: pytest reports the error on whichever test ran last, and the test that
   caused it no longer keeps its pass.
+- A pytest test file skipped whole as it loads (`pytest.skip(allow_module_level=True)`,
+  `pytest.importorskip`) counts as skipped, so in a run whose command failed it records no pass.
 - pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
   name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
   list, and runs when it changes.

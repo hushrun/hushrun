@@ -101,3 +101,6 @@ test that failed first.
   the failure is everything's that fixture served: no test it served counts as finished, in its
   file or another (a session fixture's), so none records a pass, and their files didn't run
   whole. Tests are matched by the fixture definition pytest resolved for them, else by name.
+- **A test file skipped as it loads.** `pytest.skip(allow_module_level=True)` and
+  `pytest.importorskip` skip a file's collection, which said no skip: the file ran zero of zero
+  tests and passed whole in a run that failed. Now a skipped collection is one skip of its unit.
