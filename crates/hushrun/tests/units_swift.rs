@@ -1259,3 +1259,53 @@ fn a_signal_after_swift_ended_ends_hushruns_swift() {
     assert_eq!(status.signal(), Some(15), "{status:?}");
     assert!(took < std::time::Duration::from_secs(5), "{took:?}");
 }
+
+// covers: C-48
+#[test]
+fn a_target_built_with_a_local_packages_plugin_reads_its_package_whole_end_to_end() {
+    let Some(swift) = swift() else {
+        tools("Swift 6", false);
+        return;
+    };
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", ".build/\n"),
+        file(
+            "Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Root\", dependencies: [.package(path: \"LocalPlug\")], targets: [\n  .target(name: \"Lib\", plugins: [.plugin(name: \"P\", package: \"LocalPlug\")]),\n  .target(name: \"Other\"),\n  .testTarget(name: \"LibTests\", dependencies: [\"Lib\"]),\n])\n",
+        ),
+        file("Sources/Lib/Lib.swift", "public let lib = 1\n"),
+        file("Sources/Other/Other.swift", "public let other = 1\n"),
+        file(
+            "Tests/LibTests/LibTests.swift",
+            "import XCTest\n@testable import Lib\n\nfinal class LibTests: XCTestCase {\n    func testLib() { XCTAssertEqual(lib, 1) }\n}\n",
+        ),
+        file(
+            "LocalPlug/Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"LocalPlug\", products: [.plugin(name: \"P\", targets: [\"P\"])], targets: [.plugin(name: \"P\", capability: .buildTool())])\n",
+        ),
+        file(
+            "LocalPlug/Plugins/P/plugin.swift",
+            "import PackagePlugin\n\n@main struct P: BuildToolPlugin {\n    func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] { [] }\n}\n",
+        ),
+    ];
+    let r = Repo::new(&swift, &files);
+    let first = r.run(SWIFT_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    let reads: Vec<String> = map["units"]["Tests/LibTests"]["reads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{map:#}"))
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    // Lib is built with LocalPlug's plugin: its package is read whole, a target no test depends
+    // on included, and so is the plugin's own code.
+    for path in [
+        "Sources/Other/Other.swift",
+        "LocalPlug/Plugins/P/plugin.swift",
+        "Sources/Lib/Lib.swift",
+    ] {
+        assert!(reads.contains(&path.to_string()), "{path}: {reads:?}");
+    }
+}
