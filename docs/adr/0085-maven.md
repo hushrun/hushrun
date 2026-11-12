@@ -161,6 +161,17 @@ every module that depends on it, and a test there was reused after a test class 
 The decision: the test-jar dependencies (type `test-jar` or classifier `tests`, of any scope) of
 the module and of every module it depends on, to the end, add those modules' test roots.
 
+Amendment 2 followed a plugin's dependencies and the compiler's `annotationProcessorPaths` only. A
+module that another uses only through a plugin's configuration (the dependency plugin's `copy` or
+`unpack` of `artifactItems`; the same shape in assembly, shade, exec or antrun) was read by none of
+that module's tests, and a test that runs the copied jar was reused after the module changed. The
+decision: every reactor module a plugin's configuration names, anywhere in its tree, on the plugin
+or in any execution, as Maven merged it with the parents' `pluginManagement` (an element with a
+`groupId` and an `artifactId`, or a value `groupId:artifactId[:…]`), joins the module's closure.
+Still not modelled, and so a test that reaches another module that way is reused when that module
+changes: a path to another module's `target/` written by hand in a configuration or a test, and a
+script or a test that builds or reads another module by itself.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0

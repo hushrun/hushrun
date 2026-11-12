@@ -214,6 +214,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   each test JVM as a Java agent that says how the JVM ended.
 - Maven: a test that reads another module's test classes through a third module's compile-scope
   test-jar dependency now runs when those test classes change.
+- Maven: a module another module uses only through a plugin's configuration, such as the
+  dependency plugin's `copy` of its jar, is now read by that module's tests.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
