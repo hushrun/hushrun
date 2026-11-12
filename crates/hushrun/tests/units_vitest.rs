@@ -1533,10 +1533,11 @@ fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
     );
     let result = r.newest_result();
     assert_eq!(result["result"], "pass");
-    // The tests Vitest told: those of the two files it ran.
+    // \[C-39\] The tests Vitest told, those of the two files it ran, and those this machine knows
+    // of the files reused whole: as the line counts them.
     assert_eq!(
         result["units"]["tests"],
-        json!({"total": 4, "ran": 3, "reused": 1})
+        json!({"total": 9, "ran": 3, "reused": 6})
     );
     // A reused test keeps the row it stands on; flips passed now.
     let map = r.map();

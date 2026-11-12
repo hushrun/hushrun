@@ -503,11 +503,12 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
         line(&second, "hushrun: unit: "),
         "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and so did 2 tests of the others, and 2 more that did run as a check"
     );
-    // Tests are counted where Gradle named them: a class reused whole named none.
+    // \[C-39\] Tests are counted where Gradle named them, and a class reused whole, which Gradle
+    // named none of, by the tests this machine knows of it: every one reused.
     let result = r.newest_result();
     assert_eq!(
         result["units"]["tests"],
-        json!({"total": 6, "ran": 4, "reused": 2})
+        json!({"total": 8, "ran": 4, "reused": 4})
     );
     // A nested class's method was left out too (Gradle 9's filter can't do it; the hook can):
     // of Inner's two, at most the audited one ran.
