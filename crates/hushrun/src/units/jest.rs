@@ -952,4 +952,86 @@ mod tests {
         assert_eq!(line_for(&dir.path().join("jest.config.js")), CJS_LINE);
         assert_eq!(line_for(&dir.path().join("jest.config.mjs")), ESM_LINE);
     }
+
+    fn tree_of(paths: &[&str]) -> Tree {
+        let mut bytes = format!("{}\n", hushrun_core::CANONICALIZATION).into_bytes();
+        let mut paths = paths.to_vec();
+        paths.sort();
+        for path in paths {
+            bytes.extend(format!("f {} {path}\0", "0".repeat(64)).as_bytes());
+        }
+        Tree::from_manifest(&bytes).unwrap()
+    }
+
+    fn facts(value: serde_json::Value) -> FactsFile {
+        serde_json::from_value(value).unwrap()
+    }
+
+    // covers: C-44
+    #[test]
+    fn what_the_main_process_and_the_workers_wrote_comes_to_one_unit_each() {
+        let tree = tree_of(&[
+                "jest.config.js",
+                "babel.config.js",
+                "src/a.ts",
+                "src/b.js",
+                "src/data.json",
+                "test/a.test.ts",
+                "test/b.test.ts",
+                "test/c.test.ts",
+                "test/__snapshots__/a.test.ts.snap",
+        ]);
+        let nothing = || "nothing".to_string();
+        assert_eq!(observe(&[], &tree, None, &nothing).unwrap_err(), "nothing");
+        let main = facts(serde_json::json!({
+            "schema": "hushrun.unit-facts/v1", "adapter": MAIN, "failuresByUnit": true,
+            "settings": {"testFiles": ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"],
+                         "configFiles": ["jest.config.js"], "refused": null},
+            "units": [
+                {"unit": "test/a.test.ts", "selected": 1, "finished": 1},
+                {"unit": "test/b.test.ts", "selected": 1, "finished": 1, "failed": true},
+                {"unit": "test/c.test.ts", "deselected": true},
+            ],
+        }));
+        let worker = facts(serde_json::json!({
+            "schema": "hushrun.unit-facts/v1", "adapter": ADAPTER, "failuresByUnit": true,
+            "settings": {"typeAware": true},
+            "units": [{"unit": "test/a.test.ts", "selected": 1, "finished": 1,
+                       "reads": ["src/a.ts", "src/missing.ts", "test/__snapshots__/a.test.ts.snap"],
+                       "tests": [{"id": "a", "finished": true}]}],
+        }));
+        // Workers without the main process: Jest stopped before its reporter wrote.
+        assert!(observe(&[worker.clone()], &tree, None, &nothing).is_err());
+        assert!(observe(&[main.clone(), main.clone()], &tree, None, &nothing).is_err());
+        let mut broken = main.clone();
+        broken.errors.push("version: this Jest, 28.1.3, isn't one hushrun's adapter knows (29, 30)".into());
+        assert!(observe(&[broken], &tree, None, &nothing).unwrap_err().contains("28.1.3"));
+        let seen = observe(&[main, worker], &tree, Some("jest.config.js"), &nothing).unwrap();
+        let a = &seen.units["test/a.test.ts"];
+        assert!(a.facts.complete && !a.facts.failed && a.facts.not_followed.is_empty());
+        // ts-jest checked types for it: every file of code, and the configs every test file reads;
+        // a path that isn't a file of the scope is left out.
+        assert_eq!(
+            a.reads.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "babel.config.js",
+                "jest.config.js",
+                "src/a.ts",
+                "src/b.js",
+                "test/__snapshots__/a.test.ts.snap",
+                "test/a.test.ts",
+                "test/b.test.ts",
+                "test/c.test.ts"
+            ]
+        );
+        assert_eq!(a.tests.as_ref().unwrap().len(), 1);
+        // Jest ran it and no worker said what it read: not observed, and its failure kept.
+        let b = &seen.units["test/b.test.ts"];
+        assert!(b.facts.failed);
+        assert_eq!(b.facts.not_followed.iter().next().unwrap().why, "unseen");
+        assert!(b.tests.is_none());
+        assert!(seen.units["test/c.test.ts"].facts.deselected);
+        assert_eq!(seen.unit_files.len(), 3);
+    }
+
 }

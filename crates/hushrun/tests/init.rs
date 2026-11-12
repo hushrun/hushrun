@@ -6440,6 +6440,53 @@ fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files(
     assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
 }
 
+// covers: C-15, C-44 (ADR 0082: init proposes the line Jest's config needs where a script replaces
+// NODE_OPTIONS, and writes none)
+#[test]
+fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {
+    let (_server, fake) = Fake::start(true);
+    let package = r#"{
+  "name": "shop",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {"test": "NODE_OPTIONS=--experimental-vm-modules jest"},
+  "devDependencies": {"jest": "^30.5.2"}
+}
+"#;
+    let r = Repo::new(&[
+        ("package.json", package),
+        ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        ("jest.config.cjs", "module.exports = {};\n"),
+    ]);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let line = "jest.config.cjs: add `process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);` as its first line, so that hushrun can look at Jest's test files for test (tests in hushrun.yaml): the script test sets NODE_OPTIONS, which drops hushrun's adapter";
+    assert!(
+        out.stdout.contains("Change by hand:") && out.stdout.contains(line),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(r.read("jest.config.cjs"), "module.exports = {};\n");
+    // With the line there, or a script that keeps what NODE_OPTIONS had, it proposes nothing.
+    r.write(
+        "jest.config.cjs",
+        "process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);\nmodule.exports = {};\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_JEST"), "{}", out.stdout);
+    r.write("jest.config.cjs", "module.exports = {};\n");
+    r.write(
+        "package.json",
+        &package.replace("NODE_OPTIONS=--", "NODE_OPTIONS=\\\"$NODE_OPTIONS --").replace("modules jest", "modules\\\" jest"),
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(!out.stdout.contains("HUSHRUN_JEST"), "{}", out.stdout);
+}
+
 /// \[C-38\] What init says a GitHub job needs, for a backend that keeps no hints.
 const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.v2.sqlite`";
 

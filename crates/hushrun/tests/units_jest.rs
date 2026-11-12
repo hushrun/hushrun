@@ -1523,3 +1523,88 @@ fn jest_projects_snapshots_and_worker_threads() {
         );
     }
 }
+
+// covers: C-44
+#[test]
+fn jest_in_its_es_module_mode_is_observed() {
+    for jest in jests() {
+        let files = vec![
+            file("hushrun.yaml", &yaml("observe")),
+            file(".gitignore", "node_modules\n"),
+            file("package.json", "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n"),
+            file("jest.config.js", "export default { testEnvironment: 'node', transform: {} };\n"),
+            file("src/pricing.js", "export const price = (x) => x * 2;\n"),
+            file("src/cart.js", "import { price } from './pricing.js';\nexport const total = (xs) => xs.reduce((n, x) => n + price(x), 0);\n"),
+            file(
+                "test/cart.test.js",
+                "import { test, expect } from '@jest/globals';\nimport { total } from '../src/cart.js';\ntest('total', () => { expect(total([1, 2])).toBe(6); });\n",
+            ),
+            file(
+                "test/other.test.js",
+                "import { test, expect } from '@jest/globals';\ntest('other', () => { expect(1).toBe(1); });\n",
+            ),
+        ];
+        let r = Repo::new(&jest, &files);
+        let ran = r.run(&[
+            "run",
+            "unit",
+            "--",
+            "node",
+            "--experimental-vm-modules",
+            "node_modules/jest/bin/jest.js",
+            "--ci",
+        ]);
+        assert_eq!(ran.code, 0, "{}", ran.out());
+        assert_eq!(
+            r.reads("test/cart.test.js"),
+            ["jest.config.js", "src/cart.js", "src/pricing.js", "test/cart.test.js"],
+            "Jest {}",
+            jest.major
+        );
+        assert_eq!(r.reads("test/other.test.js"), ["jest.config.js", "test/other.test.js"]);
+    }
+}
+
+// covers: C-44
+#[test]
+fn a_test_file_that_fails_to_load_or_kills_its_worker_is_told() {
+    for jest in jests() {
+        let mut files = shop("observe");
+        files.push(file(
+            "test/broken.test.js",
+            "require('./missing');\ntest('never', () => {});\n",
+        ));
+        files.push(file(
+            "test/crash.test.js",
+            "test('crash', () => { process.kill(process.pid, 'SIGKILL'); });\n",
+        ));
+        let r = Repo::new(&jest, &files);
+        let ran = r.run(&[
+            "run",
+            "unit",
+            "--",
+            "node",
+            "node_modules/jest/bin/jest.js",
+            "--ci",
+            "--maxWorkers=2",
+        ]);
+        assert_ne!(ran.code, 0, "{}", ran.out());
+        let map = r.map();
+        // The worker that ran it died before it said what it read: not observed.
+        assert_eq!(
+            map["units"]["test/crash.test.js"]["notFollowed"],
+            json!(["unseen"]),
+            "Jest {}: {map:#}",
+            jest.major
+        );
+        // A file that fails to load fails, before any of its tests ran.
+        let every = listed(&r);
+        let (code, _, facts) = adapter_jest(&r, json!({"unit": "test", "testFiles": every}), &["broken"]);
+        assert_eq!(code, 1);
+        let unit = unit_of(&facts, "test/broken.test.js");
+        assert_eq!(unit["failed"], true, "{unit:#}");
+        assert_eq!(unit["settings"]["fileFailures"][0]["in"], "collection");
+        let main = main_of(&facts);
+        assert_eq!(main["units"][0]["failed"], true, "{main:#}");
+    }
+}
