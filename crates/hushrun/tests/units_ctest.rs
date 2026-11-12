@@ -2103,3 +2103,116 @@ fn a_signal_during_a_listing_leaves_the_presets_log_as_it_was() {
         "mine\n"
     );
 }
+
+// covers: C-49
+#[test]
+fn each_preset_field_that_chooses_tests_is_kept_when_tests_are_left_out() {
+    for cmake in with_cmake() {
+        let generator = generators(&cmake)[0];
+        let at = format!("CMake {:?}", cmake.version);
+        let mut files = shop("reuse");
+        for (path, text) in &mut files {
+            if path == "CMakeLists.txt" {
+                text.push_str(
+                    "set_tests_properties(price cart_total PROPERTIES LABELS core)\nset_tests_properties(greet PROPERTIES LABELS ui)\n",
+                );
+            }
+        }
+        files.push(file(
+            "CMakePresets.json",
+            r#"{"version": 3,
+                "configurePresets": [{"name": "dev", "binaryDir": "${sourceDir}/build"}],
+                "testPresets": [
+                  {"name": "name", "configurePreset": "dev", "filter": {"include": {"name": "^(cart_total|util)$"}}},
+                  {"name": "label", "configurePreset": "dev", "filter": {"include": {"label": "core"}}},
+                  {"name": "nolabel", "configurePreset": "dev", "filter": {"exclude": {"label": "ui"}}},
+                  {"name": "union", "configurePreset": "dev",
+                   "filter": {"include": {"name": "^greet$", "label": "core", "useUnion": true}}},
+                  {"name": "noname", "configurePreset": "dev", "filter": {"exclude": {"name": "^misc$"}}}
+                ]}"#,
+        ));
+        let p = Project::new(&cmake, generator, &files);
+        let ran = |shim: &Shim| -> Vec<String> {
+            let mut out: Vec<String> = shim
+                .stdout
+                .lines()
+                .filter_map(|l| {
+                    let rest = l.split_once(" Test #")?.1;
+                    let name = rest.split_once(": ")?.1;
+                    Some(name.split(" .").next()?.trim().to_string())
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let unit_tests = |unit: &str| -> Vec<&'static str> {
+            match unit {
+                "t_util" => vec!["util"],
+                "t_price" => vec!["price"],
+                "t_greet" => vec!["greet"],
+                "t_cart" => vec!["cart_empty", "cart_tax", "cart_total"],
+                _ => unreachable!(),
+            }
+        };
+        for (preset, reused) in [
+            ("name", "t_util"),
+            ("label", "t_price"),
+            ("nolabel", "t_util"),
+            ("union", "t_greet"),
+            ("noname", "t_cart"),
+        ] {
+            // What the preset chooses, as plain ctest lists it.
+            let listed = p
+                .tool("ctest")
+                .args(["--preset", preset, "-N"])
+                .output()
+                .unwrap();
+            let chosen: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .filter_map(|l| {
+                    Some(
+                        l.split_once("Test #")?
+                            .1
+                            .split_once(": ")?
+                            .1
+                            .trim()
+                            .to_string(),
+                    )
+                })
+                .collect();
+            let shim = p.shim(
+                &["--preset", preset],
+                json!({"unit": "test", "reuse": [reused]}),
+                Some(shop_plan(&[reused])),
+                &[],
+            );
+            assert_eq!(shim.code, 0, "{at} {preset}\n{}", shim.stdout);
+            // What runs is what the preset chooses, less at most what was left out: never a test
+            // it doesn't choose, never one fewer than it chooses but those of the unit reused.
+            let ran = ran(&shim);
+            let left = unit_tests(reused);
+            for name in &ran {
+                assert!(
+                    chosen.contains(name),
+                    "{at} {preset}: {name} ran\n{}",
+                    shim.stdout
+                );
+            }
+            for name in &chosen {
+                assert!(
+                    ran.contains(name) || left.contains(&name.as_str()),
+                    "{at} {preset}: {name} didn't run\n{}",
+                    shim.stdout
+                );
+            }
+            // Where CTest honours the preset, the unit reused was left out.
+            if !(preset == "union" && cmake.version < (3, 25)) {
+                assert!(
+                    left.iter().all(|t| !ran.contains(&t.to_string())),
+                    "{at} {preset}\n{}",
+                    shim.stdout
+                );
+            }
+        }
+    }
+}
