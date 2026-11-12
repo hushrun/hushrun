@@ -306,15 +306,34 @@ pub(super) fn path_was(value: Option<OsString>) -> Option<Option<OsString>> {
 }
 
 /// The real program named `name`: the first file of that name, executable, in a directory of
-/// `path` that isn't a directory of programs (it holds no [`MARKER`]); on Windows with one of
-/// `PATHEXT`'s extensions, `.exe` and `.com` without it.
+/// `path` that isn't a directory of programs (it holds no [`MARKER`]), and that isn't a link into
+/// one; on Windows with one of `PATHEXT`'s extensions, `.exe` and `.com` without it. As a shell
+/// reads `PATH`, an empty entry is the current directory and a relative one is from it: the real
+/// program is the one COMMAND would have started.
 pub fn real(name: &str, path: &OsStr) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    real_in(name, path, &cwd)
+}
+
+/// [`real`], from the current directory `cwd`.
+fn real_in(name: &str, path: &OsStr, cwd: &Path) -> Option<PathBuf> {
+    let programs = |dir: &Path| dir.join(MARKER).exists();
     for dir in std::env::split_paths(path) {
-        if dir.as_os_str().is_empty() || dir.join(MARKER).exists() {
+        let dir = if dir.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else {
+            cwd.join(dir)
+        };
+        if programs(&dir) {
             continue;
         }
         for candidate in candidates(&dir, name) {
-            if runnable(&candidate) {
+            // A link to one of hushrun's programs would start hushrun again, for ever.
+            let into_programs = std::fs::canonicalize(&candidate)
+                .ok()
+                .and_then(|real| real.parent().map(programs))
+                .unwrap_or(false);
+            if runnable(&candidate) && !into_programs {
                 return Some(candidate);
             }
         }
@@ -392,12 +411,13 @@ fn run_with(
     was: Option<Option<OsString>>,
     units: Option<&Path>,
 ) -> ExitCode {
+    // With no PATH at all nothing is searched (an empty PATH is the current directory).
     let search = match &was {
-        Some(Some(path)) => path.clone(),
-        Some(None) => OsString::new(),
-        None => std::env::var_os("PATH").unwrap_or_default(),
+        Some(Some(path)) => Some(path.clone()),
+        Some(None) => None,
+        None => std::env::var_os("PATH"),
     };
-    let Some(real) = real(name, &search) else {
+    let Some(real) = search.and_then(|search| real(name, &search)) else {
         eprintln!("error: {name}: command not found on PATH");
         return ExitCode::from(127);
     };
@@ -579,6 +599,44 @@ mod tests {
         // A program no PATH holds: 127, as a shell says.
         let gone = run_with("nothere", &[], None, Some(Some(had)), Some(&units));
         assert_eq!(gone, ExitCode::from(127));
+    }
+
+    // covers: C-39
+    #[cfg(unix)]
+    #[test]
+    fn the_real_program_is_the_one_a_shell_would_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let out = root.join("out.txt");
+        // An empty entry of PATH is the current directory, and a relative one is from it.
+        fake_tool(&root.join("here"), "faketool", &out);
+        fake_tool(&root.join("here/rel"), "faketool", &out);
+        let here = root.join("here");
+        assert_eq!(
+            real_in("faketool", OsStr::new(":/nowhere"), &here),
+            Some(here.join("faketool"))
+        );
+        assert_eq!(
+            real_in("faketool", OsStr::new("/nowhere::/usr/bin"), &here),
+            Some(here.join("faketool"))
+        );
+        assert_eq!(
+            real_in("faketool", OsStr::new("rel"), &here),
+            Some(here.join("rel/faketool"))
+        );
+        // hushrun's own directory of programs, however PATH names it, is never the real one;
+        // nor a program that is a link into it.
+        let programs = make(&root.join("run"), Path::new("/opt/hushrun"), &["faketool"]).unwrap();
+        assert_eq!(real_in("faketool", OsStr::new(""), &programs), None);
+        assert_eq!(real_in("faketool", OsStr::new("."), &programs), None);
+        let linked = root.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(programs.join("faketool"), linked.join("faketool")).unwrap();
+        let path = std::env::join_paths([linked.clone(), root.join("here/rel")]).unwrap();
+        assert_eq!(
+            real_in("faketool", &path, &root),
+            Some(root.join("here/rel/faketool"))
+        );
     }
 
     // covers: C-39
