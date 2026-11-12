@@ -641,6 +641,9 @@ fn write_facts(
     settings: BTreeMap<String, serde_json::Value>,
     tests: bool,
 ) {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let file = FactsFile {
         schema: if tests {
             facts::FACTS_SCHEMA_V1
@@ -652,11 +655,11 @@ fn write_facts(
         failures_by_unit: true,
         settings,
         units,
+        // \[C-32\] Each `ctest` is a start of its own, and writes one file: a program counts as
+        // run whole only when each start that ran any of it ran it whole.
+        start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
         ..FactsFile::default()
     };
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
     let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);

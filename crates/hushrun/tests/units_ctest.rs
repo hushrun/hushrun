@@ -772,6 +772,69 @@ fn a_program_or_a_file_a_test_names_is_read_by_its_test_program() {
     }
 }
 
+// covers: C-49, C-32
+#[test]
+fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    // t_u's `a` runs in the first start; its `d` and `c` in the second, where t_v fails first
+    // and --stop-on-failure stops it before `c`, which always fails.
+    let p = Project::new(
+        &cmake,
+        generator,
+        &[
+            file("hushrun.yaml", &yaml("reuse")),
+            file(".gitignore", "build/\n"),
+            file(
+                "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.19)\nproject(two C)\nenable_testing()\n\
+                 add_executable(t_u tests/t_u.c)\nadd_executable(t_v tests/t_v.c)\n\
+                 add_test(NAME a COMMAND t_u a)\nadd_test(NAME d COMMAND t_u d)\n\
+                 add_test(NAME vfail COMMAND t_v)\nadd_test(NAME c COMMAND t_u c)\n\
+                 set_tests_properties(a PROPERTIES LABELS L1)\n\
+                 set_tests_properties(d vfail c PROPERTIES LABELS L2)\n",
+            ),
+            file(
+                "tests/t_u.c",
+                "#include <string.h>\nint main(int argc, char **argv) { return argc > 1 && strcmp(argv[1], \"c\") == 0; }\n",
+            ),
+            file(
+                "tests/t_v.c",
+                "#include <stdlib.h>\nint main(void) { return getenv(\"FAIL_V\") != 0; }\n",
+            ),
+        ],
+    );
+    let line = "ctest --test-dir build -L L1; ctest --test-dir build -L L2 --stop-on-failure -j1";
+    let first = p.run(&["run", "unit", "--", "sh", "-c", line], &[("FAIL_V", "1")]);
+    assert_ne!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(!first.ran().contains(&"c".to_string()), "{}", first.stdout);
+    // Each start ran a share of t_u, and neither ran it whole: it records no pass. t_v failed.
+    assert_eq!(
+        unit_results(&p.cache),
+        ["fail"],
+        "{}\n{}",
+        first.stdout,
+        first.stderr
+    );
+}
+
+/// The result of each unit result this machine recorded, `pass` or `fail`, sorted.
+fn unit_results(cache: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect(&cache.join("results/units/v0"), &mut files);
+    let mut out: Vec<String> = files
+        .iter()
+        .map(|path| {
+            let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            value["result"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 // covers: C-49, C-39
 #[test]
 fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {
