@@ -333,3 +333,16 @@ every test that requires its fixture (to run the cleanup last), so following the
 the test, not for it. In the reviewer's project (21 programs, 5 requiring a `cmake -E` fixture),
 a change to a leaf library ran 6 programs again rather than 10, and a header two include 4 rather
 than 9, as before Amendment 6.
+
+## Amendment 10: the kept listing is taken once, and an unlisted failure (2026-11-12)
+
+Amendment 6 kept the plan's listing for hushrun's `ctest`, but hushrun's `ctest` wrote one too, for
+every start, so a later identical start took the first one's: in `ctest --test-dir build;
+<discovery adds case_bad>; ctest --test-dir build` the second start's listing lacked `case_bad`,
+and the program that failed it kept its pass of the first. Only the plan writes the listing, only
+for COMMAND `ctest …` itself, and hushrun's `ctest` reads it once and removes it: a later start,
+and every start under a wrapper, lists for itself.
+
+A failed case in CTest's JUnit file that names no test of the listing (a discovery script added it
+after the listing ran) is a failure no listed test explains (C-39), of a program that can't be
+told: no unit of that start keeps a pass, said as the adapter's error.

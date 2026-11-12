@@ -148,7 +148,9 @@ impl Recognized {
             at.cwd,
             &root,
             at.assigned,
-            self.dir.get().map(PathBuf::as_path),
+            self.dir
+                .get()
+                .map_or(run::Listing::No, |dir| run::Listing::Keep(dir)),
         )
         .ok()?;
         let built = run::walk(&tests, &root, path, at.assigned);

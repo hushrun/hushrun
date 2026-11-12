@@ -64,7 +64,14 @@ impl program::Program for Ctest {
             }
             Err(Skip::Passthrough) => call.args.to_vec(),
             Err(Skip::Unobserved(why)) => {
-                write_facts(units, Vec::new(), settings_why(&why), false, None);
+                write_facts(
+                    units,
+                    Vec::new(),
+                    settings_why(&why),
+                    false,
+                    None,
+                    Vec::new(),
+                );
                 call.args.to_vec()
             }
         }
@@ -81,6 +88,7 @@ impl program::Program for Ctest {
                 settings_why("ctest was stopped by a signal, so nothing it ran is known"),
                 false,
                 None,
+                Vec::new(),
             );
             return;
         }
@@ -244,7 +252,9 @@ impl Kept {
 
 /// \[ADR 0087\] A listing kept in a run's directory, for the same `ctest`, words and directory: the
 /// plan's, made just before COMMAND `ctest …` starts, which hushrun's `ctest` then needn't make
-/// again (a listing runs the project's discovery scripts, `TEST_INCLUDE_FILES`).
+/// again (a listing runs the project's discovery scripts, `TEST_INCLUDE_FILES`). Only the plan
+/// writes it, only for COMMAND `ctest …` itself, and hushrun's `ctest` reads it once and removes
+/// it: a later start, or one under a wrapper, lists for itself.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct KeptListing {
     schema: String,
@@ -257,9 +267,26 @@ struct KeptListing {
 const KEPT_LISTING: &str = "ctest-listing.v1";
 const KEPT_LISTING_SCHEMA: &str = "hushrun.ctest-listing/v1";
 
+/// What [`listed`] does with the run directory's kept listing.
+#[derive(Debug, Clone, Copy)]
+pub enum Listing<'a> {
+    /// Nothing.
+    No,
+    /// The plan's, for COMMAND `ctest …`: lists, and keeps the listing there.
+    Keep(&'a Path),
+    /// hushrun's `ctest`'s: takes the listing kept there when it is for these words, and removes
+    /// it whatever it holds.
+    Take(&'a Path),
+}
+
 impl KeptListing {
-    fn read(dir: &Path, real: &Path, words: &[String], cwd: &Path) -> Option<Vec<select::Listed>> {
-        let bytes = std::fs::read(dir.join(KEPT_LISTING)).ok()?;
+    /// The kept listing in `dir`, when it is for `real`, `words` and `cwd`; it is removed, so no
+    /// later start takes it.
+    fn take(dir: &Path, real: &Path, words: &[String], cwd: &Path) -> Option<Vec<select::Listed>> {
+        let path = dir.join(KEPT_LISTING);
+        let bytes = std::fs::read(&path).ok();
+        let _ = std::fs::remove_file(&path);
+        let bytes = bytes?;
         let kept: KeptListing = serde_json::from_slice(&bytes).ok()?;
         (kept.schema == KEPT_LISTING_SCHEMA
             && kept.real == real
@@ -306,7 +333,7 @@ pub fn listed(
     cwd: &Path,
     root: &Path,
     assigned: &[(String, String)],
-    kept: Option<&Path>,
+    kept: Listing<'_>,
 ) -> Result<(Vec<Test>, Option<args::Preset>, PathBuf), String> {
     let version = version(real, cwd, assigned)?;
     if version < JUNIT_SINCE {
@@ -331,11 +358,15 @@ pub fn listed(
         .and_then(|p| p.log.as_ref())
         .map(|l| cwd.join(l));
     let words = args::listing(items, &[]);
-    let tests = match kept.and_then(|dir| KeptListing::read(dir, real, &words, cwd)) {
+    let taken = match kept {
+        Listing::Take(dir) => KeptListing::take(dir, real, &words, cwd),
+        Listing::No | Listing::Keep(_) => None,
+    };
+    let tests = match taken {
         Some(tests) => tests,
         None => {
             let tests = list(real, &words, cwd, log.as_deref(), assigned)?;
-            if let Some(dir) = kept {
+            if let Listing::Keep(dir) = kept {
                 KeptListing::write(dir, real, &words, cwd, &tests);
             }
             tests
@@ -510,7 +541,8 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     };
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
-    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[], Some(units))?;
+    let (tests, preset, test_dir) =
+        listed(call.real, &items, &cwd, &root, &[], Listing::Take(units))?;
     if preset.as_ref().is_some_and(|p| p.show_only) {
         return Err(
             "the test preset sets execution.showOnly, and ctest runs no test"
@@ -805,6 +837,26 @@ fn record(p: &Pending) {
         .as_ref()
         .ok()
         .map(|cases| junit::matched(&names, cases));
+    // \[C-39\] A failed test the listing didn't name (one a discovery script added after it): a
+    // failure no listed test explains, of a program that can't be told, so no pass of this start
+    // holds.
+    let unexplained: Vec<String> = read
+        .as_ref()
+        .ok()
+        .and_then(|cases| {
+            let listed: BTreeSet<&str> = p.tests.iter().map(|t| t.listed.name.as_str()).collect();
+            cases
+                .iter()
+                .find(|c| c.outcome == Outcome::Failed && !listed.contains(c.name.as_str()))
+                .map(|c| {
+                    format!(
+                        "ctest ran a test its listing didn't name, {}, which failed: which program it ran can't be told",
+                        c.name
+                    )
+                })
+        })
+        .into_iter()
+        .collect();
     let mut outcome_of: BTreeMap<usize, (Outcome, u64)> = BTreeMap::new();
     if let Some(outcomes) = &outcomes {
         let ran = (0..p.tests.len()).filter(|i| !p.leave.contains(i));
@@ -932,6 +984,7 @@ fn record(p: &Pending) {
         settings,
         p.report_tests,
         stale_build,
+        unexplained,
     );
 }
 
@@ -948,6 +1001,7 @@ fn write_facts(
     settings: BTreeMap<String, serde_json::Value>,
     tests: bool,
     stale_build: Option<String>,
+    errors: Vec<String>,
 ) {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -967,6 +1021,7 @@ fn write_facts(
         // run whole only when each start that ran any of it ran it whole.
         start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
         stale_build,
+        errors,
         ..FactsFile::default()
     };
     let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));

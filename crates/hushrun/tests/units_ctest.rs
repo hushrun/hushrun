@@ -1531,6 +1531,99 @@ fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {
     }
 }
 
+/// A project whose discovery (`TEST_INCLUDE_FILES`) adds a test `t_d` runs for each line of
+/// `build/names.txt`, and `case_bad` too from its `from`th evaluation on; `t_d` fails for
+/// `case_bad`.
+fn discovered(from: u32) -> Vec<(String, String)> {
+    vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "build/\n"),
+        file(
+            "CMakeLists.txt",
+            &format!(
+                "cmake_minimum_required(VERSION 3.19)\nproject(disc C)\nenable_testing()\n\
+                 add_executable(t_d tests/t_d.c)\nadd_executable(t_p tests/t_p.c)\nadd_test(NAME p COMMAND t_p)\n\
+                 file(WRITE ${{CMAKE_BINARY_DIR}}/names.txt \"case_ok\\n\")\n\
+                 file(WRITE ${{CMAKE_BINARY_DIR}}/disc.cmake \"\n\
+                 file(APPEND ${{CMAKE_BINARY_DIR}}/runs.log \\\"run\\\\n\\\")\n\
+                 file(STRINGS ${{CMAKE_BINARY_DIR}}/runs.log runs)\nlist(LENGTH runs n)\n\
+                 file(STRINGS ${{CMAKE_BINARY_DIR}}/names.txt names)\n\
+                 if(n GREATER_EQUAL {from})\n  list(APPEND names case_bad)\nendif()\n\
+                 list(REMOVE_DUPLICATES names)\n\
+                 foreach(name IN LISTS names)\n  add_test(\\${{name}} ${{CMAKE_BINARY_DIR}}/t_d \\${{name}})\nendforeach()\n\")\n\
+                 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES ${{CMAKE_BINARY_DIR}}/disc.cmake)\n"
+            ),
+        ),
+        file(
+            "tests/t_d.c",
+            "#include <string.h>\nint main(int argc, char **argv) { return argc > 1 && strcmp(argv[1], \"case_bad\") == 0; }\n",
+        ),
+        file("tests/t_p.c", "int main(void) { return 0; }\n"),
+    ]
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_listing_is_never_kept_for_a_later_start_of_ctest() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    let p = Project::new(&cmake, generator, &discovered(u32::MAX));
+    // Two starts of the same `ctest`; between them, discovery finds a test that fails.
+    let ran = p.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            "sh",
+            "-c",
+            "ctest --test-dir build; echo case_bad >> build/names.txt; ctest --test-dir build; exit 0",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        ran.stdout.contains("case_bad") && ran.stdout.contains("***Failed"),
+        "{}",
+        ran.stdout
+    );
+    // The second start listed for itself: t_d failed, and its pass of the first start isn't
+    // recorded.
+    assert_eq!(unit_results(&p.cache), ["fail", "pass"], "{}", ran.stderr);
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_failed_test_ctests_listing_didnt_name_keeps_every_pass_of_its_start_out() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    // Discovery adds case_bad from its second evaluation: hushrun's listing is the first, the
+    // run the second.
+    let p = Project::new(&cmake, generator, &discovered(2));
+    let ran = p.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            "sh",
+            "-c",
+            "ctest --test-dir build; exit 0",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        ran.stdout.contains("case_bad") && ran.stdout.contains("***Failed"),
+        "{}",
+        ran.stdout
+    );
+    // Which program the failure is of can't be told: no pass of the start is recorded.
+    assert!(unit_results(&p.cache).is_empty(), "{}", ran.stderr);
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_test_reads_the_programs_of_the_fixtures_and_tests_it_depends_on() {

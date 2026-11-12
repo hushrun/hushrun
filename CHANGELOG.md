@@ -310,6 +310,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   only what its command names, a script of the repository included; and a test no longer reads
   the programs of the other tests that require the same fixture. In a project of 21 programs, a
   change to one library ran 6 again rather than 10.
+- CTest: the plan's listing is taken once, by the `ctest` COMMAND starts, and never by a later
+  start or one under a wrapper, which list for themselves; and a failed test the listing didn't
+  name (one discovery added after it) keeps every pass of its `ctest` out.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build
