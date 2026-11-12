@@ -26,7 +26,9 @@ use serde::Deserialize;
 
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
-use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::adapter::{
+    Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
 use super::facts::{FactsFile, Invocation};
 use super::runner;
 
@@ -55,6 +57,9 @@ pub struct Recognized {
     pub build: Vec<String>,
     /// The packages, as COMMAND names them; none is the package in the directory.
     pub packages: Vec<String>,
+    /// \[ADR 0083\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
+    /// matching, and its tests are reused by package.
+    pub chooses: Option<&'static str>,
 }
 
 /// Build flags `go test` takes with no value, and whether `go list` takes them too because they
@@ -133,12 +138,23 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         dir: None,
         build: Vec::new(),
         packages: Vec::new(),
+        chooses: None,
     };
     let mut words = command[2..].iter();
     let mut first = true;
     while let Some(word) = words.next() {
         let was_first = std::mem::replace(&mut first, false);
         if word == "-args" || word == "--args" {
+            // \[ADR 0083\] What follows goes to each test binary as it is: its own `-test.run`.
+            for word in words.by_ref() {
+                let name = word.trim_start_matches('-');
+                let name = name.split_once('=').map_or(name, |(name, _)| name);
+                match name {
+                    "test.run" => out.chooses = out.chooses.or(Some("-run")),
+                    "test.skip" => out.chooses = out.chooses.or(Some("-skip")),
+                    _ => {}
+                }
+            }
             break;
         }
         let Some(flag) = word.strip_prefix("--").or_else(|| word.strip_prefix('-')) else {
@@ -201,6 +217,11 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             };
             if *listed {
                 out.build.push(format!("-{name}={value}"));
+            }
+            match name {
+                "run" => out.chooses = out.chooses.or(Some("-run")),
+                "skip" => out.chooses = out.chooses.or(Some("-skip")),
+                _ => {}
             }
             continue;
         }
@@ -924,6 +945,395 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// \[ADR 0083\] The longest a test binary's line may be, read as it goes by: past it, what the
+/// binary printed can't be read, and no test of it records a pass.
+const MOST_LINE: usize = 1 << 20;
+/// \[ADR 0083\] The longest `-test.skip` pattern hushrun writes: past it, it leaves out no test.
+const MOST_SKIP: usize = 64 << 10;
+/// \[ADR 0083\] The most a binary's `-test.list` may print.
+const MOST_LIST: usize = 16 << 20;
+
+/// \[ADR 0083\] What a test binary's own arguments, as `go test` gave them, say of its tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BinaryFlags {
+    /// COMMAND chose tests itself (`-run`, `-skip`, `-list`, `-fuzz`, or a `-count` that isn't a
+    /// positive number): which ran is Go's matching, which hushrun doesn't reproduce.
+    pub chooses: bool,
+    /// `-test.v=test2json`, which `go test -json` asks for: Go marks its own lines.
+    pub json: bool,
+    pub failfast: bool,
+    /// `-test.paniconexit0`, which `go test` passes: `os.Exit(0)` in a test is a panic.
+    pub panic_on_exit0: bool,
+}
+
+/// Go's `strconv.ParseBool`, as the `flag` package reads a boolean flag's value.
+fn go_bool(value: Option<&str>) -> Option<bool> {
+    match value {
+        None | Some("1" | "t" | "T" | "true" | "TRUE" | "True") => Some(true),
+        Some("0" | "f" | "F" | "false" | "FALSE" | "False") => Some(false),
+        Some(_) => None,
+    }
+}
+
+/// \[ADR 0083\] What `args`, a test binary's arguments, say of its tests. Every argument is read,
+/// those past the first that isn't a flag too, which `flag` wouldn't parse: a selection anywhere
+/// is a selection.
+pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
+    let mut out = BinaryFlags::default();
+    let mut words = args.iter().map(|a| a.to_string_lossy().into_owned());
+    while let Some(word) = words.next() {
+        let Some(flag) = word.strip_prefix("--").or_else(|| word.strip_prefix('-')) else {
+            continue;
+        };
+        let (name, inline) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (flag, None),
+        };
+        let Some(name) = name.strip_prefix("test.") else {
+            continue;
+        };
+        match name {
+            "run" | "skip" | "list" | "fuzz" => out.chooses = true,
+            "count" => {
+                let value = inline.or_else(|| words.next());
+                if !value
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .is_some_and(|n| n >= 1)
+                {
+                    out.chooses = true;
+                }
+            }
+            "v" => out.json = inline.as_deref() == Some("test2json"),
+            // A malformed boolean stops the binary before any test: no pass either way.
+            "failfast" => out.failfast = go_bool(inline.as_deref()).unwrap_or(true),
+            "paniconexit0" => out.panic_on_exit0 = go_bool(inline.as_deref()).unwrap_or(false),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// \[ADR 0083\] Whether the test binary at `path` has a `TestMain`: the name of the function Go's
+/// test main calls, `<package>.TestMain`, which the binary's own table of function names holds
+/// even when it is stripped. `None` when the binary can't be read. Seen where there is none, it
+/// only costs the package its tests one by one.
+pub fn has_test_main(path: &Path) -> Option<bool> {
+    let bytes = std::fs::read(path).ok()?;
+    let needle = b".TestMain\0";
+    Some(bytes.windows(needle.len()).any(|w| w == needle))
+}
+
+/// \[ADR 0083\] The names a test binary's `-test.list=.` printed, in order: tests, benchmarks,
+/// fuzz targets, examples. `None` when any line isn't a Go identifier: a package's `init` printed
+/// something, and the list can't be told from it.
+pub fn read_listed(stdout: &[u8]) -> Option<Vec<String>> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let first = line.chars().next()?;
+        if first.is_ascii_digit() || !line.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        out.push(line.to_string());
+    }
+    Some(out)
+}
+
+/// \[ADR 0083\] Whether a listed name is a test, as RFC 0004 counts them: a top-level `Test…`,
+/// `Example…` or `Fuzz…` function. Benchmarks aren't.
+pub fn is_test(name: &str) -> bool {
+    ["Test", "Example", "Fuzz"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// \[ADR 0083\] `-test.skip`'s value that leaves out exactly `names`, top-level tests: one
+/// element (no `/`), so Go matches it against top-level names alone, anchored at both ends, each
+/// name quoted as Go's `regexp.QuoteMeta` does.
+pub fn skip_pattern<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let quoted: Vec<String> = names
+        .into_iter()
+        .map(|name| {
+            let mut out = String::with_capacity(name.len());
+            for c in name.chars() {
+                if "\\.+*?()|[]{}^$".contains(c) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+            out
+        })
+        .collect();
+    format!("^({})$", quoted.join("|"))
+}
+
+/// \[ADR 0083\] What the runner knows of a test binary's tests before it starts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestsAt {
+    /// The package, by its directory from the root.
+    pub unit: String,
+    /// Every name the binary listed, benchmarks included.
+    pub listed: BTreeSet<String>,
+    /// Of those, its tests, in the order it listed them.
+    pub tests: Vec<String>,
+    /// The tests hushrun leaves out with `-test.skip`.
+    pub skipped: BTreeSet<String>,
+    pub flags: BinaryFlags,
+}
+
+impl TestsAt {
+    /// The argument that leaves out [`Self::skipped`], when there are any.
+    pub fn skip_arg(&self) -> Option<OsString> {
+        (!self.skipped.is_empty()).then(|| {
+            OsString::from(format!(
+                "-test.skip={}",
+                skip_pattern(self.skipped.iter().map(String::as_str))
+            ))
+        })
+    }
+}
+
+/// \[ADR 0083\] Prepares a start of the test binary at `binary`, of the package `unit`, with
+/// `args`, test by test: `None` when its tests can't be told one by one, and it runs as a package.
+/// `reuse` is what `hushrun.json`'s `reuseTests` lists for the package. `list(extra)` starts the
+/// binary as the run would, with `extra` for arguments, and gives what it printed when it exited
+/// 0. `old` is called when the binary can't leave out a test (a Go before 1.20).
+pub fn prepare(
+    unit: &str,
+    binary: &Path,
+    args: &[OsString],
+    reuse: &[String],
+    list: &mut dyn FnMut(&[&str]) -> Option<Vec<u8>>,
+    old: &mut dyn FnMut(),
+) -> Option<TestsAt> {
+    let flags = binary_flags(args);
+    // COMMAND chose its own tests, or a TestMain would run once more only to list them.
+    if flags.chooses || has_test_main(binary) != Some(false) {
+        return None;
+    }
+    // `-test.skip` is Go 1.20's: a binary from before refuses it, and still lists.
+    let (printed, skips) = match list(&["-test.list=.", "-test.skip=^$"]) {
+        Some(printed) => (printed, true),
+        None => (list(&["-test.list=."])?, false),
+    };
+    if printed.len() > MOST_LIST {
+        return None;
+    }
+    let listed = read_listed(&printed)?;
+    let tests: Vec<String> = listed.iter().filter(|n| is_test(n)).cloned().collect();
+    let mut skipped: BTreeSet<String> = reuse
+        .iter()
+        .filter(|id| tests.contains(id))
+        .cloned()
+        .collect();
+    if !skips && !skipped.is_empty() {
+        old();
+        skipped.clear();
+    }
+    if skip_pattern(skipped.iter().map(String::as_str)).len() > MOST_SKIP {
+        skipped.clear();
+    }
+    Some(TestsAt {
+        unit: unit.to_string(),
+        listed: listed.into_iter().collect(),
+        tests,
+        skipped,
+        flags,
+    })
+}
+
+/// \[ADR 0083\] Go's own summary line, `PASS` or `FAIL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Summary {
+    Pass,
+    Fail,
+}
+
+/// \[ADR 0083\] A test binary's output, read as it goes by: what it named failed, the times it
+/// gave, and whether it ended on Go's own summary.
+#[derive(Debug, Clone, Default)]
+pub struct Output {
+    /// `-test.v=test2json`: Go's own lines start with `\x16`, and its summary must.
+    json: bool,
+    line: Vec<u8>,
+    /// The line being read is longer than hushrun reads.
+    too_long: bool,
+    /// A line was longer than hushrun reads.
+    unreadable: bool,
+    /// The top-level name of everything a `--- FAIL: ` named, wherever in a line.
+    pub failed: BTreeSet<String>,
+    /// A `--- FAIL: ` was seen.
+    pub any_failure: bool,
+    /// Each top-level test's time, from Go's `--- PASS`, `--- FAIL` and `--- SKIP` lines.
+    pub durations: BTreeMap<String, u64>,
+    /// The summary, while nothing but coverage lines came after it.
+    pub summary: Option<Summary>,
+    /// The output ended with a whole line.
+    ended_whole: bool,
+}
+
+impl Output {
+    pub fn new(json: bool) -> Output {
+        Output {
+            json,
+            ended_whole: true,
+            ..Output::default()
+        }
+    }
+
+    /// Reads `bytes`, the next of the binary's output.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut rest = bytes;
+        while let Some(at) = rest.iter().position(|b| *b == b'\n') {
+            if self.too_long {
+                // The end of a line too long to read: the lines after it are read again.
+                self.too_long = false;
+            } else {
+                self.line.extend_from_slice(&rest[..at]);
+                let line = std::mem::take(&mut self.line);
+                self.read_line(&line);
+            }
+            self.line.clear();
+            rest = &rest[at + 1..];
+        }
+        if !self.too_long {
+            if self.line.len() + rest.len() > MOST_LINE {
+                self.too_long = true;
+                self.unreadable = true;
+                self.summary = None;
+                self.line.clear();
+            } else {
+                self.line.extend_from_slice(rest);
+            }
+        }
+        self.ended_whole = rest.is_empty();
+    }
+
+    /// The output ended: a last line with no newline is read for failures, and is no summary.
+    pub fn end(&mut self) {
+        if !self.line.is_empty() {
+            let line = std::mem::take(&mut self.line);
+            self.read_line(&line);
+        }
+        if !self.ended_whole {
+            self.summary = None;
+        }
+    }
+
+    /// Whether everything it printed could be read, and ended on a whole line.
+    pub fn readable(&self) -> bool {
+        !self.unreadable && self.ended_whole
+    }
+
+    fn read_line(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let text = text.strip_suffix('\r').unwrap_or(&text);
+        // Every `--- FAIL: ` names a failure, wherever it is: a test's output with no newline
+        // before Go's line, an example's `got:`, or a test that prints Go's words itself. Reading
+        // too many failures only runs a test again.
+        let mut from = 0;
+        while let Some(at) = text[from..].find("--- FAIL: ") {
+            let start = from + at + "--- FAIL: ".len();
+            self.any_failure = true;
+            self.failed.insert(top_level(&text[start..]));
+            from = start;
+        }
+        let (marked, own) = match text.strip_prefix('\u{16}') {
+            Some(own) => (true, own),
+            None => (false, text),
+        };
+        for word in ["--- PASS: ", "--- FAIL: ", "--- SKIP: "] {
+            if let Some(rest) = own.strip_prefix(word)
+                && let Some((name, time)) = rest.split_once(" (")
+                && !name.contains('/')
+                && let Some(ms) = time
+                    .strip_suffix("s)")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|s| s.is_finite() && *s >= 0.0)
+                    .map(|s| (s * 1000.0).round() as u64)
+            {
+                let entry = self.durations.entry(top_level(name)).or_default();
+                *entry = entry.saturating_add(ms);
+            }
+        }
+        let summary = match own {
+            "PASS" => Some(Summary::Pass),
+            "FAIL" => Some(Summary::Fail),
+            _ => None,
+        };
+        if let Some(summary) = summary
+            && marked == self.json
+        {
+            self.summary = Some(summary);
+        } else if !own.starts_with("coverage: ") {
+            self.summary = None;
+        }
+    }
+}
+
+/// The top-level test of a name Go printed: up to the first character no Go identifier has (a
+/// subtest's `/`, `-test.cpu`'s `-4`, a duplicate's `#01`, the space before the time).
+fn top_level(name: &str) -> String {
+    name.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// \[ADR 0083\] How a test binary ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ended {
+    pub exit: Option<i32>,
+    pub signal: Option<i32>,
+    /// Its output was read to its end.
+    pub read_whole: bool,
+}
+
+/// \[ADR 0083\] Whether a test binary's run ended as Go's test main ends one, so that every test it
+/// ran and didn't name failed passed: its output read to the end, whole and readable, on Go's own
+/// summary (marked, with `-json`) with nothing after it but coverage, and
+///
+/// - `PASS` with exit 0, `os.Exit(0)` in a test being a panic (`-test.paniconexit0`);
+/// - or `FAIL` with exit 1, a `--- FAIL: ` seen, every name a `--- FAIL: ` gave one the binary
+///   listed, and no `-failfast`, which leaves tests unstarted that nothing names.
+pub fn ended_normally(at: &TestsAt, out: &Output, ended: Ended) -> bool {
+    if !ended.read_whole || !out.readable() || ended.signal.is_some() {
+        return false;
+    }
+    if !out.failed.iter().all(|name| at.listed.contains(name)) {
+        return false;
+    }
+    match out.summary {
+        Some(Summary::Pass) => ended.exit == Some(0) && at.flags.panic_on_exit0,
+        Some(Summary::Fail) => ended.exit == Some(1) && out.any_failure && !at.flags.failfast,
+        None => false,
+    }
+}
+
+/// \[ADR 0083\] Each test of a start, as its facts say it (C-39): failed when the output named it
+/// failed; finished when the run [ended normally](ended_normally) and hushrun didn't leave it out;
+/// deselected when hushrun left it out. Its time is the one Go gave it, or 0: without `-v` Go times
+/// only the tests that failed.
+pub fn outcome(at: &TestsAt, out: &Output, ended: Ended) -> Vec<super::facts::TestFacts> {
+    let normal = ended_normally(at, out, ended);
+    at.tests
+        .iter()
+        .map(|id| {
+            let deselected = at.skipped.contains(id);
+            super::facts::TestFacts {
+                id: id.clone(),
+                finished: normal && !deselected,
+                failed: out.failed.contains(id),
+                deselected,
+                duration_ms: out.durations.get(id).copied().unwrap_or(0),
+                ..super::facts::TestFacts::default()
+            }
+        })
+        .collect()
+}
+
 /// \[ADR 0070\] The Go adapter for `go test …` (C-35); `None` for any other COMMAND.
 pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     Some(recognize(command)?.map(|r| Box::new(r) as Box<dyn Adapter>))
@@ -935,11 +1345,24 @@ impl Adapter for Recognized {
     }
 
     fn runner(&self) -> &'static str {
-        "go test"
+        match self.chooses {
+            Some("-run") => "go test -run",
+            Some(_) => "go test -skip",
+            None => "go test",
+        }
     }
 
     fn test_file(&self) -> &'static str {
         "package"
+    }
+
+    /// \[ADR 0083\] Each test one by one, unless COMMAND chooses its tests itself; what each read is
+    /// its package's.
+    fn tests(&self) -> KnowsTests {
+        KnowsTests {
+            unit: self.chooses.is_none(),
+            reads: false,
+        }
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
@@ -987,7 +1410,42 @@ impl Adapter for Recognized {
         if !at.files.iter().any(|f| f.adapter == ADAPTER) {
             return Ok(None);
         }
-        let observed = observe(self, at.files, at.root, at.cwd, at.tree)?;
+        let mut observed = observe(self, at.files, at.root, at.cwd, at.tree)?;
+        // \[ADR 0083\] Tests one by one, as the runner told them (C-39). A package of which the
+        // runner left a test out didn't run whole; one it didn't start, reused whole, left out
+        // every test this machine knows of it.
+        let told = super::facts::merged(at.files, ADAPTER);
+        for (unit, seen) in &mut observed.units {
+            match told.get(unit).and_then(|m| m.tests.clone()) {
+                Some(tests) => {
+                    if tests.values().any(|t| t.deselected) {
+                        seen.facts.complete = false;
+                    }
+                    seen.tests = Some(tests);
+                }
+                None if seen.facts.deselected => {
+                    seen.tests = at
+                        .map
+                        .units
+                        .get(unit)
+                        .filter(|mapped| !mapped.tests.is_empty())
+                        .map(|mapped| {
+                            mapped
+                                .tests
+                                .keys()
+                                .map(|id| {
+                                    let left_out = super::facts::MergedTest {
+                                        deselected: true,
+                                        ..super::facts::MergedTest::default()
+                                    };
+                                    (id.clone(), left_out)
+                                })
+                                .collect()
+                        });
+                }
+                None => {}
+            }
+        }
         let sets = units::classify(
             at.tree.paths(),
             &|path| observed.unit_files.contains(path),

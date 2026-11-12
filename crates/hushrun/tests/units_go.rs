@@ -1037,3 +1037,142 @@ fn with_tests_off_go_test_gets_nothing_new() {
     assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
     assert!(!r.cache.join("units").exists());
 }
+
+// \[ADR 0083\] Tests one by one (C-45): a Go test is a top-level `Test…`, `Example…` or `Fuzz…`
+// function of a package, its id its name.
+
+/// A Go test's body that writes its name to `$RAN_LOG`, outside the repository, so that what ran
+/// is known from the tests themselves, whatever `go test` printed.
+const RAN: &str = "func ran(t testing.TB) {\n\tif p := os.Getenv(\"RAN_LOG\"); p != \"\" {\n\t\tf, _ := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\t\tf.WriteString(t.Name() + \"\\n\")\n\t\tf.Close()\n\t}\n}\n";
+
+/// One package, `cart`, with tests: `TestFlip` fails while `FAIL` is set, `TestOk` while `HIDDEN`
+/// is, which no file says, as a missed dependency would; `TestOne` … `TestFour` always pass;
+/// `body` adds more.
+fn cart(tests: &str, body: &str) -> Vec<(String, String)> {
+    vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file(
+            "cart/cart.go",
+            "package cart\n\nfunc Total(xs []int) int {\n\tn := 0\n\tfor _, x := range xs {\n\t\tn += x\n\t}\n\treturn n\n}\n",
+        ),
+        file(
+            "cart/cart_test.go",
+            &format!(
+                "package cart\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\n\
+                 func TestFlip(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"FAIL\") != \"\" {{\n\t\tt.Fatal(\"flip\")\n\t}}\n}}\n\
+                 func TestOk(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"HIDDEN\") != \"\" {{\n\t\tt.Fatal(\"hidden\")\n\t}}\n}}\n\
+                 func TestOne(t *testing.T) {{ ran(t) }}\n\
+                 func TestTwo(t *testing.T) {{ ran(t) }}\n\
+                 func TestThree(t *testing.T) {{ ran(t) }}\n\
+                 func TestFour(t *testing.T) {{ ran(t) }}\n{body}"
+            ),
+        ),
+    ]
+}
+
+impl Repo {
+    /// `hushrun run unit -- go test <flags> ./...`, with the tests' names written to a log: what
+    /// ran, in order.
+    fn go_tests(&self, flags: &[&str], env: &[(&str, &str)]) -> (Ran, Vec<String>) {
+        let log = self.root.join("ran.log");
+        let _ = std::fs::remove_file(&log);
+        let mut args = vec!["run", "unit", "--", "go", "test"];
+        args.extend(flags);
+        args.push("./...");
+        let log_text = log.display().to_string();
+        let mut env: Vec<(&str, &str)> = env.to_vec();
+        env.push(("RAN_LOG", &log_text));
+        let ran = self.run(&args, &env);
+        let names = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (ran, names)
+    }
+
+    /// The tests of `unit` this machine's store holds, by id, with their last state.
+    fn tests_of(&self, unit: &str) -> Value {
+        self.map()["units"][unit]["tests"].clone()
+    }
+}
+
+fn line<'a>(ran: &'a Ran, start: &str) -> &'a str {
+    ran.stderr
+        .lines()
+        .find(|l| l.starts_with(start))
+        .unwrap_or_else(|| panic!("no line starting {start:?} in:\n{}", ran.stderr))
+}
+
+// covers: C-45, C-39
+#[test]
+fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_one() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let r = Repo::new(&cart(
+        "{mode: reuse, unit: test, ignore: [\"docs/**\"]}",
+        "",
+    ));
+    // The first run, with TestFlip failing: every test runs; the package didn't pass, so each test
+    // is recorded on its own.
+    let (first, ran) = r.go_tests(&[], &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(ran.len(), 6, "{ran:?}");
+    assert_eq!(
+        r.tests_of("cart"),
+        serde_json::json!({"TestFlip": "failed", "TestFour": "passed", "TestOk": "passed",
+                           "TestOne": "passed", "TestThree": "passed", "TestTwo": "passed"})
+    );
+    assert_eq!(
+        r.newest_result()["units"]["tests"],
+        serde_json::json!({"total": 6, "ran": 6, "reused": 0})
+    );
+
+    // The same files, TestFlip still failing: only it runs, and one of the five that passed, as
+    // a check (C-39's audit).
+    let (second, ran) = r.go_tests(&[], &[("FAIL", "1")]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        line(&second, "hushrun: unit: "),
+        "hushrun: unit: 2 of 6 tests run, in 1 of 1 test file; 4 already passed on the files they read, and 1 more that did runs as a check"
+    );
+    assert_eq!(ran.len(), 2, "{ran:?}");
+    assert!(ran.contains(&"TestFlip".to_string()), "{ran:?}");
+    assert_eq!(
+        r.newest_result()["units"]["tests"],
+        serde_json::json!({"total": 6, "ran": 2, "reused": 4})
+    );
+
+    // Fixed: TestFlip runs again, with one more as a check, and passes; a reused test keeps the
+    // row it stands on.
+    let (third, ran) = r.go_tests(&[], &[]);
+    assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
+    assert_eq!(ran.len(), 2, "{ran:?}");
+    assert!(ran.contains(&"TestFlip".to_string()), "{ran:?}");
+    assert_eq!(
+        r.tests_of("cart"),
+        serde_json::json!({"TestFlip": "passed", "TestFour": "passed", "TestOk": "passed",
+                           "TestOne": "passed", "TestThree": "passed", "TestTwo": "passed"})
+    );
+    // Every test has passed on these files: the same files again reuse them all, and the check
+    // skips whole (C-10).
+    let (fourth, ran) = r.go_tests(&[], &[]);
+    assert!(fourth.stderr.contains("unit skipped"), "{}", fourth.stderr);
+    assert!(ran.is_empty(), "{ran:?}");
+    // With the check run again for a file no test reads, every test but one, a check, is reused:
+    // hushrun's runner left five out of the package's binary with -test.skip.
+    r.write("docs/notes.md", "notes\n");
+    let (again, ran) = r.go_tests(&[], &[]);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert_eq!(
+        line(&again, "hushrun: unit: "),
+        "hushrun: unit: 1 of 6 tests run, in 1 of 1 test file; 5 already passed on the files they read, and 1 more that did runs as a check"
+    );
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert_eq!(
+        r.newest_result()["units"]["tests"],
+        serde_json::json!({"total": 6, "ran": 1, "reused": 5})
+    );
+}
