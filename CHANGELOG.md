@@ -6,12 +6,28 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+A test as the unit ([ADR 0077](docs/adr/0077-a-test-as-the-unit.md)): with `tests.unit: test`, a
+check reuses each test of a test file on its own, beside its test files, for pytest. New, and off
+unless a check asks.
+
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
 machine, through a rustc wrapper that `hushrun run` sets. New, and off until a person turns it on.
 
 ### Added
 
+- Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
+  **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
+  a test file whose own key didn't pass has its tests reused one by one, each under a key of its
+  own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
+  that fails runs once more alone. pytest knows tests; Cargo, Go and Vitest reuse by test file and
+  say so once. `reads: test` runs as `reads: file` in this version, and says so once.
+- Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
+  `unit: test`. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
+  adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
+- Contract: this machine's store of what test files read is now
+  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
+  alone. A CI cache step names `*.v2.sqlite`.
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been
   reused, and `on` reuses. `status`, also `hushrun build` alone, shows the mode, the store's
