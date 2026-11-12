@@ -352,6 +352,12 @@ pub trait Adapter: std::fmt::Debug {
     fn why_no_path(&self) -> Option<&'static str> {
         None
     }
+
+    /// \[C-37\] Why a test that last ran here with its test file failing, and didn't fail itself,
+    /// kept no result, when its COMMAND is why (Go without `-v`).
+    fn why_test_not_kept(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[cfg(test)]

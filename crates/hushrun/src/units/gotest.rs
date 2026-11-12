@@ -60,6 +60,8 @@ pub struct Recognized {
     /// \[ADR 0083\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
     /// matching, and its tests are reused by package.
     pub chooses: Option<&'static str>,
+    /// \[ADR 0083, amended\] COMMAND's `-v` or `-json`: Go names each test's outcome.
+    pub names_each: bool,
 }
 
 /// Build flags `go test` takes with no value, and whether `go list` takes them too because they
@@ -139,6 +141,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         build: Vec::new(),
         packages: Vec::new(),
         chooses: None,
+        names_each: false,
     };
     let mut words = command[2..].iter();
     let mut first = true;
@@ -152,6 +155,10 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
                 match name {
                     "test.run" => out.chooses = out.chooses.or(Some("-run")),
                     "test.skip" => out.chooses = out.chooses.or(Some("-skip")),
+                    "test.v" => {
+                        let value = word.split_once('=').map(|(_, v)| v);
+                        out.names_each = value == Some("test2json") || go_bool(value) == Some(true);
+                    }
                     _ => {}
                 }
             }
@@ -202,6 +209,9 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             _ => {}
         }
         if let Some((_, listed)) = BOOL_FLAGS.iter().find(|(n, _)| *n == name) {
+            if name == "v" || name == "json" {
+                out.names_each = go_bool(inline.as_deref()) == Some(true);
+            }
             if *listed {
                 out.build.push(word.clone());
             }
@@ -967,6 +977,9 @@ pub struct BinaryFlags {
     pub chooses: bool,
     /// `-test.v=test2json`, which `go test -json` asks for: Go marks its own lines.
     pub json: bool,
+    /// \[ADR 0083, amended\] `-test.v`, true or `test2json` (`go test -v`, `-json`): Go prints a
+    /// line for each test's outcome, a skip's included.
+    pub names_each: bool,
     pub failfast: bool,
     /// `-test.paniconexit0`, which `go test` passes: `os.Exit(0)` in a test is a panic.
     pub panic_on_exit0: bool,
@@ -1012,7 +1025,10 @@ pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
                     out.chooses = true;
                 }
             }
-            "v" => out.json = inline.as_deref() == Some("test2json"),
+            "v" => {
+                out.json = inline.as_deref() == Some("test2json");
+                out.names_each = out.json || go_bool(inline.as_deref()) == Some(true);
+            }
             // A malformed boolean stops the binary before any test: no pass either way.
             "failfast" => out.failfast = go_bool(inline.as_deref()).unwrap_or(true),
             "paniconexit0" => out.panic_on_exit0 = go_bool(inline.as_deref()).unwrap_or(false),
@@ -1175,6 +1191,9 @@ pub struct Output {
     pub any_failure: bool,
     /// Each top-level test's time, from Go's `--- PASS`, `--- FAIL` and `--- SKIP` lines.
     pub durations: BTreeMap<String, u64>,
+    /// \[C-32\] The top-level name of everything a `--- SKIP: ` line named, a subtest's included:
+    /// Go prints them with `-v` and `-json` only.
+    pub skipped: BTreeSet<String>,
     /// The summary, while nothing but coverage lines came after it.
     pub summary: Option<Summary>,
     /// The output ended with a whole line.
@@ -1251,6 +1270,12 @@ impl Output {
             from = start;
         }
         let own = text.strip_prefix('\u{16}').unwrap_or(text);
+        // A skip, a subtest's indented under its test: part of the test's body didn't run.
+        let indented = text.trim_start();
+        let indented = indented.strip_prefix('\u{16}').unwrap_or(indented);
+        if let Some(rest) = indented.strip_prefix("--- SKIP: ") {
+            self.skipped.insert(top_level(rest));
+        }
         for word in ["--- PASS: ", "--- FAIL: ", "--- SKIP: "] {
             if let Some(rest) = own.strip_prefix(word)
                 && let Some((name, time)) = rest.split_once(" (")
@@ -1339,23 +1364,39 @@ pub fn ended_normally(at: &TestsAt, out: &Output, ended: Ended) -> bool {
 /// failed; finished when the run [ended normally](ended_normally) and hushrun didn't leave it out;
 /// deselected when hushrun left it out. Its time is the one Go gave it, or 0: without `-v` Go times
 /// only the tests that failed.
-pub fn outcome(at: &TestsAt, out: &Output, ended: Ended) -> Vec<super::facts::TestFacts> {
+///
+/// \[ADR 0083, amended\] A binary whose run failed while its output named only the tests that
+/// failed (no `-test.v`): a test that passed can't be told from one that skipped, perhaps because
+/// another failed, so no test it didn't name failed finished, and [`UNNAMED`] says why.
+pub fn outcome(
+    at: &TestsAt,
+    out: &Output,
+    ended: Ended,
+) -> (Vec<super::facts::TestFacts>, Option<&'static str>) {
     let normal = ended_normally(at, out, ended);
-    at.tests
+    let unnamed = normal && out.summary == Some(Summary::Fail) && !at.flags.names_each;
+    let tests = at
+        .tests
         .iter()
         .map(|id| {
             let deselected = at.skipped.contains(id);
             super::facts::TestFacts {
                 id: id.clone(),
-                finished: normal && !deselected,
+                finished: normal && !deselected && (!unnamed || out.failed.contains(id)),
                 failed: out.failed.contains(id),
                 deselected,
                 duration_ms: out.durations.get(id).copied().unwrap_or(0),
+                skipped: !deselected && out.skipped.contains(id),
                 ..super::facts::TestFacts::default()
             }
         })
-        .collect()
+        .collect();
+    (tests, unnamed.then_some(UNNAMED))
 }
+
+/// \[ADR 0083, amended\] Why a package that failed kept no pass of its other tests, which the run
+/// and `hushrun why` say.
+pub const UNNAMED: &str = "a package that failed keeps its other tests' results only when go test names each one: add -v to keep them";
 
 /// \[ADR 0070\] The Go adapter for `go test …` (C-35); `None` for any other COMMAND.
 pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
@@ -1526,6 +1567,10 @@ impl Adapter for Recognized {
         !map.sources.is_empty()
     }
 
+    fn why_test_not_kept(&self) -> Option<&'static str> {
+        (!self.names_each).then_some(UNNAMED)
+    }
+
     fn why_units_are_directories(&self) -> bool {
         true
     }
@@ -1563,13 +1608,14 @@ mod tests {
         assert_eq!(r.dir.as_deref(), Some("sub"));
         assert_eq!(r.build, ["-mod=vendor"]);
         assert_eq!(r.packages, ["."]);
-        assert!(
-            recognize(&words("go test"))
-                .unwrap()
-                .unwrap()
-                .packages
-                .is_empty()
-        );
+        // \[ADR 0083, amended\] Whether Go names each test's outcome: -v or -json.
+        assert!(r.names_each);
+        let plain = recognize(&words("go test")).unwrap().unwrap();
+        assert!(plain.packages.is_empty());
+        assert!(!plain.names_each);
+        assert_eq!(plain.why_test_not_kept(), Some(UNNAMED));
+        let verbose = recognize(&words("go test -v ./...")).unwrap().unwrap();
+        assert_eq!(verbose.why_test_not_kept(), None);
         for refused in [
             "go test -c ./x",
             "go test -exec qemu ./...",
@@ -1745,6 +1791,7 @@ mod tests {
             BinaryFlags {
                 chooses: false,
                 json: true,
+                names_each: true,
                 failfast: true,
                 panic_on_exit0: true,
                 memprofile: false,
@@ -1763,6 +1810,10 @@ mod tests {
             assert!(binary_flags(&os(chooses)).chooses, "{chooses}");
         }
         assert!(!binary_flags(&os("-test.count 3")).chooses);
+        // \[ADR 0083, amended\] Go names each test's outcome with -v and -json, not without.
+        assert!(binary_flags(&os("-test.v=true")).names_each);
+        assert!(!binary_flags(&os("-test.v=false")).names_each);
+        assert!(!binary_flags(&os("-test.paniconexit0")).names_each);
         assert!(!binary_flags(&os("-test.failfast=false")).failfast);
         assert!(!binary_flags(&os("-test.v=true")).json);
         assert!(!binary_flags(&os("-test.paniconexit0=false")).panic_on_exit0);
@@ -1904,6 +1955,13 @@ mod tests {
         assert_eq!(out.durations.get("TestB"), None);
         assert_eq!(out.durations.get("TestC"), Some(&250));
         assert_eq!(out.durations.get("TestD"), Some(&0));
+        // \[C-32\] A skip, a subtest's by its test, with or without -json's mark.
+        assert_eq!(out.skipped.iter().collect::<Vec<_>>(), ["TestD"]);
+        let out = read(
+            true,
+            &[b"=== RUN   TestE\n    \x16--- SKIP: TestE/one (0.00s)\n\x16--- PASS: TestE (0.00s)\n"],
+        );
+        assert_eq!(out.skipped.iter().collect::<Vec<_>>(), ["TestE"]);
         // The summary is the last line but coverage, after output with no newline too.
         assert_eq!(
             read(false, &[b"PASS\ncoverage: 50.0% of statements\n"]).summary,
@@ -1945,6 +2003,7 @@ mod tests {
             skipped: ["TestC".to_string()].into(),
             flags: BinaryFlags {
                 panic_on_exit0: true,
+                names_each: true,
                 ..BinaryFlags::default()
             },
         };
@@ -1956,6 +2015,7 @@ mod tests {
         };
         let facts = |out: &Output, ended: Ended| -> Vec<(String, bool, bool, bool)> {
             outcome(&at, out, ended)
+                .0
                 .into_iter()
                 .map(|t| (t.id, t.finished, t.failed, t.deselected))
                 .collect()
@@ -1971,6 +2031,30 @@ mod tests {
                 row("TestC", false, false, true)
             ]
         );
+        // \[ADR 0083, amended\] Where Go names only what failed (no -v), a run that failed
+        // finishes only what it named, and says why; one that passed is as before.
+        let unnamed = TestsAt {
+            flags: BinaryFlags {
+                names_each: false,
+                ..at.flags
+            },
+            ..at.clone()
+        };
+        let (told, note) = outcome(&unnamed, &fail, ended(1));
+        assert_eq!(
+            told.iter()
+                .map(|t| (t.id.as_str(), t.finished, t.failed))
+                .collect::<Vec<_>>(),
+            [
+                ("TestA", false, false),
+                ("TestB", true, true),
+                ("TestC", false, false)
+            ]
+        );
+        assert_eq!(note, Some(UNNAMED));
+        let (told, note) = outcome(&unnamed, &read(false, &[b"PASS\n"]), ended(0));
+        assert!(told[0].finished && told[1].finished);
+        assert_eq!(note, None);
         // Any other end: the failures named, and nothing finished.
         let nothing = [
             row("TestA", false, false, false),

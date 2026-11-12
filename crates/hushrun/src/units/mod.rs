@@ -937,6 +937,14 @@ impl Session {
         };
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
         observed.left_out = left_out;
+        // \[C-32\] What an adapter's facts say people should know of this run, each said once.
+        let notes: BTreeSet<&str> = files
+            .iter()
+            .filter_map(|f| f.settings.get("note").and_then(|v| v.as_str()))
+            .collect();
+        for note in notes {
+            observed.lines.push(format!("{}: {note}", end.base.check));
+        }
         // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
         // was none. A plan said it already.
         if let (Some(unread), Mode::Observe) = (&loaded.unread, end.mode) {

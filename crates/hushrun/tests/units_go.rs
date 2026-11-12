@@ -1148,9 +1148,10 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
         "{mode: reuse, unit: test, ignore: [\"docs/**\"]}",
         "",
     ));
-    // The first run, with TestFlip failing: every test runs; the package didn't pass, so each test
-    // is recorded on its own.
-    let (first, ran) = r.go_tests(&[], &[("FAIL", "1")]);
+    // With -v, so that Go names each test's outcome: without it, a package that failed keeps no
+    // pass of its other tests (ADR 0083 Amendment 3). The first run, with TestFlip failing: every
+    // test runs; the package didn't pass, so each test is recorded on its own.
+    let (first, ran) = r.go_tests(&["-v"], &[("FAIL", "1")]);
     assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
     assert_eq!(ran.len(), 6, "{ran:?}");
     assert_eq!(
@@ -1165,7 +1166,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
 
     // The same files, TestFlip still failing: only it runs, and one of the five that passed, as
     // a check (C-39's audit).
-    let (second, ran) = r.go_tests(&[], &[("FAIL", "1")]);
+    let (second, ran) = r.go_tests(&["-v"], &[("FAIL", "1")]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
@@ -1180,7 +1181,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
 
     // Fixed: TestFlip runs again, with one more as a check, and passes; a reused test keeps the
     // row it stands on.
-    let (third, ran) = r.go_tests(&[], &[]);
+    let (third, ran) = r.go_tests(&["-v"], &[]);
     assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
     assert_eq!(ran.len(), 2, "{ran:?}");
     assert!(ran.contains(&"TestFlip".to_string()), "{ran:?}");
@@ -1191,13 +1192,13 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     );
     // Every test has passed on these files: the same files again reuse them all, and the check
     // skips whole (C-10).
-    let (fourth, ran) = r.go_tests(&[], &[]);
+    let (fourth, ran) = r.go_tests(&["-v"], &[]);
     assert!(fourth.stderr.contains("unit skipped"), "{}", fourth.stderr);
     assert!(ran.is_empty(), "{ran:?}");
     // With the check run again for a file no test reads, every test but one, a check, is reused:
     // hushrun's runner left five out of the package's binary with -test.skip.
     r.write("docs/notes.md", "notes\n");
-    let (again, ran) = r.go_tests(&[], &[]);
+    let (again, ran) = r.go_tests(&["-v"], &[]);
     assert_eq!(again.code, 0, "{}", again.stderr);
     assert_eq!(
         line(&again, "hushrun: unit: "),
@@ -1332,22 +1333,25 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
     let r = Repo::new(&shapes());
     let all = states("passed", "passed", "passed", "passed", "passed");
     let mid = states("passed", "passed", "passed", "passed", "failed");
+    // Without -v or -json Go names only what failed: a package that failed keeps no other pass.
+    let unnamed = states("not-run", "not-run", "not-run", "not-run", "failed");
     // A binary that ended on Go's own summary, with its exit code: every test it ran passed but
-    // those it named failed, with or without -v or -json, however many times or in whatever
-    // order. Benchmarks aren't tests; a skipped test passed.
+    // those it named failed, however many times or in whatever order, when it passed or Go named
+    // each test (-v, -json). Benchmarks aren't tests; a skipped test passed.
     let cases: &[(&str, &[&str], &Value)] = &[
         ("", &[], &all),
         ("", &["-json"], &all),
-        ("fail", &[], &mid),
+        ("fail", &[], &unnamed),
         ("fail", &["-v"], &mid),
         ("fail", &["-json"], &mid),
-        ("fail", &["-count=2"], &mid),
-        ("fail", &["-shuffle=on", "-parallel=1"], &mid),
-        ("fail", &["-bench=."], &mid),
-        ("parallel", &["-parallel=2"], &mid),
+        ("fail", &["-count=2"], &unnamed),
+        ("fail", &["-count=2", "-v"], &mid),
+        ("fail", &["-shuffle=on", "-parallel=1", "-v"], &mid),
+        ("fail", &["-bench=.", "-v"], &mid),
+        ("parallel", &["-parallel=2", "-v"], &mid),
         ("skip", &[], &all),
         ("short", &["-short"], &all),
-        ("glued-fail", &[], &mid),
+        ("glued-fail", &[], &unnamed),
         ("glued-fail", &["-json"], &mid),
         ("glued-pass", &[], &all),
         ("glued-pass", &["-json"], &all),
@@ -1360,7 +1364,7 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
         assert_eq!(&got, *want, "MODE={mode} {flags:?}\n{}", ran.stderr);
     }
     // A failing example and a fuzz target's failing seed are named, as tests are.
-    let (ran, got) = r.shape(100, "example", &[]);
+    let (ran, got) = r.shape(100, "example", &["-v"]);
     assert_eq!(
         got,
         states("failed", "passed", "passed", "passed", "passed"),
@@ -1382,6 +1386,165 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
         states("passed", "passed", "failed", "passed", "passed"),
         "{}",
         ran.stderr
+    );
+}
+
+/// Two packages: `p`, whose `TestNeeds` skips when `TestBase` failed, which it does unless
+/// `FIXED` is set, and `TestOk`, which passes; and `q1`, `q2`, `q3`, whose one test each passes.
+fn needs() -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            &format!(
+                "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\nvar ready bool\n\nfunc TestBase(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"FIXED\") == \"\" {{\n\t\tt.Fatal(\"base\")\n\t}}\n\tready = true\n}}\n\nfunc TestNeeds(t *testing.T) {{\n\tran(t)\n\tif !ready {{\n\t\tt.Skip(\"no base\")\n\t}}\n}}\n\nfunc TestOk(t *testing.T) {{ ran(t) }}\n"
+            ),
+        ),
+    ];
+    for n in 1..=3 {
+        files.push(file(&format!("q{n}/q.go"), &format!("package q{n}\n")));
+        files.push(file(
+            &format!("q{n}/q_test.go"),
+            &format!(
+                "package q{n}\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\nfunc TestQ{n}(t *testing.T) {{ ran(t) }}\n"
+            ),
+        ));
+    }
+    files
+}
+
+/// What `hushrun run` says when a failed package's other tests weren't kept.
+const UNNAMED: &str = "a package that failed keeps its other tests' results only when go test names each one: add -v to keep them";
+
+// covers: C-32, C-45
+#[test]
+fn a_go_package_that_failed_without_v_keeps_no_pass_of_its_other_tests() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // Without -v Go names only the tests that failed: one that skipped because another failed
+    // can't be told from one that passed, so no test of a package that failed records a pass.
+    let r = Repo::new(&needs());
+    let (first, ran) = r.go_tests(&[], &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(ran.len(), 6, "{ran:?}");
+    assert_eq!(
+        r.tests_of("p"),
+        serde_json::json!({"TestBase": "failed", "TestNeeds": "not-run", "TestOk": "not-run"})
+    );
+    assert_eq!(r.tests_of("q1"), serde_json::json!({"TestQ1": "passed"}));
+    assert_eq!(first.stderr.matches(UNNAMED).count(), 1, "{}", first.stderr);
+    assert!(
+        first.stderr.contains(&format!("hushrun: unit: {UNNAMED}")),
+        "{}",
+        first.stderr
+    );
+    // `hushrun why` gives the same reason.
+    let why = r.run(&["why", "unit", "p::TestOk"], &[]);
+    assert!(
+        why.stdout.contains(UNNAMED) || why.stderr.contains(UNNAMED),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
+    // The same code again: every test of p runs, nothing of it left out; of q1, q2 and q3, which
+    // passed whole, all but the one an audit may run are reused.
+    let (second, ran) = r.go_tests(&[], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    for test in ["TestBase", "TestNeeds", "TestOk"] {
+        assert!(
+            ran.contains(&test.to_string()),
+            "{test}: {ran:?}\n{}",
+            second.stderr
+        );
+    }
+    assert!(ran.len() <= 4, "{ran:?}\n{}", second.stderr);
+}
+
+// covers: C-32, C-45
+#[test]
+fn a_go_package_that_failed_with_v_keeps_the_passes_it_names() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // With -v Go names each test's outcome: the test that passed keeps its pass, the skip in a
+    // run that failed records nothing, and nothing is said.
+    let r = Repo::new(&needs());
+    let (first, _) = r.go_tests(&["-v"], &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.tests_of("p"),
+        serde_json::json!({"TestBase": "failed", "TestNeeds": "not-run", "TestOk": "passed"})
+    );
+    assert!(!first.stderr.contains(UNNAMED), "{}", first.stderr);
+}
+
+// covers: C-32, C-45
+#[test]
+fn a_skip_in_a_go_run_that_failed_records_nothing() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // A skip says the body didn't run: in a run that failed that may be the failure's doing (here
+    // TestNeeds skips when TestSetup failed), so the skipped test records no pass; in a run that
+    // passed, a skip is a pass. Go prints `--- SKIP` with -v and -json.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nvar ready bool\n\nfunc TestSetup(t *testing.T) {\n\tif os.Getenv(\"FIXED\") == \"\" {\n\t\tt.Fatal(\"setup\")\n\t}\n\tready = true\n}\n\nfunc TestNeeds(t *testing.T) {\n\tif !ready {\n\t\tt.Skip(\"no setup\")\n\t}\n}\n\nfunc TestOk(t *testing.T) {}\n",
+        ),
+    ]);
+    for flag in ["-v", "-json"] {
+        let cache = r.root.join(format!("cache{flag}"));
+        let cache_text = cache.display().to_string();
+        let args = ["run", "unit", "--", "go", "test", flag, "./..."];
+        let first = r.run(&args, &[("HUSHRUN_CACHE_DIR", &cache_text)]);
+        assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+        assert_eq!(
+            store::map(&cache)["units"]["p"]["tests"],
+            serde_json::json!({"TestNeeds": "not-run", "TestOk": "passed", "TestSetup": "failed"}),
+            "{flag}"
+        );
+        let second = r.run(&args, &[("HUSHRUN_CACHE_DIR", &cache_text), ("FIXED", "1")]);
+        assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    }
+}
+
+// covers: C-45
+#[test]
+fn what_a_program_a_go_test_left_running_prints_reaches_go_test_and_no_test_of_it_passes() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // The program holds the test binary's output for 6 s: just past the 5 s after the binary's
+    // exit within which its output must end for its tests to pass, and short of Go's own 10 s
+    // timeout, so the test stays as short as it can while still crossing that line.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestStarts(t *testing.T) {\n\tcmd := exec.Command(\"sh\", \"-c\", \"sleep 6; echo late\")\n\tcmd.Stdout = os.Stdout\n\tif err := cmd.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n\nfunc TestOther(t *testing.T) {}\n",
+        ),
+    ]);
+    let ran = r.run(&["run", "unit", "--", "go", "test", "-v", "./..."], &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // go test printed what the program printed, as it does without hushrun.
+    assert!(
+        ran.stdout.contains("late"),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+    assert_eq!(
+        r.map()["units"]["p"]["tests"],
+        serde_json::json!({"TestOther": "not-run", "TestStarts": "not-run"})
     );
 }
 
@@ -1539,9 +1702,10 @@ fn an_audited_go_test_that_fails_again_alone_suspends_the_checks_reuse() {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // With -v: a package that failed keeps its other tests' passes only when Go names each one.
     let r = Repo::new(&files);
-    assert_eq!(r.go_tests(&[], &[("FAIL", "1")]).0.code, 1);
-    let (caught, names) = r.go_tests(&[], &[("HIDDEN", "1")]);
+    assert_eq!(r.go_tests(&["-v"], &[("FAIL", "1")]).0.code, 1);
+    let (caught, names) = r.go_tests(&["-v"], &[("HIDDEN", "1")]);
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         line(&caught, "hushrun: unit: all"),

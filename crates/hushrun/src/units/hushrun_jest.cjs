@@ -167,6 +167,9 @@ function install(S) {
   // Workers write only for the run whose main process claimed the directory (C-32): a Jest a
   // test starts inherits the variables, and its own main process clears this one.
   const runOf = () => process.env.HUSHRUN_JEST_RUN || '';
+  // [C-32] This start of Jest, which its main process names when it claims the run: one id for it
+  // and every worker of it, whatever its projects or --shard; only one start of a run writes.
+  const startOf = () => (process.env.HUSHRUN_JEST_START ? { start: process.env.HUSHRUN_JEST_START } : {});
   S.rel = rel;
   S.note = note;
 
@@ -311,7 +314,12 @@ function install(S) {
                 const abs = (id) => (typeof id === 'string' && (id.startsWith('file:') || path.isAbsolute(id)) ? id : null);
                 const from = rel(abs(referencing && referencing.identifier));
                 const to = rel(abs(m && m.identifier));
-                if (from && to && from !== to) S.session.edge(from, to);
+                if (from && to && from !== to) {
+                  S.session.edge(from, to);
+                  const file = abs(referencing.identifier);
+                  const p = file.startsWith('file:') ? fileURLToPath(file) : file;
+                  if (S.session.watch && reexportSpecs(p).has(specifier)) S.session.reexport(from, to);
+                }
               });
             }
             return m;
@@ -368,16 +376,17 @@ function install(S) {
   // ---------------------------------------------------------------- why a test isn't watched
   const V8_COVERAGE = "Jest's own V8 coverage is on, and it takes the counters watching a test needs";
   const TYPE_AWARE = 'ts-jest checks types with a language service, which reads every file of code for every test file';
-  // The repository file whose code is running: the nearest frame of the stack that is one.
-  function opener() {
+  // [ADR 0082, amended] The repository files whose code is on the stack, nearest first: each may
+  // keep what was opened (a cache in a module above the one that read, or in the test file).
+  function openers() {
     const limit = Error.stackTraceLimit;
     const prepare = Error.prepareStackTrace;
     let frames = [];
     try {
-      Error.stackTraceLimit = 40;
+      Error.stackTraceLimit = 64;
       Error.prepareStackTrace = (_, callSites) => callSites;
       const holder = {};
-      Error.captureStackTrace(holder, opener);
+      Error.captureStackTrace(holder, openers);
       frames = holder.stack || [];
     } catch {
       frames = [];
@@ -385,13 +394,14 @@ function install(S) {
       Error.prepareStackTrace = prepare;
       Error.stackTraceLimit = limit;
     }
+    const out = [];
     for (const frame of Array.isArray(frames) ? frames : []) {
       const name = frame && typeof frame.getFileName === 'function' ? frame.getFileName() : null;
       if (!name || name === __filename) continue;
       const r = rel(name);
-      if (r) return r;
+      if (r && !out.includes(r)) out.push(r);
     }
-    return null;
+    return out;
   }
   // Jest's config files, as the main process that claimed the run found them.
   function everyFromMain() {
@@ -435,6 +445,10 @@ function install(S) {
       this.reads = new Set();
       this.dirs = new Set();
       this.edges = new Map();
+      // [ADR 0082, amended] Imports that re-export: by the importer's text, or its exports holding
+      // the imported module's own objects (a CommonJS barrel); and what each user require returned.
+      this.reexportEdges = new Map();
+      this.exportsOf = new Map();
       this.nf = [];
       this.tests = new Map(); // circus test object -> record
       this.order = [];
@@ -448,6 +462,15 @@ function install(S) {
       this.fileBucket = bucket('file');
       this.current = this.fileBucket;
       this.hooks = [];
+      // [ADR 0082, amended] What failed outside every test: the describe blocks whose afterAll
+      // failed, the errors jest-circus took as theirs, and errors it couldn't attribute (an
+      // uncaught exception, an unhandled rejection: Jest 29 charges one to whatever test runs
+      // when it arrives, which may not be the test that caused it).
+      this.afterAllFailed = [];
+      this.hookErrors = new Set();
+      this.uncaught = 0;
+      this.rejections = new Set();
+      this.circus = null;
       const run = S.run;
       // Leave out tests only when the main process that claimed the run allowed it.
       this.mayDeselect = process.env.HUSHRUN_JEST_DESELECT === '1';
@@ -490,18 +513,19 @@ function install(S) {
     }
     open(r) {
       this.reads.add(r);
-      const who = this.watch ? opener() : null;
+      const whos = this.watch ? openers() : null;
       // Inside a require, held until it ends: Jest reading a module to compile it isn't the
       // test opening it.
       const frame = S.frames[S.frames.length - 1];
-      if (frame) frame.opened.push([r, who]);
-      else this.keep(r, who);
+      if (frame) frame.opened.push([r, whos]);
+      else this.keep(r, whos);
     }
-    // An open that stands: the window's, and the module's whose code opened it. The test file's
-    // own opens are its tests' or its collection's, never every test's.
-    keep(r, who) {
+    // An open that stands: the window's, and each module's whose code was on the stack, the test
+    // file's included: any of them may have kept what it read for a later test that runs its code.
+    keep(r, whos) {
       this.current.opened.add(r);
-      if (who && who !== this.file && who !== r) {
+      for (const who of whos || []) {
+        if (who === r) continue;
         if (!this.opens.has(who)) this.opens.set(who, new Set());
         this.opens.get(who).add(r);
       }
@@ -522,6 +546,27 @@ function install(S) {
     }
     edge(from, to) {
       this.edges.set(`${from}\0${to}`, [from, to]);
+    }
+    reexport(from, to) {
+      this.reexportEdges.set(`${from}\0${to}`, [from, to]);
+    }
+    // [ADR 0082, amended] An import whose module's own objects reappear in the importer's exports
+    // re-exports it (`module.exports = require(…)`, `exports.x = require(…).x`): a wider list is
+    // safe, a narrower one isn't. Getters aren't called: that would run code of the repository's.
+    reexportsByValue() {
+      for (const [from, to] of this.edges.values()) {
+        if (this.reexportEdges.has(`${from}\0${to}`)) continue;
+        const a = this.exportsOf.get(from);
+        const b = this.exportsOf.get(to);
+        if (!a || !b || (typeof a !== 'object' && typeof a !== 'function')) continue;
+        if (a === b) {
+          this.reexport(from, to);
+          continue;
+        }
+        const values = new Set([b]);
+        for (const v of ownValues(b)) values.add(v);
+        if (ownValues(a).some((v) => values.has(v))) this.reexport(from, to);
+      }
     }
     notFollowed(item) {
       this.current.nf.push(item);
@@ -593,6 +638,7 @@ function install(S) {
     }
     handle(event, state) {
       this.sawEvents = true;
+      if (state && typeof state === 'object') this.circus = state;
       switch (event.name) {
         case 'run_start':
           this.sawRunStart = true;
@@ -614,6 +660,12 @@ function install(S) {
           if (event.name === 'hook_failure' && (t === 'beforeAll' || t === 'afterAll')) {
             // A failing beforeAll or afterAll fails the file.
             this.fileFailures.push({ in: t, describe: describePath(event.hook.parent), message: errMessage(event.error) });
+            // jest-circus fails each test under a failing beforeAll, and none under an afterAll:
+            // the tests under that block failed with it, a root-level afterAll's being all.
+            if (t === 'afterAll') {
+              this.afterAllFailed.push(event.hook.parent || event.describeBlock || null);
+              this.hookErrors.add(event.error);
+            }
           }
           if (t === 'beforeAll' || t === 'afterAll') this.switchTo(this.fileBucket);
           break;
@@ -642,12 +694,37 @@ function install(S) {
           this.switchTo(this.fileBucket);
           break;
         }
+        case 'error':
+          // An uncaught exception or unhandled rejection: whose it is can't be told. A
+          // rejection handled later (Jest 30's `error_handled`) is no error.
+          if (event.promise) this.rejections.add(event.promise);
+          else this.uncaught += 1;
+          break;
+        case 'error_handled':
+          this.rejections.delete(event.promise);
+          break;
         case 'run_finish':
           this.switchTo(this.fileBucket);
           for (const e of state.unhandledErrors || []) this.fileFailures.push({ in: 'unhandled', message: errMessage(e) });
           break;
         default:
       }
+    }
+    // [ADR 0082, amended] Each test's outcome as the file ended, not as its test_done said: an
+    // error jest-circus attached to a test after its end (Jest 30 charges a late one to the test
+    // whose code raised it), a failing afterAll above it, and an error no test can be charged with,
+    // after which no test of the file is told as finished.
+    settle() {
+      const unhandled = (this.circus && this.circus.unhandledErrors) || [];
+      const unattributed = this.uncaught > 0 || this.rejections.size > 0
+        || unhandled.some((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      for (const [test, r] of this.tests) {
+        if (r.status === 'passed') {
+          if ((test.errors && test.errors.length) || this.afterAllFailed.some((b) => b && under(test, b))) r.status = 'failed';
+        }
+        if (unattributed) r.unsure = true;
+      }
+      if (unattributed) this.fileFailures.push({ in: 'unattributed', message: 'an error no test can be charged with' });
     }
     finish() {
       if (this.done) return;
@@ -658,6 +735,7 @@ function install(S) {
       for (const b of this.hooks) unitNf.push(...b.nf);
       if (!this.sawEvents) unitNf.push({ why: 'events', detail: "no jest-circus event reached hushrun's adapter (an environment it didn't wrap)" });
       if (this.sawEvents && !this.sawRunStart) this.fileFailures.push({ in: 'collection', message: 'the test file failed before its tests ran' });
+      this.settle();
       // Process-level code: every test file of this process runs it.
       for (const f of S.processFiles) this.reads.add(f);
       const typeAware = S.typeAware || (S.tsJest && !S.tsCompilerSeen);
@@ -692,6 +770,9 @@ function install(S) {
         unit: this.file,
         selected,
         finished,
+        // [C-32] Its tests that finished without their body running (test.skip, describe.skip,
+        // test.todo): in a run that failed, its file records no pass.
+        skipped: records.filter((r) => r.status === 'skipped').length,
         failed,
         deselected: false,
         durationMs: records.reduce((n, r) => n + (r.durationMs || 0), 0),
@@ -723,7 +804,7 @@ function install(S) {
           groups.get(r.id).push(r);
         }
         const place = new Map([...groups.keys()].map((id, i) => [id, i]));
-        const done = (r) => r.status === 'passed' || r.status === 'failed' || r.status === 'skipped';
+        const done = (r) => !r.unsure && (r.status === 'passed' || r.status === 'failed' || r.status === 'skipped');
         unit.tests = [...groups.values()].map((rs) => {
           const r = rs[0];
           if (rs.length > 1 || r.ambiguous) {
@@ -731,6 +812,7 @@ function install(S) {
               id: r.id,
               finished: rs.every(done),
               failed: rs.some((x) => x.status === 'failed'),
+              ...(rs.some((x) => x.status === 'skipped') ? { skipped: true } : {}),
               deselected: false,
               durationMs: rs.reduce((n, x) => n + (x.durationMs || 0), 0),
               notFollowed: this.concurrent ? [] : dedupe(rs.flatMap((x) => x.b.nf)),
@@ -746,6 +828,7 @@ function install(S) {
             notFollowed: this.concurrent ? [] : dedupe(r.b.nf),
           };
           if (r.attempts > 1) out.attempts = r.attempts;
+          if (r.status === 'skipped') out.skipped = true;
           if (lists && !r.concurrent && (r.status === 'passed' || r.status === 'failed')) {
             const dirs = new Set([...r.b.dirs, ...fileDirs]);
             for (const b of this.hooks) if (under(this.order[position.get(r)], b.describe)) for (const d of b.dirs) dirs.add(d);
@@ -780,10 +863,21 @@ function install(S) {
       }
       const opens = {};
       if (lists) for (const [who, set] of this.opens) opens[String(ix(who))] = ixs(set);
+      const reexports = {};
+      if (lists) {
+        guard('reexports', () => this.reexportsByValue());
+        for (const [from, to] of this.reexportEdges.values()) {
+          const k = String(ix(from));
+          (reexports[k] = reexports[k] || []).push(ix(to));
+        }
+        for (const k of Object.keys(reexports)) reexports[k] = [...new Set(reexports[k])].sort((a, b) => a - b);
+      }
+      this.exportsOf.clear();
       S.written += 1;
       writeWhole(`jest-${process.pid}-${wt.threadId}-${S.written}.json`, {
         schema: SCHEMA,
         adapter: 'jest',
+        ...startOf(),
         failuresByUnit: true,
         settings: {
           typeAware,
@@ -795,6 +889,7 @@ function install(S) {
         units: [unit],
         paths: table,
         imports,
+        reexports,
         opens,
         edges: [...this.edges.values()].map(([from, to]) => [from, to, 'import']),
         removedItems: this.leftOut,
@@ -807,6 +902,57 @@ function install(S) {
     for (const i of items) seen.set(`${i.why}\0${i.detail}`, i);
     return [...seen.values()];
   }
+  // The objects and functions an exports object holds as plain values, its getters uncalled.
+  function ownValues(exp) {
+    const out = [];
+    let keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(exp).slice(0, 5000);
+    } catch {
+      return out;
+    }
+    for (const k of keys) {
+      try {
+        const d = Object.getOwnPropertyDescriptor(exp, k);
+        const v = d && 'value' in d ? d.value : undefined;
+        if (v && (typeof v === 'object' || typeof v === 'function')) out.push(v);
+      } catch {
+        // A property that can't be looked at says nothing.
+      }
+    }
+    return out;
+  }
+  // [ADR 0082, amended] The specifiers a repository file re-exports from, by its own text, before
+  // any transform: `export * from`, `export { x } from`, and CommonJS's `module.exports =
+  // require(…)`, `__exportStar(require(…))`, `...require(…)` and `Object.assign(exports, require(…))`.
+  // Text that only looks like one (a string, a comment) only widens a test's list.
+  const REEXPORT_TEXT = [
+    /export\s*(?:type\s+)?(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*(['"])([^'"]+)\1/g,
+    /module\.exports\s*=\s*require\(\s*(['"])([^'"]+)\1\s*\)/g,
+    /__exportStar\(\s*require\(\s*(['"])([^'"]+)\1/g,
+    /\.\.\.\s*require\(\s*(['"])([^'"]+)\1/g,
+  ];
+  const ASSIGN_TEXT = /Object\.assign\(\s*(?:module\.)?exports\s*,([^;]*)/g;
+  const REQUIRE_TEXT = /require\(\s*(['"])([^'"]+)\1/g;
+  const specsCache = new Map();
+  function reexportSpecs(abs) {
+    let out = specsCache.get(abs);
+    if (out) return out;
+    out = new Set();
+    let text = '';
+    try {
+      text = own.readFileSync(abs, 'utf8');
+    } catch {
+      text = '';
+    }
+    if (text.length < 4 << 20) {
+      for (const re of REEXPORT_TEXT) for (const m of text.matchAll(re)) out.add(m[2]);
+      for (const m of text.matchAll(ASSIGN_TEXT)) for (const r of m[1].matchAll(REQUIRE_TEXT)) out.add(r[2]);
+    }
+    if (specsCache.size < 50000) specsCache.set(abs, out);
+    return out;
+  }
+  S.reexportSpecs = reexportSpecs;
 
   // ---------------------------------------------------------------- Jest's parts, found by shape
   const ENV_DONE = Symbol.for('hushrun.jest.env');
@@ -902,7 +1048,7 @@ function install(S) {
       // Jest 29 reads a module in the require around the one that compiles it.
       for (const r of frame.compiled) parent.compiled.add(r);
       parent.opened.push(...kept);
-    } else if (S.session) for (const [r, who] of kept) S.session.keep(r, who);
+    } else if (S.session) for (const [r, whos] of kept) S.session.keep(r, whos);
   }
   function patchRuntime(Runtime) {
     const proto = Runtime.prototype;
@@ -913,6 +1059,7 @@ function install(S) {
       if (typeof original !== 'function') continue;
       const user = name === 'requireModuleOrMock' || name === 'unstable_importModule' || name === 'requireMock';
       proto[name] = function (from, moduleName, ...rest) {
+        let exported = null;
         if (this._testPath && runOf()) {
           guard('session', () => {
             const s = sessionFor(this);
@@ -921,7 +1068,13 @@ function install(S) {
               if (f) {
                 const target = resolveEdge(this, from, moduleName);
                 const to = rel(target);
-                if (to && to !== f) s.edge(f, to);
+                if (to && to !== f) {
+                  s.edge(f, to);
+                  if (s.watch) {
+                    if (reexportSpecs(from).has(moduleName)) s.reexport(f, to);
+                    if (name === 'requireModuleOrMock') exported = to;
+                  }
+                }
                 if (name !== 'requireModule') {
                   for (const m of mockEdges(this, from, moduleName, target)) {
                     const mr = rel(m);
@@ -944,6 +1097,7 @@ function install(S) {
           throw err;
         }
         if (frame) endFrame(frame);
+        if (exported && S.session && S.session.exportsOf.size < 100000) S.session.exportsOf.set(exported, out);
         if (!user) return out;
         if (out && typeof out.then === 'function' && name === 'unstable_importModule') {
           return out.finally(() => { S.userRequire -= 1; });
@@ -1009,6 +1163,7 @@ function install(S) {
     // What the globalSetup window reads and starts is every test file's (C-32).
     S.global = { opened: new Set(), dirs: new Set(), notFollowed: [] };
     process.env.HUSHRUN_JEST_RUN = String(process.pid);
+    process.env.HUSHRUN_JEST_START = `jest-${process.pid}-${S.started}`;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     process.env.HUSHRUN_JEST_WATCH = '0';
     process.env.HUSHRUN_JEST_EVERY = '[]';
@@ -1019,6 +1174,7 @@ function install(S) {
   function notClaimed() {
     // A Jest started inside a test file of the run: neither it nor its workers write.
     delete process.env.HUSHRUN_JEST_RUN;
+    delete process.env.HUSHRUN_JEST_START;
     delete process.env.HUSHRUN_JEST_EVERY;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     S.buffering = false;
@@ -1212,6 +1368,7 @@ function install(S) {
     writeWhole(`jest-main-${process.pid}.json`, {
       schema: SCHEMA,
       adapter: 'jest-main',
+      ...startOf(),
       failuresByUnit: !!results && !results.wasInterrupted && !results.runExecError,
       settings: {
         version: String(S.version || ''),

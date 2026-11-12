@@ -37,6 +37,7 @@ const CLEARED: &[&str] = &[
     "HUSHRUN_JEST_RUN",
     "HUSHRUN_JEST_DESELECT",
     "HUSHRUN_JEST_WATCH",
+    "HUSHRUN_JEST_START",
     "HUSHRUN_INVOKED_BY",
     "HUSHRUN_REPORTS_READ",
     "NODE_OPTIONS",
@@ -481,21 +482,23 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
         assert_eq!(
             map["units"]["test/cart.test.js"]["tests"],
             json!({"cart > one": "passed", "cart > two": "passed", "cart > flips": "failed",
-                   "cart > same": "passed", "cart > same [2]": "passed", "skipped": "passed"}),
+                   "cart > same": "passed", "cart > same [2]": "passed", "skipped": "not-run"}),
             "Jest {}: {map:#}",
             jest.major
         );
         // The flip fixed: each file's own key failed, so their tests are asked one by one; of the
-        // seven that passed, one runs as a check.
+        // six that passed, one runs as a check; the skipped test, which a run that failed recorded
+        // no pass for (C-32), is asked again.
         let second = r.run(JEST_RUN);
         assert_eq!(second.code, 0, "{}", second.out());
         assert_eq!(
             second.line("hushrun: unit: "),
-            "hushrun: unit: 3 of 8 tests run, in 2 of 2 test files; 5 already passed on the files they read, and 1 more that did runs as a check",
+            "hushrun: unit: 4 of 8 tests run, in 2 of 2 test files; 4 already passed on the files they read, and 1 more that did runs as a check",
             "Jest {}",
             jest.major
         );
-        // Jest left out what the plan listed, before any of their hooks, and says so.
+        // Jest left out what the plan listed, before any of their hooks, and says so, beside the
+        // test the file skips itself.
         assert!(
             second.stderr.contains("5 skipped"),
             "Jest {}: {}",
@@ -503,10 +506,130 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
             second.stderr
         );
         let result = store_result(&r);
-        assert_eq!(result["units"]["tests"]["reused"], 5, "{result:#}");
+        assert_eq!(result["units"]["tests"]["reused"], 4, "{result:#}");
         // The same code again: the check skips whole.
         let again = r.run(JEST_RUN);
         assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
+    }
+}
+
+/// Each test's state the store holds for `unit`, by id.
+fn tests_of(r: &Repo, unit: &str) -> serde_json::Map<String, Value> {
+    r.map()["units"][unit]["tests"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+}
+
+// covers: C-39, C-44
+#[test]
+fn a_failing_after_all_or_an_error_no_test_owns_leaves_no_test_of_its_file_passed() {
+    // Each file has a test that always fails, so that its failure is never "unexplained": the
+    // adapter itself must charge the tests under a failing afterAll, and every test of a file in
+    // which an error arrived that no test can be charged with (a timer one test left throws while
+    // another runs: Jest 29 fails the one running, Jest 30 the one that left it).
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/hooks.test.js",
+            "describe('blk', () => {\n  afterAll(() => { throw new Error('block teardown'); });\n  test('one', () => {});\n  test('two', () => {});\n});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+        file(
+            "test/root.test.js",
+            "afterAll(() => { throw new Error('root teardown'); });\ntest('r1', () => {});\ntest('r2', () => {});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+        file(
+            "test/leak.test.js",
+            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+    ];
+    files.push(file("test/fine.test.js", "test('fine', () => {});\n"));
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        let failed = |id: &str| (id.to_string(), json!("failed"));
+        assert_eq!(
+            tests_of(&r, "test/hooks.test.js"),
+            [failed("blk > one"), failed("blk > two"), failed("bad")]
+                .into_iter()
+                .collect(),
+            "Jest {}",
+            jest.major
+        );
+        assert_eq!(
+            tests_of(&r, "test/root.test.js"),
+            [failed("r1"), failed("r2"), failed("bad")]
+                .into_iter()
+                .collect(),
+            "Jest {}",
+            jest.major
+        );
+        let leak = tests_of(&r, "test/leak.test.js");
+        assert_eq!(leak.len(), 4, "{leak:?}");
+        assert!(
+            leak.values().all(|state| state != "passed"),
+            "Jest {}: {leak:?}",
+            jest.major
+        );
+        // The same code again: every one of them runs, and the teardowns and the timer fail again.
+        let second = r.run(JEST_RUN);
+        assert_eq!(second.code, 1, "{}", second.out());
+        for said in ["block teardown", "root teardown", "late timer"] {
+            assert!(
+                second.out().contains(said),
+                "Jest {}: {said}:\n{}",
+                jest.major,
+                second.out()
+            );
+        }
+        assert_eq!(
+            tests_of(&r, "test/hooks.test.js")["blk > one"],
+            "failed",
+            "Jest {}",
+            jest.major
+        );
+    }
+}
+
+// covers: C-32, C-39, C-44
+#[test]
+fn a_skip_in_a_jest_run_that_failed_records_nothing() {
+    // A skip says the body didn't run: in a run that failed that may be the failure's doing, so a
+    // skipped test and its file record no pass; in a run that passed, a skip is a pass.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/a.test.js",
+            "test.skip('skipped', () => {});\ndescribe.skip('box', () => { test('inner', () => {}); });\ntest.todo('later');\ntest('ok', () => {});\ntest('bad', () => { expect(process.env.FIXED).toBeTruthy(); });\n",
+        ),
+    ];
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        assert_eq!(
+            Value::Object(tests_of(&r, "test/a.test.js")),
+            json!({"skipped": "not-run", "box > inner": "not-run", "later": "not-run",
+                   "ok": "passed", "bad": "failed"}),
+            "Jest {}",
+            jest.major
+        );
+        let second = r.run_env(JEST_RUN, &[("FIXED", "1")]);
+        assert_eq!(second.code, 0, "{}", second.out());
+        assert_eq!(
+            Value::Object(tests_of(&r, "test/a.test.js")),
+            json!({"skipped": "passed", "box > inner": "passed", "later": "passed",
+                   "ok": "passed", "bad": "passed"}),
+            "Jest {}",
+            jest.major
+        );
     }
 }
 
@@ -2007,6 +2130,66 @@ fn jest_reads_test_follows_a_file_a_module_read_once_and_kept() {
             ),
         ],
         ("src/price.js", "6\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_file_a_module_above_the_one_that_read_it_kept() {
+    // config.js keeps what fsutil.js's readJson read for it: `target` calls config() and not
+    // readJson, which the first test's call left cached.
+    caught(
+        &[
+            ("src/settings.js", "{\"rate\": 1}\n"),
+            (
+                "src/fsutil.js",
+                "const fs = require('fs');\nexports.readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));\n",
+            ),
+            (
+                "src/config.js",
+                "const path = require('path');\nconst { readJson } = require('./fsutil');\nlet kept;\nexports.config = () => (kept = kept || readJson(path.join(__dirname, 'settings.js')));\n",
+            ),
+            (
+                "test/a.test.js",
+                "const { config } = require('../src/config');\ntest('first', () => { expect(config()).toBeTruthy(); });\ntest('target', () => { expect(config().rate).toBe(1); });\n",
+            ),
+        ],
+        ("src/settings.js", "{\"rate\": 2}\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_file_the_test_file_read_once_and_kept() {
+    caught(
+        &[
+            ("src/local.js", "{\"n\": 1}\n"),
+            (
+                "test/a.test.js",
+                "const fs = require('fs');\nlet local;\nconst mine = () => (local = local || JSON.parse(fs.readFileSync('src/local.js', 'utf8')));\ntest('first', () => { expect(mine()).toBeTruthy(); });\ntest('target', () => { expect(mine().n).toBe(1); });\n",
+            ),
+        ],
+        ("src/local.js", "{\"n\": 2}\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_chain_of_re_exports_to_the_end() {
+    // The test reads rate through two CommonJS barrels, none of whose code runs when it does. The
+    // middle one then points at another file.
+    caught(
+        &[
+            ("src/index.js", "module.exports = require('./sub');\n"),
+            ("src/sub/index.js", "module.exports = require('./impl');\n"),
+            ("src/sub/impl.js", "exports.rate = () => 1;\n"),
+            ("src/sub/impl2.js", "exports.rate = () => 2;\n"),
+            (
+                "test/a.test.js",
+                "const { rate } = require('../src');\ntest('target', () => { expect(rate()).toBe(1); });\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/sub/index.js", "module.exports = require('./impl2');\n"),
     );
 }
 

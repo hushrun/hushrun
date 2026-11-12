@@ -538,12 +538,17 @@ pub fn observe(
     let mut sessions: BTreeMap<String, usize> = BTreeMap::new();
     let mut listed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut type_aware: BTreeSet<String> = BTreeSet::new();
+    // \[C-32\] Each process of Jest runs a test file whole: one start of Jest that runs a file in
+    // two projects ran it whole only when each of them did, which a sum within the start can't say.
+    let mut whole_in_each: BTreeMap<String, bool> = BTreeMap::new();
     let mut failures_by_unit = main.failures_by_unit;
     for worker in &workers {
         failures_by_unit &= worker.failures_by_unit;
         let aware = worker.settings.get("typeAware").and_then(|v| v.as_bool()) == Some(true);
         for unit in &worker.units {
             *sessions.entry(unit.unit.clone()).or_default() += 1;
+            *whole_in_each.entry(unit.unit.clone()).or_insert(true) &=
+                unit.deselected || unit.finished >= unit.selected;
             listed
                 .entry(unit.unit.clone())
                 .or_default()
@@ -579,7 +584,9 @@ pub fn observe(
         let ran = end.as_ref().map_or(0, |e| e.runs);
         let complete = match (&end, &seen) {
             (_, _) if deselected => true,
-            (Some(_), Some(seen)) => seen.complete,
+            (Some(_), Some(seen)) => {
+                seen.complete && whole_in_each.get(&unit).copied().unwrap_or(true)
+            }
             // Jest ran it, and no worker said what it read.
             (Some(end), None) => end.finished >= end.selected,
             // A worker ran it, and Jest's main process never heard how it ended.
@@ -592,10 +599,12 @@ pub fn observe(
             });
         }
         let mut failed = end.as_ref().is_some_and(|e| e.failed);
+        let mut skipped = false;
         let mut tests = None;
         let mut duration_ms = end.as_ref().map_or(0, |e| e.duration_ms);
         if let Some(seen) = seen {
             failed |= seen.failed;
+            skipped = seen.skipped > 0;
             reads.extend(seen.reads);
             not_followed.extend(seen.not_followed);
             tests = seen.tests;
@@ -618,6 +627,7 @@ pub fn observe(
                     failed,
                     not_followed,
                     deselected,
+                    skipped,
                     ..Facts::default()
                 },
                 reads,
@@ -1042,5 +1052,44 @@ mod tests {
         assert!(b.tests.is_none());
         assert!(seen.units["test/c.test.ts"].facts.deselected);
         assert_eq!(seen.unit_files.len(), 3);
+    }
+
+    // covers: C-32
+    #[test]
+    fn a_test_file_two_projects_of_one_start_ran_ran_whole_only_when_each_did() {
+        let tree = tree_of(&["jest.config.js", "test/a.test.js"]);
+        let nothing = || "nothing".to_string();
+        let main = facts(serde_json::json!({
+            "schema": "hushrun.unit-facts/v1", "adapter": MAIN, "failuresByUnit": true,
+            "start": "s",
+            "settings": {"testFiles": ["test/a.test.js"], "configFiles": [], "refused": null},
+            "units": [
+                {"unit": "test/a.test.js", "selected": 2, "finished": 2},
+                {"unit": "test/a.test.js", "selected": 2, "finished": 2},
+            ],
+        }));
+        let worker = |finished: u64, skipped: u64| {
+            facts(serde_json::json!({
+                "schema": "hushrun.unit-facts/v1", "adapter": ADAPTER, "failuresByUnit": true,
+                "start": "s",
+                "units": [{"unit": "test/a.test.js", "selected": 2, "finished": finished,
+                           "skipped": skipped, "reads": []}],
+            }))
+        };
+        // One project's process finished both tests, the other's one: summed within the start
+        // that is two of two, but the file didn't run whole in the second.
+        let seen = observe(
+            &[main.clone(), worker(2, 0), worker(1, 0)],
+            &tree,
+            None,
+            &nothing,
+        )
+        .unwrap();
+        assert!(!seen.units["test/a.test.js"].facts.complete);
+        let seen = observe(&[main, worker(2, 1), worker(2, 0)], &tree, None, &nothing).unwrap();
+        let a = &seen.units["test/a.test.js"].facts;
+        assert!(a.complete);
+        // A skipped test in either: in a run that failed, the file records no pass.
+        assert!(a.skipped);
     }
 }
