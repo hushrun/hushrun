@@ -142,6 +142,12 @@ pub struct FactsFile {
     /// that ran its code (RFC 0003 §3.3, C-40).
     #[serde(default)]
     pub opens: BTreeMap<String, Vec<usize>>,
+    /// \[C-32\] The start of the runner this process belongs to: one id for every process of one
+    /// start (pytest's controller and its xdist workers, one `ctest`, one Jest and its workers),
+    /// another for each other start. A unit's tests are counted within a start and never summed
+    /// across starts ([`merged`]). Files that say none are one start, as before.
+    #[serde(default)]
+    pub start: Option<String>,
 }
 
 impl FactsFile {
@@ -354,8 +360,14 @@ pub fn read_all(dir: &Path) -> Option<Vec<FactsFile>> {
     reason = "`loaded` and `shared` are what `reads: test` reads"
 )]
 pub struct Merged {
+    /// The most any process selected, and the tests every process finished, over every start:
+    /// what they say, never whether it ran whole (`complete`).
     pub selected: u64,
     pub finished: u64,
+    /// \[C-32\] It ran whole: in every start that selected any of it, its processes finished as
+    /// many as the most any of them selected (pytest-xdist's workers each select all and run a
+    /// share). Never summed across starts.
+    pub complete: bool,
     pub failed: bool,
     pub deselected: bool,
     pub duration_ms: u64,
@@ -501,8 +513,14 @@ pub fn watches(files: &[FactsFile]) -> Watches {
     out
 }
 
-/// \[ADR 0077\] Merges one process's tests of a unit into `into`.
-fn merge_tests(into: &mut BTreeMap<String, MergedTest>, file: &FactsFile, tests: &[TestFacts]) {
+/// \[ADR 0077\] Merges one process's tests of a unit into `into`. `running` holds the ids of the
+/// tests a process before this one reported without deselecting them.
+fn merge_tests(
+    into: &mut BTreeMap<String, MergedTest>,
+    running: &mut BTreeSet<String>,
+    file: &FactsFile,
+    tests: &[TestFacts],
+) {
     let list = |indices: &Option<Vec<usize>>| indices.as_ref().and_then(|i| file.resolve(i));
     for test in tests {
         let first = !into.contains_key(&test.id);
@@ -510,7 +528,16 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, file: &FactsFile, tests:
             deselected: true,
             ..MergedTest::default()
         });
-        merged.finished |= test.finished;
+        // \[C-32\] It finished only when every process that reported it, and didn't deselect it,
+        // finished it: a pytest-xdist worker reports only the tests it ran or deselected, and two
+        // starts that both ran it must both have finished it.
+        if !test.deselected {
+            merged.finished = if running.insert(test.id.clone()) {
+                test.finished
+            } else {
+                merged.finished && test.finished
+            };
+        }
         merged.failed |= test.failed;
         merged.deselected &= test.deselected;
         merged.never_left_out |= test.never_left_out;
@@ -536,9 +563,15 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, file: &FactsFile, tests:
     }
 }
 
-/// The units of `adapter`'s files, merged across its processes (C-32).
+/// The units of `adapter`'s files, merged across its processes (C-32). Within one start
+/// ([`FactsFile::start`]) a unit's `selected` is the most any process says and its `finished`
+/// the sum, as pytest-xdist's workers need; across starts it ran whole (`complete`) only when it
+/// did in every start that selected any of it, and it failed when it failed in any.
 pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
     let mut out: BTreeMap<String, Merged> = BTreeMap::new();
+    // Per unit, per start: the most selected and the sum finished.
+    let mut by_start: BTreeMap<String, BTreeMap<Option<&str>, (u64, u64)>> = BTreeMap::new();
+    let mut running: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in files
         .iter()
         .filter(|f| f.adapter == adapter && !f.controller)
@@ -558,6 +591,13 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
             });
             merged.selected = merged.selected.max(unit.selected);
             merged.finished = merged.finished.saturating_add(unit.finished);
+            let counted = by_start
+                .entry(unit.unit.clone())
+                .or_default()
+                .entry(file.start.as_deref())
+                .or_default();
+            counted.0 = counted.0.max(unit.selected);
+            counted.1 = counted.1.saturating_add(unit.finished);
             merged.failed |= unit.failed;
             // \[ADR 0069\] A process that ran it, as one the plan doesn't speak for may, outweighs one
             // that deselected it.
@@ -571,7 +611,12 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
             merged.failures_by_unit &= file.failures_by_unit;
             // \[ADR 0077\] Tests, and what loading it and its shared setups touched (C-39).
             if let Some(tests) = &unit.tests {
-                merge_tests(merged.tests.get_or_insert_with(BTreeMap::new), file, tests);
+                merge_tests(
+                    merged.tests.get_or_insert_with(BTreeMap::new),
+                    running.entry(unit.unit.clone()).or_default(),
+                    file,
+                    tests,
+                );
             }
             if let Some(loaded) = &unit.loaded {
                 match file.resolve(&loaded.ran).zip(file.resolve(&loaded.opened)) {
@@ -599,6 +644,13 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
                 }
             }
         }
+    }
+    for (unit, merged) in &mut out {
+        merged.complete = by_start
+            .get(unit)
+            .into_iter()
+            .flat_map(BTreeMap::values)
+            .all(|(selected, finished)| finished >= selected);
     }
     out
 }
@@ -729,6 +781,82 @@ mod tests {
             "pytest",
         );
         assert!(both["tests/test_a.py"].deselected);
+    }
+
+    /// Whether the merged unit ran whole, as an adapter that uses [`merged`] reads it.
+    fn ran_whole(m: &Merged) -> bool {
+        m.complete
+    }
+
+    fn started(start: Option<&str>, units: Vec<UnitFacts>) -> FactsFile {
+        let mut file: FactsFile = serde_json::from_value(serde_json::json!({
+            "schema": FACTS_SCHEMA,
+            "adapter": "ctest",
+            "failuresByUnit": true,
+            "start": start,
+        }))
+        .unwrap();
+        file.units = units;
+        file
+    }
+
+    // covers: C-32
+    #[test]
+    fn completeness_is_never_summed_across_separate_starts() {
+        // `ctest -L L1; ctest -L L2 --stop-on-failure`: the first start selected one test of the
+        // program and finished it, the second selected two and stopped after one. Summed, two of
+        // two finished; one of the second's never ran.
+        let first = started(Some("a"), vec![unit("prog", 1, 1, &[])]);
+        let second = started(Some("b"), vec![unit("prog", 2, 1, &[])]);
+        let m = merged(&[first.clone(), second], "ctest");
+        assert!(!ran_whole(&m["prog"]));
+        // Two pytest-xdist workers of one start: each selected all three and ran a share.
+        let w1 = started(Some("x"), vec![unit("t.py", 3, 2, &[])]);
+        let w2 = started(Some("x"), vec![unit("t.py", 3, 1, &[])]);
+        assert!(ran_whole(&merged(&[w1.clone(), w2.clone()], "ctest")["t.py"]));
+        // A start complete in every start that selected any of it, and one that selected none.
+        let none = started(Some("y"), vec![unit("t.py", 0, 0, &[])]);
+        assert!(ran_whole(&merged(&[w1.clone(), w2.clone(), none], "ctest")["t.py"]));
+        let short = started(Some("z"), vec![unit("t.py", 3, 2, &[])]);
+        assert!(!ran_whole(&merged(&[w1.clone(), w2.clone(), short], "ctest")["t.py"]));
+        // Files that say no start are one start, as before.
+        let n1 = started(None, vec![unit("t.py", 3, 2, &[])]);
+        let n2 = started(None, vec![unit("t.py", 3, 1, &[])]);
+        assert!(ran_whole(&merged(&[n1, n2], "ctest")["t.py"]));
+        // It failed when it failed in any.
+        let mut failing = unit("prog", 1, 1, &[]);
+        failing.failed = true;
+        let m = merged(&[first, started(Some("b"), vec![failing])], "ctest");
+        assert!(m["prog"].failed && ran_whole(&m["prog"]));
+    }
+
+    // covers: C-32, C-39
+    #[test]
+    fn a_test_finished_only_when_every_process_that_ran_it_finished_it() {
+        let told = |tests: serde_json::Value| -> FactsFile {
+            serde_json::from_value(serde_json::json!({
+                "schema": FACTS_SCHEMA_V1,
+                "adapter": "pytest",
+                "failuresByUnit": true,
+                "units": [{"unit": "t.py", "selected": 1, "finished": 1, "tests": tests}],
+            }))
+            .unwrap()
+        };
+        // Two starts ran it: one finished it, one stopped inside it.
+        let done = told(serde_json::json!([{"id": "a", "finished": true}]));
+        let cut = told(serde_json::json!([{"id": "a", "finished": false}]));
+        let m = merged(&[done.clone(), cut], "pytest");
+        assert!(!m["t.py"].tests.as_ref().unwrap()["a"].finished);
+        // pytest-xdist: a worker that deselected it says nothing of whether it finished.
+        let gone = told(serde_json::json!([{"id": "a", "deselected": true}]));
+        let m = merged(&[gone.clone(), done.clone()], "pytest");
+        let a = &m["t.py"].tests.as_ref().unwrap()["a"];
+        assert!(a.finished && !a.deselected);
+        let m = merged(&[done, gone.clone()], "pytest");
+        assert!(m["t.py"].tests.as_ref().unwrap()["a"].finished);
+        let m = merged(&[gone.clone(), gone], "pytest");
+        let a = &m["t.py"].tests.as_ref().unwrap()["a"];
+        assert!(!a.finished && a.deselected);
     }
 
     // covers: C-32

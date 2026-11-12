@@ -124,6 +124,13 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   with reuse on against 35,164 MB without, while a further checkout built in about 23 s against
   74 to 87 s. Not tested: x86-64, other file systems, other linkers, musl.
 
+### Fixed
+
+- Two starts of a test runner in one command, such as two pytests or `ctest -L a; ctest -L b`,
+  no longer add up to a test file that ran whole: a test file's tests are counted within each
+  start, and one of whose tests never ran records no pass. An adapter's facts may say `start`;
+  pytest sends it. A test told by id finished only when every process that ran it finished it.
+
 ## [0.13.0] - 2026-11-12
 
 Test by test ([ADR 0068](docs/adr/0068-test-files-observed.md) to

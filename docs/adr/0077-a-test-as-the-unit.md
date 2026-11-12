@@ -112,3 +112,20 @@ tests are later decisions; this one leaves them their seams.
 - **Bumping `hushrun.json`'s schema:** an adapter that doesn't read the new fields only runs more;
   a new schema would make every older plugin read nothing.
 - **A fixed list of adapters in the store's CHECK:** every new adapter would need a schema.
+
+## Amendment 1: completeness within one start of the runner (2026-11-12)
+
+Item 7 merged every process of an adapter alike: a unit's `selected` the most any process said,
+its `finished` the sum, which pytest-xdist needs (each worker selects every test and runs a share).
+Reviewers showed it wrong for two separate starts in one COMMAND, `ctest -L L1; ctest -L L2
+--stop-on-failure` or two pytests: one of two, then one of two, summed to a unit that ran whole one
+of whose tests never ran, and its pass was recorded. And a test told by id finished when any
+process finished it, so a start that stopped inside it was outweighed by one that finished it.
+
+The decision: a facts file may say `start`, one id for every process of one start of the runner
+(pytest's controller and its xdist workers, one `ctest`, one Jest and its workers). The sum is
+taken within a start; a unit ran whole only when it did in every start that selected any of it,
+and failed when it failed in any. Files that say none are one start, as before, so an adapter that
+doesn't send it is merged as it was. A test finished only when every process that reported it,
+and didn't deselect it, finished it: an xdist worker reports only the tests it ran or deselected,
+so xdist still merges as it did. pytest sends `start`, its workers taking xdist's `testrunuid`.

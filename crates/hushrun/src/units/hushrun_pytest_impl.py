@@ -81,6 +81,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 
 __all__ = [
     "pytest_collectstart",
@@ -128,6 +129,8 @@ PYTEST_OUTSIDE = "loaded by pytest outside any test file"
 MOST_ERRORS = 20
 CLAIM_FILE = "claim"
 NO_TESTS_COLLECTED = 5
+# [C-32] This start of pytest, which a pytest-xdist worker takes from its controller instead.
+START = uuid.uuid4().hex
 
 
 def _own(fn):
@@ -1291,9 +1294,16 @@ def pytest_sessionfinish(session, exitstatus):
                         "pytest": pytest.__version__}
             if obs.watch_reason:
                 settings["watch"] = obs.watch_reason
+            # [C-32] One start: a worker's is its controller's (xdist's testrunuid, which every
+            # worker of one start has), so tests are counted within it and never across starts.
+            if worker:
+                start = "xdist-%s" % (worker.get("testrunuid") or "parent-%d" % os.getppid())
+            else:
+                start = START
             facts = {
                 "schema": SCHEMA_V1 if obs.by_test else SCHEMA,
                 "adapter": "pytest",
+                "start": start,
                 "pid": os.getpid(),
                 "worker": (worker or {}).get("workerid") if worker else None,
                 "controller": is_controller,

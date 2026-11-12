@@ -577,7 +577,7 @@ pub fn observe(
         let ran = end.as_ref().map_or(0, |e| e.runs);
         let complete = match (&end, &seen) {
             (_, _) if deselected => true,
-            (Some(_), Some(seen)) => seen.finished >= seen.selected,
+            (Some(_), Some(seen)) => seen.complete,
             // Jest ran it, and no worker said what it read.
             (Some(end), None) => end.finished >= end.selected,
             // A worker ran it, and Jest's main process never heard how it ended.

@@ -624,6 +624,34 @@ fn a_test_file_that_would_have_been_reused_and_fails_is_a_disagreement() {
     assert_eq!(store::disagreements(&r.cache()), ["test_flaky.py"]);
 }
 
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn two_starts_of_pytest_in_one_command_never_add_up_to_a_test_file_that_ran_whole() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The first pytest runs test_one; the second selects test_two and test_three, and test_two
+    // ends the session before test_three starts, with exit 0. One of two, then one of two: summed,
+    // two of two finished, and test_three never ran.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_a.py",
+            "import os, pytest\n\ndef test_one():\n    pass\n\ndef test_two():\n    if os.environ.get('STOP'):\n        pytest.exit('stop', returncode=0)\n\ndef test_three():\n    pass\n",
+        ),
+    ]);
+    let python = python();
+    let pytest = format!("{python} -m pytest -q -p no:cacheprovider test_a.py");
+    let line = format!("{pytest} -k test_one && STOP=1 {pytest} -k 'test_two or test_three'");
+    let ran = r.run(&["run", "unit", "--", "sh", "-c", &line], &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(ran.stdout.contains("1 passed"), "{}", ran.stdout);
+    // It didn't run whole: no pass of it is recorded.
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

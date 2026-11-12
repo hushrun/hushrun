@@ -393,7 +393,7 @@ impl Adapter for Pytest {
                 let mut not_followed = m.not_followed;
                 not_followed.extend(guard.clone());
                 let facts = Facts {
-                    complete: m.finished >= m.selected,
+                    complete: m.complete,
                     failed: m.failed,
                     not_followed,
                     deselected: m.deselected,

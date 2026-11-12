@@ -361,7 +361,7 @@ impl Adapter for Recognized {
             }
             named.extend(reads.iter().filter(|f| build::is_source(f)).cloned());
             let facts = Facts {
-                complete: m.finished >= m.selected,
+                complete: m.complete,
                 failed: m.failed,
                 not_followed: m.not_followed,
                 deselected: m.deselected,
