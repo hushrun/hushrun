@@ -171,6 +171,8 @@ struct Project {
     cache: PathBuf,
     cmake: Cmake,
     path: std::ffi::OsString,
+    /// When the last build ended.
+    built: std::cell::Cell<Option<std::time::SystemTime>>,
 }
 
 impl Project {
@@ -200,6 +202,7 @@ impl Project {
             repo,
             cmake: cmake.clone(),
             path,
+            built: std::cell::Cell::new(None),
         };
         for (path, text) in files {
             p.write(path, text);
@@ -244,9 +247,22 @@ impl Project {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        self.built.set(Some(std::time::SystemTime::now()));
     }
 
+    /// Writes a file of the repository, in a later second than the last build: Make 3.81, macOS's,
+    /// compares times by the second, and builds nothing again for a header written in the second
+    /// its object was built.
     fn write(&self, path: &str, text: &str) {
+        if let Some(built) = self.built.get() {
+            let second = |t: std::time::SystemTime| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            };
+            while second(std::time::SystemTime::now()) <= second(built) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         let path = self.repo.join(path);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(path, text).expect("write");
