@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-12
+
 Test by test ([ADR 0068](docs/adr/0068-test-files-observed.md) to
 [ADR 0074](docs/adr/0074-test-files-on-the-dashboard-and-milestone-4s-loose-ends.md)): inside a
 check that has to run, the test files that already passed on the files they read aren't run again.
