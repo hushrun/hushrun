@@ -1603,3 +1603,152 @@ fn a_dependency_on_a_modules_coordinates_at_another_version_reads_that_module() 
         "{map:#}"
     );
 }
+
+// covers: C-32, C-47
+#[test]
+fn a_fork_killed_or_out_of_memory_records_no_pass_for_its_class() {
+    let Some(maven) = maven() else { return };
+    // lib's WhatTest does what `SHOP_WHAT` says, run last of lib; other's three pass.
+    let what = "package shop.lib;\n\nimport org.junit.jupiter.api.*;\n\nclass ZWhatTest {\n  @Test void a() {}\n  @Test void b() throws Exception {\n    String what = System.getenv(\"SHOP_WHAT\");\n    if (\"kill\".equals(what)) new ProcessBuilder(\"kill\", \"-9\", String.valueOf(ProcessHandle.current().pid())).start().waitFor();\n    if (\"oom\".equals(what)) { java.util.List<long[]> all = new java.util.ArrayList<>(); while (true) all.add(new long[1 << 20]); }\n  }\n  @Test void c() {}\n}\n";
+    for case in ["kill", "oom"] {
+        let mut files = shop("observe");
+        files.push(file("lib/src/test/java/shop/lib/ZWhatTest.java", what));
+        let r = Repo::new(&files, maven.clone());
+        let ran = r.run(
+            &[],
+            &[
+                "--fail-at-end",
+                "test",
+                "-Dsurefire.runOrder=alphabetical",
+                "-DargLine=-Xmx16m",
+            ],
+            &[("SHOP_WHAT", case)],
+        );
+        assert_ne!(ran.code, 0, "{case}: {}\n{}", ran.stderr, ran.stdout);
+        let results = r.unit_results();
+        // lib's PriceTest and RoundTest, other's three; ZWhatTest passes nowhere: its fork died,
+        // or its test failed with the error.
+        assert_eq!(
+            results.get("pass"),
+            Some(&5),
+            "{case}: {results:?}\n{}",
+            ran.stdout
+        );
+    }
+}
+
+// covers: C-47
+#[test]
+fn the_modules_that_depend_on_a_module_read_it_under_amd() {
+    let Some(maven) = maven() else { return };
+    let r = Repo::new(&shop("reuse"), maven);
+    let first = r.run(&[], &["-pl", "lib", "-amd", "test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let map = r.map();
+    assert!(
+        map["units"][CART_TEST]["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("lib/src/main/java/shop/lib/Price.java")),
+        "{map:#}"
+    );
+    assert!(map["units"].get(GREET_TEST).is_none(), "{map:#}");
+}
+
+// covers: C-39, C-47
+#[test]
+fn junit4_and_junit5_in_one_module_and_parameterized_through_vintage_are_left_out_one_by_one() {
+    let Some(maven) = maven() else { return };
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(
+            "pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>shop</groupId><artifactId>mixed</artifactId><version>1.0</version>
+  <properties><maven.compiler.release>11</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+  <dependencies>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+    <dependency><groupId>org.junit.vintage</groupId><artifactId>junit-vintage-engine</artifactId><version>5.14.4</version><scope>test</scope></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.11.4</version><scope>test</scope></dependency>
+  </dependencies>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version></plugin></plugins></build>
+</project>
+"#,
+        ),
+        // JUnit 4's Parameterized: `small` fails for one of its invocations, `big` passes.
+        file(
+            "src/test/java/shop/ParamTest.java",
+            "package shop;\n\nimport org.junit.*;\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Parameterized;\nimport java.util.*;\n\n@RunWith(Parameterized.class)\npublic class ParamTest {\n  @Parameterized.Parameters(name = \"{index}: x={0}\") public static Collection<Object[]> data() { return Arrays.asList(new Object[][]{{1},{2},{3}}); }\n  private final int x; public ParamTest(int x) { this.x = x; }\n  @Test public void small() { Assert.assertTrue(x < 3 || System.getenv(\"FAIL\") == null); }\n  @Test public void big() { Assert.assertTrue(x > 0); }\n}\n",
+        ),
+        // JUnit 5 beside it.
+        file(
+            "src/test/java/shop/JupiterTest.java",
+            "package shop;\n\nimport org.junit.jupiter.api.*;\n\nclass JupiterTest {\n  @Test void j() {}\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n}\n",
+        ),
+    ];
+    for n in 1..=9 {
+        files.push(file(
+            &format!("src/test/java/shop/Green{n}Test.java"),
+            &format!("package shop;\n\nimport org.junit.Test;\n\npublic class Green{n}Test {{\n  @Test public void green() {{}}\n}}\n"),
+        ));
+    }
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    assert_eq!(
+        r.map()["units"]["src/test/java/shop/ParamTest.java"]["tests"],
+        serde_json::json!({"big": "passed", "small": "failed"}),
+        "{:#}\n{}",
+        r.map(),
+        first.stdout
+    );
+    let second = r.run(&[], &["test"], &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    // `small` ran, all three invocations; `big` and JupiterTest's `j` were listed (one of them
+    // maybe audited); `flip` ran.
+    let ran = second.ran();
+    assert!(
+        ran.get("shop.ParamTest").copied().unwrap_or(0) >= 3,
+        "{ran:?}"
+    );
+    assert!(
+        ran.get("shop.JupiterTest").copied().unwrap_or(0) >= 1,
+        "{ran:?}"
+    );
+    let reused = r.newest_result()["units"]["tests"]["reused"]
+        .as_u64()
+        .unwrap();
+    assert!(reused >= 1, "{}", second.stderr);
+}
+
+// covers: C-39, C-47
+#[test]
+fn a_projects_own_testng_interceptor_and_the_hooks_leave_out_what_was_listed_only() {
+    let Some(maven) = maven() else { return };
+    // The project's interceptor runs its tests in reverse order, beside the hook's.
+    let files = testng(
+        "{mode: reuse, unit: test}",
+        &[
+            (
+                "src/test/java/ng/Reverse.java",
+                "package ng;\nimport java.util.*;\nimport org.testng.*;\npublic class Reverse implements IMethodInterceptor {\n  public List<IMethodInstance> intercept(List<IMethodInstance> methods, ITestContext context) { List<IMethodInstance> out = new ArrayList<>(methods); Collections.reverse(out); return out; }\n}\n",
+            ),
+            (
+                "src/test/java/ng/OrderTest.java",
+                "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\n@Listeners(Reverse.class)\npublic class OrderTest {\n  @Test public void a() {}\n  @Test public void b() { assertNull(System.getenv(\"FAIL_B\")); }\n  @Test public void flip() { assertNull(System.getenv(\"FLIP\")); }\n}\n",
+            ),
+        ],
+    );
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], &[("FLIP", "1"), ("FAIL_B", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    // `a` is listed; `b` failed, isn't, and runs and fails again.
+    let second = r.run(&[], &["test"], &[("FAIL_B", "1")]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.stdout.contains("ng.OrderTest.b"),
+        "{}",
+        second.stdout
+    );
+}

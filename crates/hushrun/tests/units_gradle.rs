@@ -1728,3 +1728,103 @@ fn kotest_tests_which_cant_be_left_out_are_never_counted_as_reused() {
     assert!(!line.contains("already passed"), "{line}");
     assert_eq!(r.xml_cases(".", "p.NamesSpec").len(), 3);
 }
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_killed_timed_out_or_out_of_memory_records_no_pass_for_its_class() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // app's one class does what `WHAT` says; other's nine green classes are another task's.
+    let what = "package shop.app;\nimport org.junit.jupiter.api.*;\nclass WhatTest {\n  @Test void a() {}\n  @Test void b() throws Exception {\n    String what = System.getenv(\"WHAT\");\n    if (\"kill\".equals(what)) new ProcessBuilder(\"kill\", \"-9\", String.valueOf(ProcessHandle.current().pid())).start().waitFor();\n    if (\"slow\".equals(what)) Thread.sleep(120_000);\n    if (\"oom\".equals(what)) { java.util.List<long[]> all = new java.util.ArrayList<>(); while (true) all.add(new long[1 << 20]); }\n  }\n  @Test void c() {}\n}\n";
+    for (case, expected) in [
+        ("kill", vec![("pass", 9)]),
+        ("slow", vec![("pass", 9)]),
+        // A 16 MB test JVM out of memory takes Gradle's worker down with it: nothing of the task
+        // is recorded, its failure neither.
+        ("oom", vec![("pass", 9)]),
+    ] {
+        let mut files = build(Framework::Junit5, &["app", "other"], "reuse");
+        files.push(file(
+            "app/build.gradle",
+            "tasks.named('test') { maxHeapSize = '16m'; timeout = java.time.Duration.ofSeconds(15) }\n",
+        ));
+        files.push(file("app/src/test/java/shop/app/WhatTest.java", what));
+        for n in 1..=9 {
+            files.push(file(
+                &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+                &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+            ));
+        }
+        let r = Repo::new(&files);
+        let ran = r.run(&command(&gradle, &[]), &[("WHAT", case)]);
+        assert_eq!(ran.code, 1, "{case}: {}\n{}", ran.stdout, ran.stderr);
+        let expected: std::collections::BTreeMap<String, usize> = expected
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        assert_eq!(
+            r.unit_results(),
+            expected,
+            "{case}: {}\n{}",
+            ran.stdout,
+            ran.stderr
+        );
+    }
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_task_gradle_restores_from_its_build_cache_records_and_leaves_out_nothing() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&shop("reuse"));
+    let cache = ["clean", "--build-cache"];
+    let first = r.run(&command(&gradle, &cache), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let before = r.map();
+    // A file of the rest changes: every class runs as far as hushrun goes, the tasks' inputs are
+    // those of the first run, and Gradle takes their outputs from its build cache.
+    r.write("README.md", "A shop, again.\n");
+    let again = r.run(&command(&gradle, &cache), &[]);
+    assert_eq!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
+    assert!(again.stdout.contains("FROM-CACHE"), "{}", again.stdout);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 5, "ran": 0, "reused": 0}),
+        "{}",
+        again.stderr
+    );
+    assert_eq!(r.map()["units"], before["units"]);
+}
+
+// covers: C-39, C-46
+#[test]
+fn a_test_the_build_excludes_by_tag_is_neither_run_nor_listed() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
+    files.push(file(
+        "app/build.gradle",
+        "tasks.named('test') { useJUnitPlatform { excludeTags 'slow' } }\n",
+    ));
+    files.push(file(
+        "app/src/test/java/shop/app/TagTest.java",
+        "package shop.app;\nimport org.junit.jupiter.api.*;\nclass TagTest {\n  @Test void fast() {}\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Test @Tag(\"slow\") void slow() { Assertions.fail(\"never runs\"); }\n  @Test void more() {}\n}\n",
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    // `fast` or `more` was left out, the other audited, `flip` ran; `slow` never.
+    let cases = r.xml_cases("app", "shop.app.TagTest");
+    assert!(cases.contains(&"flip()".to_string()), "{cases:?}");
+    assert!(!cases.contains(&"slow()".to_string()), "{cases:?}");
+    assert_eq!(cases.len(), 2, "{cases:?}\n{}", second.stderr);
+}
