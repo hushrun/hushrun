@@ -406,11 +406,6 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
   time, and each block records the repository that built it, so later rules can decide whose
   blocks count; registry crates' paths under the cargo home stay absolute, which M0 did not test
   across machines (`m0-cli.md`).
-- **Found while measuring, not part of this decision.** The gate's `cargo deny` step reports
-  RUSTSEC-2026-0486, an advisory published 2026-11-11, against `rustix` 1.1.5
-  (`m5-disk-and-times.md`: "advisories FAILED"). That version is in the released lockfile already,
-  through `gix` and `tempfile`, and this work adds no third-party package. It needs `rustix` 1.1.6
-  on main, separately.
 - **Open, for the owner:**
   - "no size limit", against the store's measured growth above;
   - the gate sharing the worktrees' store, with `check-local.sh` setting `HUSHRUN_BUILD_DIR`. The
