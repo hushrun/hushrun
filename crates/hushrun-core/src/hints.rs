@@ -641,7 +641,7 @@ pub fn write(hint: &Hint, key: &Key) -> Result<Written, Unwritable> {
     })
 }
 
-/// \[C-41, ADR 0079\] [`write`], and when the hint is too large with its tests, tests' own lists
+/// \[C-41, ADR 0079\] [`write()`], and when the hint is too large with its tests, tests' own lists
 /// left out first, then tests: what fits, and what was left out. Past its bounds without tests, it
 /// is [`Unwritable::TooLarge`].
 pub fn write_fitting(hint: &Hint, key: &Key) -> Result<(Written, Trimmed), Unwritable> {

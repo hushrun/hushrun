@@ -217,11 +217,18 @@ fn watches() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether these tests can run here: pytest, on a Python that watches a test. Below 3.12 there is
+/// nothing to watch with, which isn't a missing tool: `test_as_unit`'s observe test holds what a
+/// run says then (C-42), and these skip.
 fn can_watch() -> bool {
-    tools(
-        "Python 3.12+ with pytest and pytest-xdist",
-        has_pytest() && watches(),
-    )
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return false;
+    }
+    if !watches() {
+        eprintln!("note: skipping: this Python has no sys.monitoring, so pytest watches no test");
+        return false;
+    }
+    true
 }
 
 fn yaml(tests: &str) -> String {
