@@ -999,9 +999,9 @@ pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
             "memprofile" => out.memprofile = true,
             "count" => {
                 let value = inline.or_else(|| words.next());
-                if !value
+                if value
                     .and_then(|v| v.parse::<u64>().ok())
-                    .is_some_and(|n| n >= 1)
+                    .is_none_or(|n| n < 1)
                 {
                     out.chooses = true;
                 }
