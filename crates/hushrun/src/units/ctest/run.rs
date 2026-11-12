@@ -615,13 +615,6 @@ fn record(p: &Pending) {
                 deselected: true,
                 ..UnitFacts::default()
             };
-            match &test.program {
-                Program::Elsewhere(program) => facts.not_followed.push(Unfollowed {
-                    why: "not built here".into(),
-                    detail: program.clone(),
-                }),
-                Program::Built { .. } | Program::None => {}
-            }
             if let Some(built) = p.built.get(&test.unit) {
                 facts.reads = built.reads.iter().cloned().collect();
                 if let Some(why) = &built.refused {
@@ -659,6 +652,14 @@ fn record(p: &Pending) {
         );
         let failed = matches!(outcome, Outcome::Failed | Outcome::Unknown { failed: true });
         let mut not_followed = Vec::new();
+        // Each test's own program: one not built here is that test's, whichever test of its unit
+        // comes first.
+        if let Program::Elsewhere(program) = &test.program {
+            not_followed.push(Unfollowed {
+                why: "not built here".into(),
+                detail: program.clone(),
+            });
+        }
         if p.retries && matches!(outcome, Outcome::Passed | Outcome::Skipped) {
             not_followed.push(Unfollowed {
                 why: "repeat until-pass".into(),
@@ -745,5 +746,97 @@ fn write_facts(
     let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test(name: &str, unit: &str, program: Program) -> Test {
+        Test {
+            listed: select::Listed {
+                name: name.into(),
+                command: Some(vec![format!("/b/{name}")]),
+                properties: Vec::new(),
+            },
+            unit: unit.into(),
+            id: name.into(),
+            program,
+        }
+    }
+
+    fn recorded(tests: Vec<Test>, report_tests: bool) -> serde_json::Value {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = Pending {
+            units_dir: dir.path().to_path_buf(),
+            tests,
+            leave: BTreeSet::new(),
+            built: BTreeMap::new(),
+            junit: dir.path().join("none.xml"),
+            before: None,
+            started: SystemTime::now(),
+            retries: false,
+            report_tests,
+            reuse: BTreeSet::new(),
+            selection: String::new(),
+        };
+        record(&pending);
+        let file = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .unwrap();
+        serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap()
+    }
+
+    // covers: C-49
+    #[test]
+    fn a_program_not_built_here_marks_its_own_test_whichever_comes_first() {
+        // Two programs one unit's name: one built here, one found on PATH (a name clash when the
+        // build names no configuration). The one not built here is told, whichever is first.
+        let built = || Program::Built {
+            path: "/b/t_x".into(),
+            build: "/b".into(),
+            named: Vec::new(),
+        };
+        let facts = recorded(
+            vec![
+                test("a", "t_x", built()),
+                test("b", "t_x", Program::Elsewhere("t_x".into())),
+            ],
+            false,
+        );
+        assert_eq!(
+            facts["units"][0]["notFollowed"][0]["why"],
+            serde_json::json!("not built here"),
+            "{facts:#}"
+        );
+        // Told one by one: the test whose program isn't built here, and not the other.
+        let facts = recorded(
+            vec![
+                test("a", "t_x", Program::Elsewhere("t_x".into())),
+                test("b", "t_x", built()),
+            ],
+            true,
+        );
+        let unit = &facts["units"][0];
+        assert_eq!(
+            unit["notFollowed"].as_array().map_or(0, Vec::len),
+            0,
+            "{facts:#}"
+        );
+        assert_eq!(
+            unit["tests"][0]["notFollowed"][0]["why"],
+            serde_json::json!("not built here"),
+            "{facts:#}"
+        );
+        assert_eq!(
+            unit["tests"][1]["notFollowed"]
+                .as_array()
+                .map_or(0, Vec::len),
+            0,
+            "{facts:#}"
+        );
     }
 }
