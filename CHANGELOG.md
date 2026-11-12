@@ -31,9 +31,6 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
   file reused gets the run without it. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and
   `reuseTests`, and an adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
-- Contract: this machine's store of what test files read is now
-  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
-  alone. A CI cache step names `*.v2.sqlite`.
 - Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens` and
   `reexports` (followed to the end on a test's own list), `settings.watch`, and each test's
   `neverLeftOut`.
@@ -127,6 +124,12 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Changed
 
+- Contract: this machine's store of what test files read is now
+  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests. When only the older
+  `<id>.v1.sqlite` is there, a run imports it once and leaves it as it was, for an older hushrun.
+  A CI cache step should name `units/*.sqlite`: one that names `units/*.v1.sqlite` restores a file
+  no run updates, and a run that imported one in CI says so. The step `hushrun init` proposes now
+  names `units/*.sqlite`.
 - A skipped test in a run whose command failed records nothing, and its test file records no
   pass: a suite setup that failed, or a runner that stopped, can skip what it hides. In a run that
   passed, a skip is a pass, as before. An adapter's facts may say `skipped`; pytest does.

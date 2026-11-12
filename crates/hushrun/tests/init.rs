@@ -6490,7 +6490,7 @@ fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {
 }
 
 /// \[C-38\] What init says a GitHub job needs, for a backend that keeps no hints.
-const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.v2.sqlite`";
+const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.sqlite`";
 
 /// A shop whose `test` check reuses test files.
 fn shop_with_tests() -> Repo {

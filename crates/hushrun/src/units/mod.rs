@@ -2584,6 +2584,26 @@ fn why_all(
         })
 }
 
+/// \[C-36\] Makes this machine's store for `repository` from the one an older hushrun keeps beside
+/// it, when there is none of this schema ([`db::upgrade`]): the line a run says once in CI
+/// (`in_ci`), where a cache step that names the older file restores one no run updates.
+pub fn upgrade_store(
+    check: &hushrun_core::CheckName,
+    repository: Option<&str>,
+    in_ci: bool,
+) -> Option<String> {
+    let cache = crate::context::cache_dir()?;
+    let old = db::upgrade(&db::path(&cache, repository))?;
+    in_ci.then(|| upgraded(check, &old))
+}
+
+/// \[C-36\] What a run in CI says once when it made this machine's store from `old`.
+fn upgraded(check: &hushrun_core::CheckName, old: &str) -> String {
+    format!(
+        "{check}: what its test files read was taken from {old}, which an older hushrun keeps: a CI cache step that names `units/*.v1.sqlite` restores a file no run updates, so name `units/*.sqlite` in it instead"
+    )
+}
+
 /// \[C-32\] The adapter that last reported the test files of the check `base` names here, for
 /// the repository the run names, as this machine's store says: what [`Session::start`] keeps a
 /// COMMAND pytest reported pytest's by.

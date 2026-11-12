@@ -211,3 +211,20 @@ why` alike. Hints aren't asked: they are read only once an adapter is chosen, fo
 its word, and asking one before would mean a request to the server for every such run. So on a
 machine whose store doesn't hold the check, such as a fresh CI runner, CTest or `swift test` takes
 the COMMAND, which the CHANGELOG says.
+
+## Amendment 9: a store of schema 1 is imported (2026-11-12)
+
+Item 8 left a `v1` file for an older hushrun and read it never, and init's cache step named
+`*.v2.sqlite`. CI workflows that cache `units/*.v1.sqlite`, the step init proposed before, would
+restore a file no run updates, and a person upgrading would see reuse stop with no word why.
+
+The decision: when there is no `v2` file and a `v1` file is hushrun's store of schema 1, a run with
+`tests` on makes the `v2` file from it before anything reads the store. A copy of the file and
+additive statements wouldn't be sound: schema 1's `checks.adapter` has a `CHECK` that takes four
+words, which SQLite can't alter, so a store copied whole would refuse every newer adapter's check.
+Instead a new file of schema 2 is made, every row of schema 1's tables copied into it from a copy
+of the `v1` file and its WAL, in one transaction, whole or not at all, with the references checked;
+it takes the store's name only when no other hushrun made one meanwhile. The `v1` file is left as
+it is, for an older hushrun. A run in CI that imported says once what to change in the cache step,
+which now names the stores without their schema (`units/*.sqlite`), so the next schema needs no
+edit. `hushrun ready` and `hushrun why`, which write nothing, never import.

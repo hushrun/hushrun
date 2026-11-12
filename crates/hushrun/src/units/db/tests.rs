@@ -556,3 +556,238 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+/// The tables of schema 1, as an older hushrun (0.13.0) made them.
+const SCHEMA_1_TABLES: &str = "
+CREATE TABLE path (
+    id   INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE
+) STRICT;
+
+-- A file's kind and content hash, as a source manifest writes them (D-4): one row per version
+-- of a file some row needs.
+CREATE TABLE version (
+    id       INTEGER PRIMARY KEY,
+    path_ref INTEGER NOT NULL REFERENCES path (id),
+    entry    TEXT NOT NULL CHECK (entry GLOB '? [0-9a-f]*' AND length(entry) = 66),
+    UNIQUE (path_ref, entry)
+) STRICT;
+
+-- One row per check id (C-33), with what it is, for `hushrun why`.
+CREATE TABLE checks (
+    id         INTEGER PRIMARY KEY,
+    check_id   TEXT NOT NULL UNIQUE CHECK (length(check_id) = 64),
+    name       TEXT NOT NULL CHECK (name <> ''),
+    command    TEXT NOT NULL CHECK (json_valid(command) AND json_type(command) = 'array'),
+    cwd        TEXT NOT NULL,
+    scope      TEXT NOT NULL CHECK (scope <> ''),
+    adapter    TEXT NOT NULL CHECK (adapter IN ('pytest', 'cargo', 'go', 'vitest')),
+    -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
+    written_at INTEGER NOT NULL
+) STRICT;
+
+-- The check's last run: its rest set, its sources, and Vitest's list of test files.
+CREATE TABLE check_rest (
+    check_ref   INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    version_ref INTEGER NOT NULL REFERENCES version (id),
+    PRIMARY KEY (check_ref, version_ref)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE check_source (
+    check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    path_ref  INTEGER NOT NULL REFERENCES path (id),
+    PRIMARY KEY (check_ref, path_ref)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE check_listed (
+    check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    path_ref  INTEGER NOT NULL REFERENCES path (id),
+    PRIMARY KEY (check_ref, path_ref)
+) STRICT, WITHOUT ROWID;
+
+-- Each test file of a check, as it last ran here, or [C-38] as another machine saw it read the
+-- files of a pass that reused it here.
+CREATE TABLE unit (
+    id        INTEGER PRIMARY KEY,
+    check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    path_ref  INTEGER NOT NULL REFERENCES path (id),
+    ran_at    INTEGER NOT NULL,
+    origin    TEXT NOT NULL CHECK (origin IN ('seen here', 'shared')),
+    -- The system whose machine saw a shared list: one for `shared`, none for `seen here`.
+    shared_os TEXT CHECK (shared_os IN ('linux', 'macos', 'windows')),
+    UNIQUE (check_ref, path_ref),
+    CHECK ((origin = 'seen here') = (shared_os IS NULL))
+) STRICT;
+-- What it read that its key holds, each file as it was then.
+CREATE TABLE unit_read (
+    unit_ref    INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    version_ref INTEGER NOT NULL REFERENCES version (id),
+    PRIMARY KEY (unit_ref, version_ref)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX unit_read_by_version ON unit_read (version_ref);
+-- What the adapter couldn't follow while it ran, by its word: any makes it `not observed`.
+CREATE TABLE unit_not_followed (
+    unit_ref INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    why      TEXT NOT NULL CHECK (why <> ''),
+    detail   TEXT NOT NULL,
+    PRIMARY KEY (unit_ref, why, detail)
+) STRICT, WITHOUT ROWID;
+-- [ADR 0070] Directories it listed: a plan adds every file below each.
+CREATE TABLE unit_dir (
+    unit_ref INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    path_ref INTEGER NOT NULL REFERENCES path (id),
+    PRIMARY KEY (unit_ref, path_ref)
+) STRICT, WITHOUT ROWID;
+
+-- Direct edges an adapter saw in a check's runs, for `hushrun why` to show a path. Never read
+-- for a key.
+CREATE TABLE edge (
+    check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    from_ref  INTEGER NOT NULL REFERENCES path (id),
+    to_ref    INTEGER NOT NULL REFERENCES path (id),
+    kind      TEXT NOT NULL CHECK (kind IN ('import', 'open', 'read')),
+    PRIMARY KEY (check_ref, from_ref, to_ref, kind)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX edge_to ON edge (to_ref);
+
+-- [C-38] Each hint this machine sent or received for a check, by its address and system: one it
+-- already knows isn't sent again. The newest 200 of a check.
+CREATE TABLE hint_known (
+    check_ref  INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    address    TEXT NOT NULL CHECK (length(address) = 64),
+    os         TEXT NOT NULL CHECK (os IN ('linux', 'macos', 'windows')),
+    content_id TEXT NOT NULL CHECK (length(content_id) = 64),
+    how        TEXT NOT NULL CHECK (how IN ('sent', 'received')),
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (check_ref, address, os, content_id)
+) STRICT, WITHOUT ROWID;
+
+-- [C-34] Each test file that would have been reused and failed: the newest 200 of a check.
+CREATE TABLE disagreement (
+    id        INTEGER PRIMARY KEY,
+    check_ref INTEGER NOT NULL REFERENCES checks (id) ON DELETE CASCADE,
+    unit      TEXT NOT NULL,
+    key       TEXT NOT NULL CHECK (length(key) = 64),
+    run_key   TEXT NOT NULL CHECK (length(run_key) = 64),
+    at        TEXT NOT NULL
+) STRICT;
+";
+
+/// A store of schema 1 at `path`, as an older hushrun wrote it, with rows of every table: a check
+/// of pytest's, a test file that read two files, one that wasn't followed, the rest set, edges, a
+/// hint known and a disagreement.
+fn schema_1_store(path: &Path, check_id: &Digest) {
+    let conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn.execute_batch(SCHEMA_1_TABLES).unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = 1;
+         INSERT INTO path (id, path) VALUES (1, 'tests/test_a.py'), (2, 'app.py'),
+             (3, 'tests/test_b.py'), (4, 'data'), (5, 'uv.lock');
+         INSERT INTO version (id, path_ref, entry) VALUES (1, 1, '{HASH_A}'), (2, 2, '{HASH_B}'),
+             (3, 5, '{HASH_A}');
+         INSERT INTO checks (id, check_id, name, command, cwd, scope, adapter, written_at)
+             VALUES (1, '{}', 'unit', '[\"pytest\",\"-q\"]', '', 'default', 'pytest', 1);
+         INSERT INTO check_rest VALUES (1, 3);
+         INSERT INTO check_source VALUES (1, 2);
+         INSERT INTO unit (id, check_ref, path_ref, ran_at, origin, shared_os)
+             VALUES (1, 1, 1, 1, 'seen here', NULL), (2, 1, 3, 1, 'shared', 'linux');
+         INSERT INTO unit_read VALUES (1, 1), (1, 2);
+         INSERT INTO unit_not_followed VALUES (2, 'subprocess', 'git');
+         INSERT INTO unit_dir VALUES (1, 4);
+         INSERT INTO edge VALUES (1, 1, 2, 'import');
+         INSERT INTO hint_known VALUES (1, '{}', 'linux', '{}', 'sent', 1);
+         INSERT INTO disagreement (check_ref, unit, key, run_key, at)
+             VALUES (1, 'tests/test_a.py', '{}', '{}', '2026-11-01T00:00:00Z');",
+        check_id.hex(),
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64),
+    ))
+    .unwrap();
+}
+
+// covers: C-36
+#[test]
+fn a_store_of_schema_1_is_imported_whole_once_and_left_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = older(&path).unwrap();
+    assert!(old.to_string_lossy().ends_with(".v1.sqlite"));
+    let check_id = id("unit");
+    schema_1_store(&old, &check_id);
+    let before = std::fs::read(&old).unwrap();
+    assert_eq!(
+        upgrade(&path).as_deref(),
+        old.file_name().and_then(|n| n.to_str())
+    );
+    let map = load(&path, &check_id);
+    assert!(map.unread.is_none(), "{:?}", map.unread);
+    let map = map.map;
+    assert!(map.reported());
+    assert_eq!(
+        map.units["tests/test_a.py"]
+            .reads
+            .keys()
+            .collect::<Vec<_>>(),
+        ["app.py", "tests/test_a.py"]
+    );
+    assert_eq!(
+        map.units["tests/test_a.py"].dirs.iter().collect::<Vec<_>>(),
+        ["data"]
+    );
+    assert_eq!(map.units["tests/test_b.py"].not_followed.len(), 1);
+    assert_eq!(
+        map.units["tests/test_b.py"].origin,
+        Origin::Shared(hushrun_core::hints::Os::Linux)
+    );
+    assert_eq!(adapter_of(&path, &check_id).as_deref(), Some("pytest"));
+    assert_eq!(edges(&path, &check_id).unwrap().len(), 1);
+    assert_eq!(disagreements(&path, &check_id).unwrap().len(), 1);
+    // Its tables are this schema's: a check of an adapter schema 1 didn't know is kept, and a run
+    // writes into it.
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE checks SET adapter = 'ctest' WHERE check_id = ?1",
+            [check_id.hex()],
+        )
+        .unwrap();
+    assert_eq!(adapter_of(&path, &check_id).as_deref(), Some("ctest"));
+    let r = run(
+        "other",
+        &[("tests/test_a.py", mapped(&[("app.py", HASH_B)]))],
+        &["app.py", "tests/test_a.py"],
+    );
+    write_run(&path, &r).unwrap();
+    assert!(load(&path, &id("other")).map.reported());
+    // Once: with a store of this schema there, nothing is imported again; the older file stays.
+    assert_eq!(upgrade(&path), None);
+    assert_eq!(std::fs::read(&old).unwrap(), before);
+}
+
+// covers: C-36
+#[test]
+fn a_file_that_isnt_a_store_of_schema_1_is_never_imported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), None);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = older(&path).unwrap();
+    std::fs::write(&old, b"not a database").unwrap();
+    assert_eq!(upgrade(&path), None);
+    assert!(!path.exists());
+    // Another application's database: nothing either, and nothing left behind.
+    std::fs::remove_file(&old).unwrap();
+    Connection::open(&old)
+        .unwrap()
+        .execute_batch("CREATE TABLE t (x); PRAGMA user_version = 1;")
+        .unwrap();
+    assert_eq!(upgrade(&path), None);
+    assert!(!path.exists());
+    let left: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.iter().all(|n| !n.starts_with(".import-")), "{left:?}");
+}

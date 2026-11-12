@@ -1511,6 +1511,12 @@ fn observe_tests(
         ));
         return None;
     }
+    // \[C-36\] A store an older hushrun kept, when there is none of this schema: imported once,
+    // and said in CI, whose cache step may name the older file.
+    let in_ci = hushrun_ci::context(&Env::from_process()).in_ci;
+    if let Some(line) = units::upgrade_store(check, code.repository_here().as_deref(), in_ci) {
+        say.line(format_args!("{line}"));
+    }
     // \[C-32\] The adapter that last reported this check's test files here: a COMMAND pytest
     // reported stays pytest's.
     let stored = units::stored_adapter(&key_base(code, command), code.repository_here().as_deref());

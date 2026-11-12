@@ -1125,3 +1125,17 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
     assert_eq!(o.units["tests/test_a.py"].0, State::Reused);
     assert_eq!(o.counts.as_ref().unwrap().tests, None);
 }
+
+// covers: C-36
+#[test]
+fn a_run_in_ci_that_imported_an_older_store_says_what_to_change_in_its_cache_step() {
+    let check = CheckName::new("unit").unwrap();
+    assert_eq!(
+        upgraded(&check, "abc.v1.sqlite"),
+        "unit: what its test files read was taken from abc.v1.sqlite, which an older hushrun keeps: a CI cache step that names `units/*.v1.sqlite` restores a file no run updates, so name `units/*.sqlite` in it instead"
+    );
+    // Outside CI, or with nothing to import, nothing is said.
+    let cache = tempfile::tempdir().unwrap();
+    let path = db::path(cache.path(), None);
+    assert_eq!(db::upgrade(&path), None);
+}

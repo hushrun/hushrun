@@ -62,6 +62,10 @@ pub const THROUGH_PATH: usize = 2;
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
 /// takes it, else pytest's; `Err` says why the one it would get can't load safely.
+#[allow(
+    dead_code,
+    reason = "the rule for a check this machine's store doesn't hold, which the registry's tests hold"
+)]
 pub fn choose(command: &[String], cwd: &Path) -> Result<Box<dyn Adapter>, String> {
     choose_kept(command, cwd, None)
 }

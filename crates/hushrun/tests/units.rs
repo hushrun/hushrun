@@ -700,6 +700,74 @@ fn a_relative_path_opened_after_a_chdir_is_the_file_it_names_there() {
     );
 }
 
+// covers: C-36
+#[test]
+fn a_store_an_older_hushrun_kept_is_imported_once_and_left_as_it_was() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("lib.py", "X = 1\n"),
+        ("extra.py", "Y = 1\n"),
+        (
+            "test_a.py",
+            "import lib\n\ndef test_a():\n    assert lib.X == 1\n",
+        ),
+        ("test_b.py", "def test_b():\n    assert True\n"),
+    ]);
+    let python = python();
+    let args = [
+        "run",
+        "unit",
+        "--",
+        &python,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ];
+    let first = r.run(&args, &[]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    // What an older hushrun left: the same rows in `<id>.v1.sqlite`, of schema 1, and no store of
+    // schema 2.
+    let stores = store::stores(&r.cache());
+    assert_eq!(stores.len(), 1);
+    let v2 = stores[0].clone();
+    let v1 = v2.with_file_name(
+        v2.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(".v2.sqlite", ".v1.sqlite"),
+    );
+    {
+        let conn = rusqlite::Connection::open(&v2).unwrap();
+        conn.execute_batch(
+            "DROP TABLE test_not_followed; DROP TABLE test; DROP TABLE test_list_dir;
+             DROP TABLE test_list_read; DROP TABLE test_list; PRAGMA user_version = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    }
+    std::fs::rename(&v2, &v1).unwrap();
+    let v1_bytes = std::fs::read(&v1).unwrap();
+    // A change no test file read: the check runs, and what reuse would have done reads the map
+    // the older store held.
+    r.write("extra.py", "Y = 2\n");
+    let second = r.run(&args, &[]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(
+        second.observe_line(),
+        "hushrun: unit: with `tests: reuse`, 0 of 2 test files would have run; 2 already passed on the files they read"
+    );
+    // The older file stays as it was, for an older hushrun; this one's store is of schema 2.
+    assert_eq!(std::fs::read(&v1).unwrap(), v1_bytes);
+    assert!(v2.is_file());
+    assert!(!second.stderr.contains("cache step"), "{}", second.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

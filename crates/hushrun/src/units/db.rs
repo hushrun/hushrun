@@ -388,6 +388,121 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     Ok(conn)
 }
 
+/// \[C-36\] The tables of schema 1, in an order their references allow: schema 2 holds them with
+/// the same columns, beside its tests' tables, and its adapter column takes any word where schema
+/// 1's took four, so every row of schema 1 is a row of schema 2.
+const TABLES_OF_SCHEMA_1: &[&str] = &[
+    "path",
+    "version",
+    "checks",
+    "check_rest",
+    "check_source",
+    "check_listed",
+    "unit",
+    "unit_read",
+    "unit_not_followed",
+    "unit_dir",
+    "edge",
+    "hint_known",
+    "disagreement",
+];
+
+/// \[C-36\] The store of schema 1 an older hushrun keeps beside `path`: `<id>.v1.sqlite`.
+pub fn older(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(&format!(".v{SCHEMA}.sqlite"))?;
+    Some(path.with_file_name(format!("{stem}.v1.sqlite")))
+}
+
+/// \[C-36\] Makes this schema's store at `path` from the store of schema 1 beside it, when there
+/// is none of this schema and that one is hushrun's of schema 1: its rows are copied into a new
+/// file in one transaction, whole or not at all, which takes `path` only when no other hushrun
+/// made one meanwhile. The older file is copied first and left as it is, for an older hushrun.
+/// The older file's name when it did; `None` when there was nothing to do, or it couldn't be done,
+/// and then the run goes on as with no store. Readers that write nothing never call it.
+pub fn upgrade(path: &Path) -> Option<String> {
+    if path.exists() {
+        return None;
+    }
+    let old = older(path).filter(|old| old.is_file())?;
+    match import(&old, path) {
+        Ok(()) => old.file_name().map(|n| n.to_string_lossy().into_owned()),
+        Err(why) => {
+            tracing::debug!("{} wasn't imported: {why}", old.display());
+            None
+        }
+    }
+}
+
+fn import(old: &Path, path: &Path) -> Result<(), String> {
+    let dir = path.parent().ok_or("a store has a directory")?;
+    let work = tempfile::Builder::new()
+        .prefix(".import-")
+        .tempdir_in(dir)
+        .map_err(|err| err.to_string())?;
+    // A copy, with its WAL, which opening it recovers: the older file is never opened.
+    let copy = work.path().join("old.sqlite");
+    std::fs::copy(old, &copy).map_err(|err| err.to_string())?;
+    let mut wal = old.as_os_str().to_os_string();
+    wal.push("-wal");
+    if Path::new(&wal).is_file() {
+        std::fs::copy(&wal, work.path().join("old.sqlite-wal")).map_err(|err| err.to_string())?;
+    }
+    let made = work.path().join("new.sqlite");
+    {
+        let mut conn = Connection::open(&made).map_err(|e| e.to_string())?;
+        conn.execute("ATTACH DATABASE ?1 AS old", [copy.to_string_lossy()])
+            .map_err(|e| e.to_string())?;
+        let pragma = |name: &str| -> Result<i64, String> {
+            conn.query_row(&format!("PRAGMA old.{name}"), [], |row| row.get(0))
+                .map_err(|e| e.to_string())
+        };
+        let ids = (pragma("application_id")?, pragma("user_version")?);
+        if ids != (APPLICATION_ID, 1) {
+            return Err("it isn't hushrun's store of schema 1".into());
+        }
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute_batch(TABLES).map_err(|e| e.to_string())?;
+        for table in TABLES_OF_SCHEMA_1 {
+            let columns: Vec<String> = tx
+                .prepare(&format!("PRAGMA old.table_info({table})"))
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| row.get::<_, String>("name"))?
+                        .collect::<rusqlite::Result<Vec<String>>>()
+                })
+                .map_err(|e| e.to_string())?;
+            if columns.is_empty() {
+                return Err(format!("it has no table {table}"));
+            }
+            let columns = columns.join(", ");
+            tx.execute_batch(&format!(
+                "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM old.{table};"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute_batch(&format!(
+            "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA};"
+        ))
+        .map_err(|e| e.to_string())?;
+        let broken: Option<String> = tx
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(table) = broken {
+            return Err(format!("a row of {table} names one that isn't there"));
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        conn.execute_batch("DETACH DATABASE old; PRAGMA journal_mode = WAL;")
+            .map_err(|e| e.to_string())?;
+    }
+    // Whole, closed: it takes the store's name only if none is there yet.
+    std::fs::hard_link(&made, path).map_err(|err| err.to_string())
+}
+
 /// Removes a store and its WAL's files.
 fn remove(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
