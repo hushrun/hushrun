@@ -1,0 +1,277 @@
+Test Suite 'All tests' started at 2026-11-12 04:49:01.980
+Test Suite 'Debug-linux-aarch64.xctest' started at 2026-11-12 04:49:01.980
+Test Suite 'MixedXCTests' started at 2026-11-12 04:49:01.980
+Test Case 'MixedXCTests.testAsync' started at 2026-11-12 04:49:01.980
+Test Case 'MixedXCTests.testAsync' passed (0.001 seconds)
+Test Case 'MixedXCTests.testCrashWhenAsked' started at 2026-11-12 04:49:01.981
+MixedTests/MixedXCTests.swift:15: Fatal error: deliberate crash
+
+*** Signal 5: Backtracing from 0xffff9609dbc8... done ***
+
+*** Program crashed: System trap at 0x0000ffff9609dbc8 ***
+
+Platform: arm64 Linux (Ubuntu 26.04.1 LTS)
+
+Thread 0 "MixedTests-test" crashed:
+
+ 0               0x0000ffff9609dbc8 _assertionFailure(_:_:file:line:flags:) + 208 in libswiftCore.so
+ 1 [ra]          0x0000ffff96501cd4 MixedXCTests.testCrashWhenAsked() + 555 in MixedTests.so at /work/Shop/Tests/MixedTests/MixedXCTests.swift:15:73
+ 2 [ra] [system] 0x0000aaaacd3726d8 implicit closure #4 in implicit closure #3 in __allDiscoveredTests() + 35 in MixedTests-test-runner at /work/Shop/.build/out/Intermediates.noindex/ShopFlat.build/Debug-linux-aarch64/MixedTests-test-runner.build/DerivedSources/test_entry_point.swift
+ 3 [ra] [thunk]  0x0000aaaacd372640 thunk for @escaping @callee_guaranteed () -> (@error @owned Error) + 23 in MixedTests-test-runner at //<compiler-generated>
+ 4 [ra] [thunk]  0x0000aaaacd372f80 partial apply for thunk for @escaping @callee_guaranteed () -> (@error @owned Error) + 27 in MixedTests-test-runner at //<compiler-generated>
+ 5 [ra] [thunk]  0x0000ffff9492259c partial apply for thunk for @escaping @callee_guaranteed () -> (@out (), @error @owned Error) + 19 in libXCTest.so
+ 6 [ra]          0x0000ffff94921cf4 closure #1 in test<A>(_:) + 71 in libXCTest.so
+ 7 [ra] [thunk]  0x0000ffff94922504 partial apply for closure #1 in test<A>(_:) + 19 in libXCTest.so
+ 8 [ra] [thunk]  0x0000ffff949224e4 partial apply for thunk for @escaping @callee_guaranteed (@guaranteed XCTestCase) -> (@error @owned Error) + 23 in libXCTest.so
+ 9 [ra] [thunk]  0x0000ffff949229a4 partial apply for thunk for @escaping @callee_guaranteed (@guaranteed XCTestCase) -> (@error @owned Error) + 11 in libXCTest.so
+10 [ra] [thunk]  0x0000ffff94920ab4 partial apply for thunk for @escaping @callee_guaranteed (@in_guaranteed XCTestCase) -> (@out (), @error @owned Error) + 27 in libXCTest.so
+11 [ra]          0x0000ffff94922d90 XCTestCase.invokeTest() + 403 in libXCTest.so
+12 [ra]          0x0000ffff94922a60 XCTestCase.perform(_:) + 115 in libXCTest.so
+13 [ra]          0x0000ffff94925510 XCTest.run() + 163 in libXCTest.so
+14 [ra]          0x0000ffff94923ab0 XCTestSuite.perform(_:) + 171 in libXCTest.so
+15 [ra]          0x0000ffff94925510 XCTest.run() + 163 in libXCTest.so
+16 [ra]          0x0000ffff94923ab0 XCTestSuite.perform(_:) + 171 in libXCTest.so
+17 [ra]          0x0000ffff94925510 XCTest.run() + 163 in libXCTest.so
+18 [ra]          0x0000ffff94923ab0 XCTestSuite.perform(_:) + 171 in libXCTest.so
+19 [ra]          0x0000ffff94925510 XCTest.run() + 163 in libXCTest.so
+20 [ra]          0x0000ffff94920c10 XCTMain(_:arguments:observers:) + 239 in libXCTest.so
+21 [ra]          0x0000ffff94920cbc XCTMain(_:) + 39 in libXCTest.so
+22 [ra]          0x0000aaaacd373b78 static __SwiftPMGeneratedTestRunner.main() + 235 in MixedTests-test-runner at /work/Shop/.build/out/Intermediates.noindex/ShopFlat.build/Debug-linux-aarch64/MixedTests-test-runner.build/DerivedSources/test_entry_point.swift:578:5
+23 [ra] [system] 0x0000aaaacd373b98 static __SwiftPMGeneratedTestRunner.$main() + 11 in MixedTests-test-runner at //<compiler-generated>
+24 [ra] [system] 0x0000aaaacd373bb0 main + 11 in MixedTests-test-runner at /work/Shop/.build/out/Intermediates.noindex/ShopFlat.build/Debug-linux-aarch64/MixedTests-test-runner.build/DerivedSources/test_entry_point.swift
+25 [ra]          0x0000ffff94632f1c <unknown> in libc.so.6
+26 [ra]          0x001cffff9463305c
+
+Thread 1 "DispatchWorker":
+
+0      0x0000ffff946a5aec <unknown> in libc.so.6
+1 [ra] 0x0060ffff946988b4
+2 [ra] 0x0060ffff946a56b8
+3 [ra] 0x0078ffff95a5cf9c
+4 [ra] 0x0000ffff95a55db0 _dispatch_semaphore_wait_slow + 35 in libdispatch.so
+5 [ra] 0x0000ffff95a5559c _dispatch_worker_thread + 983 in libdispatch.so
+6 [ra] 0x0000ffff9469c248 <unknown> in libc.so.6
+
+Thread 2 "DispatchWorker":
+
+0      0x0000ffff946a5aec <unknown> in libc.so.6
+1 [ra] 0x005dffff94698490
+2 [ra] 0x0041ffff94706e84
+3 [ra] 0x0025ffff95a5c87c
+4 [ra] 0x0000ffff95a52084 _dispatch_mgr_invoke + 123 in libdispatch.so
+5 [ra] 0x0000ffff95a51ff8 _dispatch_mgr_thread + 131 in libdispatch.so
+6 [ra] 0x0000ffff95a55448 _dispatch_worker_thread + 643 in libdispatch.so
+7 [ra] 0x0000ffff9469c248 <unknown> in libc.so.6
+
+Thread 3 "DispatchWorker":
+
+0      0x0000ffff946a5aec <unknown> in libc.so.6
+1 [ra] 0x0010ffff946988b4
+2 [ra] 0x002cffff946a56b8
+3 [ra] 0x002bffff95a5cf9c
+4 [ra] 0x0000ffff95a55db0 _dispatch_semaphore_wait_slow + 35 in libdispatch.so
+5 [ra] 0x0000ffff95a5559c _dispatch_worker_thread + 983 in libdispatch.so
+6 [ra] 0x0000ffff9469c248 <unknown> in libc.so.6
+
+Thread 4 "DispatchWorker":
+
+0      0x0000ffff946a5aec <unknown> in libc.so.6
+1 [ra] 0x005affff946988b4
+2 [ra] 0x007fffff946a56b8
+3 [ra] 0x003fffff95a5cf9c
+4 [ra] 0x0000ffff95a55db0 _dispatch_semaphore_wait_slow + 35 in libdispatch.so
+5 [ra] 0x0000ffff95a5559c _dispatch_worker_thread + 983 in libdispatch.so
+6 [ra] 0x0000ffff9469c248 <unknown> in libc.so.6
+
+Thread 5 "DispatchWorker":
+
+0      0x0000ffff946a5aec <unknown> in libc.so.6
+1 [ra] 0x0037ffff946988b4
+2 [ra] 0x0048ffff946a56b8
+3 [ra] 0x0054ffff95a5cf9c
+4 [ra] 0x0000ffff95a55db0 _dispatch_semaphore_wait_slow + 35 in libdispatch.so
+5 [ra] 0x0000ffff95a5559c _dispatch_worker_thread + 983 in libdispatch.so
+6 [ra] 0x0000ffff9469c248 <unknown> in libc.so.6
+
+
+Registers:
+
+ x0 0x8000ffff96503470  64 69 6e 67 3a 20 2e 75 74 66 38 29 2e 63 6f 6e  ding: .utf8).con
+ x1 0x0000aaab06e1e0e8  0e 00 0f 00 0e 00 06 00 0f 00 10 00 0f 00 0f 00  ················
+ x2 0x0000000000000030  48
+ x3 0x0000aaab06e29500  19 94 51 ac a1 aa 00 00 ab 9c 03 be be 1c 47 50  ··Q¬¡ª··«··¾¾·GP
+ x4 0x000000000000000a  10
+ x5 0x0000aaab06e1e0e0  04 00 0a 00 0e 00 0b 00 0e 00 0f 00 0e 00 06 00  ················
+ x6 0x0000000000000010  16
+ x7 0x0000aaab06e294f0  00 00 00 00 00 00 00 00 31 00 00 00 00 00 00 00  ········1·······
+ x8 0x0000000000000000  0
+ x9 0x0000000000000031  49
+x10 0x0000000000000002  2
+x11 0x00000000000000d0  208
+x12 0x0000ffff9652de20  40 e6 52 96 ff ff 00 00 00 00 00 00 00 00 00 00  @æR·ÿÿ··········
+x13 0x0000000000000000  0
+x14 0x0000000000000001  1
+x15 0x0000ffff96567f60  00 00 dd 95 ff ff 00 00 30 7f 56 96 ff ff 00 00  ··Ý·ÿÿ··0·V·ÿÿ··
+x16 0x0000ffff96360038  f0 e6 6a 94 ff ff 00 00 30 ae f2 95 ff ff 00 00  ðæj·ÿÿ··0®ò·ÿÿ··
+x17 0x0000ffff946ae6f0  5f 24 03 d5 e0 07 00 b4 e3 03 00 aa 07 40 00 d1  _$·Õà··´ã··ª·@·Ñ
+x18 0x000000000000006f  111
+x19 0x0000aaab06e233e0  20 07 52 96 ff ff 00 00 03 00 00 00 08 00 00 00   ·R·ÿÿ··········
+x20 0x0000aaab06e27b70  28 99 2d 95 ff ff 00 00 03 00 00 00 00 00 00 00  (·-·ÿÿ··········
+x21 0x0000000000000000  0
+x22 0x0000ffff96520720  00 00 00 00 00 00 00 00 c0 0e 96 94 ff ff 00 00  ········À···ÿÿ··
+x23 0x0000000000000000  0
+x24 0x0000ffff9492252c  ff c3 00 d1 fd 7b 01 a9 f4 13 00 f9 fd 43 00 91  ÿÃ·Ñý{·©ô··ùýC··
+x25 0x0000ffff9492546c  ff 83 01 d1 fd 7b 03 a9 f5 23 00 f9 f4 4f 05 a9  ÿ··Ñý{·©õ#·ùôO·©
+x26 0x0000fffff43bc240  ac 95 1e 96 ff ff 00 00 98 03 e2 06 ab aa 00 00  ¬···ÿÿ····â·«ª··
+x27 0x0000000000000001  1
+x28 0x0000aaab06e1f3a0  30 1d e2 06 ab aa 00 00 e0 33 e2 06 ab aa 00 00  0·â·«ª··à3â·«ª··
+ fp 0x0000fffff43bbf20  20 c0 3b f4 ff ff 00 00 d4 1c 50 96 ff ff 00 00   À;ôÿÿ··Ô·P·ÿÿ··
+ lr 0x0000ffff9609dbc8  20 00 20 d4 28 00 80 52 89 12 80 52 00 17 00 90   · Ô(··R···R····
+ sp 0x0000fffff43bbf00  01 00 00 00 ab aa 00 00 00 31 e3 06 ab aa 00 00  ····«ª···1ã·«ª··
+ pc 0x0000ffff9609dbc8  20 00 20 d4 28 00 80 52 89 12 80 52 00 17 00 90   · Ô(··R···R····
+
+
+Images (21 omitted):
+
+0x0000aaaacd370000–0x0000aaaacd374b78 3d53b2994c86c3ce42d51cb1c90ca5358c17e898 MixedTests-test-runner /work/Shop/.build/out/Products/Debug-linux-aarch64/MixedTests-test-runner
+0x0000ffff94610000–0x0000ffff947b8998 5697d481680bea92debb50f8a02893668fb7f6e1 libc.so.6              /usr/lib/aarch64-linux-gnu/libc.so.6
+0x0000ffff948f0000–0x0000ffff94943738 911550c9f7cc2681ecb1eeddd332f3e164523532 libXCTest.so           /usr/lib/swift/linux/libXCTest.so
+0x0000ffff95a20000–0x0000ffff95a6ab90 2258d1761c44f24d98cd3ef06027bdc2a4f4b534 libdispatch.so         /usr/lib/swift/linux/libdispatch.so
+0x0000ffff95dd0000–0x0000ffff963346b8 bfeff0b394c6a17fd5767506ae21e30364a00d5b libswiftCore.so        /usr/lib/swift/linux/libswiftCore.so
+0x0000ffff964f0000–0x0000ffff965073f0 41bece2961e05fe7f539577dbd4ea63ab18200b2 MixedTests.so          /work/Shop/.build/out/Products/Debug-linux-aarch64/MixedTests.so
+
+Backtrace took 0.02s
+
+Test Suite 'All tests' started at 2026-11-12 04:49:02.010
+Test Suite 'Debug-linux-aarch64.xctest' started at 2026-11-12 04:49:02.011
+Test Suite 'Debug-linux-aarch64.xctest' passed at 2026-11-12 04:49:02.011
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 (0.0) seconds
+Test Suite 'All tests' passed at 2026-11-12 04:49:02.011
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.0 (0.0) seconds
+Test Suite 'All tests' started at 2026-11-12 04:49:02.014
+Test Suite 'Debug-linux-aarch64.xctest' started at 2026-11-12 04:49:02.015
+Test Suite 'CartTests' started at 2026-11-12 04:49:02.015
+Test Case 'CartTests.testAsync' started at 2026-11-12 04:49:02.015
+Test Case 'CartTests.testAsync' passed (0.024 seconds)
+Test Case 'CartTests.testFails' started at 2026-11-12 04:49:02.039
+/work/Shop/Tests/CartTests/CartTests.swift:10: error: CartTests.testFails : XCTAssertEqual failed: ("1000") is not equal to ("1") - deliberate failure
+Test Case 'CartTests.testFails' failed (0.0 seconds)
+Test Case 'CartTests.testGenerated' started at 2026-11-12 04:49:02.039
+Test Case 'CartTests.testGenerated' passed (0.0 seconds)
+Test Case 'CartTests.testSkipped' started at 2026-11-12 04:49:02.040
+/work/Shop/Tests/CartTests/CartTests.swift:11: CartTests.testSkipped : Test skipped - not today
+Test Case 'CartTests.testSkipped' skipped (0.0 seconds)
+Test Case 'CartTests.testTotal' started at 2026-11-12 04:49:02.040
+Test Case 'CartTests.testTotal' passed (0.101 seconds)
+Test Case 'CartTests.testTotalWithTax' started at 2026-11-12 04:49:02.141
+Test Case 'CartTests.testTotalWithTax' passed (0.0 seconds)
+Test Suite 'CartTests' failed at 2026-11-12 04:49:02.141
+	 Executed 6 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.126 (0.126) seconds
+Test Suite 'CartTestsMore' started at 2026-11-12 04:49:02.141
+Test Case 'CartTestsMore.testTotal' started at 2026-11-12 04:49:02.141
+Test Case 'CartTestsMore.testTotal' passed (0.0 seconds)
+Test Suite 'CartTestsMore' passed at 2026-11-12 04:49:02.141
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.0 (0.0) seconds
+Test Suite 'Debug-linux-aarch64.xctest' failed at 2026-11-12 04:49:02.141
+	 Executed 7 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.126 (0.126) seconds
+Test Suite 'All tests' failed at 2026-11-12 04:49:02.141
+	 Executed 7 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.126 (0.126) seconds
+◇ Test run started.
+↳ Testing Library Version: 6.4.2 (288a2328ff84644)
+↳ Target Platform: aarch64-unknown-linux-gnu
+◇ Suite MixedSuite started.
+◇ Test asyncTest() started.
+◇ Test fails() started.
+◇ Suite Nested started.
+◇ Test testTotal() started.
+◇ Test crashWhenAsked() started.
+◇ Test resource() started.
+◇ Test testTotalWithTax() started.
+◇ Test param(flag:) started.
+➜ Test skipped() skipped.
+◇ Test inner() started.
+◇ Test case passing 1 argument flag → true to param(flag:) started.
+◇ Test case passing 1 argument flag → false to param(flag:) started.
+✔ Test testTotal() passed after 0.001 seconds.
+✔ Test crashWhenAsked() passed after 0.001 seconds.
+✔ Test testTotalWithTax() passed after 0.001 seconds.
+✔ Test asyncTest() passed after 0.001 seconds.
+✘ Test fails() recorded an issue at MixedSwiftTests.swift:12:24: Expectation failed: Bool(false)
+↳ deliberate failure
+↳ Bool(false) → false
+↳   false → ()
+✔ Test inner() passed after 0.001 seconds.
+✔ Test param(flag:) with 2 test cases passed after 0.001 seconds.
+✔ Suite Nested passed after 0.001 seconds.
+✔ Test resource() passed after 0.001 seconds.
+✘ Test fails() failed after 0.001 seconds with 1 issue.
+✘ Suite MixedSuite failed after 0.001 seconds with 1 issue.
+✘ Test run with 9 tests in 2 suites failed after 0.001 seconds with 1 issue.
+◇ Test run started.
+↳ Testing Library Version: 6.4.2 (288a2328ff84644)
+↳ Target Platform: aarch64-unknown-linux-gnu
+◇ Test "raw identifier test" started.
+➜ Suite DisabledSuite skipped: "whole suite off"
+◇ Suite PriceTests started.
+◇ Test "A display name, with (parens) and / slash" started.
+◇ Test freeFunction() started.
+◇ Suite Nested started.
+◇ Test freeParam(n:) started.
+✔ Test "A display name, with (parens) and / slash" passed after 0.001 seconds.
+◇ Test testTotal() started.
+◇ Test twoArgs(s:n:) started.
+◇ Test zlibLinked() started.
+◇ Test asyncTest() started.
+◇ Test testTotalWithTax() started.
+◇ Test fromExtension() started.
+✔ Test "raw identifier test" passed after 0.001 seconds.
+◇ Suite "Deep display name" started.
+◇ Test case passing 1 argument n → 2 to freeParam(n:) started.
+◇ Test case passing 1 argument n → 1 to freeParam(n:) started.
+◇ Test fails() started.
+◇ Test case passing 1 argument n → 3 to freeParam(n:) started.
+◇ Test zipped(label:value:) started.
+➜ Test neverRuns() skipped: "whole suite off"
+◇ Test case passing 2 arguments s → "a", n → 1 to twoArgs(s:n:) started.
+◇ Test case passing 2 arguments s → "a", n → 2 to twoArgs(s:n:) started.
+◇ Test case passing 2 arguments s → "b", n → 2 to twoArgs(s:n:) started.
+◇ Test inner() started.
+➜ Test skipped() skipped: "not today"
+✔ Test freeFunction() passed after 0.001 seconds.
+✔ Test zlibLinked() passed after 0.001 seconds.
+✔ Test testTotal() passed after 0.001 seconds.
+◇ Test case passing 2 arguments label → "x", value → 10 to zipped(label:value:) started.
+◇ Test case passing 2 arguments label → "y", value → 20 to zipped(label:value:) started.
+✔ Test testTotalWithTax() passed after 0.001 seconds.
+◇ Test "Deepest with display" started.
+✘ Test fails() recorded an issue at CoreTests.swift:13:24: Expectation failed: 1 == 2
+↳ deliberate failure
+↳ 1 == 2 → false
+✔ Test zipped(label:value:) with 2 test cases passed after 0.001 seconds.
+✔ Test fromExtension() passed after 0.001 seconds.
+✔ Test inner() passed after 0.001 seconds.
+✔ Test "Deepest with display" passed after 0.001 seconds.
+✘ Test freeParam(n:) recorded an issue with 1 argument n → 2 at CoreTests.swift:8:54: Expectation failed: n != 2
+↳ two fails
+↳ n != 2 → false
+↳   n → 2
+◇ Test deepest() started.
+✔ Test deepest() passed after 0.001 seconds.
+✘ Test fails() failed after 0.001 seconds with 1 issue.
+✔ Suite "Deep display name" passed after 0.001 seconds.
+◇ Test case passing 2 arguments s → "b", n → 1 to twoArgs(s:n:) started.
+✘ Test freeParam(n:) with 3 test cases failed after 0.001 seconds with 1 issue.
+✔ Suite Nested passed after 0.001 seconds.
+✔ Test twoArgs(s:n:) with 4 test cases passed after 0.001 seconds.
+✔ Test asyncTest() passed after 0.022 seconds.
+✘ Suite PriceTests failed after 0.022 seconds with 1 issue.
+✘ Test run with 17 tests in 4 suites failed after 0.023 seconds with 2 issues.
+◇ Test run started.
+↳ Testing Library Version: 6.4.2 (288a2328ff84644)
+↳ Target Platform: aarch64-unknown-linux-gnu
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Note: Some test targets reported failures:
+  - MixedTests (XCTest)
+  - CartTests (XCTest)
+  - MixedTests (Swift Testing)
+  - CoreTests (Swift Testing)

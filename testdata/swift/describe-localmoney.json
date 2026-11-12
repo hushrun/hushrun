@@ -1,0 +1,65 @@
+{
+ "dependencies": [],
+ "manifest_display_name": "LocalMoney",
+ "name": "LocalMoney",
+ "path": "/work/LocalMoney",
+ "platforms": [],
+ "products": [
+  {
+   "name": "Money",
+   "targets": [
+    "Money"
+   ],
+   "type": {
+    "library": [
+     "automatic"
+    ]
+   }
+  }
+ ],
+ "targets": [
+  {
+   "c99name": "MoneyTests",
+   "module_type": "SwiftTarget",
+   "name": "MoneyTests",
+   "path": "Tests/MoneyTests",
+   "sources": [
+    "MoneyTests.swift"
+   ],
+   "target_dependencies": [
+    "Money"
+   ],
+   "type": "test"
+  },
+  {
+   "c99name": "MoneyFormat",
+   "module_type": "SwiftTarget",
+   "name": "MoneyFormat",
+   "path": "Sources/MoneyFormat",
+   "product_memberships": [
+    "Money"
+   ],
+   "sources": [
+    "Format.swift"
+   ],
+   "type": "library"
+  },
+  {
+   "c99name": "Money",
+   "module_type": "SwiftTarget",
+   "name": "Money",
+   "path": "Sources/Money",
+   "product_memberships": [
+    "Money"
+   ],
+   "sources": [
+    "Money.swift"
+   ],
+   "target_dependencies": [
+    "MoneyFormat"
+   ],
+   "type": "library"
+  }
+ ],
+ "tools_version": "6.0"
+}

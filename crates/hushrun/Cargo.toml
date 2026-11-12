@@ -43,6 +43,8 @@ hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
 rayon.workspace = true
+# \[ADR 0086\] The xunit file `swift test --parallel` writes, read as the reports crate reads JUnit.
+quick-xml.workspace = true
 # \[ADR 0072\] The local store of what test files read.
 rusqlite.workspace = true
 serde_json.workspace = true
@@ -77,7 +79,9 @@ serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+# \[ADR 0086\] `pty` and `termios`: the pseudo-terminal hushrun's `swift` copies `swift test`'s
+# output through, so that it colors as on the person's terminal.
+rustix = { workspace = true, features = ["pty", "termios"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # A terminal for tests of what hushrun says only on one.
