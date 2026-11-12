@@ -344,6 +344,33 @@ fn a_tests_state_comes_from_its_own_facts_and_a_file_partly_reused_didnt_pass_wh
     assert_eq!(Unit::from_word("case"), None);
 }
 
+// covers: C-32, C-39
+#[test]
+fn a_skip_in_a_run_whose_command_failed_proves_nothing() {
+    let skipped = Facts {
+        skipped: true,
+        ..facts(true, false, false)
+    };
+    // COMMAND passed: a skip is a pass, as before.
+    assert_eq!(state(&skipped, &PASSED), State::Passed);
+    // COMMAND failed, though the adapter reports each failure by unit: not run, nothing recorded.
+    let failed_run = RunFacts {
+        command_passed: false,
+        ..PASSED
+    };
+    assert_eq!(state(&skipped, &failed_run), State::NotRun);
+    assert_eq!(
+        state(&facts(true, false, false), &failed_run),
+        State::Passed
+    );
+    // A failure is still a failure.
+    let skipped_failed = Facts {
+        failed: true,
+        ..skipped.clone()
+    };
+    assert_eq!(state(&skipped_failed, &failed_run), State::Failed);
+}
+
 // covers: C-5
 #[test]
 fn modes_read_as_written() {

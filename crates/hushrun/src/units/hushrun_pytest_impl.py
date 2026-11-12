@@ -197,6 +197,7 @@ class Observer(object):
         self.setup_stack = []         # the shared setups setting up now, innermost last
         self.code_files = {}          # code filename -> repository file or None
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
+        self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
 
     # --- paths -------------------------------------------------------------------------
 
@@ -529,7 +530,7 @@ class Observer(object):
         tests = self.tests.setdefault(unit, {})
         if test_id not in tests:
             tests[test_id] = {"finished": False, "failed": False, "deselected": False,
-                              "duration": 0.0}
+                              "duration": 0.0, "skipped": False}
             self.test_order.setdefault(unit, []).append(test_id)
         return tests[test_id]
 
@@ -550,7 +551,7 @@ class Observer(object):
 
     def unit_entry(self, unit):
         return self.units.setdefault(unit, {"collected": 0, "selected": 0, "finished": 0,
-                                             "failed": False, "duration": 0.0})
+                                             "failed": False, "duration": 0.0, "skipped": 0})
 
     # --- the end -----------------------------------------------------------------------
 
@@ -650,6 +651,7 @@ class Observer(object):
                 "failed": bool(info["failed"]),
                 "deselected": unit in self.deselected,
                 "durationMs": int(round(info["duration"] * 1000)),
+                "skipped": info.get("skipped", 0),
                 "reads": sorted(reads),
                 "notFollowed": not_followed,
             }
@@ -745,6 +747,7 @@ class Observer(object):
                 "finished": bool(facts["finished"]),
                 "failed": bool(facts["failed"]),
                 "deselected": bool(facts["deselected"]),
+                "skipped": bool(facts.get("skipped")),
                 "durationMs": int(round(facts["duration"] * 1000)),
                 "notFollowed": [{"why": k, "detail": d}
                                 for k, v in sorted(self.test_not_followed.get((unit, test_id), {}).items())
@@ -1053,11 +1056,19 @@ def _logreport(obs, report):
     if report.failed:
         # A failure, or an error in setup or teardown; pytest reports a strict xpass failed too.
         entry["failed"] = True
+    # [C-32] Its body didn't run: a skip or skipif mark, a skip raised in setup or in the test, an
+    # xfail that isn't run. An xfail that ran, and failed as expected, ran.
+    skipped = report.skipped and not (report.when == "call" and hasattr(report, "wasxfail"))
+    if skipped and report.nodeid not in obs.skipped_ids:
+        obs.skipped_ids.add(report.nodeid)
+        entry["skipped"] = entry.get("skipped", 0) + 1
     if obs.by_test and obs.active_test is not None:
         test = obs.test_entry(unit, obs.active_test)
         test["duration"] += duration
         if report.failed:
             test["failed"] = True
+        if skipped:
+            test["skipped"] = True
 
 
 def _protocol_start(obs, unit, test_id, fixtures):

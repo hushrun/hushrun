@@ -547,6 +547,11 @@ pub struct Facts {
     /// \[ADR 0077\] Of a test file: some of its tests were reused one by one, so this run didn't
     /// execute all of it, and it didn't pass whole (C-39).
     pub tests_reused: bool,
+    /// \[C-32, C-39\] Of a test: it finished without its body running (skipped, disabled, an
+    /// assumption not met). Of a test file: one of its finished tests was. In a run whose COMMAND
+    /// failed it proves nothing: a suite setup that failed skips what it hides, and a runner that
+    /// stopped may call the test in flight skipped.
+    pub skipped: bool,
 }
 
 /// What a run knows beyond a unit's own facts (C-32).
@@ -614,6 +619,9 @@ impl State {
 /// `not_followed` what wasn't followed inside its window and outside every window of its file. A
 /// test file some of whose tests were reused one by one didn't run whole: `not run`, so it records
 /// no pass of its own (C-39).
+///
+/// \[C-32\] In a run whose COMMAND failed, a test that was skipped, and a test file one of whose
+/// tests was, are `not run`: a skip there proves nothing. In a run that passed, a skip is a pass.
 pub fn state(facts: &Facts, run: &RunFacts) -> State {
     // \[ADR 0069\] First, before a deselection: a process that may not deselect (a nested pytest, an
     // xdist worker the plan doesn't speak for) can run a unit another deselected, and its failure
@@ -630,6 +638,10 @@ pub fn state(facts: &Facts, run: &RunFacts) -> State {
         };
     }
     if !facts.complete || facts.tests_reused {
+        return State::NotRun;
+    }
+    // \[C-32\] A skip in a run whose COMMAND failed: nothing ran that a pass could stand on.
+    if facts.skipped && !run.command_passed {
         return State::NotRun;
     }
     if !facts.not_followed.is_empty() {

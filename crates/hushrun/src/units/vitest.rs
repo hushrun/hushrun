@@ -313,6 +313,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
             opened: list(&test.opened),
             dirs: list(&test.dirs),
             never_left_out: test.never_left_out,
+            skipped: test.skipped,
         };
         let Some(had) = into.get_mut(&test.id) else {
             into.insert(test.id.clone(), told);

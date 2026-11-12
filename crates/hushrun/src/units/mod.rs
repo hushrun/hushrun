@@ -376,6 +376,7 @@ fn tests_decided(
                 not_followed,
                 deselected: test.deselected,
                 tests_reused: false,
+                skipped: test.skipped,
             };
             let state = units::state(&facts, &run(id));
             (id.clone(), (state, facts))
@@ -1982,6 +1983,8 @@ fn decide(
         let mut whole = facts.clone();
         for test in seen.tests.iter().flat_map(BTreeMap::values) {
             whole.not_followed.extend(test.not_followed.iter().cloned());
+            // \[C-32\] A test file one of whose tests was skipped: in a run that failed, no pass.
+            whole.skipped |= test.skipped && !test.deselected;
         }
         if let Some(states) = &test_states {
             told_tests = true;

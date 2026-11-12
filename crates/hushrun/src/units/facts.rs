@@ -231,6 +231,10 @@ pub struct UnitFacts {
     /// whose code ran: pytest's `conftest.py` files above it (C-40).
     #[serde(default)]
     pub every_test: Vec<usize>,
+    /// \[C-32\] How many of its finished tests were skipped (their body didn't run), for a unit
+    /// told without its tests: in a run whose COMMAND failed it records no pass.
+    #[serde(default)]
+    pub skipped: u64,
 }
 
 /// \[ADR 0077\] What an adapter saw of one test in one process (C-39). An adapter that knows tests
@@ -263,6 +267,10 @@ pub struct TestFacts {
     /// What the adapter couldn't follow inside its own window: its alone.
     #[serde(default)]
     pub not_followed: Vec<Unfollowed>,
+    /// \[C-32, C-39\] It finished without its body running: skipped, disabled, an assumption not
+    /// met. In a run whose COMMAND failed it records nothing, and its test file no pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     /// \[C-39\] The adapter never leaves it out, whatever `reuseTests` lists, such as one whose id
     /// another test of its file shares: it records no key of its own, so no plan lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -374,6 +382,8 @@ pub struct Merged {
     pub reads: BTreeSet<String>,
     pub not_followed: BTreeSet<NotFollowed>,
     pub failures_by_unit: bool,
+    /// \[C-32\] How many of its finished tests were skipped, over its processes.
+    pub skipped: u64,
     /// \[ADR 0077\] Its tests, merged across the processes that reported them, by id; `None` when
     /// no process told its tests (C-39).
     pub tests: Option<BTreeMap<String, MergedTest>>,
@@ -402,6 +412,8 @@ pub struct MergedTest {
     pub not_followed: BTreeSet<NotFollowed>,
     /// \[C-39\] A process said it never leaves it out.
     pub never_left_out: bool,
+    /// \[C-32\] A process that ran it said it was skipped.
+    pub skipped: bool,
     /// What ran, was opened and listed while it ran, from the root; `None` when a process didn't
     /// say, or said it in a way that can't be read: then what it read can't be told test by test.
     pub ran: Option<BTreeSet<String>>,
@@ -539,6 +551,7 @@ fn merge_tests(
             };
         }
         merged.failed |= test.failed;
+        merged.skipped |= test.skipped && !test.deselected;
         merged.deselected &= test.deselected;
         merged.never_left_out |= test.never_left_out;
         merged.duration_ms = merged.duration_ms.saturating_add(test.duration_ms);
@@ -599,6 +612,7 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
             counted.0 = counted.0.max(unit.selected);
             counted.1 = counted.1.saturating_add(unit.finished);
             merged.failed |= unit.failed;
+            merged.skipped = merged.skipped.saturating_add(unit.skipped);
             // \[ADR 0069\] A process that ran it, as one the plan doesn't speak for may, outweighs one
             // that deselected it.
             merged.deselected &= unit.deselected;

@@ -397,6 +397,7 @@ impl Adapter for Pytest {
                     failed: m.failed,
                     not_followed,
                     deselected: m.deselected,
+                    skipped: m.skipped > 0,
                     ..Facts::default()
                 };
                 let seen = Seen {

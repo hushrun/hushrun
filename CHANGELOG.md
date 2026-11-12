@@ -124,6 +124,12 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   with reuse on against 35,164 MB without, while a further checkout built in about 23 s against
   74 to 87 s. Not tested: x86-64, other file systems, other linkers, musl.
 
+### Changed
+
+- A skipped test in a run whose command failed records nothing, and its test file records no
+  pass: a suite setup that failed, or a runner that stopped, can skip what it hides. In a run that
+  passed, a skip is a pass, as before. An adapter's facts may say `skipped`; pytest does.
+
 ### Fixed
 
 - Two starts of a test runner in one command, such as two pytests or `ctest -L a; ctest -L b`,

@@ -388,6 +388,49 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
 }
 
+// covers: C-39, C-32
+#[test]
+fn a_skip_in_a_run_that_failed_records_nothing() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // While SKIP is set, test_skipped's body doesn't run (a skipif, a skip in a fixture's setup,
+    // an xfail that isn't run), and test_flips fails while FAIL is set. A skip in a run that
+    // failed proves nothing: a suite setup that failed can skip what it hides.
+    let mut files = shop("{mode: reuse, unit: test}");
+    files.push((
+        "tests/test_skips.py".into(),
+        "import os\nimport pytest\n\n\
+         @pytest.fixture\ndef ready():\n    if os.environ.get('SKIP'):\n        pytest.skip('not ready')\n\n\
+         @pytest.mark.skipif(bool(os.environ.get('SKIP')), reason='skipped')\ndef test_skipped():\n    assert True\n\n\
+         def test_in_setup(ready):\n    assert True\n\n\
+         @pytest.mark.xfail(bool(os.environ.get('SKIP')), run=False, reason='not run')\ndef test_not_run():\n    assert True\n\n\
+         def test_ran():\n    assert True\n"
+            .into(),
+    ));
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[("FAIL", "1"), ("SKIP", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = store::map(&r.cache);
+    // The skipped tests are not run, and record nothing; the one that ran records its pass.
+    assert_eq!(
+        map["units"]["tests/test_skips.py"]["tests"],
+        json!({"test_in_setup": "not-run", "test_not_run": "not-run", "test_ran": "passed",
+               "test_skipped": "not-run"}),
+        "{map:#}"
+    );
+    // In a run that passed, a skip is a pass, as before.
+    let passed = r.run(&pytest_args(&python, &[]), &[("SKIP", "1")]);
+    assert_eq!(passed.code, 0, "{}\n{}", passed.stdout, passed.stderr);
+    let map = store::map(&r.cache);
+    assert_eq!(
+        map["units"]["tests/test_skips.py"]["tests"]["test_skipped"],
+        "passed",
+        "{map:#}"
+    );
+}
+
 // covers: C-39
 #[test]
 fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {

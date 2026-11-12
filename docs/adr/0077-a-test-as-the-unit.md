@@ -129,3 +129,19 @@ and failed when it failed in any. Files that say none are one start, as before, 
 doesn't send it is merged as it was. A test finished only when every process that reported it,
 and didn't deselect it, finished it: an xdist worker reports only the tests it ran or deselected,
 so xdist still merges as it did. pytest sends `start`, its workers taking xdist's `testrunuid`.
+
+## Amendment 2: a skip in a run that failed proves nothing (2026-11-12)
+
+Item 4 decided a test that finished as `ran and passed`, a skipped one included. Reviewers showed
+TestNG skipping every test after a suite setup failed: those classes were recorded as passed, the
+next run left them out, and the setup's failure was hidden; and Gradle calling the test in flight
+skipped when its JVM died. A skip says the body didn't run, and in a run that failed that can be
+the failure's doing.
+
+The decision: a test's facts may say `skipped` (it finished without its body running: skipped,
+disabled, an assumption not met), and a unit's, for a unit told without its tests, how many of its
+finished tests were. In a run whose COMMAND failed, the one state function makes such a test `not
+run`, and a test file with any skipped test records no pass of its own; its failure, if it failed,
+is recorded as before. In a run that passed, nothing changes. An adapter that doesn't say
+`skipped` is read as before. pytest says it for a skip or skipif mark, a skip raised in a fixture's
+setup or in the test, and an xfail that isn't run; an xfail that ran, and failed as expected, ran.
