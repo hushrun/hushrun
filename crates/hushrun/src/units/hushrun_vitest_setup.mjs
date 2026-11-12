@@ -218,7 +218,6 @@ function readTests() {
   }
 }
 
-
 function newBucket() {
   return { ran: new Set(), opened: new Set(), dirs: new Set(), notFollowed: [] };
 }
@@ -280,7 +279,14 @@ function startFile(told) {
     finished: new Set(),
   };
   state.file.current = state.file.loaded;
-  if (state.file.watch) coverage();
+  // Without V8's coverage no test says what it ran, and each gets its file's list.
+  if (state.file.watch) {
+    try {
+      state.file.watch = coverage() !== null;
+    } catch {
+      state.file.watch = false;
+    }
+  }
   hooks();
 }
 
@@ -308,7 +314,6 @@ function relativeTo(root, p) {
 function coverage() {
   if (state.inspector !== undefined) return state.inspector;
   state.inspector = null;
-  // eslint-disable-next-line no-undef
   const inspector = module.createRequire(import.meta.url)('node:inspector');
   const session = new inspector.Session();
   session.connect();
@@ -364,13 +369,13 @@ function take() {
   return files;
 }
 
-// What ran since the last boundary goes to what is happening now.
+// What ran since the last boundary goes to what is happening now. A take that fails stops
+// watching: no test of the file then says what it ran, and each gets its file's list.
 function flush(F) {
   if (!F.watch) return;
   try {
     for (const p of take()) F.current.ran.add(p);
-  } catch (err) {
-    state.errors.push(`coverage: ${message(err)}`.slice(0, 500));
+  } catch {
     F.watch = false;
   }
 }
