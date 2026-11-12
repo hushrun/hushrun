@@ -410,3 +410,29 @@ fn sources_are_the_jvm_files_below_the_roots_some_unit_read_and_the_rest_is_the_
         assert_eq!(sets.of(rest), Some(units::Set::Rest), "{rest}");
     }
 }
+
+// covers: C-47
+#[test]
+fn what_testngs_interceptor_left_out_is_told_beside_what_its_reports_say_ran() {
+    // TestNG's own provider: the interceptor wrote what it left out, no listener wrote events, and
+    // the report holds what ran. The class didn't run whole.
+    let events = jvm::read_events(
+        br#"{"e":"jvm","pid":"1","dir":"/w","basedir":"/w"}
+{"e":"left-out","by":"testng","class":"ng.GreenTest","method":"green1"}
+"#,
+    );
+    let mut seen = ClassSeen {
+        events: events.classes.get("ng.GreenTest").cloned(),
+        ..ClassSeen::default()
+    };
+    for case in reports::cases(&data("testng-TestSuite.xml")).unwrap() {
+        if case.classname == "ng.GreenTest" && case.name != "green1" {
+            seen.from_reports = true;
+            let slot = seen.cases.entry(case.name.clone()).or_default();
+            slot.0.push(case.outcome);
+        }
+    }
+    let green = decide_class(&seen).unwrap();
+    assert!(test(&green, "green1").deselected);
+    assert!(test(&green, "green2").finished && !test(&green, "green2").deselected);
+}

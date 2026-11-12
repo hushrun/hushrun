@@ -506,7 +506,10 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
 
     // The hook's events, each JVM's by the module whose directory it ran in.
     let events = jvm::read_events_dir(&Path::new(&graph.units_dir).join(jvm::EVENTS_DIR))?;
-    let listened = events.values().any(|e| e.listened);
+    // The hook loaded in a JVM that listened, or left something out.
+    let listened = events
+        .values()
+        .any(|e| e.listened || e.classes.values().any(|c| c.left_out));
     for jvm_events in events.values() {
         let dir = jvm_events.basedir.as_ref().or(jvm_events.dir.as_ref());
         let module = dir
@@ -731,6 +734,19 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
                     ..MergedTest::default()
                 },
             );
+        }
+        // TestNG's interceptor leaves tests out where no listener writes their events (TestNG's
+        // own provider): what it left out is in the events, what ran in the reports.
+        for (id, t) in c.events.iter().flat_map(|e| &e.tests) {
+            if t.left_out && !t.started && !tests.contains_key(id) {
+                tests.insert(
+                    id.clone(),
+                    MergedTest {
+                        deselected: true,
+                        ..MergedTest::default()
+                    },
+                );
+            }
         }
         class_failed = any_failed;
         open = false;
