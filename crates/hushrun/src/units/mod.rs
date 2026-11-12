@@ -1784,6 +1784,38 @@ fn decide(
         edges,
         received,
     } = read;
+    let mut seen = seen;
+    // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the
+    // file out before any test was named): its tests as this machine's store, else a hint, knows
+    // them, each left out, so that `units.tests` counts them as reused. Known nowhere, no count
+    // of tests is sent, rather than one that leaves them out.
+    let mut tests_unknown = false;
+    if mode.unit == Unit::Test {
+        for (unit, s) in &mut seen {
+            if !s.facts.deselected || s.tests.as_ref().is_some_and(|t| !t.is_empty()) {
+                continue;
+            }
+            let known: BTreeSet<String> = match map.units.get(unit).filter(|m| !m.tests.is_empty())
+            {
+                Some(mapped) => mapped.tests.keys().cloned().collect(),
+                None => mode
+                    .shared
+                    .test_ids(unit)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            };
+            if known.is_empty() {
+                tests_unknown |= matches!(&how, How::Plan(plan) if plan.reuse.contains(unit));
+                continue;
+            }
+            let left_out = facts::MergedTest {
+                deselected: true,
+                ..facts::MergedTest::default()
+            };
+            s.tests = Some(known.into_iter().map(|id| (id, left_out.clone())).collect());
+        }
+    }
     let sets = &sets;
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base);
@@ -2236,7 +2268,7 @@ fn decide(
     }
     out.rest = rest_of(sets, tree);
     out.sources = sources;
-    if told_tests {
+    if told_tests && !tests_unknown {
         counts.tests = Some(test_counts.clone());
     }
     if matches!(how, How::Plan(_)) && (counts.reused > 0 || test_counts.reused > 0) {

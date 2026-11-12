@@ -947,3 +947,63 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         .remove("t0");
     assert_eq!(plan(&map), Ok(()));
 }
+
+// covers: C-39, C-10
+#[test]
+fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
+    // The adapter left the test file out whole and told none of its tests, as Gradle's and CTest's
+    // do: its tests count from what this machine knows of them, every one reused.
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = ["app.py", "tests/test_a.py"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tree = tree(&paths);
+    let left_out = || Seen {
+        facts: Facts {
+            deselected: true,
+            ..Facts::default()
+        },
+        reads: BTreeSet::new(),
+        duration_ms: 0,
+        tests: None,
+    };
+    let row = store::TestRow {
+        state: State::Passed,
+        duration_ms: 7,
+        not_followed: BTreeSet::new(),
+        list: None,
+    };
+    let mut map = store::Map {
+        reported: true,
+        ..store::Map::default()
+    };
+    map.units.insert(
+        "tests/test_a.py".into(),
+        Mapped {
+            tests: BTreeMap::from([
+                ("test_one".to_string(), row.clone()),
+                ("test_two".to_string(), row.clone()),
+            ]),
+            ..Mapped::default()
+        },
+    );
+    let mut plan = Plan::default();
+    plan.reuse.insert("tests/test_a.py".into());
+    let (o, _) = decided(dir.path(), &tree, left_out(), &map, &plan);
+    assert_eq!(o.units["tests/test_a.py"].0, State::Reused);
+    let counts = o.counts.as_ref().unwrap();
+    assert_eq!((counts.total, counts.ran, counts.reused), (1, 0, 1));
+    assert_eq!(
+        counts.tests,
+        Some(TestCounts {
+            total: 2,
+            ran: 0,
+            reused: 2
+        })
+    );
+    // Its tests known nowhere: no count of tests that would understate them.
+    let (o, _) = decided(dir.path(), &tree, left_out(), &store::Map::default(), &plan);
+    assert_eq!(o.units["tests/test_a.py"].0, State::Reused);
+    assert_eq!(o.counts.as_ref().unwrap().tests, None);
+}

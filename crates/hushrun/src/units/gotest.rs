@@ -1428,38 +1428,15 @@ impl Adapter for Recognized {
         }
         let mut observed = observe(self, at.files, at.root, at.cwd, at.tree)?;
         // \[ADR 0083\] Tests one by one, as the runner told them (C-39). A package of which the
-        // runner left a test out didn't run whole; one it didn't start, reused whole, left out
-        // every test this machine knows of it.
+        // runner left a test out didn't run whole. One it didn't start, reused whole, tells none:
+        // the core counts the tests this machine knows of it (C-39).
         let told = super::facts::merged(at.files, ADAPTER);
         for (unit, seen) in &mut observed.units {
-            match told.get(unit).and_then(|m| m.tests.clone()) {
-                Some(tests) => {
-                    if tests.values().any(|t| t.deselected) {
-                        seen.facts.complete = false;
-                    }
-                    seen.tests = Some(tests);
+            if let Some(tests) = told.get(unit).and_then(|m| m.tests.clone()) {
+                if tests.values().any(|t| t.deselected) {
+                    seen.facts.complete = false;
                 }
-                None if seen.facts.deselected => {
-                    seen.tests = at
-                        .map
-                        .units
-                        .get(unit)
-                        .filter(|mapped| !mapped.tests.is_empty())
-                        .map(|mapped| {
-                            mapped
-                                .tests
-                                .keys()
-                                .map(|id| {
-                                    let left_out = super::facts::MergedTest {
-                                        deselected: true,
-                                        ..super::facts::MergedTest::default()
-                                    };
-                                    (id.clone(), left_out)
-                                })
-                                .collect()
-                        });
-                }
-                None => {}
+                seen.tests = Some(tests);
             }
         }
         let sets = units::classify(
