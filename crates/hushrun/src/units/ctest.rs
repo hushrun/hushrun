@@ -324,7 +324,9 @@ impl Adapter for Recognized {
         let mine: Vec<&facts::FactsFile> =
             at.files.iter().filter(|f| f.adapter == ADAPTER).collect();
         if mine.is_empty() {
-            return Err(format!("no ctest was started by name: {BYPASSED}"));
+            return Err(format!(
+                "CTest wrote nothing for hushrun: no `ctest` reached hushrun's `ctest` on PATH; {BYPASSED}"
+            ));
         }
         if mine.iter().all(|f| f.units.is_empty()) {
             let why = mine

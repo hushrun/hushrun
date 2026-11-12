@@ -447,7 +447,7 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     assert_eq!(bypassed.code, 0, "{}", bypassed.stderr);
     assert!(
         bypassed.stderr.contains(
-            "hushrun: unit: test files weren't observed: no `swift test` started through hushrun's `swift` on PATH"
+            "hushrun: unit: test files weren't observed: swift test wrote nothing for hushrun: no `swift test` reached hushrun's `swift` on PATH"
         ),
         "{}",
         bypassed.stderr

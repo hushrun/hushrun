@@ -58,7 +58,7 @@ and on Linux, found what can be relied on and what can't; this decision is what 
    programs on `PATH` (ADR 0077). They catch `swift test` typed, or started by a script, a
    Makefile, `sh -c` or `env`. `xcrun swift test` and a path to `swift` go round them: COMMAND in
    either form is refused, said once, and a script that does it writes nothing, which the run says
-   once (`no swift test started through hushrun's swift on PATH`). Every other subcommand, and
+   once (`swift test wrote nothing for hushrun: no swift test reached hushrun's swift on PATH`). Every other subcommand, and
    `swift test list`, `last`, `--help`, `--version`, `--list-tests`, `--show-codecov-path`,
    `--debugger`, passes through untouched. The real `swift` gets `PATH` as COMMAND had it, so a
    `swift test` that a test starts never reaches hushrun: that is the child's mark. The adapter is

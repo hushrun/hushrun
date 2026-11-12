@@ -66,7 +66,7 @@ const MOST_PATTERN: usize = 64 * 1024;
 /// take: SwiftPM passes them again to each Swift Testing process.
 const MOST_COMMAND_LINE: usize = 512 * 1024;
 /// Why nothing was observed when hushrun's `swift` wrote nothing.
-pub const NOT_CAUGHT: &str = "no `swift test` started through hushrun's `swift` on PATH, which stands in front of the `swift` and `swift-test` a command finds there, not `xcrun swift test` or a path to swift";
+pub const NOT_CAUGHT: &str = "swift test wrote nothing for hushrun: no `swift test` reached hushrun's `swift` on PATH, which stands in front of the `swift` and `swift-test` a command finds there; start it as `swift test`, not with `xcrun swift test` or a path to swift";
 
 /// \[C-48\] The `swift test` adapter for a run whose plan describes the package at `package`.
 #[derive(Debug)]

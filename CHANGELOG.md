@@ -16,43 +16,49 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Added
 
-- CTest ([ADR 0087](docs/adr/0087-ctest.md)): C and C++ test programs built with CMake are observed and reused, and each CTest test with `tests.unit: test`, through a `ctest` of hushrun's first on `PATH`.
-- Jest 29 and 30 are observed, test files and tests, through `NODE_OPTIONS` ([ADR 0082](docs/adr/0082-jest.md)).
-- Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
-  **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
-  a test file whose own key didn't pass has its tests reused one by one, each under a key of its
-  own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
+- Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and **`tests.reads`**
+  (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`, a test file whose
+  own key didn't pass has its tests reused one by one, each under a key of its own
+  (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
   that fails runs once more alone. pytest, Vitest, Jest, Go, Gradle, Maven, `swift test` and CTest
   know tests; Cargo reuses by test binary and says so once. With `reads: test`, pytest on Python
-  3.12 or later, Vitest and Jest watch each test, and a test is
-  keyed by what it read alone ([ADR 0078](docs/adr/0078-what-a-test-read.md),
+  3.12 or later, Vitest and Jest watch each test, and a test is keyed by what it read alone
+  ([ADR 0078](docs/adr/0078-what-a-test-read.md),
   [ADR 0080](docs/adr/0080-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
   runs as `reads: file`, and says so once.
-- Vitest's tests one by one ([ADR 0081](docs/adr/0081-vitest-tests-one-by-one.md)): with
-  `unit: test` each test, named by its suites' names and its own, is reused on its own, and with
-  `reads: test` watched through V8's coverage.
+- Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
+  `unit: test`. A run sends its results failures first, up to 50,000 and 8 MiB; an older server's
+  5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
+  file reused gets the run without it. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and
+  `reuseTests`, and an adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
+- Contract: this machine's store of what test files read is now
+  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
+  alone. A CI cache step names `*.v2.sqlite`.
+- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens`,
+  `settings.watch`, and each test's `neverLeftOut`.
 - Hints hold tests ([ADR 0079](docs/adr/0079-hints-with-tests.md)): `hushrun.unit-hints/v1`
   carries a check's tests, their ids sealed with XChaCha20-Poly1305 under a key the server never
   has, so a machine with an empty cache reuses single tests on its first run. A hint with no tests
   is version 0, as before.
 - `hushrun why NAME UNIT::TEST` explains one test; its JSON gains `test`. `hushrun ready` counts
   tests where tests are the unit.
-- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens`,
-  `settings.watch`, and each test's `neverLeftOut`.
-- `go test`'s tests one by one ([ADR 0083](docs/adr/0083-go-tests-one-by-one.md)): with
-  `tests.unit: test`, a Go package's tests are listed, left out with `-test.skip` and read from the
-  binary's own output; with COMMAND's own `-run` or `-skip`, by package.
-- Test by test for Maven ([ADR 0085](docs/adr/0085-maven.md)): `mvn` and `./mvnw` get an adapter that reuses test classes, and with `unit: test` single tests, through `MAVEN_OPTS`, with no file of the repository changed.
-- **Gradle** ([ADR 0084](docs/adr/0084-gradle.md)): test classes and, with `unit: test`, their methods for Java, Kotlin and Android's local unit tests, on Gradle 8.14 and 9, after one line in the settings file that `hushrun init` proposes.
-- Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
-  `unit: test`. A run sends its results failures first, up to 50,000 and 8 MiB; an older server's
-  5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
-  file reused gets the run without it. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
-  adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
-- Contract: this machine's store of what test files read is now
-  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
-  alone. A CI cache step names `*.v2.sqlite`.
-- The **`swift test` adapter** ([ADR 0086](docs/adr/0086-swift-test.md)): test targets, and with `unit: test` XCTest and Swift Testing tests, through hushrun's `swift` on COMMAND's `PATH`.
+- **Vitest** ([ADR 0081](docs/adr/0081-vitest-tests-one-by-one.md)): with `unit: test`, each test,
+  named by its suites' names and its own, is reused on its own, and with `reads: test` watched
+  through V8's coverage.
+- **Jest** ([ADR 0082](docs/adr/0082-jest.md)): Jest 29 and 30 are observed through
+  `NODE_OPTIONS`, test files and, with `unit: test`, each test.
+- **Go** ([ADR 0083](docs/adr/0083-go-tests-one-by-one.md)): with `unit: test`, a package's tests
+  are listed, left out with `-test.skip` and read from the binary's own output; with COMMAND's own
+  `-run` or `-skip`, by package.
+- **Gradle** ([ADR 0084](docs/adr/0084-gradle.md)): test classes and, with `unit: test`, their
+  methods, for Java, Kotlin and Android's local unit tests, on Gradle 8.14 and 9, after one line
+  in the settings file that `hushrun init` proposes.
+- **Maven** ([ADR 0085](docs/adr/0085-maven.md)): `mvn` and `./mvnw` reuse test classes and, with
+  `unit: test`, single tests, through `MAVEN_OPTS`, with no file of the repository changed.
+- **`swift test`** ([ADR 0086](docs/adr/0086-swift-test.md)): test targets and, with `unit: test`,
+  XCTest and Swift Testing tests, through hushrun's `swift` on COMMAND's `PATH`.
+- **CTest** ([ADR 0087](docs/adr/0087-ctest.md)): C and C++ test programs built with CMake and,
+  with `unit: test`, each CTest test, through hushrun's `ctest` on COMMAND's `PATH`.
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been
   reused, and `on` reuses. `status`, also `hushrun build` alone, shows the mode, the store's
