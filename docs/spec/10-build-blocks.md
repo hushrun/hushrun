@@ -98,11 +98,12 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
   one whose metadata came out different for any reason gives another key, never a dependent
   that fails to load. The digest is taken from the bytes that are stored, in the read that hashes
-them, and the block records it; a reuse names the file by that record. *Rests on:* a macro's
-expansion following from its sources, dependencies, flags and compiler (all in what it was
-built from) and not from how it was linked, and a dependent reading from the file only its
-metadata. *Breaks if:* a linker changed the code a macro runs (a different C library linked
-into it is in what it was built from, `link`'s libraries, so that doesn't). A file in which that
+them, and the block records it; a reuse names the file by that record. *Rests on:* the code a
+dependent's rustc loads from the file and runs, and the metadata it reads, following from what
+the macro was built from (its sources, dependencies, flags, compiler and the libraries linked
+into it, `link`'s libraries) and not from how the linker laid them out. *Breaks if:* a linker
+changed the code a macro runs, or a macro's expansion depended on something its compile wasn't
+told about (see B-24 on inputs read without telling rustc). A file in which that
 metadata can't be found, and a tied proc macro,
   which is another file in each checkout, are named by their SHA-256;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
@@ -188,8 +189,9 @@ moves the base, have another. *Rests on:* a path under a base meaning the same f
 install of the same packages (the registry's unpacked sources, the toolchain's files, each read
 by content), every compile's paths under the cargo home remapped (B-9), and B-10 finding a base's
 value wherever a block holds it. *Breaks if:* a block held a base's value where neither the
-search nor the proof of a variable sees it; then it is still not portable for the variable that
-named the base, and it would be reused on its own machine as if the base had one value. Where a
+search nor the proof of a variable sees it (B-24): such a block is keyed as if the base had one
+value, may be marked portable, and is reused on another machine or by another person with the
+first machine's value; only the audit (B-16) finds it. Where a
 root and a base hold the same path, the root names it.
 
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
@@ -474,9 +476,15 @@ Its hint names which folders, never their values, and the lookup fills in this m
 two people with other homes on one store, or one person who moves `CARGO_HOME` or a toolchain,
 find another key: each compiles once and stores a block of their own beside the other's, and
 neither is refused. *Rests on:* the search (B-10) and the proof of a variable that names a base
-finding every folder a block holds. *Breaks if:* a block held such a folder in a form neither
-search nor proof sees (hashed, or split across bytes); it would be reused as before, on this
-machine only, since it is not portable either. The reasons:
+finding every folder a block holds. What they see: a folder's text anywhere in an output or a
+record, as raw bytes; and the effect on the bytes of a variable the compile reported reading
+(an `env-dep`) whose value names a base. What they can't see: a value read without telling
+rustc (a proc macro calling `std::env::var("CARGO_HOME")`, or reading a file) and written in
+another form (hashed, reversed, split across bytes). Such a block holds a machine's folder with
+no reason found: it is marked portable, holds no `bound`, and is reused on another machine or
+by another person on a shared store with the first one's value. This is the limit of every
+input a compile isn't told about, not of portability alone; the audit (B-16) is the only thing
+that catches it, by compiling a reused block again and comparing. The reasons:
 
 - `linked`: a program, a proc macro or a build-script binary. Its linker, C runtime and SDK have
   no content identity yet.

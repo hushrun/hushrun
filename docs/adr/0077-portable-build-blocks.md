@@ -85,3 +85,6 @@ differed under equal keys with no path in them.
   linkers.
 - Each rule that takes something out of a key says in the spec what it rests on and what would
   break it.
+- Known limit: an input a compile isn't told about (a proc macro reading `CARGO_HOME` with
+  `std::env::var` and writing it in another form) can leave a machine's folder in a block marked
+  portable. Neither the search nor the proof sees it; the audit (B-16) is what catches it.
