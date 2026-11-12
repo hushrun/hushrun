@@ -784,6 +784,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
             }
         }
         reads.extend(super::gotest::under(tree, &dirs));
+        let not_followed = one_local_repository_reason(not_followed);
         if unit.contains("::") {
             out.own.insert(unit.clone(), Vec::new());
         } else {
@@ -826,6 +827,33 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
         );
     }
     Ok(Some(out))
+}
+
+/// Why a class whose classpath holds a jar of a local Maven repository that no project of this
+/// build made, and no remote repository supplied, isn't followed.
+const LOCAL_REPOSITORY: &str = "local-maven-repository";
+
+/// \[ADR 0084\] One sentence, for `hushrun why`, in place of every `local-maven-repository` entry:
+/// the jars, at most three named and how many more, and what a person can do.
+fn one_local_repository_reason(not_followed: BTreeSet<NotFollowed>) -> BTreeSet<NotFollowed> {
+    let (local, mut out): (BTreeSet<NotFollowed>, BTreeSet<NotFollowed>) = not_followed
+        .into_iter()
+        .partition(|n| n.why == LOCAL_REPOSITORY);
+    if local.is_empty() {
+        return out;
+    }
+    let jars: Vec<&str> = local.iter().map(|n| n.detail.as_str()).collect();
+    let mut named = jars.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    if jars.len() > 3 {
+        named.push_str(&format!(" and {} more", jars.len() - 3));
+    }
+    out.insert(NotFollowed {
+        why: LOCAL_REPOSITORY.into(),
+        detail: format!(
+            "hushrun doesn't know what built {named}, which the tests take from a local Maven repository: put mavenLocal() after the remote repositories, or filter it to this build's own group"
+        ),
+    });
+    out
 }
 
 /// \[C-30, ADR 0084\] The sources: every file of a JVM kind below one of `dirs`, the directories

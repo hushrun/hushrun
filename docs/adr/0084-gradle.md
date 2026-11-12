@@ -274,6 +274,26 @@ reused, and then they all ran. The decision: a test of a class whose tests the h
 method (Kotest's) is told never left out (C-39), so it records no pass of its own, no plan lists
 it, and the line counts it as running. Its failure is recorded as before.
 
+## Amendment 11: a jar a remote repository supplied is fine, wherever it lies (2026-11-12)
+
+Amendment 9 made every jar of a file-based Maven repository whose `group:name` is no project of the
+build `not observed`. A build that declares `mavenLocal()` and finds third-party jars there (a
+Maven user's local repository holds JUnit) then lost all reuse: every class ran every time. The
+rule was meant for a jar something on this machine built. The decision tells them apart by what
+Maven and Gradle themselves leave beside an artifact, which runs showed: Maven 3.9's `install`
+writes `maven-metadata-local.xml` beside the version directory and an empty remote for the file in
+`_remote.repositories` (`thing-1.0.jar>=`); Gradle's `publishToMavenLocal` writes
+`maven-metadata-local.xml` and no `_remote.repositories`; a jar Maven downloaded has its remote
+named for the file (`junit-4.13.2.jar>central=`). So a jar whose `_remote.repositories` names a
+remote for it, with no `maven-metadata-local.xml` and a version that isn't a `-SNAPSHOT`, is as
+good as Gradle's own cache, and fine; any other (installed or published here, a snapshot, markers
+missing or unreadable) reads the project with its coordinates where the build has one, and else
+makes its class `not observed`. The reason is one sentence for `hushrun why`: what built the jars
+(at most three named, and how many more) isn't known to hushrun; put `mavenLocal()` after the
+remote repositories, or filter it to the build's own group. The cost: a jar installed by hand, or
+by another build of this machine, still keeps its classes from reuse until the build stops taking
+it from the local repository.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

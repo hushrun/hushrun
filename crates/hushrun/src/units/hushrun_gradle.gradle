@@ -113,6 +113,26 @@ class HushrunRun {
         return null
     }
 
+    /**
+     * Whether a jar of a file-based Maven repository came from a remote repository, as Maven's
+     * resolver leaves it: `_remote.repositories` beside it names a remote for its file, no
+     * `maven-metadata-local.xml` says it was installed or published here, and its version isn't a
+     * snapshot. Anything else, or markers that can't be read, is not.
+     */
+    static boolean downloaded(File jar, String version) {
+        try {
+            if (version == null || version.endsWith("-SNAPSHOT")) return false
+            File dir = jar.parentFile
+            if (new File(dir.parentFile, "maven-metadata-local.xml").exists()) return false
+            File marks = new File(dir, "_remote.repositories")
+            if (!marks.isFile()) return false
+            String prefix = jar.name + ">"
+            return marks.readLines("UTF-8").any { String l -> l.startsWith(prefix) && l.indexOf('=') > prefix.length() }
+        } catch (Throwable ignored) {
+            return false
+        }
+    }
+
     static String outerOf(String cls) { int d = cls.indexOf('$'); d > 0 ? cls.substring(0, d) : cls }
 
     static String brief(Throwable t) {
@@ -337,17 +357,21 @@ class HushrunSelection {
                 if (guh && p.startsWith(guh + File.separator)) return
                 String r = HushrunRun.rel(root, p)
                 if (r != null) { paths << r; return }
-                // A file-based Maven repository (mavenLocal()): a project of this build may have
-                // published it, and then the class reads that project; else what made it can't
-                // be told.
+                // A file-based Maven repository (mavenLocal()): a jar a
+                // remote repository supplied, not a snapshot, is as good as Gradle's own cache; one
+                // installed or published here (or a snapshot) reads the project with its
+                // coordinates, when the build has one; else what made it can't be told.
                 String repo = shared.fileRepositories.find { p.startsWith(it + File.separator) }
                 if (repo != null) {
                     List<String> parts = Arrays.asList(p.substring(repo.length() + 1).replace(File.separatorChar, '/' as char).split("/"))
                     int n = parts.size()
                     String coords = n >= 4 ? parts.subList(0, n - 3).join(".") + ":" + parts.get(n - 3) : null
+                    String version = n >= 4 ? parts.get(n - 2) : null
+                    if (coords != null && HushrunRun.downloaded(f, version)) return
                     String publisher = coords == null ? null : shared.coordinates.get(coords)
-                    if (publisher != null) addProject(publisher)
-                    else notFollowed << [why: "local-maven-repository", detail: (coords != null ? coords + ":" + parts.get(n - 2) : p) + " from " + repo + ", which hushrun doesn't know what built"]
+                    if (publisher != null) { addProject(publisher); return }
+                    notFollowed << [why: "local-maven-repository", detail: coords != null ? coords + ":" + version : p]
+                    return
                 }
             }
         } catch (Throwable t) {

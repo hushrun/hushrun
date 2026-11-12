@@ -1021,3 +1021,26 @@ fn a_task_whose_hook_left_out_what_its_list_didnt_name_says_so() {
         "{why}"
     );
 }
+
+// covers: C-46
+#[test]
+fn jars_of_a_local_maven_repository_nothing_here_built_are_one_reason_a_person_can_act_on() {
+    let entries: BTreeSet<NotFollowed> = ["a:a:1", "b:b:1", "c:c:1", "d:d:1", "e:e:1"]
+        .iter()
+        .map(|c| NotFollowed {
+            why: LOCAL_REPOSITORY.into(),
+            detail: (*c).into(),
+        })
+        .chain([NotFollowed {
+            why: "classpath".into(),
+            detail: "out/classes".into(),
+        }])
+        .collect();
+    let out = one_local_repository_reason(entries);
+    assert_eq!(out.len(), 2);
+    let local = out.iter().find(|n| n.why == LOCAL_REPOSITORY).unwrap();
+    assert_eq!(
+        local.detail,
+        "hushrun doesn't know what built a:a:1, b:b:1, c:c:1 and 2 more, which the tests take from a local Maven repository: put mavenLocal() after the remote repositories, or filter it to this build's own group"
+    );
+}

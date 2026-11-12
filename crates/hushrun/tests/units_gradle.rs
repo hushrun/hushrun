@@ -1631,11 +1631,26 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
         "<project><modelVersion>4.0.0</modelVersion><groupId>com.other</groupId><artifactId>thing</artifactId><version>1.0</version></project>\n",
     )
     .unwrap();
+    // And one Maven downloaded from a remote repository, as Maven leaves it: `_remote.repositories`
+    // names the remote for the jar, and nothing installed it here. It is as good as Gradle's cache.
+    let dl = m2.join("com/other/dl/1.0");
+    std::fs::create_dir_all(&dl).unwrap();
+    std::fs::write(dl.join("dl-1.0.jar"), &empty).unwrap();
+    std::fs::write(
+        dl.join("dl-1.0.pom"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.other</groupId><artifactId>dl</artifactId><version>1.0</version></project>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dl.join("_remote.repositories"),
+        "#NOTE: This is a Maven Resolver internal implementation file.\ndl-1.0.jar>central=\ndl-1.0.pom>central=\n",
+    )
+    .unwrap();
     // lib publishes to the local repository, and app takes it from there, not as a project.
     let mut files = build(Framework::Junit5, &["lib", "app"], "reuse");
     files[3] = file(
         "build.gradle",
-        "subprojects {\n  apply plugin: 'java'\n  repositories { mavenLocal(); mavenCentral() }\n  dependencies {\n    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n  }\n  tasks.withType(Test).configureEach { useJUnitPlatform() }\n}\nproject(':lib') { apply plugin: 'maven-publish'; group = 'com.example'; version = '1.0'\n  publishing { publications { maven(MavenPublication) { from components.java } } } }\nproject(':app') {\n  dependencies { implementation 'com.example:lib:1.0'; testImplementation(System.getenv('THING') ? 'com.other:thing:1.0' : 'com.example:lib:1.0') }\n  tasks.named('compileJava') { mustRunAfter(':lib:publishToMavenLocal') }\n  tasks.named('test') { mustRunAfter(':lib:publishToMavenLocal') }\n}\n",
+        "subprojects {\n  apply plugin: 'java'\n  repositories { mavenLocal(); mavenCentral() }\n  dependencies {\n    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n  }\n  tasks.withType(Test).configureEach { useJUnitPlatform() }\n}\nproject(':lib') { apply plugin: 'maven-publish'; group = 'com.example'; version = '1.0'\n  publishing { publications { maven(MavenPublication) { from components.java } } } }\nproject(':app') {\n  dependencies { implementation 'com.example:lib:1.0'; testImplementation 'com.other:dl:1.0'; testImplementation(System.getenv('THING') ? 'com.other:thing:1.0' : 'com.example:lib:1.0') }\n  tasks.named('compileJava') { mustRunAfter(':lib:publishToMavenLocal') }\n  tasks.named('test') { mustRunAfter(':lib:publishToMavenLocal') }\n}\n",
     );
     files.extend([
         file(
@@ -1683,7 +1698,14 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
     let first = run(&tasks, &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
     // app's classes read lib's sources: lib built the jar they took from the local repository.
+    // The jar Maven downloaded is followed as Gradle's own cache is.
     let map = r.map();
+    assert!(
+        map["units"]["app/src/test/java/app/AppTest.java"]
+            .get("notFollowed")
+            .is_none(),
+        "{map:#}"
+    );
     assert!(
         map["units"]["app/src/test/java/app/AppTest.java"]["reads"]
             .as_array()
