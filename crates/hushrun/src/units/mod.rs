@@ -82,6 +82,9 @@ pub struct Session {
     tests: Tests,
     root: PathBuf,
     plan: Option<Plan>,
+    /// What COMMAND's compiles get besides: the build blocks' wrapper and session (B-2), which
+    /// the plan's build, COMMAND's own made first, gets too.
+    compile_env: Vec<(OsString, OsString)>,
 }
 
 impl Drop for Session {
@@ -177,7 +180,14 @@ impl Session {
             tests: tests.clone(),
             root: root.to_path_buf(),
             plan: None,
+            compile_env: Vec::new(),
         }))
+    }
+
+    /// B-2: the variables every start of COMMAND gets to compile through the build blocks'
+    /// wrapper, which the plan's build gets too: it is COMMAND's build, made first.
+    pub fn compile_with(&mut self, env: Vec<(OsString, OsString)>) {
+        self.compile_env = env;
     }
 
     /// Gives COMMAND the variables that load the adapter.
@@ -230,10 +240,11 @@ impl Session {
                 }
             }
             Adapter::Cargo(recognized) => {
-                let b = match cargo::plan_build(recognized, input.root, input.cwd) {
-                    Ok(b) => b,
-                    Err(why) => return Planned::Everything(why),
-                };
+                let b =
+                    match cargo::plan_build(recognized, input.root, input.cwd, &self.compile_env) {
+                        Ok(b) => b,
+                        Err(why) => return Planned::Everything(why),
+                    };
                 let sets = units::classify(
                     input.tree.paths(),
                     &|path| b.unit_files.contains(path),

@@ -1807,6 +1807,7 @@ dependencies = [
  "hex",
  "hushrun-artifact",
  "hushrun-attest",
+ "hushrun-build",
  "hushrun-ci",
  "hushrun-core",
  "hushrun-digest",
@@ -1884,6 +1885,20 @@ dependencies = [
  "tracing",
  "x509-cert",
  "zeroize",
+]
+
+[[package]]
+name = "hushrun-build"
+version = "0.13.0"
+dependencies = [
+ "hushrun-core",
+ "hushrun-digest",
+ "memchr",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -4046,6 +4061,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "hex",
+ "hushrun-build",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

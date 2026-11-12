@@ -13,6 +13,7 @@
 //! \[ADR 0032\] A check event that hushrun's server refuses for the org's plan isn't recorded:
 //! the run says so once, marks the check `not recorded`, and goes on, exiting as it would have.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use serde_json::json;
 
+use hushrun_build::session::Session;
 use hushrun_core::event::{
     CheckRecord, Environment, EventKind, EvidenceKind, Outcome, VerifiedEvent, pinned_digest,
 };
@@ -34,7 +36,9 @@ use hushrun_vcs::{Snapshot, digest_scopes};
 
 use crate::app::{App, ledger_failure};
 use crate::cli::RunArgs;
+use crate::cmd::build_session::{self, system_time};
 use crate::cmd::common::base_event;
+use crate::cmd::wrap;
 use crate::context::{Content, Source, Subject};
 use crate::events::{self, Recorded, Unrecorded};
 use crate::exit::{CmdResult, Exit, Failure};
@@ -283,6 +287,14 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
 
     let ci = crate::ci::Ci::of(app);
     let mut unrecorded = Unrecorded::default();
+    // B-2: what build blocks record a check run here under, as `hushrun run NAME -- COMMAND`
+    // says it. A line saying why reuse is off is said once, not for every check.
+    let repository = app
+        .run
+        .repository
+        .clone()
+        .or_else(|| wrap::repository_of(&content));
+    let mut said_off = false;
     for Prepared {
         name,
         why,
@@ -304,6 +316,26 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
             _ => eprintln!("hushrun run: `{name}` ({why}): {}", program.describe()),
         }
         let timeout = args.timeout.or(def.timeout);
+        // B-2: a check run here compiles through the wrapper, in one session for all its
+        // attempts. An isolated one never begins a session: its container has neither the link
+        // nor the store.
+        let build = match isolation {
+            Some(_) => None,
+            None => match build_session::begin(
+                system_time(wrap::now(app.global)),
+                repository.as_deref(),
+            ) {
+                Ok(session) => Some(session),
+                Err(why) => {
+                    if let Some(why) = why.filter(|_| !said_off) {
+                        say(app, &why);
+                        said_off = true;
+                    }
+                    None
+                }
+            },
+        };
+        let here_env = build.as_ref().map(Session::env).unwrap_or_default();
         let started_at = Time::from_timestamp(jiff::Timestamp::now());
         let started = Instant::now();
         let mut attempts = 0;
@@ -339,7 +371,13 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
                     }
                     code?
                 }
-                _ => program.execute(timeout)?,
+                _ => match program.execute(timeout, &here_env) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        finish(app, build);
+                        return Err(err);
+                    }
+                },
             };
             if exit_code == Some(0) || attempts > def.retries {
                 break;
@@ -350,6 +388,8 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
             );
         }
         let duration = started.elapsed();
+        // B-20: what its compiles came to, whatever its exit code.
+        finish(app, build);
         let finished_at = Time::from_timestamp(jiff::Timestamp::now());
         let result = if exit_code == Some(0) {
             Outcome::Pass
@@ -464,6 +504,23 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         }
     }
     Ok(if failed { Exit::CheckFailed } else { Exit::Ok })
+}
+
+/// One of hushrun's lines about a check, on stderr: stdout is the command's output. `-q`
+/// silences it.
+fn say(app: &App<'_>, line: &str) {
+    if app.global.quiet == 0 {
+        eprintln!("hushrun run: {line}");
+    }
+}
+
+/// Ends a check's build session, if it had one, and says what its compiles came to (B-20).
+fn finish(app: &App<'_>, build: Option<Session>) {
+    if let Some(session) = build {
+        for line in session.finish(system_time(wrap::now(app.global))).lines() {
+            say(app, line);
+        }
+    }
 }
 
 /// The subject's scope in this checkout.
@@ -634,9 +691,14 @@ impl Program {
         }
     }
 
-    /// Runs once; the exit code, or `None` when killed at the timeout or by a signal. The
-    /// check's stdout goes to hushrun's stderr, so hushrun's stdout stays its own output.
-    fn execute(&self, timeout: Option<Dur>) -> Result<Option<i32>, Failure> {
+    /// Runs once, here, with `env` added to hushrun's own; the exit code, or `None` when killed
+    /// at the timeout or by a signal. The check's stdout goes to hushrun's stderr, so hushrun's
+    /// stdout stays its own output. An isolated run never comes here (`isolated::execute`).
+    fn execute(
+        &self,
+        timeout: Option<Dur>,
+        env: &[(OsString, OsString)],
+    ) -> Result<Option<i32>, Failure> {
         let mut command = match self {
             Program::Shell { shell, script } => {
                 let mut c = Command::new(match shell {
@@ -654,6 +716,7 @@ impl Program {
             }
         };
         command
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::from(std::io::stderr()))
             .stderr(Stdio::inherit());

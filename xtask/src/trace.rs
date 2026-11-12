@@ -21,7 +21,7 @@ const MARKERS: &[&str] = &["covers:", "\"covers\":"];
 const SCANNED_DIRS: &[&str] = &["crates", "tools", "testdata", "fuzz"];
 const SCANNED_EXTENSIONS: &[&str] = &["rs", "py", "yaml", "yml", "json", "sh"];
 /// Order in which rule families appear in the spec, for the report.
-const FAMILIES: &[char] = &['D', 'E', 'L', 'C', 'T', 'O', 'P', 'I', 'A'];
+const FAMILIES: &[char] = &['D', 'E', 'L', 'C', 'T', 'O', 'P', 'I', 'A', 'B'];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct RuleId {
@@ -176,6 +176,7 @@ fn base_milestone(id: RuleId) -> Option<u32> {
         ('A', 7) => 6,
         ('A', _) => 5,
         ('O', _) => 13,
+        ('B', _) => 8,
         _ => return None,
     })
 }

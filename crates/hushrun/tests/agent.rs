@@ -1013,6 +1013,11 @@ fn a_token_where_the_string_goes_says_what_to_do() {
 /// hushrun's variables, every one it reads: a string in any is dropped, and said once.
 const HUSHRUNS_VARIABLES: &[&str] = &[
     "HUSHRUN_BACKEND",
+    // B-1, B-13, B-14: build blocks' variables; `hushrun run` hands the session to the wrapper.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_SESSION",
     "HUSHRUN_CACHE_DIR",
     "HUSHRUN_CONFIG",
     "HUSHRUN_CONTAINER_RUNTIME",
@@ -1024,6 +1029,9 @@ const HUSHRUNS_VARIABLES: &[&str] = &[
     "HUSHRUN_FULCIO_URL",
     "HUSHRUN_GITLAB_TOKEN",
     "HUSHRUN_GIT_READER",
+    // \[ADR 0068\] With HUSHRUN_UNITS, what `hushrun run` hands the test runner it puts in front
+    // of a test binary, which hushrun reads as that runner.
+    "HUSHRUN_GOFLAGS",
     "HUSHRUN_HOST",
     "HUSHRUN_INSIDE_RUN",
     "HUSHRUN_INSTALLER_GITHUB_BASE_URL",
@@ -1054,6 +1062,7 @@ const HUSHRUNS_VARIABLES: &[&str] = &[
     "HUSHRUN_SIGSTORE_TUF_URL",
     "HUSHRUN_TOKEN",
     "HUSHRUN_TSA",
+    "HUSHRUN_UNITS",
 ];
 
 /// A string as it goes astray: alone, in the quotes `docker --env-file` keeps, pasted whole, and

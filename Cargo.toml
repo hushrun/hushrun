@@ -36,6 +36,7 @@ hushrun-ci = { path = "crates/hushrun-ci" }
 hushrun-testkit = { path = "crates/hushrun-testkit" }
 hushrun-tlog = { path = "crates/hushrun-tlog" }
 hushrun-reports = { path = "crates/hushrun-reports" }
+hushrun-build = { path = "crates/hushrun-build" }
 
 anyhow = "1.0.100"
 base64 = "0.23"
@@ -45,6 +46,9 @@ ed25519-dalek = { version = "2.2", features = ["pkcs8", "pem", "zeroize"] }
 getrandom = "0.3"
 gix = { version = "0.90", default-features = false, features = ["max-performance", "parallel", "revision", "sha1", "sha256"] }
 hex = "0.4.3"
+# Build blocks search compiled outputs for folder paths (B-10). Every build has it already,
+# under regex and aho-corasick.
+memchr = "2.8"
 jiff = { version = "0.2.24", default-features = false, features = ["std"] }
 ignore = "0.4.23"
 mimalloc = { version = "0.1.48", default-features = false }

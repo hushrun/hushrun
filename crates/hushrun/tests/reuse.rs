@@ -52,6 +52,13 @@ const CLEARED: &[&str] = &[
     "COPILOT_MODEL",
     "COPILOT_ALLOW_ALL",
     "COPILOT_GITHUB_TOKEN",
+    // B-1, B-2: the developer's build mode, store and wrapper stay out: a test run that cargo
+    // itself compiles through the wrapper doesn't pass its session on to a fixture's cargo.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_SESSION",
+    "RUSTC_WRAPPER",
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";
@@ -1436,5 +1443,248 @@ fn ready_asks_the_server_as_ci_counts_and_says_a_suspension() {
             .contains("unit: every test file runs: reuse of its test files is suspended"),
         "{}",
         ready.stdout
+    );
+}
+
+/// What a step of [`rust_steps`] came to: test reuse's outcome, which build reuse must leave as
+/// it is, and what build reuse did.
+#[derive(Debug)]
+struct Step {
+    /// Test reuse's own outcome: the exit code, the plan's line, the recorded units without the
+    /// time they saved (a time, never the same twice), and whether an audit suspended reuse.
+    tests: (i32, String, Value, bool),
+    /// The lines that total what the compiles came to (B-20).
+    build_totals: Vec<String>,
+    /// Each start of `cargo` hushrun made, in order: whether it was COMMAND (inside the run), its
+    /// RUSTC_WRAPPER, its HUSHRUN_BUILD_SESSION, whether that session's folder was there (it goes
+    /// when the session finishes), and its arguments.
+    starts: Vec<(bool, String, String, bool, String)>,
+}
+
+/// The steps of the Rust fixture that make test reuse plan, reuse, audit, and start COMMAND a
+/// second time for a test file that failed though it had passed on the same files it read
+/// (C-34): each step's outcome. `env` goes to every run; `cargo` on PATH is a shim that writes
+/// down each start before it hands over to the real one.
+#[cfg(unix)]
+fn rust_steps(r: &Repo, env: &[(&str, &str)]) -> Vec<Step> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let real = std::env::split_paths(&path)
+        .map(|dir| dir.join("cargo"))
+        .find(|cargo| cargo.is_file())
+        .expect("cargo on PATH");
+    let shims = r.root.join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let log = r.root.join("starts.log");
+    let shim = shims.join("cargo");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nthere=no\n[ -n \"$HUSHRUN_BUILD_SESSION\" ] && [ -d \"$HUSHRUN_BUILD_SESSION\" ] && there=yes\nprintf '%s|%s|%s|%s|%s\\n' \"$HUSHRUN_INSIDE_RUN\" \"$RUSTC_WRAPPER\" \"$HUSHRUN_BUILD_SESSION\" \"$there\" \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut dirs = vec![shims];
+    dirs.extend(std::env::split_paths(&path));
+    let shimmed = std::env::join_paths(dirs).unwrap();
+    let shimmed = shimmed.to_str().expect("a PATH in UTF-8");
+    let mut env: Vec<(&str, &str)> = env.to_vec();
+    env.push(("PATH", shimmed));
+
+    let nextest = [
+        "run",
+        "test",
+        "--",
+        "cargo",
+        "nextest",
+        "run",
+        "--workspace",
+        "--locked",
+    ];
+    let mut steps = Vec::new();
+    let mut step = |r: &Repo| {
+        let _ = std::fs::remove_file(&log);
+        let ran = r.run(&nextest, &env);
+        let starts = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let mut parts = line.splitn(5, '|');
+                let mut next = || parts.next().unwrap_or_default().to_string();
+                (next() == "1", next(), next(), next() == "yes", next())
+            })
+            .collect();
+        let mut units = r.newest_result()["units"].clone();
+        if let Some(units) = units.as_object_mut() {
+            units.remove("savedMs");
+        }
+        steps.push(Step {
+            tests: (
+                ran.code,
+                ran.plan_line().to_string(),
+                units,
+                ran.stderr
+                    .contains("reuse of test's test files is suspended"),
+            ),
+            build_totals: ran
+                .stderr
+                .lines()
+                .filter(|line| {
+                    line.strip_prefix("hushrun: build: ").is_some_and(|rest| {
+                        rest.starts_with(|c: char| c.is_ascii_digit())
+                            && (rest.contains(" built") || rest.contains(" reused"))
+                    })
+                })
+                .map(str::to_string)
+                .collect(),
+            starts,
+        });
+    };
+    // Everything runs, and passes.
+    step(r);
+    // One crate changes: its test binary runs, three are reused and one runs as a check.
+    r.write(
+        "crates/other/src/lib.rs",
+        "pub fn two() -> u32 { 1 + 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+    );
+    step(r);
+    // The flag, which no dep-info names: the only test binary that could be reused is the one
+    // audited, it fails, and COMMAND starts again for it alone; it fails again, so reuse is
+    // suspended.
+    r.write("flag", "");
+    r.write(
+        "crates/core/src/lib.rs",
+        "pub fn answer() -> u32 { 40 + 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn answer_is_42() { assert_eq!(super::answer(), 42); }\n}\n",
+    );
+    r.write(
+        "crates/other/src/lib.rs",
+        "pub fn two() -> u32 { 2 * 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+    );
+    step(r);
+    steps
+}
+
+/// The Rust fixture, with its lockfile committed.
+fn rust_repo() -> Repo {
+    let r = Repo::new(&rust_files());
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    r
+}
+
+// covers: B-2, B-20, C-34
+// Build blocks and test reuse in the same run: with build reuse on, every start of COMMAND
+// compiles through the wrapper in the run's one session, the second start for an audited test
+// file too, and so does the plan's build, which is COMMAND's made first; the compiles are totalled
+// once a run; and test reuse decides, records and suspends exactly as it does with build reuse
+// off. A second checkout that shares the store reuses crates the first one compiled.
+#[cfg(unix)]
+#[test]
+fn build_reuse_and_test_reuse_work_in_the_same_run() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let off = rust_repo();
+    let without = rust_steps(&off, &[("HUSHRUN_BUILD", "off")]);
+    let on = rust_repo();
+    let store = on.root.join("store");
+    let store = store.to_str().unwrap();
+    let with = rust_steps(
+        &on,
+        &[("HUSHRUN_BUILD", "on"), ("HUSHRUN_BUILD_DIR", store)],
+    );
+
+    // Test reuse's own outcome, step by step, is the same with build reuse on or off.
+    let outcomes = |steps: &[Step]| steps.iter().map(|s| s.tests.clone()).collect::<Vec<_>>();
+    assert_eq!(outcomes(&with), outcomes(&without));
+    // And it is what test reuse does on this fixture: plan, reuse, audit, suspend.
+    let tests = outcomes(&without);
+    assert_eq!(tests[0].0, 0, "{tests:?}");
+    assert_eq!(
+        tests[1].1,
+        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+    );
+    assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
+    assert_ne!(tests[2].0, 0, "{tests:?}");
+    assert!(tests[2].3, "{tests:?}");
+
+    for (n, (step, plain)) in with.iter().zip(&without).enumerate() {
+        let commands: Vec<_> = step.starts.iter().filter(|s| s.0).collect();
+        // Without build reuse, nothing is set and nothing is totalled.
+        assert!(plain.build_totals.is_empty(), "{n}: {plain:?}");
+        assert!(
+            plain
+                .starts
+                .iter()
+                .all(|s| s.1.is_empty() && s.2.is_empty()),
+            "{n}: {plain:?}"
+        );
+        assert_eq!(
+            plain.starts.iter().filter(|s| s.0).count(),
+            commands.len(),
+            "{n}: COMMAND starts as often either way: {plain:?}\n{step:?}"
+        );
+        // With it: the wrapper and one session on every start of COMMAND.
+        assert!(!commands.is_empty(), "{n}: {step:?}");
+        let session = &commands[0].2;
+        assert!(!session.is_empty(), "{n}: {step:?}");
+        for start in &commands {
+            assert!(start.1.ends_with("/hushrun-rustc"), "{n}: {step:?}");
+            assert_eq!(&start.2, session, "{n}: one session a run: {step:?}");
+            assert!(start.3, "{n}: the session is still going: {step:?}");
+        }
+        // The plan's build, COMMAND's made first, compiles through the wrapper in that session.
+        let plan_builds: Vec<_> = step
+            .starts
+            .iter()
+            .take_while(|s| !s.0)
+            .filter(|s| s.4.starts_with("test --no-run"))
+            .collect();
+        assert!(!plan_builds.is_empty(), "{n}: {step:?}");
+        assert!(
+            plan_builds
+                .iter()
+                .all(|s| s.1.ends_with("/hushrun-rustc") && &s.2 == session && s.3),
+            "{n}: {step:?}"
+        );
+        // What the compiles came to, once.
+        assert_eq!(step.build_totals.len(), 1, "{n}: {step:?}");
+    }
+    // The first run compiled every crate through the wrapper; the audited test file's second
+    // start of COMMAND had it too.
+    assert!(
+        with[0].build_totals[0].contains(" built, none reused"),
+        "{:?}",
+        with[0]
+    );
+    assert_eq!(
+        with[2].starts.iter().filter(|s| s.0).count(),
+        2,
+        "{:?}",
+        with[2]
+    );
+
+    // Another checkout of the same files, sharing the store: crates are reused, and test reuse
+    // ends as it did in the first checkout.
+    let other = rust_repo();
+    let again = rust_steps(
+        &other,
+        &[("HUSHRUN_BUILD", "on"), ("HUSHRUN_BUILD_DIR", store)],
+    );
+    assert_eq!(outcomes(&again), tests);
+    assert!(
+        again[0].build_totals[0].contains(" reused")
+            && !again[0].build_totals[0].contains("none reused"),
+        "{:?}",
+        again[0]
     );
 }

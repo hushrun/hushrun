@@ -3,6 +3,8 @@
 pub mod adopt;
 pub mod artifact;
 pub mod attest;
+pub mod build;
+pub(crate) mod build_session;
 pub(crate) mod common;
 pub mod digest;
 pub mod doctor;

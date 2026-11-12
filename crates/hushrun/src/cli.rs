@@ -150,6 +150,13 @@ pub enum Command {
     /// It changes nothing.
     #[command(after_long_help = WHY_HELP)]
     Why(WhyArgs),
+    /// Reuse compiled Rust crates between worktrees and runs on this machine.
+    ///
+    /// With reuse on, `hushrun run NAME -- COMMAND` runs COMMAND with cargo's RUSTC_WRAPPER set
+    /// to hushrun, which puts a crate in place instead of compiling it when the same inputs were
+    /// compiled before, in any worktree. Nothing leaves the machine. It is off until you turn it
+    /// on; `hushrun build` alone shows the status.
+    Build(BuildArgs),
     /// Run a check's command, unless this exact code already passed it.
     ///
     /// `hushrun run [NAME] -- COMMAND` runs COMMAND unless the repository's files, as they are
@@ -315,6 +322,28 @@ const WHY_HELP: &str = "Examples:
                                     For the run of this command, not the newest run here
   hushrun why unit tests/test_cart.py --format json
                                     The same as data (hushrun.why/v1)";
+
+/// `hushrun build` (B-1, B-21).
+#[derive(Debug, Args)]
+pub struct BuildArgs {
+    #[command(subcommand)]
+    pub command: Option<BuildCommand>,
+}
+
+/// `hushrun build`'s commands (B-1, B-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum BuildCommand {
+    /// Reuse compiled crates in commands `hushrun run` runs.
+    On,
+    /// Compile everything as usual, keep the crates, and say what would have been reused.
+    Observe,
+    /// Reuse and keep nothing. The crates already kept stay until `hushrun build clean`.
+    Off,
+    /// Show the mode, the settings file, where crates are kept, and how much is kept.
+    Status,
+    /// Delete every crate kept.
+    Clean,
+}
 
 /// `hushrun hook` (C-23).
 #[derive(Debug, Subcommand)]

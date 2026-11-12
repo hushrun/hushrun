@@ -36,6 +36,13 @@ const CLEARED: &[&str] = &[
     "PYTHONPATH",
     "CARGO_TARGET_DIR",
     "npm_lifecycle_event",
+    // B-1, B-2: the developer's build mode, store and wrapper stay out: a test run that cargo
+    // itself compiles through the wrapper doesn't pass its session on to a fixture's cargo.
+    "HUSHRUN_BUILD",
+    "HUSHRUN_BUILD_KEEP_DAYS",
+    "HUSHRUN_BUILD_DIR",
+    "HUSHRUN_BUILD_SESSION",
+    "RUSTC_WRAPPER",
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";

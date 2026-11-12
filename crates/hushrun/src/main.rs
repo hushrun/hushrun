@@ -38,6 +38,15 @@ use exit::{Exit, Failure};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // B-2: called by the wrapper's name, this binary stands in for rustc and does nothing else.
+    // Cargo starts it once per compile, about a thousand times in a cold build, so this comes
+    // before any setting, the command line, logging, the hook or the notice.
+    if std::env::args_os()
+        .next()
+        .is_some_and(|name| hushrun_build::wrapper::called_as_wrapper(&name))
+    {
+        return hushrun_build::wrapper::main();
+    }
     // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
     // of its own: it runs the binary and passes everything through, before anything else.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -138,6 +147,8 @@ fn run(cli: &Cli) -> ExitCode {
         Command::Tests(command) => cmd::tests::run(&cli.global, command),
         // C-37: what a run would do with a test file; no hushrun.yaml needed, nothing written.
         Command::Why(args) => cmd::why::run(&cli.global, args),
+        // B-21: per user, no repository, no hook.
+        Command::Build(args) => cmd::build::run(&cli.global, args),
         // C-15: setting up `hushrun run` needs no hushrun.yaml.
         Command::Init(args) if !args.pipeline() => cmd::setup::run(&cli.global, args),
         command => app::App::new(&cli.global).and_then(|app| match command {
@@ -168,6 +179,7 @@ fn run(cli: &Cli) -> ExitCode {
             | Command::Skill(_)
             | Command::Tests(_)
             | Command::Why(_)
+            | Command::Build(_)
             | Command::Approve(_) => {
                 unreachable!("handled above")
             }
