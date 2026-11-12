@@ -87,7 +87,9 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
   the file where they are), which holds the crate hash a dependent is compiled against and which
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
   one whose metadata came out different for any reason gives another key, never a dependent
-  that fails to load. A file in which that metadata can't be found, and a tied proc macro,
+  that fails to load. The digest is taken from the bytes that are stored, in the read that hashes
+them, and the block records it; a reuse names the file by that record. A file in which that
+metadata can't be found, and a tied proc macro,
   which is another file in each checkout, are named by their SHA-256;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,

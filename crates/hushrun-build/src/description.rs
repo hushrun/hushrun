@@ -14,7 +14,7 @@ use crate::model::Class;
 use crate::portable::Portability;
 
 /// The schema name every description carries. One with another name is not read.
-pub const SCHEMA: &str = "hushrun.build.description/3";
+pub const SCHEMA: &str = "hushrun.build.description/4";
 
 /// What one output file of a block is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +47,10 @@ pub struct Output {
     pub name: String,
     /// What it is.
     pub kind: OutputKind,
+    /// For a linked library, the digest of the crate metadata in it, taken from the bytes stored
+    /// ([`crate::metadata::digest`]): what a reuse's record names it by (B-6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Digest>,
 }
 
 /// One `# env-dep:` line, with roots in its value as placeholders.
@@ -192,10 +196,12 @@ mod tests {
                 Output {
                     name: "liba.rmeta".into(),
                     kind: OutputKind::Metadata,
+                    metadata: None,
                 },
                 Output {
                     name: "a.dSYM/Contents/Resources/DWARF/a".into(),
                     kind: OutputKind::DebugBundle,
+                    metadata: None,
                 },
             ],
             dep_info: StoredDepInfo {

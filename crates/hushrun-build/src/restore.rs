@@ -108,6 +108,8 @@ struct Ready {
     dest: PathBuf,
     /// The file's SHA-256, or `None` for the bundle's folder, whose files were each checked.
     sha256: Option<Digest>,
+    /// For a linked library, the digest of its metadata the block recorded from its bytes.
+    metadata: Option<Digest>,
 }
 
 /// Whether `name` is one plain file name of this call's outputs: no folder, not hidden, holding
@@ -247,6 +249,7 @@ impl Restore<'_> {
                     temp: temp.clone(),
                     dest: out_dir.join(&name),
                     sha256: None,
+                    metadata: None,
                 });
                 for file in bundle {
                     let rest = in_bundle(&file.name, &stem)
@@ -269,6 +272,11 @@ impl Restore<'_> {
                     temp: temp.clone(),
                     dest: out_dir.join(&file.name),
                     sha256: Some(file.sha256),
+                    metadata: description
+                        .outputs
+                        .iter()
+                        .find(|o| o.name == file.name)
+                        .and_then(|o| o.metadata),
                 });
                 copy_checked(&file.path, &temp, file.sha256)?;
                 finish_file(&temp, self.start)?;
@@ -279,6 +287,7 @@ impl Restore<'_> {
                 temp: temp.clone(),
                 dest: dep_dest.clone(),
                 sha256: Some(Digest::of(dep_text.as_bytes())),
+                metadata: None,
             });
             finish_file(&temp, self.start)
         })();
@@ -336,8 +345,9 @@ impl Prepared {
             for file in &ready {
                 // A bundle is no dependent's input: no record, and none written inside it.
                 let Some(sha256) = file.sha256 else { continue };
-                let produced_by =
-                    origin.and_then(|known| crate::metadata::produced_by(known, &file.dest));
+                let produced_by = origin.and_then(|known| {
+                    crate::metadata::produced_by(known, &file.dest, file.metadata)
+                });
                 sidecar::record_block(&file.dest, sha256, produced_by, Some(step), true, portable)
                     .map_err(at(&file.dest))?;
             }

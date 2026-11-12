@@ -359,10 +359,24 @@ impl Search {
 
     /// One output, hashed and searched in one pass.
     fn file(&self, path: PathBuf, name: String, kind: OutputKind) -> Result<Searched, NotStored> {
-        let (found, sha256, size) = self
-            .needles
-            .all_in_file_hashed(&path)
-            .map_err(|_| NotStored::Scan)?;
+        // A linked library (a proc macro) is read whole once: its SHA-256, the search and the
+        // digest of its metadata (B-6) all come from the bytes that are stored.
+        let (found, sha256, size, metadata) =
+            if kind == OutputKind::Link && inputs::is_linked_library(&path) {
+                let bytes = crate::regular::read(&path).map_err(|_| NotStored::Scan)?;
+                (
+                    self.needles.all_in_bytes(&bytes),
+                    Digest::of(&bytes),
+                    bytes.len() as u64,
+                    metadata::digest(&bytes),
+                )
+            } else {
+                let (found, sha256, size) = self
+                    .needles
+                    .all_in_file_hashed(&path)
+                    .map_err(|_| NotStored::Scan)?;
+                (found, sha256, size, None)
+            };
         let mut tied = false;
         let mut machine = BTreeSet::new();
         for (hit, kinds) in found.iter().zip(&self.kinds) {
@@ -385,6 +399,7 @@ impl Search {
                 kind,
                 sha256,
                 size,
+                metadata,
             },
             tied,
             machine,
@@ -399,6 +414,9 @@ struct OutputFile {
     kind: OutputKind,
     sha256: Digest,
     size: u64,
+    /// For a linked library, the digest of the crate metadata in it ([`metadata::digest`]),
+    /// from the same read as `sha256`.
+    metadata: Option<Digest>,
 }
 
 impl Call<'_> {
@@ -1078,8 +1096,9 @@ impl Call<'_> {
                         let _ = sidecar::record_block(
                             &output.path,
                             output.sha256,
-                            produced_by
-                                .and_then(|known| metadata::produced_by(known, &output.path)),
+                            produced_by.and_then(|known| {
+                                metadata::produced_by(known, &output.path, output.metadata)
+                            }),
                             Some(cx.step),
                             false,
                             portable,
@@ -1712,6 +1731,7 @@ impl Call<'_> {
                 .map(|o| Output {
                     name: o.name.clone(),
                     kind: o.kind,
+                    metadata: o.metadata,
                 })
                 .collect(),
             dep_info: StoredDepInfo::of(&produced.dep_info, placeholders),

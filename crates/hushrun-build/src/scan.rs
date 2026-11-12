@@ -117,6 +117,15 @@ impl Needles {
         Ok((found, Digest::from_bytes(hasher.finish()), size))
     }
 
+    /// Every needle found anywhere in `bytes`, as one flag per needle in the order
+    /// [`Needles::needles`] gives them: [`Needles::all_in_file_hashed`] for bytes already read.
+    pub fn all_in_bytes(&self, bytes: &[u8]) -> Vec<bool> {
+        self.finders
+            .iter()
+            .map(|finder| finder.find(bytes).is_some())
+            .collect()
+    }
+
     /// The earliest (needle, offset) in `bytes`. Each later needle searches only up to where a
     /// hit would still be earlier.
     fn search(&self, bytes: &[u8]) -> Option<(usize, usize)> {

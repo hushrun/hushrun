@@ -3617,6 +3617,21 @@ fn a_dependent_of_a_proc_macro_whose_metadata_differs_elsewhere_is_built_not_reu
         settle();
         assert_eq!(call_m(&a, &ws_a).outcome(), STORED);
         assert_eq!(call_a(&a, &ws_a).outcome(), STORED);
+        // The macro's block records the digest of its metadata from the bytes it stored: what
+        // a reuse names the file by, with no second read.
+        let so = ws_a.join(format!(
+            "target/debug/deps/libm-xm.{}",
+            std::env::consts::DLL_EXTENSION
+        ));
+        let recorded = crate::metadata::of(&so).unwrap().to_string();
+        let store_blocks = walk(&a.w.session.current().store.join("blocks"));
+        assert!(
+            store_blocks
+                .iter()
+                .any(|f| f.ends_with("block.json")
+                    && fs::read_to_string(f).unwrap().contains(&recorded)),
+            "no block records {recorded}"
+        );
         // A's blocks in B's store.
         let (store_a, store_b) = (&a.w.session.current().store, &b.w.session.current().store);
         for part in ["blocks", "steps"] {

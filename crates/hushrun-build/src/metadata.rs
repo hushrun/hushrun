@@ -68,14 +68,15 @@ pub fn name(known_by: &Digest, metadata: &Digest) -> Result<Digest, KeyError> {
 }
 
 /// What the record of `file`, an output of a block that may move and was built from
-/// `known_by`, says dependents name it by: for a linked library (a proc macro), [`name`] of its
-/// metadata now, or nothing when that can't be read, so its bytes name it; for any other file,
-/// `known_by`. The one place that decides it, for a compile and for a reuse.
-pub fn produced_by(known_by: Digest, file: &Path) -> Option<Digest> {
+/// `known_by`, says dependents name it by: for a linked library (a proc macro), [`name`] of the
+/// digest of its metadata (`metadata`, [`digest`] of the very bytes stored), or nothing when
+/// none was found, so its bytes name it; for any other file, `known_by`. The one place that
+/// decides it, for a compile and for a reuse.
+pub fn produced_by(known_by: Digest, file: &Path, metadata: Option<Digest>) -> Option<Digest> {
     if !crate::inputs::is_linked_library(file) {
         return Some(known_by);
     }
-    name(&known_by, &of(file)?).ok()
+    name(&known_by, &metadata?).ok()
 }
 
 #[cfg(test)]
@@ -136,22 +137,22 @@ mod tests {
             .path()
             .join(format!("libm-1.{}", std::env::consts::DLL_EXTENSION));
         std::fs::write(&so, library(b"x", b"meta", b"y")).unwrap();
-        let named = produced_by(known, &so).unwrap();
+        let named = produced_by(known, &so, of(&so)).unwrap();
         assert_ne!(named, known);
         // Another linker: the same name.
         std::fs::write(&so, library(b"other linker", b"meta", b"")).unwrap();
-        assert_eq!(produced_by(known, &so), Some(named));
+        assert_eq!(produced_by(known, &so, of(&so)), Some(named));
         // Other metadata, or other inputs: another name.
         std::fs::write(&so, library(b"x", b"other meta", b"y")).unwrap();
-        assert_ne!(produced_by(known, &so), Some(named));
+        assert_ne!(produced_by(known, &so, of(&so)), Some(named));
         std::fs::write(&so, library(b"x", b"meta", b"y")).unwrap();
-        assert_ne!(produced_by(Digest::of(b"other"), &so), Some(named));
+        assert_ne!(produced_by(Digest::of(b"other"), &so, of(&so)), Some(named));
         // No metadata found: no name, so dependents key the file by its bytes.
         std::fs::write(&so, b"not a library").unwrap();
-        assert_eq!(produced_by(known, &so), None);
+        assert_eq!(produced_by(known, &so, of(&so)), None);
         // An rlib or rmeta is named by what it was built from (its dependents key its bytes).
         let rlib = dir.path().join("libm-1.rlib");
         std::fs::write(&rlib, b"rlib").unwrap();
-        assert_eq!(produced_by(known, &rlib), Some(known));
+        assert_eq!(produced_by(known, &rlib, None), Some(known));
     }
 }
