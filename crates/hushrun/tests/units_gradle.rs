@@ -74,7 +74,8 @@ const CLEARED: &[&str] = &[
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";
-const LINE: &str = r#"if (System.getenv("HUSHRUN_GRADLE")) apply from: System.getenv("HUSHRUN_GRADLE")"#;
+const LINE: &str =
+    r#"if (System.getenv("HUSHRUN_GRADLE")) apply from: System.getenv("HUSHRUN_GRADLE")"#;
 
 struct Repo {
     _dir: tempfile::TempDir,
@@ -182,7 +183,11 @@ impl Repo {
 
     /// Removes the builds' outputs, which the tests are done with.
     fn clean(&self) {
-        for entry in std::fs::read_dir(&self.repo).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&self.repo)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let _ = std::fs::remove_dir_all(entry.path().join("build"));
         }
         let _ = std::fs::remove_dir_all(self.repo.join("build"));
@@ -219,7 +224,12 @@ fn line<'a>(ran: &'a Ran, start: &str) -> &'a str {
     ran.stderr
         .lines()
         .find(|l| l.starts_with(start))
-        .unwrap_or_else(|| panic!("no line starting {start:?} in:\n{}\n{}", ran.stderr, ran.stdout))
+        .unwrap_or_else(|| {
+            panic!(
+                "no line starting {start:?} in:\n{}\n{}",
+                ran.stderr, ran.stdout
+            )
+        })
 }
 
 fn tools(what: &str, here: bool) -> bool {
@@ -257,8 +267,7 @@ fn has_gradle() -> bool {
     })
 }
 
-const NEEDS: &str =
-    "Gradle (HUSHRUN_TEST_GRADLE) and a Gradle user home with JUnit (HUSHRUN_TEST_GRADLE_USER_HOME)";
+const NEEDS: &str = "Gradle (HUSHRUN_TEST_GRADLE) and a Gradle user home with JUnit (HUSHRUN_TEST_GRADLE_USER_HOME)";
 
 fn file(path: &str, text: &str) -> (String, String) {
     (path.to_string(), text.to_string())
@@ -439,7 +448,10 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
     // Gradle didn't run the reused classes: two of other's three wrote no report.
     let ran_in_other = ["A", "B", "C"]
         .iter()
-        .filter(|n| !r.xml_cases("other", &format!("shop.other.{n}Test")).is_empty())
+        .filter(|n| {
+            !r.xml_cases("other", &format!("shop.other.{n}Test"))
+                .is_empty()
+        })
         .count();
     assert_eq!(ran_in_other, 1, "{}", changed.stdout);
 }
@@ -705,8 +717,9 @@ fn with_isolated_projects_on_nothing_is_observed_and_the_build_is_as_it_was() {
     );
     assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
     assert!(
-        ran.stdout
-            .contains("hushrun: Isolated Projects is on, so hushrun looks at no test class of this build"),
+        ran.stdout.contains(
+            "hushrun: Isolated Projects is on, so hushrun looks at no test class of this build"
+        ),
         "{}",
         ran.stdout
     );
@@ -736,7 +749,10 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     let plugin = std::env::var("HUSHRUN_TEST_ANDROID_PLUGIN").unwrap_or_else(|_| "9.1.1".into());
     let r = Repo::new(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
-        file(".gitignore", "build/\n.gradle/\n.kotlin/\nlocal.properties\n"),
+        file(
+            ".gitignore",
+            "build/\n.gradle/\n.kotlin/\nlocal.properties\n",
+        ),
         // As the spike's Android sample is, whose Gradle user home the tests run offline against.
         file(
             "settings.gradle.kts",

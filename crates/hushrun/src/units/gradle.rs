@@ -389,7 +389,9 @@ struct UnitSaw {
 }
 
 impl UnitSaw {
-    fn new() -> UnitSaw {
+    /// What no task has said anything of yet: complete and left out until one says otherwise,
+    /// which `add` takes as AND.
+    fn unseen() -> UnitSaw {
         UnitSaw {
             complete: true,
             deselected: true,
@@ -473,7 +475,8 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
     let no_source = report.outcome == "no-source";
     // The task ran its tests whole: its root suite ended, or it sent no event and succeeded.
     let whole = no_source
-        || (executed && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
+        || (executed
+            && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
     // A failure outside any class: no test of the task is known to have run whole.
     let outside = report.suite_failures.iter().any(|s| s.c.is_none());
     let whole = whole && !outside;
@@ -514,11 +517,12 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
             .or_default()
             .push(inv);
     }
-    let left_out_classes: BTreeSet<&str> = report.left_out.classes.iter().map(String::as_str).collect();
+    let left_out_classes: BTreeSet<&str> =
+        report.left_out.classes.iter().map(String::as_str).collect();
     let up_to_date = matches!(report.outcome.as_str(), "up-to-date" | "from-cache");
     for (outer, name) in &report.names {
         let events = by_class.get(outer.as_str());
-        let mut one = UnitSaw::new();
+        let mut one = UnitSaw::unseen();
         one.not_followed = task_not_followed.clone();
         one.dirs = report.reads.dirs.iter().cloned().collect();
         one.paths = report.reads.paths.iter().cloned().collect();
@@ -535,12 +539,8 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
         // A class left out whole ran nothing, and Gradle never named its tests.
         one.told = !one.deselected;
         let testng = report.framework.as_deref() == Some("testng");
-        let any_failed = events.is_some_and(|tests| {
-            tests
-                .values()
-                .flatten()
-                .any(|inv| inv.r == "FAILURE")
-        });
+        let any_failed =
+            events.is_some_and(|tests| tests.values().flatten().any(|inv| inv.r == "FAILURE"));
         for (id, invs) in events.into_iter().flatten() {
             let failed = invs.iter().any(|inv| inv.r == "FAILURE");
             let skipped = invs.iter().all(|inv| inv.r == "SKIPPED");
@@ -587,7 +587,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
     for file in mine {
         let report = report_of(file)?;
         for (name, one) in units_of(&report, &file.errors) {
-            merged.entry(name).or_insert_with(UnitSaw::new).add(one);
+            merged.entry(name).or_insert_with(UnitSaw::unseen).add(one);
         }
     }
     let mut out = Observed::default();
@@ -725,7 +725,11 @@ pub fn classify(
 /// The units a plan knows of, and the directories they read, from this machine's map, else from
 /// the newest hint that names test classes: the test classes' files of the last run here, and the
 /// units named by no file it kept.
-fn known(map: &Map, shared: &Shared, tree: &Tree) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+fn known(
+    map: &Map,
+    shared: &Shared,
+    tree: &Tree,
+) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let mut files: BTreeSet<String> = map
         .unit_files
         .iter()
@@ -837,7 +841,12 @@ impl Adapter for Recognized {
         let Some(observed) = observe(at.files, at.tree)? else {
             return Ok(None);
         };
-        let sets = classify(at.tree, &observed.unit_files, &observed.known_dirs, at.ignore);
+        let sets = classify(
+            at.tree,
+            &observed.unit_files,
+            &observed.known_dirs,
+            at.ignore,
+        );
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let planned = observed
             .units

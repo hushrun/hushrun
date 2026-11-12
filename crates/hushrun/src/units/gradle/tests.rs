@@ -61,7 +61,13 @@ fn gradle_is_recognized_by_its_program_and_continuous_builds_are_refused() {
         );
     }
     // A script that hides Gradle isn't Gradle: the default adapter, which does nothing for it.
-    for other in ["make test", "./ci.sh", "npm test", "mvn test", "sh gradlew test"] {
+    for other in [
+        "make test",
+        "./ci.sh",
+        "npm test",
+        "mvn test",
+        "sh gradlew test",
+    ] {
         assert!(recognize(&words(other)).is_none(), "{other}");
     }
 }
@@ -134,7 +140,10 @@ fn a_tests_id_is_its_class_and_method_for_every_invocation() {
     let class = [(c, c)];
     let cases: Vec<(Invocation, &str)> = vec![
         // JUnit 5: plain, overloads, parametrized, repeated, factory, nested, Kotlin backticks.
-        (inv(c, "passes()", &class, "SUCCESS"), "ex.app.CalcTest.passes"),
+        (
+            inv(c, "passes()", &class, "SUCCESS"),
+            "ex.app.CalcTest.passes",
+        ),
         (
             inv(c, "overloaded(TestInfo)", &class, "SUCCESS"),
             "ex.app.CalcTest.overloaded",
@@ -169,7 +178,10 @@ fn a_tests_id_is_its_class_and_method_for_every_invocation() {
             inv(
                 "ex.j4.ParamTest",
                 "small[0: x=1]",
-                &[("[0: x=1]", "ex.j4.ParamTest"), ("ex.j4.ParamTest", "ex.j4.ParamTest")],
+                &[
+                    ("[0: x=1]", "ex.j4.ParamTest"),
+                    ("ex.j4.ParamTest", "ex.j4.ParamTest"),
+                ],
                 "SUCCESS",
             ),
             "ex.j4.ParamTest.small",
@@ -255,7 +267,10 @@ fn sources_are_jvm_files_below_the_projects_test_classes_read_and_not_build_logi
         sets.of("app/src/test/java/ex/AppTest.java"),
         Some(units::Set::Units)
     );
-    assert_eq!(sets.of("lib/src/main/kotlin/ex/Lib.kt"), Some(units::Set::Sources));
+    assert_eq!(
+        sets.of("lib/src/main/kotlin/ex/Lib.kt"),
+        Some(units::Set::Sources)
+    );
     // A file of a project no test class read, resources and build scripts run everything.
     for rest in [
         "other/src/main/java/ex/Other.java",
@@ -393,16 +408,31 @@ fn a_junit5_task_reports_classes_and_tests_left_out_and_class_failures() {
     // What a class read: every file below its project's directory and below each project its
     // classpath is built from, build logic and other projects left out.
     assert!(calc.reads.contains("lib/src/main/java/ex/lib/Lib.java"));
-    assert!(calc.reads.contains("app/src/test/java/ex/app/CalcTest.java"));
+    assert!(
+        calc.reads
+            .contains("app/src/test/java/ex/app/CalcTest.java")
+    );
     assert!(!calc.reads.iter().any(|r| r.starts_with("other/")));
-    assert_eq!(observed.dirs["app/src/test/java/ex/app/CalcTest.java"], set(&["app", "lib"]));
-    assert_eq!(observed.dirs["lib/src/test/java/ex/lib/LibTest.java"], set(&["lib"]));
+    assert_eq!(
+        observed.dirs["app/src/test/java/ex/app/CalcTest.java"],
+        set(&["app", "lib"])
+    );
+    assert_eq!(
+        observed.dirs["lib/src/test/java/ex/lib/LibTest.java"],
+        set(&["lib"])
+    );
     assert_eq!(observed.known_dirs, set(&["app", "lib"]));
     assert!(observed.own.is_empty());
     // A project no test class read is in the rest set, and so is build logic.
     let sets = classify(&t, &observed.unit_files, &observed.known_dirs, &[]);
-    assert_eq!(sets.of("other/src/test/java/ex/other/OtherTest.java"), Some(units::Set::Rest));
-    assert_eq!(sets.of("lib/src/main/java/ex/lib/Lib.java"), Some(units::Set::Sources));
+    assert_eq!(
+        sets.of("other/src/test/java/ex/other/OtherTest.java"),
+        Some(units::Set::Rest)
+    );
+    assert_eq!(
+        sets.of("lib/src/main/java/ex/lib/Lib.java"),
+        Some(units::Set::Sources)
+    );
 }
 
 // covers: C-46, C-39
@@ -421,13 +451,28 @@ fn testng_kotest_spock_and_junit4_tests_record_only_what_they_earned() {
     let before = &observed.units["tng/src/test/java/ex/tng/BeforeClassFailTest.java"];
     assert_eq!(state(before, false), units::State::Failed);
     let states = test_states(before, &[]);
-    assert_eq!(states["ex.tng.BeforeClassFailTest.neverRuns"], units::State::NotRun);
-    assert_eq!(states["ex.tng.BeforeClassFailTest.boom"], units::State::Failed);
-    let calc = test_states(&observed.units["tng/src/test/java/ex/tng/CalcTest.java"], &[]);
-    assert_eq!(calc["ex.tng.CalcTest.skippedByException"], units::State::NotRun);
+    assert_eq!(
+        states["ex.tng.BeforeClassFailTest.neverRuns"],
+        units::State::NotRun
+    );
+    assert_eq!(
+        states["ex.tng.BeforeClassFailTest.boom"],
+        units::State::Failed
+    );
+    let calc = test_states(
+        &observed.units["tng/src/test/java/ex/tng/CalcTest.java"],
+        &[],
+    );
+    assert_eq!(
+        calc["ex.tng.CalcTest.skippedByException"],
+        units::State::NotRun
+    );
     assert_eq!(calc["ex.tng.CalcTest.param"], units::State::Failed);
     assert_eq!(calc["ex.tng.CalcTest.passes"], units::State::Passed);
-    assert_eq!(calc["ex.tng.CalcTest$Nested.nestedPasses"], units::State::Passed);
+    assert_eq!(
+        calc["ex.tng.CalcTest$Nested.nestedPasses"],
+        units::State::Passed
+    );
 
     // Kotest: a failed beforeSpec fails its spec; a spec's tests are what Gradle names them.
     let t = tree(&["kotest/src/test/kotlin/ex/kotest/KoSpec.kt"]);
@@ -449,12 +494,21 @@ fn testng_kotest_spock_and_junit4_tests_record_only_what_they_earned() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        state(&observed.units["spock/src/test/groovy/ex/spock/SetupSpecFailSpec.groovy"], false),
+        state(
+            &observed.units["spock/src/test/groovy/ex/spock/SetupSpecFailSpec.groovy"],
+            false
+        ),
         units::State::Failed
     );
-    let states = test_states(&observed.units["spock/src/test/groovy/ex/spock/CalcSpec.groovy"], &[]);
+    let states = test_states(
+        &observed.units["spock/src/test/groovy/ex/spock/CalcSpec.groovy"],
+        &[],
+    );
     assert_eq!(states["ex.spock.CalcSpec.param #x"], units::State::Failed);
-    assert_eq!(states["ex.spock.CalcSpec$Inner.inner works"], units::State::Passed);
+    assert_eq!(
+        states["ex.spock.CalcSpec$Inner.inner works"],
+        units::State::Passed
+    );
 
     // JUnit 4 through Gradle's filter patterns: a nested class's test and a Parameterized test
     // left out; @BeforeClass and a class JUnit 4 refuses fail their class. The same on Gradle 8
@@ -475,29 +529,47 @@ fn testng_kotest_spock_and_junit4_tests_record_only_what_they_earned() {
         "ex.app.CalcTest.fails",
         "ex.app.ParamTest.small",
     ];
-    let calc = test_states(&observed.units["app/src/test/java/ex/app/CalcTest.java"], &left);
+    let calc = test_states(
+        &observed.units["app/src/test/java/ex/app/CalcTest.java"],
+        &left,
+    );
     assert_eq!(calc["ex.app.CalcTest.fails"], units::State::Reused);
-    assert_eq!(calc["ex.app.CalcTest$Nested.nestedFails"], units::State::Reused);
+    assert_eq!(
+        calc["ex.app.CalcTest$Nested.nestedFails"],
+        units::State::Reused
+    );
     assert_eq!(calc["ex.app.CalcTest.passes"], units::State::Passed);
-    let param = test_states(&observed.units["app/src/test/java/ex/app/ParamTest.java"], &left);
+    let param = test_states(
+        &observed.units["app/src/test/java/ex/app/ParamTest.java"],
+        &left,
+    );
     assert_eq!(param["ex.app.ParamTest.small"], units::State::Reused);
     assert_eq!(param["ex.app.ParamTest.positive"], units::State::Passed);
     for failed in [
         "app/src/test/java/ex/app/BeforeClassFailTest.java",
         "app/src/test/java/ex/app/Extras.java",
     ] {
-        assert_eq!(state(&observed.units[failed], false), units::State::Failed, "{failed}");
+        assert_eq!(
+            state(&observed.units[failed], false),
+            units::State::Failed,
+            "{failed}"
+        );
     }
     // A jar of the repository on the classpath is read; it is in the rest set.
-    assert!(observed.units["app/src/test/java/ex/app/CalcTest.java"]
-        .reads
-        .contains("libs/local.jar"));
+    assert!(
+        observed.units["app/src/test/java/ex/app/CalcTest.java"]
+            .reads
+            .contains("libs/local.jar")
+    );
     for (text, version) in [
         (include_str!("junit4-gradle8.json"), 8),
         (include_str!("junit4-gradle9.json"), 9),
     ] {
         let observed = observe(&[captured(text)], &t).unwrap().unwrap();
-        let param = test_states(&observed.units["app/src/test/java/ex/app/ParamTest.java"], &[]);
+        let param = test_states(
+            &observed.units["app/src/test/java/ex/app/ParamTest.java"],
+            &[],
+        );
         assert_eq!(
             param.keys().map(String::as_str).collect::<Vec<_>>(),
             ["ex.app.ParamTest.positive", "ex.app.ParamTest.small"],
@@ -516,8 +588,14 @@ fn a_flaky_test_is_a_failed_one_and_a_kotlin_class_is_named_by_its_file() {
         .unwrap()
         .unwrap();
     let flaky = &observed.units["src/test/java/ex/retry/FlakyTest.java"];
-    assert_eq!(test_states(flaky, &[])["ex.retry.FlakyTest.flaky"], units::State::Failed);
-    assert_eq!(observed.dirs["src/test/java/ex/retry/FlakyTest.java"], set(&["."]));
+    assert_eq!(
+        test_states(flaky, &[])["ex.retry.FlakyTest.flaky"],
+        units::State::Failed
+    );
+    assert_eq!(
+        observed.dirs["src/test/java/ex/retry/FlakyTest.java"],
+        set(&["."])
+    );
     // Kotlin: two classes in Things.kt, a class whose package isn't its directory, backticks.
     let t = tree(&[
         "app/src/test/kotlin/ex/app/BeforeAllFail.kt",
@@ -528,10 +606,24 @@ fn a_flaky_test_is_a_failed_one_and_a_kotlin_class_is_named_by_its_file() {
     let observed = observe(&[captured(include_str!("kotlin-junit5.json"))], &t)
         .unwrap()
         .unwrap();
-    assert!(observed.units.contains_key("app/src/test/kotlin/ex/app/Things.kt"));
-    assert!(observed.units.contains_key("app/src/test/kotlin/flat/Misplaced.kt"));
-    let calc = test_states(&observed.units["app/src/test/kotlin/ex/app/CalcTest.kt"], &[]);
-    assert_eq!(calc["ex.app.CalcTest.name with spaces"], units::State::Passed);
+    assert!(
+        observed
+            .units
+            .contains_key("app/src/test/kotlin/ex/app/Things.kt")
+    );
+    assert!(
+        observed
+            .units
+            .contains_key("app/src/test/kotlin/flat/Misplaced.kt")
+    );
+    let calc = test_states(
+        &observed.units["app/src/test/kotlin/ex/app/CalcTest.kt"],
+        &[],
+    );
+    assert_eq!(
+        calc["ex.app.CalcTest.name with spaces"],
+        units::State::Passed
+    );
 }
 
 // covers: C-46, C-32
@@ -558,9 +650,16 @@ fn a_task_gradle_didnt_run_whole_records_nothing() {
     let observed = observe(&[crashed], &t).unwrap().unwrap();
     let calc = &observed.units["app/src/test/java/ex/app/CalcTest.java"];
     assert_eq!(state(calc, false), units::State::NotRun);
-    assert!(test_states(calc, &[]).values().all(|s| *s == units::State::NotRun));
+    assert!(
+        test_states(calc, &[])
+            .values()
+            .all(|s| *s == units::State::NotRun)
+    );
     assert_eq!(
-        state(&observed.units["app/src/test/java/ex/app/StaticInitFailTest.java"], false),
+        state(
+            &observed.units["app/src/test/java/ex/app/StaticInitFailTest.java"],
+            false
+        ),
         units::State::Failed
     );
     // A failure outside every class: nothing of the task ran whole.
@@ -569,16 +668,18 @@ fn a_task_gradle_didnt_run_whole_records_nothing() {
     });
     let observed = observe(&[outside], &t).unwrap().unwrap();
     assert_eq!(
-        state(&observed.units["app/src/test/java/ex/app/CalcTest.java"], false),
+        state(
+            &observed.units["app/src/test/java/ex/app/CalcTest.java"],
+            false
+        ),
         units::State::NotRun
     );
     // A test the plan listed that ran all the same ran: never reused.
     let ran_anyway = changed(&app, |r| {
-        r["invocations"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({"c": "ex.app.CalcTest", "n": "fails()", "r": "SUCCESS", "ms": 3,
-                                     "p": [["ex.app.CalcTest", "ex.app.CalcTest"]]}));
+        r["invocations"].as_array_mut().unwrap().push(
+            serde_json::json!({"c": "ex.app.CalcTest", "n": "fails()", "r": "SUCCESS", "ms": 3,
+                                     "p": [["ex.app.CalcTest", "ex.app.CalcTest"]]}),
+        );
     });
     let observed = observe(&[ran_anyway], &t).unwrap().unwrap();
     let states = test_states(
@@ -602,13 +703,18 @@ fn what_the_script_couldnt_follow_makes_its_task_not_observed() {
     for file in [unknown, broken] {
         let observed = observe(&[file], &t).unwrap().unwrap();
         assert_eq!(
-            state(&observed.units["app/src/test/java/ex/app/CalcTest.java"], false),
+            state(
+                &observed.units["app/src/test/java/ex/app/CalcTest.java"],
+                false
+            ),
             units::State::NotObserved
         );
-        assert!(!observed.units["app/src/test/java/ex/app/CalcTest.java"]
-            .facts
-            .not_followed
-            .is_empty());
+        assert!(
+            !observed.units["app/src/test/java/ex/app/CalcTest.java"]
+                .facts
+                .not_followed
+                .is_empty()
+        );
     }
     // A classpath entry of the repository that is no file of it (built output outside every
     // project's build directory), a directory of it, and a name no source file gives.
@@ -618,7 +724,12 @@ fn what_the_script_couldnt_follow_makes_its_task_not_observed() {
     });
     let observed = observe(&[odd], &t).unwrap().unwrap();
     let calc = &observed.units["app::ex.app.CalcTest"];
-    assert!(calc.facts.not_followed.iter().any(|n| n.why == "classpath" && n.detail == "out/classes"));
+    assert!(
+        calc.facts
+            .not_followed
+            .iter()
+            .any(|n| n.why == "classpath" && n.detail == "out/classes")
+    );
     assert!(observed.dirs["app::ex.app.CalcTest"].contains("other"));
     assert_eq!(observed.own["app::ex.app.CalcTest"], Vec::<String>::new());
     assert!(!observed.unit_files.contains("app::ex.app.CalcTest"));
@@ -629,11 +740,19 @@ fn what_the_script_couldnt_follow_makes_its_task_not_observed() {
                                 "notFollowed": [{"why": "task", "detail": "included build"}]}}
     }))
     .unwrap();
-    assert!(observe(&[not_followed], &t).unwrap().unwrap().units.is_empty());
+    assert!(
+        observe(&[not_followed], &t)
+            .unwrap()
+            .unwrap()
+            .units
+            .is_empty()
+    );
     assert!(observe(&[], &t).unwrap().is_none());
     // A report that can't be read: nothing can be told.
     let mut unread = app.clone();
-    unread.settings.insert(ADAPTER.into(), serde_json::json!({"schema": "other/v9"}));
+    unread
+        .settings
+        .insert(ADAPTER.into(), serde_json::json!({"schema": "other/v9"}));
     assert!(observe(&[unread], &t).is_err());
 }
 
@@ -655,9 +774,12 @@ fn a_class_two_tasks_ran_passed_only_where_each_ran_it_whole() {
     let states = test_states(calc, &["ex.app.CalcTest.fails"]);
     assert_eq!(states["ex.app.CalcTest.passes"], units::State::NotRun);
     assert_eq!(states["ex.app.CalcTest.fails"], units::State::NotRun);
-    let both = observe(&[app.clone(), changed(&app, |r| r["task"] = ":b".into())], &t)
-        .unwrap()
-        .unwrap();
+    let both = observe(
+        &[app.clone(), changed(&app, |r| r["task"] = ":b".into())],
+        &t,
+    )
+    .unwrap()
+    .unwrap();
     let states = test_states(
         &both.units["app/src/test/java/ex/app/CalcTest.java"],
         &["ex.app.CalcTest.fails"],
