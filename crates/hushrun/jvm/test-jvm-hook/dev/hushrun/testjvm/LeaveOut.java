@@ -10,7 +10,8 @@ import java.util.Set;
 
 /**
  * The tests hushrun asks the test JVM to leave out, read once from the file that the system property
- * {@code hushrun.tests.leaveOut}, else the variable {@code HUSHRUN_TESTS_LEAVE_OUT}, names.
+ * {@code hushrun.tests.leaveOut} names, else the variable {@code HUSHRUN_TESTS_LEAVE_OUT}, else
+ * {@code $HUSHRUN_UNITS/test-jvm/leave-out.txt} when {@code HUSHRUN_UNITS} is set.
  *
  * <p>The file is UTF-8, one entry per line; blank lines and lines starting with {@code #} are
  * ignored, and each line is trimmed. An entry is a class's binary name ({@code Class.getName()},
@@ -26,10 +27,15 @@ import java.util.Set;
  *   <li>{@code pkg.Outer$Inner#name} the same, for a method of a nested class.
  * </ul>
  *
+ * <p>A line {@code @<directory>} scopes the entries after it, up to the next such line, to a JVM whose
+ * directory is that one: its system property {@code basedir}, else its working directory, both
+ * compared as canonical paths. Entries before any such line apply in every JVM.
+ *
  * <p>A method's name is matched up to its first {@code [}, which no JVM method name holds (JUnit 4's
  * Parameterized names its tests {@code name[0: x=1]}). Nothing is a pattern.
  *
- * <p>When the file can't be read, nothing is left out: every test runs, and the events say why.
+ * <p>When there is no such file, nothing is left out. When it can't be read, nothing is left out
+ * either, and the events say why.
  */
 final class LeaveOut {
     static final String PROPERTY = "hushrun.tests.leaveOut";
@@ -80,14 +86,25 @@ final class LeaveOut {
     }
 
     private static LeaveOut read() {
-        String path = Names.of(PROPERTY, VARIABLE);
+        String path = Names.of(PROPERTY, VARIABLE, "leave-out.txt");
         Set<String> classes = new HashSet<>();
         Set<String> methods = new HashSet<>();
-        if (path == null) return new LeaveOut(Collections.<String>emptySet(), Collections.<String>emptySet());
+        if (path == null || !Files.exists(Paths.get(path))) {
+            return new LeaveOut(Collections.<String>emptySet(), Collections.<String>emptySet());
+        }
         try {
+            String here = null;
+            boolean applies = true;
             for (String raw : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
                 String line = raw.trim();
                 if (line.isEmpty() || line.startsWith("#")) continue;
+                if (line.startsWith("@")) {
+                    if (here == null) here = Names.jvmDir();
+                    String scope = line.substring(1).trim();
+                    applies = here != null && !scope.isEmpty() && Names.canonical(scope).equals(here);
+                    continue;
+                }
+                if (!applies) continue;
                 int hash = line.indexOf('#');
                 if (hash < 0) {
                     classes.add(line);

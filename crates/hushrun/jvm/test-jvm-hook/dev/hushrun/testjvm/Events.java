@@ -10,8 +10,9 @@ import java.util.Locale;
 
 /**
  * What the test JVM did, one JSON object a line, in a file of its own in the directory that the
- * system property {@code hushrun.tests.events}, else the variable {@code HUSHRUN_TESTS_EVENTS},
- * names: {@code <pid>-<nanos>.jsonl}, created on the first event, each line flushed as it is written,
+ * system property {@code hushrun.tests.events} names, else the variable {@code HUSHRUN_TESTS_EVENTS},
+ * else {@code $HUSHRUN_UNITS/test-jvm/events}: {@code <pid>-<nanos>.jsonl}, created (with the
+ * directory) on the first event, each line flushed as it is written,
  * so a JVM that dies leaves every line before it. Nothing is written when neither is set, and an
  * error writing stops the writing, never the tests.
  *
@@ -97,8 +98,9 @@ final class Events {
     }
 
     private void open() throws IOException {
-        String dir = Names.of(PROPERTY, VARIABLE);
+        String dir = Names.of(PROPERTY, VARIABLE, "events");
         if (dir == null) return;
+        new File(dir).mkdirs();
         String pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
         File file = null;
         for (int i = 0; i < 100; i++) {
