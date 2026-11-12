@@ -17,12 +17,6 @@
 //! or a run with no directory of its own. A real program that can't be found exits 127, as a
 //! shell does.
 
-// The first adapter that puts a program on PATH removes this.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "no adapter puts a program on PATH yet")
-)]
-
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -54,7 +48,7 @@ pub trait Program: Sync {
 }
 
 /// \[ADR 0077\] The programs adapters put on `PATH`, by name. A new one is one entry here.
-pub const PROGRAMS: &[&dyn Program] = &[];
+pub const PROGRAMS: &[&dyn Program] = &[&super::ctest::Ctest];
 
 /// One start of a program on `PATH`.
 pub struct Call<'a> {
@@ -129,7 +123,7 @@ pub fn variables(dir: &Path, path: Option<OsString>) -> Result<Vec<(String, OsSt
 
 /// `PATH` as COMMAND's environment had it, from [`PATH_WAS`]: `Some(None)` when it had none,
 /// `None` when the variable isn't there.
-fn path_was(value: Option<OsString>) -> Option<Option<OsString>> {
+pub(super) fn path_was(value: Option<OsString>) -> Option<Option<OsString>> {
     let value = value?;
     if value.is_empty() {
         return Some(None);

@@ -26,6 +26,7 @@
 
 pub mod adapter;
 pub mod cargo;
+pub mod ctest;
 pub mod db;
 pub mod facts;
 pub mod gotest;
