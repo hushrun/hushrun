@@ -1395,3 +1395,100 @@ fn a_test_that_ends_its_fork_with_system_exit_records_no_pass() {
         );
     }
 }
+
+/// A module of the reactor: `name`, its parent the reactor's, with `body` inside `<project>`.
+fn reactor_module(name: &str, body: &str) -> String {
+    format!(
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>shop</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>{name}</artifactId>
+  {body}
+</project>
+"#
+    )
+}
+
+fn greens(dir: &str, pkg: &str, n: usize) -> Vec<(String, String)> {
+    (1..=n)
+        .map(|i| {
+            file(
+                &format!("{dir}/{pkg}/Green{i}Test.java"),
+                &format!("package {pkg};\n\nimport org.junit.jupiter.api.Test;\n\nclass Green{i}Test {{\n  @Test void green() {{}}\n}}\n"),
+            )
+        })
+        .collect()
+}
+
+// covers: C-47
+#[test]
+fn test_classes_a_module_reaches_through_another_modules_test_jar_are_read() {
+    let Some(maven) = maven() else { return };
+    // core makes a test-jar of its test classes, Fixtures among them; testkit depends on it at
+    // compile scope; x depends on testkit, and XTest reads Fixtures through Kit.
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file("pom.xml", &parent(&["core", "testkit", "x"], "5", "3.5.4")),
+        file(
+            "core/pom.xml",
+            &reactor_module(
+                "core",
+                "<build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version><executions><execution><goals><goal>test-jar</goal></goals></execution></executions></plugin></plugins></build>",
+            ),
+        ),
+        file(
+            "core/src/main/java/core/Core.java",
+            "package core;\n\npublic class Core {}\n",
+        ),
+        file(
+            "core/src/test/java/core/Fixtures.java",
+            "package core;\n\npublic class Fixtures {\n  public static int v() { return 1; }\n}\n",
+        ),
+        file(
+            "core/src/test/java/core/CoreTest.java",
+            "package core;\n\nimport org.junit.jupiter.api.Test;\n\nclass CoreTest {\n  @Test void core() {}\n}\n",
+        ),
+        file(
+            "testkit/pom.xml",
+            &reactor_module(
+                "testkit",
+                "<dependencies><dependency><groupId>shop</groupId><artifactId>core</artifactId><version>1.0</version><type>test-jar</type></dependency></dependencies>",
+            ),
+        ),
+        file(
+            "testkit/src/main/java/kit/Kit.java",
+            "package kit;\n\npublic class Kit {\n  public static int v() { return core.Fixtures.v(); }\n}\n",
+        ),
+        file(
+            "x/pom.xml",
+            &reactor_module(
+                "x",
+                "<dependencies><dependency><groupId>shop</groupId><artifactId>testkit</artifactId><version>1.0</version><scope>test</scope></dependency></dependencies>",
+            ),
+        ),
+        file(
+            "x/src/test/java/x/XTest.java",
+            "package x;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass XTest {\n  @Test void v() { assertEquals(1, kit.Kit.v()); }\n}\n",
+        ),
+    ];
+    files.extend(greens("x/src/test/java", "x", 9));
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let map = r.map();
+    let reads = map["units"]["x/src/test/java/x/XTest.java"]["reads"].clone();
+    assert!(
+        reads
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("core/src/test/java/core/Fixtures.java")),
+        "{map:#}"
+    );
+    r.write(
+        "core/src/test/java/core/Fixtures.java",
+        "package core;\n\npublic class Fixtures {\n  public static int v() { return 2; }\n}\n",
+    );
+    let second = r.run(&[], &["test"], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    assert!(second.stdout.contains("x.XTest.v"), "{}", second.stdout);
+}

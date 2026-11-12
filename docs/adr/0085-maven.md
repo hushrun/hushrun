@@ -153,6 +153,14 @@ the build knows which files it compiles, and a file it doesn't may reach a test 
 doesn't see, such as a jar in the local repository. With `-pl app -am`, the modules app depends on
 keep their sources on app's classes' lists.
 
+## Amendment 5: test-jars handed on, and modules a plugin names (2026-11-12)
+
+Item 4 added an upstream module's test roots only when the module itself declared that module's
+test-jar. A module that takes another's test-jar at compile scope hands those test classes on to
+every module that depends on it, and a test there was reused after a test class it reads changed.
+The decision: the test-jar dependencies (type `test-jar` or classifier `tests`, of any scope) of
+the module and of every module it depends on, to the end, add those modules' test roots.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0

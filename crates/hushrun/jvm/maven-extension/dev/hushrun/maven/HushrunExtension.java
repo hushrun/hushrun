@@ -413,13 +413,23 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
         return out;
     }
 
-    /** The reactor projects whose test classes p's tests read: a test-jar dependency on them. */
+    /**
+     * The reactor projects whose test classes p's tests read: a test-jar dependency on them (type
+     * {@code test-jar} or classifier {@code tests}, of any scope) of p or of any project p depends
+     * on, to the end: a module that takes another's test-jar at compile scope hands its test
+     * classes on.
+     */
     private static List<String> testJars(Map<String, MavenProject> byId, MavenProject p) {
         List<String> out = new ArrayList<>();
-        for (Dependency d : p.getDependencies()) {
-            String id = d.getGroupId() + ":" + d.getArtifactId();
-            boolean tests = "test-jar".equals(d.getType()) || "tests".equals(d.getClassifier());
-            if (tests && byId.containsKey(id) && !out.contains(id)) out.add(id);
+        List<MavenProject> those = new ArrayList<>();
+        those.add(p);
+        those.addAll(closure(byId, p));
+        for (MavenProject c : those) {
+            for (Dependency d : c.getDependencies()) {
+                String id = d.getGroupId() + ":" + d.getArtifactId();
+                boolean tests = "test-jar".equals(d.getType()) || "tests".equals(d.getClassifier());
+                if (tests && byId.containsKey(id) && !out.contains(id)) out.add(id);
+            }
         }
         return out;
     }
