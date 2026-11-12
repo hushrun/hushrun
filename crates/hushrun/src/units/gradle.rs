@@ -386,6 +386,8 @@ struct TestSaw {
     deselected: bool,
     /// \[C-32\] An invocation of it was skipped: its body didn't run.
     skipped: bool,
+    /// \[C-39\] The hook can't leave it out: its runner gives it no method (Kotest).
+    never_left_out: bool,
     duration_ms: u64,
 }
 
@@ -447,6 +449,7 @@ impl UnitSaw {
                     }
                     had.failed |= saw.failed;
                     had.skipped |= saw.skipped;
+                    had.never_left_out |= saw.never_left_out;
                     had.deselected &= saw.deselected;
                     had.duration_ms = had.duration_ms.saturating_add(saw.duration_ms);
                 }
@@ -610,6 +613,15 @@ fn units_of(
         .map(|(outer, _)| outer.as_str())
         .collect();
     open.extend(stopped.iter().flatten().map(String::as_str));
+    // \[C-39\] Classes whose tests the hook saw with no method to leave them out by (Kotest's):
+    // their tests are never left out, so none is ever counted as reused.
+    let unnamed: BTreeSet<&str> = events
+        .iter()
+        .flat_map(BTreeMap::values)
+        .flat_map(|jvm| jvm.classes.iter())
+        .filter(|(_, class)| class.unnamed)
+        .map(|(outer, _)| outer.as_str())
+        .collect();
     let mut task_not_followed: BTreeSet<NotFollowed> =
         report.not_followed.iter().map(NotFollowed::from).collect();
     if let Some(error) = errors.first() {
@@ -683,6 +695,7 @@ fn units_of(
                 failed,
                 deselected: false,
                 skipped,
+                never_left_out: unnamed.contains(outer.as_str()),
                 duration_ms: invs.iter().map(|inv| inv.ms).fold(0, u64::saturating_add),
             };
             one.failed |= failed;
@@ -705,6 +718,7 @@ fn units_of(
                 failed: false,
                 deselected: whole,
                 skipped: false,
+                never_left_out: false,
                 duration_ms: 0,
             });
         }
@@ -800,6 +814,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                                 failed: t.failed,
                                 deselected: t.deselected,
                                 skipped: t.skipped,
+                                never_left_out: t.never_left_out,
                                 duration_ms: t.duration_ms,
                                 ..MergedTest::default()
                             };

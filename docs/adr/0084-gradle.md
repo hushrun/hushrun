@@ -266,6 +266,14 @@ which no file of this checkout made. Maven's side: the extension names a reactor
 version, resolved from the local repository, still reads that module's sources, which a test
 checks.
 
+## Amendment 10: Kotest's tests, never counted as reused (2026-11-12)
+
+Item 7 let Kotest's tests run, since the hook has no method to leave them out by, but they were
+recorded one by one, so the next plan listed those that passed and its line said they were
+reused, and then they all ran. The decision: a test of a class whose tests the hook saw with no
+method (Kotest's) is told never left out (C-39), so it records no pass of its own, no plan lists
+it, and the line counts it as running. Its failure is recorded as before.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

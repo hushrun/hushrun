@@ -1693,3 +1693,38 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
         "{map:#}"
     );
 }
+
+// covers: C-39, C-46
+#[test]
+fn kotest_tests_which_cant_be_left_out_are_never_counted_as_reused() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "build/\n.gradle/\n.kotlin/\n"),
+        file(
+            "settings.gradle",
+            &format!(
+                "pluginManagement {{ repositories {{ gradlePluginPortal(); mavenCentral() }} }}\n{LINE}\nrootProject.name = 'kt'\n"
+            ),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'org.jetbrains.kotlin.jvm' version '2.3.21' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'io.kotest:kotest-runner-junit5:5.9.1'; testRuntimeOnly 'org.junit.platform:junit-platform-launcher' }\ntest { useJUnitPlatform() }\n",
+        ),
+        file(
+            "src/test/kotlin/p/NamesSpec.kt",
+            "package p\nimport io.kotest.core.spec.style.FunSpec\nclass NamesSpec : FunSpec({\n  test(\"one\") { }\n  test(\"two\") { check(System.getenv(\"FAIL\") == null) }\n  test(\"three\") { }\n})\n",
+        ),
+    ]);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Kotest's tests can't be left out one by one: none is listed, and the line says they run.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let line = line(&second, "hushrun: unit: ");
+    assert!(!line.contains("already passed"), "{line}");
+    assert_eq!(r.xml_cases(".", "p.NamesSpec").len(), 3);
+}
