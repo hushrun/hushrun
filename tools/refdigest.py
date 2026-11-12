@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8), of the
-unit key (C-31), and of hints (C-38): their key, tokens, address, content id and reader.
+unit key (C-31) and a test's key (C-39), and of hints (C-38): their key, tokens, address, content
+id and reader.
 
 Written from docs/spec/04-source-digest.md, not from the Rust code, so the two can check each
 other on the golden vectors. Standard library only; Python 3.9 or later.
@@ -10,7 +11,7 @@ Usage:
   refdigest.py dir  PATH                     [SCOPE OPTIONS] [--manifest-out FILE]
   refdigest.py vectors FILE [--update]   check (or rewrite) the expected digests of every vector
   refdigest.py globs FILE                check every case of a glob vector file
-  refdigest.py unit-keys FILE            check every unit key vector (C-31)
+  refdigest.py unit-keys FILE            check every unit key vector (C-31), and a test's (C-39)
   refdigest.py unit-hints FILE [--corpus DIR]
                                          check every hint vector (C-38); with --corpus, also write
                                          each vector's bytes and content there, for the fuzzer
@@ -529,6 +530,8 @@ def check_globs(path):
 # --- Unit keys (C-31) -------------------------------------------------------------------------
 
 UNIT_KEY_SCHEMA = "hushrun.unit-key/v0"
+# A test's key (C-39): a unit key's fields, computed the same way, and `test`, its id in its unit.
+TEST_KEY_SCHEMA = "hushrun.unit-key/v1"
 
 
 def files_digest(paths, files):
@@ -562,6 +565,9 @@ def evaluate_unit_key(vector):
     key = {"schema": UNIT_KEY_SCHEMA, "check": base["check"], "command": base["command"],
            "cwd": base["cwd"], "scope": base["scope"], "unit": vector["unit"],
            "reads": reads, "rest": rest, "shape": shape}
+    if "test" in vector:
+        key["schema"] = TEST_KEY_SCHEMA
+        key["test"] = vector["test"]
     for optional in ("external", "counts_from"):
         if optional in base:
             key[optional] = base[optional]

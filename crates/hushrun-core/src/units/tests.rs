@@ -179,20 +179,50 @@ fn unit_keys_match_the_golden_vectors() {
             external: base.get("external").cloned(),
             counts_from: base.get("counts_from").cloned(),
         };
-        let key = unit_key(
-            &key_base,
-            vector["unit"].as_str().unwrap(),
-            &reads,
-            &rest,
-            &shape,
-        )
-        .unwrap();
+        let unit = vector["unit"].as_str().unwrap();
+        // \[ADR 0077\] A vector that names a test is a test's key (C-39); the others, a unit's.
+        let key = match vector.get("test").and_then(Value::as_str) {
+            Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape).unwrap(),
+            None => unit_key(&key_base, unit, &reads, &rest, &shape).unwrap(),
+        };
         let expect = &vector["expect"];
         assert_eq!(reads.to_string(), expect["reads"], "{name}: reads");
         assert_eq!(rest.to_string(), expect["rest"], "{name}: rest");
         assert_eq!(shape.to_string(), expect["shape"], "{name}: shape");
         assert_eq!(key.to_string(), expect["key"], "{name}: key");
     }
+}
+
+// covers: C-39
+#[test]
+fn a_tests_key_is_its_unit_keys_fields_and_its_id_and_never_a_units_key() {
+    let base = KeyBase {
+        check: CheckName::new("unit").unwrap(),
+        command: vec!["pytest".into()],
+        cwd: String::new(),
+        scope: ScopeName::new("default").unwrap(),
+        external: None,
+        counts_from: None,
+    };
+    let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
+    let file = unit_key(&base, "tests/test_a.py", &reads, &rest, &shape).unwrap();
+    let a = test_key(&base, "tests/test_a.py", "test_x", &reads, &rest, &shape).unwrap();
+    let b = test_key(&base, "tests/test_a.py", "test_y", &reads, &rest, &shape).unwrap();
+    // A test's key is never its file's, nor another test's of the same file and files.
+    assert_ne!(a, file);
+    assert_ne!(a, b);
+    // An id that looks like a path doesn't make another unit's test the same key.
+    let c = test_key(&base, "tests/test_a.py::x", "y", &reads, &rest, &shape).unwrap();
+    let d = test_key(&base, "tests/test_a.py", "x::y", &reads, &rest, &shape).unwrap();
+    assert_ne!(c, d);
+    // Every byte a key holds of what it read moves it.
+    let other = test_key(&base, "tests/test_a.py", "test_x", &shape, &rest, &shape).unwrap();
+    assert_ne!(a, other);
+    assert_eq!(
+        test_name("tests/test_a.py", "TestA::test_x[1]"),
+        "tests/test_a.py::TestA::test_x[1]"
+    );
+    assert_eq!(MOST_TESTS, 50_000);
 }
 
 // covers: C-31
@@ -284,6 +314,36 @@ fn a_units_state_is_decided_once_from_its_facts() {
     }
 }
 
+// covers: C-39
+#[test]
+fn a_tests_state_comes_from_its_own_facts_and_a_file_partly_reused_didnt_pass_whole() {
+    // A test: the same function, from what happened inside its own window.
+    assert_eq!(state(&facts(true, false, false), &PASSED), State::Passed);
+    assert_eq!(
+        state(&facts(true, false, true), &PASSED),
+        State::NotObserved
+    );
+    assert_eq!(state(&facts(false, false, false), &PASSED), State::NotRun);
+    // A test file some of whose tests were reused one by one: not run whole, so no pass of its
+    // own; a failure of one of its tests is still its failure.
+    let partly = Facts {
+        tests_reused: true,
+        ..facts(true, false, false)
+    };
+    assert_eq!(state(&partly, &PASSED), State::NotRun);
+    assert_eq!(State::NotRun.recorded(), None);
+    let partly_failed = Facts {
+        tests_reused: true,
+        ..facts(true, true, false)
+    };
+    assert_eq!(state(&partly_failed, &PASSED), State::Failed);
+    let words = |unit: Unit, reads: Reads| (unit.word(), reads.word());
+    assert_eq!(words(Unit::default(), Reads::default()), ("file", "file"));
+    assert_eq!(Unit::from_word("test"), Some(Unit::Test));
+    assert_eq!(Reads::from_word("test"), Some(Reads::Test));
+    assert_eq!(Unit::from_word("case"), None);
+}
+
 // covers: C-5
 #[test]
 fn modes_read_as_written() {
@@ -295,6 +355,7 @@ fn modes_read_as_written() {
         mode: Mode::Observe,
         ignore: Vec::new(),
         always: globs(&["xtask/**"]),
+        ..Tests::default()
     };
     assert!(tests.is_on());
     assert!(tests.always_runs("xtask/src/main.rs"));

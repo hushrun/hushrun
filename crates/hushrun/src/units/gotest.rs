@@ -761,6 +761,7 @@ pub fn observe(
                     failed,
                     not_followed,
                     deselected,
+                    ..Facts::default()
                 },
                 reads,
                 duration_ms,

@@ -888,3 +888,51 @@ fn a_checks_tests_are_a_mode_or_a_mode_with_globs() {
     );
     assert_error(&check("\n      mode: maybe\n"), 6, "maybe");
 }
+
+// covers: C-5, C-39 (ADR 0077: a test as the unit, and what a test read)
+#[test]
+fn a_checks_tests_name_their_unit_and_what_a_test_read() {
+    use crate::units::{Mode, Reads, Unit};
+    let unit = CheckName::new("unit").unwrap();
+    // The short form, and a long form that says neither, mean test files, as before.
+    let short = parsed("checks:\n  unit: {tests: reuse}\n");
+    assert_eq!(short.tests[&unit].unit, Unit::File);
+    assert_eq!(short.tests[&unit].reads, Reads::File);
+    let long = parsed("checks:\n  unit:\n    tests:\n      mode: reuse\n      unit: test\n");
+    assert_eq!(long.tests[&unit].mode, Mode::Reuse);
+    assert_eq!(long.tests[&unit].unit, Unit::Test);
+    assert_eq!(long.tests[&unit].reads, Reads::File);
+    let both = parsed(
+        "checks:\n  unit:\n    tests:\n      mode: observe\n      unit: test\n      reads: test\n",
+    );
+    assert_eq!(both.tests[&unit].unit, Unit::Test);
+    assert_eq!(both.tests[&unit].reads, Reads::Test);
+    // Neither changes the check's definition (E-6).
+    let plain = parsed("checks:\n  unit: {tests: observe}\n");
+    assert_eq!(
+        both.checks[&unit].definition_digest,
+        plain.checks[&unit].definition_digest
+    );
+    let check = |tests: &str| format!("{HEAD}checks:\n  unit:\n    tests:{tests}");
+    // `reads: test` is a question only for tests: the error says what to write.
+    assert_error(
+        &check("\n      mode: reuse\n      reads: test\n"),
+        7,
+        "`tests.reads: test` needs `tests.unit: test`: write `unit: test` beside it, or `reads: file`",
+    );
+    assert_error(
+        &check("\n      mode: reuse\n      unit: file\n      reads: test\n"),
+        8,
+        "needs `tests.unit: test`",
+    );
+    assert_error(
+        &check("\n      mode: reuse\n      unit: case\n"),
+        7,
+        "file or test",
+    );
+    assert_error(
+        &check("\n      mode: reuse\n      reads: lines\n"),
+        7,
+        "file or test",
+    );
+}

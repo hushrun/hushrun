@@ -536,6 +536,7 @@ impl Session {
                             failed: m.failed,
                             not_followed,
                             deselected: m.deselected,
+                            ..Facts::default()
                         };
                         let seen = Seen {
                             facts,

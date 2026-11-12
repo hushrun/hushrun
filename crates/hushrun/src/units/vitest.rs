@@ -488,6 +488,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                     failed,
                     not_followed,
                     deselected,
+                    ..Facts::default()
                 },
                 reads,
                 duration_ms,
