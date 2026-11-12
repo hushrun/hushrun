@@ -17,9 +17,10 @@
 //!   [`read_xunit`]).
 //! - **Nothing is left out** where SwiftPM would run less than it was told: on macOS when the
 //!   package has a nested XCTest class, and where the XCTest tests that remain may not fit in one
-//!   argument ([`leaves_nothing_out`]). Both are known from the previous run's list, which the map
-//!   keeps as its list of what the runner listed; and after the run, from this run's list
-//!   ([`run_again_whole`]).
+//!   argument. After the run, this run's list says whether either hit, and then `swift test` runs
+//!   again with nothing left out ([`run_again_whole`]): that is the guard. The previous run's
+//!   list, which the map keeps as its list of what the runner listed, only saves that second run
+//!   ([`leaves_nothing_out`]); with none, the plan leaves out as it plans.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -1219,15 +1220,13 @@ fn strings(value: &Value) -> Vec<String> {
 }
 
 /// \[C-48\] Why a plan leaves nothing out, from the last list this machine kept (`map`'s list of
-/// what the runner listed, `<unit>::<id>`): none yet; on macOS, a nested XCTest class, which
-/// SwiftPM silently doesn't run once any `--skip` is given; or XCTest ids that may not fit the one
-/// argument SwiftPM passes those that remain in.
+/// what the runner listed, `<unit>::<id>`): on macOS, a nested XCTest class, which SwiftPM
+/// silently doesn't run once any `--skip` is given; or XCTest ids that may not fit the one argument
+/// SwiftPM passes those that remain in. With no list kept the plan leaves out as it plans:
+/// hushrun's `swift` checks this run's own list after it and runs `swift test` again with nothing
+/// left out when either fault hit ([`run_again_whole`]), as it does for a class added since the
+/// list; a kept list that says one would hit only saves that second run.
 pub fn leaves_nothing_out(map: &Map, graph: &Graph) -> Result<(), String> {
-    if map.unit_files.is_empty() {
-        return Err(
-            "no run of it here has listed its tests yet, which says what can be left out".into(),
-        );
-    }
     let ids: Vec<(&str, &str)> = map
         .unit_files
         .iter()
@@ -2634,14 +2633,11 @@ mod tests {
 
     // covers: C-48
     #[test]
-    fn a_plan_leaves_nothing_out_without_a_list_or_where_swiftpm_would_run_less() {
+    fn a_plan_leaves_nothing_out_where_its_list_says_swiftpm_would_run_less() {
         let graph = Graph::default();
         let mut map = Map::default();
-        assert!(
-            leaves_nothing_out(&map, &graph)
-                .unwrap_err()
-                .contains("listed its tests")
-        );
+        // No list kept: the list after the run is the check (run_again_whole).
+        assert!(leaves_nothing_out(&map, &graph).is_ok());
         map.unit_files = [
             "Tests/CartTests::CartTests/testTotal",
             "Tests/CoreTests::PriceTests/a()",

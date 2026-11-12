@@ -90,12 +90,16 @@ and on Linux, found what can be relied on and what can't; this decision is what 
    `--filter`, and under `--parallel` its xunit says it passed; on Linux, the XCTest tests that
    remain go to the runner as one argument, which must stay under 128 KiB. Both are known from the
    previous run's list, which the store keeps as its list of what the runner listed (C-36), each
-   `<unit>::<id>`: a plan with no list, with a nested XCTest class (macOS), or with XCTest ids
-   that come to more than 96 KiB on Linux (512 KiB elsewhere, room for tests added since) leaves
-   nothing out, said once. And after a run that left tests out, this run's list is checked again:
-   a nested class in a target that ran (macOS), or a run that failed with no XCTest test started
-   and XCTest ids past the limit (Linux), runs `swift test` again with nothing left out, with a
-   line, and that run is the one reported.
+   `<unit>::<id>`: a plan whose list has a nested XCTest class (macOS), or XCTest ids that come to
+   more than 96 KiB on Linux (512 KiB elsewhere, room for tests added since), leaves nothing out,
+   said once. And after a run that left tests out, this run's list is checked again: a nested
+   class in a target that ran (macOS), or a run that failed with no XCTest test started and XCTest
+   ids past the limit (Linux), runs `swift test` again with nothing left out, with a line, and that
+   run is the one reported. That check is the guard: it already catches a class added since the
+   list, and a plan with no list at all (a fresh machine whose hints carry the targets' lists)
+   leaves out as it plans and relies on it; the list kept only saves the second run. The list
+   stays where it is (the store's list of what the runner listed) rather than in the store's
+   tests, which hold ids only for `unit: test`, while the faults matter for `unit: file` too.
 10. **Outcomes** (C-48), never a pass from absence, never an id the list after the run doesn't
     hold:
     - *Swift Testing:* the event stream, `--event-stream-output-path` to a fresh path of hushrun's

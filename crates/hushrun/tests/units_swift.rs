@@ -336,10 +336,10 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     let r = Repo::new(&swift, &shop("{mode: reuse, ignore: ['notes/**']}"));
     let first = r.run(SWIFT_TEST, &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
-    // Before any list, nothing is left out.
+    // Nothing had passed yet: every test target runs.
     assert_eq!(
-        first.line("hushrun: unit: every test file runs"),
-        "hushrun: unit: every test file runs: no run of it here has listed its tests yet, which says what can be left out"
+        first.line("hushrun: unit: all "),
+        "hushrun: unit: all 3 test files run: none had passed here yet on the files it read"
     );
     let map = r.map();
     let reads = |unit: &str| -> Vec<String> {
@@ -750,6 +750,41 @@ fn a_nested_xctest_class_makes_nothing_be_left_out_on_macos() {
         after.stdout.contains("InnerTests testInner]' passed"),
         "{}",
         after.stdout
+    );
+}
+
+// covers: C-48
+#[cfg(target_os = "macos")]
+#[test]
+fn with_no_list_kept_a_plan_leaves_out_and_the_list_after_the_run_catches_a_nested_class() {
+    let Some(swift) = swift() else {
+        tools("Swift 6", false);
+        return;
+    };
+    let r = Repo::new(&swift, &shop("{mode: reuse}"));
+    assert_eq!(r.run(SWIFT_TEST, &[]).code, 0);
+    // This machine keeps no run's list now, as a fresh one with hints wouldn't: the plan leaves
+    // Core's and Greet's targets out all the same.
+    store::forget_listed(&r.cache);
+    r.write(
+        "Tests/CartTests/Nested.swift",
+        "import XCTest\n\nenum Outer {\n    final class InnerTests: XCTestCase {\n        func testInner() { XCTAssertTrue(ProcessInfo.processInfo.environment[\"NESTED_FAIL\"] == nil) }\n    }\n}\n",
+    );
+    let again = r.run(SWIFT_TEST, &[("NESTED_FAIL", "1")]);
+    assert_eq!(again.code, 1, "{}\n{}", again.stdout, again.stderr);
+    // The nested class SwiftPM skipped once a test was left out is in the list after the run:
+    // swift test runs again whole, and the failure shows.
+    assert!(
+        again.stderr.contains(
+            "hushrun: swift test runs again with nothing left out: on macOS SwiftPM doesn't run a nested XCTest class (CartTests.Outer.InnerTests) once a test is left out"
+        ),
+        "{}",
+        again.stderr
+    );
+    assert!(
+        again.stdout.contains("InnerTests testInner]' failed"),
+        "{}",
+        again.stdout
     );
 }
 

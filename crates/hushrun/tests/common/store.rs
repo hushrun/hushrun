@@ -126,6 +126,16 @@ pub fn map(cache: &Path) -> Value {
     })
 }
 
+/// Forgets the list of what the runner listed that the one store in `cache` keeps for its check,
+/// as on a machine whose store holds no run's list: the rows of its test files stay.
+#[allow(dead_code)]
+pub fn forget_listed(cache: &Path) {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open(&stores[0]).expect("the store opens");
+    conn.execute("DELETE FROM check_listed", []).unwrap();
+}
+
 /// The test files of the disagreements the one store in `cache` holds, oldest first.
 #[allow(dead_code)]
 pub fn disagreements(cache: &Path) -> Vec<String> {
