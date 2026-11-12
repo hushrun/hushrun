@@ -1,0 +1,143 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit-platform",
+   "gradle": "9.3.1",
+   "invocations": [
+    {
+     "c": "ex.kotest.KoBeforeSpecFail",
+     "f": "org.gradle.internal.serialize.PlaceholderException: java.lang.IllegalStateException: beforeSpec failed",
+     "ms": 3,
+     "n": "never runs",
+     "p": [
+      [
+       "ex.kotest.KoBeforeSpecFail",
+       "ex.kotest.KoBeforeSpecFail"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.kotest.KoBeforeSpecFail",
+     "f": "java.lang.IllegalStateException: beforeSpec failed",
+     "ms": 0,
+     "n": "Before Spec Error",
+     "p": [
+      [
+       "ex.kotest.KoBeforeSpecFail",
+       "ex.kotest.KoBeforeSpecFail"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.kotest.KoBeforeSpecFail",
+     "f": "org.gradle.internal.serialize.PlaceholderException: java.lang.IllegalStateException: beforeSpec failed",
+     "ms": 3,
+     "n": "executionError",
+     "p": [
+      [
+       "ex.kotest.KoBeforeSpecFail",
+       "ex.kotest.KoBeforeSpecFail"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "ms": 8,
+     "n": "passes",
+     "p": [
+      [
+       "ex.kotest.KoFunSpec",
+       "ex.kotest.KoFunSpec"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: expected:<2> but was:<1>",
+     "ms": 9,
+     "n": "fails",
+     "p": [
+      [
+       "ex.kotest.KoFunSpec",
+       "ex.kotest.KoFunSpec"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "ms": 0,
+     "n": "inside",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "ms": 0,
+     "n": "1",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "ms": 1,
+     "n": "2",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: expected:<true> but was:<false>",
+     "ms": 6,
+     "n": "3",
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.kotest.KoFunSpec",
+     "ms": 2,
+     "n": "disabled",
+     "p": [
+      [
+       "ex.kotest.KoFunSpec",
+       "ex.kotest.KoFunSpec"
+      ]
+     ],
+     "r": "SKIPPED"
+    }
+   ],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.kotest.KoBeforeSpecFail": "kotest/src/test/kotlin/ex/kotest/KoSpec.kt",
+    "ex.kotest.KoFunSpec": "kotest/src/test/kotlin/ex/kotest/KoSpec.kt"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": "kotest",
+   "reads": {
+    "dirs": [
+     "kotest"
+    ],
+    "paths": []
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets+kotlin",
+   "suiteFailures": [],
+   "task": ":kotest:test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}

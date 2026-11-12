@@ -1,0 +1,190 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "testng",
+   "gradle": "9.3.1",
+   "invocations": [
+    {
+     "c": "ex.tng.BeforeClassFailTest",
+     "f": "java.lang.IllegalStateException: beforeClass failed",
+     "ms": 5,
+     "n": "boom",
+     "p": [
+      [
+       "ex.tng.BeforeClassFailTest",
+       "ex.tng.BeforeClassFailTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.tng.BeforeClassFailTest",
+     "ms": 0,
+     "n": "neverRuns",
+     "p": [
+      [
+       "ex.tng.BeforeClassFailTest",
+       "ex.tng.BeforeClassFailTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.tng.BeforeClassFailTest",
+     "ms": 0,
+     "n": "neverRunsEither",
+     "p": [
+      [
+       "ex.tng.BeforeClassFailTest",
+       "ex.tng.BeforeClassFailTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "f": "java.lang.AssertionError: boom",
+     "ms": 3,
+     "n": "fails",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "ms": 0,
+     "n": "named",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "ms": 0,
+     "n": "param[0](1)",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "ms": 0,
+     "n": "param[1](2)",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "f": "java.lang.AssertionError: expected [true] but found [false]",
+     "ms": 1,
+     "n": "param[2](3)",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "ms": 0,
+     "n": "passes",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.tng.CalcTest",
+     "ms": 0,
+     "n": "skippedByException",
+     "p": [
+      [
+       "ex.tng.CalcTest",
+       "ex.tng.CalcTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.tng.CalcTest$Nested",
+     "f": "java.lang.AssertionError: n",
+     "ms": 0,
+     "n": "nestedFails",
+     "p": [
+      [
+       "ex.tng.CalcTest$Nested",
+       "ex.tng.CalcTest$Nested"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.tng.CalcTest$Nested",
+     "ms": 0,
+     "n": "nestedPasses",
+     "p": [
+      [
+       "ex.tng.CalcTest$Nested",
+       "ex.tng.CalcTest$Nested"
+      ]
+     ],
+     "r": "SUCCESS"
+    }
+   ],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.tng.BeforeClassFailTest": "tng/src/test/java/ex/tng/BeforeClassFailTest.java",
+    "ex.tng.CalcTest": "tng/src/test/java/ex/tng/CalcTest.java"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": "tng",
+   "reads": {
+    "dirs": [
+     "tng"
+    ],
+    "paths": []
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":tng:test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}
