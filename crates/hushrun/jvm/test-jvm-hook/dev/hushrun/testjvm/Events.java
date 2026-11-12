@@ -24,7 +24,8 @@ import java.util.Locale;
  *   <li>{@code leave-out-unread}: the list couldn't be read ({@code path}, {@code error}), and
  *       nothing is left out;
  *   <li>{@code left-out}: {@code by} ({@code junit-platform} or {@code testng}) left out a listed
- *       {@code class}'s {@code method} (null when it left out a class with no method under it);
+ *       {@code class}'s {@code method} (null when it left out a class with no method under it), as
+ *       the list's {@code entry} names it, with the JUnit Platform's {@code uid} (null in TestNG);
  *   <li>{@code not-left-out}: {@code by} kept a listed {@code class}'s {@code method}, for a
  *       {@code reason};
  *   <li>{@code plan-started}, {@code plan-finished}: the JUnit Platform began and ended a test plan;
@@ -51,8 +52,9 @@ final class Events {
         write("{\"e\":\"leave-out-unread\",\"path\":" + q(path) + ",\"error\":" + q(String.valueOf(error)) + "}");
     }
 
-    void leftOut(String by, String className, String method) {
-        write("{\"e\":\"left-out\",\"by\":" + q(by) + ",\"class\":" + q(className) + ",\"method\":" + q(method) + "}");
+    void leftOut(String by, String uid, String className, String method, String entry) {
+        write("{\"e\":\"left-out\",\"by\":" + q(by) + ",\"uid\":" + q(uid) + ",\"class\":" + q(className)
+            + ",\"method\":" + q(method) + ",\"entry\":" + q(entry) + "}");
     }
 
     void notLeftOut(String by, String className, String method, String reason) {

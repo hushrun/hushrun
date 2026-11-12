@@ -32,7 +32,7 @@ fn from_reports(files: &[&str], class: &str) -> Option<super::super::Seen> {
                 seen.case_class_failed |= case.outcome == reports::Outcome::Failed;
                 continue;
             }
-            let (_, id) = jvm::test_id(&case.classname, method_of_case(&case.name));
+            let (_, id) = jvm::test_id(&case.classname, method_of_case(&case.name), true);
             let slot = seen.cases.entry(id).or_default();
             slot.0.push(case.outcome);
             slot.1 += case.time_ms;
@@ -506,4 +506,53 @@ fn what_testngs_interceptor_left_out_is_told_beside_what_its_reports_say_ran() {
     let green = decide_class(&seen, false).unwrap();
     assert!(test(&green, "green1").deselected);
     assert!(test(&green, "green2").finished && !test(&green, "green2").deselected);
+}
+
+// covers: C-32, C-47
+#[test]
+fn a_module_whose_hook_left_out_what_its_list_didnt_name_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let abs = real(dir.path());
+    let at = abs.to_string_lossy().into_owned();
+    let graph = |lines: &[&str]| -> Graph {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "startedMs": 0, "unitsDir": "/u", "projects": [],
+            "leaveOut": {"written": true, "listed": {at.clone(): lines}}
+        }))
+        .unwrap()
+    };
+    let modules = BTreeMap::from([(
+        "lib".to_string(),
+        Module {
+            dir: "lib".into(),
+            abs: abs.clone(),
+            ..Module::default()
+        },
+    )]);
+    let events = |lines: &str| {
+        BTreeMap::from([(
+            "1.jsonl".to_string(),
+            jvm::read_events(
+                format!(
+                    "{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":{at:?},\"basedir\":{at:?}}}\n{lines}"
+                )
+                .as_bytes(),
+            ),
+        )])
+    };
+    let ran = BTreeMap::from([(("lib".to_string(), "p.A".to_string()), BTreeSet::new())]);
+    let left_b = r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.A","method":"b","entry":"p.A#b"}"#;
+    let started_c = r#"{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.A]/[method:c()]","class":"p.A","method":"c","params":""}"#;
+    // b left out, c ran: as listed.
+    let both = events(&format!("{left_b}\n{started_c}\n"));
+    assert_eq!(
+        left_out_unlisted(&graph(&["p.A#b"]), &modules, &both, &ran),
+        None
+    );
+    // b left out though only c was listed.
+    let why = left_out_unlisted(&graph(&["p.A#c"]), &modules, &both, &ran).unwrap();
+    assert!(why.contains("left out p.A#b"), "{why}");
+    // d listed, in a class that ran, and neither left out nor started.
+    let why = left_out_unlisted(&graph(&["p.A#b", "p.A#d"]), &modules, &both, &ran).unwrap();
+    assert!(why.contains("found no test p.A#d"), "{why}");
 }

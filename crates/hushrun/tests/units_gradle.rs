@@ -1017,3 +1017,37 @@ fn a_test_jvm_that_died_records_no_pass_for_the_class_it_was_in() {
         );
     }
 }
+
+// covers: C-39, C-46
+#[test]
+fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'spock'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'groovy' }\nrepositories { mavenCentral() }\ndependencies {\n  testImplementation platform('org.spockframework:spock-bom:2.3-groovy-4.0')\n  testImplementation 'org.spockframework:spock-core'\n  testImplementation 'org.apache.groovy:groovy:4.0.24'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n",
+        ),
+        file(
+            "src/test/groovy/ex/ParseSpec.groovy",
+            "package ex\nimport spock.lang.*\nclass ParseSpec extends Specification {\n  def \"parses [a]\"() { expect: true }\n  def \"parses [c]\"() { expect: true }\n  def \"parses [b]\"() { expect: 1 == 2 }\n}\n",
+        ),
+    ]);
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Nothing changed: one of the two that passed is left out, the other runs as a check, and
+    // the one that failed runs, and fails again.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let cases = r.xml_cases(".", "ex.ParseSpec");
+    assert!(cases.contains(&"parses [b]".to_string()), "{cases:?}");
+    assert_eq!(cases.len(), 2, "{cases:?}");
+}

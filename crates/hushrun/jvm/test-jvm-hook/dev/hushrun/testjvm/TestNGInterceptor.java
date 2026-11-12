@@ -31,13 +31,14 @@ public final class TestNGInterceptor implements IMethodInterceptor {
                 ITestNGMethod t = m.getMethod();
                 String cls = testClass(m);
                 String name = t.getMethodName();
-                if (!list.listed(cls, name)) {
+                String entry = list.entry(cls, name, false);
+                if (entry == null) {
                     kept.add(m);
                 } else if (dependency != null) {
                     Events.get().notLeftOut(BY, cls, name, dependency);
                     kept.add(m);
                 } else {
-                    Events.get().leftOut(BY, cls, name);
+                    Events.get().leftOut(BY, null, cls, name, entry);
                 }
             }
             return kept;

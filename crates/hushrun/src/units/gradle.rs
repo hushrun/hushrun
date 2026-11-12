@@ -254,6 +254,10 @@ pub struct LeftOut {
     pub tests: Vec<String>,
     /// Tests `reuseTests` listed that it couldn't leave out: they run.
     pub not_attempted: Vec<String>,
+    /// How it left tests out: `hook` or `patterns`.
+    pub how: Option<String>,
+    /// The test-JVM hook's list, `class#method` a line, when it went through the hook.
+    pub hook: Vec<String>,
 }
 
 /// One test invocation, as Gradle's `afterTest` gave it.
@@ -452,6 +456,8 @@ pub struct Observed {
     pub own: BTreeMap<String, Vec<String>>,
     /// The directories some unit read: where the sources are (C-30).
     pub known_dirs: BTreeSet<String>,
+    /// \[C-32\] Why a task left out what the plan didn't list.
+    pub left_out: Option<String>,
 }
 
 /// A task's report, from one facts file, with its errors.
@@ -469,6 +475,43 @@ fn report_of(file: &FactsFile) -> Result<Report, String> {
         ));
     }
     Ok(report)
+}
+
+/// \[C-32\] Why a task's hook left out what its list didn't list, or found no test its list named
+/// in a class that ran (it neither left it out nor saw it run): then what ran can't be told.
+fn left_out_unlisted(report: &Report, events: &BTreeMap<String, JvmEvents>) -> Option<String> {
+    let listed: BTreeSet<String> = report.left_out.hook.iter().cloned().collect();
+    if let Some(why) = jvm::left_out_unlisted(events.values(), &listed) {
+        return Some(why);
+    }
+    if report.left_out.how.as_deref() != Some("hook") {
+        return None;
+    }
+    let left_out: BTreeSet<&str> = events
+        .values()
+        .flat_map(|jvm| &jvm.left_out)
+        .filter_map(|out| out.entry.as_deref())
+        .collect();
+    let ran: BTreeSet<String> = report.invocations.iter().filter_map(test_id).collect();
+    let classes_ran: BTreeSet<&str> = report
+        .invocations
+        .iter()
+        .filter_map(|inv| inv.c.as_deref().map(outer_of))
+        .collect();
+    for line in &report.left_out.hook {
+        let Some((class, method)) = line.split_once('#') else {
+            continue;
+        };
+        if classes_ran.contains(outer_of(class))
+            && !left_out.contains(line.as_str())
+            && !ran.contains(&format!("{class}.{method}"))
+        {
+            return Some(format!(
+                "the test-JVM hook found no test {line} that its list named, in a class that ran"
+            ));
+        }
+    }
+    None
 }
 
 /// Whether something a task's report speaks of failed: the task, a test, or a suite.
@@ -652,7 +695,16 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
             merged.entry(name).or_insert_with(UnitSaw::unseen).add(one);
         }
     }
-    let mut out = Observed::default();
+    let mut out = Observed {
+        left_out: reports
+            .iter()
+            .zip(&events)
+            .find_map(|((report, _), events)| {
+                left_out_unlisted(report, events.as_ref().ok()?)
+                    .map(|why| format!("{}: {why}", report.task))
+            }),
+        ..Observed::default()
+    };
     for (unit, saw) in merged {
         let mut not_followed = saw.not_followed.clone();
         let mut dirs = saw.dirs.clone();
@@ -930,6 +982,7 @@ impl Adapter for Recognized {
             dirs: observed.dirs,
             unit_files: Some(observed.unit_files),
             received: shared.received,
+            left_out: observed.left_out,
             ..Read::default()
         }))
     }

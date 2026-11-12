@@ -494,6 +494,8 @@ pub struct Observed {
     pub unit_files: BTreeSet<String>,
     pub failures_by_unit: bool,
     pub refused: Option<String>,
+    /// \[C-32\] Why the hook left out what the plan didn't list.
+    pub left_out: Option<String>,
 }
 
 /// Reads what the extension, the hook and the reports say of a run in the repository at `root`
@@ -577,7 +579,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                     entry.case_class_failed |= case.outcome == reports::Outcome::Failed;
                     continue;
                 }
-                let (_, id) = jvm::test_id(class, method_of_case(&case.name));
+                let (_, id) = jvm::test_id(class, method_of_case(&case.name), true);
                 let slot = entry.cases.entry(id).or_default();
                 slot.0.push(case.outcome);
                 slot.1 = slot.1.saturating_add(case.time_ms);
@@ -591,6 +593,17 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     };
     // \[C-32\] Something of this run failed: a failure no class owns, or any class's.
     let run_failed = unattributed > 0 || seen.values().any(ClassSeen::any_failed);
+    // Each class that ran, by module and top-level class, with the ids its reports name.
+    let seen_ran: BTreeMap<(String, String), BTreeSet<String>> = seen
+        .iter()
+        .filter(|(_, c)| {
+            !c.cases.is_empty()
+                || c.events
+                    .as_ref()
+                    .is_some_and(|e| e.started || e.tests.values().any(|t| t.started))
+        })
+        .map(|(k, c)| (k.clone(), c.cases.keys().cloned().collect()))
+        .collect();
     for ((module_dir, class), class_seen) in seen {
         let Some(module) = modules.get(&module_dir) else {
             continue;
@@ -629,6 +642,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             }
         }
     }
+    out.left_out = left_out_unlisted(&graph, &modules, &events, &seen_ran);
     let listed = graph
         .leave_out
         .as_ref()
@@ -641,6 +655,66 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         _ => None,
     };
     Ok(Some(out))
+}
+
+/// \[C-32\] Why the hook left out, in some module's JVM, what the extension's list for that module
+/// didn't list; or found no test a method entry named in a class that ran, which it neither left
+/// out nor saw start (`ran`: the classes that ran, with the ids their reports name).
+fn left_out_unlisted(
+    graph: &Graph,
+    modules: &BTreeMap<String, Module>,
+    events: &BTreeMap<String, jvm::JvmEvents>,
+    ran: &BTreeMap<(String, String), BTreeSet<String>>,
+) -> Option<String> {
+    let listed = graph.leave_out.as_ref().map(|l| &l.listed);
+    for module in modules.values() {
+        let abs = module.abs.to_string_lossy().into_owned();
+        let lines: BTreeSet<String> = listed
+            .and_then(|l| l.get(&abs))
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let mine: Vec<&jvm::JvmEvents> = events
+            .values()
+            .filter(|e| {
+                e.basedir
+                    .as_ref()
+                    .or(e.dir.as_ref())
+                    .is_some_and(|d| real(Path::new(d)) == module.abs)
+            })
+            .collect();
+        if let Some(why) = jvm::left_out_unlisted(mine.iter().copied(), &lines) {
+            return Some(why);
+        }
+        let left_out: BTreeSet<&str> = mine
+            .iter()
+            .flat_map(|e| &e.left_out)
+            .filter_map(|o| o.entry.as_deref())
+            .collect();
+        for line in &lines {
+            let Some((class, method)) = line.split_once('#') else {
+                continue;
+            };
+            let (top, id) = jvm::test_id(class, method, true);
+            let Some(ids) = ran.get(&(module.dir.clone(), top)) else {
+                continue;
+            };
+            let started = mine.iter().any(|e| {
+                e.seen.iter().any(|s| {
+                    s == line
+                        || s.strip_prefix(line.as_str())
+                            .is_some_and(|rest| rest.starts_with('['))
+                })
+            });
+            if !left_out.contains(line.as_str()) && !started && !ids.contains(&id) {
+                return Some(format!(
+                    "the test-JVM hook found no test {line} that its list named, in a class that ran"
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn merge_events(mut a: ClassEvents, b: &ClassEvents) -> ClassEvents {
@@ -916,6 +990,7 @@ impl Adapter for Recognized {
             dirs: observed.dirs,
             unit_files: Some(observed.unit_files),
             refused: observed.refused,
+            left_out: observed.left_out,
             received: shared.received,
             ..Read::default()
         }))

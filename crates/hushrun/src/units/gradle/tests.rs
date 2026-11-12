@@ -951,3 +951,60 @@ fn a_test_jvm_that_died_leaves_the_class_it_was_in_not_run() {
     .unwrap();
     assert_eq!(state(&observed.units[crash], false), units::State::NotRun);
 }
+
+// covers: C-32, C-46
+#[test]
+fn a_task_whose_hook_left_out_what_its_list_didnt_name_says_so() {
+    let t = tree(&[
+        "src/test/java/p/CrashTest.java",
+        "src/test/java/p/FailTest.java",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let events = |lines: &str| {
+        std::fs::write(
+            dir.path().join("1-1.jsonl"),
+            format!("{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":\"/w\",\"basedir\":null}}\n{lines}"),
+        )
+        .unwrap();
+    };
+    let ran = [("p.CrashTest", "a()", "SUCCESS")];
+    let file = || {
+        task(
+            &ran,
+            serde_json::json!({
+                "eventsDir": dir.path().to_string_lossy(),
+                "leftOut": {"classes": [], "tests": ["p.CrashTest.b", "p.CrashTest.c"],
+                            "how": "hook", "hook": ["p.CrashTest#b", "p.CrashTest#c"]}
+            }),
+        )
+    };
+    // b and c left out, as listed: nothing to say.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"c","entry":"p.CrashTest#c"}"#,
+        "\n",
+    ));
+    assert_eq!(observe(&[file()], &t).unwrap().unwrap().left_out, None);
+    // c neither left out nor run, in a class that ran.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+    ));
+    let why = observe(&[file()], &t).unwrap().unwrap().left_out.unwrap();
+    assert!(why.contains("found no test p.CrashTest#c"), "{why}");
+    // a, which ran, and d, which nobody listed, left out for b's entry.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"c","entry":"p.CrashTest#c"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"d","entry":"p.CrashTest#b"}"#,
+        "\n",
+    ));
+    let why = observe(&[file()], &t).unwrap().unwrap().left_out.unwrap();
+    assert!(
+        why.starts_with(":test: the test-JVM hook left out p.CrashTest#d"),
+        "{why}"
+    );
+}

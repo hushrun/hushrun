@@ -31,8 +31,10 @@ import java.util.Set;
  * directory is that one: its system property {@code basedir}, else its working directory, both
  * compared as canonical paths. Entries before any such line apply in every JVM.
  *
- * <p>A method's name is matched up to its first {@code [}, which no JVM method name holds (JUnit 4's
- * Parameterized names its tests {@code name[0: x=1]}). Nothing is a pattern.
+ * <p>A method's name is matched whole, as the test's source names it: a Spock feature, a Kotlin
+ * name in backticks or a parametrized display name may hold {@code [}, spaces or anything else.
+ * One exception, for the JUnit Vintage engine only: JUnit 4's Parameterized names each invocation
+ * {@code name[0: x=1]}, which an entry {@code Class#name} matches. Nothing is a pattern.
  *
  * <p>When there is no such file, nothing is left out. When it can't be read, nothing is left out
  * either, and the events say why.
@@ -65,24 +67,29 @@ final class LeaveOut {
         return classes.isEmpty() && methods.isEmpty();
     }
 
-    /** Whether a test of {@code className}'s {@code method} (null for a class itself) is listed. */
-    boolean listed(String className, String method) {
-        if (className == null || className.isEmpty()) return false;
+    /**
+     * The entry that lists a test of {@code className}'s {@code method} (null for a class itself),
+     * as the list spells it; null when none does. {@code vintage}: the test is the JUnit Vintage
+     * engine's, whose Parameterized invocations are {@code name[...]}.
+     */
+    String entry(String className, String method, boolean vintage) {
+        if (className == null || className.isEmpty()) return null;
         String c = className;
         while (true) {
-            if (classes.contains(c)) return true;
+            if (classes.contains(c)) return c;
             int i = c.lastIndexOf('$');
             if (i <= 0) break;
             c = c.substring(0, i);
         }
-        if (method == null) return false;
-        return methods.contains(className + "#" + name(method));
-    }
-
-    /** A method's name up to its first '['. */
-    static String name(String method) {
-        int i = method.indexOf('[');
-        return i < 0 ? method : method.substring(0, i);
+        if (method == null) return null;
+        String whole = className + "#" + method;
+        if (methods.contains(whole)) return whole;
+        int bracket = method.indexOf('[');
+        if (vintage && bracket > 0 && method.endsWith("]")) {
+            String invoked = className + "#" + method.substring(0, bracket);
+            if (methods.contains(invoked)) return invoked;
+        }
+        return null;
     }
 
     private static LeaveOut read() {
@@ -109,7 +116,7 @@ final class LeaveOut {
                 if (hash < 0) {
                     classes.add(line);
                 } else if (hash > 0 && hash < line.length() - 1) {
-                    methods.add(line.substring(0, hash) + "#" + name(line.substring(hash + 1)));
+                    methods.add(line);
                 }
             }
         } catch (IOException | RuntimeException e) {

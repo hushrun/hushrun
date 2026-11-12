@@ -24,12 +24,14 @@
 //! The list is UTF-8, one entry a line, blank lines and lines starting with `#` ignored:
 //! `pkg.Outer` (that class and every class nested in it), `pkg.Outer$Inner` (that nested class
 //! down), `pkg.Outer#method` and `pkg.Outer$Inner#method` (every test of exactly that class whose
-//! method has that name: every overload, every invocation; a name is compared up to its first
-//! `[`). Class names are binary names, as `Class.getName()` gives them. Nothing is a pattern. A line
+//! method has that name: every overload, every invocation; a name is compared whole, but that a
+//! JUnit Vintage test's `name[…]`, JUnit 4's Parameterized invocation, is `name`'s). Class names
+//! are binary names, as `Class.getName()` gives them. Nothing is a pattern. A line
 //! `@<directory>` scopes the entries after it to a JVM whose `basedir` system property, else working
 //! directory, is that directory (canonical paths). No list leaves nothing out; a list that can't be
 //! read leaves nothing out, and the events say so. The events' lines are described in the hook's
-//! `Events.java`.
+//! `Events.java`: each test the hook left out is told with the entry that listed it, which
+//! [`left_out_unlisted`] holds against the list.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -108,13 +110,26 @@ pub struct JvmEvents {
     pub classes: BTreeMap<String, ClassEvents>,
     /// Tests, or failures, whose class can't be told.
     pub unattributed: u64,
+    /// What the hook left out, each as it said it: class, method, and the entry that listed it.
+    pub left_out: Vec<LeftOutEvent>,
+    /// Each test that started or was skipped, `class#method` as its source names them.
+    pub seen: BTreeSet<String>,
+}
+
+/// One test, or class, the hook left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftOutEvent {
+    pub class: String,
+    pub method: Option<String>,
+    /// The list's entry that listed it, as the list spells it.
+    pub entry: Option<String>,
 }
 
 /// What a JVM's events say of one top-level class and the classes nested in it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClassEvents {
-    /// Each test by its id: its method, after its nested class and `#` when it has one, up to the
-    /// method's first `[`.
+    /// Each test by its id: its method, after its nested class and `#` when it has one; a JUnit
+    /// Vintage test's up to its first `[`.
     pub tests: BTreeMap<String, TestEvents>,
     /// The class's own container started, and finished.
     pub started: bool,
@@ -179,13 +194,18 @@ fn from_uid(uid: &str) -> (Option<String>, Option<String>) {
     (class, method)
 }
 
-/// A test's top-level class and id, from its class's binary name and its method's name.
-pub fn test_id(class: &str, method: &str) -> (String, String) {
+/// A test's top-level class and id, from its class's binary name and its method's name: whole,
+/// or up to its first `[` when `cut` (JUnit 4's Parameterized names an invocation `name[0: x=1]`).
+pub fn test_id(class: &str, method: &str, cut: bool) -> (String, String) {
     let (top, nested) = match class.split_once('$') {
         Some((top, nested)) => (top, nested),
         None => (class, ""),
     };
-    let method = method.split('[').next().unwrap_or(method);
+    let method = if cut {
+        method.split('[').next().unwrap_or(method)
+    } else {
+        method
+    };
     let id = if nested.is_empty() {
         method.to_string()
     } else {
@@ -210,6 +230,8 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
         };
         let field = |name: &str| event.get(name).and_then(serde_json::Value::as_str);
         let is_test = event.get("test").and_then(serde_json::Value::as_bool) == Some(true);
+        // JUnit Vintage names a Parameterized invocation `name[…]`: one test, `name`.
+        let vintage = field("uid").is_some_and(|u| u.starts_with("[engine:junit-vintage]"));
         let (mut class, mut method) = (
             field("class").map(str::to_string),
             field("method").map(str::to_string),
@@ -228,7 +250,14 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
             "leave-out-unread" => out.list_unread = Some(field("error").unwrap_or("").to_string()),
             kind @ ("left-out" | "not-left-out") => {
                 let Some(class) = class else { continue };
-                let (top, id) = test_id(&class, method.as_deref().unwrap_or(""));
+                if kind == "left-out" {
+                    out.left_out.push(LeftOutEvent {
+                        class: class.clone(),
+                        method: method.clone(),
+                        entry: field("entry").map(str::to_string),
+                    });
+                }
+                let (top, id) = test_id(&class, method.as_deref().unwrap_or(""), vintage);
                 let entry = out.classes.entry(top).or_default();
                 if kind == "left-out" {
                     entry.left_out = true;
@@ -250,7 +279,12 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
                     }
                     continue;
                 };
-                let (top, id) = test_id(&class, method.as_deref().unwrap_or(""));
+                if let Some(m) = &method
+                    && (kind == "started" || kind == "skipped")
+                {
+                    out.seen.insert(format!("{class}#{m}"));
+                }
+                let (top, id) = test_id(&class, method.as_deref().unwrap_or(""), vintage);
                 let uid = field("uid").unwrap_or("").to_string();
                 let entry = out.classes.entry(top.clone()).or_default();
                 let own_class = class == top && method.is_none();
@@ -319,6 +353,54 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
     out
 }
 
+/// \[C-32\] Why the hook's events say it left out what `listed`, the lines of its list, didn't
+/// list: a test it told no entry for, or one whose entry, which the list must hold, doesn't name
+/// it exactly (a class entry its class or a class it is nested in; a method entry its class and
+/// its method, or for JUnit 4's Parameterized `method[…]`). `None` when every test it left out
+/// was listed.
+pub fn left_out_unlisted<'a>(
+    events: impl IntoIterator<Item = &'a JvmEvents>,
+    listed: &BTreeSet<String>,
+) -> Option<String> {
+    for jvm in events {
+        for out in &jvm.left_out {
+            let what = match &out.method {
+                Some(m) => format!("{}#{m}", out.class),
+                None => out.class.clone(),
+            };
+            let Some(entry) = out.entry.as_ref().filter(|e| listed.contains(*e)) else {
+                return Some(format!(
+                    "the test-JVM hook left out {what}, which no entry of its list names"
+                ));
+            };
+            let names = match entry.split_once('#') {
+                None => {
+                    out.class == *entry
+                        || out
+                            .class
+                            .strip_prefix(entry.as_str())
+                            .is_some_and(|rest| rest.starts_with('$'))
+                }
+                Some((class, method)) => {
+                    out.class == class
+                        && out.method.as_deref().is_some_and(|m| {
+                            m == method
+                                || m.strip_prefix(method).is_some_and(|rest| {
+                                    rest.starts_with('[') && rest.ends_with(']')
+                                })
+                        })
+                }
+            };
+            if !names {
+                return Some(format!(
+                    "the test-JVM hook left out {what} for the entry {entry}, which names another test"
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Every event file in `dir`, read, by file name: `Err` when the directory is there and can't be
 /// read, or a file is larger than [`MOST_EVENT_BYTES`]. No directory is no file.
 pub fn read_events_dir(dir: &Path) -> Result<BTreeMap<String, JvmEvents>, String> {
@@ -383,6 +465,59 @@ mod tests {
             assert!(gradle.contains(&format!("\"-D{property}=\"")), "{property}");
         }
         assert!(names.contains("new File(v.trim(), \"test-jvm\")"));
+    }
+
+    // covers: C-32, C-39
+    #[test]
+    fn a_test_the_hook_left_out_is_one_its_list_named_exactly() {
+        let events = |lines: &str| {
+            read_events(
+                format!("{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":\"/w\",\"basedir\":null}}\n{lines}")
+                    .as_bytes(),
+            )
+        };
+        let listed: BTreeSet<String> = ["ex.Spec#parses [a]", "p.Param#small", "p.Outer"]
+            .map(String::from)
+            .into();
+        let ok = events(concat!(
+            r#"{"e":"left-out","by":"junit-platform","uid":"[engine:spock]/[spec:ex.Spec]/[feature:$spock_feature_0_0]","class":"ex.Spec","method":"parses [a]","entry":"ex.Spec#parses [a]"}"#,
+            "\n",
+            r#"{"e":"left-out","by":"junit-platform","uid":"[engine:junit-vintage]/[runner:p.Param]/[test:small[0: x=1](p.Param)]","class":"p.Param","method":"small[0: x=1]","entry":"p.Param#small"}"#,
+            "\n",
+            r#"{"e":"left-out","by":"testng","uid":null,"class":"p.Outer$Inner","method":"m","entry":"p.Outer"}"#,
+            "\n",
+        ));
+        assert_eq!(left_out_unlisted([&ok], &listed), None);
+        // A Vintage invocation is one test, `small`, as its id says; a Spock feature is its name.
+        assert!(ok.classes["p.Param"].tests.contains_key("small"));
+        assert!(ok.classes["ex.Spec"].tests.contains_key("parses [a]"));
+        for (line, says) in [
+            // A feature that differs after a bracket, which the list didn't name.
+            (
+                r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"ex.Spec","method":"parses [b]","entry":"ex.Spec#parses [a]"}"#,
+                "names another test",
+            ),
+            (
+                r#"{"e":"left-out","by":"testng","uid":null,"class":"p.Sub","method":"small","entry":"p.Param#small"}"#,
+                "names another test",
+            ),
+            (
+                r#"{"e":"left-out","by":"testng","uid":null,"class":"p.OuterX","method":"m","entry":"p.Outer"}"#,
+                "names another test",
+            ),
+            (
+                r#"{"e":"left-out","by":"testng","uid":null,"class":"p.Other","method":"m","entry":"p.Other#m"}"#,
+                "no entry of its list",
+            ),
+            (
+                r#"{"e":"left-out","by":"testng","uid":null,"class":"p.Other","method":"m"}"#,
+                "no entry of its list",
+            ),
+        ] {
+            let why = left_out_unlisted([&events(&format!("{line}\n"))], &listed)
+                .unwrap_or_else(|| panic!("{line}"));
+            assert!(why.contains(says), "{why}");
+        }
     }
 
     #[test]

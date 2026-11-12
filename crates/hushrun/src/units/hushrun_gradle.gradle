@@ -467,6 +467,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
     transient List<String> narrowedBy
     transient List<String> attempted
     transient List<String> notAttempted
+    transient List<String> hookLines
     transient String how
     transient boolean rootDone
     transient String rootResult
@@ -479,6 +480,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         narrowedBy = []
         attempted = []
         notAttempted = []
+        hookLines = []
         errors = []
         how = null
         rootDone = false
@@ -514,6 +516,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
             }
             File work = HushrunRun.work(info.shared.buildRoot, info.taskPath)
             if (work != null) HushrunRun.writeWhole(new File(work, "leave-out.txt"), hook.join("\n") + "\n")
+            hookLines.addAll(hook)
             // A task left with no test by this run must not fail for that.
             if (s != null && s.leavesOut()) filter.failOnNoMatchingTests = false
         } catch (Throwable e) {
@@ -571,6 +574,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         report.leftOut.tests = attempted
         report.leftOut.notAttempted = notAttempted
         report.leftOut.how = how
+        report.leftOut.hook = hookLines
         report.invocations = new ArrayList(invocations)
         report.suiteFailures = new ArrayList(suiteFailures)
         Set<String> outers = new TreeSet<>()
