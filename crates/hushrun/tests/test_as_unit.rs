@@ -1039,3 +1039,41 @@ fn a_plan_that_doesnt_know_every_test_files_tests_counts_test_files() {
         "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 7 tests of the others, and 2 more that did run as a check"
     );
 }
+
+// covers: C-39
+#[test]
+fn past_50000_tests_a_run_counts_by_test_file_and_says_so() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: observe, unit: test}")),
+        (
+            ".gitignore".into(),
+            "__pycache__/\n.pytest_cache/\n".into(),
+        ),
+        (
+            "pytest.ini".into(),
+            "[pytest]\ntestpaths = tests\n".into(),
+        ),
+        (
+            "tests/test_big.py".into(),
+            "import pytest\n\n@pytest.mark.parametrize('n', range(50001))\ndef test_n(n):\n    pass\n"
+                .into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let ran = r.run(&pytest_args(&python(), &[]), &[]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        ran.stderr.lines().any(|l| l
+            == "hushrun: unit: its tests are reused by test file in this run: it has 50,001 tests, more than the 50,000 this version reuses one by one"),
+        "{}",
+        ran.stderr
+    );
+    // Counted by test file: the run's units say nothing of tests, and its test file recorded its
+    // own pass.
+    let units = &r.newest_result()["units"];
+    assert!(units.get("tests").is_none(), "{units}");
+    assert_eq!(units["ran"], 1, "{units}");
+}
