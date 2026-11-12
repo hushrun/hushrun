@@ -344,6 +344,19 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             );
         }
         Ok(lookup) => match shared::choose(&keys, &lookup.found) {
+            // \[C-37\] A test its test file's row doesn't have isn't one the file's reuse covers.
+            Choice::Passed(..)
+                if test.as_ref().is_some_and(|id| {
+                    own.is_some_and(|m| !m.tests.is_empty() && !m.tests.contains_key(id))
+                }) =>
+            {
+                says(
+                    &mut out,
+                    Decision::Runs,
+                    "never-ran-here",
+                    "this machine doesn't know this test: no run of its test file here told it".into(),
+                );
+            }
             Choice::Passed(..) if test.is_some() && whole_reusable(&map, &unit) => {
                 says(
                     &mut out,

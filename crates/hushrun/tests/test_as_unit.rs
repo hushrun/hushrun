@@ -1872,7 +1872,9 @@ fn why_explains_one_test_and_a_test_file_with_a_test_not_followed() {
     );
     let nope = why_json(&r, "tests/test_cart.py::test_nope");
     assert_eq!(nope["reason"], "never-ran-here", "{nope:#}");
-    // test_child.py passed whole: its tests go with it.
+    // test_child.py passed whole: its tests go with it; \[C-37\] a test it doesn't have doesn't.
+    let none = why_json(&r, "tests/test_child.py::test_nope");
+    assert_eq!(none["reason"], "never-ran-here", "{none:#}");
     let a = why_json(&r, "tests/test_child.py::test_a");
     assert_eq!(
         a["says"],
