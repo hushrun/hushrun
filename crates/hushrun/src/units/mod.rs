@@ -29,6 +29,7 @@ pub mod cargo;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod jest;
 pub mod program;
 pub mod pytest;
 pub mod runner;
