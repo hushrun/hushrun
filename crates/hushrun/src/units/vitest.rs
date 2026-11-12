@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 
 use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
-use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
-use super::facts::{FactsFile, Unfollowed};
+use super::adapter::{
+    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
+use super::facts::{FactsFile, MergedTest, TestFacts, Unfollowed};
 
 /// The adapter's name in its main process's facts file.
 pub const ADAPTER: &str = "vitest";
@@ -294,6 +296,52 @@ struct WorkerSaw {
     /// Directories it listed, from the root.
     dirs: BTreeSet<String>,
     not_followed: BTreeSet<NotFollowed>,
+    /// \[ADR 0081\] Its tests, by id, when every worker that ran it told them (C-43).
+    tests: Option<BTreeMap<String, MergedTest>>,
+    /// \[ADR 0081\] A worker that ran it told no tests: none of them can be told.
+    untold: bool,
+}
+
+/// \[ADR 0081\] Adds what one worker told of a test file's tests to what others did. A file that
+/// two projects run runs each of its tests in each: a test finished only where every worker that
+/// told it finished it, failed where any failed it, was left out where every one left it out, and
+/// what it read is known only where every one said it.
+fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, tests: &[TestFacts]) {
+    let list = |indices: &Option<Vec<usize>>| indices.as_ref().and_then(|i| worker.resolve(i));
+    for test in tests {
+        let told = MergedTest {
+            finished: test.finished,
+            failed: test.failed,
+            deselected: test.deselected,
+            duration_ms: test.duration_ms,
+            not_followed: test.not_followed.iter().map(NotFollowed::from).collect(),
+            ran: list(&test.ran),
+            opened: list(&test.opened),
+            dirs: list(&test.dirs),
+        };
+        let Some(had) = into.get_mut(&test.id) else {
+            into.insert(test.id.clone(), told);
+            continue;
+        };
+        had.finished &= told.finished;
+        had.failed |= told.failed;
+        had.deselected &= told.deselected;
+        had.duration_ms = had.duration_ms.saturating_add(told.duration_ms);
+        had.not_followed.extend(told.not_followed);
+        for (had, told) in [
+            (&mut had.ran, told.ran),
+            (&mut had.opened, told.opened),
+            (&mut had.dirs, told.dirs),
+        ] {
+            *had = match (had.take(), told) {
+                (Some(mut had), Some(told)) => {
+                    had.extend(told);
+                    Some(had)
+                }
+                _ => None,
+            };
+        }
+    }
 }
 
 /// How one test file ended, by Vitest's main process, over the projects that ran it.
@@ -403,6 +451,16 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             entry
                 .not_followed
                 .extend(unit.not_followed.iter().map(NotFollowed::from));
+            // \[ADR 0081\] Its tests, one by one, when the worker told them (C-43).
+            match &unit.tests {
+                Some(tests) if !entry.untold => {
+                    merge_tests(entry.tests.get_or_insert_with(BTreeMap::new), worker, tests);
+                }
+                _ => {
+                    entry.untold = true;
+                    entry.tests = None;
+                }
+            }
             if let Some(error) = worker.errors.first() {
                 entry.not_followed.insert(NotFollowed {
                     why: "adapter-error".into(),
@@ -465,11 +523,13 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let mut reads: BTreeSet<String> = config_files.clone();
         reads.insert(unit.clone());
         let mut dirs = BTreeSet::new();
+        let mut tests = None;
         match seen_by.remove(&unit) {
             Some(saw) => {
                 reads.extend(saw.files);
                 not_followed.extend(saw.not_followed);
                 dirs = saw.dirs;
+                tests = saw.tests;
             }
             None if !deselected => {
                 not_followed.insert(NotFollowed {
@@ -493,7 +553,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 },
                 reads,
                 duration_ms,
-                tests: None,
+                tests,
             },
         );
     }
@@ -524,6 +584,15 @@ impl Adapter for Recognized {
 
     fn hints(&self) -> Hints {
         Hints::Kinds(SOURCE_KINDS)
+    }
+
+    /// \[ADR 0081\] Its setup file names each test, leaves out those `reuseTests` lists, says how
+    /// each ended, and watches what each read (C-43).
+    fn tests(&self) -> KnowsTests {
+        KnowsTests {
+            unit: true,
+            reads: true,
+        }
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {

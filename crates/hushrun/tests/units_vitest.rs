@@ -885,3 +885,294 @@ fn vitest_hazards_miss_no_failure() {
     }
     assert!(reused > 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// [ADR 0081] Tests one by one (C-39, C-43).
+
+/// The plugin and its setup file, as hushrun writes them.
+const PLUGIN: &str = include_str!("../src/units/hushrun_vitest.mjs");
+const SETUP: &str = include_str!("../src/units/hushrun_vitest_setup.mjs");
+
+/// What Vitest with hushrun's plugin did, with tests told one by one.
+struct Told {
+    code: i32,
+    stdout: String,
+    /// Each test file's worker facts, by its path from the root.
+    workers: std::collections::BTreeMap<String, Value>,
+}
+
+impl Told {
+    fn unit(&self, unit: &str) -> &Value {
+        self.workers
+            .get(unit)
+            .unwrap_or_else(|| panic!("no facts for {unit}: {:#?}", self.workers.keys()))
+    }
+
+    /// Each test of `unit` that the worker told, by id.
+    fn tests(&self, unit: &str) -> std::collections::BTreeMap<String, Value> {
+        self.unit(unit)["units"][0]["tests"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{unit} told no tests: {:#}", self.unit(unit)))
+            .iter()
+            .map(|t| (t["id"].as_str().unwrap().to_string(), t.clone()))
+            .collect()
+    }
+
+    fn ids(&self, unit: &str) -> Vec<String> {
+        self.unit(unit)["units"][0]["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The paths a list of indices names in `unit`'s facts, in order; `None` for no list.
+    fn names(&self, unit: &str, indices: &Value) -> Option<Vec<String>> {
+        let paths = self.unit(unit)["paths"].as_array().unwrap();
+        let mut out: Vec<String> = indices
+            .as_array()?
+            .iter()
+            .map(|i| paths[i.as_u64().unwrap() as usize].as_str().unwrap().to_string())
+            .collect();
+        out.sort();
+        Some(out)
+    }
+
+    /// What one test of `unit` ran, opened or listed (`what`).
+    fn list(&self, unit: &str, id: &str, what: &str) -> Option<Vec<String>> {
+        let tests = self.tests(unit);
+        let test = tests
+            .get(id)
+            .unwrap_or_else(|| panic!("no test {id:?} in {:?}", tests.keys()));
+        self.names(unit, &test[what])
+    }
+
+    /// Each file's direct imports in `unit`'s facts, by path.
+    fn imports(&self, unit: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let facts = self.unit(unit);
+        let paths = facts["paths"].as_array().unwrap();
+        facts["imports"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(from, to)| {
+                let from = paths[from.parse::<usize>().unwrap()].as_str().unwrap();
+                (from.to_string(), self.names(unit, to).unwrap())
+            })
+            .collect()
+    }
+}
+
+/// The test files of `r`, as Vitest's default `include` names them here.
+fn test_files(r: &Repo) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if name.ends_with(".test.ts") {
+                let rel = path.strip_prefix(root).unwrap();
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&r.repo, &r.repo, &mut out);
+    out.sort();
+    out
+}
+
+/// Vitest with hushrun's plugin and a `hushrun.json` written here, as a plan with `unit: test`
+/// would: `reads`, and the tests it may leave out.
+fn tests_vitest(
+    r: &Repo,
+    reads: &str,
+    reuse_tests: Value,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Told {
+    let units = r.root.join("units");
+    let _ = std::fs::remove_dir_all(&units);
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("hushrun.json"),
+        json!({"schema": "hushrun.units/v0", "root": r.repo, "reuse": [],
+               "testFiles": test_files(r), "unit": "test", "reads": reads,
+               "reuseTests": reuse_tests})
+        .to_string(),
+    )
+    .unwrap();
+    let adapter = r.root.join("adapter");
+    std::fs::create_dir_all(&adapter).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest.mjs"), PLUGIN).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest-setup.mjs"), SETUP).unwrap();
+    let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
+    Repo::clean(&mut cmd);
+    let out = cmd
+        .arg("run")
+        .args(args)
+        .current_dir(&r.repo)
+        .env("HUSHRUN_UNITS", &units)
+        .env(
+            "HUSHRUN_VITEST",
+            format!("file://{}", adapter.join("hushrun-vitest.mjs").display()),
+        )
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let mut workers = std::collections::BTreeMap::new();
+    for path in std::fs::read_dir(&units).unwrap().flatten().map(|e| e.path()) {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !name.starts_with("vitest-worker-") || !name.ends_with(".json") {
+            continue;
+        }
+        let facts: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let unit = std::fs::canonicalize(facts["units"][0]["unit"].as_str().unwrap()).unwrap();
+        let unit = unit
+            .strip_prefix(std::fs::canonicalize(&r.repo).unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        workers.insert(unit, facts);
+    }
+    Told {
+        code: out.status.code().unwrap_or(-1),
+        stdout: plain(&String::from_utf8_lossy(&out.stdout))
+            + &plain(&String::from_utf8_lossy(&out.stderr)),
+        workers,
+    }
+}
+
+/// A repository with `files` besides the config and package.json.
+fn told_repo(files: &[(&str, &str)]) -> Repo {
+    let mut all = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+    ];
+    all.extend(files.iter().map(|(p, t)| file(p, t)));
+    Repo::new(&all)
+}
+
+const NAMES: &str = "import { describe, test, expect, beforeAll } from 'vitest'
+import { writeFileSync } from 'node:fs'
+describe('cart', () => {
+  test('total', () => {})
+  test('total', () => {})
+  describe('in euros', () => {
+    beforeAll(() => { writeFileSync(process.env.MARK ?? '/dev/null', 'ran') })
+    test('rounds', () => {})
+  })
+  test.each([1, 2])('adds %i', (n) => { expect(n).toBeGreaterThan(0) })
+})
+describe('a > b', () => { test('c', () => {}) })
+describe('a', () => { describe('b', () => { test('c', () => {}) }) })
+test('top', () => {})
+test.skip('skipped', () => {})
+test.todo('later')
+";
+
+// covers: C-43, C-39
+#[test]
+fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_their_hooks() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("test/names.test.ts", NAMES),
+        (
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('one', () => {})\ntest('two', () => {})\n",
+        ),
+    ]);
+    let mark = r.root.join("mark");
+    let told = tests_vitest(&r, "file", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    // Suites' names and its own, ` [2]` for the second of a name, `test.each`'s cases each a test;
+    // a skipped test and a todo passed; the two that join to `a > b > c` from different suites are
+    // never told, so never left out.
+    assert_eq!(
+        told.ids("test/names.test.ts"),
+        [
+            "cart > total",
+            "cart > total [2]",
+            "cart > in euros > rounds",
+            "cart > adds 1",
+            "cart > adds 2",
+            "top",
+            "skipped",
+            "later",
+        ]
+    );
+    let tests = told.tests("test/names.test.ts");
+    for (id, test) in &tests {
+        assert_eq!(
+            (&test["finished"], &test["failed"], &test["deselected"]),
+            (&json!(true), &json!(false), &json!(false)),
+            "{id}"
+        );
+        // With `reads: file`, no test is watched.
+        assert!(test.get("ran").is_none(), "{id}: {test}");
+    }
+
+    // The listed tests are left out after collection: a suite all of whose tests are left out
+    // doesn't run its `beforeAll`, and what Vitest says is a pass, with the tests skipped.
+    std::fs::write(&mark, "").unwrap();
+    let listed = json!({"test/names.test.ts": ["cart > total [2]", "cart > in euros > rounds",
+                                               "cart > adds 1", "a > b > c", "skipped", "gone"]});
+    let told = tests_vitest(&r, "file", listed, &[], &[("MARK", mark.to_str().unwrap())]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    assert_eq!(std::fs::read_to_string(&mark).unwrap(), "", "beforeAll ran");
+    // Vitest counts the tests of a suite it skipped whole in its total only: it reports no
+    // result for them.
+    assert!(
+        told.stdout.contains("Tests  7 passed | 3 skipped | 1 todo (12)"),
+        "{}",
+        told.stdout
+    );
+    let tests = told.tests("test/names.test.ts");
+    let left: Vec<&String> = tests
+        .iter()
+        .filter(|(_, t)| t["deselected"] == true)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        left,
+        ["cart > adds 1", "cart > in euros > rounds", "cart > total [2]"]
+    );
+    for id in &left {
+        assert_eq!(tests[*id]["finished"], false, "{id}");
+    }
+    // A skipped test isn't left out: Vitest skips it anyway, and it passed.
+    assert_eq!(tests["skipped"]["deselected"], false);
+    assert_eq!(tests["skipped"]["finished"], true);
+
+    // Every test of one file left out: the file is skipped, and the run still passes.
+    let every = json!({"test/other.test.ts": ["one", "two"]});
+    let told = tests_vitest(&r, "file", every, &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    assert!(
+        told.stdout.contains("Test Files  1 passed | 1 skipped (2)"),
+        "{}",
+        told.stdout
+    );
+    assert!(
+        told.tests("test/other.test.ts")
+            .values()
+            .all(|t| t["deselected"] == true)
+    );
+    // Every test of every file: still a pass.
+    let names: Vec<String> = told.ids("test/names.test.ts");
+    let all = json!({"test/other.test.ts": ["one", "two"], "test/names.test.ts": names});
+    let told = tests_vitest(&r, "file", all, &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+}

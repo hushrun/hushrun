@@ -226,16 +226,35 @@ async function allTestFiles(vitest) {
 async function deselect(state, vitest, sorted) {
   state.testFiles = await allTestFiles(vitest);
   const run = readRun(state.dir);
-  if (!run || !Array.isArray(run.reuse) || run.reuse.length === 0) return sorted;
+  if (!run) return sorted;
   const root = realOrSelf(run.root);
-  if (vitest.config.coverage && vitest.config.coverage.enabled) {
-    state.refused = "Vitest's coverage is on, and a partial run's coverage would read as a drop";
-    return sorted;
-  }
+  const coverage = Boolean(vitest.config.coverage && vitest.config.coverage.enabled);
   const mine = [...state.testFiles].map((f) => relativeTo(root, f)).filter(Boolean).sort();
   const planned = [...(run.testFiles || [])].sort();
-  if (mine.length !== planned.length || mine.some((f, i) => f !== planned[i])) {
-    state.refused = "Vitest's test files aren't the ones hushrun planned from";
+  const same = mine.length === planned.length && mine.every((f, i) => f === planned[i]);
+  const refused = coverage
+    ? "Vitest's coverage is on, and a partial run's coverage would read as a drop"
+    : !same ? "Vitest's test files aren't the ones hushrun planned from" : null;
+  // [ADR 0081] Tests one by one, handed to the workers before any starts: the tests they may
+  // leave out only where test files may be, and watching each test only without Vitest's own
+  // coverage, which shares V8's counters.
+  if (run.unit === 'test') {
+    const reuseTests = refused === null && run.reuseTests && typeof run.reuseTests === 'object'
+      ? run.reuseTests : {};
+    if (refused !== null && run.reuseTests && Object.keys(run.reuseTests).length) {
+      state.refused = refused;
+    }
+    writeWhole(path.join(state.dir, 'vitest-tests'), {
+      unit: 'test',
+      watch: run.reads === 'test' && !coverage,
+      root,
+      reuseTests,
+      configFiles: [...state.configFiles],
+    });
+  }
+  if (!Array.isArray(run.reuse) || run.reuse.length === 0) return sorted;
+  if (refused !== null) {
+    state.refused = refused;
     return sorted;
   }
   const reuse = new Set(run.reuse);
