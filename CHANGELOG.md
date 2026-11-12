@@ -166,6 +166,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   failed), a failure no test explains, a start that died, a stale build, a test its adapter never
   leaves out. Before, it said nothing had changed and no pass counted. A stale build in a run that
   failed no longer records the passes of test files and tests either.
+- A run's results of test files and tests fit a server's 8 MiB body, cut from the last as past
+  50,000, and only a 413 in an older server's words sends the first 5,000 again: a server's own
+  413 is said as its refusal.
 - With `reads: test`, pytest's adapter follows what Python modules re-export: a package's
   `__init__.py` that binds names from another module, `from X import *`, and a module's `__all__`.
 - pytest's adapter takes a SQLite database a test connects to as read, as it does a file it opens.

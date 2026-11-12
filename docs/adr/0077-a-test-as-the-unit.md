@@ -70,7 +70,8 @@ tests are later decisions; this one leaves them their seams.
 10. **Where an adapter can't** (RFC 0004 §1.2). One that knows no test keeps working with
     `unit: test`: it reuses by test file and says so once, `its tests are reused by test binary:
     cargo's tests can't be reused one by one yet`. One that can't watch a test answers
-    `reads: test` with `reads: file`, and says so once. In this version that is pytest too.
+    `reads: test` with `reads: file`, and says so once. pytest watches a test (ADR 0080) while no
+    other tool uses `sys.monitoring`.
 11. **The limit** (C-39). A check with more than 50,000 tests reuses by test file for that run, and
     says so.
 12. **One interface for adapters.** The plan, the reading of what an adapter wrote, each unit's
@@ -97,8 +98,8 @@ tests are later decisions; this one leaves them their seams.
 - A partly reused test file's list only grows until it runs whole, which makes its keys finer and
   never wrong.
 - A test whose id changes (a renamed parameter) is a new test, and runs.
-- Results grow with tests where test files don't pass whole. More than 5,000 in a run records none,
-  as before; sending failures first and the server's new limit are a later decision.
+- Results grow with tests where test files don't pass whole. A run sends at most 50,000, failures
+  first, in at most 8 MiB, and an older server keeps the first 5,000 (ADR 0078, item 9).
 
 ## Alternatives considered
 
@@ -279,3 +280,7 @@ first; the plugin's are in ADR 0080's Amendment 2.
   without its tests and decided `not run` still keeps no row, as before: `why` says it never ran
   here. A stale build in a run that failed now keeps every pass out too: before, a test file or
   test whose failures the adapter reports by unit recorded its pass.
+- **Corrections.** Item 10 said pytest can't watch a test "in this version": it does, by ADR 0080,
+  while no other tool uses `sys.monitoring`. The Consequences said more than 5,000 results in a run
+  record none: a run sends 50,000 at most, failures first, and an older server keeps the first
+  5,000 (ADR 0078, item 9 and Amendment 4).

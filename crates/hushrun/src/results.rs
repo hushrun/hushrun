@@ -1253,19 +1253,55 @@ fn without_saved(result: &RunResult) -> Option<RunResult> {
 }
 
 /// \[RFC 0004 §3.8\] Whether a server refused a run's results by the limits of one from before
-/// tests as the unit: 413 for a body over 1 MiB, or 400 `invalid` for more than 5,000.
+/// tests as the unit: 413 for a body over 1 MiB, or 400 `invalid` for more than 5,000. Both servers
+/// answer a body past their limit with axum's own 413 and [`BODY_LIMIT`]; since the body sent fits
+/// [`MOST_RUN_BYTES`] ([`fitting`]), that answer can only be an older server's smaller limit. A 413
+/// in other words is a server's own refusal.
 fn older_limit(status: u16, answer: &[u8]) -> bool {
-    status == 413
+    (status == 413 && String::from_utf8_lossy(answer).contains(BODY_LIMIT))
         || (status == 400
             && error_code(answer).as_deref() == Some("invalid")
             && error_message(answer)
                 .is_some_and(|m| m.starts_with("a run records at most 5000 test files' results")))
 }
 
+/// What a server whose body limit a request passed answers with its 413 (axum's own words).
+const BODY_LIMIT: &str = "Failed to buffer the request body: length limit exceeded";
+
 /// \[RFC 0004 §3.8\] The most results of test files and tests a run sends.
 pub const MOST_RESULTS: usize = 50_000;
 /// \[RFC 0004 §3.8\] The most a server from before tests as the unit takes.
 pub const OLDER_MOST_RESULTS: usize = 5_000;
+/// \[RFC 0004 §3.8\] The largest run's body a server takes.
+pub const MOST_RUN_BYTES: usize = 8 << 20;
+
+/// \[RFC 0004 §3.8\] How many of `units`, from the first, a run's body sends with `result`: at
+/// most [`MOST_RESULTS`], and no more than fit a body of `limit` bytes as [`Backend::post_units`]
+/// writes it. What is cut is cut from the last, tests' passes first, as past the count.
+fn fitting(result: &RunResult, units: &[crate::units::store::UnitRecord], limit: usize) -> usize {
+    let base = serde_json::to_vec(&json!({
+        "schema": RUN_UNITS_SCHEMA,
+        "result": result,
+        "units": [],
+    }))
+    .map_or(usize::MAX, |body| body.len());
+    let mut size = base;
+    let mut fit = 0;
+    for (i, unit) in units.iter().take(MOST_RESULTS).enumerate() {
+        let one = unit_json(unit).to_string().len() + usize::from(i > 0);
+        size = size.saturating_add(one);
+        if size > limit {
+            break;
+        }
+        fit = i + 1;
+    }
+    fit
+}
+
+/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex.
+fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
+    json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+}
 
 /// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1342,7 +1378,8 @@ impl Backend {
     /// result; the caller keeps the units beside it.
     ///
     /// \[RFC 0004 §3.8\] `units` come in the order whatever is cut is a pass of: failures, then
-    /// test files' results, then tests' passes. At most [`MOST_RESULTS`] go; a server from before
+    /// test files' results, then tests' passes. At most [`MOST_RESULTS`] go, in a body of at most
+    /// [`MOST_RUN_BYTES`], cut from the last ([`fitting`]); a server from before
     /// tests as the unit, which takes [`OLDER_MOST_RESULTS`], gets the first of them again; one that
     /// refuses `savedMs` with no test file reused gets the result again without it.
     pub fn record_with_units(
@@ -1363,7 +1400,7 @@ impl Backend {
         if server.reads_as.is_some() {
             return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
         }
-        let mut sent = units.len().min(MOST_RESULTS);
+        let mut sent = fitting(result, units, MOST_RUN_BYTES);
         let mut result = std::borrow::Cow::Borrowed(result);
         loop {
             let (status, answer) = self.post_units(server, key, &result, &units[..sent])?;
@@ -1409,12 +1446,7 @@ impl Backend {
         units: &[crate::units::store::UnitRecord],
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         // Keys as the protocol has them: 64 lowercase hex characters.
-        let units: Vec<serde_json::Value> = units
-            .iter()
-            .map(|unit| {
-                json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
-            })
-            .collect();
+        let units: Vec<serde_json::Value> = units.iter().map(unit_json).collect();
         let body = serde_json::to_vec(&json!({
             "schema": RUN_UNITS_SCHEMA,
             "result": result,
@@ -2002,5 +2034,37 @@ mod tests {
             assert_eq!(same, without);
             assert_eq!(rule, None);
         }
+    }
+
+    // covers: C-12
+    #[test]
+    fn a_runs_body_sends_the_results_that_fit_its_limit_cutting_the_last() {
+        let record = |n: u8, result: &str| crate::units::store::UnitRecord {
+            key: Digest::of(&[n]),
+            result: result.into(),
+            duration_ms: 12,
+        };
+        let units: Vec<_> = (0..10)
+            .map(|n| record(n, if n < 2 { "fail" } else { "pass" }))
+            .collect();
+        let result = pass(Provider::Github, None);
+        let body = |n: usize| {
+            let units: Vec<serde_json::Value> = units[..n]
+                .iter()
+                .map(|u| json!({"key": u.key.hex(), "result": u.result, "durationMs": u.duration_ms}))
+                .collect();
+            serde_json::to_vec(
+                &json!({"schema": RUN_UNITS_SCHEMA, "result": &result, "units": units}),
+            )
+            .unwrap()
+            .len()
+        };
+        // Room for every one: all go; for six and a byte short of seven, the first six.
+        assert_eq!(fitting(&result, &units, body(10)), 10);
+        assert_eq!(fitting(&result, &units, body(7) - 1), 6);
+        assert_eq!(fitting(&result, &units, body(6)), 6);
+        // Never past the count, whatever the room.
+        assert_eq!(fitting(&result, &units, usize::MAX), 10);
+        assert_eq!(fitting(&result, &units, body(0)), 0);
     }
 }
