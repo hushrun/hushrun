@@ -84,3 +84,14 @@ Reviewers confirmed wrong reuses in item 4 and in what item 1 left out.
   `use_tool_id`, which it lets through after giving way. When another appears it stops for the
   rest of the process, releases its id, reports no test of the process as watched (each reads its
   test file's list), and says why once in `settings.watch`.
+
+## Amendment 2: what the second review ran (2026-11-12)
+
+A second review ran the plugin on pytest 8.4.2 and 9.2 and confirmed more. Each is fixed with a
+test that failed first.
+
+- **A test cut short.** The protocol's wrapper counted a test finished after its `yield` whatever
+  came up through it, so a test a session fixture's `pytest.exit` or a `KeyboardInterrupt` cut
+  short was recorded as passed, and with `unit: file` a file whose last test it was ran whole.
+  Now a test finished only once its teardown's report was logged and no exception came up through
+  its protocol.

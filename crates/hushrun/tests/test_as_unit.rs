@@ -532,6 +532,44 @@ fn an_adapter_that_left_out_what_the_plan_didnt_list_runs_again_with_nothing_lef
     assert_eq!(r.unit_results(), before);
 }
 
+// covers: C-39, C-32
+#[test]
+fn a_test_cut_short_by_pytest_exit_or_an_interrupt_records_nothing() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // A session fixture ends the session with pytest.exit; an interrupt arrives in a body. Neither
+    // test finished: no pass of either, and their files didn't run whole.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\npythonpath = .\n".into()),
+        (
+            "tests/conftest.py".into(),
+            "import os, pytest\n\n@pytest.fixture(scope='session')\ndef db():\n    if os.environ.get('NODB'):\n        pytest.exit('database not reachable', returncode=3)\n    return 1\n".into(),
+        ),
+        (
+            "tests/test_k.py".into(),
+            "import os, signal, time\n\ndef test_1():\n    assert True\n\n\
+             def test_db(db):\n    assert True\n\n\
+             def test_slow():\n    if os.environ.get('INT'):\n        os.kill(os.getpid(), signal.SIGINT)\n        time.sleep(1)\n\n\
+             def test_3():\n    assert True\n"
+                .into(),
+        ),
+    ];
+    for (var, cut) in [("NODB", "test_db"), ("INT", "test_slow")] {
+        let r = repo_of(&files);
+        let python = python();
+        let ran = r.run(&pytest_args(&python, &[]), &[(var, "1")]);
+        assert_ne!(ran.code, 0, "{var}: {}\n{}", ran.stdout, ran.stderr);
+        let map = store::map(&r.cache);
+        let tests = &map["units"]["tests/test_k.py"]["tests"];
+        assert_ne!(tests[cut], "passed", "{var}: {map:#}");
+        assert_eq!(tests["test_1"], "passed", "{var}: {map:#}");
+        assert_ne!(tests["test_3"], "passed", "{var}: {map:#}");
+    }
+}
+
 // covers: C-39
 #[test]
 fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {

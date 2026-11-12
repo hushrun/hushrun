@@ -198,6 +198,7 @@ class Observer(object):
         self.code_files = {}          # code filename -> repository file or None
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
+        self.torn_ids = set()         # node ids of tests whose teardown report was logged
         self.session_ran = set()      # [ADR 0080] files a function of which started outside every
         self.session_opened = set()   # window, and files opened there: every test reads them
         self.shared_finishing = 0     # >0 while a fixture of a wider scope than a test is ended
@@ -1174,6 +1175,8 @@ def _logreport(obs, report):
     unit = obs.active
     if not unit:
         return
+    if report.when == "teardown":
+        obs.torn_ids.add(report.nodeid)
     entry = obs.unit_entry(unit)
     duration = getattr(report, "duration", 0.0) or 0.0
     entry["duration"] += duration
@@ -1217,10 +1220,18 @@ def _served(obs, unit, test_id, fixtures):
         window[3] = window[3] | frozenset(fixtures)
 
 
-def _protocol_end(obs, unit, test_id):
-    obs.unit_entry(unit)["finished"] += 1
+def _protocol_end(obs, unit, test_id, nodeid, cut):
+    # [C-32] A test finished only once its teardown's report was logged, and no `pytest.exit` or
+    # interrupt came up through its protocol: one cut short didn't finish, and its file didn't run
+    # whole.
+    finished = not cut and nodeid in obs.torn_ids
+    if finished:
+        obs.unit_entry(unit)["finished"] += 1
     if obs.by_test and test_id is not None:
-        obs.test_entry(unit, test_id)["finished"] = True
+        if finished:
+            obs.test_entry(unit, test_id)["finished"] = True
+        else:
+            obs.test_entry(unit, test_id)
         window = obs.test_window.get((unit, test_id))
         if window is not None:
             window[1] = obs.tick()
@@ -1334,10 +1345,14 @@ def pytest_runtest_protocol(item, nextitem):
         fixtures = ()
     if unit:
         _call(_protocol_start, unit, test_id, fixtures)
-    yield
+    outcome = yield
     if unit:
+        try:
+            cut = getattr(outcome, "excinfo", None) is not None
+        except Exception:
+            cut = True
         _call(_served, unit, test_id, _request_fixtures(item))
-        _call(_protocol_end, unit, test_id)
+        _call(_protocol_end, unit, test_id, getattr(item, "nodeid", None), cut)
 
 
 def _shared_setup(obs, fixturedef, step):

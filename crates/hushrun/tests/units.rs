@@ -768,6 +768,33 @@ fn a_store_an_older_hushrun_kept_is_imported_once_and_left_as_it_was() {
     assert!(!second.stderr.contains("cache step"), "{}", second.stderr);
 }
 
+// covers: C-32
+#[test]
+fn a_test_file_whose_last_test_pytest_exit_cut_short_didnt_run_whole() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_db, the file's last, asks for a fixture that ends the session: two of two tests
+    // started, one finished. Neither file runs whole: nothing records a pass.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "conftest.py",
+            "import pytest\n\n@pytest.fixture\ndef db():\n    pytest.exit('database not reachable', returncode=3)\n",
+        ),
+        ("test_k.py", "def test_1():\n    pass\n\ndef test_db(db):\n    pass\n"),
+        ("test_z.py", "def test_z():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[],
+    );
+    assert_eq!(ran.code, 3, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {
