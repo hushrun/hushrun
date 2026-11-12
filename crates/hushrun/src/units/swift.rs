@@ -1956,7 +1956,18 @@ fn observe(
     }
     let file = match &listing {
         Some(listing) => facts_of(listing, &started, &left, parsed, &package),
-        None => refusal("swift test list didn't list the tests after the run".into()),
+        None => {
+            let mut file = refusal("swift test list didn't list the tests after the run".into());
+            // \[C-32\] What SwiftPM ran of what hushrun left out can't be checked against the
+            // list (a nested class, a test added since): the run starts COMMAND once more with
+            // nothing left out.
+            if !left.patterns.is_empty() {
+                file.left_out_unlisted = Some(
+                    "swift test list didn't list the tests after the run, so what swift test ran of those left out can't be checked".into(),
+                );
+            }
+            file
+        }
     };
     write_facts(units, &file);
     let _ = std::fs::remove_dir_all(&work);

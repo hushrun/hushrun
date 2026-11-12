@@ -882,3 +882,73 @@ fn hushruns_swift_passes_output_through_a_terminal_byte_for_byte() {
     assert_eq!(facts.len(), 2, "{facts:?}");
     assert!(facts.iter().all(|f| f["units"][0]["tests"][0]["finished"] == false && f["failuresByUnit"] == false), "{facts:?}");
 }
+
+/// A `swift` for hushrun's own `swift` alone: a package with one test target, `ATests`, whose
+/// `test list` exits 1 when `LIST_FAILS` is set; `test` prints its arguments and exits 0.
+#[cfg(unix)]
+fn fake_package_swift(dir: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let describe = json!({"name": "Fake", "path": root, "dependencies": [], "products": [],
+        "targets": [{"name": "ATests", "c99name": "ATests", "type": "test", "path": "Tests/ATests"}]});
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Swift version 6.4.2 (fake)' ;;\n\
+         *describe*) echo '{describe}' ;;\n*dump-package*) echo '{{\"targets\": []}}' ;;\n\
+         'test list'*) [ -n \"$LIST_FAILS\" ] && exit 1; echo 'ATests.ATests/testA' ;;\n\
+         test*) echo \"args:$*\" ;;\nesac\n"
+    );
+    let path = dir.join("swift");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: C-48, C-32
+#[cfg(unix)]
+#[test]
+fn a_list_after_the_run_that_fails_where_tests_were_left_out_runs_again_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("Tests/ATests")).unwrap();
+    let real = root.join("real");
+    fake_package_swift(&real, &root);
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("hushrun.json"),
+        json!({"schema": "hushrun.units/v0", "root": root, "reuse": ["Tests/ATests"], "unit": "file"})
+            .to_string(),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "swift", "test"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .env("LIST_FAILS", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("--skip ^ATests\\."), "{stdout}");
+    let facts: Vec<Value> = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("swift-"))
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    // What SwiftPM ran of what hushrun left out can't be checked: the run starts COMMAND once
+    // more with nothing left out.
+    assert!(
+        facts[0]["leftOutUnlisted"]
+            .as_str()
+            .is_some_and(|w| w.contains("swift test list")),
+        "{:#}",
+        facts[0]
+    );
+}
