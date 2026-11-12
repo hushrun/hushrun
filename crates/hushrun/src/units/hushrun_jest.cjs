@@ -368,16 +368,17 @@ function install(S) {
   // ---------------------------------------------------------------- why a test isn't watched
   const V8_COVERAGE = "Jest's own V8 coverage is on, and it takes the counters watching a test needs";
   const TYPE_AWARE = 'ts-jest checks types with a language service, which reads every file of code for every test file';
-  // The repository file whose code is running: the nearest frame of the stack that is one.
-  function opener() {
+  // [ADR 0082, amended] The repository files whose code is on the stack, nearest first: each may
+  // keep what was opened (a cache in a module above the one that read, or in the test file).
+  function openers() {
     const limit = Error.stackTraceLimit;
     const prepare = Error.prepareStackTrace;
     let frames = [];
     try {
-      Error.stackTraceLimit = 40;
+      Error.stackTraceLimit = 64;
       Error.prepareStackTrace = (_, callSites) => callSites;
       const holder = {};
-      Error.captureStackTrace(holder, opener);
+      Error.captureStackTrace(holder, openers);
       frames = holder.stack || [];
     } catch {
       frames = [];
@@ -385,13 +386,14 @@ function install(S) {
       Error.prepareStackTrace = prepare;
       Error.stackTraceLimit = limit;
     }
+    const out = [];
     for (const frame of Array.isArray(frames) ? frames : []) {
       const name = frame && typeof frame.getFileName === 'function' ? frame.getFileName() : null;
       if (!name || name === __filename) continue;
       const r = rel(name);
-      if (r) return r;
+      if (r && !out.includes(r)) out.push(r);
     }
-    return null;
+    return out;
   }
   // Jest's config files, as the main process that claimed the run found them.
   function everyFromMain() {
@@ -499,18 +501,19 @@ function install(S) {
     }
     open(r) {
       this.reads.add(r);
-      const who = this.watch ? opener() : null;
+      const whos = this.watch ? openers() : null;
       // Inside a require, held until it ends: Jest reading a module to compile it isn't the
       // test opening it.
       const frame = S.frames[S.frames.length - 1];
-      if (frame) frame.opened.push([r, who]);
-      else this.keep(r, who);
+      if (frame) frame.opened.push([r, whos]);
+      else this.keep(r, whos);
     }
-    // An open that stands: the window's, and the module's whose code opened it. The test file's
-    // own opens are its tests' or its collection's, never every test's.
-    keep(r, who) {
+    // An open that stands: the window's, and each module's whose code was on the stack, the test
+    // file's included: any of them may have kept what it read for a later test that runs its code.
+    keep(r, whos) {
       this.current.opened.add(r);
-      if (who && who !== this.file && who !== r) {
+      for (const who of whos || []) {
+        if (who === r) continue;
         if (!this.opens.has(who)) this.opens.set(who, new Set());
         this.opens.get(who).add(r);
       }
@@ -944,7 +947,7 @@ function install(S) {
       // Jest 29 reads a module in the require around the one that compiles it.
       for (const r of frame.compiled) parent.compiled.add(r);
       parent.opened.push(...kept);
-    } else if (S.session) for (const [r, who] of kept) S.session.keep(r, who);
+    } else if (S.session) for (const [r, whos] of kept) S.session.keep(r, whos);
   }
   function patchRuntime(Runtime) {
     const proto = Runtime.prototype;

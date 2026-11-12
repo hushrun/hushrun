@@ -2094,6 +2094,46 @@ fn jest_reads_test_follows_a_file_a_module_read_once_and_kept() {
 
 // covers: C-40, C-44
 #[test]
+fn jest_reads_test_follows_a_file_a_module_above_the_one_that_read_it_kept() {
+    // config.js keeps what fsutil.js's readJson read for it: `target` calls config() and not
+    // readJson, which the first test's call left cached.
+    caught(
+        &[
+            ("src/settings.js", "{\"rate\": 1}\n"),
+            (
+                "src/fsutil.js",
+                "const fs = require('fs');\nexports.readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));\n",
+            ),
+            (
+                "src/config.js",
+                "const path = require('path');\nconst { readJson } = require('./fsutil');\nlet kept;\nexports.config = () => (kept = kept || readJson(path.join(__dirname, 'settings.js')));\n",
+            ),
+            (
+                "test/a.test.js",
+                "const { config } = require('../src/config');\ntest('first', () => { expect(config()).toBeTruthy(); });\ntest('target', () => { expect(config().rate).toBe(1); });\n",
+            ),
+        ],
+        ("src/settings.js", "{\"rate\": 2}\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_file_the_test_file_read_once_and_kept() {
+    caught(
+        &[
+            ("src/local.js", "{\"n\": 1}\n"),
+            (
+                "test/a.test.js",
+                "const fs = require('fs');\nlet local;\nconst mine = () => (local = local || JSON.parse(fs.readFileSync('src/local.js', 'utf8')));\ntest('first', () => { expect(mine()).toBeTruthy(); });\ntest('target', () => { expect(mine().n).toBe(1); });\n",
+            ),
+        ],
+        ("src/local.js", "{\"n\": 2}\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
 fn jest_reads_test_follows_what_a_before_all_read() {
     caught(
         &[
