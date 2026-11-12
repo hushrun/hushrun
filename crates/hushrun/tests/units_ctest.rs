@@ -1156,6 +1156,87 @@ fn on_makefiles_a_source_newer_than_its_object_is_a_stale_program() {
     );
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_test_reads_the_programs_of_the_fixtures_and_tests_it_depends_on() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(fx C)\nenable_testing()\n\
+                     include_directories(${CMAKE_SOURCE_DIR}/inc)\n\
+                     foreach(t t_setup t_inner t_use t_first t_after t_p)\n  add_executable(${t} tests/${t}.c)\nendforeach()\n\
+                     add_test(NAME setup COMMAND t_setup)\nadd_test(NAME inner COMMAND t_inner)\n\
+                     add_test(NAME use COMMAND t_use)\nadd_test(NAME first COMMAND t_first)\n\
+                     add_test(NAME after COMMAND t_after)\nadd_test(NAME p COMMAND t_p)\n\
+                     set_tests_properties(setup PROPERTIES FIXTURES_SETUP outer FIXTURES_REQUIRED in)\n\
+                     set_tests_properties(inner PROPERTIES FIXTURES_CLEANUP in)\n\
+                     set_tests_properties(use PROPERTIES FIXTURES_REQUIRED outer)\n\
+                     set_tests_properties(after PROPERTIES DEPENDS first)\n",
+                ),
+                file("inc/fix.h", "#define FIX 1\n"),
+                file("inc/inner.h", "#define INNER 1\n"),
+                file("inc/first.h", "#define FIRST 1\n"),
+                file(
+                    "tests/t_setup.c",
+                    "#include \"fix.h\"\nint main(void) { return FIX - 1; }\n",
+                ),
+                file(
+                    "tests/t_inner.c",
+                    "#include \"inner.h\"\nint main(void) { return INNER - 1; }\n",
+                ),
+                file("tests/t_use.c", "int main(void) { return 0; }\n"),
+                file(
+                    "tests/t_first.c",
+                    "#include \"first.h\"\nint main(void) { return FIRST - 1; }\n",
+                ),
+                file("tests/t_after.c", "int main(void) { return 0; }\n"),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = |unit: &str| -> Vec<String> {
+            map["units"][unit]["reads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{at}: {unit}: {map:#}"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // A fixture's setup, and through it the cleanup of a fixture the setup requires: what
+        // they are built from reaches the test that needs them; and what a test it DEPENDS on is
+        // built from.
+        assert_eq!(
+            reads("t_use"),
+            [
+                "inc/fix.h",
+                "inc/inner.h",
+                "tests/t_inner.c",
+                "tests/t_setup.c",
+                "tests/t_use.c"
+            ],
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_after"),
+            ["inc/first.h", "tests/t_after.c", "tests/t_first.c"],
+            "{at}"
+        );
+        assert_eq!(reads("t_p"), ["tests/t_p.c"], "{at}");
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

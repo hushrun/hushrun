@@ -280,12 +280,15 @@ pub fn walk(
                 had.refused = had.refused.take().or(built.refused);
             }
         };
-    for test in tests {
+    let mut walked: BTreeMap<PathBuf, Built> = BTreeMap::new();
+    let mut helper_done: BTreeSet<(String, usize)> = BTreeSet::new();
+    for (i, test) in tests.iter().enumerate() {
         let Program::Built { path, build, named } = &test.program else {
             continue;
         };
         if done.insert(path.clone()) {
             let built = walker.program(path, build);
+            walked.insert(path.clone(), built.clone());
             merge(&mut out, &test.unit, built);
         }
         // What the test names besides: a program it starts, a file it reads.
@@ -295,8 +298,76 @@ pub fn walk(
                 merge(&mut out, &test.unit, built);
             }
         }
+        // \[ADR 0087\] What runs before it for it: the setup and cleanup of each fixture it
+        // requires, followed through the fixtures they require, and each test it DEPENDS on. What
+        // their programs are built from, and what they name, the test reads too.
+        for h in helpers(tests, i) {
+            if !helper_done.insert((test.unit.clone(), h)) {
+                continue;
+            }
+            match &tests[h].program {
+                Program::Built { path, build, named } => {
+                    let mut built = match walked.get(path) {
+                        Some(built) => built.clone(),
+                        None => {
+                            let built = walker.program(path, build);
+                            walked.insert(path.clone(), built.clone());
+                            built
+                        }
+                    };
+                    built.own.clear();
+                    merge(&mut out, &test.unit, built);
+                    for n in named {
+                        if named_done.insert((test.unit.clone(), n.clone())) {
+                            let built = walker.named(n);
+                            merge(&mut out, &test.unit, built);
+                        }
+                    }
+                }
+                // A program not built here (a script): any built program it starts reads only
+                // sources, so the test reads every one.
+                Program::Elsewhere(_) | Program::None => {
+                    let built = Built {
+                        every_source: true,
+                        method: "every source",
+                        ..Built::default()
+                    };
+                    merge(&mut out, &test.unit, built);
+                }
+            }
+        }
     }
     out
+}
+
+/// The tests that run before test `i` for it, by index, but itself: the setup and cleanup tests of
+/// each fixture it requires (`FIXTURES_REQUIRED`, `FIXTURES_SETUP`, `FIXTURES_CLEANUP`) and the
+/// tests it `DEPENDS` on, and theirs in turn.
+fn helpers(tests: &[Test], i: usize) -> BTreeSet<usize> {
+    let mut found: BTreeSet<usize> = BTreeSet::new();
+    let mut stack = vec![i];
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        let test = &tests[at].listed;
+        let needs: BTreeSet<String> = test.words("FIXTURES_REQUIRED").into_iter().collect();
+        let after: BTreeSet<String> = test.words("DEPENDS").into_iter().collect();
+        for (j, other) in tests.iter().enumerate() {
+            let provides = other
+                .listed
+                .words("FIXTURES_SETUP")
+                .into_iter()
+                .chain(other.listed.words("FIXTURES_CLEANUP"))
+                .any(|f| needs.contains(&f));
+            if j != i && (provides || after.contains(&other.listed.name)) {
+                found.insert(j);
+                stack.push(j);
+            }
+        }
+    }
+    found
 }
 
 fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Skip> {
