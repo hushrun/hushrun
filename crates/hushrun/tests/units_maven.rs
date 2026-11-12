@@ -1764,3 +1764,16 @@ fn a_projects_own_testng_interceptor_and_the_hooks_leave_out_what_was_listed_onl
         second.stdout
     );
 }
+
+// covers: C-47
+#[test]
+fn the_maven_opts_a_person_set_reach_maven_beside_hushruns() {
+    let Some(maven) = maven() else { return };
+    // hushrun adds its extension and hook to MAVEN_OPTS, after what it had: a person's own
+    // property still reaches Maven, which skips the tests as it says.
+    let r = Repo::new(&shop("observe"), maven);
+    let ran = r.run(&[], &["test"], &[("MAVEN_OPTS", "-DskipTests=true")]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stderr, ran.stdout);
+    assert!(ran.ran().is_empty(), "{:?}\n{}", ran.ran(), ran.stdout);
+    assert!(ran.stdout.contains("Tests are skipped"), "{}", ran.stdout);
+}
