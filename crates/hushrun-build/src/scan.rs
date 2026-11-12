@@ -82,6 +82,41 @@ impl Needles {
         Ok((found, Digest::from_bytes(hasher.finish()), size))
     }
 
+    /// Every needle found anywhere in the file at `path`, as one flag per needle in the order
+    /// [`Needles::needles`] gives them, with the SHA-256 and size of all its bytes, in one pass.
+    /// Unlike [`Needles::in_file_hashed`] the search doesn't stop at the first hit: each needle
+    /// is looked for until it is found.
+    pub fn all_in_file_hashed(&self, path: &Path) -> io::Result<(Vec<bool>, Digest, u64)> {
+        let mut file = crate::regular::open(path)?;
+        let mut hasher = Hasher::new();
+        let keep = self.longest.saturating_sub(1);
+        let chunk = self.chunk.max(1);
+        let mut buf = vec![0u8; keep + chunk];
+        let mut have = 0usize;
+        let mut size = 0u64;
+        let mut found = vec![false; self.finders.len()];
+        loop {
+            let n = match file.read(&mut buf[have..have + chunk]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            };
+            hasher.update(&buf[have..have + n]);
+            size += n as u64;
+            have += n;
+            for (index, finder) in self.finders.iter().enumerate() {
+                if !found[index] && finder.find(&buf[..have]).is_some() {
+                    found[index] = true;
+                }
+            }
+            let tail = keep.min(have);
+            buf.copy_within(have - tail..have, 0);
+            have = tail;
+        }
+        Ok((found, Digest::from_bytes(hasher.finish()), size))
+    }
+
     /// The earliest (needle, offset) in `bytes`. Each later needle searches only up to where a
     /// hit would still be earlier.
     fn search(&self, bytes: &[u8]) -> Option<(usize, usize)> {
@@ -160,6 +195,12 @@ impl Needles {
         self.chunk = chunk;
         self
     }
+
+    /// A copy of the same needles, read `chunk` bytes at a time.
+    #[cfg(test)]
+    fn clone_with(&self, chunk: usize) -> Needles {
+        Needles::new(self.needles().map(<[u8]>::to_vec).collect()).with_chunk(chunk)
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +220,32 @@ mod tests {
     /// Bytes that hold no `/` and no letter, so no root can appear by chance.
     fn filler(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 7) as u8).collect()
+    }
+
+    // covers: B-10
+    #[test]
+    fn every_needle_is_found_wherever_it_lies_and_the_hash_is_of_all_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = filler(40);
+        bytes.extend(b"/home/dev/.cargo/registry");
+        bytes.extend(filler(37));
+        bytes.extend(b"/home/dev/work");
+        let path = write(dir.path(), "out", &bytes);
+        let n = needles(&[
+            b"/home/dev/work",
+            b"/home/dev/.cargo",
+            b"/home/dev",
+            b"/nowhere",
+        ]);
+        for chunk in [1, 3, 16, 1 << 20] {
+            let (found, sha, size) = n.clone_with(chunk).all_in_file_hashed(&path).unwrap();
+            assert_eq!(found, [true, true, true, false], "chunk {chunk}");
+            assert_eq!(sha, Digest::of(&bytes));
+            assert_eq!(size, bytes.len() as u64);
+        }
+        // The first-hit search stops at the earliest needle and says nothing of the others.
+        let (first, _, _) = n.in_file_hashed(&path).unwrap();
+        assert_eq!(first.map(|f| f.needle), Some(1));
     }
 
     // covers: B-10
