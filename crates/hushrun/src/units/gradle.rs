@@ -60,6 +60,14 @@ const SETTINGS_NAMES: &[&str] = &["settings.gradle.kts", "settings.gradle"];
 /// runner's `classMethod` (`@BeforeClass`, `@AfterClass`), Kotest's `executionError`.
 const CLASS_LEVEL: &[&str] = &["initializationError", "classMethod", "executionError"];
 
+/// The exception classes of a Test task's failure that say its test process ended badly: what
+/// Gradle's test executer throws, and the process's own.
+const DIED_TYPES: &[&str] = &[
+    "TestSuiteExecutionException",
+    "ProcessExecutionException",
+    "ExecException",
+];
+
 /// COMMAND, when it is Gradle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recognized {
@@ -243,6 +251,8 @@ pub struct Report {
     pub events_dir: Option<String>,
     /// The messages of the task's failure and its causes, when it failed.
     pub task_failures: Vec<String>,
+    /// The exception class of the task's failure and of each of its causes, when it failed.
+    pub task_failure_types: Vec<String>,
 }
 
 /// What a task left out.
@@ -549,14 +559,22 @@ fn units_of(
             && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
     // A failure outside any class: no test of the task is known to have run whole.
     let outside = report.suite_failures.iter().any(|s| s.c.is_none());
-    // A test JVM that died: a failure no test explains, or Gradle's word for it.
+    // A test JVM that died: the type of the task's failure says so (Gradle's test executer
+    // wraps a test process that ended badly in a `TestSuiteExecutionException`, caused by the
+    // process's `ProcessExecutionException`, an `ExecException` before Gradle 9); or a failure no
+    // test or suite explains; or, last, the words of Gradle's message, for a failure whose
+    // description names no type.
     let died = report
-        .task_failures
+        .task_failure_types
         .iter()
-        .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"))
+        .any(|t| DIED_TYPES.contains(&t.rsplit('.').next().unwrap_or(t)))
         || (report.task_failed
             && report.suite_failures.is_empty()
-            && !report.invocations.iter().any(|inv| inv.r == "FAILURE"));
+            && !report.invocations.iter().any(|inv| inv.r == "FAILURE"))
+        || report
+            .task_failures
+            .iter()
+            .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"));
     let whole = whole && !outside && !died && events.is_ok();
     // The classes a test JVM started and never ended, by their outer class.
     let open: BTreeSet<&str> = events

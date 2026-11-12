@@ -205,6 +205,24 @@ road hushrun doesn't see. A second build of the repository was the rest already 
 a settings file of its own). A task of one project (`:app:test`) keeps the sources of the projects
 its classes read on their list, which a test checks.
 
+## Amendment 7: a JVM that died, told by its failure's type (2026-11-12)
+
+Amendment 3 told a test JVM that died, beside a genuine failure in the same task, only by the
+words of Gradle's message, where no hook writes events (JUnit 4 on Gradle's own runner, TestNG).
+The decision: the report also holds the exception class of the task's failure and of each cause,
+the name that starts each failure's description (its stack trace), which no locale changes; a
+`TestSuiteExecutionException` (Gradle's test executer, "an unexpected problem"), a
+`ProcessExecutionException` (Gradle 9's test process that exited badly) or an `ExecException`
+(the same before Gradle 9) says the task ran nothing whole. What was tried and not taken: the
+build service's tooling events carry no exception object, only a message and a description;
+`taskGraph.afterTask` gives the throwable but doesn't hold under the configuration cache; and a
+count of the classes Gradle started against those it reported proves nothing either way: Gradle
+ends the root suite and calls the test in flight skipped when its test process dies (Amendment
+3), and a run showed the events of a JUnit 4 test that failed in the dying JVM lost altogether. The message words stay as the last signal,
+for a failure whose description names no type. A run checks the mixed case, one class failing for
+real and another's JVM dying in its class teardown, with each class in a JVM of its own, on
+Gradle 8.14.5 and 9.3.1, and with the words switched off it holds by the type alone.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

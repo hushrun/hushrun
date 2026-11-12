@@ -913,19 +913,32 @@ fn a_test_jvm_that_died_leaves_the_class_it_was_in_not_run() {
             .values()
             .all(|t| !t.finished)
     );
-    // Without the events, the same task: CrashTest ran whole as far as Gradle says.
+    // Without the events, the same task, whose failure is the failed test's: CrashTest ran whole
+    // as far as Gradle says.
     let observed = observe(&[task(&ran, serde_json::json!({"taskFailed": true}))], &t)
         .unwrap()
         .unwrap();
     assert_eq!(state(&observed.units[crash], false), units::State::Passed);
-    // A failed task no failed test explains, or Gradle's word that its test process ended
-    // badly: no class of it ran whole.
+    // A failed task no failed test explains, the type of its failure that says its test process
+    // ended badly, or, last, Gradle's words for it: no class of it ran whole.
     let green = [
         ("p.CrashTest", "a()", "SUCCESS"),
         ("p.CrashTest", "b()", "SUCCESS"),
     ];
     for file in [
         task(&green, serde_json::json!({"taskFailed": true})),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailureTypes": [
+                "org.gradle.api.tasks.TaskExecutionException",
+                "org.gradle.process.ProcessExecutionException"]}),
+        ),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailureTypes": [
+                "org.gradle.api.tasks.TaskExecutionException",
+                "org.gradle.api.internal.tasks.testing.TestSuiteExecutionException"]}),
+        ),
         task(
             &ran,
             serde_json::json!({"taskFailed": true, "taskFailures": [

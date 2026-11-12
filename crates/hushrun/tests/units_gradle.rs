@@ -1499,3 +1499,44 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
         second.stderr
     );
 }
+
+// covers: C-32, C-46
+#[test]
+fn a_junit4_test_jvm_that_died_beside_a_genuine_failure_records_no_pass_for_its_class() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // JUnit 4 on Gradle's own runner, which loads no hook: one class fails for real, and the JVM
+    // dies in another's class teardown once its tests passed. Nine green classes in `other`.
+    let mut files = build(Framework::Junit4, &["app", "other"], "reuse");
+    files.extend([
+        // A JVM a class, so that the failure is reported before the other JVM dies.
+        file("app/build.gradle", "tasks.named('test') { forkEvery = 1 }\n"),
+        file(
+            "app/src/test/java/shop/app/AFailTest.java",
+            "package shop.app;\nimport org.junit.*;\npublic class AFailTest { @Test public void fails() { Assert.fail(\"for real\"); } }\n",
+        ),
+        file(
+            "app/src/test/java/shop/app/CrashTest.java",
+            "package shop.app;\nimport org.junit.*;\npublic class CrashTest {\n  @Test public void a() {}\n  @Test public void b() {}\n  @AfterClass public static void after() { if (System.getenv(\"CRASH\") != null) Runtime.getRuntime().halt(3); }\n}\n",
+        ),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+            &format!("package shop.other;\nimport org.junit.*;\npublic class Green{n}Test {{ @Test public void green() {{}} }}\n"),
+        ));
+    }
+    let r = Repo::new(&files);
+    let ran = r.run(&command(&gradle, &[]), &[("CRASH", "1")]);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // AFailTest failed; other's passed; CrashTest recorded nothing.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("fail".into(), 1), ("pass".into(), 9)]),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+}

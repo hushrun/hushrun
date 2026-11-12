@@ -691,10 +691,28 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             report.outcome = outcome
             report.taskFailed = failed
             report.taskFailures = failed ? HushrunService.messages(res.failures, 0) : []
+            report.taskFailureTypes = failed ? HushrunService.types(res.failures, 0) : []
             HushrunRun.writeWhole(HushrunRun.facts(root, path, start), HushrunRun.factsText(report, errors, start))
             target.delete()
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * The exception class of each of a task's failures and their causes, at most 20: the name
+     * that starts its description (its stack trace), which no locale changes.
+     */
+    static List<String> types(def failures, int depth) {
+        List<String> out = []
+        try {
+            (failures ?: []).each { f ->
+                if (out.size() >= 20 || depth > 8) return
+                def m = ((f.description ?: "") =~ /^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)(?::|\s|$)/)
+                if (m.find()) out << m.group(1)
+                out.addAll(types(f.causes, depth + 1))
+            }
+        } catch (Throwable ignored) {}
+        return out.size() > 20 ? out.subList(0, 20) : out
     }
 
     /** The messages of a task's failures and their causes, at most 20. */
