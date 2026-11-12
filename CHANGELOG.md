@@ -7,8 +7,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 ## [Unreleased]
 
 A test as the unit ([ADR 0077](docs/adr/0077-a-test-as-the-unit.md)): with `tests.unit: test`, a
-check reuses each test of a test file on its own, beside its test files, for pytest. New, and off
-unless a check asks.
+check reuses each test of a test file on its own, beside its test files, for pytest, Go, Gradle,
+Maven, `swift test` and CTest. New, and off unless a check asks.
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
@@ -16,12 +16,13 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Added
 
+- CTest ([ADR 0087](docs/adr/0087-ctest.md)): C and C++ test programs built with CMake are observed and reused, and each CTest test with `tests.unit: test`, through a `ctest` of hushrun's first on `PATH`.
 - Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
-  that fails runs once more alone. pytest knows tests; Cargo, Go and Vitest reuse by test file and
-  say so once. With `reads: test`, pytest on Python 3.12 or later watches each test, and a test is
+  that fails runs once more alone. pytest, Go, Gradle, Maven, `swift test` and CTest know tests;
+  Cargo and Vitest reuse by test file and say so once. With `reads: test`, pytest on Python 3.12 or later watches each test, and a test is
   keyed by what it read alone ([ADR 0078](docs/adr/0078-what-a-test-read.md),
   [ADR 0080](docs/adr/0080-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
   runs as `reads: file`, and says so once.
@@ -33,6 +34,11 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   tests where tests are the unit.
 - Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens`,
   `settings.watch`, and each test's `neverLeftOut`.
+- `go test`'s tests one by one ([ADR 0083](docs/adr/0083-go-tests-one-by-one.md)): with
+  `tests.unit: test`, a Go package's tests are listed, left out with `-test.skip` and read from the
+  binary's own output; with COMMAND's own `-run` or `-skip`, by package.
+- Test by test for Maven ([ADR 0085](docs/adr/0085-maven.md)): `mvn` and `./mvnw` get an adapter that reuses test classes, and with `unit: test` single tests, through `MAVEN_OPTS`, with no file of the repository changed.
+- **Gradle** ([ADR 0084](docs/adr/0084-gradle.md)): test classes and, with `unit: test`, their methods for Java, Kotlin and Android's local unit tests, on Gradle 8.14 and 9, after one line in the settings file that `hushrun init` proposes.
 - Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
   `unit: test`. A run sends its results failures first, up to 50,000 and 8 MiB; an older server's
   5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
@@ -41,6 +47,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Contract: this machine's store of what test files read is now
   `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
   alone. A CI cache step names `*.v2.sqlite`.
+- The **`swift test` adapter** ([ADR 0086](docs/adr/0086-swift-test.md)): test targets, and with `unit: test` XCTest and Swift Testing tests, through hushrun's `swift` on COMMAND's `PATH`.
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been
   reused, and `on` reuses. `status`, also `hushrun build` alone, shows the mode, the store's

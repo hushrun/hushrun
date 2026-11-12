@@ -1,0 +1,77 @@
+{
+ "cLanguageStandard": null,
+ "cxxLanguageStandard": null,
+ "defaultLocalization": null,
+ "dependencies": [],
+ "name": "LocalMoney",
+ "packageKind": {
+  "root": [
+   "/work/LocalMoney"
+  ]
+ },
+ "pkgConfig": null,
+ "platforms": [],
+ "products": [
+  {
+   "name": "Money",
+   "settings": [],
+   "targets": [
+    "Money"
+   ],
+   "type": {
+    "library": [
+     "automatic"
+    ]
+   }
+  }
+ ],
+ "providers": null,
+ "swiftLanguageVersions": null,
+ "targets": [
+  {
+   "dependencies": [],
+   "exclude": [],
+   "name": "MoneyFormat",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "regular"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "MoneyFormat",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "Money",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "regular"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Money",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "MoneyTests",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "test"
+  }
+ ],
+ "toolsVersion": {
+  "_version": "6.0.0"
+ },
+ "traits": []
+}

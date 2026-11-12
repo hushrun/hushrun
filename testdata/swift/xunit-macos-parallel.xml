@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<testsuites>
+<testsuite name="TestResults" errors="0" tests="15" failures="2" time="3.037715915">
+<testcase classname="CartTests.CartTests" name="testTotalWithTax" time="0.119340834">
+</testcase>
+<testcase classname="CartTests.CartTests" name="testTotal" time="0.119417917">
+</testcase>
+<testcase classname="CartTests.CartTests" name="testGenerated" time="0.119492875">
+</testcase>
+<testcase classname="CartTests.CartTests" name="testSkipped" time="0.136940208">
+</testcase>
+<testcase classname="CartTests.CartTests" name="testAsync" time="0.136935583">
+</testcase>
+<testcase classname="CartTests.CartTestsMore" name="testTotal" time="0.189287083">
+</testcase>
+<testcase classname="CartTests.Outer.InnerTests" name="testInner" time="0.189134417">
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testTotal" time="0.098987791">
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testTotalWithTax" time="0.104011">
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testAsync" time="0.350104417">
+</testcase>
+<testcase classname="CartTests.CartTests" name="testFails" time="0.3500415">
+<failure message="failure"></failure>
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testCrashWhenAsked" time="0.350142375">
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testFails" time="0.257989458">
+<failure message="failure"></failure>
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testResource" time="0.257974416">
+</testcase>
+<testcase classname="MixedTests.MixedXCTests" name="testSkipped" time="0.257916041">
+</testcase>
+</testsuite>
+</testsuites>

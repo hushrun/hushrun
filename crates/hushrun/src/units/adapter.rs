@@ -32,7 +32,7 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, cargo, gotest, pytest, vitest};
+use super::{Seen, cargo, ctest, gotest, gradle, maven, pytest, swift, vitest};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -40,7 +40,20 @@ pub type Recognize = fn(&[String], &Path) -> Option<Result<Box<dyn Adapter>, Str
 
 /// The adapters a COMMAND may get, tried in order. Any COMMAND none of them takes gets pytest's,
 /// which does nothing where pytest never starts ([`choose`]).
-pub const RECOGNIZED: &[Recognize] = &[cargo::recognized, gotest::recognized, vitest::recognized];
+///
+/// Those that know COMMAND by its program's name come first. CTest's and Swift's come last, since
+/// they also take COMMANDs beyond `ctest` and `swift test`: CTest's a shell line, script or
+/// Makefile that starts `ctest`, Swift's any COMMAND in a directory with a `Package.swift`. CTest's
+/// goes before Swift's, so that `ctest` in a Swift package is CTest's.
+pub const RECOGNIZED: &[Recognize] = &[
+    cargo::recognized,
+    gotest::recognized,
+    vitest::recognized,
+    maven::recognized,
+    gradle::recognized,
+    ctest::recognized,
+    swift::recognized,
+];
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
 /// takes it, else pytest's; `Err` says why the one it would get can't load safely. The run,
@@ -84,10 +97,6 @@ pub struct StartAt<'a> {
     pub cwd: &'a Path,
     /// The run's own directory, removed when the run ends: where a directory of programs for
     /// `PATH` goes ([`super::program::make`]).
-    #[allow(
-        dead_code,
-        reason = "for an adapter that puts a program on PATH; none does yet"
-    )]
     pub dir: &'a Path,
     /// COMMAND's environment as hushrun has it.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
@@ -303,3 +312,6 @@ pub trait Adapter: std::fmt::Debug {
         None
     }
 }
+
+#[cfg(test)]
+mod tests;

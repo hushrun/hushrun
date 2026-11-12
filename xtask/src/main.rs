@@ -6,6 +6,7 @@ mod build_replay;
 mod corpus;
 mod e2e;
 mod installer;
+mod jars;
 mod notices;
 mod trace;
 
@@ -34,6 +35,10 @@ commands:
   installer-pins --version VERSION --from DIR [--script PATH] [--out PATH]
       Pin a release's archive checksums (DIR holds its *.tar.xz.sha256 files) in
       recipes/gitlab/install-hushrun.sh.
+  jars [--check]
+      Build the JVM jars hushrun embeds from their Java sources with javac 21.0.11, against API
+      jars fetched from Maven Central and checked by SHA-256 (ADR 0085). --check fails when a
+      checked-in jar isn't what its sources build.
   notices [--check]
       Write THIRD-PARTY-NOTICES.md: the crates the release binaries are built with, for
       dist-workspace.toml's targets, and their license texts. --check fails when it is stale.
@@ -48,6 +53,7 @@ fn main() -> ExitCode {
         Some("corpus") => corpus::run(&workspace_root(), &args[1..]),
         Some("e2e") => e2e::run(&workspace_root(), &args[1..]),
         Some("installer-pins") => installer::run(&workspace_root(), &args[1..]),
+        Some("jars") => jars::run(&workspace_root(), &args[1..]),
         Some("notices") => notices::run(&workspace_root(), &args[1..]),
         Some("-h" | "--help") => {
             print!("{USAGE}");

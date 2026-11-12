@@ -26,14 +26,19 @@
 
 pub mod adapter;
 pub mod cargo;
+pub mod ctest;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod gradle;
+pub mod jvm;
+pub mod maven;
 pub mod program;
 pub mod pytest;
 pub mod runner;
 pub mod shared;
 pub mod store;
+pub mod swift;
 pub mod vitest;
 pub mod why;
 

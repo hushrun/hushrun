@@ -288,11 +288,23 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         notes,
         ["its tests are reused by test binary: cargo's tests can't be reused one by one yet"]
     );
+    // \[ADR 0083\] Go knows tests, unless COMMAND chooses its own.
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &go);
-    assert_eq!((unit, reads), (Unit::File, Reads::File));
+    assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
-        ["its tests are reused by package: go test's tests can't be reused one by one yet"]
+        [
+            "each test is taken to have read what its package read: go test can't be watched test by test yet"
+        ]
+    );
+    let run = gotest::recognize(&words("go test -run TestX ./..."))
+        .unwrap()
+        .unwrap();
+    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &run);
+    assert_eq!(unit, Unit::File);
+    assert_eq!(
+        notes,
+        ["its tests are reused by package: go test -run's tests can't be reused one by one yet"]
     );
     let (_, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &vitest);
     assert_eq!(

@@ -387,6 +387,8 @@ struct Look {
     turbo: turbo::Edit,
     /// \[ADR 0071\] The line Vitest's config needs for a check whose `tests` are on.
     vitest_line: Option<String>,
+    /// \[ADR 0084\] The line Gradle's settings file needs for a check whose `tests` are on.
+    gradle_line: Option<String>,
     /// \[C-38\] Some check of hushrun.yaml has `tests` on (`observe` or `reuse`).
     tests_on: bool,
 }
@@ -462,6 +464,16 @@ impl Look {
                     .collect();
                 crate::units::vitest::proposal(root, &checks)
             });
+        // \[ADR 0084\] And in Gradle's settings file.
+        let gradle_line = policy.as_ref().and_then(|p| {
+            let checks: Vec<String> = p
+                .tests
+                .iter()
+                .filter(|(_, t)| t.is_on())
+                .map(|(name, _)| name.to_string())
+                .collect();
+            crate::units::gradle::proposal(root, &checks)
+        });
         let mut members = Vec::new();
         let mut package = package;
         if let (Some(root_package), Some(workspace)) = (&mut package, &workspace) {
@@ -540,6 +552,7 @@ impl Look {
             backend: hosted::repository_backend(root),
             reports_skip,
             vitest_line,
+            gradle_line,
             tests_on,
             members,
             job_runs: BTreeMap::new(),
@@ -1431,6 +1444,7 @@ impl Plan {
             plan.left_in_ci = look.proposal.left.iter().map(|left| left.text()).collect();
         }
         plan.manual.extend(look.vitest_line.clone());
+        plan.manual.extend(look.gradle_line.clone());
         if look.unreadable_policy && !look.proposal.is_empty() {
             plan.manual.push(format!(
                 "{POLICY_FILE} doesn't parse, so init leaves it and CI's files as they are: fix it, then run hushrun init again"

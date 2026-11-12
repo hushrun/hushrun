@@ -1869,6 +1869,7 @@ dependencies = [
  "mimalloc",
  "oci-client",
  "predicates",
+ "quick-xml",
  "rayon",
  "reqwest",
  "rusqlite",

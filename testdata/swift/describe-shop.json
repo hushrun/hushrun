@@ -1,0 +1,213 @@
+{
+ "dependencies": [
+  {
+   "identity": "localmoney",
+   "path": "/work/LocalMoney",
+   "type": "fileSystem"
+  },
+  {
+   "identity": "remotefmt",
+   "requirement": {
+    "range": [
+     {
+      "lower_bound": "1.0.0",
+      "upper_bound": "2.0.0"
+     }
+    ]
+   },
+   "type": "sourceControl",
+   "url": "/work/RemoteFmt"
+  }
+ ],
+ "manifest_display_name": "Shop",
+ "name": "Shop",
+ "path": "/work/Shop",
+ "platforms": [
+  {
+   "name": "macos",
+   "version": "13.0"
+  }
+ ],
+ "products": [
+  {
+   "name": "shop-cli",
+   "targets": [
+    "shop-cli"
+   ],
+   "type": {
+    "executable": null
+   }
+  },
+  {
+   "name": "gen-tool",
+   "targets": [
+    "gen-tool"
+   ],
+   "type": {
+    "executable": null
+   }
+  }
+ ],
+ "targets": [
+  {
+   "c99name": "shop_cli",
+   "module_type": "SwiftTarget",
+   "name": "shop-cli",
+   "path": "Sources/shop-cli",
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [
+    "main.swift"
+   ],
+   "target_dependencies": [
+    "Cart"
+   ],
+   "type": "executable"
+  },
+  {
+   "c99name": "gen_tool",
+   "module_type": "SwiftTarget",
+   "name": "gen-tool",
+   "path": "Sources/gen-tool",
+   "product_memberships": [
+    "shop-cli",
+    "gen-tool"
+   ],
+   "sources": [
+    "main.swift"
+   ],
+   "type": "executable"
+  },
+  {
+   "c99name": "MixedTests",
+   "module_type": "SwiftTarget",
+   "name": "MixedTests",
+   "path": "Tests/MixedTests",
+   "resources": [
+    {
+     "path": "/work/Shop/Tests/MixedTests/Fixtures",
+     "rule": {
+      "copy": {}
+     }
+    }
+   ],
+   "sources": [
+    "MixedSwiftTests.swift",
+    "MixedXCTests.swift"
+   ],
+   "target_dependencies": [
+    "Cart"
+   ],
+   "type": "test"
+  },
+  {
+   "c99name": "GenPlugin",
+   "module_type": "PluginTarget",
+   "name": "GenPlugin",
+   "path": "Plugins/GenPlugin",
+   "plugin_capability": {
+    "type": "buildTool"
+   },
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [
+    "plugin.swift"
+   ],
+   "target_dependencies": [
+    "gen-tool"
+   ],
+   "type": "plugin"
+  },
+  {
+   "c99name": "CoreTests",
+   "module_type": "SwiftTarget",
+   "name": "CoreTests",
+   "path": "Tests/CoreTests",
+   "sources": [
+    "CoreTests.swift"
+   ],
+   "target_dependencies": [
+    "Core"
+   ],
+   "type": "test"
+  },
+  {
+   "c99name": "Core",
+   "module_type": "SwiftTarget",
+   "name": "Core",
+   "path": "Sources/Core",
+   "product_dependencies": [
+    "Money",
+    "Fmt"
+   ],
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [
+    "Core.swift"
+   ],
+   "target_dependencies": [
+    "CHelpers",
+    "CZ"
+   ],
+   "type": "library"
+  },
+  {
+   "c99name": "CartTests",
+   "module_type": "SwiftTarget",
+   "name": "CartTests",
+   "path": "Tests/CartTests",
+   "sources": [
+    "CartTests.swift"
+   ],
+   "target_dependencies": [
+    "Cart"
+   ],
+   "type": "test"
+  },
+  {
+   "c99name": "Cart",
+   "module_type": "SwiftTarget",
+   "name": "Cart",
+   "path": "Sources/Cart",
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [
+    "Cart.swift"
+   ],
+   "target_dependencies": [
+    "Core",
+    "GenPlugin"
+   ],
+   "type": "library"
+  },
+  {
+   "c99name": "CZ",
+   "module_type": "SystemLibraryTarget",
+   "name": "CZ",
+   "path": "Sources/CZ",
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [],
+   "type": "system-target"
+  },
+  {
+   "c99name": "CHelpers",
+   "module_type": "ClangTarget",
+   "name": "CHelpers",
+   "path": "Sources/CHelpers",
+   "product_memberships": [
+    "shop-cli"
+   ],
+   "sources": [
+    "helpers.c"
+   ],
+   "type": "library"
+  }
+ ],
+ "tools_version": "6.0"
+}
