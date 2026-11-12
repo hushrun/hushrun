@@ -95,6 +95,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         cmd
     }
 
@@ -1383,6 +1385,8 @@ fn sweeps_at_once_keep_every_new_result_and_a_stamp_that_cant_be_written_stops_n
             for var in CLEARED {
                 cmd.env_remove(var);
             }
+            // What the developer's shell exports never reaches a runner a test starts.
+            hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
             cmd.args(["run", "--now", "2026-02-10T00:00:00Z"])
                 .arg(format!("check-{n}"))
                 .args(["--", "git", "--version"])
