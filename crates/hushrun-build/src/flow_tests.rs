@@ -2712,6 +2712,21 @@ fn a_library_that_bundled_nothing_is_not_keyed_by_the_static_libraries_beside_it
             vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o", "1f2e-curve25519.o"],
             false,
         ),
+        // A bundled object named as rustc names its own (a build script's `inner.rcgu.o`), and
+        // a bundled Rust static library's objects (another crate's prefix): bundled, whatever
+        // the suffix.
+        (
+            vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o", "inner.rcgu.o"],
+            false,
+        ),
+        (
+            vec![
+                "lib.rmeta",
+                "a-xa.a.1-cgu.0.rcgu.o",
+                "std-5f49f7b3.std.2c1a-cgu.0.rcgu.o",
+            ],
+            false,
+        ),
     ] {
         let w = world(Mode::On);
         w.plan(
