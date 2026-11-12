@@ -1511,14 +1511,18 @@ fn observe_tests(
         ));
         return None;
     }
-    let session = match units::Session::start(Some(tests), command, &code.root, dir) {
-        units::Start::Off => return None,
-        units::Start::Not(why) => {
-            say.line(format_args!("{check}: test files aren't observed: {why}"));
-            return None;
-        }
-        units::Start::On(session) => session,
-    };
+    // \[C-32\] The adapter that last reported this check's test files here: a COMMAND pytest
+    // reported stays pytest's.
+    let stored = units::stored_adapter(&key_base(code, command), code.repository_here().as_deref());
+    let session =
+        match units::Session::start(Some(tests), command, &code.root, dir, stored.as_deref()) {
+            units::Start::Off => return None,
+            units::Start::Not(why) => {
+                say.line(format_args!("{check}: test files aren't observed: {why}"));
+                return None;
+            }
+            units::Start::On(session) => session,
+        };
     // \[C-39\] Where its adapter can't do what the check asks: once a run.
     for note in session.notes() {
         say.line(format_args!("{check}: {note}"));

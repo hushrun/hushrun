@@ -126,7 +126,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     };
-    let adapter = match adapter::choose(&input.base.command, input.cwd) {
+    let stored = db::adapter_of(input.store, &store::check_id(&input.base, input.repository));
+    let adapter = match adapter::choose_kept(&input.base.command, input.cwd, stored.as_deref()) {
         Ok(adapter) => adapter,
         Err(why) => {
             out.decision = Decision::Off;

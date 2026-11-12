@@ -159,6 +159,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - `reads: test`'s known misses name a third: a value an earlier test computed and a cache kept,
   such as a `functools.cache` wrapper, which a later test reads without its code running. The
   audit's second run catches it, as it does the other two.
+- A `ctest`, `swift test` or wrapper COMMAND that CTest's or `swift test`'s adapter now takes,
+  which pytest's adapter took before, stays pytest's where this machine's store says pytest
+  reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the
+  check, CTest or `swift test` observes it, and what pytest ran under it is no longer observed.
 
 ## [0.13.0] - 2026-11-12
 

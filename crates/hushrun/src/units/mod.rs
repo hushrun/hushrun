@@ -536,14 +536,23 @@ pub enum Planned {
 impl Session {
     /// Starts observing a run of `command` in `cwd`, in the repository at `root`, for a check
     /// whose `tests` are `tests`: `Off` without them, and then nothing is written or set.
-    pub fn start(tests: Option<&Tests>, command: &[String], root: &Path, cwd: &Path) -> Start {
+    /// \[C-32\] `stored`: the adapter that last reported the check's test files here, as this
+    /// machine's store names it ([`db::adapter_of`]), which keeps a COMMAND pytest reported
+    /// pytest's ([`adapter::choose_kept`]).
+    pub fn start(
+        tests: Option<&Tests>,
+        command: &[String],
+        root: &Path,
+        cwd: &Path,
+        stored: Option<&str>,
+    ) -> Start {
         let Some(tests) = tests.filter(|t| t.is_on()) else {
             return Start::Off;
         };
         let Some(cache) = crate::context::cache_dir() else {
             return Start::Not("there is no cache directory".into());
         };
-        let adapter = match adapter::choose(command, cwd) {
+        let adapter = match adapter::choose_kept(command, cwd, stored) {
             Ok(adapter) => adapter,
             Err(why) => return Start::Not(why),
         };
@@ -1166,9 +1175,10 @@ pub enum Previewed {
 /// build (Cargo, Go), when no adapter would load, or when the lookup fails. It writes nothing,
 /// and sends nothing but the lookup.
 pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
-    let adapter = adapter::choose(p.command, p.cwd).ok()?;
     let cache = crate::context::cache_dir()?;
     let check_id = store::check_id(&p.base, p.repository);
+    let stored = db::adapter_of(&db::path(&cache, p.repository), &check_id);
+    let adapter = adapter::choose_kept(p.command, p.cwd, stored.as_deref()).ok()?;
     let loaded = db::load(&db::path(&cache, p.repository), &check_id);
     if loaded.unread.is_some() {
         return None;
@@ -2572,6 +2582,17 @@ fn why_all(
                 .find(|path| !sources.contains(*path))
                 .map(|path| format!("{path} is gone, which can change what tests load"))
         })
+}
+
+/// \[C-32\] The adapter that last reported the test files of the check `base` names here, for
+/// the repository the run names, as this machine's store says: what [`Session::start`] keeps a
+/// COMMAND pytest reported pytest's by.
+pub fn stored_adapter(base: &KeyBase, repository: Option<&str>) -> Option<String> {
+    let cache = crate::context::cache_dir()?;
+    db::adapter_of(
+        &db::path(&cache, repository),
+        &store::check_id(base, repository),
+    )
 }
 
 /// This machine's results directory, where unit results go in local mode (C-33), with the reuse

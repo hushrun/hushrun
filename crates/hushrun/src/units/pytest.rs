@@ -22,6 +22,8 @@ const SHIM: &str = include_str!("hushrun_pytest.py");
 const ADAPTER: &str = include_str!("hushrun_pytest_impl.py");
 /// The module `-p` names.
 pub const MODULE: &str = "hushrun_pytest";
+/// The adapter's word (C-36).
+pub const WORD: &str = "pytest";
 /// What pytest collects as test files when its configuration says nothing.
 pub const DEFAULT_PYTHON_FILES: [&str; 2] = ["test_*.py", "*_test.py"];
 /// The kinds of files the adapter observes being read: its sources (C-30).

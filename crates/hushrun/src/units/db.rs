@@ -397,6 +397,19 @@ fn remove(path: &Path) {
     }
 }
 
+/// \[C-32\] The adapter that last reported the check `check_id`'s test files in the store at
+/// `path`, by its word: `None` when the store doesn't hold the check, or can't be read.
+pub fn adapter_of(path: &Path, check_id: &Digest) -> Option<String> {
+    let conn = open_to_read(path).ok()??;
+    conn.query_row(
+        "SELECT adapter FROM checks WHERE check_id = ?1",
+        [check_id.hex()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()?
+}
+
 /// What reading a check's map came to: the map, empty when there is none; and why the store
 /// couldn't be read, when it is there and couldn't be.
 #[derive(Debug, Default)]

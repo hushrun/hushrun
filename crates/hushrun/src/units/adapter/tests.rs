@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{RECOGNIZED, choose};
+use super::{RECOGNIZED, choose, choose_kept};
 use crate::units::{gradle, vitest};
 
 fn words(text: &str) -> Vec<String> {
@@ -92,6 +92,34 @@ fn the_wider_matches_come_after_every_match_by_name() {
     // And in a Swift package: a wrapper is claimed only for what its text starts.
     assert_eq!(chosen(&shell, dir.path()), Ok("pytest"));
     assert_eq!(chosen(&words("pytest -q"), dir.path()), Ok("pytest"));
+}
+
+#[test]
+fn a_command_pytest_reported_for_stays_pytests_where_ctest_or_swift_would_claim_it() {
+    // Before CTest's and Swift's adapters, pytest's took every COMMAND nobody else did: a check
+    // whose `ctest` runs pytest's tests was observed by pytest, and its store says so.
+    let dir = loads_all();
+    std::fs::write(
+        dir.path().join("Makefile"),
+        "test:\n\tctest --test-dir build\n",
+    )
+    .unwrap();
+    let kept = |command: &str, stored: Option<&str>| {
+        choose_kept(&words(command), dir.path(), stored).map(|adapter| adapter.word())
+    };
+    for command in [
+        "ctest --test-dir build",
+        "make test",
+        "swift test",
+        "/usr/bin/ctest",
+    ] {
+        assert_eq!(kept(command, Some("pytest")), Ok("pytest"), "{command}");
+    }
+    assert_eq!(kept("ctest --test-dir build", None), Ok("ctest"));
+    assert_eq!(kept("ctest --test-dir build", Some("ctest")), Ok("ctest"));
+    // A COMMAND an adapter knows by its program's name stays that adapter's.
+    assert_eq!(kept("go test ./...", Some("pytest")), Ok("go"));
+    assert_eq!(kept("mvn test", Some("pytest")), Ok("maven"));
 }
 
 /// The one rule for a wrapper COMMAND (C-32): a shell's `-c` line, a `#!` script named by its

@@ -199,3 +199,15 @@ files `go list` names for this machine's target. Now every such tool is built th
 (`units::command::tool`), which applies COMMAND's own assignments (`StartAt`, `PlanAt` and `ReadAt`
 carry them as `assigned`), and an adapter reads COMMAND's environment with them first. And a
 program's name is compared in lower case on Windows, whose file system ignores case.
+
+## Amendment 8: a check pytest observed stays pytest's (2026-11-12)
+
+Before CTest's and `swift test`'s adapters, any COMMAND no adapter recognized got pytest's, so
+`hushrun run x -- ctest` in a project whose CTest tests are pytest was observed by pytest; now CTest
+claims it and observes nothing of what pytest ran. The decision: when this machine's store says
+pytest last reported the check's test files, a COMMAND CTest's or `swift test`'s adapter would
+claim stays pytest's (`units::adapter::choose_kept`), for the run, `hushrun ready` and `hushrun
+why` alike. Hints aren't asked: they are read only once an adapter is chosen, for its sources and
+its word, and asking one before would mean a request to the server for every such run. So on a
+machine whose store doesn't hold the check, such as a fresh CI runner, CTest or `swift test` takes
+the COMMAND, which the CHANGELOG says.

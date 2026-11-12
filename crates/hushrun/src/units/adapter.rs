@@ -56,12 +56,33 @@ pub const RECOGNIZED: &[Recognize] = &[
     swift::recognized,
 ];
 
+/// How many of [`RECOGNIZED`], at its end, load through `PATH` and take wrapper COMMANDs too:
+/// CTest's and Swift's, which came after pytest took every COMMAND nobody else did.
+pub const THROUGH_PATH: usize = 2;
+
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
-/// takes it, else pytest's; `Err` says why the one it would get can't load safely. The run,
-/// `hushrun ready` and `hushrun why` all ask it.
+/// takes it, else pytest's; `Err` says why the one it would get can't load safely.
 pub fn choose(command: &[String], cwd: &Path) -> Result<Box<dyn Adapter>, String> {
+    choose_kept(command, cwd, None)
+}
+
+/// \[C-32\] [`choose`] for a check whose store names the adapter that last reported its test files
+/// here (`stored`, [`super::db::adapter_of`]): a COMMAND CTest's or Swift's adapter would claim
+/// stays pytest's when pytest reported it, as it was before those adapters took it, so that a
+/// `ctest` whose tests are pytest's keeps being observed by pytest. The run, `hushrun ready` and
+/// `hushrun why` all ask it.
+pub fn choose_kept(
+    command: &[String],
+    cwd: &Path,
+    stored: Option<&str>,
+) -> Result<Box<dyn Adapter>, String> {
     let command = super::command::without_env(command);
-    for recognize in RECOGNIZED {
+    let by_name = if stored == Some(pytest::WORD) {
+        RECOGNIZED.len() - THROUGH_PATH
+    } else {
+        RECOGNIZED.len()
+    };
+    for recognize in &RECOGNIZED[..by_name] {
         if let Some(found) = recognize(command, cwd) {
             return found;
         }
