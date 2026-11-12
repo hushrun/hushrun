@@ -15,7 +15,11 @@
 //! - what `hushrun why` can tell of its units from this machine alone (the `why_` methods).
 //!
 //! A new adapter is one module under `units/` that implements [`Adapter`] and a [`Recognize`]
-//! function, one line in [`RECOGNIZED`], and its docs and tests.
+//! function, one line in [`RECOGNIZED`], and its docs and tests. A runner hushrun can only get
+//! into from `PATH` (`swift`, `ctest`) uses [`super::program`]: its adapter makes the directory in
+//! [`StartAt::dir`] and returns [`super::program::variables`] from [`Adapter::variables`], and one
+//! [`super::program::Program`] in [`super::program::PROGRAMS`] changes the real program's
+//! arguments.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -78,6 +82,13 @@ pub struct StartAt<'a> {
     pub cache: &'a Path,
     /// Where COMMAND runs.
     pub cwd: &'a Path,
+    /// The run's own directory, removed when the run ends: where a directory of programs for
+    /// `PATH` goes ([`super::program::make`]).
+    #[allow(
+        dead_code,
+        reason = "for an adapter that puts a program on PATH; none does yet"
+    )]
+    pub dir: &'a Path,
     /// COMMAND's environment as hushrun has it.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
 }

@@ -23,6 +23,7 @@ pub mod cargo;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod program;
 pub mod pytest;
 pub mod runner;
 pub mod shared;
@@ -186,6 +187,7 @@ impl Session {
         let at = StartAt {
             cache: &cache,
             cwd,
+            dir: &dir,
             env: &env,
         };
         let mut variables = match adapter.variables(&at) {

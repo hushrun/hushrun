@@ -360,33 +360,33 @@ fn record(dir: &std::path::Path, invocation: Invocation) {
 }
 
 #[cfg(unix)]
-fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+pub(super) fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt as _;
     status.signal()
 }
 
 #[cfg(not(unix))]
-fn signal_of(_: &std::process::ExitStatus) -> Option<i32> {
+pub(super) fn signal_of(_: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
 /// Ends this process as the test's did, by the same signal, so that nextest and Cargo see what
 /// they would have seen; 128 + the signal when it can't.
 #[cfg(unix)]
-fn end_as(signal: i32) -> ExitCode {
+pub(super) fn end_as(signal: i32) -> ExitCode {
     let _ = signal_hook::low_level::emulate_default_handler(signal);
     ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
 #[cfg(not(unix))]
-fn end_as(signal: i32) -> ExitCode {
+pub(super) fn end_as(signal: i32) -> ExitCode {
     ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
 /// Passes the signals that stop a process on to the test while it runs: a terminal or nextest
 /// may signal this process alone. Dropping what it returns stops passing them.
 #[cfg(unix)]
-fn forward_signals(child: u32) -> Option<Forwarding> {
+pub(super) fn forward_signals(child: u32) -> Option<Forwarding> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -418,7 +418,7 @@ fn forward_signals(child: u32) -> Option<Forwarding> {
 
 /// While it lives, signals go on to the test.
 #[cfg(unix)]
-struct Forwarding(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(super) struct Forwarding(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 #[cfg(unix)]
 impl Drop for Forwarding {
@@ -430,7 +430,7 @@ impl Drop for Forwarding {
 /// Where there are no signals, nothing to pass on. Not `()`: the caller drops what it gets, and
 /// rustc and clippy warn of dropping a value that has nothing to drop in the Windows build.
 #[cfg(not(unix))]
-struct Forwarding;
+pub(super) struct Forwarding;
 
 #[cfg(not(unix))]
 impl Drop for Forwarding {
@@ -438,7 +438,7 @@ impl Drop for Forwarding {
 }
 
 #[cfg(not(unix))]
-fn forward_signals(_: u32) -> Option<Forwarding> {
+pub(super) fn forward_signals(_: u32) -> Option<Forwarding> {
     Some(Forwarding)
 }
 

@@ -53,6 +53,10 @@ fn main() -> ExitCode {
     if let Some(code) = units::runner::from_args(&args) {
         return code;
     }
+    // \[ADR 0077\] As a program an adapter put on COMMAND's PATH, likewise: it starts the real one.
+    if let Some(code) = units::program::from_args(&args) {
+        return code;
+    }
     hushrun_core::set_release(env!("CARGO_PKG_VERSION"));
     // \[ADR 0046\] Before clap, which quotes what it can't read, and before a run, which records
     // its command: a string on the command line goes no further than this.

@@ -914,6 +914,54 @@ fn the_target_runner_passes_everything_through() {
     assert_eq!(out.status.code(), Some(0));
 }
 
+// covers: C-39
+#[cfg(unix)]
+#[test]
+fn a_program_on_path_starts_the_real_one_with_path_as_it_was() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    // A directory of hushrun's programs, which a real program is never taken from, first on PATH;
+    // then the real one, a fake tool that says its arguments and environment.
+    let programs = root.join("programs");
+    std::fs::create_dir_all(&programs).unwrap();
+    std::fs::write(programs.join(".hushrun-programs"), b"").unwrap();
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    for at in [&programs, &real] {
+        let tool = at.join("faketool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\necho \"[$*][$PATH][${HUSHRUN_PROGRAMS-unset}][${HUSHRUN_PROGRAMS_PATH-unset}]\"\nexit 4\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let program = |name: &str, args: &[&str]| {
+        let mut cmd = assert_cmd::Command::cargo_bin("hushrun").unwrap();
+        cmd.arg("__hushrun-program")
+            .arg(name)
+            .args(args)
+            .env("PATH", format!("{}:{was}", programs.display()))
+            .env("HUSHRUN_PROGRAMS", &programs)
+            .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+            .env("HUSHRUN_UNITS", root.join("units"));
+        cmd.output().unwrap()
+    };
+    // The real program, with no program of hushrun's named for it: its arguments as they came,
+    // its exit code, PATH as COMMAND had it, and neither of hushrun's variables.
+    let out = program("faketool", &["test", "--parallel"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("[test --parallel][{was}][unset][unset]\n")
+    );
+    // None on PATH: 127, as a shell says.
+    let out = program("nothere", &[]);
+    assert_eq!(out.status.code(), Some(127));
+}
+
 /// The first 10 characters of a ULID: its milliseconds.
 fn ulid_time(ms: i64) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
