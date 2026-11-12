@@ -34,8 +34,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Contract: this machine's store of what test files read is now
   `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
   alone. A CI cache step names `*.v2.sqlite`.
-- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens`,
-  `settings.watch`, and each test's `neverLeftOut`.
+- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens` and
+  `reexports` (followed to the end on a test's own list), `settings.watch`, and each test's
+  `neverLeftOut`.
 - Hints hold tests ([ADR 0079](docs/adr/0079-hints-with-tests.md)): `hushrun.unit-hints/v1`
   carries a check's tests, their ids sealed with XChaCha20-Poly1305 under a key the server never
   has, so a machine with an empty cache reuses single tests on its first run. A hint with no tests

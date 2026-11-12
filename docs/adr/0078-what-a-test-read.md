@@ -78,3 +78,16 @@ reuse nobody earned.
   interface would stop compiling. The facts carry them, read once for every adapter.
 - **Keying `reads: test` tests only when their file didn't pass whole:** the next run, with a
   change only some tests read, would find no test's pass to reuse.
+
+## Amendment 1: re-exports are followed to the end (2026-11-12)
+
+Item 2's rules take a test to have read the files its code imports directly, one step. A reviewer
+showed Vitest missing `export * from` chains: `index.ts` re-exports `api.ts`, which re-exports
+`impl.ts`; the test calls `run` through `index.ts`, no function of `api.ts` is ever called (it has
+none of its own), and `impl.ts` was on no test's list. A change to it reused the test.
+
+The decision: a facts file may send `reexports`, shaped like `imports`, the files each file
+re-exports from. For every file on a test's own list, the files it re-exports from are on the list
+too, followed to the end through re-exports only, in the one function (`test_list`). An adapter
+that doesn't send it loses nothing it had. Vitest's adapter sends it; with `reads: file` the list
+is the test file's, as before.

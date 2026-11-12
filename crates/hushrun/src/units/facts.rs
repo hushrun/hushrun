@@ -148,6 +148,11 @@ pub struct FactsFile {
     /// across starts ([`merged`]). Files that say none are one start, as before.
     #[serde(default)]
     pub start: Option<String>,
+    /// \[C-40\] The files each file re-exports from, shaped like `imports`: the index of a file,
+    /// as a string, to the indices of the files it re-exports (`export * from`, `export { x }
+    /// from`). A test that reads a file reads what it re-exports, to the end.
+    #[serde(default)]
+    pub reexports: BTreeMap<String, Vec<usize>>,
 }
 
 impl FactsFile {
@@ -455,6 +460,8 @@ fn edges_by_index(
 #[derive(Debug, Clone, Default)]
 pub struct Watches {
     pub imports: BTreeMap<String, BTreeSet<String>>,
+    /// \[C-40\] Each file's re-exports, over every file of the run.
+    pub reexports: BTreeMap<String, BTreeSet<String>>,
     pub opens: BTreeMap<String, BTreeSet<String>>,
     pub units: BTreeMap<String, UnitWatch>,
 }
@@ -474,6 +481,7 @@ pub fn watches(files: &[FactsFile]) -> Watches {
     let all: Vec<&FactsFile> = files.iter().collect();
     let mut out = Watches {
         imports: edges_by_index(&all, |f| &f.imports),
+        reexports: edges_by_index(&all, |f| &f.reexports),
         opens: edges_by_index(&all, |f| &f.opens),
         units: BTreeMap::new(),
     };

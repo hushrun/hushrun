@@ -2130,6 +2130,7 @@ fn decide(
             file: &reads,
             file_dirs: dirs.get(unit).unwrap_or(&no_dirs),
             imports: &mode.watches.imports,
+            reexports: &mode.watches.reexports,
             opens: &mode.watches.opens,
             loaded: unit_watch
                 .and_then(|w| w.loaded.as_ref())

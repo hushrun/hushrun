@@ -472,11 +472,13 @@ fn a_tests_list_is_what_ran_what_that_imports_directly_and_what_it_opened() {
         set(&["app/fixtures.py"]),
         set(&["fixture.json"]),
     )];
+    let no_reexports = BTreeMap::new();
     let watch = FileWatch {
         unit: "tests/test_a.py",
         file: &file,
         file_dirs: &none,
         imports: &imports,
+        reexports: &no_reexports,
         opens: &opens,
         loaded: Some((&loaded_ran, &loaded_opened)),
         every: &every,
@@ -542,4 +544,55 @@ fn a_tests_list_is_what_ran_what_that_imports_directly_and_what_it_opened() {
         ..watch
     };
     assert_eq!(test_list(Reads::Test, &no_loaded, &test("test_x")), whole);
+}
+
+// covers: C-40
+#[test]
+fn a_tests_list_follows_reexports_to_the_end() {
+    // The test calls a function of index.ts, which re-exports everything of api.ts, which
+    // re-exports impl.ts's `run`: no function of api.ts is called, and impl.ts isn't imported
+    // directly by anything that ran. Its list holds both, and never what impl.ts merely imports.
+    let file = set(&["test/a.test.ts", "src/index.ts", "src/api.ts", "src/impl.ts"]);
+    let none = BTreeSet::new();
+    let imports = BTreeMap::from([
+        ("test/a.test.ts".to_string(), set(&["src/index.ts"])),
+        ("src/index.ts".to_string(), set(&["src/api.ts"])),
+        ("src/api.ts".to_string(), set(&["src/impl.ts"])),
+        ("src/impl.ts".to_string(), set(&["src/deep.ts"])),
+    ]);
+    let reexports = BTreeMap::from([
+        ("src/index.ts".to_string(), set(&["src/api.ts"])),
+        ("src/api.ts".to_string(), set(&["src/impl.ts"])),
+        // A cycle ends.
+        ("src/impl.ts".to_string(), set(&["src/index.ts"])),
+    ]);
+    let opens = BTreeMap::new();
+    let (loaded_ran, loaded_opened) = (BTreeSet::new(), BTreeSet::new());
+    let watch = FileWatch {
+        unit: "test/a.test.ts",
+        file: &file,
+        file_dirs: &none,
+        imports: &imports,
+        reexports: &reexports,
+        opens: &opens,
+        loaded: Some((&loaded_ran, &loaded_opened)),
+        every: &none,
+        shared: &[],
+    };
+    let ran = set(&["src/index.ts"]);
+    let list = test_list(
+        Reads::Test,
+        &watch,
+        &TestWatch {
+            id: "a",
+            ran: Some(&ran),
+            opened: Some(&none),
+            dirs: Some(&none),
+        },
+    );
+    assert!(list.own);
+    assert_eq!(
+        list.files,
+        set(&["test/a.test.ts", "src/index.ts", "src/api.ts", "src/impl.ts"])
+    );
 }

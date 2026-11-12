@@ -431,6 +431,9 @@ pub struct FileWatch<'a> {
     pub file_dirs: &'a BTreeSet<String>,
     /// Each file's direct imports.
     pub imports: &'a BTreeMap<String, BTreeSet<String>>,
+    /// \[C-40\] The files each file re-exports from (`export * from`, `export { x } from`): a test
+    /// that reads a file reads what it re-exports, followed to the end through re-exports only.
+    pub reexports: &'a BTreeMap<String, BTreeSet<String>>,
     /// The files each module opened from its own code, read once and perhaps kept (RFC 0003 §3.3).
     pub opens: &'a BTreeMap<String, BTreeSet<String>>,
     /// What loading it ran (functions called, not top-level code) and opened: `None` when the
@@ -479,7 +482,9 @@ pub struct TestList {
 /// 3. every file that one of those, or its own file, imports directly: one step;
 /// 4. every file it opened, every file a module whose code ran opened from its own code (read once
 ///    and kept), every file below a directory it listed, and what a shared setup that served it,
-///    or loading its file, opened.
+///    or loading its file, opened;
+/// 5. for every file of those, the files it re-exports from, followed to the end through
+///    re-exports only: a file that only re-exports has no function of its own to call.
 ///
 /// It can miss a value that reached the test two imports away, or through no import (a registry
 /// another file filled), with no function of the way called: that is the trade `reads: test`
@@ -517,6 +522,15 @@ pub fn test_list(reads: Reads, file: &FileWatch<'_>, test: &TestWatch<'_>) -> Te
         files.extend(file.opens.get(path).into_iter().flatten().cloned());
     }
     files.extend(code);
+    // 5. What every file of it re-exports from, followed to the end through re-exports only.
+    let mut pending: Vec<String> = files.iter().cloned().collect();
+    while let Some(path) = pending.pop() {
+        for next in file.reexports.get(&path).into_iter().flatten() {
+            if files.insert(next.clone()) {
+                pending.push(next.clone());
+            }
+        }
+    }
     TestList {
         files,
         dirs: dirs.clone(),
