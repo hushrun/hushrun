@@ -84,6 +84,7 @@ import time
 import uuid
 
 __all__ = [
+    "pytest_sessionstart",
     "pytest_collectstart",
     "pytest_itemcollected",
     "pytest_collectreport",
@@ -199,6 +200,7 @@ class Observer(object):
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
         self.torn_ids = set()         # node ids of tests whose teardown report was logged
+        self.started_file = None      # [C-32] this start's `.started` file, removed at its end
         self.finished_ids = {}        # node id -> (unit, test id) of each test that finished
         self.served = {}              # node id -> (fixture names, fixture def ids) it was served
         self.failed_wide = []         # (name, def id) of each wider fixture whose end raised
@@ -1332,6 +1334,23 @@ def _workers_removed(obs):
     return removed
 
 
+def _session_started(obs, session):
+    """[C-32] The main process (an xdist controller, not a worker, whose death its tests already
+    say) says it began: a `.started` file it removes once its facts are written. One left after
+    COMMAND means a start died before it said what it saw."""
+    if getattr(session.config, "workerinput", None) is not None:
+        return
+    path = os.path.join(obs.directory, "pytest-%d.started" % os.getpid())
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    obs.started_file = path
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session):
+    _call(_session_started, session)
+
+
 def pytest_collectstart(collector):
     _call(_collectstart, collector)
 
@@ -1558,5 +1577,11 @@ def pytest_sessionfinish(session, exitstatus):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(facts, f, sort_keys=True)
             os.replace(tmp, os.path.join(obs.directory, name))
+            # [C-32] Its facts are written whole: this start ended.
+            if obs.started_file:
+                try:
+                    os.remove(obs.started_file)
+                except OSError:
+                    pass
     except Exception:
         obs.done = True

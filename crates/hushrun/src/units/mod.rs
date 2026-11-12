@@ -872,6 +872,20 @@ impl Session {
         let files = facts::read_all(&self.run_dir)?;
         // \[C-32\] What a facts file says the runner left out that the plan didn't list.
         let unlisted = facts::left_out(&files);
+        // \[C-32\] A start of the runner that began and never said it ended: what it ran can't
+        // be told, so no unit and no test of the run records a pass; a fail still records.
+        let unfinished = facts::unfinished_starts(&self.run_dir);
+        let narrowed;
+        let end = if unfinished {
+            narrowed = Finish {
+                base: end.base.clone(),
+                command_passed: false,
+                ..*end
+            };
+            &narrowed
+        } else {
+            end
+        };
         let at = StoreAt {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
@@ -935,7 +949,17 @@ impl Session {
             unwatched,
             shared: &fetched,
         };
+        let mut read = read;
+        if unfinished {
+            read.failures_by_unit = false;
+        }
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
+        if unfinished {
+            observed.lines.push(format!(
+                "{}: no test file or test records a pass: a start of its runner ended before it said what it saw",
+                end.base.check
+            ));
+        }
         observed.left_out = left_out;
         // \[C-32\] What an adapter's facts say people should know of this run, each said once.
         let notes: BTreeSet<&str> = files

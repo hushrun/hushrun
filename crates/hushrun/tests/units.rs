@@ -856,6 +856,38 @@ fn a_test_file_skipped_whole_as_it_loads_records_no_pass_in_a_run_that_failed() 
     assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
 }
 
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The first pytest passes; the second dies inside test_2 and writes nothing: the file's pass
+    // from the first can't be told from what the second would have said.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_x.py",
+            "import os, signal\n\ndef test_1():\n    pass\n\ndef test_2():\n    if os.environ.get('CRASH'):\n        os.kill(os.getpid(), signal.SIGKILL)\n",
+        ),
+    ]);
+    let python = python();
+    let pytest = format!("{python} -m pytest -q -p no:cacheprovider test_x.py");
+    let line = format!("{pytest}; CRASH=1 {pytest}");
+    let ran = r.run(&["run", "unit", "--", "sh", "-c", &line], &[]);
+    assert_ne!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit: no test file or test records a pass: a start of its runner ended before it said what it saw"
+        ),
+        "{}",
+        ran.stderr
+    );
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

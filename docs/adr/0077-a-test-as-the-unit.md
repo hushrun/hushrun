@@ -228,3 +228,17 @@ it takes the store's name only when no other hushrun made one meanwhile. The `v1
 it is, for an older hushrun. A run in CI that imported says once what to change in the cache step,
 which now names the stores without their schema (`units/*.sqlite`), so the next schema needs no
 edit. `hushrun ready` and `hushrun why`, which write nothing, never import.
+
+## Amendment 10: what the second review ran (2026-11-12)
+
+A second review ran the core on pytest 8.4.2 and 9.2. Each item is fixed with a test that failed
+first; the plugin's are in ADR 0080's Amendment 2.
+
+- **A start that died.** A start of the runner that died before writing its facts was invisible:
+  `pytest tests; CRASH=1 pytest tests` recorded the file passed whole from the first start in a
+  run that exited 139. Now a process may make `<anything>.started` in the run's directory as it
+  begins and remove it once its facts are written; one left after COMMAND means no unit and no
+  test of the run records a pass (the one state function gets COMMAND as failed and no failure
+  told by unit), fails still record, and the run says so once. No rule says a failed COMMAND with
+  no failed unit keeps nothing: a package that fails to build beside fifty that passed keeps the
+  fifty.

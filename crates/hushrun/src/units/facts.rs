@@ -690,6 +690,24 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
     out
 }
 
+/// \[C-32\] The suffix of the file a process of an adapter may make in the run's directory when it
+/// begins (`<anything>.started`), and removes once its facts file is written whole.
+pub const STARTED_SUFFIX: &str = ".started";
+
+/// \[C-32\] Whether a start of the runner began and never said it ended: a `<anything>.started`
+/// file left in the run's directory `dir` after COMMAND.
+pub fn unfinished_starts(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_type().is_ok_and(|t| t.is_file())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(STARTED_SUFFIX))
+        })
+    })
+}
+
 /// \[C-32\] Why the first file of `files` that says so left out what the plan didn't list.
 pub fn left_out(files: &[FactsFile]) -> Option<String> {
     files
