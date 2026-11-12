@@ -1001,3 +1001,89 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
     results.sort();
     assert_eq!(results, ["fail", "pass"], "{}", ran.stderr);
 }
+
+/// A `swift` for a whole run: a package whose `CoreTests` depends on `Extra` only when the
+/// environment has `WITH_EXTRA`, as a manifest that reads `Context.environment` may say, and
+/// whose XCTest tests print as macOS prints them, but those a `--skip` leaves out.
+#[cfg(unix)]
+fn fake_env_swift(dir: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let target = |name: &str, kind: &str, path: &str, deps: &str| {
+        format!(
+            r#"{{"name": "{name}", "c99name": "{name}", "type": "{kind}", "path": "{path}", "target_dependencies": [{deps}]}}"#
+        )
+    };
+    let describe = |core_deps: &str| {
+        format!(
+            r#"{{"name": "Fake", "path": "{}", "dependencies": [], "products": [], "targets": [{}, {}, {}, {}, {}]}}"#,
+            root.display(),
+            target("CoreTests", "test", "Tests/CoreTests", core_deps),
+            target("GreetTests", "test", "Tests/GreetTests", r#""Greet""#),
+            target("Core", "library", "Sources/Core", ""),
+            target("Extra", "library", "Sources/Extra", ""),
+            target("Greet", "library", "Sources/Greet", ""),
+        )
+    };
+    let dump = r#"{"targets": [{"name": "CoreTests", "settings": []}, {"name": "GreetTests", "settings": []}, {"name": "Core", "settings": []}, {"name": "Extra", "settings": []}, {"name": "Greet", "settings": []}]}"#;
+    let test = |target: &str, method: &str| {
+        format!(
+            "case \"$*\" in *'^{target}'*) ;; *) echo \"Test Case '-[{target}.{target} {method}]' started.\"; echo \"Test Case '-[{target}.{target} {method}]' passed (0.001 seconds).\" ;; esac\n"
+        )
+    };
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Swift version 6.4.2 (fake)'; exit 0 ;;\n\
+         *describe*) if [ -n \"$WITH_EXTRA\" ]; then echo '{with}'; else echo '{without}'; fi; exit 0 ;;\n\
+         *dump-package*) echo '{dump}'; exit 0 ;;\n\
+         'test list'*) printf 'CoreTests.CoreTests/testA\\nGreetTests.GreetTests/testB\\n'; exit 0 ;;\n\
+         esac\n{a}{b}",
+        with = describe(r#""Core", "Extra""#),
+        without = describe(r#""Core""#),
+        a = test("CoreTests", "testA"),
+        b = test("GreetTests", "testB"),
+    );
+    let path = dir.join("swift");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: C-48, C-32
+#[cfg(unix)]
+#[test]
+fn the_tools_hushrun_starts_for_swift_get_commands_own_env_assignments() {
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file("Package.swift", "// swift-tools-version: 6.0\n"),
+        file("Sources/Core/Core.swift", "public let core = 1\n"),
+        file("Sources/Extra/Extra.swift", "public let extra = 1\n"),
+        file("Sources/Greet/Greet.swift", "public let greet = 1\n"),
+        file("Tests/CoreTests/CoreTests.swift", "// a\n"),
+        file("Tests/GreetTests/GreetTests.swift", "// b\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fake = std::fs::canonicalize(dir.path()).unwrap().join("swift");
+    let r = Repo::new(&fake, &files);
+    fake_env_swift(&fake.parent().unwrap().join("bin"), &r.repo);
+    let fake = fake.parent().unwrap().join("bin/swift");
+    let r = Repo {
+        path: std::env::join_paths([
+            fake.parent().unwrap(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap(),
+        ..r
+    };
+    let command = ["run", "unit", "--", "env", "WITH_EXTRA=1", "swift", "test"];
+    let first = r.run(&command, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // `swift package describe`, which the plan starts before COMMAND, sees the WITH_EXTRA COMMAND
+    // sets: CoreTests reads Extra, and runs when Extra changes.
+    r.write("Sources/Extra/Extra.swift", "public let extra = 2\n");
+    let second = r.run(&command, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        second.line("hushrun: unit: "),
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+    );
+}

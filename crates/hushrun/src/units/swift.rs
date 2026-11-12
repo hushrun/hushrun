@@ -85,8 +85,17 @@ impl Swift {
         }
     }
 
-    /// The target map of the package at `package` for the files `tree`, described once.
-    fn graph(&self, package: &Path, root: &Path, tree: &Tree) -> Result<Arc<Graph>, String> {
+    /// The target map of the package at `package` for the files `tree`, described once, by a
+    /// `swift` started in `cwd` with \[C-32\] COMMAND's own `env NAME=value` assignments
+    /// (`assigned`): a manifest may read the environment (`Context.environment`).
+    fn graph(
+        &self,
+        package: &Path,
+        root: &Path,
+        tree: &Tree,
+        cwd: &Path,
+        assigned: &[(String, String)],
+    ) -> Result<Arc<Graph>, String> {
         let key = Digest::of(
             format!("{}\0{}", package.display(), tree.digest(tree.paths()).hex()).as_bytes(),
         );
@@ -98,20 +107,14 @@ impl Swift {
         }
         let scratch =
             tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
-        let described = describe_all(&swift_here, package, scratch.path())?;
+        let swift = || command::tool("swift", cwd, assigned);
+        let described = describe_all(&swift, package, scratch.path())?;
         let graph = Arc::new(graph_of(&described, root, tree));
         if let Ok(mut cached) = self.graph.lock() {
             *cached = Some((key, Arc::clone(&graph)));
         }
         Ok(graph)
     }
-}
-
-/// `swift`, as COMMAND's environment finds it, with none of hushrun's variables.
-fn swift_here() -> Command {
-    let mut command = Command::new("swift");
-    command.env_remove(super::runner::UNITS_VAR);
-    command
 }
 
 /// \[ADR 0086\] The adapter for `swift test …`, `swift-test …`, or, in a directory that holds a
@@ -1345,7 +1348,7 @@ impl Adapter for Swift {
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        let graph = self.graph(&self.package, at.root, at.tree)?;
+        let graph = self.graph(&self.package, at.root, at.tree, at.cwd, at.assigned)?;
         leaves_nothing_out(at.map, &graph)?;
         let sets = units::classify(
             at.tree.paths(),
@@ -1406,7 +1409,7 @@ impl Adapter for Swift {
             let this = match graphs.get(&package) {
                 Some(g) => Arc::clone(g),
                 None => {
-                    let g = self.graph(&package, at.root, at.tree)?;
+                    let g = self.graph(&package, at.root, at.tree, at.cwd, at.assigned)?;
                     graphs.insert(package.clone(), Arc::clone(&g));
                     graph.merge(&g);
                     g
