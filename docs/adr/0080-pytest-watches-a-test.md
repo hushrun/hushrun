@@ -77,3 +77,10 @@ Reviewers confirmed wrong reuses in item 4 and in what item 1 left out.
   test. Now what runs, or is opened, while no window is open is read by every test of the
   process, and events are restarted when a window ends too, so a function seen in a window is
   seen again outside it.
+- The plugin took a tool id for the session and called `restart_events()` at every window, which
+  re-arms the events of every tool (coverage.py's sysmon core, a debugger), and a repository whose
+  own tests take the same tool id failed. Now it watches only while no other tool holds a tool
+  id: checked as it starts and at each window's start and end, and at another tool's
+  `use_tool_id`, which it lets through after giving way. When another appears it stops for the
+  rest of the process, releases its id, reports no test of the process as watched (each reads its
+  test file's list), and says why once in `settings.watch`.

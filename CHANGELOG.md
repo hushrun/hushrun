@@ -152,6 +152,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   `pytest_configure` of a `conftest.py`, is every test's.
 - A process a pytest fixture of a wider scope starts as it ends, when it switches its parameter
   inside the next test's setup, is its test file's, not that one test's.
+- pytest's adapter watches a test only while no other tool uses `sys.monitoring` (a debugger,
+  coverage.py's sysmon core, a repository's own tool): with one there it watches nothing, and when
+  one appears it stops, gives back its tool id and says why once; each test then reads its test
+  file's list.
 
 ## [0.13.0] - 2026-11-12
 

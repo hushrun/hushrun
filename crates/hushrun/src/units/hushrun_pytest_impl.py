@@ -555,8 +555,7 @@ class Observer(object):
     # --- phases ------------------------------------------------------------------------
 
     def start(self, unit):
-        if self.watching:
-            _restart_watch()
+        self.rewatch()
         self.seq += 1
         self.active = unit
         self.unit_last_seq[unit] = self.seq
@@ -567,8 +566,28 @@ class Observer(object):
             self.unit_last_seq[self.active] = self.seq
         self.active = None
         # What runs outside every window from here is the session's: seen anew.
-        if self.watching:
-            _restart_watch()
+        self.rewatch()
+
+    def rewatch(self):
+        """[ADR 0080] A window starts or ends: functions are watched anew, so that each one is seen
+        in every window that calls it. Only while no other tool uses sys.monitoring: restarting
+        events re-arms every tool's, and one that appeared stops the watching for the rest of the
+        process, said once."""
+        if not self.watching:
+            return
+        other = _other_tool()
+        if other is not None:
+            self.stop_watching("%s started using sys.monitoring during the run" % other)
+            return
+        _restart_watch()
+
+    def stop_watching(self, why):
+        """[ADR 0080] Stops watching for the rest of the process and releases the tool id: this
+        process watched no test then, and each reads its test file's list."""
+        _stop_watching()
+        self.watching = False
+        if self.watch_reason is None:
+            self.watch_reason = "%s, which watching a test would disturb" % why
 
     def unit_entry(self, unit):
         return self.units.setdefault(unit, {"collected": 0, "selected": 0, "finished": 0,
@@ -906,14 +925,49 @@ def _on_py_start(code, offset):
     return sys.monitoring.DISABLE
 
 
+_ORIG_USE_TOOL_ID = None
+
+
+def _other_tool():
+    """[ADR 0080] The name of a tool other than hushrun's that holds a sys.monitoring tool id (a
+    debugger, coverage.py's sysmon core, a profiler, a repository's own), or None."""
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is None:
+        return None
+    for tool in range(6):
+        if tool == WATCH_TOOL:
+            continue
+        try:
+            name = monitoring.get_tool(tool)
+        except Exception:
+            name = None
+        if name is not None:
+            return repr(name)
+    return None
+
+
+def _use_tool_id(tool_id, name):
+    """[ADR 0080] sys.monitoring.use_tool_id, which another tool calls: hushrun gives way first, and
+    watches no more in this process, so that the tool gets its id and its events stay its own."""
+    obs = OBSERVER
+    if WATCH_TOOL is not None and obs is not None:
+        _call(lambda o: o.stop_watching("%r started using sys.monitoring during the run" % (name,)))
+    return _ORIG_USE_TOOL_ID(tool_id, name)
+
+
 def _start_watching(observer):
-    """[ADR 0080] Watches each test's functions with sys.monitoring, Python 3.12 or later: why not,
-    or None."""
-    global WATCH_TOOL
+    """[ADR 0080] Watches each test's functions with sys.monitoring, Python 3.12 or later, while no
+    other tool uses it: why not, or None."""
+    global WATCH_TOOL, _ORIG_USE_TOOL_ID
     monitoring = getattr(sys, "monitoring", None)
     if monitoring is None:
         return "Python %d.%d has no sys.monitoring, which watching a test needs (3.12 or later)" \
             % sys.version_info[:2]
+    other = _other_tool()
+    if other is not None:
+        # Restarting events at each test re-arms every tool's: coverage.py's sysmon core, a
+        # debugger.
+        return "%s uses sys.monitoring, which watching a test would disturb" % other
     for tool in (4, 3):
         if monitoring.get_tool(tool) is None:
             monitoring.use_tool_id(tool, "hushrun")
@@ -923,11 +977,15 @@ def _start_watching(observer):
         return "no sys.monitoring tool id was free"
     monitoring.register_callback(WATCH_TOOL, monitoring.events.PY_START, _on_py_start)
     monitoring.set_events(WATCH_TOOL, monitoring.events.PY_START)
+    if _ORIG_USE_TOOL_ID is None:
+        _ORIG_USE_TOOL_ID = monitoring.use_tool_id
+        monitoring.use_tool_id = _use_tool_id
     observer.watching = True
     return None
 
 
 def _stop_watching():
+    """Releases hushrun's tool id: events off, its callback gone, the id free for another tool."""
     global WATCH_TOOL
     if WATCH_TOOL is None:
         return
@@ -938,6 +996,11 @@ def _stop_watching():
     except Exception:
         pass
     WATCH_TOOL = None
+    if _ORIG_USE_TOOL_ID is not None:
+        try:
+            sys.monitoring.use_tool_id = _ORIG_USE_TOOL_ID
+        except Exception:
+            pass
 
 
 def _shared_finishing(obs, step):
@@ -1288,7 +1351,9 @@ def _shared_setup(obs, fixturedef, step):
         return
     # Each start and end of a shared setup watches anew, so that one function is seen by every
     # setup and test that calls it, not only the first.
-    _restart_watch()
+    obs.rewatch()
+    if not obs.watching:
+        return
     if step > 0:
         setup = {"argname": getattr(fixturedef, "argname", None), "ran": set(), "opened": set(),
                  "start": obs.tick(), "end": None, "def": id(fixturedef)}

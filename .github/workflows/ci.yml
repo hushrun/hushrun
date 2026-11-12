@@ -85,12 +85,13 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
-      # pytest and pytest-xdist for the tests of `tests: observe` (ADR 0068), which fail rather
-      # than pass without them when HUSHRUN_TEST_TOOLS is `required`; then Go and Vitest.
+      # pytest, pytest-xdist and pytest-cov for the tests of `tests: observe` (ADR 0068), which
+      # fail rather than pass without them when HUSHRUN_TEST_TOOLS is `required`; then Go and
+      # Vitest.
       - name: Install pytest for the test-file tests
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0 pytest-cov==7.1.0 coverage==7.17.2
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those
@@ -222,7 +223,7 @@ jobs:
       - name: Install pytest for the test-file tests
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0 pytest-cov==7.1.0 coverage==7.17.2
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those

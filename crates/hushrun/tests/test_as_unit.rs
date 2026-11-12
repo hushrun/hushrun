@@ -755,6 +755,95 @@ fn a_wider_fixture_that_switches_its_parameter_ends_the_old_one_for_the_test_fil
     );
 }
 
+/// The facts of a run of the plugin in `tests/test_m.py` with `reads: test`, and its exit code
+/// and output, with `env` set.
+fn watched_facts(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> (i32, String, Value) {
+    let units = r.root.join("units");
+    let _ = std::fs::remove_dir_all(&units);
+    std::fs::create_dir_all(&units).unwrap();
+    let run = json!({"schema": "hushrun.units/v0", "root": r.repo, "reuse": [], "unit": "test",
+                     "reads": "test"});
+    std::fs::write(units.join("hushrun.json"), run.to_string()).unwrap();
+    let adapter = std::fs::read_dir(r.cache.join("adapters"))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    let out = Command::new(python())
+        .args(["-m", "pytest", "-q", "-p", "no:cacheprovider"])
+        .args(args)
+        .current_dir(&r.repo)
+        .env("HUSHRUN_UNITS", &units)
+        .env("PYTHONPATH", &adapter)
+        .env("PYTEST_ADDOPTS", "-p hushrun_pytest")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let facts = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("pytest-"))
+        .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
+        .unwrap_or(Value::Null);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        facts,
+    )
+}
+
+// covers: C-42
+#[test]
+fn pytest_watches_only_while_no_other_tool_uses_sys_monitoring() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) || !watches() {
+        return;
+    }
+    // test_tool takes sys.monitoring's tool ids 3 and 4 for a tool of its own, as a repository
+    // that tests its own tool would. hushrun gives way: it stops watching, says why, and the test
+    // passes.
+    let r = repo_of(&[
+        ("hushrun.yaml".into(), yaml("observe")),
+        (
+            "tests/test_m.py".into(),
+            "import sys\n\n\
+             def test_before():\n    assert True\n\n\
+             def test_tool():\n    for tool in (3, 4):\n        sys.monitoring.use_tool_id(tool, 'mine')\n    for tool in (3, 4):\n        sys.monitoring.free_tool_id(tool)\n\n\
+             def test_after():\n    assert True\n"
+                .into(),
+        ),
+    ]);
+    let python = python();
+    let _ = r.run(&pytest_args(&python, &[]), &[]);
+    let (code, out, facts) = watched_facts(&r, &[], &["tests/test_m.py"]);
+    assert_eq!(code, 0, "{out}");
+    let watch = facts["settings"]["watch"].as_str().unwrap_or_default();
+    assert!(watch.contains("sys.monitoring"), "{facts:#}");
+    // It watched no test of the process: each reads its test file's list.
+    let unit = unit_of(&facts, "tests/test_m.py");
+    for test in unit["tests"].as_array().unwrap() {
+        assert!(test.get("ran").is_none(), "{test:#}");
+    }
+    // Another tool already in use, as coverage.py's sysmon core is under pytest-cov: hushrun
+    // doesn't watch at all, and says why.
+    let has_cov = Command::new(&python)
+        .args(["-c", "import pytest_cov, coverage"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !tools("pytest-cov", has_cov) {
+        return;
+    }
+    let (code, out, facts) = watched_facts(
+        &r,
+        &[("COVERAGE_CORE", "sysmon")],
+        &["--cov=tests", "tests/test_m.py", "-k", "not test_tool"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let watch = facts["settings"]["watch"].as_str().unwrap_or_default();
+    assert!(watch.contains("sys.monitoring"), "{facts:#}");
+}
+
 fn unit_of<'a>(facts: &'a Value, unit: &str) -> &'a Value {
     facts["units"]
         .as_array()
