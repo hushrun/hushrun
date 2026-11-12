@@ -501,7 +501,7 @@ fn a_test_that_wasnt_followed_keeps_its_test_file_from_a_pass_when_tests_go_by_f
             None,
         );
         assert!(
-            lists.is_none() || !whole_reusable(Unit::Test, &map, "tests/test_a.py"),
+            lists.is_none() || !whole_reusable(&map, "tests/test_a.py"),
             "{unit:?}"
         );
         assert!(
@@ -509,6 +509,31 @@ fn a_test_that_wasnt_followed_keeps_its_test_file_from_a_pass_when_tests_go_by_f
             "{unit:?}: by test file, the file itself isn't keyed"
         );
     }
+}
+
+// covers: C-39, C-34
+#[test]
+fn a_test_not_followed_keeps_its_file_from_being_reused_whole_for_either_unit() {
+    // With `unit: test` a test that started a process has its own row, and its file's row keeps
+    // only what was outside every test. Switched back to `unit: file`, the file must still not be
+    // reused whole on an older pass of its own key.
+    let mut map = store::Map::default();
+    let mut mapped = Mapped::default();
+    mapped.tests.insert(
+        "test_spawns".into(),
+        store::TestRow {
+            state: State::NotObserved,
+            duration_ms: 1,
+            not_followed: BTreeSet::from([units::NotFollowed {
+                why: "subprocess".into(),
+                detail: "python".into(),
+            }]),
+            list: None,
+        },
+    );
+    map.units.insert("tests/test_a.py".into(), mapped);
+    assert!(!whole_reusable(&map, "tests/test_a.py"));
+    assert!(whole_reusable(&map, "tests/test_b.py"));
 }
 
 // covers: C-39, C-34

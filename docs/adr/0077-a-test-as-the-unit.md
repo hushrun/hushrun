@@ -180,3 +180,12 @@ test file's. pytest ends a parametrized fixture of a wider scope that switches i
 the next test's setup, not in a teardown, and a reviewer confirmed in the facts a process started
 there charged to that one test alone. Now what isn't followed while a fixture of a wider scope
 ends is the test file's, wherever pytest ends it.
+
+## Amendment 6: a test not followed guards its file for either unit (2026-11-12)
+
+Item 5 kept a test that wasn't followed in its own row, and the file's row only what was outside
+every test; the plan didn't reuse such a file whole, but only with `unit: test`. A check switched
+back to `unit: file` then reused the file whole on an older pass of its own key, which the test
+that started a process never earned again. The guard now holds for either unit, in the one
+predicate the plan, `observe`, `hushrun ready` and `hushrun why` ask; the file's next run, whole,
+replaces the row.

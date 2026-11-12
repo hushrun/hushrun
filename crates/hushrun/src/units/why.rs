@@ -318,8 +318,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     };
     let keyer = Keyer::new(input.tree, &sets, &input.base);
     // \[C-39\] A test file one of whose tests wasn't followed the last time it ran here isn't
-    // reused whole: its own pass may stand on a run before that.
-    let unfollowed = own.filter(|_| unit_mode == Unit::Test).and_then(|mapped| {
+    // reused whole, whatever the check's unit is now: its own pass may stand on a run before that.
+    let unfollowed = own.and_then(|mapped| {
         mapped
             .tests
             .iter()
@@ -346,7 +346,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             );
         }
         Ok(lookup) => match shared::choose(&keys, &lookup.found) {
-            Choice::Passed(..) if test.is_some() && whole_reusable(unit_mode, &map, &unit) => {
+            Choice::Passed(..) if test.is_some() && whole_reusable(&map, &unit) => {
                 says(
                     &mut out,
                     Decision::Reused,
@@ -373,7 +373,15 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
                 );
                 out.detail.insert(
                     0,
-                    "its other tests may still be reused one by one: `hushrun why` of one says".into(),
+                    match unit_mode {
+                        Unit::Test => {
+                            "its other tests may still be reused one by one: `hushrun why` of one says"
+                        }
+                        Unit::File => {
+                            "it runs whole until a run of it follows all that its tests read"
+                        }
+                    }
+                    .into(),
                 );
             }
             _ if test.is_some() => {

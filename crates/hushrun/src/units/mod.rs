@@ -671,7 +671,7 @@ impl Session {
         let mut passed: BTreeMap<String, Found> = BTreeMap::new();
         let mut chosen = BTreeMap::new();
         for (unit, lists) in &keyed {
-            if !whole_reusable(self.unit, &map, unit) {
+            if !whole_reusable(&map, unit) {
                 continue;
             }
             let lists_keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
@@ -1188,7 +1188,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     let mut keys: BTreeMap<String, Digest> = BTreeMap::new();
     for (test_file, lists) in &keyed {
         let lists_keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
-        if whole_reusable(unit, &map, test_file)
+        if whole_reusable(&map, test_file)
             && let Choice::Passed(_, key) = shared::choose(&lists_keys, &lookup.found)
             && let Some(found) = lookup.found.get(&key)
         {
@@ -1693,16 +1693,15 @@ fn test_files(n: u64) -> String {
     }
 }
 
-/// \[C-39\] Whether a test file may be reused whole, beside what its key says: with tests as the
-/// unit (`unit`), not when one of its tests wasn't followed the last time it ran here, since its
-/// own pass may stand on a run before that, and its other tests may still be reused one by one.
-/// The plan, what `observe` says and `hushrun ready` all ask it.
-fn whole_reusable(unit: Unit, map: &store::Map, test_file: &str) -> bool {
-    unit == Unit::File
-        || !map
-            .units
-            .get(test_file)
-            .is_some_and(|m| m.tests.values().any(|t| t.state == State::NotObserved))
+/// \[C-39\] Whether a test file may be reused whole, beside what its key says: not when one of its
+/// tests wasn't followed the last time it ran here, since its own pass may stand on a run before
+/// that; with tests as the unit its other tests may still be reused one by one. For either unit:
+/// a check switched from `unit: test` back to `unit: file` keeps the guard its test's row holds.
+/// The plan, what `observe` says, `hushrun ready` and `hushrun why` all ask it.
+fn whole_reusable(map: &store::Map, test_file: &str) -> bool {
+    !map.units
+        .get(test_file)
+        .is_some_and(|m| m.tests.values().any(|t| t.state == State::NotObserved))
 }
 
 /// \[C-39\] One test file, or `2,140 test files`, for the lines that count tests.
@@ -1957,7 +1956,7 @@ fn decide(
         let keyed = keyed(&keyer, &known, tests);
         if let Ok(lookup) = shared::lookup(end.store, all_keys(&keyed), end.counts) {
             for (unit, lists) in &keyed {
-                if by_test && !whole_reusable(unit_mode, map, unit) {
+                if !whole_reusable(map, unit) {
                     continue;
                 }
                 let keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
