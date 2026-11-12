@@ -1050,6 +1050,70 @@ fn a_source_no_program_is_built_from_is_in_the_rest_set() {
     }
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_custom_commands_depfile_is_read() {
+    for (cmake, generator) in with_cmake()
+        .into_iter()
+        .flat_map(|c| generators(&c).into_iter().map(move |g| (c.clone(), g)))
+    {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        // tools/gen.sh reads inc/dep.h, which only its depfile names, to write gen_dep.h, which
+        // t_dep includes; t_s includes dep.h, so dep.h is a source.
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.20)\nproject(dep C)\nenable_testing()\n\
+                     include_directories(${CMAKE_SOURCE_DIR}/inc)\n\
+                     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gen_dep.h\n\
+                     \x20 COMMAND sh ${CMAKE_SOURCE_DIR}/tools/gen.sh ${CMAKE_SOURCE_DIR}/inc/dep.h ${CMAKE_BINARY_DIR}/gen_dep.h ${CMAKE_BINARY_DIR}/gen_dep.d\n\
+                     \x20 DEPENDS ${CMAKE_SOURCE_DIR}/tools/gen.sh DEPFILE ${CMAKE_BINARY_DIR}/gen_dep.d)\n\
+                     add_executable(t_dep tests/t_dep.c ${CMAKE_BINARY_DIR}/gen_dep.h)\n\
+                     target_include_directories(t_dep PRIVATE ${CMAKE_BINARY_DIR})\n\
+                     add_executable(t_s tests/t_s.c)\nadd_executable(t_p tests/t_p.c)\n\
+                     add_test(NAME dep COMMAND t_dep)\nadd_test(NAME s COMMAND t_s)\nadd_test(NAME p COMMAND t_p)\n",
+                ),
+                file("inc/dep.h", "#define DEP 1\n"),
+                file(
+                    "tools/gen.sh",
+                    "v=$(sed -n 's/#define DEP \\([0-9]*\\)/\\1/p' \"$1\")\necho \"#define GEN_DEP $v\" > \"$2\"\necho \"$2: $1\" > \"$3\"\n",
+                ),
+                file(
+                    "tests/t_dep.c",
+                    "#include \"gen_dep.h\"\nint main(void) { return GEN_DEP == 1 ? 0 : 1; }\n",
+                ),
+                file(
+                    "tests/t_s.c",
+                    "#include \"dep.h\"\nint main(void) { return DEP > 0 ? 0 : 1; }\n",
+                ),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = map["units"]["t_dep"]["reads"].clone();
+        assert!(
+            reads.as_array().unwrap().contains(&json!("inc/dep.h")),
+            "{at}: t_dep read {reads}"
+        );
+        p.write("inc/dep.h", "#define DEP 2\n");
+        p.build();
+        let second = p.run(CTEST, &[]);
+        assert!(
+            second.ran().contains(&"dep".to_string()),
+            "{at}\n{}",
+            second.stdout
+        );
+        assert_ne!(second.code, 0, "{at}");
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

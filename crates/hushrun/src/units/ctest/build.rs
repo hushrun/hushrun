@@ -71,9 +71,13 @@ enum Dir {
     Ninja {
         ninja: PathBuf,
         outputs: BTreeSet<String>,
+        /// The outputs of rules with a depfile of their own (a custom command's `DEPFILE`).
+        depfiled: BTreeSet<String>,
     },
     Make {
         graph: BTreeMap<String, Vec<String>>,
+        /// A custom command's output to its `DEPFILE`, from the top of the build directory.
+        custom: BTreeMap<String, String>,
     },
     Unread,
 }
@@ -120,13 +124,17 @@ impl<'a> Walker<'a> {
             self.dirs.insert(build.to_path_buf(), dir);
         }
         let read = match self.dirs.get(build) {
-            Some(Dir::Ninja { ninja, outputs }) if outputs.contains(&target) => {
-                let (ninja, outputs) = (ninja.clone(), outputs.clone());
-                self.ninja(&ninja, &outputs, build, &target)
+            Some(Dir::Ninja {
+                ninja,
+                outputs,
+                depfiled,
+            }) if outputs.contains(&target) => {
+                let (ninja, outputs, depfiled) = (ninja.clone(), outputs.clone(), depfiled.clone());
+                self.ninja(&ninja, &outputs, &depfiled, build, &target)
             }
-            Some(Dir::Make { graph }) if graph.contains_key(&target) => {
-                let graph = graph.clone();
-                self.make(&graph, build, &target, program)
+            Some(Dir::Make { graph, custom }) if graph.contains_key(&target) => {
+                let (graph, custom) = (graph.clone(), custom.clone());
+                self.make(&graph, &custom, build, &target, program)
             }
             _ => None,
         };
@@ -181,7 +189,7 @@ impl<'a> Walker<'a> {
         }
         match self.dirs.get(build) {
             Some(Dir::Ninja { outputs, .. }) => outputs.contains(&target),
-            Some(Dir::Make { graph }) => graph.contains_key(&target),
+            Some(Dir::Make { graph, .. }) => graph.contains_key(&target),
             _ => true,
         }
     }
@@ -209,10 +217,15 @@ impl<'a> Walker<'a> {
                     .lines()
                     .filter_map(|line| line.rsplit_once(": ").map(|(o, _)| o.to_string()))
                     .collect();
-                Dir::Ninja { ninja, outputs }
+                Dir::Ninja {
+                    ninja,
+                    outputs,
+                    depfiled: ninja_depfiled(build),
+                }
             }
             "Unix Makefiles" => Dir::Make {
                 graph: make_graph(build),
+                custom: make_custom_depfiles(build),
             },
             _ => Dir::Unread,
         }
@@ -255,6 +268,7 @@ impl<'a> Walker<'a> {
         &mut self,
         ninja: &Path,
         outputs: &BTreeSet<String>,
+        depfiled: &BTreeSet<String>,
         build: &Path,
         target: &str,
     ) -> Option<Built> {
@@ -277,8 +291,13 @@ impl<'a> Walker<'a> {
                     continue;
                 };
                 let object = is_object(&node);
-                if object || node.ends_with(".pch") || node.ends_with(".gch") {
-                    // ran on Linux: what GCC's precompiled header read is in its own record.
+                if object
+                    || node.ends_with(".pch")
+                    || node.ends_with(".gch")
+                    || depfiled.contains(&node)
+                {
+                    // ran on Linux: what GCC's precompiled header read is in its own record; a
+                    // custom command's depfile is in its output's.
                     objects.push(node.clone());
                 }
                 for (input, explicit) in &edge.inputs {
@@ -362,7 +381,11 @@ impl<'a> Walker<'a> {
                 let mut next = Vec::new();
                 for node in std::mem::take(&mut frontier) {
                     seen.insert(node.clone());
-                    if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch") {
+                    if is_object(&node)
+                        || node.ends_with(".pch")
+                        || node.ends_with(".gch")
+                        || depfiled.contains(&node)
+                    {
                         pending.push(node.clone());
                     }
                     for (input, _) in edges
@@ -417,6 +440,7 @@ impl<'a> Walker<'a> {
     fn make(
         &mut self,
         graph: &BTreeMap<String, Vec<String>>,
+        custom: &BTreeMap<String, String>,
         build: &Path,
         target: &str,
         program: &Path,
@@ -441,7 +465,11 @@ impl<'a> Walker<'a> {
                 continue;
             }
             let object = is_object(&node);
-            if object || node.ends_with(".pch") || node.ends_with(".gch") {
+            if object
+                || node.ends_with(".pch")
+                || node.ends_with(".gch")
+                || custom.contains_key(&node)
+            {
                 objects.push(node.clone());
             }
             for dep in graph.get(&node).into_iter().flatten() {
@@ -475,7 +503,11 @@ impl<'a> Walker<'a> {
             if !asked.insert(object.clone()) {
                 continue;
             }
-            let depfile = build.join(format!("{object}.d"));
+            // A custom command's own depfile, else the compiler's beside the object.
+            let depfile = match custom.get(&object) {
+                Some(depfile) => build.join(depfile),
+                None => build.join(format!("{object}.d")),
+            };
             let files = depfile_deps(&depfile)?;
             for file in files {
                 match self.place(&file, build) {
@@ -489,7 +521,10 @@ impl<'a> Walker<'a> {
                             if !seen.insert(node.clone()) {
                                 continue;
                             }
-                            if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch")
+                            if is_object(&node)
+                                || node.ends_with(".pch")
+                                || node.ends_with(".gch")
+                                || custom.contains_key(&node)
                             {
                                 pending.push(node.clone());
                             }
@@ -710,6 +745,102 @@ pub fn make_graph(build: &Path) -> BTreeMap<String, Vec<String>> {
         }
     }
     graph
+}
+
+/// \[ADR 0087\] The outputs of `build.ninja`'s edges that set a `depfile` of their own: a custom
+/// command's `DEPFILE`, whose inputs are in Ninja's record of the output (`deps = gcc`).
+fn ninja_depfiled(build: &Path) -> BTreeSet<String> {
+    let text = std::fs::read(build.join("build.ninja")).unwrap_or_default();
+    let text = String::from_utf8_lossy(&text);
+    let mut out = BTreeSet::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("build ") {
+            current = ninja_outputs(rest);
+        } else if !line.starts_with(' ') {
+            current.clear();
+        } else if line.trim_start().starts_with("depfile =") {
+            out.extend(current.iter().cloned());
+        }
+    }
+    out
+}
+
+/// The outputs of a `build` line, its text after `build `: up to its first `:` that isn't
+/// escaped, implicit outputs after `|` included, those named from `${cmake_ninja_workdir}` left
+/// out (the same files by another name).
+fn ninja_outputs(rest: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' => match chars.next() {
+                Some(next @ (' ' | ':' | '$')) => word.push(next),
+                Some(next) => {
+                    word.push('$');
+                    word.push(next);
+                }
+                None => {}
+            },
+            ':' => break,
+            ' ' => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            other => word.push(other),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+        .into_iter()
+        .filter(|w| w != "|" && !w.starts_with("${"))
+        .collect()
+}
+
+/// \[ADR 0087\] A Makefile build's custom commands with a `DEPFILE`: each output, to its depfile,
+/// from every `CMakeFiles/<target>.dir/DependInfo.cmake`'s `CMAKE_DEPENDS_DEPENDENCY_FILES`
+/// (`"" "<output>" "custom" "<depfile>"`).
+fn make_custom_depfiles(build: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![build.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if !(path.file_name().is_some_and(|n| n == "_deps") && dir == build) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.file_name().is_none_or(|n| n != "DependInfo.cmake") {
+                continue;
+            }
+            let text = std::fs::read(&path).unwrap_or_default();
+            let text = String::from_utf8_lossy(&text);
+            let Some(start) = text.find("set(CMAKE_DEPENDS_DEPENDENCY_FILES") else {
+                continue;
+            };
+            let body = &text[start..];
+            let body = &body[..body.find("\n  )").unwrap_or(body.len())];
+            for line in body.lines() {
+                let quoted: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+                if let [_, output, "custom", depfile] = quoted.as_slice() {
+                    out.insert(output.to_string(), depfile.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `out: in` at its first `: ` that isn't escaped.
