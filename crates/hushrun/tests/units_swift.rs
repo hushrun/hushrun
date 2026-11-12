@@ -749,3 +749,98 @@ fn a_nested_xctest_class_makes_nothing_be_left_out_on_macos() {
         after.stdout
     );
 }
+
+/// A `swift` that says, for `test`, whether its standard output is a terminal, in color, and the
+/// `PATH` it got; lists one test; and exits 3.
+#[cfg(unix)]
+fn fake_swift(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let script = "#!/bin/sh\ncase \"$1 $2\" in\n\"--version \"*) echo 'Swift version 6.4.2 (fake)' ;;\n\"test list\") echo 'T.C/testA' ;;\n\"test \"*) if [ -t 1 ]; then printf '\\033[1mterminal\\033[0m\\nnext\\n'; else echo pipe; fi; echo \"path:$PATH\"; exit 3 ;;\nesac\n";
+    let path = dir.join("swift");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: C-48
+#[cfg(unix)]
+#[test]
+fn hushruns_swift_passes_output_through_a_terminal_byte_for_byte() {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    use std::io::Read as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let real = root.join("real");
+    fake_swift(&real);
+    // A directory of programs, as a run makes it, first on PATH; PATH as COMMAND had it after.
+    let programs = root.join("programs");
+    std::fs::create_dir_all(&programs).unwrap();
+    std::fs::write(programs.join(".hushrun-programs"), "").unwrap();
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    let command = |stdout: std::process::Stdio| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hushrun"));
+        cmd.args(["__hushrun-program", "swift", "test", "--parallel"])
+            .current_dir(&root)
+            .env("PATH", format!("{}:{was}", programs.display()))
+            .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+            .env("HUSHRUN_UNITS", &units)
+            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+            .env("HUSHRUN_HOST", NO_HOST)
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout);
+        cmd
+    };
+    // Through a pipe: what swift wrote, and its exit code.
+    let piped = command(std::process::Stdio::piped()).output().unwrap();
+    assert_eq!(piped.status.code(), Some(3));
+    let text = String::from_utf8_lossy(&piped.stdout).into_owned();
+    assert!(text.starts_with("pipe\npath:"), "{text}");
+    // What the real swift got: PATH as COMMAND had it, so a swift a test starts isn't hushrun's.
+    assert_eq!(text.trim_end(), format!("pipe\npath:{was}"));
+    // On a terminal in raw mode: swift sees a terminal too, and its bytes arrive as written.
+    let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&controller).unwrap();
+    unlockpt(&controller).unwrap();
+    let name = ptsname(&controller, Vec::new()).unwrap();
+    let terminal = rustix::fs::open(
+        name.as_c_str(),
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap();
+    let mut modes = rustix::termios::tcgetattr(&terminal).unwrap();
+    modes.make_raw();
+    rustix::termios::tcsetattr(&terminal, rustix::termios::OptionalActions::Now, &modes).unwrap();
+    let mut cmd = command(std::fs::File::from(terminal).into());
+    let mut child = cmd.spawn().unwrap();
+    drop(cmd);
+    let mut controller = std::fs::File::from(controller);
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut buf = [0; 4096];
+        while let Ok(n @ 1..) = controller.read(&mut buf) {
+            out.extend_from_slice(&buf[..n]);
+        }
+        out
+    });
+    let status = child.wait().unwrap();
+    let out = reader.join().unwrap();
+    assert_eq!(status.code(), Some(3));
+    assert!(
+        out.starts_with(b"\x1b[1mterminal\x1b[0m\nnext\npath:"),
+        "{:?}",
+        String::from_utf8_lossy(&out)
+    );
+    // Its facts: the one test listed, which nothing says ran.
+    let facts: Vec<Value> = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert!(facts.iter().all(|f| f["units"][0]["tests"][0]["finished"] == false && f["failuresByUnit"] == false), "{facts:?}");
+}
