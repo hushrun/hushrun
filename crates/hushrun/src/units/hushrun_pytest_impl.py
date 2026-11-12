@@ -199,6 +199,9 @@ class Observer(object):
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
         self.torn_ids = set()         # node ids of tests whose teardown report was logged
+        self.finished_ids = {}        # node id -> (unit, test id) of each test that finished
+        self.served = {}              # node id -> (fixture names, fixture def ids) it was served
+        self.failed_wide = []         # (name, def id) of each wider fixture whose end raised
         self.session_ran = set()      # [ADR 0080] files a function of which started outside every
         self.session_opened = set()   # window, and files opened there: every test reads them
         self.shared_finishing = 0     # >0 while a fixture of a wider scope than a test is ended
@@ -646,8 +649,25 @@ class Observer(object):
                     out.add((unit, r, "read"))
         return [list(e) for e in sorted(out)]
 
+    def unserve_failed(self):
+        """[C-32] A wider fixture whose end raised failed everything it served: no test it served
+        finished (a session fixture's reaches tests in other files), so none records a pass, and
+        their test files didn't run whole. A test is matched by the fixture it was served, by its
+        definition where pytest says, else by its name."""
+        for name, def_id in self.failed_wide:
+            for nodeid, (names, def_ids) in self.served.items():
+                hit = def_id in def_ids if def_ids else name in names
+                if not hit or nodeid not in self.finished_ids:
+                    continue
+                unit, test_id = self.finished_ids.pop(nodeid)
+                entry = self.unit_entry(unit)
+                entry["finished"] = max(0, entry["finished"] - 1)
+                if test_id is not None and test_id in self.tests.get(unit, {}):
+                    self.tests[unit][test_id]["finished"] = False
+
     def results(self):
         self.scan_modules()
+        self.unserve_failed()
         file_edges = {}
         for f, targets in self.edges.items():
             file_edges.setdefault(f, set()).update(targets)
@@ -1026,6 +1046,11 @@ def _wrap_fixture_finish():
             _call(_shared_finishing, 1)
         try:
             return original(self, *args, **kwargs)
+        except BaseException:
+            # [C-32] Its end failed: what it served didn't pass.
+            if wide:
+                _call(_wide_failed, self)
+            raise
         finally:
             if wide:
                 _call(_shared_finishing, -1)
@@ -1068,8 +1093,7 @@ def _install():
             observer.note_module(name)
             observer.make_ambient(name=name, why="loaded before the adapter")
     OBSERVER = observer
-    if observer.by_test:
-        _wrap_fixture_finish()
+    _wrap_fixture_finish()
     if wants_watch:
         try:
             observer.watch_reason = _start_watching(observer)
@@ -1227,6 +1251,7 @@ def _protocol_end(obs, unit, test_id, nodeid, cut):
     finished = not cut and nodeid in obs.torn_ids
     if finished:
         obs.unit_entry(unit)["finished"] += 1
+        obs.finished_ids[nodeid] = (unit, test_id)
     if obs.by_test and test_id is not None:
         if finished:
             obs.test_entry(unit, test_id)["finished"] = True
@@ -1352,6 +1377,8 @@ def pytest_runtest_protocol(item, nextitem):
         except Exception:
             cut = True
         _call(_served, unit, test_id, _request_fixtures(item))
+        _call(_note_served, getattr(item, "nodeid", None), fixtures + _request_fixtures(item),
+              _request_fixture_defs(item))
         _call(_protocol_end, unit, test_id, getattr(item, "nodeid", None), cut)
 
 
@@ -1406,6 +1433,25 @@ def _teardown_shares(obs, item, nextitem):
     class, or of the session. What happens meanwhile is the test file's."""
     obs.shared_teardown = nextitem is None or getattr(nextitem, "parent", None) is not \
         getattr(item, "parent", None)
+
+
+def _note_served(obs, nodeid, names, def_ids):
+    """[C-32] The fixtures a test was served, by name and by definition: what a wider fixture whose
+    end fails takes the pass of."""
+    obs.served[nodeid] = (frozenset(names), frozenset(def_ids))
+
+
+def _request_fixture_defs(item):
+    """The ids of the fixture definitions `item`'s request resolved; none when pytest doesn't say,
+    and then fixtures are matched by name."""
+    try:
+        return tuple(id(d) for d in item._request._fixture_defs.values())
+    except Exception:
+        return ()
+
+
+def _wide_failed(obs, fixturedef):
+    obs.failed_wide.append((getattr(fixturedef, "argname", None), id(fixturedef)))
 
 
 def _request_fixtures(item):

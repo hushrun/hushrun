@@ -149,6 +149,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - A pytest test that `pytest.exit` or an interrupt cut short no longer counts as finished: it
   records nothing, and its test file, which didn't run whole, records no pass. Before, with
   `tests: reuse`, the file could be recorded as passed when that test was its last.
+- A pytest fixture of a wider scope whose teardown fails keeps every test it served from a pass,
+  in every file it served: pytest reports the error on whichever test ran last, and the test that
+  caused it no longer keeps its pass.
 - pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
   name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
   list, and runs when it changes.

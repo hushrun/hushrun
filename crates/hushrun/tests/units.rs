@@ -795,6 +795,36 @@ fn a_test_file_whose_last_test_pytest_exit_cut_short_didnt_run_whole() {
     assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
 }
 
+// covers: C-32
+#[test]
+fn a_session_fixture_whose_end_fails_keeps_every_file_it_served_from_a_pass() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // A session fixture two files use fails as it ends, after the last test: pytest reports it on
+    // test_c.py's test, which didn't use it; test_a.py and test_b.py, which it served, record no
+    // pass either.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "conftest.py",
+            "import pytest\n\n@pytest.fixture(scope='session')\ndef db():\n    yield 1\n    raise RuntimeError('the database was left dirty')\n",
+        ),
+        ("test_a.py", "def test_a(db):\n    pass\n"),
+        ("test_b.py", "def test_b(db):\n    pass\n"),
+        ("test_c.py", "def test_c():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // test_c.py records its fail, and nothing else is recorded.
+    assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

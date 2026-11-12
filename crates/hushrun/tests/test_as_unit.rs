@@ -570,6 +570,46 @@ fn a_test_cut_short_by_pytest_exit_or_an_interrupt_records_nothing() {
     }
 }
 
+// covers: C-39, C-32
+#[test]
+fn a_failing_teardown_of_a_wider_fixture_keeps_every_test_it_served_from_a_pass() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // An autouse module fixture checks at its end that no test leaked; test_opens leaks, and
+    // pytest reports the error on test_last. Left out on the next run, test_opens would let the
+    // check pass on the same code.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\npythonpath = .\n".into()),
+        (
+            "tests/test_leak.py".into(),
+            "import os, pytest\nLEAKS = []\n\n\
+             @pytest.fixture(scope='module', autouse=True)\ndef no_leaks():\n    yield\n    assert not LEAKS, 'a test left a connection open'\n\n\
+             def test_opens():\n    if os.environ.get('BUG'):\n        LEAKS.append('conn')\n\n\
+             @pytest.mark.parametrize('i', range(10))\ndef test_more(i):\n    assert True\n\n\
+             def test_last():\n    assert True\n"
+                .into(),
+        ),
+        (
+            "tests/test_other.py".into(),
+            "def test_other():\n    assert True\n".into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = store::map(&r.cache);
+    let tests = &map["units"]["tests/test_leak.py"]["tests"];
+    assert_ne!(tests["test_opens"], "passed", "{map:#}");
+    assert_ne!(tests["test_more[3]"], "passed", "{map:#}");
+    // Run again on the same code: the leak is caught again.
+    let second = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+}
+
 // covers: C-39
 #[test]
 fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {

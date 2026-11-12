@@ -95,3 +95,9 @@ test that failed first.
   short was recorded as passed, and with `unit: file` a file whose last test it was ran whole.
   Now a test finished only once its teardown's report was logged and no exception came up through
   its protocol.
+- **A wider fixture whose end fails.** pytest reports the failing teardown of a module, class,
+  package or session fixture on the test that ran last; the test that caused it (a leak an autouse
+  fixture checks for) kept its pass, and the next run left it out and passed on the same code. Now
+  the failure is everything's that fixture served: no test it served counts as finished, in its
+  file or another (a session fixture's), so none records a pass, and their files didn't run
+  whole. Tests are matched by the fixture definition pytest resolved for them, else by name.
