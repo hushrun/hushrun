@@ -63,6 +63,8 @@ pub struct Walker<'a> {
     path: Option<OsString>,
     dirs: HashMap<PathBuf, Dir>,
     real: HashMap<PathBuf, Option<PathBuf>>,
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which `ninja` gets.
+    assigned: Vec<(String, String)>,
 }
 
 enum Dir {
@@ -84,12 +86,17 @@ enum Place {
 }
 
 impl<'a> Walker<'a> {
-    pub fn new(root: &'a Path, path: Option<OsString>) -> Walker<'a> {
+    pub fn new(
+        root: &'a Path,
+        path: Option<OsString>,
+        assigned: &[(String, String)],
+    ) -> Walker<'a> {
         Walker {
             root,
             path,
             dirs: HashMap::new(),
             real: HashMap::new(),
+            assigned: assigned.to_vec(),
         }
     }
 
@@ -194,7 +201,8 @@ impl<'a> Walker<'a> {
                 let Some(ninja) = ninja else {
                     return Dir::Unread;
                 };
-                let Some(out) = run(&ninja, build, &["-t", "targets", "all"]) else {
+                let Some(out) = run(&ninja, build, &["-t", "targets", "all"], &self.assigned)
+                else {
                     return Dir::Unread;
                 };
                 let outputs = out
@@ -261,7 +269,7 @@ impl<'a> Walker<'a> {
         let mut configured = false;
         let mut first = true;
         while !frontier.is_empty() {
-            let edges = query(ninja, build, &frontier)?;
+            let edges = query(ninja, build, &frontier, &self.assigned)?;
             let mut next = Vec::new();
             for node in std::mem::take(&mut frontier) {
                 seen.insert(node.clone());
@@ -322,7 +330,7 @@ impl<'a> Walker<'a> {
             if pending.is_empty() {
                 break;
             }
-            let deps = deps(ninja, build, &pending)?;
+            let deps = deps(ninja, build, &pending, &self.assigned)?;
             let mut generated: Vec<String> = Vec::new();
             for object in std::mem::take(&mut pending) {
                 let Some((state, files)) = deps.get(&object).filter(|(_, f)| !f.is_empty()) else {
@@ -350,7 +358,7 @@ impl<'a> Walker<'a> {
             frontier.sort();
             frontier.dedup();
             while !frontier.is_empty() {
-                let edges = query(ninja, build, &frontier)?;
+                let edges = query(ninja, build, &frontier, &self.assigned)?;
                 let mut next = Vec::new();
                 for node in std::mem::take(&mut frontier) {
                     seen.insert(node.clone());
@@ -385,7 +393,7 @@ impl<'a> Walker<'a> {
             }
         }
         if configured {
-            let inputs = query(ninja, build, &["build.ninja".to_string()])?;
+            let inputs = query(ninja, build, &["build.ninja".to_string()], &self.assigned)?;
             for (input, _) in inputs
                 .get("build.ninja")
                 .map(|e| e.inputs.as_slice())
@@ -397,7 +405,7 @@ impl<'a> Walker<'a> {
             }
         }
         if out.stale.is_none() {
-            match run(ninja, build, &["-n", target]) {
+            match run(ninja, build, &["-n", target], &self.assigned) {
                 Some(text) if text.contains("no work to do") => {}
                 Some(_) => out.stale = Some("ninja would build it again".into()),
                 None => out.stale = Some("ninja can't say whether it is up to date".into()),
@@ -554,13 +562,18 @@ struct Edge {
     inputs: Vec<(String, bool)>,
 }
 
-fn query(ninja: &Path, build: &Path, targets: &[String]) -> Option<BTreeMap<String, Edge>> {
+fn query(
+    ninja: &Path,
+    build: &Path,
+    targets: &[String],
+    assigned: &[(String, String)],
+) -> Option<BTreeMap<String, Edge>> {
     let mut out = BTreeMap::new();
     for chunk in targets.chunks(500) {
         let mut args = vec!["-t".to_string(), "query".to_string()];
         args.extend(chunk.iter().cloned());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = run(ninja, build, &args)?;
+        let text = run(ninja, build, &args, assigned)?;
         let mut current: Option<String> = None;
         let mut inputs = false;
         for line in text.lines() {
@@ -596,13 +609,14 @@ fn deps(
     ninja: &Path,
     build: &Path,
     objects: &[String],
+    assigned: &[(String, String)],
 ) -> Option<BTreeMap<String, (String, Vec<String>)>> {
     let mut out: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     for chunk in objects.chunks(500) {
         let mut args = vec!["-t".to_string(), "deps".to_string()];
         args.extend(chunk.iter().cloned());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = run(ninja, build, &args)?;
+        let text = run(ninja, build, &args, assigned)?;
         let mut current: Option<String> = None;
         for line in text.lines() {
             if line.is_empty() {
@@ -630,9 +644,10 @@ fn deps(
     Some(out)
 }
 
-/// `program`'s output in `dir`, when it exits 0.
-fn run(program: &Path, dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
+/// `program`'s output in `dir`, when it exits 0, with COMMAND's environment and its own
+/// assignments (`assigned`).
+fn run(program: &Path, dir: &Path, args: &[&str], assigned: &[(String, String)]) -> Option<String> {
+    let output = super::run::tool(program, dir, assigned)
         .arg("-C")
         .arg(dir)
         .args(args)

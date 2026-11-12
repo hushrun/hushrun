@@ -69,6 +69,13 @@ pub const PROGRAMS: &[&dyn Program] = &[
 /// nothing it starts reaches a program of hushrun's.
 pub fn real_command(real: &Path) -> Command {
     let mut command = Command::new(real);
+    as_command_had(&mut command);
+    command
+}
+
+/// \[C-32\] Gives `command` the environment COMMAND had, as [`real_command`] does: `PATH` as it
+/// was, and neither of this module's variables. Nothing changes outside a program on `PATH`.
+pub fn as_command_had(command: &mut Command) {
     match path_was(std::env::var_os(PATH_WAS)) {
         Some(Some(path)) => {
             command.env("PATH", path);
@@ -79,7 +86,6 @@ pub fn real_command(real: &Path) -> Command {
         None => {}
     }
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
-    command
 }
 
 /// \[ADR 0086\] How a real program run by [`run_copying_stdout`] ended, and what it wrote on its

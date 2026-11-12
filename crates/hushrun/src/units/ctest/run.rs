@@ -101,9 +101,12 @@ impl From<String> for Skip {
     }
 }
 
-/// The real `ctest`, or another tool, with the environment COMMAND had: `PATH` as it was.
-fn tool(program: &Path) -> Command {
-    let mut command = program::real_command(program);
+/// The real `ctest`, or another tool, in `cwd` with the environment COMMAND had: `PATH` as it
+/// was, and \[C-32\] COMMAND's own `env NAME=value` assignments (`assigned`), which the plan's
+/// listing, made before COMMAND, needs given (inside COMMAND they are there already).
+pub fn tool(program: &Path, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    let mut command = super::super::command::tool(program, cwd, assigned);
+    program::as_command_had(&mut command);
     command.stdin(Stdio::null()).stderr(Stdio::null());
     command
 }
@@ -126,10 +129,11 @@ pub fn list(
     args: &[String],
     cwd: &Path,
     log: Option<&Path>,
+    assigned: &[(String, String)],
 ) -> Result<Vec<select::Listed>, String> {
     let own = tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
     let kept = log.map(Kept::new);
-    let output = tool(real)
+    let output = tool(real, cwd, assigned)
         .args(args)
         .arg("--show-only=json-v1")
         .arg("--output-junit")
@@ -187,8 +191,12 @@ impl Kept {
 }
 
 /// The real `ctest`'s version.
-pub fn version(real: &Path) -> Result<(u32, u32, u32), String> {
-    let output = tool(real)
+pub fn version(
+    real: &Path,
+    cwd: &Path,
+    assigned: &[(String, String)],
+) -> Result<(u32, u32, u32), String> {
+    let output = tool(real, cwd, assigned)
         .arg("--version")
         .output()
         .map_err(|err| format!("can't start {}: {err}", real.display()))?;
@@ -205,8 +213,9 @@ pub fn listed(
     items: &[args::Item],
     cwd: &Path,
     root: &Path,
+    assigned: &[(String, String)],
 ) -> Result<(Vec<Test>, Option<args::Preset>, PathBuf), String> {
-    let version = version(real)?;
+    let version = version(real, cwd, assigned)?;
     if version < JUNIT_SINCE {
         return Err(format!(
             "ctest {}.{}.{} writes no JUnit file (--output-junit came in CMake 3.21)",
@@ -228,7 +237,13 @@ pub fn listed(
         .as_ref()
         .and_then(|p| p.log.as_ref())
         .map(|l| cwd.join(l));
-    let tests = list(real, &args::listing(items, &[]), cwd, log.as_deref())?;
+    let tests = list(
+        real,
+        &args::listing(items, &[]),
+        cwd,
+        log.as_deref(),
+        assigned,
+    )?;
     if tests.is_empty() {
         let multi = select::build_dir(&test_dir).multi_config;
         return Err(if multi && !args::has(items, &["-C", "--build-config"]) {
@@ -242,8 +257,13 @@ pub fn listed(
 }
 
 /// What each unit's programs are built from, merged.
-pub fn walk(tests: &[Test], root: &Path, path: Option<OsString>) -> BTreeMap<String, Built> {
-    let mut walker = Walker::new(root, path);
+pub fn walk(
+    tests: &[Test],
+    root: &Path,
+    path: Option<OsString>,
+    assigned: &[(String, String)],
+) -> BTreeMap<String, Built> {
+    let mut walker = Walker::new(root, path, assigned);
     let mut out: BTreeMap<String, Built> = BTreeMap::new();
     let mut done: BTreeSet<PathBuf> = BTreeSet::new();
     let mut named_done: BTreeSet<(String, select::Named)> = BTreeSet::new();
@@ -304,7 +324,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     };
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
-    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root)?;
+    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[])?;
     if preset.as_ref().is_some_and(|p| p.show_only) {
         return Err(
             "the test preset sets execution.showOnly, and ctest runs no test"
@@ -314,7 +334,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     }
     // A preset's `filter.include.index` picks tests by their position, as `-I` does.
     let select = select && !preset.as_ref().is_some_and(|p| p.by_position);
-    let built = walk(&tests, &root, path_was());
+    let built = walk(&tests, &root, path_was(), &[]);
     let started = SystemTime::now();
     let nanos = started
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -524,7 +544,7 @@ fn choose(
         }
         None => None,
     };
-    let version = version(real).ok()?;
+    let version = version(real, cwd, &[]).ok()?;
     let file = own_dir.join("exclude.txt");
     let at = SelectAt {
         version,
@@ -555,6 +575,7 @@ fn choose(
             &args::listing(&args::parse(&words), &[]),
             cwd,
             log.as_deref(),
+            &[],
         ) else {
             continue;
         };

@@ -128,16 +128,21 @@ impl Recognized {
     /// What the build says each listed unit is built from now, for COMMAND `ctest …`, before it:
     /// `None` when it can't be told, and then the map alone keys the plan.
     fn compiled(&self, at: &PlanAt<'_>) -> Option<Compiled> {
+        self.compiled_with(at, std::env::var_os("PATH"))
+    }
+
+    /// [`Recognized::compiled`] with the real `ctest` found on `path`. \[C-32\] The listing and
+    /// the walk get COMMAND's own `env NAME=value` assignments, as its `ctest` will.
+    fn compiled_with(&self, at: &PlanAt<'_>, path: Option<OsString>) -> Option<Compiled> {
         let words = self.direct.as_ref()?;
         let items = args::parse(words);
         if !matches!(args::mode(&items), args::Mode::Select) {
             return None;
         }
-        let path = std::env::var_os("PATH");
         let real = program::real("ctest", path.as_deref().unwrap_or_default())?;
         let root = std::fs::canonicalize(at.root).ok()?;
-        let (tests, _, _) = run::listed(&real, &items, at.cwd, &root).ok()?;
-        let built = run::walk(&tests, &root, path);
+        let (tests, _, _) = run::listed(&real, &items, at.cwd, &root, at.assigned).ok()?;
+        let built = run::walk(&tests, &root, path, at.assigned);
         let mut out = Compiled::default();
         let mut programs: BTreeMap<&str, bool> = BTreeMap::new();
         for test in &tests {
@@ -529,5 +534,66 @@ mod tests {
         ));
         assert!(recognize(&words("go test ./..."), cwd).is_none());
         assert!(recognize(&words("pytest"), cwd).is_none());
+    }
+
+    // covers: C-49, C-32
+    #[cfg(unix)]
+    #[test]
+    fn the_plans_listing_gets_commands_own_env_assignments() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A ctest that lists its test only for the configuration a variable names, as a
+        // multi-config build's does for `env CTEST_CONFIGURATION_TYPE=Release ctest`.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let build = root.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            "CMAKE_GENERATOR:INTERNAL=Other\n",
+        )
+        .unwrap();
+        std::fs::write(build.join("t_a"), "").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let listing = serde_json::json!({"kind": "ctestInfo", "tests": [
+            {"name": "a", "command": [build.join("t_a")]}]});
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'ctest version 3.22.1' ;;\n  *--show-only=json-v1*) if [ \"$CTEST_CONFIGURATION_TYPE\" = Release ]; then echo '{listing}'; else echo '{{\"tests\": []}}'; fi ;;\nesac\n"
+        );
+        std::fs::write(bin.join("ctest"), script).unwrap();
+        std::fs::set_permissions(bin.join("ctest"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let manifest = format!(
+            "{}\nf {} a.c\0",
+            hushrun_core::CANONICALIZATION,
+            "0".repeat(64)
+        );
+        let tree = units::Tree::from_manifest(manifest.as_bytes()).unwrap();
+        let map = super::super::store::Map::default();
+        let path = Some(OsString::from(bin.as_os_str()));
+        let recognized = Recognized {
+            direct: Some(words("--test-dir build")),
+            dir: OnceLock::new(),
+        };
+        let compiled = |assigned: &[(String, String)]| {
+            let at = PlanAt {
+                tree: &tree,
+                root: &root,
+                cwd: &root,
+                map: &map,
+                asker: None,
+                ignore: &[],
+                compile_env: &[],
+                assigned,
+            };
+            recognized.compiled_with(&at, path.clone())
+        };
+        let assigned = vec![(
+            "CTEST_CONFIGURATION_TYPE".to_string(),
+            "Release".to_string(),
+        )];
+        let with = compiled(&assigned).expect("the listing names the test");
+        assert!(with.units.contains_key("t_a"), "{with:?}");
+        assert!(compiled(&[]).is_none());
     }
 }
