@@ -23,7 +23,8 @@ use super::{ADAPTER, PLAN_FILE, PlanFile};
 /// The program hushrun puts on `PATH` for the CTest adapter.
 pub struct Ctest;
 
-/// What [`Ctest::args`] leaves for [`Ctest::ended`]: one start per process.
+/// What [`Ctest`]'s [`args`](program::Program::args) leaves for its
+/// [`ended`](program::Program::ended): one start per process.
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// What a start of the real `ctest` was given, for reading what it did.
