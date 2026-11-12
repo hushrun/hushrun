@@ -19,9 +19,9 @@ use crate::depinfo;
 use crate::description::{Description, Output, OutputKind, SCHEMA, StoredDepInfo};
 use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
-use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
+use crate::key::{Asked, Bound, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
-use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs};
+use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs, RootName};
 use crate::portable::{self, Portability, Reason};
 use crate::restore::Restore;
 use crate::roots::{Machine, RootPaths, Roots, resolve_on_disk};
@@ -1239,9 +1239,10 @@ impl Call<'_> {
         if !tied && !facts.changed && !through_roots.is_empty() && stored_before().is_none() {
             tied = !self.prove(roots, &through_roots, &outputs)?;
         }
-        // A variable that names only a base is the same in every checkout here: it never ties
-        // the block. Whether its value left a trace of this machine in the outputs (a path
-        // hashed, say) is proved the same way, once: otherwise the block stays here.
+        // A variable that names only a base is the same in every checkout of one person: it
+        // never ties the block to a checkout. Whether its value left a trace in the outputs (a
+        // path hashed, say) is proved the same way, once: otherwise the block stays here, keyed
+        // by the base's value (`bound`, below).
         let variable_names_base = match () {
             _ if through_bases.is_empty() => false,
             _ if tied || facts.changed => true,
@@ -1273,6 +1274,35 @@ impl Call<'_> {
             variable_names_base,
             externs: &common.externs_portable,
         });
+        // B-10: a block that holds a folder of this machine holds its value here. One store can
+        // serve people with other homes, and one person can move a cargo home or a toolchain:
+        // the block is keyed by those folders' values, so another value finds another block and
+        // stores its own beside it.
+        let mut bound: Vec<Bound> = Vec::new();
+        for reason in &portability.reasons {
+            match reason {
+                Reason::CargoHomeInOutput | Reason::CargoHomeInRecord => {
+                    bound.push(Bound::CargoHome);
+                }
+                Reason::RustupHomeInOutput | Reason::RustupHomeInRecord => {
+                    bound.push(Bound::RustupHome);
+                }
+                Reason::HomeInOutput | Reason::HomeInRecord => bound.push(Bound::Home),
+                Reason::VariableNamesBase => {
+                    for (_, value) in &through_bases {
+                        for name in roots.named(value) {
+                            match name {
+                                RootName::CargoHome => bound.push(Bound::CargoHome),
+                                RootName::Toolchain => bound.push(Bound::Toolchain),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        observed.bound = roots.bound(&bound);
         if self.current.key_log.is_some() {
             self.keys.borrow_mut().in_outputs = in_outputs.into_iter().collect();
         }

@@ -3294,6 +3294,21 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
 /// [`a_machine`], with `CARGO_HOME` and `RUSTUP_HOME` set to these folders under the machine's
 /// root, as an image that installs Rust under a system folder does.
 fn a_machine_with(user: &str, toolchain: &str, homes: Option<(&str, &str)>) -> Box2 {
+    a_machine_on(user, toolchain, homes, None)
+}
+
+/// [`a_machine`], another user of a machine whose store is `store` (`HUSHRUN_BUILD_DIR`), as a
+/// group-writable store two people share.
+fn a_user_of(user: &str, toolchain: &str, store: &Path) -> Box2 {
+    a_machine_on(user, toolchain, None, Some(store.to_path_buf()))
+}
+
+fn a_machine_on(
+    user: &str,
+    toolchain: &str,
+    homes: Option<(&str, &str)>,
+    store: Option<PathBuf>,
+) -> Box2 {
     let dir = tempfile::tempdir().unwrap();
     let root = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
     let home = root.join("home").join(user);
@@ -3319,6 +3334,7 @@ fn a_machine_with(user: &str, toolchain: &str, homes: Option<(&str, &str)>) -> B
             session::KEY_LOG => Some(key_log.clone().into_os_string()),
             "CARGO_HOME" => set.as_ref().map(|s| s.0.clone().into_os_string()),
             "RUSTUP_HOME" => set.as_ref().map(|s| s.1.clone().into_os_string()),
+            "HUSHRUN_BUILD_DIR" => store.clone().map(PathBuf::into_os_string),
             _ => None,
         }
     };
@@ -3935,4 +3951,64 @@ fn a_variable_naming_the_cargo_home_is_proved_before_a_block_may_leave() {
         assert_eq!(second.outcome(), REUSED);
         assert_eq!(second.entry.unwrap().portable.unwrap(), found);
     }
+}
+
+// covers: B-10, B-24
+#[test]
+fn a_block_that_holds_one_users_cargo_home_is_not_another_users_on_a_shared_store() {
+    // Two people on one machine share a store; each has a cargo home of their own, and a
+    // library writes the cargo home into its bytes (`env!("CARGO_HOME")`, kept for run time).
+    let one = a_machine("dev", "stable-aarch64-apple-darwin");
+    let store = one.w.session.current().store.clone();
+    let two = a_user_of("dev2", "stable-aarch64-apple-darwin", &store);
+    assert_eq!(two.w.session.current().store, store);
+    let call = |m: &Box2, ws: &Path| {
+        m.w.plan(
+            "a",
+            Plan {
+                embed_var: Some("CARGO_HOME".into()),
+                ..Plan::default()
+            },
+        );
+        m.w.call_with(ws, "a", &[], |fake| {
+            m.toolchain_vars(fake);
+            fake.vars
+                .insert("CARGO_HOME".into(), m.cargo_home.to_str().unwrap().into());
+        })
+    };
+    let embedded = |ws: &Path| {
+        let rlib = fs::read_to_string(ws.join("target/debug/deps/liba-xa.rlib")).unwrap();
+        rlib.lines()
+            .find_map(|line| line.strip_prefix("embedded ").map(str::to_string))
+            .unwrap()
+    };
+    let ws1 = one.w.checkout("ws");
+    let ws2 = two.w.checkout("ws");
+    settle();
+    let first = call(&one, &ws1);
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    assert!(
+        !first
+            .entry
+            .as_ref()
+            .unwrap()
+            .portable
+            .as_ref()
+            .unwrap()
+            .portable,
+        "the block holds the cargo home"
+    );
+    // The other user's compile is not the first user's block: it holds their own cargo home.
+    let second = call(&two, &ws2);
+    assert_eq!(second.outcome(), STORED, "{}", second.stderr);
+    assert_eq!(embedded(&ws2), two.cargo_home.to_str().unwrap());
+    // And each finds their own block from then on.
+    for ws in [&ws1, &ws2] {
+        fs::remove_dir_all(ws.join("target")).unwrap();
+        fs::create_dir_all(ws.join("target/debug/deps")).unwrap();
+    }
+    assert_eq!(call(&one, &ws1).outcome(), REUSED);
+    assert_eq!(embedded(&ws1), one.cargo_home.to_str().unwrap());
+    assert_eq!(call(&two, &ws2).outcome(), REUSED);
+    assert_eq!(embedded(&ws2), two.cargo_home.to_str().unwrap());
 }

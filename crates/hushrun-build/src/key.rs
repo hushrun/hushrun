@@ -21,8 +21,9 @@ pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 /// The schema of the second key. v5: reads under the cargo home and the toolchain named as
 /// bases, a proc macro named by what it was built from. v6: and by its metadata. v7: a library
 /// that bundled nothing names its native folders without their static libraries. v8: only the
-/// crate's own objects count as rustc's (a v7 hint judged by a member's suffix).
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v8";
+/// crate's own objects count as rustc's (a v7 hint judged by a member's suffix). v9: a block
+/// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]).
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v9";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -295,6 +296,26 @@ pub struct Observed {
     pub link: Option<Link>,
     /// Where the block may be reused.
     pub place: Place,
+    /// The machine's folders the block holds (in an output, in a record, or through a variable
+    /// that names a base), each with its forms on the machine that built it (B-10): such a block
+    /// is reused only where they are the same. Empty for any other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound: Vec<(Bound, Vec<String>)>,
+}
+
+/// A folder of the machine whose value a block can hold (B-10): the three that outputs are
+/// searched for, and the toolchain, which a variable can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Bound {
+    /// The cargo home.
+    CargoHome,
+    /// The rustup home.
+    RustupHome,
+    /// The home folder.
+    Home,
+    /// The toolchain's folder.
+    Toolchain,
 }
 
 impl Observed {
@@ -310,6 +331,7 @@ impl Observed {
     pub fn known_by(&self) -> Result<Digest, KeyError> {
         let mut body = self.body()?;
         body.place = Place::Anywhere;
+        body.bound = Vec::new();
         if let Some(link) = body.link.as_mut() {
             link.linker = String::new();
             link.sdk = String::new();
@@ -350,6 +372,21 @@ impl Observed {
                 |d| d.dir.clone(),
             )?,
             bundles_nothing: self.bundles_nothing,
+            bound: {
+                let mut bound: Vec<(Bound, Vec<String>)> = self
+                    .bound
+                    .iter()
+                    .map(|(name, forms)| {
+                        let mut forms = forms.clone();
+                        forms.sort();
+                        forms.dedup();
+                        (*name, forms)
+                    })
+                    .collect();
+                bound.sort();
+                bound.dedup();
+                bound
+            },
             shape: normalize_shape(&self.shape)?,
             generated: self
                 .generated
@@ -480,6 +517,8 @@ struct BlockBody {
     native_dirs: Vec<NativeDir>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     bundles_nothing: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    bound: Vec<(Bound, Vec<String>)>,
     shape: Vec<Shape>,
     generated: Option<Vec<Generated>>,
     declared: Option<DeclaredBody>,
@@ -607,6 +646,10 @@ pub struct ReadList {
     /// besides (its sources and flags), so a compile that bundles one never finds this key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bundles_nothing: bool,
+    /// The machine's folders the block holds ([`Observed::bound`]): the lookup keys them by
+    /// their values on this machine, so another value of one finds another block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound: Vec<Bound>,
 }
 
 /// The digest of a call's roots as [`crate::roots::Roots::tied`] gives them, in any order.
@@ -655,6 +698,7 @@ impl ReadList {
                 Place::Tied(roots) => Some(roots_digest(roots)),
             },
             bundles_nothing: observed.bundles_nothing,
+            bound: sorted(observed.bound.iter().map(|(name, _)| *name).collect()),
         }
     }
 }
@@ -745,6 +789,7 @@ mod tests {
                 archives: vec![("libx.a".into(), d(11))],
             }],
             bundles_nothing: false,
+            bound: Vec::new(),
             shape: vec![Shape {
                 dir: at(RootName::Package, "src"),
                 names: vec!["lib.rs".into(), "util.rs".into()],
@@ -790,12 +835,41 @@ mod tests {
         assert_eq!(asked().key().unwrap(), Digest::of(text.as_bytes()));
     }
 
+    // covers: B-10
+    #[test]
+    fn a_block_that_holds_a_machine_folder_is_keyed_by_its_value() {
+        let base = observed();
+        let mut one = observed();
+        one.bound = vec![(Bound::CargoHome, vec!["/home/dev/.cargo".into()])];
+        let mut two = observed();
+        two.bound = vec![(Bound::CargoHome, vec!["/home/dev2/.cargo".into()])];
+        assert_ne!(one.key().unwrap(), base.key().unwrap());
+        assert_ne!(one.key().unwrap(), two.key().unwrap());
+        // Forms in any order are one value.
+        let mut both = observed();
+        both.bound = vec![(
+            Bound::CargoHome,
+            vec!["/b/.cargo".into(), "/a/.cargo".into()],
+        )];
+        let mut again = observed();
+        again.bound = vec![(
+            Bound::CargoHome,
+            vec!["/a/.cargo".into(), "/b/.cargo".into()],
+        )];
+        assert_eq!(both.key().unwrap(), again.key().unwrap());
+        // What a dependent names a proc macro by leaves it out, as it leaves out the place.
+        assert_eq!(one.known_by().unwrap(), two.known_by().unwrap());
+        // The hint says which folders, never their values.
+        assert_eq!(ReadList::of(&one), ReadList::of(&two));
+        assert_eq!(ReadList::of(&one).bound, vec![Bound::CargoHome]);
+    }
+
     // covers: B-6
     #[test]
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "3e0a8b308d2c97d632ec99259519ebd29656c6cbace004b570dc0bd9986ddba3"
+            "c477f0d37dd0f51d39f14aead9069613c63277607f5356609f483ef21b7c77bd"
         );
     }
 

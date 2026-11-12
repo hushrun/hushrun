@@ -165,9 +165,10 @@ found it) and the toolchain (the compiler's sysroot, B-17, and its view without 
 A path under a base is recorded, like one under a root, as the base's name and the rest
 (`{hushrun:cargo-home}/registry/src/…`, `{hushrun:toolchain}/lib/rustlib/…`) in arguments,
 keyed variables, reads and hints, so that keys and hints name no machine's folder. Unlike a
-root, a base is the same for every checkout on the machine: it never ties a block, and B-10
-doesn't search for it to decide a place. Where a root and a base hold the same path, the root
-names it.
+root, a base is the same for every checkout of one person: it never ties a block to a
+checkout, and B-10 doesn't search for it to decide a place. A block whose bytes or records hold
+a base's value is keyed by that value (`bound`, B-24), since two people on one store, or one who
+moves the base, have another. Where a root and a base hold the same path, the root names it.
 
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
 adds `--remap-path-prefix` for the cargo home, as `/hushrun/cargo`, for the workspace, as `.`,
@@ -437,8 +438,18 @@ wrapper answers by content as usual. Nothing is asked of the person.
 **B-24 Portable.** A block is **portable**, and is the only kind that may ever leave the machine
 that built it, when nothing in its keys, its hint, its record or its bytes names that machine.
 One function decides it, from the compile's facts, and records the answer with every reason
-that holds in the block's description and in the run's log; a block is reused on its own machine
-exactly as before, whatever the answer. The reasons:
+that holds in the block's description and in the run's log. On its own machine a block is
+reused whatever the answer, with one condition: a block that holds one of the machine's folders
+(the `…-in-output`, `…-in-record` and `variable-names-base` reasons below) has those folders'
+values in its second key, as `bound`: each of the cargo home, the rustup home, the home folder
+and, for a variable that names it, the toolchain, with its forms on the machine that built it.
+Its hint names which folders, never their values, and the lookup fills in this machine's. So
+two people with other homes on one store, or one person who moves `CARGO_HOME` or a toolchain,
+find another key: each compiles once and stores a block of their own beside the other's, and
+neither is refused. *Rests on:* the search (B-10) and the proof of a variable that names a base
+finding every folder a block holds. *Breaks if:* a block held such a folder in a form neither
+search nor proof sees (hashed, or split across bytes); it would be reused as before, on this
+machine only, since it is not portable either. The reasons:
 
 - `linked`: a program, a proc macro or a build-script binary. Its linker, C runtime and SDK have
   no content identity yet.

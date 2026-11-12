@@ -527,6 +527,43 @@ impl Roots {
         &self.machine
     }
 
+    /// Each of these folders of the machine with its forms here, sorted; no form when this
+    /// machine doesn't have it. What a block that holds them is keyed by (B-10).
+    pub fn bound(&self, names: &[crate::key::Bound]) -> Vec<(crate::key::Bound, Vec<String>)> {
+        use crate::key::Bound;
+        let mut out: Vec<(Bound, Vec<String>)> = names
+            .iter()
+            .map(|name| {
+                let mut forms: Vec<String> = match name {
+                    Bound::Toolchain => self
+                        .bases
+                        .iter()
+                        .filter(|base| base.name == RootName::Toolchain)
+                        .flat_map(|base| [base.given.clone(), base.resolved.clone()])
+                        .collect(),
+                    folder => {
+                        let folder = match folder {
+                            Bound::CargoHome => Folder::CargoHome,
+                            Bound::RustupHome => Folder::RustupHome,
+                            _ => Folder::Home,
+                        };
+                        self.machine
+                            .iter()
+                            .filter(|(f, _)| *f == folder)
+                            .map(|(_, form)| form.clone())
+                            .collect()
+                    }
+                };
+                forms.sort();
+                forms.dedup();
+                (*name, forms)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The roots and bases a text names, by its placeholders once replaced.
     pub fn named(&self, text: &str) -> Vec<RootName> {
         let replaced = self.to_placeholders(text);

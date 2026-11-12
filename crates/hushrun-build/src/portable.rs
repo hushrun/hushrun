@@ -272,6 +272,7 @@ mod tests {
             native: vec![],
             native_dirs: vec![],
             bundles_nothing: false,
+            bound: Vec::new(),
             shape: vec![],
             generated: None,
             declared: None,
