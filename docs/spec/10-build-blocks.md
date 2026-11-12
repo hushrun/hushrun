@@ -153,7 +153,14 @@ matches no program compiled now and would keep it from being stored (B-18).
 After it, it removes the bundle's `Contents/Resources/Relocations`, which names the program by
 its absolute path and which no debugger reads. A program set to `tied`, a program whose own
 flags say `-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug
-info and a program for any other target are left as they are. It changes nothing else.
+info and a program for any other target are left as they are. When the toolchain holds the
+sources of the standard library or of the compiler (`lib/rustlib/src`, rustup's `rust-src`;
+`lib/rustlib/rustc-src`, `rustc-dev`), every compile also gets `--sysroot` naming a folder of
+links to everything else in the toolchain (B-17): rustc maps the standard library's
+`/rustc/<commit>/` paths to those folders when they are there and reads macro text from them,
+which changes crate hashes, metadata and debug info, so a machine with them and one without
+would compile one key two ways. Paths under that folder are paths under the toolchain (B-8). It
+changes nothing else.
 
 No block comes from an incremental compile, and an edit never loses incremental compilation: a
 compile that asks for `-C incremental`, finds no block, and already has its dep-info file in the
@@ -230,18 +237,23 @@ proc macros are not compared. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` 
 every such compile when it is `every` and none when it is `none`: a replay that compares two
 machines asks for the first, a test that expects a reuse for the second.
 
-**B-17 The compiler.** The compiler's identity is: the path given, resolved; its size and
-modification time; `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; under rustup, the size and modification
-time of the toolchain's own `rustc` and of its `librustc_driver`; the output of `rustc -vV`; and
-the standard library: the names, sizes and modification times of the files in
-`<sysroot>/lib/rustlib/<triple>/lib/` for the host and for the call's `--target`. The compiler's
-built-in targets are the output of `rustc --print target-list`. `-vV`, the target list, the
-standard library's listing and which `librustc_driver` files the toolchain's `lib/` holds are kept
-per compiler and target, and computed again when a standard library folder, a `lib/` folder or
-one of those files changes. They are kept only when every one of those folders and files, and
-the compiler's own files, is dated before what keeps them: a file system may date from a clock
-that moves once a tick (Linux), so a folder changed twice in one tick keeps its dates. A rustup
-proxy with no `RUSTUP_TOOLCHAIN` is passed through.
+**B-17 The compiler.** The compiler's identity is its content, so that one toolchain installed
+on two machines, under any folder or name, is one compiler: the output of `rustc -vV`; the
+SHA-256 of the compiler's own binary (under rustup the toolchain's `bin/rustc`, never the proxy);
+the SHA-256 of each compiler library in the toolchain's `lib/` (`librustc_driver-*`, `libLLVM*`),
+by name; and the SHA-256 of each file under `<sysroot>/lib/rustlib/<triple>/lib/`, by its path
+there, for the host and for the call's `--target`. Whether the toolchain holds sources is not
+part of it: no compile sees them (B-9). The folder without them is made once per toolchain and
+set of entries, named by the toolchain's path and the names in its own folder, in `lib/` and in
+`lib/rustlib/`, so a target or component installed later gives a new one; one that can't be made
+is a compiler of unknown identity. The compiler's built-in targets are the output of
+`rustc --print target-list`. The content, `-vV` and the target list are kept per compiler and
+target in a memo named by the compiler's path, size and dates, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`
+and the stamps of the `lib/` folders, and computed again when a standard library folder, a `lib/`
+folder or a compiler library changes. A memo is kept only when every one of those folders and
+files, and the compiler's own files, is dated before it: a file system may date from a clock that
+moves once a tick (Linux), so a folder changed twice in one tick keeps its dates. A rustup proxy
+with no `RUSTUP_TOOLCHAIN` is passed through.
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
 reports with `--print=link-args`; the libraries named with `-l` and the files options name, as

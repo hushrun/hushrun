@@ -168,6 +168,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         floor,
         link_extra: Vec::new(),
         sysroot: None,
+        hide_sources: None,
         bundle: false,
         clear_bundle: false,
         keys: std::cell::RefCell::new(KeyLine::default()),
@@ -240,6 +241,8 @@ struct Call<'a> {
     link_extra: Vec<OsString>,
     /// The compiler's sysroot (B-17), where a link's `-B` folders must lie (B-18).
     sysroot: Option<PathBuf>,
+    /// `--sysroot=<the toolchain without its sources>`, when it has sources (B-9, B-17).
+    hide_sources: Option<OsString>,
     /// A program that gets a debug bundle and may move (B-9): its compile is changed so, and
     /// its block carries the bundle.
     bundle: bool,
@@ -640,6 +643,12 @@ impl Call<'_> {
             return self.pass(PassedThrough::Compiler);
         };
         self.sysroot = identity.sysroot.clone();
+        // Every compile sees the toolchain as one without sources does (B-9, B-17).
+        self.hide_sources = identity.hidden_sources.as_ref().map(|view| {
+            let mut arg = OsString::from("--sysroot=");
+            arg.push(view);
+            arg
+        });
         // A target that is not one of the compiler's own is a file rustc loads (B-4).
         if inv
             .target()
@@ -652,6 +661,11 @@ impl Call<'_> {
             cargo_home: self.current.cargo_home.clone(),
             toolchain: identity
                 .sysroot
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_string),
+            toolchain_view: identity
+                .hidden_sources
                 .as_ref()
                 .and_then(|path| path.to_str())
                 .map(str::to_string),
@@ -929,9 +943,7 @@ impl Call<'_> {
     ) -> i32 {
         let inv = self.invocation;
         let linked = inv.class() != Class::Library;
-        let mut extra = roots.remap_args();
-        extra.extend(self.link_extra.iter().cloned());
-        let args = inv.command(&extra);
+        let args = inv.command(&self.added(roots));
         let rustc = OsString::from(inv.rustc());
         let before = if inv.class() == Class::Program && !self.bundle {
             debug_objects(&self.out_dir(), &inv.file_stem())
@@ -1295,8 +1307,7 @@ impl Call<'_> {
         let inv = self.invocation;
         let scratch_out = scratch.join("out");
         std::fs::create_dir_all(&scratch_out).map_err(|_| NotStored::PlaceCheck)?;
-        let mut extra = roots.remap_args();
-        extra.extend(self.link_extra.iter().cloned());
+        let mut extra = self.added(roots);
         let mut env = Vec::with_capacity(vars.len());
         for (i, (name, value)) in vars.iter().enumerate() {
             let target = Path::new(inv.cwd()).join(value);
@@ -1340,6 +1351,15 @@ impl Call<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// What the wrapper adds to a compile it doesn't pass through (B-9): the remaps, the
+    /// sysroot without sources when the toolchain has sources, and a linked output's additions.
+    fn added(&self, roots: &Roots) -> Vec<OsString> {
+        let mut extra = roots.remap_args();
+        extra.extend(self.hide_sources.iter().cloned());
+        extra.extend(self.link_extra.iter().cloned());
+        extra
     }
 
     /// Whether `dir` lies under the compiler's sysroot, in either form.

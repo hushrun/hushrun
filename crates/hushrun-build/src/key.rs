@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Located, RootName};
 
 /// The schema of the first key. v6: the compiler by content, the cargo home and the toolchain
-/// named as bases.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v6";
+/// named as bases. v7: no compile sees the toolchain's sources.
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 
 /// The schema of the second key. v5: reads under the cargo home and the toolchain named as
 /// bases, a proc macro named by what it was built from.
@@ -742,11 +742,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "3a1a023a050edbb3c8e08de313a82d74358a09d1d9ceaf066f7a904fd33f806e"
+            "9845ee648cfb553df63b7a9441144b665f331711c85a5e010421910f05b85b8f"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v6",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v7",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,

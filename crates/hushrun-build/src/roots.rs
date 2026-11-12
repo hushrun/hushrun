@@ -63,6 +63,10 @@ pub struct Machine {
     pub cargo_home: Option<String>,
     /// The toolchain's folder: the compiler's sysroot (B-17).
     pub toolchain: Option<String>,
+    /// The sysroot without sources compiles are given (B-9, B-17): its links lead into the
+    /// toolchain, so a path under it is recorded as one under the toolchain, and recorded paths
+    /// are looked up under the toolchain itself.
+    pub toolchain_view: Option<String>,
     /// The rustup home: `RUSTUP_HOME`, else `~/.rustup`. Not a base: only searched for.
     pub rustup_home: Option<String>,
     /// The home folder, `HOME`. Not a base: only searched for.
@@ -239,9 +243,12 @@ impl Roots {
             both(path).ok()
         };
         let mut bases = Vec::new();
+        // The view comes after the toolchain: a placeholder is resolved under the first base of
+        // its name.
         for (name, path) in [
             (RootName::CargoHome, &machine.cargo_home),
             (RootName::Toolchain, &machine.toolchain),
+            (RootName::Toolchain, &machine.toolchain_view),
         ] {
             if let Some((given, resolved)) = usable(path) {
                 bases.push(Root {
@@ -1232,6 +1239,7 @@ mod tests {
         Machine {
             cargo_home: Some(format!("{home}/.cargo")),
             toolchain: Some(format!("{home}/.rustup/toolchains/{toolchain}")),
+            toolchain_view: None,
             rustup_home: Some(format!("{home}/.rustup")),
             home: Some(home.to_string()),
         }
@@ -1428,6 +1436,7 @@ mod tests {
             &Machine {
                 cargo_home: Some("/".into()),
                 toolchain: Some("relative/toolchain".into()),
+                toolchain_view: None,
                 rustup_home: Some(String::new()),
                 home: Some("/".into()),
             },

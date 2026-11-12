@@ -300,7 +300,20 @@ impl Fake {
         let Some(text) = plans.get(&name).and_then(|p| p.stdout.clone()) else {
             return Vec::new();
         };
+        // The sysroot rustc uses: the one `--sysroot` names, else the toolchain's.
+        let sysroot = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--sysroot=").map(str::to_string))
+            .or_else(|| {
+                Some(format!(
+                    "{}/toolchains/{}",
+                    self.vars.get("RUSTUP_HOME")?,
+                    self.vars.get("RUSTUP_TOOLCHAIN")?
+                ))
+            })
+            .unwrap_or_default();
         text.replace("{ws}", self.cwd.to_str().unwrap())
+            .replace("{sysroot}", &sysroot)
             .into_bytes()
     }
 }
@@ -3397,6 +3410,112 @@ fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_bet
     );
     assert!(!dep_info.contains(a.home.to_str().unwrap()), "{dep_info}");
     assert_eq!(c.keys()["reg"]["portable"]["portable"], true);
+}
+
+/// Gives machine `m`'s toolchain the standard library's sources, as rustup's `rust-src` does.
+fn with_rust_src(m: &Box2) {
+    let sysroot = m.home.join(".rustup/toolchains").join(&m.toolchain);
+    for rest in [
+        "lib/rustlib/src/rust/library/std/src/lib.rs",
+        "lib/rustlib/src/rust/library/core/src/macros/mod.rs",
+    ] {
+        fs::create_dir_all(sysroot.join(rest).parent().unwrap()).unwrap();
+        fs::write(sysroot.join(rest), "// the source").unwrap();
+    }
+    fs::write(sysroot.join("lib/rustlib/manifest-rust-src"), "file:x\n").unwrap();
+}
+
+/// The `--sysroot` a compile was given, if any.
+fn sysroot_arg(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .find_map(|a| a.strip_prefix("--sysroot=").map(PathBuf::from))
+}
+
+// covers: B-5, B-9, B-17
+#[test]
+fn a_machine_with_the_standard_librarys_sources_compiles_as_one_without_them() {
+    // rustc reads a standard library macro's text from `lib/rustlib/src` when it is there, and
+    // a crate that expands `unreachable!("…")` gets another crate hash: on two machines, one
+    // with rust-src and one without, one key would name two different libraries. Every compile
+    // gets a sysroot without the sources instead, and the keys stay equal.
+    let a = a_machine("runner", "stable-aarch64-apple-darwin");
+    let b = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&b);
+    for m in [&a, &b] {
+        m.w.plan(
+            "reg",
+            Plan {
+                reads: vec![m.package().join("src/util.rs").to_str().unwrap().into()],
+                ..Plan::default()
+            },
+        );
+        m.w.plan("a", Plan::default());
+    }
+    let ws_a = a.w.checkout("ws");
+    let ws_b = b.w.checkout("another/ws");
+    settle();
+    let (reg_a, reg_b) = (a.call_reg(&ws_a), b.call_reg(&ws_b));
+    assert_eq!((reg_a.outcome(), reg_b.outcome()), (STORED, STORED));
+    assert_eq!(sysroot_arg(&reg_a.seen.compiles[0]), None, "nothing to hide");
+    let view = sysroot_arg(&reg_b.seen.compiles[0]).expect("a sysroot without the sources");
+    let toolchain_b = b.home.join(".rustup/toolchains").join(&b.toolchain);
+    assert!(toolchain_b.join("lib/rustlib/src").is_dir());
+    assert!(!view.join("lib/rustlib/src").exists(), "{}", view.display());
+    assert_eq!(
+        fs::read(view.join("lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib")).unwrap(),
+        b"std"
+    );
+    assert!(!view.starts_with(&toolchain_b));
+    // What was asked and what was read are the same on both machines.
+    let (a_crate, b_crate) = (a.call_a(&ws_a), b.call_a(&ws_b));
+    assert_eq!((a_crate.outcome(), b_crate.outcome()), (STORED, STORED));
+    assert!(sysroot_arg(&b_crate.seen.compiles[0]).is_some());
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    for name in ["reg", "a"] {
+        assert_eq!(keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"], "{name}");
+        assert_eq!(keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"], "{name}");
+        assert_eq!(library_files(&ws_a, name), library_files(&ws_b, name));
+    }
+}
+
+// covers: B-8, B-9, B-18
+#[test]
+fn a_proc_macro_linked_through_the_sysroot_without_sources_names_the_toolchain_and_moves() {
+    // The link line names the standard library under the sysroot the compile was given. Those
+    // paths are the toolchain's: the block is not tied by them, and moves between checkouts.
+    let m = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&m);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "{sysroot}/lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let call = |ws: &Path| {
+        let mut args = m.w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        m.w.call_args(ws, "a", args, |fake| m.toolchain_vars(fake))
+    };
+    let checkout = |name: &str| {
+        let ws = m.w.checkout(name);
+        fs::create_dir_all(ws.join("tools")).unwrap();
+        fs::write(ws.join("tools/cc"), b"driver").unwrap();
+        ws
+    };
+    let (one, two) = (checkout("one"), checkout("two-longer"));
+    settle();
+    let first = call(&one);
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    assert!(sysroot_arg(&first.seen.compiles[0]).is_some());
+    let portable = first.entry.unwrap().portable.unwrap();
+    assert!(
+        !portable.reasons.contains(&crate::portable::Reason::Tied),
+        "{portable:?}"
+    );
+    assert_eq!(call(&two).outcome(), REUSED);
 }
 
 /// Copies every file under `from` to the same place under `to`.
