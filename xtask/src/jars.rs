@@ -86,6 +86,8 @@ struct Jar {
     sources: &'static str,
     out: &'static str,
     api: &'static [Api],
+    /// Lines its manifest adds, each ending in CRLF.
+    manifest: &'static str,
 }
 
 const JARS: &[Jar] = &[
@@ -94,12 +96,15 @@ const JARS: &[Jar] = &[
         sources: "crates/hushrun/jvm/test-jvm-hook",
         out: "crates/hushrun/jvm/hushrun-test-jvm-hook.jar",
         api: JUNIT_PLATFORM,
+        // Gradle's script also gives it to each test JVM as a Java agent.
+        manifest: "Premain-Class: dev.hushrun.testjvm.Agent\r\n",
     },
     // The Maven core extension: the reactor's model, and the hook's list from hushrun.json.
     Jar {
         sources: "crates/hushrun/jvm/maven-extension",
         out: "crates/hushrun/jvm/hushrun-maven-extension.jar",
         api: MAVEN,
+        manifest: "",
     },
 ];
 
@@ -124,6 +129,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<bool> {
             &root.join(jar.sources),
             &classpath,
             &work.join("build"),
+            jar.manifest,
         )?;
         let out = root.join(jar.out);
         if check {
@@ -216,7 +222,13 @@ fn fetch(dir: &Path, api: &Api) -> Result<PathBuf> {
 }
 
 /// The jar's bytes, compiled from `sources` in a fresh directory under `work`.
-fn build(javac: &Path, sources: &Path, classpath: &[PathBuf], work: &Path) -> Result<Vec<u8>> {
+fn build(
+    javac: &Path,
+    sources: &Path,
+    classpath: &[PathBuf],
+    work: &Path,
+    manifest: &str,
+) -> Result<Vec<u8>> {
     let classes = work.join("classes");
     if classes.exists() {
         fs::remove_dir_all(&classes)?;
@@ -272,7 +284,8 @@ fn build(javac: &Path, sources: &Path, classpath: &[PathBuf], work: &Path) -> Re
     }
     let mut all = vec![(
         "META-INF/MANIFEST.MF".to_string(),
-        b"Manifest-Version: 1.0\r\nCreated-By: cargo xtask jars\r\n\r\n".to_vec(),
+        format!("Manifest-Version: 1.0\r\nCreated-By: cargo xtask jars\r\n{manifest}\r\n")
+            .into_bytes(),
     )];
     all.extend(entries);
     Ok(zip(&all))

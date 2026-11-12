@@ -223,6 +223,32 @@ for a failure whose description names no type. A run checks the mixed case, one 
 real and another's JVM dying in its class teardown, with each class in a JVM of its own, on
 Gradle 8.14.5 and 9.3.1, and with the words switched off it holds by the type alone.
 
+## Amendment 8: a test that ends its JVM, told by the hook as an agent (2026-11-12)
+
+Amendments 3 and 7 needed the task to fail. A test that calls `System.exit(0)` under JUnit 4 or
+TestNG on Gradle's own runners ends its JVM: Gradle calls the test in flight skipped, never
+reports the rest of the class, and calls the task successful; those runners load no listener of
+the hook, so no class was seen open, and the class was recorded as passed.
+
+The decision: the script gives each test JVM of a run the hook's jar as a Java agent
+(`-javaagent`, `Premain-Class` in its manifest). The agent transforms nothing: it writes that the
+JVM began and registers a shutdown hook that writes that it ended, whether a thread called
+`System.exit`, and the frames below that call. A JVM that began and never said it ended (a halt, a
+kill, an out-of-memory death, Gradle's own timeout) ran nothing of its task whole; one a test
+ended (frames of a test framework below the exit) leaves the classes whose frames are there not
+run whole, or, when none is a class of the task, the whole task; and an exit that Gradle's worker
+didn't call (a thread a test started) is the same as a halt. Gradle's worker ends a test JVM
+normally by calling `System.exit` from `GradleWorkerMain`, which a run showed on Gradle 9.3.1, and
+the Gradle tests show on 8.14.5.
+
+What was tried, in the order asked: a TestNG listener through TestNG's own service loading would
+have told TestNG's classes open, but JUnit 4 on Gradle's own runner loads nothing from the
+classpath by itself, so it couldn't hold for both; the agent holds for both, and for the JUnit
+Platform too, so it was kept alone. The conservative rule (a class with a skipped test under a
+runner without events never reused whole) wasn't needed. Maven's Surefire already fails the
+build when a test ends its fork (`The forked VM terminated without properly saying goodbye`), and
+writes no report of that class: a test checks it.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

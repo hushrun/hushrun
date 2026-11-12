@@ -1355,3 +1355,43 @@ fn a_module_this_command_didnt_build_keeps_its_sources_on_the_lists_of_the_tests
         second.ran()
     );
 }
+
+// covers: C-32, C-47
+#[test]
+fn a_test_that_ends_its_fork_with_system_exit_records_no_pass() {
+    let Some(maven) = maven() else { return };
+    // JUnit 4 without the hook and JUnit 5 with it: `b` ends the fork with `System.exit(0)`.
+    let exit4 = "package shop.core;\n\nimport org.junit.*;\nimport org.junit.runners.MethodSorters;\n\n@FixMethodOrder(MethodSorters.NAME_ASCENDING)\npublic class ExitTest {\n  @Test public void a() {}\n  @Test public void b() { if (System.getenv(\"SHOP_EXIT\") != null) System.exit(0); }\n  @Test public void c() { Assert.fail(\"c\"); }\n}\n";
+    let exit5 = "package shop.lib;\n\nimport org.junit.jupiter.api.*;\n\n@TestMethodOrder(MethodOrderer.MethodName.class)\nclass ExitTest {\n  @Test void a() {}\n  @Test void b() { if (System.getenv(\"SHOP_EXIT\") != null) System.exit(0); }\n  @Test void c() { Assertions.fail(\"c\"); }\n}\n";
+    let mut four = junit4("observe");
+    four.push(file("core/src/test/java/shop/core/ExitTest.java", exit4));
+    let mut five = shop("observe");
+    five.push(file("lib/src/test/java/shop/lib/ExitTest.java", exit5));
+    // Run last of its module: JUnit 4's AskTest, CalcTest and CrashTest pass first; lib's
+    // RoundTest and PriceTest, and other's three, in JUnit 5.
+    for (files, order, passed) in [(four, "alphabetical", 3), (five, "reversealphabetical", 5)] {
+        let r = Repo::new(&files, maven.clone());
+        let ran = r.run(
+            &[],
+            &[
+                "--fail-at-end",
+                "test",
+                &format!("-Dsurefire.runOrder={order}"),
+            ],
+            &[("SHOP_EXIT", "1")],
+        );
+        assert_ne!(ran.code, 0, "{}\n{}", ran.stderr, ran.stdout);
+        assert!(
+            ran.stdout.contains("The forked VM terminated"),
+            "{}",
+            ran.stdout
+        );
+        assert_eq!(
+            r.unit_results(),
+            BTreeMap::from([("pass".into(), passed)]),
+            "{order}: {}\n{}",
+            ran.stderr,
+            ran.stdout
+        );
+    }
+}

@@ -559,6 +559,29 @@ fn units_of(
             && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
     // A failure outside any class: no test of the task is known to have run whole.
     let outside = report.suite_failures.iter().any(|s| s.c.is_none());
+    // \[C-32\] The hook's agent: a test JVM of the task stopped before its runner was done, which
+    // Gradle may call a success (a test's `System.exit(0)`). The classes whose frames were below
+    // the exit didn't run whole; `None` when which can't be told (a halt, a kill, an exit from
+    // elsewhere): then nothing of the task did.
+    let stopped: Option<BTreeSet<String>> = events
+        .iter()
+        .flat_map(BTreeMap::values)
+        .filter(|jvm| jvm.stopped_early())
+        .try_fold(BTreeSet::new(), |mut classes, jvm| {
+            let end = jvm.ended.as_ref().filter(|end| end.by_test)?;
+            let found: Vec<String> = end
+                .stack
+                .split(' ')
+                .filter_map(|frame| frame.rsplit_once('.').map(|(class, _)| outer_of(class)))
+                .filter(|class| report.names.contains_key(*class))
+                .map(str::to_string)
+                .collect();
+            if found.is_empty() {
+                return None;
+            }
+            classes.extend(found);
+            Some(classes)
+        });
     // A test JVM that died: the type of the task's failure says so (Gradle's test executer
     // wraps a test process that ended badly in a `TestSuiteExecutionException`, caused by the
     // process's `ProcessExecutionException`, an `ExecException` before Gradle 9); or a failure no
@@ -574,16 +597,19 @@ fn units_of(
         || report
             .task_failures
             .iter()
-            .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"));
+            .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"))
+        || stopped.is_none();
     let whole = whole && !outside && !died && events.is_ok();
-    // The classes a test JVM started and never ended, by their outer class.
-    let open: BTreeSet<&str> = events
+    // The classes a test JVM started and never ended, by their outer class, and those a test of
+    // which ended its JVM.
+    let mut open: BTreeSet<&str> = events
         .iter()
         .flat_map(BTreeMap::values)
         .flat_map(|jvm| jvm.classes.iter())
         .filter(|(_, class)| class.open)
         .map(|(outer, _)| outer.as_str())
         .collect();
+    open.extend(stopped.iter().flatten().map(String::as_str));
     let mut task_not_followed: BTreeSet<NotFollowed> =
         report.not_followed.iter().map(NotFollowed::from).collect();
     if let Some(error) = errors.first() {

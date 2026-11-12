@@ -209,6 +209,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   project's sources that a script builds and publishes to `mavenLocal()`, is now the rest, so a
   change to it runs every test class: a project is read as its source directories, not its whole
   directory. Maven read modules so already.
+- Gradle: a test that ends its JVM with `System.exit(0)` under JUnit 4 or TestNG, which Gradle
+  calls a success, no longer has its class recorded as passed: the test-JVM hook now also goes on
+  each test JVM as a Java agent that says how the JVM ended.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

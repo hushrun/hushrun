@@ -1540,3 +1540,53 @@ fn a_junit4_test_jvm_that_died_beside_a_genuine_failure_records_no_pass_for_its_
         ran.stderr
     );
 }
+
+// covers: C-32, C-46
+#[test]
+fn a_test_that_ends_its_jvm_records_no_pass_under_gradles_own_runners() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // JUnit 4 and TestNG on Gradle's own runners, which load no listener of the hook: `b` ends
+    // the test JVM with `System.exit(0)` when `EXIT` is set, and `c`, which always fails, never
+    // runs. Gradle calls the task successful. A JVM a class, so that the green ones run.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'exit'\ninclude 'j4', 'ng'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "subprojects { apply plugin: 'java'; repositories { mavenCentral() }; tasks.withType(Test).configureEach { forkEvery = 1 } }\nproject(':j4') { dependencies { testImplementation 'junit:junit:4.13.2' }; test { useJUnit() } }\nproject(':ng') { dependencies { testImplementation 'org.testng:testng:7.10.2' }; test { useTestNG() } }\n",
+        ),
+        file(
+            "j4/src/test/java/p/ExitTest.java",
+            "package p;\nimport org.junit.*;\nimport org.junit.runners.MethodSorters;\n@FixMethodOrder(MethodSorters.NAME_ASCENDING)\npublic class ExitTest {\n  @Test public void a() {}\n  @Test public void b() { if (System.getenv(\"EXIT\") != null) System.exit(0); }\n  @Test public void c() { Assert.fail(\"c\"); }\n}\n",
+        ),
+        file(
+            "j4/src/test/java/p/GreenTest.java",
+            "package p;\nimport org.junit.*;\npublic class GreenTest { @Test public void g() {} }\n",
+        ),
+        file(
+            "ng/src/test/java/q/ExitTest.java",
+            "package q;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class ExitTest {\n  @Test public void a() {}\n  @Test(dependsOnMethods = \"a\") public void b() { if (System.getenv(\"EXIT\") != null) System.exit(0); }\n  @Test(dependsOnMethods = \"b\") public void c() { fail(\"c\"); }\n}\n",
+        ),
+        file(
+            "ng/src/test/java/q/GreenTest.java",
+            "package q;\nimport org.testng.annotations.*;\npublic class GreenTest { @Test public void g() {} }\n",
+        ),
+    ]);
+    let ran = r.run(&command(&gradle, &[]), &[("EXIT", "1")]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // The green classes passed; neither ExitTest did.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("pass".into(), 2)]),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+}

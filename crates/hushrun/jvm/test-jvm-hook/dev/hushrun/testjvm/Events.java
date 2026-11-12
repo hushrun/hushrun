@@ -28,6 +28,10 @@ import java.util.Locale;
  *       the list's {@code entry} names it, with the JUnit Platform's {@code uid} (null in TestNG);
  *   <li>{@code not-left-out}: {@code by} kept a listed {@code class}'s {@code method}, for a
  *       {@code reason};
+ *   <li>{@code jvm-began}, {@code jvm-ended}: from the hook as a Java agent ({@link Agent}), the JVM
+ *       began, and ended through its shutdown hooks; {@code exit} whether a thread called
+ *       {@code System.exit}, {@code byTest} whether frames of a test or its framework were below that
+ *       call, {@code stack} the frames;
  *   <li>{@code plan-started}, {@code plan-finished}: the JUnit Platform began and ended a test plan;
  *   <li>{@code started}, {@code skipped} (with {@code reason}), {@code finished} (with {@code status}:
  *       {@code SUCCESSFUL}, {@code FAILED} or {@code ABORTED}, {@code ms} and {@code message}): a test
@@ -60,6 +64,14 @@ final class Events {
     void notLeftOut(String by, String className, String method, String reason) {
         write("{\"e\":\"not-left-out\",\"by\":" + q(by) + ",\"class\":" + q(className) + ",\"method\":" + q(method)
             + ",\"reason\":" + q(reason) + "}");
+    }
+
+    void began() {
+        write("{\"e\":\"jvm-began\"}");
+    }
+
+    void ended(boolean exited, boolean byTest, String exit) {
+        write("{\"e\":\"jvm-ended\",\"exit\":" + exited + ",\"byTest\":" + byTest + ",\"stack\":" + q(exit) + "}");
     }
 
     void plan(boolean started) {
