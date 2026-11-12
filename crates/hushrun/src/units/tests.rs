@@ -210,7 +210,9 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
     assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert_eq!(
         notes,
-        ["each test is taken to have read what its package read: go test can't be watched test by test yet"]
+        [
+            "each test is taken to have read what its package read: go test can't be watched test by test yet"
+        ]
     );
     let run = gotest::recognize(&words("go test -run TestX ./..."))
         .unwrap()

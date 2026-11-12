@@ -1046,8 +1046,8 @@ fn with_tests_off_go_test_gets_nothing_new() {
 const RAN: &str = "func ran(t testing.TB) {\n\tif p := os.Getenv(\"RAN_LOG\"); p != \"\" {\n\t\tf, _ := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\t\tf.WriteString(t.Name() + \"\\n\")\n\t\tf.Close()\n\t}\n}\n";
 
 /// One package, `cart`, with tests: `TestFlip` fails while `FAIL` is set, `TestOk` while `HIDDEN`
-/// is, which no file says, as a missed dependency would; `TestOne` … `TestFour` always pass;
-/// `body` adds more.
+/// is, which no file says, as a missed dependency would; `TestFlipToo`, a name `TestFlip` is a
+/// prefix of, `TestTwo`, `TestThree` and `TestFour` always pass; `body` adds more.
 fn cart(tests: &str, body: &str) -> Vec<(String, String)> {
     vec![
         file("hushrun.yaml", &yaml(tests)),
@@ -1062,7 +1062,7 @@ fn cart(tests: &str, body: &str) -> Vec<(String, String)> {
                 "package cart\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\n\
                  func TestFlip(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"FAIL\") != \"\" {{\n\t\tt.Fatal(\"flip\")\n\t}}\n}}\n\
                  func TestOk(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"HIDDEN\") != \"\" {{\n\t\tt.Fatal(\"hidden\")\n\t}}\n}}\n\
-                 func TestOne(t *testing.T) {{ ran(t) }}\n\
+                 func TestFlipToo(t *testing.T) {{ ran(t) }}\n\
                  func TestTwo(t *testing.T) {{ ran(t) }}\n\
                  func TestThree(t *testing.T) {{ ran(t) }}\n\
                  func TestFour(t *testing.T) {{ ran(t) }}\n{body}"
@@ -1123,7 +1123,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     assert_eq!(
         r.tests_of("cart"),
         serde_json::json!({"TestFlip": "failed", "TestFour": "passed", "TestOk": "passed",
-                           "TestOne": "passed", "TestThree": "passed", "TestTwo": "passed"})
+                           "TestFlipToo": "passed", "TestThree": "passed", "TestTwo": "passed"})
     );
     assert_eq!(
         r.newest_result()["units"]["tests"],
@@ -1154,7 +1154,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     assert_eq!(
         r.tests_of("cart"),
         serde_json::json!({"TestFlip": "passed", "TestFour": "passed", "TestOk": "passed",
-                           "TestOne": "passed", "TestThree": "passed", "TestTwo": "passed"})
+                           "TestFlipToo": "passed", "TestThree": "passed", "TestTwo": "passed"})
     );
     // Every test has passed on these files: the same files again reuse them all, and the check
     // skips whole (C-10).
@@ -1182,10 +1182,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
 /// test.
 fn shapes() -> Vec<(String, String)> {
     vec![
-        file(
-            "hushrun.yaml",
-            &yaml("{mode: observe, unit: test}"),
-        ),
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
         file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
         file("p/p.go", "package p\n\nfunc One() int { return 1 }\n"),
         file(
@@ -1387,4 +1384,148 @@ fn a_go_binary_that_ended_any_other_way_records_its_named_failures_and_no_pass()
         assert_eq!(&got, *want, "MODE={mode} {flags:?}\n{}", ran.stderr);
         assert_ne!(ran.code, 0, "MODE={mode} {flags:?}\n{}", ran.stderr);
     }
+}
+
+// covers: C-45, C-39
+#[test]
+fn with_commands_own_run_or_skip_go_tests_are_reused_by_package_and_it_says_so() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let r = Repo::new(&cart("{mode: reuse, unit: test}", ""));
+    // Which tests ran is Go's matching of COMMAND's pattern: hushrun doesn't reproduce it, and
+    // reuses by package, said once.
+    for (n, (flag, word)) in [
+        (&["-run", "TestFlip|TestOk"][..], "-run"),
+        (&["-skip", "TestTwo"], "-skip"),
+        (&["-args", "-test.run=TestFlip"], "-run"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cache = r.root.join(format!("cache-{n}"));
+        let cache_text = cache.display().to_string();
+        let mut args = vec!["run", "unit", "--", "go", "test", "./..."];
+        args.extend(flag);
+        let ran = r.run(&args, &[("FAIL", "1"), ("HUSHRUN_CACHE_DIR", &cache_text)]);
+        assert_eq!(ran.code, 1, "{flag:?}\n{}", ran.stderr);
+        assert!(
+            ran.stderr.contains(&format!(
+                "hushrun: unit: its tests are reused by package: go test {word}'s tests can't be reused one by one yet"
+            )),
+            "{flag:?}\n{}",
+            ran.stderr
+        );
+        let map = store::map(&cache);
+        assert!(map["units"]["cart"]["tests"].is_null(), "{flag:?}: {map:#}");
+    }
+    // A -run COMMAND doesn't show, in GOFLAGS: each binary's own arguments say it, and no test of
+    // it is told one by one.
+    let (ran, names) = r.go_tests(&[], &[("FAIL", "1"), ("GOFLAGS", "-run=^TestFlip$")]);
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    assert_eq!(names, ["TestFlip"]);
+    assert!(r.tests_of("cart").is_null(), "{:#}", r.map());
+    assert!(r.newest_result()["units"]["tests"].is_null());
+}
+
+// covers: C-45, C-35
+#[test]
+fn a_go_package_not_observed_is_so_for_every_test_and_its_test_main_runs_once() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // A package whose test starts a program: its tests are told, and none is followed, since Go's
+    // log is the package's.
+    let mut files = cart(
+        "{mode: reuse, unit: test}",
+        "func TestProc(t *testing.T) {\n\tran(t)\n\tif err := exec.Command(\"go\", \"version\").Run(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n",
+    );
+    files[3].1 = files[3].1.replace("\"os\"\n", "\"os\"\n\t\"os/exec\"\n");
+    // A package with a TestMain, which writes to the log too: hushrun doesn't list its tests,
+    // which would run it once more.
+    files.push(file(
+        "main/main_test.go",
+        &format!(
+            "package main_test\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\n\
+             type named string\n\nfunc (n named) Name() string {{ return string(n) }}\n\n\
+             func TestMain(m *testing.M) {{\n\tif p := os.Getenv(\"RAN_LOG\"); p != \"\" {{\n\t\tf, _ := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\t\tf.WriteString(\"TestMain\\n\")\n\t\tf.Close()\n\t}}\n\tos.Exit(m.Run())\n}}\n\n\
+             func TestInMain(t *testing.T) {{ ran(t) }}\n"
+        ),
+    ));
+    let r = Repo::new(&files);
+    let (first, names) = r.go_tests(&[], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        names.iter().filter(|n| *n == "TestMain").count(),
+        1,
+        "{names:?}"
+    );
+    let map = r.map();
+    assert_eq!(
+        map["units"]["cart"]["notFollowed"],
+        serde_json::json!(["subprocess"])
+    );
+    let states: BTreeSet<&str> = map["units"]["cart"]["tests"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(states, BTreeSet::from(["not-observed"]), "{map:#}");
+    assert_eq!(
+        map["units"]["main"]["notFollowed"],
+        serde_json::json!(["test-main"])
+    );
+    assert!(map["units"]["main"]["tests"].is_null(), "{map:#}");
+    // Nothing of either is reused.
+    r.write("docs/notes.md", "notes\n");
+    let (again, names) = r.go_tests(&[], &[]);
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert_eq!(names.len(), 9, "{names:?}");
+}
+
+// covers: C-45, C-39, C-34
+#[test]
+fn an_audited_go_test_that_fails_again_alone_suspends_the_checks_reuse() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // TestFlip and TestOk alone: with TestFlip failed, TestOk is the one test that could be
+    // reused, and runs as a check.
+    let mut files = cart("{mode: reuse, unit: test}", "");
+    files[3].1 = files[3]
+        .1
+        .lines()
+        .filter(|l| {
+            !l.starts_with("func TestFlipToo")
+                && !l.starts_with("func TestT")
+                && !l.starts_with("func TestFour")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let r = Repo::new(&files);
+    assert_eq!(r.go_tests(&[], &[("FAIL", "1")]).0.code, 1);
+    let (caught, names) = r.go_tests(&[], &[("HIDDEN", "1")]);
+    assert_eq!(caught.code, 1, "{}", caught.stderr);
+    assert_eq!(
+        line(&caught, "hushrun: unit: all"),
+        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+    );
+    assert!(
+        caught.stderr.contains(
+            "hushrun: unit: cart::TestOk failed, though it passed before on the same files it read: running it once more"
+        ),
+        "{}",
+        caught.stderr
+    );
+    // The second run ran TestOk alone: TestFlip was left out one by one.
+    assert_eq!(names, ["TestFlip", "TestOk", "TestOk"], "{names:?}");
+    assert!(
+        caught.stderr.contains(
+            "hushrun: unit: cart::TestOk failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
+        ),
+        "{}",
+        caught.stderr
+    );
+    assert_eq!(store::disagreements(&r.cache), ["cart::TestOk"]);
 }

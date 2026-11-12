@@ -1746,4 +1746,406 @@ mod tests {
         ]);
         assert!(written.programs.is_empty(), "{written:?}");
     }
+
+    fn os(words: &str) -> Vec<OsString> {
+        words.split(' ').map(OsString::from).collect()
+    }
+
+    // covers: C-45
+    #[test]
+    fn a_test_binarys_arguments_say_whether_command_chose_its_tests() {
+        let flags = binary_flags(&os(
+            "-test.paniconexit0 -test.timeout=10m0s -test.v=test2json -test.count=1 -test.failfast=true -test.shuffle=on",
+        ));
+        assert_eq!(
+            flags,
+            BinaryFlags {
+                chooses: false,
+                json: true,
+                failfast: true,
+                panic_on_exit0: true,
+                memprofile: false,
+            }
+        );
+        for chooses in [
+            "-test.run=^TestA$",
+            "-test.skip=TestB",
+            "-test.list=.",
+            "-test.count=0",
+            "-test.count=x",
+            "-test.count",
+            "--test.run TestA",
+            "-test.paniconexit0 x -test.run=A",
+        ] {
+            assert!(binary_flags(&os(chooses)).chooses, "{chooses}");
+        }
+        assert!(!binary_flags(&os("-test.count 3")).chooses);
+        assert!(!binary_flags(&os("-test.failfast=false")).failfast);
+        assert!(!binary_flags(&os("-test.v=true")).json);
+        assert!(!binary_flags(&os("-test.paniconexit0=false")).panic_on_exit0);
+        assert!(binary_flags(&os("-test.memprofile=m.out")).memprofile);
+    }
+
+    // covers: C-45
+    #[test]
+    fn a_listing_is_read_only_when_every_line_is_a_go_name() {
+        let listed =
+            read_listed(b"TestA\nTestAB\nBenchmarkX\nFuzzF\nExample_out\nTest\xc3\x84\n").unwrap();
+        let tests: Vec<&String> = listed.iter().filter(|n| is_test(n)).collect();
+        assert_eq!(tests, ["TestA", "TestAB", "FuzzF", "Example_out", "TestÄ"]);
+        assert_eq!(read_listed(b"").unwrap(), Vec::<String>::new());
+        // A package's init printed something: the list can't be told.
+        assert!(read_listed(b"connecting to db...\nTestA\n").is_none());
+        assert!(read_listed(b"TestA\n\nTestB\n").is_none());
+        assert!(read_listed(b"9Test\n").is_none());
+    }
+
+    // covers: C-45
+    #[test]
+    fn the_skip_pattern_anchors_and_quotes_every_name() {
+        assert_eq!(skip_pattern(["TestA"]), "^(TestA)$");
+        assert_eq!(skip_pattern(["TestA", "Example_b"]), "^(TestA|Example_b)$");
+        assert_eq!(skip_pattern(["A.b+c$"]), r"^(A\.b\+c\$)$");
+    }
+
+    fn fake_binary(main: bool) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let body: &[u8] = if main {
+            b"\x7fELF...\0example.com/p_test.TestMain\0..."
+        } else {
+            b"\x7fELF...\0example.com/p.TestA\0..."
+        };
+        std::io::Write::write_all(&mut file, body).unwrap();
+        file
+    }
+
+    // covers: C-45
+    #[test]
+    fn a_start_is_prepared_from_the_binarys_own_list() {
+        let binary = fake_binary(false);
+        let listing = b"TestA\nTestAB\nBenchmarkB\nExample_e\n".to_vec();
+        let reuse = vec!["TestA".to_string(), "TestGone".to_string()];
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let mut said = 0;
+        let at = prepare(
+            "p",
+            binary.path(),
+            &os("-test.paniconexit0 -test.timeout=10m0s"),
+            &reuse,
+            &mut |extra: &[&str]| {
+                asked.push(extra.iter().map(|s| s.to_string()).collect());
+                Some(listing.clone())
+            },
+            &mut || said += 1,
+        )
+        .unwrap();
+        assert_eq!(at.tests, ["TestA", "TestAB", "Example_e"]);
+        // Only what the binary has is left out: a test the plan lists that is gone isn't asked.
+        assert_eq!(at.skipped.iter().collect::<Vec<_>>(), ["TestA"], "{at:?}");
+        assert_eq!(at.skip_arg().unwrap(), "-test.skip=^(TestA)$");
+        assert_eq!(asked, [vec!["-test.list=.", "-test.skip=^$"]]);
+        assert_eq!(said, 0);
+
+        // A Go before 1.20 refuses -test.skip: it lists without, leaves nothing out, and says so.
+        let at = prepare(
+            "p",
+            binary.path(),
+            &os("-test.paniconexit0"),
+            &reuse,
+            &mut |extra: &[&str]| (extra.len() == 1).then(|| listing.clone()),
+            &mut || said += 1,
+        )
+        .unwrap();
+        assert!(at.skipped.is_empty() && at.skip_arg().is_none());
+        assert_eq!(at.tests.len(), 3);
+        assert_eq!(said, 1);
+
+        // Nothing one by one: COMMAND chose its tests, a TestMain would run only to list them,
+        // the binary can't be read or listed, or its list isn't names.
+        let mut list_ok = |_: &[&str]| Some(listing.clone());
+        let mut quiet = || {};
+        let chose = prepare(
+            "p",
+            binary.path(),
+            &os("-test.run=TestA"),
+            &reuse,
+            &mut list_ok,
+            &mut quiet,
+        );
+        assert!(chose.is_none());
+        let main = fake_binary(true);
+        assert!(prepare("p", main.path(), &[], &reuse, &mut list_ok, &mut quiet).is_none());
+        let gone = std::path::Path::new("/nonexistent/p.test");
+        assert!(prepare("p", gone, &[], &reuse, &mut list_ok, &mut quiet).is_none());
+        assert!(
+            prepare(
+                "p",
+                binary.path(),
+                &[],
+                &reuse,
+                &mut |_: &[&str]| None,
+                &mut quiet
+            )
+            .is_none()
+        );
+        let mut noisy = |_: &[&str]| Some(b"hello from init\nTestA\n".to_vec());
+        assert!(prepare("p", binary.path(), &[], &reuse, &mut noisy, &mut quiet).is_none());
+    }
+
+    fn read(json: bool, chunks: &[&[u8]]) -> Output {
+        let mut out = Output::new(json);
+        for chunk in chunks {
+            out.feed(chunk);
+        }
+        out.end();
+        out
+    }
+
+    // covers: C-45
+    #[test]
+    fn output_is_read_as_it_goes_by() {
+        // Failures named wherever they are, by their top-level test: a subtest's, a duplicate's,
+        // -test.cpu's suffix, after output with no newline, split across reads.
+        let out = read(
+            false,
+            &[
+                b"--- FAIL: TestA (0.01s)\n    --- FAIL: TestA/sub#01 (0.00s)\nno newline--- FA",
+                b"IL: TestB-4 (1.50s)\n--- PASS: TestC (0.25s)\n--- SKIP: TestD (0.00s)\nFAIL\n",
+            ],
+        );
+        assert_eq!(out.failed.iter().collect::<Vec<_>>(), ["TestA", "TestB"]);
+        assert_eq!(out.summary, Some(Summary::Fail));
+        assert!(out.readable());
+        // Only Go's own lines give times: a glued one doesn't.
+        assert_eq!(out.durations.get("TestA"), Some(&10));
+        assert_eq!(out.durations.get("TestB"), None);
+        assert_eq!(out.durations.get("TestC"), Some(&250));
+        assert_eq!(out.durations.get("TestD"), Some(&0));
+        // The summary is the last line but coverage, after output with no newline too.
+        assert_eq!(
+            read(false, &[b"PASS\ncoverage: 50.0% of statements\n"]).summary,
+            Some(Summary::Pass)
+        );
+        assert_eq!(
+            read(false, &[b"no newlinePASS\n"]).summary,
+            Some(Summary::Pass)
+        );
+        assert_eq!(read(false, &[b"PASS\nleaked goroutine\n"]).summary, None);
+        assert_eq!(read(false, &[b"PASS"]).summary, None);
+        assert!(!read(false, &[b"PASS"]).readable());
+        // With -json, Go marks its own lines: a test's PASS isn't Go's.
+        assert_eq!(read(true, &[b"\x16PASS\n"]).summary, Some(Summary::Pass));
+        assert_eq!(read(true, &[b"x\x16FAIL\n"]).summary, Some(Summary::Fail));
+        assert_eq!(read(true, &[b"\x16PASS\nPASS\n"]).summary, None);
+        assert_eq!(read(true, &[b"PASS\n"]).summary, None);
+        let out = read(
+            true,
+            &[b"\x16--- FAIL: TestA (0.00s)\n--- FAIL: TestB (0.00s)\n"],
+        );
+        assert_eq!(out.failed.len(), 2);
+        // A line too long to read: nothing passes, and later lines are still read for failures.
+        let long = vec![b'x'; MOST_LINE + 10];
+        let out = read(false, &[&long, b"\n--- FAIL: TestZ (0.00s)\nPASS\n"]);
+        assert!(!out.readable());
+        assert!(out.failed.contains("TestZ"));
+    }
+
+    // covers: C-45
+    #[test]
+    fn a_test_passes_only_when_the_binary_ended_normally() {
+        let at = TestsAt {
+            unit: "p".into(),
+            listed: ["TestA", "TestB", "TestC", "BenchmarkX"]
+                .map(String::from)
+                .into(),
+            tests: ["TestA", "TestB", "TestC"].map(String::from).to_vec(),
+            skipped: ["TestC".to_string()].into(),
+            flags: BinaryFlags {
+                panic_on_exit0: true,
+                ..BinaryFlags::default()
+            },
+        };
+        let ended = |exit: i32| Ended {
+            exit: Some(exit),
+            signal: None,
+            read_whole: true,
+            returned: true,
+        };
+        let facts = |out: &Output, ended: Ended| -> Vec<(String, bool, bool, bool)> {
+            outcome(&at, out, ended)
+                .into_iter()
+                .map(|t| (t.id, t.finished, t.failed, t.deselected))
+                .collect()
+        };
+        let row =
+            |id: &str, finished, failed, deselected| (id.to_string(), finished, failed, deselected);
+        let fail = read(false, &[b"--- FAIL: TestB (0.00s)\nFAIL\n"]);
+        assert_eq!(
+            facts(&fail, ended(1)),
+            [
+                row("TestA", true, false, false),
+                row("TestB", true, true, false),
+                row("TestC", false, false, true)
+            ]
+        );
+        // Any other end: the failures named, and nothing finished.
+        let nothing = [
+            row("TestA", false, false, false),
+            row("TestB", false, true, false),
+            row("TestC", false, false, true),
+        ];
+        for other in [
+            Ended {
+                returned: false,
+                ..ended(1)
+            },
+            Ended {
+                read_whole: false,
+                ..ended(1)
+            },
+            Ended {
+                signal: Some(9),
+                exit: None,
+                ..ended(1)
+            },
+            ended(2),
+            ended(0),
+        ] {
+            assert_eq!(facts(&fail, other), nothing, "{other:?}");
+        }
+        // -failfast with a failure leaves tests unstarted.
+        let failfast = TestsAt {
+            flags: BinaryFlags {
+                failfast: true,
+                ..at.flags
+            },
+            ..at.clone()
+        };
+        assert!(!ended_normally(&failfast, &fail, ended(1)));
+        // FAIL with nothing named, or a name the binary doesn't have.
+        assert!(!ended_normally(&at, &read(false, &[b"FAIL\n"]), ended(1)));
+        assert!(!ended_normally(
+            &at,
+            &read(false, &[b"--- FAIL: TestGone (0.00s)\nFAIL\n"]),
+            ended(1)
+        ));
+        // A benchmark's failure is one the binary listed.
+        assert!(ended_normally(
+            &at,
+            &read(false, &[b"--- FAIL: BenchmarkX\nFAIL\n"]),
+            ended(1)
+        ));
+        // PASS needs exit 0, and os.Exit(0) a panic.
+        let pass = read(false, &[b"PASS\n"]);
+        assert!(ended_normally(&at, &pass, ended(0)));
+        assert!(!ended_normally(&at, &pass, ended(1)));
+        let lax = TestsAt {
+            flags: BinaryFlags::default(),
+            ..at.clone()
+        };
+        assert!(!ended_normally(&lax, &pass, ended(0)));
+    }
+
+    /// Go, for the tests that prove a pattern against it: `None`, said, where it is missing,
+    /// unless `HUSHRUN_TEST_TOOLS=required`.
+    fn go_here() -> bool {
+        let here = std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !here {
+            assert!(
+                std::env::var("HUSHRUN_TEST_TOOLS").as_deref() != Ok("required"),
+                "Go is missing, and HUSHRUN_TEST_TOOLS=required"
+            );
+            eprintln!(
+                "note: skipping: Go is missing (HUSHRUN_TEST_TOOLS=required makes this fail)"
+            );
+        }
+        here
+    }
+
+    // covers: C-45
+    #[test]
+    fn the_skip_pattern_leaves_out_exactly_the_tests_it_names_in_a_real_go_binary() {
+        if !go_here() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/p\n\ngo 1.21\n").unwrap();
+        // Names that are prefixes of others, a subtest named as a top-level test, an example
+        // and a fuzz target, and a name outside ASCII.
+        std::fs::write(
+            root.join("p_test.go"),
+            "package p\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\n\
+             func TestA(t *testing.T) {}\nfunc TestAB(t *testing.T) {}\nfunc TestA_B(t *testing.T) {}\n\
+             func TestA2(t *testing.T) {}\nfunc TestÄ(t *testing.T) {}\n\
+             func TestB(t *testing.T) { t.Run(\"TestA\", func(t *testing.T) {}) }\n\
+             func FuzzA(f *testing.F) { f.Add(1); f.Fuzz(func(t *testing.T, i int) {}) }\n\
+             func Example_a() {\n\tfmt.Println(\"a\")\n\t// Output: a\n}\n",
+        )
+        .unwrap();
+        let build = std::process::Command::new("go")
+            .args(["test", "-c", "-o", "p.test", "."])
+            .current_dir(root)
+            .env("GOTOOLCHAIN", "local")
+            .env("GOFLAGS", "")
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary = root.join("p.test");
+        let ran = |skip: &[&str]| -> BTreeSet<String> {
+            let mut command = std::process::Command::new(&binary);
+            command.current_dir(root).arg("-test.v");
+            if !skip.is_empty() {
+                command.arg(format!("-test.skip={}", skip_pattern(skip.iter().copied())));
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|l| l.strip_prefix("=== RUN   "))
+                .map(str::to_string)
+                .collect()
+        };
+        let all = ran(&[]);
+        assert_eq!(all.len(), 10, "{all:?}");
+        for skip in [
+            &["TestA"][..],
+            &["TestAB", "TestA2"],
+            &["TestÄ", "Example_a", "FuzzA"],
+            &["TestB"],
+            &[
+                "TestA",
+                "TestAB",
+                "TestA_B",
+                "TestA2",
+                "TestÄ",
+                "TestB",
+                "FuzzA",
+                "Example_a",
+            ],
+        ] {
+            let left: BTreeSet<String> = ran(skip);
+            // Exactly the named top-level tests are gone, with their subtests and seeds.
+            let want: BTreeSet<String> = all
+                .iter()
+                .filter(|name| {
+                    let top = name.split('/').next().unwrap();
+                    !skip.contains(&top)
+                })
+                .cloned()
+                .collect();
+            assert_eq!(left, want, "{skip:?}");
+        }
+    }
 }
