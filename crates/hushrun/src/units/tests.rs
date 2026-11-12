@@ -306,11 +306,10 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         notes,
         ["its tests are reused by package: go test -run's tests can't be reused one by one yet"]
     );
-    let (_, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &vitest);
-    assert_eq!(
-        notes,
-        ["its tests are reused by test file: Vitest's tests can't be reused one by one yet"]
-    );
+    // \[ADR 0081\] Vitest knows tests and watches each: nothing to say.
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &vitest);
+    assert_eq!((unit, reads), (Unit::Test, Reads::Test));
+    assert!(notes.is_empty(), "{notes:?}");
     // pytest knows tests, and \[ADR 0080\] watches each one: it says itself where it can't.
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &pytest::Pytest);
     assert_eq!((unit, reads), (Unit::Test, Reads::File));

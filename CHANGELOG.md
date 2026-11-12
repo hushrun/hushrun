@@ -7,8 +7,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 ## [Unreleased]
 
 A test as the unit ([ADR 0077](docs/adr/0077-a-test-as-the-unit.md)): with `tests.unit: test`, a
-check reuses each test of a test file on its own, beside its test files, for pytest, Go, Gradle,
-Maven, `swift test` and CTest. New, and off unless a check asks.
+check reuses each test of a test file on its own, beside its test files, for pytest, Vitest,
+Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check asks.
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
@@ -21,11 +21,15 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
-  that fails runs once more alone. pytest, Go, Gradle, Maven, `swift test` and CTest know tests;
-  Cargo and Vitest reuse by test file and say so once. With `reads: test`, pytest on Python 3.12 or later watches each test, and a test is
+  that fails runs once more alone. pytest, Vitest, Go, Gradle, Maven, `swift test` and CTest know
+  tests; Cargo reuses by test binary and says so once. With `reads: test`, pytest on Python 3.12 or
+  later and Vitest watch each test, and a test is
   keyed by what it read alone ([ADR 0078](docs/adr/0078-what-a-test-read.md),
   [ADR 0080](docs/adr/0080-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
   runs as `reads: file`, and says so once.
+- Vitest's tests one by one ([ADR 0081](docs/adr/0081-vitest-tests-one-by-one.md)): with
+  `unit: test` each test, named by its suites' names and its own, is reused on its own, and with
+  `reads: test` watched through V8's coverage.
 - Hints hold tests ([ADR 0079](docs/adr/0079-hints-with-tests.md)): `hushrun.unit-hints/v1`
   carries a check's tests, their ids sealed with XChaCha20-Poly1305 under a key the server never
   has, so a machine with an empty cache reuses single tests on its first run. A hint with no tests
