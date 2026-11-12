@@ -1123,8 +1123,8 @@ fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_th
     let told = tests_vitest(&r, "file", json!({}), &[], &[]);
     assert_eq!(told.code, 0, "{}", told.stdout);
     // Suites' names and its own, ` [2]` for the second of a name, `test.each`'s cases each a test;
-    // a skipped test and a todo passed; the two that join to `a > b > c` from different suites are
-    // never told, so never left out.
+    // a skipped test and a todo passed; the two that join to `a > b > c` from different suites
+    // are told once, by that id, and never left out.
     assert_eq!(
         told.ids("test/names.test.ts"),
         [
@@ -1133,6 +1133,7 @@ fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_th
             "cart > in euros > rounds",
             "cart > adds 1",
             "cart > adds 2",
+            "a > b > c",
             "top",
             "skipped",
             "later",
@@ -1185,6 +1186,15 @@ fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_th
     // A skipped test isn't left out: Vitest skips it anyway, and it passed.
     assert_eq!(tests["skipped"]["deselected"], false);
     assert_eq!(tests["skipped"]["finished"], true);
+    // Two tests that share an id ran, though listed, and say they are never left out.
+    assert_eq!(
+        (
+            &tests["a > b > c"]["deselected"],
+            &tests["a > b > c"]["finished"],
+            &tests["a > b > c"]["neverLeftOut"]
+        ),
+        (&json!(false), &json!(true), &json!(true))
+    );
 
     // Every test of one file left out: the file is skipped, and the run still passes.
     let every = json!({"test/other.test.ts": ["one", "two"]});
@@ -1406,11 +1416,16 @@ fn vitest_watches_what_each_test_ran_opened_and_listed() {
             vec!["src/db.ts".to_string(), unit.to_string()]
         )]
     );
-    // What loading the file ran, for every test: a function called at import, the config, and
-    // far.ts, whose FAR near.ts read through its getter when it was imported.
+    // What loading the file ran, for every test: a function called at import, and far.ts, whose
+    // FAR near.ts read through its getter when it was imported; and what Vitest loads for every
+    // test, the config.
     assert_eq!(
         told.names(unit, &facts["loaded"]["ran"]).unwrap(),
-        ["src/far.ts", "src/load.ts", unit, "vitest.config.ts"]
+        ["src/far.ts", "src/load.ts", unit]
+    );
+    assert_eq!(
+        told.names(unit, &facts["everyTest"]).unwrap(),
+        ["vitest.config.ts"]
     );
 
     // Two tests at once can't be watched alone: no test of that file says what it ran, so each
@@ -1638,4 +1653,500 @@ fn with_vitests_coverage_on_no_test_is_left_out_or_watched() {
         );
         assert!(test.get("ran").is_none(), "{id}: {test}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// [ADR 0081] `reads: test` through `hushrun run` (C-40, C-43): what a watched test's own list
+// catches, and what Vitest makes of the two misses RFC 0004 §3.2 names.
+
+/// A repository for `reads`, with `files` and a test file every change runs.
+fn reads_repo(files: &[(&str, &str)], tests: &str) -> Repo {
+    let mut all = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('other', () => {})\n",
+        ),
+    ];
+    for (path, text) in files {
+        all.retain(|(p, _)| p != path);
+        all.push(file(path, text));
+    }
+    Repo::new(&all)
+}
+
+/// Whether `observe`, with `reads`, would have reused `target` of `test/a.test.ts` after `change`
+/// made it fail: what its disagreement line says.
+fn would_reuse_test(files: &[(&str, &str)], change: (&str, &str), reads: &str) -> bool {
+    let r = reads_repo(
+        files,
+        &format!("{{mode: observe, unit: test, reads: {reads}}}"),
+    );
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        !first.stderr.contains("each test is taken to have read"),
+        "{}",
+        first.stderr
+    );
+    r.write(change.0, change.1);
+    let second = r.run(VITEST_RUN);
+    assert_eq!(
+        second.code, 1,
+        "the change makes target fail:\n{}\n{}",
+        second.stdout, second.stderr
+    );
+    assert!(
+        plain(&second.stdout).contains("target"),
+        "{}",
+        second.stdout
+    );
+    second.stderr.contains(
+        "hushrun: unit: test/a.test.ts::target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
+    )
+}
+
+/// `reads: test` follows the change: neither setting would reuse the test.
+fn caught_by_vitest(files: &[(&str, &str)], change: (&str, &str)) {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    assert!(!would_reuse_test(files, change, "file"), "reads: file");
+    assert!(!would_reuse_test(files, change, "test"), "reads: test");
+}
+
+/// A known miss of `reads: test` (RFC 0004 §3.2): `reads: file` runs the test, `reads: test`
+/// would reuse it. Whoever closes the miss changes the second assertion.
+fn known_miss_of_vitest(files: &[(&str, &str)], change: (&str, &str)) {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    assert!(!would_reuse_test(files, change, "file"), "reads: file");
+    assert!(
+        would_reuse_test(files, change, "test"),
+        "reads: test: a known miss"
+    );
+}
+
+const T: &str = "import { describe, test, expect, beforeAll } from 'vitest'\n";
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_function_called() {
+    caught_by_vitest(
+        &[
+            ("src/calc.ts", "export function f() { return 1 }\n"),
+            (
+                "src/facade.ts",
+                "import { f } from './calc'\nexport function g() { return f() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ g }} from '../src/facade'\ntest('target', () => {{ expect(g()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/calc.ts", "export function f() { return 2 }\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_constant_the_code_that_ran_imports_directly() {
+    caught_by_vitest(
+        &[
+            ("src/consts.ts", "export const K = 1\n"),
+            (
+                "src/facade.ts",
+                "import { K } from './consts'\nexport function g() { return K }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ g }} from '../src/facade'\ntest('target', () => {{ expect(g()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/consts.ts", "export const K = 2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_constant_the_test_file_imports_directly() {
+    caught_by_vitest(
+        &[
+            ("src/consts.ts", "export const K = 1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ K }} from '../src/consts'\ntest('target', () => {{ expect(K).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/consts.ts", "export const K = 2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_file_opened() {
+    caught_by_vitest(
+        &[
+            ("data/value.txt", "1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ readFileSync }} from 'node:fs'\ntest('target', () => {{ expect(readFileSync('data/value.txt', 'utf8').trim()).toBe('1') }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("data/value.txt", "2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_file_a_module_read_once_and_kept() {
+    // first opens the file through prices.ts, which keeps what it read; target, after it, gets
+    // the kept value and opens nothing.
+    caught_by_vitest(
+        &[
+            ("data/price.txt", "5\n"),
+            (
+                "src/prices.ts",
+                "import { readFileSync } from 'node:fs'\nlet kept: string | undefined\nexport function price() {\n  kept ??= readFileSync('data/price.txt', 'utf8').trim()\n  return kept\n}\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ price }} from '../src/prices'\ntest('first', () => {{ expect(price()).toBeTruthy() }})\ntest('target', () => {{ expect(price()).toBe('5') }})\n"
+                ),
+            ),
+        ],
+        ("data/price.txt", "6\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_what_a_before_all_read() {
+    caught_by_vitest(
+        &[
+            ("src/helper.ts", "export function make() { return 1 }\n"),
+            (
+                "src/fx.ts",
+                "import { make as made } from './helper'\nexport function make() { return made() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ make }} from '../src/fx'\ndescribe('served', () => {{\n  let value = 0\n  beforeAll(() => {{ value = make() }})\n  test('target', () => {{ expect(value).toBe(1) }})\n}})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/helper.ts", "export function make() { return 2 }\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_module_imported_lazily_inside_a_test() {
+    caught_by_vitest(
+        &[
+            ("src/lazy.ts", "export const K = 1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}test('target', async () => {{\n  const lazy = await import('../src/lazy')\n  expect(lazy.K).toBe(1)\n}})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/lazy.ts", "export const K = 2\n"),
+    );
+}
+
+/// Two imports away: cart.ts ran and imports settings.ts, which built TAX from defaults.ts, with
+/// no function of either called by the test.
+fn vitest_two_imports_away() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("src/defaults.ts", "export const RATE = 3\n"),
+        (
+            "src/settings.ts",
+            "import { RATE } from './defaults'\nexport const TAX = RATE * 2\n",
+        ),
+        (
+            "src/cart.ts",
+            "import { TAX } from './settings'\nexport function total(xs: number[]) { return xs.reduce((a, b) => a + b, 0) + TAX }\n",
+        ),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport { total } from '../src/cart'\ntest('target', () => { expect(total([1])).toBe(7) })\ntest('plain', () => {})\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_catches_a_value_two_imports_away_which_reads_test_may_miss_elsewhere() {
+    // RFC 0004 §3.2's first miss doesn't happen with Vitest: settings.ts read RATE through
+    // defaults.ts's export getter while the file loaded, a function of defaults.ts, so every test
+    // of the file has it (ADR 0081).
+    caught_by_vitest(
+        &vitest_two_imports_away(),
+        ("src/defaults.ts", "export const RATE = 4\n"),
+    );
+}
+
+/// A registry plugins.ts fills as boot.ts imports it: the test file imports boot.ts for that and
+/// the registry, and nothing of plugins.ts, whose code runs at import only.
+fn vitest_registry() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "src/registry.ts",
+            "export const HANDLERS: Record<string, number> = {}\n",
+        ),
+        (
+            "src/plugins.ts",
+            "import { HANDLERS } from './registry'\nHANDLERS.x = 41\n",
+        ),
+        ("src/boot.ts", "import './plugins'\n"),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport '../src/boot'\nimport { HANDLERS } from '../src/registry'\ntest('target', () => { expect(HANDLERS.x).toBe(41) })\ntest('plain', () => {})\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-43
+#[test]
+fn a_known_miss_of_vitest_reads_test_a_registry_another_file_filled_at_import() {
+    known_miss_of_vitest(
+        &vitest_registry(),
+        (
+            "src/plugins.ts",
+            "import { HANDLERS } from './registry'\nHANDLERS.x = 42\n",
+        ),
+    );
+}
+
+/// The observe line's count of tests that would have run, `N of M`.
+fn would_run(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|l| l.contains("with `tests: reuse`,") && l.contains("tests would have run"))
+        .unwrap_or_else(|| panic!("no observe line for tests in:\n{stderr}"))
+        .split("reuse`, ")
+        .nth(1)
+        .unwrap()
+        .split(" tests")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+// covers: C-40, C-43
+#[test]
+fn a_concurrent_vitest_test_gets_its_files_list() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // target uses other.ts alone; plain runs calc.ts's code through facade.ts. A change to calc.ts
+    // is two imports away from target: watched alone, target would be reused; run at once with
+    // plain, it gets its file's list, and runs.
+    let files = |concurrent: &str| {
+        vec![
+            (
+                "src/calc.ts",
+                "export function f() { return 1 }\n".to_string(),
+            ),
+            (
+                "src/facade.ts",
+                "import { f } from './calc'\nexport function g() { return f() }\n".to_string(),
+            ),
+            (
+                "src/other.ts",
+                "export function h() { return 1 }\n".to_string(),
+            ),
+            (
+                "test/a.test.ts",
+                format!(
+                    "{T}import {{ g }} from '../src/facade'\nimport {{ h }} from '../src/other'\ntest{concurrent}('target', async () => {{ expect(h()).toBe(1) }})\ntest{concurrent}('plain', async () => {{ expect(g()).toBe(1) }})\n"
+                ),
+            ),
+        ]
+    };
+    let mut counts = Vec::new();
+    for concurrent in ["", ".concurrent"] {
+        let files = files(concurrent);
+        let borrowed: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+        let r = reads_repo(&borrowed, "{mode: observe, unit: test, reads: test}");
+        assert_eq!(r.run(VITEST_RUN).code, 0);
+        r.write(
+            "src/calc.ts",
+            "export function f() { return 1 } // changed\n",
+        );
+        let second = r.run(VITEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.stderr);
+        counts.push(would_run(&second.stderr));
+    }
+    assert_eq!(counts, ["1 of 3", "2 of 3"]);
+}
+
+// covers: C-40, C-43
+#[test]
+fn with_vitests_coverage_on_reads_test_watches_nothing_and_says_why() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = reads_repo(
+        &[
+            ("cov.mjs", NO_COVERAGE),
+            (
+                "test/a.test.ts",
+                "import { test } from 'vitest'\ntest('one', () => {})\n",
+            ),
+        ],
+        "{mode: observe, unit: test, reads: test}",
+    );
+    r.write(
+        "vitest.config.ts",
+        &config("  test: { coverage: { enabled: true, provider: 'custom', customProviderModule: './cov.mjs' } },\n"),
+    );
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit: each test is taken to have read what its test file read: Vitest's coverage is on, and it shares V8's counters with watching a test\n"
+        ),
+        "{}",
+        ran.stderr
+    );
+}
+
+// covers: C-40, C-43, C-36
+#[test]
+fn with_vitest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_test() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // One test runs a.ts's code through wa.ts, sixty others b.ts's through wb.ts; the test file
+    // imports both wrappers: a change to a.ts runs only the first test, and audits.
+    let r = reads_repo(
+        &[
+            ("src/a.ts", "export function f() { return 1 }\n"),
+            ("src/b.ts", "export function f() { return 1 }\n"),
+            (
+                "src/wa.ts",
+                "import { f } from './a'\nexport function wa() { return f() }\n",
+            ),
+            (
+                "src/wb.ts",
+                "import { f } from './b'\nexport function wb() { return f() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ wa }} from '../src/wa'\nimport {{ wb }} from '../src/wb'\ntest('one', () => {{ expect(wa()).toBe(1) }})\ntest.each(Array.from({{ length: 60 }}, (_, i) => i))('two %i', () => {{ expect(wb()).toBe(1) }})\n"
+                ),
+            ),
+        ],
+        "{mode: reuse, unit: test, reads: test}",
+    );
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // A test file that passed whole records its own pass and each test's.
+    let map = r.map();
+    assert_eq!(
+        map["units"]["test/a.test.ts"]["tests"]
+            .as_object()
+            .unwrap()
+            .len(),
+        61
+    );
+    assert_eq!(unit_results(&r.cache), 2 + 61 + 1);
+    r.write("src/a.ts", "export function f() { return 1 } // changed\n");
+    let second = r.run(VITEST_RUN);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stderr.contains(
+            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that did run as a check"
+        ),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(
+        r.newest_result()["units"]["tests"],
+        json!({"total": 62, "ran": 4, "reused": 58})
+    );
+}
+
+/// How many unit results this machine holds.
+fn unit_results(cache: &Path) -> usize {
+    fn count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .map(|p| {
+                if p.is_dir() {
+                    count(&p)
+                } else {
+                    usize::from(p.extension().is_some_and(|e| e == "json"))
+                }
+            })
+            .sum()
+    }
+    count(&cache.join("results/units/v0"))
+}
+
+// covers: C-40, C-43
+#[test]
+fn what_a_module_opened_is_kept_with_the_module() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("data/price.txt", "5\n"),
+        (
+            "src/prices.ts",
+            "import { readFileSync } from 'node:fs'\nlet kept: string | undefined\nexport function price() {\n  kept ??= readFileSync('data/price.txt', 'utf8').trim()\n  return kept\n}\n",
+        ),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport { price } from '../src/prices'\ntest('first', () => { expect(price()).toBeTruthy() })\ntest('target', () => { expect(price()).toBe('5') })\n",
+        ),
+    ]);
+    let told = tests_vitest(&r, "test", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let unit = "test/a.test.ts";
+    // target opened nothing, and ran prices.ts, which keeps what it opened for first.
+    assert_eq!(
+        told.list(unit, "target", "opened").unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        told.list(unit, "target", "ran").unwrap(),
+        ["src/prices.ts", unit]
+    );
+    let facts = told.unit(unit);
+    let paths = facts["paths"].as_array().unwrap();
+    let opens: std::collections::BTreeMap<String, Vec<String>> = facts["opens"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(from, to)| {
+            let from = paths[from.parse::<usize>().unwrap()].as_str().unwrap();
+            (from.to_string(), told.names(unit, to).unwrap())
+        })
+        .collect();
+    assert_eq!(opens["src/prices.ts"], ["data/price.txt"]);
 }
