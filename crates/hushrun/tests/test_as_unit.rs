@@ -450,6 +450,8 @@ facts = {"schema": "hushrun.unit-facts/v0", "adapter": "pytest", "failuresByUnit
          "settings": {"pythonFiles": ["test_*.py", "*_test.py"]}, "units": units}
 if str(n) in os.environ.get("FAKE_LEFT_OUT", "").split():
     facts["leftOutUnlisted"] = "2 features of test_a.py nobody listed"
+if os.environ.get("FAKE_STALE"):
+    facts["staleBuild"] = os.environ["FAKE_STALE"]
 with open(os.path.join(d, "fake-%d.json" % n), "w") as f:
     json.dump(facts, f)
 sys.exit(int(os.environ.get("FAKE_EXIT_%d" % n, "0")))
@@ -650,6 +652,52 @@ fn in_observe_a_start_that_left_out_what_nothing_listed_records_no_unit_and_keep
     );
     assert_eq!(r.unit_results(), 0);
     assert!(r.newest_result().get("units").is_none());
+}
+
+// covers: C-32
+#[test]
+fn a_run_on_a_stale_build_records_no_pass_of_its_check() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The adapter knows the runner ran a program built before the last change: the run passed,
+    // and proves nothing of this code.
+    let r = Repo::new(&[
+        ("hushrun.yaml", &yaml("observe")),
+        (".gitignore", "__pycache__/\n"),
+        ("fake.py", FAKE_RUNNER),
+        ("test_a.py", "def test_a():\n    pass\n"),
+    ]);
+    let state = r.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = python();
+    let state_dir = state.to_string_lossy().into_owned();
+    let env = [
+        ("FAKE_STATE", state_dir.as_str()),
+        ("FAKE_FILES", "test_a.py"),
+        ("FAKE_STALE", "build/prog is older than what it is built from"),
+    ];
+    let ran = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit passed, but it isn't recorded: build/prog is older than what it is built from"
+        ),
+        "{}",
+        ran.stderr
+    );
+    assert!(!ran.stderr.contains("it won't run again"), "{}", ran.stderr);
+    let mut files = Vec::new();
+    collect(&r.cache.join("results/results/v0"), &mut files);
+    assert!(files.is_empty(), "{files:?}");
+    assert_eq!(r.unit_results(), 0);
+    // A failure is recorded as usual.
+    let failed = r.run(
+        &["run", "unit", "--", &python, "fake.py"],
+        &[env[0], env[1], env[2], ("FAKE_EXIT_2", "1")],
+    );
+    assert_eq!(failed.code, 1, "{}", failed.stderr);
+    assert_eq!(r.newest_result()["result"], "fail");
 }
 
 // covers: C-39

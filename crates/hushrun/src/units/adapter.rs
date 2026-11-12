@@ -235,6 +235,10 @@ pub struct Read {
     /// left out and goes by that start alone; when that can't be done, or it says so again,
     /// nothing is recorded and the run fails. (A facts file can say it too: `leftOutUnlisted`.)
     pub left_out: Option<String>,
+    /// \[C-32\] The runner ran what was built before the files now, and why, in words people
+    /// read: a run that passed records nothing, not even the check's pass; a failed one records
+    /// its fail. (A facts file can say it too: `staleBuild`.)
+    pub stale_build: Option<String>,
 }
 
 /// What `hushrun why` has to go by: this machine's store and the files now, and no tool.

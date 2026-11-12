@@ -874,8 +874,10 @@ impl Session {
     /// unit is recorded.
     pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
         let files = facts::read_all(&self.run_dir)?;
-        // \[C-32\] What a facts file says the runner left out that the plan didn't list.
+        // \[C-32\] What a facts file says the runner left out that the plan didn't list, and
+        // whether it ran on a stale build.
         let unlisted = facts::left_out(&files);
+        let stale = facts::stale_build(&files);
         // \[C-32\] A start of the runner that began and never said it ended: what it ran can't
         // be told, so no unit and no test of the run records a pass; a fail still records.
         let unfinished = facts::unfinished_starts(&self.run_dir);
@@ -921,19 +923,22 @@ impl Session {
             // \[C-32\] Left out what the plan didn't list: whatever else could be read, this start
             // decides nothing.
             Ok(None) => {
-                return unlisted.map(|why| Observed {
-                    left_out: Some(why),
+                return (unlisted.is_some() || stale.is_some()).then(|| Observed {
+                    left_out: unlisted,
+                    stale_build: stale,
                     ..Observed::default()
                 });
             }
             Err(why) => {
                 return Observed::unread(&end.base.check, &why).map(|o| Observed {
                     left_out: unlisted,
+                    stale_build: stale,
                     ..o
                 });
             }
         };
         let left_out = read.left_out.clone().or(unlisted);
+        let stale = read.stale_build.clone().or(stale);
         // \[C-32\] Left out what nothing listed, in a start whose plan listed nothing (`observe`,
         // or a plan that reused nothing): another start would be the same, and could fail one that
         // passed. No unit is recorded, said once, and COMMAND's own exit stands.
@@ -981,6 +986,7 @@ impl Session {
             ));
         }
         observed.left_out = left_out;
+        observed.stale_build = stale;
         // \[C-32\] What an adapter's facts say people should know of this run, each said once.
         let notes: BTreeSet<&str> = files
             .iter()
@@ -1530,6 +1536,8 @@ pub struct Observed {
     /// \[C-32\] The adapter left out what the plan didn't list, and why: this start decides
     /// nothing, and COMMAND starts once more with nothing left out.
     pub left_out: Option<String>,
+    /// \[C-32\] The runner ran on a stale build, and why: a run that passed records nothing.
+    pub stale_build: Option<String>,
     /// \[C-39\] Whether tests were decided one by one in this run, and \[C-40\] what each was
     /// taken to have read: what its hint holds of them (C-41).
     by_test: bool,
@@ -1924,6 +1932,7 @@ fn decide(
         edges,
         received,
         left_out: _,
+        stale_build: _,
     } = read;
     let mut seen = seen;
     // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the

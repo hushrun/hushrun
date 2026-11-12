@@ -246,3 +246,7 @@ first; the plugin's are in ADR 0080's Amendment 2.
   listed: it would be the same run, and a second start that failed turned a passing COMMAND into a
   failure. Now only a start whose plan listed something runs again; any other records no unit,
   says why once, and keeps COMMAND's exit code.
+- **A stale build.** A `ctest --test-dir build` with no build after a source change ran the old
+  programs and passed, and that was recorded as the check's pass on this code: the next run was
+  skipped. An adapter that knows says so (`Read::stale_build`, or `staleBuild` in its facts): a run
+  that passed then records nothing at all and says why once; a failed one records its fail.

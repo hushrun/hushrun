@@ -758,6 +758,16 @@ fn skip_or_run(
         }
     }
 
+    // \[C-32\] The runner ran what was built before these files: a pass proves nothing of them,
+    // and nothing is recorded, for the check or any unit. A failure is recorded as usual.
+    if verdict == Verdict::Pass
+        && let Some(why) = observed.as_ref().and_then(|(o, _)| o.stale_build.as_ref())
+    {
+        say.line(format_args!(
+            "{check} passed, but it isn't recorded: {why}{flaky}"
+        ));
+        return ExitCode::from(exit);
+    }
     if let Some((o, _)) = &observed {
         for line in &o.lines {
             say.line(format_args!("{line}"));

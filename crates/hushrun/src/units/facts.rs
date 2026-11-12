@@ -157,6 +157,10 @@ pub struct FactsFile {
     /// read: the run starts COMMAND once more with nothing left out, and goes by that start alone.
     #[serde(default)]
     pub left_out_unlisted: Option<String>,
+    /// \[C-32\] The runner ran what was built before the files now (a stale program), and why, in
+    /// words people read: a run that passed records nothing, not even the check's pass.
+    #[serde(default)]
+    pub stale_build: Option<String>,
 }
 
 impl FactsFile {
@@ -706,6 +710,14 @@ pub fn unfinished_starts(dir: &Path) -> bool {
                     .is_some_and(|name| name.ends_with(STARTED_SUFFIX))
         })
     })
+}
+
+/// \[C-32\] Why the first file of `files` that says so ran on a stale build.
+pub fn stale_build(files: &[FactsFile]) -> Option<String> {
+    files
+        .iter()
+        .find_map(|f| f.stale_build.clone())
+        .map(|why| why.chars().take(300).collect())
 }
 
 /// \[C-32\] Why the first file of `files` that says so left out what the plan didn't list.

@@ -154,6 +154,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   caused it no longer keeps its pass.
 - A pytest test file skipped whole as it loads (`pytest.skip(allow_module_level=True)`,
   `pytest.importorskip`) counts as skipped, so in a run whose command failed it records no pass.
+- A run whose adapter knows it ran a stale build, such as `ctest` on programs built before the
+  last change, is no longer recorded as the check's pass: it says it passed and isn't recorded,
+  and the next run runs it. Contract: an adapter's facts may say `staleBuild`.
 - A start of a test runner that dies before it says what it saw, such as a second pytest that
   crashes, keeps every test file and test of the run from a pass. Contract: an adapter's process
   may make `<anything>.started` in `HUSHRUN_UNITS` as it begins and remove it once its facts are
