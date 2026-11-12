@@ -1506,9 +1506,13 @@ fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
             .unwrap_or_else(|| panic!("{}", second.stderr)),
         "hushrun: unit: 3 of 9 tests run, in 2 of 7 test files; 6 already passed on the files they read, and 2 more that did run as a check"
     );
-    // Vitest ran flips, the audited test and the audited file's, and skipped the reused test.
+    // Vitest ran flips, the audited test and the audited file's, and left out the reused test:
+    // skipped, or, when the audit chose `total`, in a suite skipped whole and counted in the total
+    // only.
+    let stdout = plain(&second.stdout);
     assert!(
-        plain(&second.stdout).contains("Tests  3 passed | 1 skipped (4)"),
+        stdout.contains("Tests  3 passed | 1 skipped (4)")
+            || stdout.contains("Tests  3 passed (4)"),
         "{}",
         second.stdout
     );
