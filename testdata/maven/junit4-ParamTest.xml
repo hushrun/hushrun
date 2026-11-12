@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" name="j4.ParamTest" time="0.032" tests="9" errors="0" skipped="0" failures="1">
+  <testcase name="smaller[0: x=1]" classname="j4.ParamTest" time="0.004"/>
+  <testcase name="small[0: x=1]" classname="j4.ParamTest" time="0.003"/>
+  <testcase name="positive[0: x=1]" classname="j4.ParamTest" time="0"/>
+  <testcase name="smaller[1: x=2]" classname="j4.ParamTest" time="0"/>
+  <testcase name="small[1: x=2]" classname="j4.ParamTest" time="0"/>
+  <testcase name="positive[1: x=2]" classname="j4.ParamTest" time="0"/>
+  <testcase name="smaller[2: x=3]" classname="j4.ParamTest" time="0"/>
+  <testcase name="small[2: x=3]" classname="j4.ParamTest" time="0.002">
+    <failure message="too big: 3" type="java.lang.AssertionError">java.lang.AssertionError: too big: 3
+	at j4.ParamTest.small(ParamTest.java:10)
+</failure>
+  </testcase>
+  <testcase name="positive[2: x=3]" classname="j4.ParamTest" time="0"/>
+</testsuite>

@@ -1,0 +1,65 @@
+{"e":"jvm","pid":"100","dir":"/work/reactor-junit5/lib","basedir":"/work/reactor-junit5/lib"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest","method":"fails"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest","method":"param"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest$Inner","method":"innerFails"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.GreenTest","method":null}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.GreenTest","method":"green1"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.GreenTest","method":"green2"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest","method":"fails"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest","method":"param"}
+{"e":"left-out","by":"junit-platform","class":"com.example.lib.CalcTest$Inner","method":"innerFails"}
+{"e":"plan-started"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]","class":null,"method":null,"params":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.BeforeAllFailTest]","class":"com.example.lib.BeforeAllFailTest","method":null,"params":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.BeforeAllFailTest]","class":"com.example.lib.BeforeAllFailTest","method":null,"params":null,"status":"FAILED","ms":20,"message":"java.lang.IllegalStateException: deliberate @BeforeAll failure"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]","class":"com.example.lib.CalcTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:errors()]","class":"com.example.lib.CalcTest","method":"errors","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:errors()]","class":"com.example.lib.CalcTest","method":"errors","params":"","status":"FAILED","ms":4,"message":"java.lang.IllegalStateException: deliberate error"}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:passes()]","class":"com.example.lib.CalcTest","method":"passes","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:passes()]","class":"com.example.lib.CalcTest","method":"passes","params":"","status":"SUCCESSFUL","ms":2,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:assumed()]","class":"com.example.lib.CalcTest","method":"assumed","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:assumed()]","class":"com.example.lib.CalcTest","method":"assumed","params":"","status":"ABORTED","ms":1,"message":"org.opentest4j.TestAbortedException: Assumption failed: deliberate assumption"}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:over()]","class":"com.example.lib.CalcTest","method":"over","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:over()]","class":"com.example.lib.CalcTest","method":"over","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:over(org.junit.jupiter.api.TestInfo)]","class":"com.example.lib.CalcTest","method":"over","params":"org.junit.jupiter.api.TestInfo"}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:over(org.junit.jupiter.api.TestInfo)]","class":"com.example.lib.CalcTest","method":"over","params":"org.junit.jupiter.api.TestInfo","status":"SUCCESSFUL","ms":3,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:flaky()]","class":"com.example.lib.CalcTest","method":"flaky","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:flaky()]","class":"com.example.lib.CalcTest","method":"flaky","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"skipped","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:disabled()]","class":"com.example.lib.CalcTest","method":"disabled","params":"","reason":"deliberately disabled"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int"}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]/[test-template-invocation:#1]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int"}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]/[test-template-invocation:#1]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int","status":"SUCCESSFUL","ms":8,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]/[test-template-invocation:#2]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int"}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]/[test-template-invocation:#2]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int","status":"FAILED","ms":2,"message":"org.opentest4j.AssertionFailedError: fails for b ==> expected: <true> but was: <false>"}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[test-template:paramCustom(java.lang.String, int)]","class":"com.example.lib.CalcTest","method":"paramCustom","params":"java.lang.String, int","status":"SUCCESSFUL","ms":39,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:displayNamed()]","class":"com.example.lib.CalcTest","method":"displayNamed","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[method:displayNamed()]","class":"com.example.lib.CalcTest","method":"displayNamed","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:InnerTest]","class":"com.example.lib.CalcTest$InnerTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:InnerTest]/[method:nestedNamedLikeATest()]","class":"com.example.lib.CalcTest$InnerTest","method":"nestedNamedLikeATest","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:InnerTest]/[method:nestedNamedLikeATest()]","class":"com.example.lib.CalcTest$InnerTest","method":"nestedNamedLikeATest","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:InnerTest]","class":"com.example.lib.CalcTest$InnerTest","method":null,"params":null,"status":"SUCCESSFUL","ms":2,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]","class":"com.example.lib.CalcTest$Inner","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[method:innerPasses()]","class":"com.example.lib.CalcTest$Inner","method":"innerPasses","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[method:innerPasses()]","class":"com.example.lib.CalcTest$Inner","method":"innerPasses","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[nested-class:Deeper]","class":"com.example.lib.CalcTest$Inner$Deeper","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[nested-class:Deeper]/[method:deepPasses()]","class":"com.example.lib.CalcTest$Inner$Deeper","method":"deepPasses","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[nested-class:Deeper]/[method:deepPasses()]","class":"com.example.lib.CalcTest$Inner$Deeper","method":"deepPasses","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]/[nested-class:Deeper]","class":"com.example.lib.CalcTest$Inner$Deeper","method":null,"params":null,"status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]/[nested-class:Inner]","class":"com.example.lib.CalcTest$Inner","method":null,"params":null,"status":"SUCCESSFUL","ms":3,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CalcTest]","class":"com.example.lib.CalcTest","method":null,"params":null,"status":"SUCCESSFUL","ms":70,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]","class":"com.example.lib.SlowTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]/[method:a_fast()]","class":"com.example.lib.SlowTest","method":"a_fast","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]/[method:a_fast()]","class":"com.example.lib.SlowTest","method":"a_fast","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]/[method:b_slow()]","class":"com.example.lib.SlowTest","method":"b_slow","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]/[method:b_slow()]","class":"com.example.lib.SlowTest","method":"b_slow","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.SlowTest]","class":"com.example.lib.SlowTest","method":null,"params":null,"status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]","class":"com.example.lib.CrashTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:a_before()]","class":"com.example.lib.CrashTest","method":"a_before","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:a_before()]","class":"com.example.lib.CrashTest","method":"a_before","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:b_crash()]","class":"com.example.lib.CrashTest","method":"b_crash","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:b_crash()]","class":"com.example.lib.CrashTest","method":"b_crash","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:c_after()]","class":"com.example.lib.CrashTest","method":"c_after","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:c_after()]","class":"com.example.lib.CrashTest","method":"c_after","params":"","status":"SUCCESSFUL","ms":0,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]","class":"com.example.lib.CrashTest","method":null,"params":null,"status":"SUCCESSFUL","ms":2,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]","class":null,"method":null,"params":null,"status":"SUCCESSFUL","ms":105,"message":null}
+{"e":"plan-finished"}

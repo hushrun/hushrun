@@ -30,6 +30,8 @@ pub mod ctest;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod jvm;
+pub mod maven;
 pub mod program;
 pub mod pytest;
 pub mod runner;

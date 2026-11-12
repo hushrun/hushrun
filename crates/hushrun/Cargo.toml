@@ -42,9 +42,9 @@ hushrun-core.workspace = true
 hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
-# \[ADR 0087\] The JUnit file CTest writes, read test by test; already in the build through
-# hushrun-reports. \[ADR 0086\] The xunit file `swift test --parallel` writes, read as the
-# reports crate reads JUnit.
+# The reports the adapters read test by test, already in the build through hushrun-reports:
+# \[ADR 0087\] the JUnit file CTest writes, \[ADR 0086\] the xunit file `swift test --parallel`
+# writes, \[ADR 0085\] Surefire's and Failsafe's reports.
 quick-xml.workspace = true
 rayon.workspace = true
 # \[ADR 0072\] The local store of what test files read.

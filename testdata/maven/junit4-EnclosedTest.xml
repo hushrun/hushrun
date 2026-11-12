@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" name="j4.EnclosedTest" time="0.075" tests="3" errors="0" skipped="0" failures="1">
+  <testcase name="nestedNamedLikeATest" classname="j4.EnclosedTest$InnerTest" time="0.039"/>
+  <testcase name="innerPasses" classname="j4.EnclosedTest$Inner" time="0.011"/>
+  <testcase name="innerFails" classname="j4.EnclosedTest$Inner" time="0.001">
+    <failure message="deliberate nested failure" type="java.lang.AssertionError">java.lang.AssertionError: deliberate nested failure
+	at j4.EnclosedTest$Inner.innerFails(EnclosedTest.java:5)
+</failure>
+  </testcase>
+</testsuite>
