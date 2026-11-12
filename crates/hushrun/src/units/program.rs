@@ -143,38 +143,77 @@ impl Copied {
 /// again, [`FORWARD`], with the read end as its standard input and this process's standard output
 /// as its own), as a shell lets that program go on printing: nothing waits, nothing is lost, and
 /// the run is [`Copied::held`].
-#[cfg(unix)]
 pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
-    use std::io::{Read as _, Write as _};
-    use std::time::Instant;
     let (mut from, to) = output_channel()?;
     command.stdout(to);
     let mut child = command.spawn()?;
     // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
     drop(command);
     let forwarding = super::runner::forward_signals(child.id());
-    // Read without blocking, so that the program's end is seen while its output stays open.
-    let flags = rustix::fs::fcntl_getfl(&from)?;
-    rustix::fs::fcntl_setfl(&from, flags | rustix::fs::OFlags::NONBLOCK)?;
     let mut kept = Vec::new();
+    let mut cut = false;
+    let (status, held) = copy_until_held(&mut from, &mut child, &mut |bytes| {
+        // Kept up to KEEP_MOST to be read; passed on whole.
+        let room = KEEP_MOST.saturating_sub(kept.len());
+        kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        cut |= bytes.len() > room;
+    });
+    drop(forwarding);
+    if held {
+        hand_over(from);
+    }
+    Ok(match status {
+        Some(status) => Copied {
+            exit: status.code(),
+            signal: super::runner::signal_of(&status),
+            stdout: kept,
+            held,
+            cut,
+        },
+        None => Copied {
+            stdout: kept,
+            held,
+            cut,
+            ..Copied::default()
+        },
+    })
+}
+
+/// \[ADR 0083, 0086\] The one copy of a program's output for a stand-in (hushrun's `ctest` and
+/// `swift` on `PATH`, and the runner of Go's test binaries): what comes from `from` goes on to
+/// this process's standard output as it comes, and to `sink`, until it ends, or, once `child`
+/// ended, until it has been quiet for [`QUIET`] (at most [`MOST_AFTER`]). How the child ended,
+/// and whether its output was still held open then: [`hand_over`] then gives the rest to a
+/// forwarder, so that what reads this process's output sees what it would without hushrun, the
+/// program gone and its output still open.
+#[cfg(unix)]
+pub(super) fn copy_until_held(
+    from: &mut std::fs::File,
+    child: &mut std::process::Child,
+    sink: &mut dyn FnMut(&[u8]),
+) -> (Option<std::process::ExitStatus>, bool) {
+    use std::io::{Read as _, Write as _};
+    use std::time::Instant;
+    // Read without blocking, so that the program's end is seen while its output stays open.
+    let flags = rustix::fs::fcntl_getfl(&*from).ok();
+    if let Some(flags) = flags {
+        let _ = rustix::fs::fcntl_setfl(&*from, flags | rustix::fs::OFlags::NONBLOCK);
+    }
     let mut buf = vec![0u8; 64 * 1024];
     let out = std::io::stdout();
     let mut status: Option<Option<std::process::ExitStatus>> = None;
     let mut ended_at: Option<Instant> = None;
     let mut last = Instant::now();
     let mut held = false;
-    let mut cut = false;
     loop {
         // Every pass, whatever arrives, asks whether the program ended, and counts from its end.
         let read = match from.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // Kept up to KEEP_MOST to be read; passed on whole.
-                let room = KEEP_MOST.saturating_sub(kept.len());
-                kept.extend_from_slice(&buf[..n.min(room)]);
-                cut |= n > room;
                 let mut out = out.lock();
                 let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                drop(out);
+                sink(&buf[..n]);
                 last = Instant::now();
                 true
             }
@@ -206,43 +245,59 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
+    // A reader of what is left (the forwarder) reads as any reader does: blocking again.
+    if let Some(flags) = flags {
+        let _ = rustix::fs::fcntl_setfl(&*from, flags);
+    }
     let status = match status {
         Some(status) => status,
-        None => loop {
-            match child.wait() {
-                Ok(done) => break Some(done),
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break None,
-            }
-        },
+        None => wait(child),
     };
-    drop(forwarding);
-    if held {
-        // The forwarder reads as any reader does: blocking again.
-        let _ = rustix::fs::fcntl_setfl(&from, flags);
-        hand_over(from);
+    (status, held)
+}
+
+/// [`copy_until_held`] where output can't be read without blocking: it is read to its end, and
+/// nothing is held.
+#[cfg(not(unix))]
+pub(super) fn copy_until_held(
+    from: &mut std::fs::File,
+    child: &mut std::process::Child,
+    sink: &mut dyn FnMut(&[u8]),
+) -> (Option<std::process::ExitStatus>, bool) {
+    use std::io::{Read as _, Write as _};
+    let mut buf = vec![0u8; 64 * 1024];
+    let out = std::io::stdout();
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut out = out.lock();
+                let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                drop(out);
+                sink(&buf[..n]);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
     }
-    Ok(match status {
-        Some(status) => Copied {
-            exit: status.code(),
-            signal: super::runner::signal_of(&status),
-            stdout: kept,
-            held,
-            cut,
-        },
-        None => Copied {
-            stdout: kept,
-            held,
-            cut,
-            ..Copied::default()
-        },
-    })
+    (wait(child), false)
+}
+
+/// How `child` ended, when that can be told.
+fn wait(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.wait() {
+            Ok(done) => return Some(done),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Hands `from` to a forwarder this process doesn't wait for, which copies it to this process's
 /// standard output until its end; when none can be started, copies it here, to its end.
 #[cfg(unix)]
-fn hand_over(from: std::fs::File) {
+pub(super) fn hand_over(from: std::fs::File) {
     // A unit test's own executable is its test harness, not hushrun: there `cat` forwards.
     #[cfg(test)]
     let exe: std::io::Result<PathBuf> = Ok(PathBuf::from("cat"));
@@ -283,42 +338,22 @@ fn forward(mut from: impl std::io::Read) {
     }
 }
 
-/// [`run_copying_stdout`] where output can't be read without blocking: it is read to its end, and
-/// nothing is held.
+/// Where nothing is held, nothing is handed over: what is left is copied here.
 #[cfg(not(unix))]
-pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
-    use std::io::{Read as _, Write as _};
-    let (mut from, to) = output_channel()?;
-    command.stdout(to);
-    let mut child = command.spawn()?;
-    drop(command);
-    let reader = std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        let mut buf = vec![0u8; 64 * 1024];
-        let out = std::io::stdout();
-        loop {
-            match from.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    kept.extend_from_slice(&buf[..n]);
-                    let mut out = out.lock();
-                    let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-        kept
-    });
-    let status = child.wait().ok();
-    let stdout = reader.join().unwrap_or_default();
-    Ok(Copied {
-        exit: status.and_then(|s| s.code()),
-        signal: None,
-        stdout,
-        held: false,
-        cut: false,
-    })
+pub(super) fn hand_over(from: std::fs::File) {
+    forward(from);
+}
+
+/// A pipe's read end as a file, for [`copy_until_held`] and [`hand_over`].
+pub(super) fn pipe_file(reader: std::io::PipeReader) -> std::fs::File {
+    #[cfg(unix)]
+    {
+        std::fs::File::from(std::os::fd::OwnedFd::from(reader))
+    }
+    #[cfg(windows)]
+    {
+        std::fs::File::from(std::os::windows::io::OwnedHandle::from(reader))
+    }
 }
 
 /// The end this process reads and the end the child writes its standard output to: a
@@ -362,9 +397,9 @@ fn output_channel() -> std::io::Result<(std::fs::File, std::process::Stdio)> {
 }
 
 #[cfg(not(unix))]
-fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::process::Stdio)> {
+fn output_channel() -> std::io::Result<(std::fs::File, std::process::Stdio)> {
     let (from, to) = std::io::pipe()?;
-    Ok((Box::new(from), to.into()))
+    Ok((pipe_file(from), to.into()))
 }
 
 /// One start of a program on `PATH`.

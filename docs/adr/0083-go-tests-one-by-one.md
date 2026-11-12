@@ -186,3 +186,24 @@ changed file.
 Considered and not done: adding `-test.v` to the binary's arguments and filtering its lines back
 out. It changes what COMMAND prints (Go's non-verbose output holds a test's log only when it
 fails, and in other places than `-v`'s), and hushrun never changes what COMMAND prints.
+
+## Amendment 4: output held open is handed on, and `go test` decides (2026-11-12)
+
+Amendment 1 said the runner passing the output on to its end reads it "as `go test` reads it
+without hushrun". That holds only for a program that lets the output go within `go test`'s own
+wait. `go test` waits for a binary's output only so long after the binary exits (Go 1.27:
+`WaitDelay`, the larger of 5 s and a tenth of `-timeout`, none with `-bench` or `-fuzz`), then
+prints `*** Test I/O incomplete … after exiting.` and fails the package. Under hushrun `go test`
+waits on the runner; a runner that exited only at the output's end turned that failure into `ok`,
+and the check recorded a pass (a reviewer: plain `FAIL … exit 1` against `ok … unit passed`). The
+runner that exited after 5 s before Amendment 1 turned it into `ok` too.
+
+The decision: the runner reads the binary's output as hushrun's `swift` does (ADR 0086 Amendment
+3), with the one function both use: once the binary exited, until the output ends or has been quiet
+for 250 ms (at most 1 s). Output still open then: no test of the start passes (the reason as
+before), the runner writes its facts, hands the open pipe to a forwarder it starts and doesn't wait
+for (hushrun under a hidden subcommand, the pipe as its standard input, the runner's standard
+output, `go test`'s pipe, as its own), and exits with the binary's code. `go test` then sees what it
+sees without hushrun, the binary gone and its output still open, and its own wait decides: late
+output inside it arrives and the package is `ok`; past it, `go test` prints its line and fails the
+package, on its own timing. The runner needs no knowledge of the delay.

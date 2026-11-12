@@ -248,6 +248,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   one past 255 used to end as 1.
 - On Windows, hushrun's test runner ends with a Cargo or Go test binary's exit code whole, as
   its `ctest` and `swift` do, where one past 255 used to end as 1.
+- Go with `unit: test`: a package whose test leaves a program holding its output past `go test`'s
+  own wait now fails with `Test I/O incomplete`, as without hushrun. The runner hands output still
+  open after the binary exits to a forwarder and exits, rather than passing it on to its end
+  itself, which made `go test` print `ok`.
 - The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
   the current directory, a relative one is from it, and a link to one of hushrun's own programs
   is passed over.

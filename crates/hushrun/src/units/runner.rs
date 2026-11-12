@@ -169,9 +169,10 @@ fn run(args: &[OsString]) -> ExitCode {
         }
     };
     let forwarding = forward_signals(child.id());
-    let reading = watch.map(|(at, reader)| {
-        let json = at.flags.json;
-        (at, read_through(reader, json))
+    // \[ADR 0083\] The binary's output, read as it passes through to `go test`.
+    let mut watched = watch.map(|(at, reader)| {
+        let output = super::gotest::Output::new(at.flags.json);
+        (at, super::program::pipe_file(reader), output)
     });
     // A list goes on to Cargo or nextest byte for byte, as it comes; hushrun keeps a copy.
     let mut listed_bytes = Vec::new();
@@ -193,12 +194,23 @@ fn run(args: &[OsString]) -> ExitCode {
         }
         let _ = stdout.flush();
     }
-    let status = loop {
-        match child.wait() {
-            Ok(status) => break Some(status),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break None,
+    // \[ADR 0083, amended\] Copied until it ends, or until it is still held open once the binary
+    // ended: then the rest is handed to a forwarder below, and `go test` sees what it sees without
+    // hushrun, the binary gone and its output open, and its own WaitDelay decides.
+    let (status, held) = match watched.as_mut() {
+        Some((_, from, output)) => {
+            super::program::copy_until_held(from, &mut child, &mut |bytes| output.feed(bytes))
         }
+        None => (
+            loop {
+                match child.wait() {
+                    Ok(status) => break Some(status),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break None,
+                }
+            },
+            false,
+        ),
     };
     drop(forwarding);
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -206,13 +218,16 @@ fn run(args: &[OsString]) -> ExitCode {
         Some(status) => (status.code(), signal_of(status)),
         None => (None, None),
     };
-    // \[ADR 0083\] What each test came to, from what the binary printed and how it ended. The
-    // output goes on being passed through after that, to its end (`draining`).
-    let mut draining = None;
-    let tests = match reading {
-        Some((at, mut reading)) => {
-            let (out, read_whole) = reading.finish();
-            draining = Some(reading);
+    // \[ADR 0083\] What each test came to, from what the binary printed and how it ended.
+    let mut held_open = None;
+    let tests = match watched {
+        Some((at, from, mut out)) => {
+            let read_whole = !held;
+            if read_whole {
+                out.end();
+            } else {
+                held_open = Some(from);
+            }
             let returned = returned.as_ref().is_some_and(|path| {
                 let written = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
                 let _ = std::fs::remove_file(path);
@@ -264,9 +279,9 @@ fn run(args: &[OsString]) -> ExitCode {
         );
     }
     // \[ADR 0083, amended\] What a program the test left running still prints goes on to `go
-    // test` until it lets the output go, as it would without hushrun between them.
-    if let Some(reading) = draining {
-        reading.drain();
+    // test` through a forwarder hushrun doesn't wait for, as it would without hushrun between them.
+    if let Some(from) = held_open {
+        super::program::hand_over(from);
     }
     end_with(exit, signal)
 }
@@ -385,11 +400,6 @@ fn package_at(run: &facts::RunFile, here: &Path) -> Option<String> {
 
 /// \[ADR 0083\] The longest hushrun waits for a test binary to list its tests.
 const LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
-/// \[ADR 0083, amended\] How long after a test binary exited its output may still be open for its
-/// tests to pass: a program it started that holds the output longer may print anything into it, so
-/// none of the binary's tests passes. The output is passed on to its end either way, as `go test`
-/// reads it without hushrun (Go 1.27 waited the 12 s such a program held it).
-const OUTPUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// \[ADR 0083\] With `unit: test` (C-39), what the Go package in `here` runs test by test: its
 /// tests listed, and those `hushrun.json`'s `reuseTests` names to be left out. `None` with
@@ -512,68 +522,6 @@ fn stdout_is_stderr() -> bool {
 #[cfg(not(unix))]
 fn stdout_is_stderr() -> bool {
     false
-}
-
-/// \[ADR 0083\] A test binary's output being passed on byte for byte, and read.
-struct Reading {
-    output: std::sync::Arc<std::sync::Mutex<super::gotest::Output>>,
-    done: std::sync::mpsc::Receiver<()>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-/// Passes what comes from `reader` on to this process's standard output as it comes, and reads it.
-fn read_through(reader: std::io::PipeReader, json: bool) -> Reading {
-    let output = std::sync::Arc::new(std::sync::Mutex::new(super::gotest::Output::new(json)));
-    let (tell, done) = std::sync::mpsc::channel();
-    let shared = std::sync::Arc::clone(&output);
-    let thread = std::thread::spawn(move || {
-        let mut reader = reader;
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let mut stdout = std::io::stdout().lock();
-                    let _ = stdout.write_all(&buffer[..n]);
-                    let _ = stdout.flush();
-                    if let Ok(mut out) = shared.lock() {
-                        out.feed(&buffer[..n]);
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return,
-            }
-        }
-        if let Ok(mut out) = shared.lock() {
-            out.end();
-        }
-        let _ = tell.send(());
-    });
-    Reading {
-        output,
-        done,
-        thread: Some(thread),
-    }
-}
-
-impl Reading {
-    /// What was read, and whether to the end: once the binary exited, its output ends when every
-    /// program holding the pipe let it go. Read to the end within [`OUTPUT_GRACE`], it is whole.
-    fn finish(&mut self) -> (super::gotest::Output, bool) {
-        let whole = self.done.recv_timeout(OUTPUT_GRACE).is_ok();
-        let out = match self.output.lock() {
-            Ok(out) => out.clone(),
-            Err(_) => return (super::gotest::Output::default(), false),
-        };
-        (out, whole)
-    }
-
-    /// Waits until the output ended, everything in it passed on.
-    fn drain(mut self) {
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
 }
 
 /// \[ADR 0069\] Whether the run's `hushrun.json` reuses `binary`: it lists a binary at the same

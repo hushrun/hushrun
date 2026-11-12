@@ -1574,16 +1574,17 @@ fn what_a_program_a_go_test_left_running_prints_reaches_go_test_and_no_test_of_i
     if !tools("Go", has_go()) {
         return;
     }
-    // The program holds the test binary's output for 6 s: just past the 5 s after the binary's
-    // exit within which its output must end for its tests to pass, and short of Go's own 10 s
-    // timeout, so the test stays as short as it can while still crossing that line.
+    // The program holds the test binary's output for 2 s after the binary exited: longer than the
+    // quarter second within which the runner tells output still held open from output closing,
+    // and well inside the minute go test itself waits for it under its default timeout. (It held
+    // it for 6 s when the runner waited 5 s and then passed the output on itself.)
     let r = Repo::new(&[
         file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
         file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
         file("p/p.go", "package p\n"),
         file(
             "p/p_test.go",
-            "package p\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestStarts(t *testing.T) {\n\tcmd := exec.Command(\"sh\", \"-c\", \"sleep 6; echo late\")\n\tcmd.Stdout = os.Stdout\n\tif err := cmd.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n\nfunc TestOther(t *testing.T) {}\n",
+            "package p\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestStarts(t *testing.T) {\n\tcmd := exec.Command(\"sh\", \"-c\", \"sleep 2; echo late\")\n\tcmd.Stdout = os.Stdout\n\tif err := cmd.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n\nfunc TestOther(t *testing.T) {}\n",
         ),
     ]);
     let ran = r.run(&["run", "unit", "--", "go", "test", "-v", "./..."], &[]);
@@ -1599,6 +1600,65 @@ fn what_a_program_a_go_test_left_running_prints_reaches_go_test_and_no_test_of_i
         r.map()["units"]["p"]["tests"],
         serde_json::json!({"TestOther": "not-run", "TestStarts": "not-run"})
     );
+}
+
+/// A package whose one test leaves a program holding its output for `hold` seconds, which then
+/// prints `late`.
+fn holding(hold: u32) -> Repo {
+    Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            &format!(
+                "package p\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestStarts(t *testing.T) {{\n\tcmd := exec.Command(\"sh\", \"-c\", \"sleep {hold}; echo late\")\n\tcmd.Stdout = os.Stdout\n\tif err := cmd.Start(); err != nil {{\n\t\tt.Fatal(err)\n\t}}\n}}\n\nfunc TestOther(t *testing.T) {{}}\n"
+            ),
+        ),
+    ])
+}
+
+// covers: C-45
+#[test]
+fn output_held_past_go_tests_own_wait_fails_the_package_as_it_does_without_hushrun() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // With -timeout=20s go test waits 5 s for a binary's output after it exits; the program
+    // holds it for 8 s. Without hushrun, go test fails the package for it.
+    let r = holding(8);
+    let words = ["go", "test", "-count=1", "-timeout=20s", "-v", "./..."];
+    let plain = Command::new("go")
+        .args(&words[1..])
+        .current_dir(&r.repo)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    let plain_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert_eq!(plain.status.code(), Some(1), "{plain_text}");
+    assert!(plain_text.contains("Test I/O incomplete"), "{plain_text}");
+    let mut args = vec!["run", "unit", "--"];
+    args.extend(words);
+    let ran = r.run(&args, &[]);
+    let text = format!("{}{}", ran.stdout, ran.stderr);
+    // Under hushrun go test sees what it sees without: the binary gone, its output still open.
+    assert_eq!(ran.code, 1, "{text}");
+    assert!(text.contains("Test I/O incomplete"), "{text}");
+    assert!(!text.contains("it won't run again on this code"), "{text}");
+    assert_eq!(
+        r.map()["units"]["p"]["tests"],
+        serde_json::json!({"TestOther": "not-run", "TestStarts": "not-run"})
+    );
+    // Held for 2 s, inside go test's wait: the package passes, with what the program printed.
+    let r = holding(2);
+    let ran = r.run(&args, &[]);
+    let text = format!("{}{}", ran.stdout, ran.stderr);
+    assert_eq!(ran.code, 0, "{text}");
+    assert!(text.contains("late") && text.contains("ok "), "{text}");
 }
 
 // covers: C-45
