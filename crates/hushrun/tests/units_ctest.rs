@@ -680,6 +680,98 @@ fn a_header_a_program_of_the_project_writes_reads_what_that_program_is_built_fro
     }
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_program_or_a_file_a_test_names_is_read_by_its_test_program() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let driver = "#include <unistd.h>\n#include <stdlib.h>\nint main(int argc, char **argv) {\n\
+            \x20 const char *p = argc > 1 ? argv[1] : getenv(\"SERVER\");\n\
+            \x20 if (!p) return 0;\n  execv(p, (char *const[]){(char *)p, 0}); return 2;\n}\n";
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(drv C)\nenable_testing()\n\
+                     file(WRITE ${CMAKE_BINARY_DIR}/data.txt \"x\")\n\
+                     add_executable(server tools/server.c)\ntarget_include_directories(server PRIVATE common)\n\
+                     add_executable(other tools/other.c)\ntarget_include_directories(other PRIVATE common)\n\
+                     foreach(t t_driver t_envdriver)\n  add_executable(${t} tests/driver.c)\nendforeach()\n\
+                     add_executable(t_dirdriver tests/t_data.c)\n\
+                     add_executable(t_data tests/t_data.c)\nadd_executable(t_input tests/t_input.c)\n\
+                     add_test(NAME integ COMMAND t_driver $<TARGET_FILE:server>)\n\
+                     add_test(NAME env COMMAND t_envdriver)\n\
+                     set_tests_properties(env PROPERTIES ENVIRONMENT \"SERVER=$<TARGET_FILE:other>\")\n\
+                     add_test(NAME dir COMMAND t_dirdriver --dir=${CMAKE_BINARY_DIR})\n\
+                     add_test(NAME data COMMAND t_data ${CMAKE_BINARY_DIR}/data.txt)\n\
+                     add_test(NAME input COMMAND t_input ${CMAKE_SOURCE_DIR}/tests/input.c)\n",
+                ),
+                file("common/val.h", "#define VAL 1\n"),
+                file(
+                    "tools/server.c",
+                    "#include \"val.h\"\nint main(void) { return VAL == 1 ? 0 : 1; }\n",
+                ),
+                file(
+                    "tools/other.c",
+                    "#include \"val.h\"\nint main(void) { return VAL == 1 ? 0 : 1; }\n",
+                ),
+                file("tests/driver.c", driver),
+                file("tests/t_data.c", "int main(void) { return 0; }\n"),
+                file("tests/t_input.c", "int main(void) { return 0; }\n"),
+                file("tests/input.c", "int unused;\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = |unit: &str| -> Vec<String> {
+            map["units"][unit]["reads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{at}: {unit}: {map:#}"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // A program a test starts by its path on the command line, or from a variable its test
+        // sets, is read by the test's program.
+        assert_eq!(
+            reads("t_driver"),
+            ["common/val.h", "tests/driver.c", "tools/server.c"],
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_envdriver"),
+            ["common/val.h", "tests/driver.c", "tools/other.c"],
+            "{at}"
+        );
+        // The build directory itself: any program in it may start, every source is read, and
+        // whether those programs are up to date can't be told.
+        assert!(
+            reads("t_dirdriver").contains(&"tools/server.c".to_string()),
+            "{at}: {map:#}"
+        );
+        assert_eq!(
+            map["units"]["t_dirdriver"]["notFollowed"],
+            json!(["stale program"]),
+            "{at}"
+        );
+        // A file no rule builds is no program; a file of the repository is read.
+        assert_eq!(reads("t_data"), ["tests/t_data.c"], "{at}");
+        assert_eq!(
+            reads("t_input"),
+            ["tests/input.c", "tests/t_input.c"],
+            "{at}"
+        );
+    }
+}
+
 // covers: C-49, C-39
 #[test]
 fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {

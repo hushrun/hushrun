@@ -186,23 +186,32 @@ pub fn walk(tests: &[Test], root: &Path, path: Option<OsString>) -> BTreeMap<Str
     let mut walker = Walker::new(root, path);
     let mut out: BTreeMap<String, Built> = BTreeMap::new();
     let mut done: BTreeSet<PathBuf> = BTreeSet::new();
-    for test in tests {
-        let Program::Built { path, build } = &test.program else {
-            continue;
-        };
-        if !done.insert(path.clone()) {
-            continue;
-        }
-        let built = walker.program(path, build);
-        match out.get_mut(&test.unit) {
+    let mut named_done: BTreeSet<(String, select::Named)> = BTreeSet::new();
+    let merge =
+        |out: &mut BTreeMap<String, Built>, unit: &str, built: Built| match out.get_mut(unit) {
             None => {
-                out.insert(test.unit.clone(), built);
+                out.insert(unit.to_string(), built);
             }
             Some(had) => {
                 had.reads.extend(built.reads);
                 had.own.extend(built.own);
                 had.every_source |= built.every_source;
                 had.stale = had.stale.take().or(built.stale);
+            }
+        };
+    for test in tests {
+        let Program::Built { path, build, named } = &test.program else {
+            continue;
+        };
+        if done.insert(path.clone()) {
+            let built = walker.program(path, build);
+            merge(&mut out, &test.unit, built);
+        }
+        // What the test names besides: a program it starts, a file it reads.
+        for n in named {
+            if named_done.insert((test.unit.clone(), n.clone())) {
+                let built = walker.named(n);
+                merge(&mut out, &test.unit, built);
             }
         }
     }
@@ -368,14 +377,20 @@ fn verify(
         return false;
     }
     for test in tests.iter().filter(|t| t.unit == unit) {
-        let Program::Built { path, .. } = &test.program else {
+        let Program::Built { path, named, .. } = &test.program else {
             return false;
         };
-        let rebuilt = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map_or(true, |m| m > *planned_at);
-        if rebuilt {
-            return false;
+        let programs = std::iter::once(path).chain(named.iter().filter_map(|n| match n {
+            select::Named::Built { path, .. } => Some(path),
+            _ => None,
+        }));
+        for program in programs {
+            let rebuilt = std::fs::metadata(program)
+                .and_then(|m| m.modified())
+                .map_or(true, |m| m > *planned_at);
+            if rebuilt {
+                return false;
+            }
         }
     }
     let scope: BTreeSet<&str> = plan.scope.iter().map(String::as_str).collect();

@@ -110,6 +110,59 @@ impl<'a> Walker<'a> {
         read.unwrap_or_else(|| self.every_source(program))
     }
 
+    /// What a path a test names beside its program adds to what that program reads: a program a
+    /// build rule makes, what it is built from; a directory of the repository, every source; a
+    /// directory of a build, every source and a program that can't be told up to date (which of
+    /// its programs the test starts can't be told); a file of the repository, itself; a file of a
+    /// build directory no rule makes (data the test reads or writes), nothing.
+    pub fn named(&mut self, named: &super::select::Named) -> Built {
+        use super::select::Named;
+        match named {
+            Named::Built { path, build } => {
+                if self.makes(path, build) {
+                    let mut built = self.program(path, build);
+                    built.own.clear();
+                    built
+                } else {
+                    Built::default()
+                }
+            }
+            Named::BuildDir(dir) => Built {
+                every_source: true,
+                stale: Some(format!(
+                    "its test names {}, a directory of a build, whose programs it may start can't be told up to date",
+                    dir.display()
+                )),
+                method: "every source",
+                ..Built::default()
+            },
+            Named::RepoDir(_) => Built {
+                every_source: true,
+                method: "every source",
+                ..Built::default()
+            },
+            Named::Repo(rel) => Built {
+                reads: [rel.clone()].into(),
+                ..Built::default()
+            },
+        }
+    }
+
+    /// Whether a rule of the build directory `build` makes `path`; true where the build can't be
+    /// read, which can't tell.
+    fn makes(&mut self, path: &Path, build: &Path) -> bool {
+        let target = super::select::slashed(path.strip_prefix(build).unwrap_or(path));
+        if !self.dirs.contains_key(build) {
+            let dir = self.open(build);
+            self.dirs.insert(build.to_path_buf(), dir);
+        }
+        match self.dirs.get(build) {
+            Some(Dir::Ninja { outputs, .. }) => outputs.contains(&target),
+            Some(Dir::Make { graph }) => graph.contains_key(&target),
+            _ => true,
+        }
+    }
+
     fn open(&self, build: &Path) -> Dir {
         let dir = super::select::build_dir(build);
         match dir.generator.as_str() {
