@@ -737,6 +737,74 @@ impl Store {
         tally
     }
 
+    /// Removes what the compiler memos' folder holds that no run used since `cutoff` (B-14,
+    /// B-17): a memo (a memo of an older form is never read again, and one in use is only
+    /// computed again), and a toolchain's view without sources whose marker no run dated since.
+    /// A view without its marker, and what a maker left (a temporary or moved-aside folder, a
+    /// lock), go once they are older than `leftover`. A view goes by a rename into `trash/`, so
+    /// no compile is ever given half of one.
+    pub(crate) fn remove_unused_compilers(
+        &self,
+        cutoff: SystemTime,
+        leftover: SystemTime,
+    ) -> Tally {
+        let mut tally = Tally::default();
+        let dated = |path: &Path| {
+            fs::symlink_metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        };
+        let memos = self.root.join(crate::compiler::MEMOS);
+        let Ok(entries) = fs::read_dir(&memos) else {
+            return tally;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == crate::compiler::SYSROOTS {
+                continue;
+            }
+            let limit = if name.starts_with('.') {
+                leftover
+            } else {
+                cutoff
+            };
+            if dated(&path).is_some_and(|changed| changed < limit) {
+                count(&mut tally, remove_tree(&path).map(|()| true));
+            }
+        }
+        let Ok(entries) = fs::read_dir(memos.join(crate::compiler::SYSROOTS)) else {
+            return tally;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let unused = if name.starts_with('.') {
+                dated(&path).is_some_and(|changed| changed < leftover)
+            } else {
+                match dated(&path.join(crate::compiler::VIEW_MARKER)) {
+                    Some(used) => used < cutoff,
+                    None => dated(&path).is_some_and(|changed| changed < leftover),
+                }
+            };
+            if !unused {
+                continue;
+            }
+            if name.starts_with('.') {
+                count(&mut tally, remove_tree(&path).map(|()| true));
+            } else {
+                count(
+                    &mut tally,
+                    self.to_trash(&path).and_then(|moved| match moved {
+                        Some(moved) => remove_tree(&moved).map(|()| true),
+                        None => Ok(false),
+                    }),
+                );
+            }
+        }
+        tally
+    }
+
     /// Removes the hints last refreshed before `before`, and the folders of first keys left
     /// with no hint and no suspension.
     pub(crate) fn remove_stale_hints(&self, before: SystemTime) -> Tally {

@@ -227,7 +227,12 @@ repository that built it.
 After a run, at most once a day, `hushrun run` deletes every block whose last use is more than
 `keep_days` old (15 unless set; `HUSHRUN_BUILD_KEEP_DAYS` overrides it), by renaming it into
 `trash/` and deleting it there, deletes the hints not refreshed for as long, and deletes what is
-more than a day old under `tmp/` and `trash/`. The stamp of the sweep is written before anything
+more than a day old under `tmp/` and `trash/`. By the same rule it deletes the compiler memos
+written longer ago than `keep_days` (one of an older form is never read again; one in use is
+computed again) and each toolchain's view without sources (B-17) whose marker no run dated for
+as long, by renaming it into `trash/`; a run dates the marker of each view it uses once. A
+view without its marker, and what a maker of one left (a temporary or moved-aside folder, a
+lock), go once they are more than a day old. The stamp of the sweep is written before anything
 is deleted. There is no limit on the
 store's size.
 
