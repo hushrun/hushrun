@@ -15,6 +15,8 @@
 //!   the build (`configure_file`): the program reads every file configuring read.
 //! - Sources fetched into the build directory (`FetchContent`, under `_deps/`) aren't the
 //!   repository's: their identity is their declaration, in a CMake file, in the rest set.
+//! - An in-source build (its build directory holds the repository) isn't read: what the build
+//!   wrote can't be told from the repository's files, and its programs aren't observed.
 //! - With neither readable (another generator, a program the graph doesn't know, an object with
 //!   no record of its headers), the program reads every C and C++ file of the scope.
 
@@ -47,6 +49,8 @@ pub struct Built {
     pub every_source: bool,
     /// Why it isn't up to date, when it isn't: it ran old code.
     pub stale: Option<String>,
+    /// Why what it is built from can't be told at all, when it can't: it isn't observed.
+    pub refused: Option<String>,
     /// How it was read: `ninja`, `makefile` or `every source`.
     pub method: &'static str,
 }
@@ -91,6 +95,18 @@ impl<'a> Walker<'a> {
 
     /// What `program`, in the build directory `build`, is built from.
     pub fn program(&mut self, program: &Path, build: &Path) -> Built {
+        // An in-source build: its build directory holds the repository, so a file the build
+        // writes can't be told from one of the repository's, and its records name both alike.
+        if self.root.starts_with(build) {
+            return Built {
+                refused: Some(format!(
+                    "its build directory, {}, is the repository's: what it is built from can't be told from the repository's own files; a build directory of its own (cmake -B build) can be read",
+                    build.display()
+                )),
+                method: "every source",
+                ..Built::default()
+            };
+        }
         let target = super::select::slashed(program.strip_prefix(build).unwrap_or(program));
         if !self.dirs.contains_key(build) {
             let dir = self.open(build);

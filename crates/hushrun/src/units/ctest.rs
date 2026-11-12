@@ -146,7 +146,10 @@ impl Recognized {
         }
         let every: BTreeSet<String> = every_source(at.tree);
         for (unit, built_here) in programs {
-            let Some(b) = built.get(unit).filter(|b| built_here && b.stale.is_none()) else {
+            let Some(b) = built
+                .get(unit)
+                .filter(|b| built_here && b.stale.is_none() && b.refused.is_none())
+            else {
                 out.units.insert(unit.to_string(), None);
                 continue;
             };

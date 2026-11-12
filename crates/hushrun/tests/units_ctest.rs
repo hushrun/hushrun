@@ -173,11 +173,23 @@ struct Project {
     path: std::ffi::OsString,
     /// When the last build ended.
     built: std::cell::Cell<Option<std::time::SystemTime>>,
+    /// The build directory, from the repository.
+    build_dir: String,
 }
 
 impl Project {
     /// A repository of `files`, configured in `build` with `generator` and built.
     fn new(cmake: &Cmake, generator: &str, files: &[(String, String)]) -> Project {
+        Project::new_in(cmake, generator, files, "build")
+    }
+
+    /// [`Project::new`], built in `build_dir`.
+    fn new_in(
+        cmake: &Cmake,
+        generator: &str,
+        files: &[(String, String)],
+        build_dir: &str,
+    ) -> Project {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("real path");
         let repo = root.join("repo");
@@ -203,13 +215,14 @@ impl Project {
             cmake: cmake.clone(),
             path,
             built: std::cell::Cell::new(None),
+            build_dir: build_dir.to_string(),
         };
         for (path, text) in files {
             p.write(path, text);
         }
         git::commit_all(&p.repo, "init");
         let mut configure = p.tool("cmake");
-        configure.args(["-S", ".", "-B", "build", "-G", generator]);
+        configure.args(["-S", ".", "-B", build_dir, "-G", generator]);
         if generator == "Ninja" {
             configure.arg(format!(
                 "-DCMAKE_MAKE_PROGRAM={}",
@@ -238,7 +251,7 @@ impl Project {
     fn build(&self) {
         let out = self
             .tool("cmake")
-            .args(["--build", "build"])
+            .args(["--build", &self.build_dir])
             .output()
             .expect("cmake --build");
         assert!(
@@ -901,6 +914,36 @@ fn hushruns_listings_write_no_file_a_preset_or_the_command_line_names() {
             "{at}: a listing changed a file before: {}",
             std::fs::read_to_string(&marker).unwrap_or_default()
         );
+    }
+}
+
+// covers: C-49
+#[test]
+fn an_in_source_build_says_why_nothing_is_reused() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let mut files = shop("reuse");
+        files.retain(|(path, _)| path != ".gitignore");
+        files.push(file(
+            ".gitignore",
+            "CMakeFiles/\nCMakeCache.txt\n*.cmake\nMakefile\n*.ninja\n.ninja_*\nTesting/\nlib*.a\nt_*\n!tests/\n",
+        ));
+        let p = Project::new_in(&cmake, generator, &files, ".");
+        let first = p.run(&["run", "unit", "--", "ctest"], &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        // Its build directory is the repository: what each program is built from can't be told
+        // apart from the repository's files, and the run says so of each program.
+        let map = store::map(&p.cache);
+        for unit in ["t_price", "t_greet"] {
+            assert_eq!(
+                map["units"][unit]["notFollowed"],
+                json!(["in-source build"]),
+                "{at}: {map:#}"
+            );
+        }
     }
 }
 

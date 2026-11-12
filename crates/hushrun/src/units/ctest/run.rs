@@ -257,6 +257,7 @@ pub fn walk(tests: &[Test], root: &Path, path: Option<OsString>) -> BTreeMap<Str
                 had.own.extend(built.own);
                 had.every_source |= built.every_source;
                 had.stale = had.stale.take().or(built.stale);
+                had.refused = had.refused.take().or(built.refused);
             }
         };
     for test in tests {
@@ -442,7 +443,7 @@ fn verify(
     let Some(built) = built.get(unit) else {
         return false;
     };
-    if built.stale.is_some() {
+    if built.stale.is_some() || built.refused.is_some() {
         return false;
     }
     for test in tests.iter().filter(|t| t.unit == unit) {
@@ -623,6 +624,12 @@ fn record(p: &Pending) {
             }
             if let Some(built) = p.built.get(&test.unit) {
                 facts.reads = built.reads.iter().cloned().collect();
+                if let Some(why) = &built.refused {
+                    facts.not_followed.push(Unfollowed {
+                        why: "in-source build".into(),
+                        detail: why.clone(),
+                    });
+                }
                 if let Some(why) = &built.stale {
                     facts.not_followed.push(Unfollowed {
                         why: "stale program".into(),
