@@ -64,6 +64,10 @@ pub struct Record {
     /// Whether a reuse put it there. These are the files removed when a dependent fails to
     /// compile against them (B-15).
     pub reused: bool,
+    /// Whether a dependent on another machine would name this file as one here does: the block
+    /// it came from is portable, or is a proc macro named by what it was built from
+    /// ([`crate::portable::Portability::named_portably`]).
+    pub portable: bool,
 }
 
 /// The answer of [`lookup`]: the file's SHA-256 now and where it came from.
@@ -77,6 +81,8 @@ pub struct Known {
     pub step: Option<Digest>,
     /// Whether a reuse put it there, if its record still holds.
     pub reused: bool,
+    /// Whether another machine names the file the same way, if its record still holds.
+    pub portable: bool,
     /// Whether the file had to be hashed to answer.
     pub read: bool,
 }
@@ -96,6 +102,8 @@ struct Stored {
     #[serde(default)]
     step: Option<Digest>,
     reused: bool,
+    #[serde(default)]
+    portable: bool,
 }
 
 impl From<&Record> for Stored {
@@ -112,6 +120,7 @@ impl From<&Record> for Stored {
             produced_by: record.produced_by,
             step: record.step,
             reused: record.reused,
+            portable: record.portable,
         }
     }
 }
@@ -131,6 +140,7 @@ impl Stored {
             produced_by: self.produced_by,
             step: self.step,
             reused: self.reused,
+            portable: self.portable,
         })
     }
 }
@@ -175,16 +185,18 @@ pub fn record(
     produced_by: Option<Digest>,
     reused: bool,
 ) -> io::Result<()> {
-    record_block(file, sha256, produced_by, None, reused)
+    record_block(file, sha256, produced_by, None, reused, false)
 }
 
-/// [`record`], with the first key of the block the file came from.
+/// [`record`], with the first key of the block the file came from and whether another machine
+/// names it the same way.
 pub fn record_block(
     file: &Path,
     sha256: Digest,
     produced_by: Option<Digest>,
     step: Option<Digest>,
     reused: bool,
+    portable: bool,
 ) -> io::Result<()> {
     let stat = Stat::of(&fs::metadata(file)?);
     write(
@@ -195,6 +207,7 @@ pub fn record_block(
             produced_by,
             step,
             reused,
+            portable,
         },
     )
 }
@@ -217,6 +230,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
             produced_by: old.produced_by,
             step: old.step,
             reused: old.reused,
+            portable: old.portable,
             read: false,
         });
     }
@@ -229,6 +243,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
             produced_by: None,
             step: None,
             reused: false,
+            portable: false,
         },
     };
     // Best effort: a record is a saving, never the answer's source of truth here.
@@ -238,6 +253,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
         produced_by: fresh.produced_by,
         step: fresh.step,
         reused: fresh.reused,
+        portable: fresh.portable,
         read: true,
     })
 }
@@ -427,6 +443,7 @@ mod tests {
                 produced_by: Some(key(1)),
                 step: None,
                 reused: true,
+                portable: false,
                 read: false,
             }
         );
@@ -478,6 +495,7 @@ mod tests {
                 produced_by: None,
                 step: None,
                 reused: false,
+                portable: false,
                 read: true,
             }
         );
@@ -520,6 +538,7 @@ mod tests {
                     produced_by: None,
                     step: None,
                     reused: false,
+                    portable: false,
                     read: true,
                 }
             );
@@ -557,6 +576,7 @@ mod tests {
                 produced_by: None,
                 step: None,
                 reused: false,
+                portable: false,
                 read: true,
             }
         );

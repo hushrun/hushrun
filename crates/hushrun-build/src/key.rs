@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Located, RootName};
 
-/// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v5";
+/// The schema of the first key. v6: the compiler by content, the cargo home and the toolchain
+/// named as bases.
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v6";
 
-/// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v4";
+/// The schema of the second key. v5: reads under the cargo home and the toolchain named as
+/// bases, a proc macro named by what it was built from.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v5";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -114,7 +116,10 @@ impl EnvRead {
 pub enum ExternBy {
     /// By the SHA-256 of the file passed.
     Content(Digest),
-    /// A proc macro, by the key of the block that produced it, without its place.
+    /// A proc macro whose block may move, by what it was built from: the key of the block that
+    /// produced it without its place and without the linker, the SDK and `dsymutil`
+    /// ([`Observed::known_by`]). The same sources, dependencies, flags and compiler give a macro
+    /// that expands the same way whichever linker packed it.
     ProducedBy(Digest),
     /// No file was passed: `--extern proc_macro`. The name and options are all there is.
     Builtin,
@@ -283,7 +288,33 @@ pub struct Observed {
 impl Observed {
     /// The second key.
     pub fn key(&self) -> Result<Digest, KeyError> {
-        let body = BlockBody {
+        digest(BLOCK_SCHEMA, &self.body()?)
+    }
+
+    /// What a dependent names this block's linked library by when it may move (B-6): the key
+    /// without its place and without the link environment (the linker, the SDK and `dsymutil`),
+    /// which differs between machines and doesn't change how a proc macro expands. The same as
+    /// the key without its place for a block with no link part.
+    pub fn known_by(&self) -> Result<Digest, KeyError> {
+        let mut body = self.body()?;
+        body.place = Place::Anywhere;
+        if let Some(link) = body.link.as_mut() {
+            link.linker = String::new();
+            link.sdk = String::new();
+        }
+        digest(BLOCK_SCHEMA, &body)
+    }
+
+    /// The second key's body, each part as a digest of its JCS form, and each list part's
+    /// entries by what they name: what tells which part of two keys differs.
+    pub fn parts(&self) -> Result<serde_json::Value, KeyError> {
+        let body =
+            serde_json::to_value(self.body()?).map_err(|e| KeyError::Canonical(e.to_string()))?;
+        parts_of(&body)
+    }
+
+    fn body(&self) -> Result<BlockBody, KeyError> {
+        Ok(BlockBody {
             step: self.step,
             reads: normalize(&self.reads, "reads", |r| r.at.clone())?,
             env: normalize(&self.env, "env", |e| e.name.clone())?,
@@ -336,13 +367,83 @@ impl Observed {
                     Place::Tied(roots)
                 }
             },
-        };
-        digest(BLOCK_SCHEMA, &body)
+        })
     }
 }
 
+impl Asked {
+    /// The first key's body, each part as a digest of its JCS form, with each argument and
+    /// variable by itself: what tells which part of two keys differs.
+    pub fn parts(&self) -> Result<serde_json::Value, KeyError> {
+        let body = serde_json::to_value(self).map_err(|e| KeyError::Canonical(e.to_string()))?;
+        parts_of(&body)
+    }
+}
+
+/// A key body's parts: each top-level part by the digest of its JCS form, and, for a part that
+/// is a list or a map, each entry by its digest too. A list's entries are named by what they
+/// name (`at`, `dir`, `name` and `options`, or `rest`, as compact JSON with sorted keys) when
+/// every entry has it, else by position.
+fn parts_of(body: &serde_json::Value) -> Result<serde_json::Value, KeyError> {
+    use serde_json::{Map, Value};
+    let jcs = |value: &Value| {
+        hushrun_core::jcs::digest(value)
+            .map(|d| Value::String(d.to_string()))
+            .map_err(|e| KeyError::Canonical(e.to_string()))
+    };
+    let label = |item: &Value| -> Option<String> {
+        ["at", "dir", "rest"]
+            .iter()
+            .find_map(|field| item.get(field))
+            .map(Value::to_string)
+            .or_else(|| {
+                let name = item.get("name")?;
+                Some(match item.get("options") {
+                    Some(options) => format!("{name} {options}"),
+                    None => name.to_string(),
+                })
+            })
+    };
+    let mut out = Map::new();
+    let Value::Object(members) = body else {
+        return jcs(body);
+    };
+    for (name, value) in members {
+        let entries = match value {
+            Value::Array(items) => {
+                let labels: Option<Vec<String>> = items.iter().map(label).collect();
+                match labels {
+                    Some(labels) if !labels.is_empty() => Some(Value::Object(
+                        labels
+                            .into_iter()
+                            .zip(items)
+                            .map(|(l, item)| Ok((l, jcs(item)?)))
+                            .collect::<Result<_, KeyError>>()?,
+                    )),
+                    _ => Some(Value::Array(
+                        items.iter().map(jcs).collect::<Result<_, _>>()?,
+                    )),
+                }
+            }
+            Value::Object(map) => Some(Value::Object(
+                map.iter()
+                    .map(|(k, v)| Ok((k.clone(), jcs(v)?)))
+                    .collect::<Result<_, KeyError>>()?,
+            )),
+            _ => None,
+        };
+        let mut part = Map::new();
+        part.insert("digest".into(), jcs(value)?);
+        if let Some(entries) = entries {
+            part.insert("entries".into(), entries);
+        }
+        out.insert(name.clone(), Value::Object(part));
+    }
+    Ok(Value::Object(out))
+}
+
 /// The second key's parts, sorted, as they are hashed.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct BlockBody {
     step: Digest,
     reads: Vec<Read>,
@@ -357,14 +458,14 @@ struct BlockBody {
     place: Place,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct DeclaredBody {
     files: Vec<Read>,
     env: Vec<EnvRead>,
     above: Vec<FoundAbove>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct LinkBody {
     libraries: Vec<Digest>,
     files: Vec<Read>,
@@ -641,11 +742,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "24d66a5d192aaeeec35ab19a84dadf9fb86964300a0b13ee14f6af19e83dde9a"
+            "3a1a023a050edbb3c8e08de313a82d74358a09d1d9ceaf066f7a904fd33f806e"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v5",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v6",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -658,7 +759,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "3a8ea260bb4d6fc29c751ab5ecc5de8b2675433f00393eccda649a12325f21f9"
+            "c428a04143cf810a8977deda7efcdd11f52a461b4b3e186089015ffb79673c88"
         );
     }
 
@@ -873,6 +974,91 @@ mod tests {
                 "sdk 16"
             )
         );
+    }
+
+    fn linked(linker: &str, sdk: &str, byte: u8) -> Observed {
+        let mut o = observed();
+        o.link = Some(Link {
+            libraries: vec![LinkLibrary {
+                at: at(RootName::Deps(0), "libsyn.rlib"),
+                sha256: d(byte),
+            }],
+            files: vec![Read {
+                at: at(RootName::Toolchain, "lib/rustlib/x/lib/libSystem.tbd"),
+                state: ReadState::Absent,
+            }],
+            linker: linker.into(),
+            sdk: sdk.into(),
+            linker_path: Located::Shared(format!("/usr/bin/{linker}")),
+            ld_path: None,
+            sdk_path: None,
+            dsymutil_path: None,
+        });
+        o
+    }
+
+    // covers: B-6
+    #[test]
+    fn a_proc_macro_is_known_by_what_it_was_built_from_not_by_its_linker() {
+        let here = linked("cc 10 5", "sdk 15", 1);
+        // Another machine: another linker, another SDK, the same sources and libraries.
+        let there = linked("ld.lld 99 1\ndsymutil x 1 2", "sdk 16", 1);
+        assert_ne!(here.key().unwrap(), there.key().unwrap());
+        assert_eq!(here.known_by().unwrap(), there.known_by().unwrap());
+        // What it was linked from still counts, and so does every other part.
+        assert_ne!(
+            here.known_by().unwrap(),
+            linked("cc 10 5", "sdk 15", 2).known_by().unwrap()
+        );
+        let mut read = linked("cc 10 5", "sdk 15", 1);
+        read.reads[0].state = ReadState::Present(d(99));
+        assert_ne!(here.known_by().unwrap(), read.known_by().unwrap());
+        // Without its place, as before; and for a block with no link part, the key without its
+        // place.
+        let mut tied = here.clone();
+        tied.place = Place::Tied(vec![(RootName::Workspace, "/w".into())]);
+        assert_eq!(tied.known_by().unwrap(), here.known_by().unwrap());
+        assert_eq!(observed().known_by().unwrap(), observed().key().unwrap());
+    }
+
+    // covers: B-5, B-6
+    #[test]
+    fn the_parts_of_two_keys_tell_which_part_differs() {
+        let base = observed().parts().unwrap();
+        let mut o = observed();
+        o.reads[1].state = ReadState::Present(d(77));
+        let changed = o.parts().unwrap();
+        let differing: Vec<&String> = base
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(name, part)| changed[name.as_str()]["digest"] != part["digest"])
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(differing, ["reads"]);
+        // Each read by where it is.
+        let label = |at: Located| serde_json::to_value(at).unwrap().to_string();
+        let entry = label(at(RootName::Package, "src/util.rs"));
+        assert_ne!(
+            base["reads"]["entries"][&entry],
+            changed["reads"]["entries"][&entry]
+        );
+        let other = label(at(RootName::Package, "src/lib.rs"));
+        assert_eq!(
+            base["reads"]["entries"][&other],
+            changed["reads"]["entries"][&other]
+        );
+        // The first key's arguments by position and its variables by name.
+        let first = asked().parts().unwrap();
+        let mut a = asked();
+        a.env.insert("CARGO_PKG_NAME".into(), "other".into());
+        let second = a.parts().unwrap();
+        assert_eq!(first["args"], second["args"]);
+        assert_ne!(
+            first["env"]["entries"]["CARGO_PKG_NAME"],
+            second["env"]["entries"]["CARGO_PKG_NAME"]
+        );
+        assert_eq!(first["compiler"], second["compiler"]);
     }
 
     // covers: B-6

@@ -413,12 +413,27 @@ pub enum RootName {
     /// The i-th distinct folder a `CARGO_BIN_EXE_<name>` value is in, counted from 0 in the
     /// order of the variables' names: where cargo puts the package's programs for its tests.
     BinExe(u8),
+    /// A base, not a root: the cargo home (`CARGO_HOME`, else `~/.cargo`), where registry and
+    /// git packages lie. A path under it is recorded from it, so a key holds no machine's
+    /// folder, but it is the same for every checkout on a machine: it never ties a block and is
+    /// not searched for to decide a block's place (B-10).
+    CargoHome,
+    /// A base, not a root: the toolchain's folder (the sysroot), such as rustup's
+    /// `toolchains/<name>`. Recorded and treated as [`RootName::CargoHome`] is.
+    Toolchain,
 }
 
 impl RootName {
+    /// Whether this is a base (the cargo home or the toolchain) rather than a root of the
+    /// checkout: a path under it is named the same way on every machine, and it never ties a
+    /// block to its folders.
+    pub const fn is_base(self) -> bool {
+        matches!(self, RootName::CargoHome | RootName::Toolchain)
+    }
+
     /// The name as records and placeholders write it: `workspace`, `package`, `script-out`,
     /// `out-dir`, `deps-<i>`, `native-<i>`, `target-dir`, `build-target-dir`, `target-tmpdir`,
-    /// `bin-exe-<i>`. Stable.
+    /// `bin-exe-<i>`, `cargo-home`, `toolchain`. Stable.
     pub fn as_string(self) -> String {
         match self {
             RootName::Workspace => "workspace".to_string(),
@@ -431,6 +446,8 @@ impl RootName {
             RootName::BuildTargetDir => "build-target-dir".to_string(),
             RootName::TargetTmp => "target-tmpdir".to_string(),
             RootName::BinExe(i) => format!("bin-exe-{i}"),
+            RootName::CargoHome => "cargo-home".to_string(),
+            RootName::Toolchain => "toolchain".to_string(),
         }
     }
 
@@ -445,6 +462,8 @@ impl RootName {
             "target-dir" => Some(RootName::TargetDir),
             "build-target-dir" => Some(RootName::BuildTargetDir),
             "target-tmpdir" => Some(RootName::TargetTmp),
+            "cargo-home" => Some(RootName::CargoHome),
+            "toolchain" => Some(RootName::Toolchain),
             _ => {
                 let (make, digits): (fn(u8) -> RootName, &str) =
                     if let Some(digits) = text.strip_prefix("deps-") {
@@ -481,6 +500,19 @@ impl<'de> Deserialize<'de> for RootName {
     }
 }
 
+/// A folder that names the machine a block was built on: an output or a record that holds one
+/// keeps the block from leaving the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Folder {
+    /// The cargo home.
+    CargoHome,
+    /// The rustup home.
+    RustupHome,
+    /// The home folder.
+    Home,
+}
+
 /// A path recorded from a root: the root's name and the rest, `/`-separated, no leading slash.
 /// An empty rest is the root itself.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -495,10 +527,11 @@ pub struct Rooted {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Located {
-    /// Under a root: recorded from it, looked up under the current one.
+    /// Under a root or a base (the cargo home, the toolchain): recorded from it, looked up
+    /// under the current one.
     Rooted(Rooted),
-    /// Under a shared folder (cargo home, toolchain, system): the same path for every checkout
-    /// on this machine.
+    /// Under another shared folder (the rustup home outside the toolchain, the system's own):
+    /// the same path for every checkout on this machine.
     Shared(String),
     /// Anywhere else, as an absolute path. A read here ties the block to its roots.
     Outside(String),
@@ -580,6 +613,8 @@ mod tests {
             RootName::TargetTmp,
             RootName::BinExe(0),
             RootName::BinExe(3),
+            RootName::CargoHome,
+            RootName::Toolchain,
         ] {
             assert_eq!(RootName::parse(&name.as_string()), Some(name));
             assert_eq!(serde_name(&name), name.as_string());

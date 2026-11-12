@@ -20,6 +20,11 @@ use crate::unit::Checked;
 /// The variable that names the session's folder for the wrapper.
 pub const SESSION: &str = "HUSHRUN_BUILD_SESSION";
 
+/// The variable that names a file each compile of the run appends its keys' parts to, one JSON
+/// line per compile ([`Current::key_log`]). Read once, as `hushrun run` begins; a path that is
+/// not absolute is ignored, since compiles run in other folders.
+pub const KEY_LOG: &str = "HUSHRUN_BUILD_KEY_LOG";
+
 /// The variable cargo reads the wrapper from.
 pub const RUSTC_WRAPPER: &str = "RUSTC_WRAPPER";
 
@@ -94,6 +99,20 @@ pub struct Current {
     /// Folders that are the same for every checkout on this machine (B-8): the cargo home, the
     /// rustup home and the system's own.
     pub shared: Vec<String>,
+    /// The cargo home, as `hushrun run` found it: a base (B-8), and searched for in outputs.
+    #[serde(default)]
+    pub cargo_home: Option<String>,
+    /// The rustup home, as `hushrun run` found it: searched for in outputs.
+    #[serde(default)]
+    pub rustup_home: Option<String>,
+    /// The home folder, `HOME`: searched for in outputs.
+    #[serde(default)]
+    pub home: Option<String>,
+    /// Where each compile appends one line of its keys' parts, when `HUSHRUN_BUILD_KEY_LOG`
+    /// named a file as `hushrun run` began: what tells which part of a key differs between two
+    /// machines. Nothing is written otherwise.
+    #[serde(default)]
+    pub key_log: Option<PathBuf>,
     /// The session's folder.
     pub folder: PathBuf,
 }
@@ -123,6 +142,10 @@ pub struct Entry {
     pub differed: bool,
     /// One line for the person, when something needs saying (a suspension, low space).
     pub note: Option<String>,
+    /// Whether the block may leave the machine, and why not: for a compile that got as far as
+    /// searching its outputs, and for a reuse (from the block's record). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable: Option<crate::portable::Portability>,
 }
 
 const SESSION_FILE: &str = "session.json";
@@ -189,18 +212,27 @@ impl Current {
     }
 }
 
+/// A folder a variable names, else `default` under the home folder, as cargo and rustup find
+/// theirs.
+fn under_home(
+    env: &dyn Fn(&str) -> Option<OsString>,
+    variable: &str,
+    default: &str,
+) -> Option<String> {
+    let home = env("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    env(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(default)))
+        .and_then(|path| path.to_str().map(str::to_string))
+}
+
 fn shared_folders(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<String> {
-    let home = env("HOME").map(PathBuf::from);
-    let under_home = |variable: &str, default: &str| {
-        env(variable)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(default)))
-            .and_then(|path| path.to_str().map(str::to_string))
-    };
     let mut shared: Vec<String> = SYSTEM.iter().map(|s| s.to_string()).collect();
-    shared.extend(under_home("CARGO_HOME", ".cargo"));
-    shared.extend(under_home("RUSTUP_HOME", ".rustup"));
+    shared.extend(under_home(env, "CARGO_HOME", ".cargo"));
+    shared.extend(under_home(env, "RUSTUP_HOME", ".rustup"));
     shared
 }
 
@@ -462,6 +494,14 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         repository: start.repository.map(str::to_string),
         started_ms: millis,
         shared: shared_folders(start.env),
+        cargo_home: under_home(start.env, "CARGO_HOME", ".cargo"),
+        rustup_home: under_home(start.env, "RUSTUP_HOME", ".rustup"),
+        home: (start.env)("HOME")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.into_string().ok()),
+        key_log: (start.env)(KEY_LOG)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()),
         folder,
     };
     let file = current.folder.join(SESSION_FILE);
@@ -686,6 +726,7 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -747,6 +788,7 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
         }
     }
 

@@ -2021,6 +2021,7 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
         }
     }
 

@@ -4,7 +4,7 @@
 //! [`main`] wires the real ones; tests drive [`call`] with a fake compiler. Every error of this
 //! machinery is a value that ends in rustc running as asked (rule 1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -21,9 +21,10 @@ use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
-use crate::model::{Class, Located, NotStored, Outcome, PassedThrough, Programs};
+use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs};
+use crate::portable::{self, Portability, Reason};
 use crate::restore::Restore;
-use crate::roots::{RootPaths, Roots, resolve_on_disk};
+use crate::roots::{Machine, RootPaths, Roots, resolve_on_disk};
 use crate::scan::Needles;
 use crate::script::{self, Script};
 use crate::session::{self, Current, Entry};
@@ -169,6 +170,8 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         sysroot: None,
         bundle: false,
         clear_bundle: false,
+        keys: std::cell::RefCell::new(KeyLine::default()),
+        asked: None,
     }
     .run()
 }
@@ -186,6 +189,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         found: false,
         differed: false,
         note: None,
+        portable: None,
     }
 }
 
@@ -242,6 +246,38 @@ struct Call<'a> {
     /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
     /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
     clear_bundle: bool,
+    /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
+    keys: std::cell::RefCell<KeyLine>,
+    /// The first key's parts, once computed: what decides whether the block may leave the
+    /// machine reads them.
+    asked: Option<Asked>,
+}
+
+/// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
+/// machines' lines for one crate tell which part differs. Written only when the log is asked
+/// for.
+#[derive(Debug, Default, serde::Serialize)]
+struct KeyLine {
+    /// The first key.
+    step: Option<Digest>,
+    /// The first key's body as it is hashed: the compiler's digest, the arguments and the
+    /// variables with roots and bases as placeholders.
+    first: Option<serde_json::Value>,
+    /// The first key's parts, each by digest.
+    first_parts: Option<serde_json::Value>,
+    /// The compiler identity's parts, each by digest (B-17).
+    compiler: Option<compiler::Parts>,
+    /// The second key: of the block stored, or the one a lookup found.
+    block: Option<Digest>,
+    /// The second key's parts, each by digest, list entries by what they name.
+    second_parts: Option<serde_json::Value>,
+    /// The outputs, by name and SHA-256.
+    outputs: Vec<(String, Digest)>,
+    /// The folders that name the machine found in an output.
+    in_outputs: Vec<Folder>,
+    /// Each `--extern` as the second key holds it: by the SHA-256 of its file, or a proc macro
+    /// by what it was built from. With `outputs`, what joins a crate to its dependencies.
+    externs: Vec<crate::key::ExternInput>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -267,9 +303,86 @@ struct Linked {
 /// What a compile produced, for the store.
 struct Produced {
     observed: Observed,
-    origin: Digest,
+    /// What dependents name a linked library by when the block may move (B-6).
+    known_by: Digest,
     outputs: Vec<OutputFile>,
     dep_info: depinfo::DepInfo,
+    /// Whether the block may leave the machine.
+    portability: Portability,
+}
+
+/// An output searched (B-10): whether it holds a root, and which folders that name the machine.
+struct Searched {
+    file: OutputFile,
+    tied: bool,
+    machine: BTreeSet<Folder>,
+}
+
+/// What outputs are searched for: the roots (B-10) and the folders that name the machine, each
+/// text once with every kind it stands for.
+struct Search {
+    needles: Needles,
+    kinds: Vec<Vec<Option<Folder>>>,
+}
+
+impl Search {
+    fn new(roots: &Roots) -> Search {
+        let mut texts: Vec<(Vec<u8>, Vec<Option<Folder>>)> = Vec::new();
+        let mut add = |bytes: Vec<u8>, kind: Option<Folder>| {
+            if bytes.is_empty() {
+                return;
+            }
+            match texts.iter_mut().find(|(text, _)| *text == bytes) {
+                Some((_, kinds)) => kinds.push(kind),
+                None => texts.push((bytes, vec![kind])),
+            }
+        };
+        for needle in roots.needles() {
+            add(needle, None);
+        }
+        for (folder, text) in roots.machine_needles() {
+            add(text.as_bytes().to_vec(), Some(*folder));
+        }
+        let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
+        Search {
+            needles: Needles::new(texts.into_iter().map(|(text, _)| text).collect()),
+            kinds,
+        }
+    }
+
+    /// One output, hashed and searched in one pass.
+    fn file(&self, path: PathBuf, name: String, kind: OutputKind) -> Result<Searched, NotStored> {
+        let (found, sha256, size) = self
+            .needles
+            .all_in_file_hashed(&path)
+            .map_err(|_| NotStored::Scan)?;
+        let mut tied = false;
+        let mut machine = BTreeSet::new();
+        for (hit, kinds) in found.iter().zip(&self.kinds) {
+            if !hit {
+                continue;
+            }
+            for kind in kinds {
+                match kind {
+                    None => tied = true,
+                    Some(folder) => {
+                        machine.insert(*folder);
+                    }
+                }
+            }
+        }
+        Ok(Searched {
+            file: OutputFile {
+                path,
+                name,
+                kind,
+                sha256,
+                size,
+            },
+            tied,
+            machine,
+        })
+    }
 }
 
 /// One output file of a compile.
@@ -284,11 +397,43 @@ struct OutputFile {
 impl Call<'_> {
     fn log(&self, entry: Entry) {
         let package = self.invocation.package();
-        self.current.log(&Entry {
+        let entry = Entry {
             crate_name: self.invocation.crate_name().to_string(),
             package: package_id(package.name.clone(), package.version.clone()),
             ..entry
+        };
+        self.current.log(&entry);
+        self.log_keys(&entry);
+    }
+
+    /// Appends this call's line to the key log, when the run asked for one. A line that can't
+    /// be written never fails a compile.
+    fn log_keys(&self, entry: &Entry) {
+        use std::io::Write as _;
+        let Some(path) = &self.current.key_log else {
+            return;
+        };
+        let keys = self.keys.borrow();
+        let line = serde_json::json!({
+            "crate_name": entry.crate_name,
+            "package": entry.package,
+            "class": entry.class,
+            "outcome": entry.outcome,
+            "portable": entry.portable,
+            "keys": &*keys,
         });
+        let Ok(mut bytes) = serde_json::to_vec(&line) else {
+            return;
+        };
+        bytes.push(b'\n');
+        // One write of one whole line, to a file opened for appending.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(&bytes);
+        }
     }
 
     /// Runs rustc exactly as asked, logging `outcome`: the one place that decides how, for every
@@ -500,8 +645,23 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::TargetFile);
         }
-        let Ok(roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
-        else {
+        // The bases (B-8) and what outputs are searched for besides the roots (B-10).
+        let machine = Machine {
+            cargo_home: self.current.cargo_home.clone(),
+            toolchain: identity
+                .sysroot
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_string),
+            rustup_home: self.current.rustup_home.clone(),
+            home: self.current.home.clone(),
+        };
+        let Ok(roots) = Roots::new(
+            &RootPaths::of(inv),
+            &self.current.shared,
+            &machine,
+            resolve_on_disk,
+        ) else {
             return self.pass(PassedThrough::Roots);
         };
 
@@ -562,6 +722,14 @@ impl Call<'_> {
             added,
         };
         let step = asked.key().ok();
+        if self.current.key_log.is_some() {
+            let mut keys = self.keys.borrow_mut();
+            keys.step = step;
+            keys.first = serde_json::to_value(&asked).ok();
+            keys.first_parts = asked.parts().ok();
+            keys.compiler = Some(identity.parts.clone());
+        }
+        self.asked = Some(asked.clone());
         let cx = step.map(|step| Context {
             invocation: inv,
             roots: &roots,
@@ -663,6 +831,17 @@ impl Call<'_> {
                     let serves_form = description.messages.form() == self.invocation.form()
                         || description.messages.only_notices();
                     let audit = self.ports.audited(&key, self.current.started_ms);
+                    if self.current.key_log.is_some() {
+                        let mut keys = self.keys.borrow_mut();
+                        keys.block = Some(key);
+                        keys.second_parts = observed.parts().ok();
+                        keys.externs = observed.externs.clone();
+                        keys.outputs = block
+                            .files
+                            .iter()
+                            .map(|f| (f.name.clone(), f.sha256))
+                            .collect();
+                    }
                     *found = Some(Found {
                         block,
                         description,
@@ -724,6 +903,7 @@ impl Call<'_> {
         self.log(Entry {
             saved_ms: found.description.rustc_ms.saturating_sub(took),
             found: true,
+            portable: Some(found.description.portability.clone()),
             ..entry(verdict.outcome, Some(self.invocation.class()))
         });
         0
@@ -838,11 +1018,24 @@ impl Call<'_> {
                     facts.compared = compare_outputs(&produced.outputs, &found.block);
                 }
                 let trusted = !facts.changed && facts.compared != Compared::Differed;
+                log.portable = Some(produced.portability.clone());
+                if self.current.key_log.is_some() {
+                    let mut keys = self.keys.borrow_mut();
+                    keys.block = produced.observed.key().ok();
+                    keys.second_parts = produced.observed.parts().ok();
+                    keys.externs = produced.observed.externs.clone();
+                    keys.outputs = produced
+                        .outputs
+                        .iter()
+                        .map(|o| (o.name.clone(), o.sha256))
+                        .collect();
+                }
                 if trusted {
-                    // Dependents may know a block by its origin only if it may move: a tied one
-                    // is another file in another checkout, under the same origin (B-6).
+                    // Dependents may know a block by what it was built from only if it may move:
+                    // a tied one is another file in another checkout, under the same name (B-6).
                     let produced_by = matches!(produced.observed.place, Place::Anywhere)
-                        .then_some(produced.origin);
+                        .then_some(produced.known_by);
+                    let portable = produced.portability.named_portably(inv.class());
                     // A bundle's files are a program's debug info: no dependent loads them, and
                     // no record is written inside the bundle.
                     for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
@@ -852,6 +1045,7 @@ impl Call<'_> {
                             produced_by,
                             Some(cx.step),
                             false,
+                            portable,
                         );
                     }
                 }
@@ -929,7 +1123,8 @@ impl Call<'_> {
                 &mut std::collections::BTreeSet::new(),
             );
         }
-        let mut outputs = self.outputs(recorded, roots)?;
+        let search = Search::new(roots);
+        let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
         if inv.class() != Class::Library {
@@ -937,49 +1132,92 @@ impl Call<'_> {
             observed.link = Some(linked.link);
             outside |= linked.outside;
             facts.changed |= linked.changed;
-            outputs.extend(self.debug_outputs(roots, before)?);
+            outputs.extend(self.debug_outputs(&search, before)?);
         }
 
-        let tied_by_bytes = outputs.iter().any(|o| o.1);
-        let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.0).collect();
+        let tied_by_bytes = outputs.iter().any(|o| o.tied);
+        let in_outputs: BTreeSet<Folder> = outputs
+            .iter()
+            .flat_map(|o| o.machine.iter().copied())
+            .collect();
+        let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.file).collect();
         let origin = observed.key().map_err(|_| NotStored::Key)?;
+        let known_by = observed.known_by().map_err(|_| NotStored::Key)?;
         let mut tied = !inv.searchable() || tied_by_bytes || outside;
-        if !tied && !facts.changed {
-            let through_vars: Vec<(String, String)> = info
-                .env
-                .iter()
-                .filter_map(|dep| {
-                    let value = dep.value.as_ref()?;
-                    (roots.to_placeholders(value) != *value)
-                        .then(|| (dep.name.clone(), value.clone()))
-                })
-                .collect();
-            // Proved before, by whoever stored this very block (B-10).
-            if !through_vars.is_empty() && !matches!(store.block(&origin), Ok(Some(_))) {
-                tied = !self.prove(roots, &through_vars, &outputs)?;
+        // The variables the compile read whose value names a root, or only bases (B-10).
+        let mut through_roots: Vec<(String, String)> = Vec::new();
+        let mut through_bases: Vec<(String, String)> = Vec::new();
+        for dep in &info.env {
+            let Some(value) = dep.value.as_ref() else {
+                continue;
+            };
+            let named = roots.named(value);
+            if !named.is_empty() && named.iter().all(|name| name.is_base()) {
+                through_bases.push((dep.name.clone(), value.clone()));
+            } else if roots.to_placeholders(value) != *value {
+                through_roots.push((dep.name.clone(), value.clone()));
             }
         }
+        // Proved before, by whoever stored this very block (B-10).
+        let stored_before = || match store.block(&origin) {
+            Ok(Some(block)) => Some(Description::from_value(&block.description)),
+            _ => None,
+        };
+        if !tied && !facts.changed && !through_roots.is_empty() && stored_before().is_none() {
+            tied = !self.prove(roots, &through_roots, &outputs)?;
+        }
+        // A variable that names only a base is the same in every checkout here: it never ties
+        // the block. Whether its value left a trace of this machine in the outputs (a path
+        // hashed, say) is proved the same way, once: otherwise the block stays here.
+        let variable_names_base = match () {
+            _ if through_bases.is_empty() => false,
+            _ if tied || facts.changed => true,
+            _ => match stored_before() {
+                Some(description) => description
+                    .is_none_or(|d| d.portability.reasons.contains(&Reason::VariableNamesBase)),
+                None => !self.prove(roots, &through_bases, &outputs).unwrap_or(false),
+            },
+        };
         if tied {
             observed.place = Place::Tied(roots.tied());
         }
+        let placeholders = |text: &str| roots.to_placeholders(text);
+        let records: Vec<String> = [
+            serde_json::to_string(&StoredDepInfo::of(&info, placeholders)),
+            serde_json::to_string(&recorded.store(placeholders)),
+        ]
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .map_err(|_| NotStored::Messages)?;
+        let asked = self.asked.as_ref().ok_or(NotStored::Key)?;
+        let portability = portable::portable(&portable::Facts {
+            class: inv.class(),
+            asked,
+            observed: &observed,
+            records: &records,
+            in_outputs: &in_outputs,
+            machine: roots.machine_needles(),
+            variable_names_base,
+            externs: &common.externs_portable,
+        });
+        if self.current.key_log.is_some() {
+            self.keys.borrow_mut().in_outputs = in_outputs.into_iter().collect();
+        }
         Ok(Produced {
             observed,
-            origin,
+            known_by,
             outputs,
             dep_info: info,
+            portability,
         })
     }
 
-    /// Step 11: the files rustc announced, each hashed and searched for the roots in one pass.
-    /// The dep-info is left out: it holds real paths by design.
-    fn outputs(
-        &self,
-        recorded: &Recorded,
-        roots: &Roots,
-    ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    /// Step 11: the files rustc announced, each hashed and searched for the roots and for the
+    /// folders that name the machine in one pass. The dep-info is left out: it holds real paths
+    /// by design.
+    fn outputs(&self, recorded: &Recorded, search: &Search) -> Result<Vec<Searched>, NotStored> {
         let inv = self.invocation;
         let out_dir = Path::new(inv.cwd()).join(inv.out_dir());
-        let needles = Needles::new(roots.needles());
         let mut emits: Vec<Emit> = Vec::new();
         let mut out = Vec::new();
         for line in recorded.lines() {
@@ -1011,17 +1249,7 @@ impl Call<'_> {
                 .and_then(OsStr::to_str)
                 .ok_or(NotStored::Outputs)?
                 .to_string();
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, kind)?);
         }
         let mut asked = inv.emits().to_vec();
         asked.sort();
@@ -1334,11 +1562,11 @@ impl Call<'_> {
     /// doesn't carry (a `.dSYM` the wrapper didn't ask for, `.dwp`) refuse the store.
     fn debug_outputs(
         &self,
-        roots: &Roots,
+        search: &Search,
         before: &BTreeMap<String, Stat>,
-    ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    ) -> Result<Vec<Searched>, NotStored> {
         if self.bundle {
-            return self.bundle_outputs(roots);
+            return self.bundle_outputs(search);
         }
         let inv = self.invocation;
         let stem = inv.file_stem();
@@ -1354,7 +1582,6 @@ impl Call<'_> {
         if inv.class() != Class::Program {
             return Ok(Vec::new());
         }
-        let needles = Needles::new(roots.needles());
         let mut out = Vec::new();
         for (name, stat) in debug_objects(&out_dir, &stem) {
             if before
@@ -1364,17 +1591,7 @@ impl Call<'_> {
                 continue;
             }
             let path = out_dir.join(&name);
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind: OutputKind::DebugObject,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, OutputKind::DebugObject)?);
         }
         Ok(out)
     }
@@ -1385,7 +1602,7 @@ impl Call<'_> {
     /// (`Contents/Resources/Relocations`) name the program by its absolute path; no debugger
     /// reads them, and they are removed first. A bundle with no DWARF file, or holding anything
     /// but folders and regular files, refuses the store.
-    fn bundle_outputs(&self, roots: &Roots) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    fn bundle_outputs(&self, search: &Search) -> Result<Vec<Searched>, NotStored> {
         let dir = self.bundle_dir();
         let top = bundle_name(&self.invocation.file_stem());
         match std::fs::remove_dir_all(dir.join(RELOCATIONS)) {
@@ -1399,20 +1616,9 @@ impl Call<'_> {
         if !files.iter().any(|(_, name)| name.starts_with(&dwarf)) {
             return Err(NotStored::DebugFiles);
         }
-        let needles = Needles::new(roots.needles());
         let mut out = Vec::with_capacity(files.len());
         for (path, name) in files {
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind: OutputKind::DebugBundle,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, OutputKind::DebugBundle)?);
         }
         Ok(out)
     }
@@ -1438,11 +1644,12 @@ impl Call<'_> {
             crate_name: self.invocation.crate_name().to_string(),
             package: self.invocation.package().name.clone(),
             step: cx.step,
-            origin: produced.origin,
+            origin: produced.known_by,
             place: match produced.observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
                 Place::Tied(_) => PlaceKind::Tied,
             },
+            portability: produced.portability.clone(),
             outputs: produced
                 .outputs
                 .iter()

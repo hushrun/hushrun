@@ -26,6 +26,10 @@ use crate::roots::Roots;
 use crate::script::{self, Script};
 use crate::{link, memo, regular, shape, sidecar};
 
+/// Every `--extern` as the key holds it, and each proc macro's crate name with whether another
+/// machine names it the same way.
+pub type Externs = (Vec<ExternInput>, Vec<(String, bool)>);
+
 /// What every gathering needs: the call, its roots and variables, and the build script's
 /// saved output when it has one.
 pub struct Context<'a> {
@@ -139,6 +143,9 @@ fn links_changed_from(
 pub struct Common {
     /// Every `--extern`.
     pub externs: Vec<ExternInput>,
+    /// Each proc macro among the externs by crate name, and whether another machine names it the
+    /// same way.
+    pub externs_portable: Vec<(String, bool)>,
     /// Each place a library named with `-l` may be in the `-L` folders (B-6).
     pub native: Vec<Read>,
     /// For a library compile, every `-L native=`, `all=` and bare folder: its names and static
@@ -271,16 +278,23 @@ impl Context<'_> {
         })
     }
 
-    /// Every `--extern`, by content, or by the block that produced it for a proc macro whose
-    /// record names one (B-6).
-    pub fn externs(&self) -> Result<Vec<ExternInput>, NotStored> {
+    /// Every `--extern`, by content, or by what it was built from for a proc macro whose
+    /// record names it (B-6); with, for each proc macro, whether another machine names it the
+    /// same way (its record says so). A proc macro's record is written before cargo starts any
+    /// dependent; a library's may not be yet (cargo starts a dependent once the `.rmeta` is
+    /// written), and it is keyed by its bytes anyway.
+    pub fn externs(&self) -> Result<Externs, NotStored> {
         let mut out = Vec::with_capacity(self.invocation.externs().len());
+        let mut portable = Vec::with_capacity(self.invocation.externs().len());
         for ext in self.invocation.externs() {
             let by = match &ext.path {
                 None => ExternBy::Builtin,
                 Some(path) => {
                     let path = self.absolute(path);
                     let known = sidecar::lookup(&path).map_err(|_| NotStored::Hash)?;
+                    if is_linked_library(&path) {
+                        portable.push((ext.name.clone(), known.portable));
+                    }
                     match known.produced_by {
                         Some(origin) if is_linked_library(&path) => ExternBy::ProducedBy(origin),
                         _ => ExternBy::Content(known.sha256),
@@ -293,7 +307,7 @@ impl Context<'_> {
                 by,
             });
         }
-        Ok(out)
+        Ok((out, portable))
     }
 
     /// The parts that don't depend on the dep-info. Hashed now, checked again after the compile.
@@ -313,8 +327,10 @@ impl Context<'_> {
         } else {
             Vec::new()
         };
+        let (externs, externs_portable) = self.externs()?;
         Ok(Common {
-            externs: self.externs()?,
+            externs,
+            externs_portable,
             native,
             native_dirs,
             generated,
@@ -1047,12 +1063,13 @@ fn located_text(at: &Located) -> Option<String> {
     serde_json::to_string(at).ok()
 }
 
-/// The linker's identity as one text (B-18): where it lies (B-8) and, for one under a root (a
-/// script in the repository, another file in each checkout), its SHA-256; for any other, its
-/// size and modification time. `None` when it can't be read.
+/// The linker's identity as one text (B-18): where it lies (B-8) and, for one under a root of
+/// the checkout (a script in the repository, another file in each checkout), its SHA-256; for
+/// any other, the toolchain's `rust-lld` among them, its size and modification time. `None`
+/// when it can't be read.
 pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
     let place = located_text(at)?;
-    if matches!(at, Located::Rooted(_)) {
+    if matches!(at, Located::Rooted(rooted) if !rooted.root.is_base()) {
         let (sha, _) = regular::hash_steady(path).ok()?;
         return Some(format!("{place} {}", sha.hex()));
     }

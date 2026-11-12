@@ -97,6 +97,8 @@ pub struct Prepared {
     pid: u32,
     origin: Option<Digest>,
     step: Digest,
+    /// Whether another machine names the block's files as this one does.
+    portable: bool,
 }
 
 /// A file, or a program's whole debug bundle, ready to be renamed into place.
@@ -293,6 +295,7 @@ impl Restore<'_> {
             // Only a block that may move is known to dependents by its origin (B-6).
             origin: (description.place == PlaceKind::Anywhere).then_some(description.origin),
             step: description.step,
+            portable: description.portability.named_portably(description.class),
         })
     }
 }
@@ -322,6 +325,7 @@ impl Prepared {
             pid,
             origin,
             step,
+            portable,
         } = self;
         let mut placed: Vec<PathBuf> = Vec::with_capacity(ready.len());
         let renamed = (|| -> Result<(), RestoreError> {
@@ -332,7 +336,7 @@ impl Prepared {
             for file in &ready {
                 // A bundle is no dependent's input: no record, and none written inside it.
                 let Some(sha256) = file.sha256 else { continue };
-                sidecar::record_block(&file.dest, sha256, origin, Some(step), true)
+                sidecar::record_block(&file.dest, sha256, origin, Some(step), true, portable)
                     .map_err(at(&file.dest))?;
             }
             Ok(())

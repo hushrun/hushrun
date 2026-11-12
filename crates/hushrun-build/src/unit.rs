@@ -450,7 +450,10 @@ pub fn digests(cx: &Context<'_>, observed: &Observed) -> BTreeMap<PathBuf, Diges
         let ReadState::Present(sha) = read.state else {
             continue;
         };
-        if matches!(read.at, Located::Shared(_)) {
+        // What lies in a shared folder or a base is the same for every checkout: never watched.
+        if matches!(&read.at, Located::Shared(_))
+            || matches!(&read.at, Located::Rooted(rooted) if rooted.root.is_base())
+        {
             continue;
         }
         if let Some(path) = cx.open_at(&read.at) {

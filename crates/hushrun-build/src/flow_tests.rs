@@ -995,6 +995,7 @@ fn a_kill_between_the_copy_and_the_rename_leaves_nothing_taken_for_a_block() {
     let roots = crate::roots::Roots::new(
         &crate::roots::RootPaths::of(&inv),
         &[],
+        &crate::roots::Machine::default(),
         crate::roots::resolve_on_disk,
     )
     .unwrap();
@@ -2342,6 +2343,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
         let roots = crate::roots::Roots::new(
             &crate::roots::RootPaths::of(&inv),
             &[],
+            &crate::roots::Machine::default(),
             crate::roots::resolve_on_disk,
         )
         .unwrap();
@@ -3022,6 +3024,7 @@ fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whol
         let roots = crate::roots::Roots::new(
             &crate::roots::RootPaths::of(&inv),
             &[],
+            &crate::roots::Machine::default(),
             crate::roots::resolve_on_disk,
         )
         .unwrap();
@@ -3147,4 +3150,337 @@ fn every_call_leaves_a_record_of_its_unit_or_none() {
     assert_eq!(w.call(&ws, "a", &[]).code, 1);
     assert!(!unit_record(&ws).exists());
     assert_eq!(w.store().out_dirs().len(), 1);
+}
+
+// Two machines: other users, other homes (so other cargo and rustup homes), the toolchain
+// installed under another name, the checkout at another path, each with its own store.
+
+/// The index folder crates.io's packages are unpacked under in every cargo home.
+const INDEX: &str = "registry/src/index.crates.io-1949cf8c6b5b557f";
+
+/// One machine: a [`World`] whose session knows `home`, a toolchain at
+/// `<home>/.rustup/toolchains/<toolchain>` with the same bytes on every machine, and a key log.
+struct Box2 {
+    w: World,
+    home: PathBuf,
+    toolchain: String,
+    key_log: PathBuf,
+}
+
+fn a_machine(user: &str, toolchain: &str) -> Box2 {
+    let dir = tempfile::tempdir().unwrap();
+    let root = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
+    let home = root.join("home").join(user);
+    let key_log = root.join("keys.jsonl");
+    let settings = root.join("build.json");
+    settings::update(&settings, |s| {
+        s.mode = Mode::On;
+        s.min_free_gb = 0;
+    })
+    .unwrap();
+    let exe = root.join("hushrun");
+    fs::write(&exe, b"binary").unwrap();
+    let env = {
+        let home = home.clone();
+        let key_log = key_log.clone();
+        move |name: &str| match name {
+            "HOME" => Some(home.clone().into_os_string()),
+            session::KEY_LOG => Some(key_log.clone().into_os_string()),
+            _ => None,
+        }
+    };
+    let session = session::begin(&Start {
+        settings: &settings,
+        cache_dir: Some(&root.join("cache")),
+        exe: &exe,
+        in_ci: false,
+        repository: Some("test/repo"),
+        env: &env,
+        now: SystemTime::now(),
+    })
+    .unwrap();
+    // The same toolchain, installed under this machine's own name.
+    let sysroot = home.join(".rustup/toolchains").join(toolchain);
+    let rustc = sysroot.join("bin/rustc");
+    for (rest, bytes) in [
+        ("bin/rustc", &b"fake rustc"[..]),
+        ("lib/librustc_driver-1.dylib", b"driver"),
+        ("lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib", b"std"),
+    ] {
+        fs::create_dir_all(sysroot.join(rest).parent().unwrap()).unwrap();
+        fs::write(sysroot.join(rest), bytes).unwrap();
+    }
+    // A registry package unpacked in this machine's cargo home.
+    let package = home.join(".cargo").join(INDEX).join("reg-1.0.0");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(package.join("src/lib.rs"), "mod util;\n").unwrap();
+    fs::write(package.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    fs::write(package.join("data.txt"), "data\n").unwrap();
+    Box2 {
+        w: World {
+            dir,
+            session,
+            rustc,
+            plans: Rc::default(),
+        },
+        home,
+        toolchain: toolchain.to_string(),
+        key_log,
+    }
+}
+
+impl Box2 {
+    fn package(&self) -> PathBuf {
+        self.home.join(".cargo").join(INDEX).join("reg-1.0.0")
+    }
+
+    /// The variables cargo and rustup hand every compile on this machine.
+    fn toolchain_vars(&self, fake: &mut Fake) {
+        fake.vars.insert(
+            "RUSTUP_HOME".into(),
+            self.home.join(".rustup").to_str().unwrap().into(),
+        );
+        fake.vars
+            .insert("RUSTUP_TOOLCHAIN".into(), self.toolchain.clone());
+    }
+
+    /// The registry crate `reg`, built in the checkout `ws`.
+    fn call_reg(&self, ws: &Path) -> Result {
+        let source = self.package().join("src/lib.rs");
+        let args: Vec<OsString> = self
+            .w
+            .args(ws, "reg", &[])
+            .into_iter()
+            .map(|arg| {
+                if arg == "reg/src/lib.rs" {
+                    source.clone().into_os_string()
+                } else {
+                    arg
+                }
+            })
+            .collect();
+        self.w.call_args(ws, "reg", args, |fake| {
+            self.toolchain_vars(fake);
+            fake.vars.insert(
+                "CARGO_MANIFEST_DIR".into(),
+                self.package().to_str().unwrap().into(),
+            );
+            fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+        })
+    }
+
+    /// The workspace crate `a`, which depends on `reg`.
+    fn call_a(&self, ws: &Path) -> Result {
+        let reg = ws.join("target/debug/deps/libreg-xreg.rlib");
+        let extern_reg = format!("reg={}", reg.display());
+        self.w
+            .call_with(ws, "a", &["--extern", &extern_reg], |fake| {
+                self.toolchain_vars(fake)
+            })
+    }
+
+    /// The key log's lines, by crate name: the last one of each.
+    fn keys(&self) -> BTreeMap<String, serde_json::Value> {
+        let text = fs::read_to_string(&self.key_log).unwrap_or_default();
+        text.lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .map(|line| (line["crate_name"].as_str().unwrap().to_string(), line))
+            .collect()
+    }
+}
+
+/// The library files a crate's compile left in `ws`'s output folder.
+fn library_files(ws: &Path, crate_name: &str) -> Vec<(String, Vec<u8>)> {
+    let deps = ws.join("target/debug/deps");
+    ["rlib", "rmeta"]
+        .iter()
+        .map(|ext| {
+            let name = format!("lib{crate_name}-x{crate_name}.{ext}");
+            let bytes = fs::read(deps.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+// covers: B-5, B-6, B-8, B-9, B-17
+#[test]
+fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_between_them() {
+    let a = a_machine("dev", "stable-aarch64-apple-darwin");
+    let b = a_machine("someone-else", "1.94.0-aarch64-apple-darwin");
+    let plan = |m: &Box2| {
+        m.w.plan(
+            "reg",
+            Plan {
+                reads: vec![m.package().join("src/util.rs").to_str().unwrap().into()],
+                env_reads: vec!["CARGO_PKG_VERSION".into()],
+                ..Plan::default()
+            },
+        );
+        m.w.plan(
+            "a",
+            Plan {
+                reads: vec!["a/src/foo.rs".into()],
+                ..Plan::default()
+            },
+        );
+    };
+    plan(&a);
+    plan(&b);
+    let ws_a = a.w.checkout("ws");
+    let ws_b = b.w.checkout("a-checkout-at-a-longer-path");
+    settle();
+    for (m, ws) in [(&a, &ws_a), (&b, &ws_b)] {
+        let reg = m.call_reg(ws);
+        assert_eq!(reg.outcome(), STORED, "{}", reg.stderr);
+        // The cargo home was remapped like the workspace.
+        let args = &reg.seen.compiles[0];
+        let cargo_home = m.home.join(".cargo");
+        assert!(
+            args.contains(&format!(
+                "--remap-path-prefix={}=/hushrun/cargo",
+                cargo_home.display()
+            )),
+            "{args:?}"
+        );
+        let a_crate = m.call_a(ws);
+        assert_eq!(a_crate.outcome(), STORED, "{}", a_crate.stderr);
+        for name in ["reg", "a"] {
+            let portable = m.keys()[name]["portable"].clone();
+            assert_eq!(portable["portable"], true, "{name}: {portable}");
+        }
+    }
+    // Equal first keys, equal second keys, the same bytes.
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    for name in ["reg", "a"] {
+        assert_eq!(
+            keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"],
+            "{name}: {} / {}",
+            keys_a[name]["keys"]["first"], keys_b[name]["keys"]["first"]
+        );
+        assert_eq!(
+            keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"],
+            "{name}: {} / {}",
+            keys_a[name]["keys"]["second_parts"], keys_b[name]["keys"]["second_parts"]
+        );
+        assert!(keys_a[name]["keys"]["step"].is_string());
+        assert_eq!(library_files(&ws_a, name), library_files(&ws_b, name));
+    }
+    let rlib = String::from_utf8(library_files(&ws_a, "reg")[0].1.clone()).unwrap();
+    assert!(
+        rlib.contains(&format!(
+            "source /hushrun/cargo/{INDEX}/reg-1.0.0/src/lib.rs"
+        )),
+        "{rlib}"
+    );
+    assert!(!rlib.contains(a.home.to_str().unwrap()), "{rlib}");
+
+    // A third machine with machine A's blocks in its store: both are reused there, and what is
+    // put in place names the third machine's own folders.
+    let c = a_machine("third", "nightly-aarch64-apple-darwin");
+    plan(&c);
+    let ws_c = c.w.checkout("elsewhere");
+    let store_a = &a.w.session.current().store;
+    let store_c = &c.w.session.current().store;
+    for part in ["blocks", "steps"] {
+        copy_tree(&store_a.join(part), &store_c.join(part));
+    }
+    settle();
+    let reg = c.call_reg(&ws_c);
+    assert_eq!(reg.outcome(), REUSED, "{}", reg.stderr);
+    assert_eq!(c.call_a(&ws_c).outcome(), REUSED);
+    assert_eq!(library_files(&ws_a, "reg"), library_files(&ws_c, "reg"));
+    assert_eq!(library_files(&ws_a, "a"), library_files(&ws_c, "a"));
+    let dep_info = fs::read_to_string(ws_c.join("target/debug/deps/reg-xreg.d")).unwrap();
+    assert!(
+        dep_info.contains(c.package().join("src/util.rs").to_str().unwrap()),
+        "{dep_info}"
+    );
+    assert!(!dep_info.contains(a.home.to_str().unwrap()), "{dep_info}");
+    assert_eq!(c.keys()["reg"]["portable"]["portable"], true);
+}
+
+/// Copies every file under `from` to the same place under `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    for file in walk(from) {
+        let dest = to.join(file.strip_prefix(from).unwrap());
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::copy(&file, &dest).unwrap();
+    }
+}
+
+// covers: B-8, B-10
+#[test]
+fn a_registry_crate_whose_output_holds_the_cargo_home_is_reused_here_but_stays_here() {
+    let m = a_machine("dev", "stable-aarch64-apple-darwin");
+    m.w.plan(
+        "reg",
+        Plan {
+            embed_var: Some("CARGO_MANIFEST_DIR".into()),
+            ..Plan::default()
+        },
+    );
+    let one = m.w.checkout("one");
+    let two = m.w.checkout("two");
+    settle();
+    let first = m.call_reg(&one);
+    assert_eq!(first.outcome(), STORED);
+    let portable = &first.entry.as_ref().unwrap().portable.as_ref().unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::CargoHomeInOutput)
+    );
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::HomeInOutput)
+    );
+    assert!(!portable.reasons.contains(&crate::portable::Reason::Tied));
+    // The cargo home is the same for every checkout here: reused in another, as before.
+    let second = m.call_reg(&two);
+    assert_eq!(second.outcome(), REUSED);
+    assert_eq!(second.entry.unwrap().portable.unwrap(), **portable);
+    // A dependent keys it by its bytes: elsewhere they differ, and so does the dependent's key,
+    // which is no reason of the dependent's own.
+    let dependent = m.call_a(&two);
+    assert_eq!(dependent.outcome(), STORED);
+    assert!(dependent.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-10
+#[test]
+fn a_variable_naming_the_cargo_home_is_proved_before_a_block_may_leave() {
+    for (hash_var, portable) in [(false, true), (true, false)] {
+        let m = a_machine("dev", "stable-aarch64-apple-darwin");
+        // `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/data.txt"))`: the path is remapped
+        // where it lands, unless the macro also hashes it.
+        m.w.plan(
+            "reg",
+            Plan {
+                include_var: Some(("CARGO_MANIFEST_DIR".into(), "data.txt".into())),
+                hash_var,
+                ..Plan::default()
+            },
+        );
+        let one = m.w.checkout("one");
+        let two = m.w.checkout("two");
+        settle();
+        let first = m.call_reg(&one);
+        assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+        // A second compile with the variable pointing elsewhere decided it.
+        assert_eq!(first.seen.compiles.len(), 2);
+        let found = first.entry.unwrap().portable.unwrap();
+        assert_eq!(found.portable, portable, "{found:?}");
+        assert_eq!(
+            found
+                .reasons
+                .contains(&crate::portable::Reason::VariableNamesBase),
+            !portable
+        );
+        // Either way it moves between checkouts here, and the proof is not made again.
+        let second = m.call_reg(&two);
+        assert_eq!(second.outcome(), REUSED);
+        assert_eq!(second.entry.unwrap().portable.unwrap(), found);
+    }
 }
