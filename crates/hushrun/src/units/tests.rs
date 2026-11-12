@@ -688,7 +688,9 @@ fn a_failure_no_test_explains_keeps_no_tests_pass() {
         Unit::Test,
         false,
     );
-    let one = keyer.test_key("tests/test_a.py", "test_one", &reads).unwrap();
+    let one = keyer
+        .test_key("tests/test_a.py", "test_one", &reads)
+        .unwrap();
     assert!(
         o.records()
             .iter()

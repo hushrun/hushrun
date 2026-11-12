@@ -847,12 +847,18 @@ mod tests {
         // Two pytest-xdist workers of one start: each selected all three and ran a share.
         let w1 = started(Some("x"), vec![unit("t.py", 3, 2, &[])]);
         let w2 = started(Some("x"), vec![unit("t.py", 3, 1, &[])]);
-        assert!(ran_whole(&merged(&[w1.clone(), w2.clone()], "ctest")["t.py"]));
+        assert!(ran_whole(
+            &merged(&[w1.clone(), w2.clone()], "ctest")["t.py"]
+        ));
         // A start complete in every start that selected any of it, and one that selected none.
         let none = started(Some("y"), vec![unit("t.py", 0, 0, &[])]);
-        assert!(ran_whole(&merged(&[w1.clone(), w2.clone(), none], "ctest")["t.py"]));
+        assert!(ran_whole(
+            &merged(&[w1.clone(), w2.clone(), none], "ctest")["t.py"]
+        ));
         let short = started(Some("z"), vec![unit("t.py", 3, 2, &[])]);
-        assert!(!ran_whole(&merged(&[w1.clone(), w2.clone(), short], "ctest")["t.py"]));
+        assert!(!ran_whole(
+            &merged(&[w1.clone(), w2.clone(), short], "ctest")["t.py"]
+        ));
         // Files that say no start are one start, as before.
         let n1 = started(None, vec![unit("t.py", 3, 2, &[])]);
         let n2 = started(None, vec![unit("t.py", 3, 1, &[])]);

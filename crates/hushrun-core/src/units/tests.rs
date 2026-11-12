@@ -552,7 +552,12 @@ fn a_tests_list_follows_reexports_to_the_end() {
     // The test calls a function of index.ts, which re-exports everything of api.ts, which
     // re-exports impl.ts's `run`: no function of api.ts is called, and impl.ts isn't imported
     // directly by anything that ran. Its list holds both, and never what impl.ts merely imports.
-    let file = set(&["test/a.test.ts", "src/index.ts", "src/api.ts", "src/impl.ts"]);
+    let file = set(&[
+        "test/a.test.ts",
+        "src/index.ts",
+        "src/api.ts",
+        "src/impl.ts",
+    ]);
     let none = BTreeSet::new();
     let imports = BTreeMap::from([
         ("test/a.test.ts".to_string(), set(&["src/index.ts"])),
@@ -593,6 +598,11 @@ fn a_tests_list_follows_reexports_to_the_end() {
     assert!(list.own);
     assert_eq!(
         list.files,
-        set(&["test/a.test.ts", "src/index.ts", "src/api.ts", "src/impl.ts"])
+        set(&[
+            "test/a.test.ts",
+            "src/index.ts",
+            "src/api.ts",
+            "src/impl.ts"
+        ])
     );
 }

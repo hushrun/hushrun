@@ -425,8 +425,7 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
     assert_eq!(passed.code, 0, "{}\n{}", passed.stdout, passed.stderr);
     let map = store::map(&r.cache);
     assert_eq!(
-        map["units"]["tests/test_skips.py"]["tests"]["test_skipped"],
-        "passed",
+        map["units"]["tests/test_skips.py"]["tests"]["test_skipped"], "passed",
         "{map:#}"
     );
 }
@@ -505,7 +504,10 @@ fn an_adapter_that_left_out_what_the_plan_didnt_list_runs_again_with_nothing_lef
     let result = r.newest_result();
     assert_eq!(result["result"], "pass", "{result:#}");
     assert_eq!(
-        (result["units"]["total"].clone(), result["units"]["reused"].clone()),
+        (
+            result["units"]["total"].clone(),
+            result["units"]["reused"].clone()
+        ),
         (json!(2), json!(0))
     );
     // Start 5 says it again: nothing is recorded, and hushrun fails, saying why.
@@ -784,7 +786,12 @@ fn watched_facts(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> (i32, String,
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("pytest-"))
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pytest-")
+        })
         .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
         .unwrap_or(Value::Null);
     (

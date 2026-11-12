@@ -621,7 +621,10 @@ fn a_value_a_cache_kept() -> Vec<(&'static str, &'static str)> {
 // covers: C-40
 #[test]
 fn a_known_miss_of_reads_test_a_value_an_earlier_test_computed_and_a_cache_kept() {
-    known_miss(&a_value_a_cache_kept(), ("app/rates.py", "def rate():\n    return 2\n"));
+    known_miss(
+        &a_value_a_cache_kept(),
+        ("app/rates.py", "def rate():\n    return 2\n"),
+    );
 }
 
 // covers: C-40, C-34
