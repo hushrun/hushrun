@@ -675,6 +675,44 @@ fn an_audited_test_runs_again_alone_under_a_warm_daemon_and_the_configuration_ca
     assert_eq!(store::disagreements(&r.cache), [name]);
 }
 
+// covers: C-46
+#[test]
+fn with_isolated_projects_on_nothing_is_observed_and_the_build_is_as_it_was() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // A build Isolated Projects takes: each project configures itself.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("observe")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'shop'\ninclude 'app'\n{LINE}\n"),
+        ),
+        file(
+            "app/build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies {\n  testImplementation platform('org.junit:junit-bom:5.11.4')\n  testImplementation 'org.junit.jupiter:junit-jupiter'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n",
+        ),
+        file(
+            "app/src/test/java/shop/app/OneTest.java",
+            "package shop.app;\nimport org.junit.jupiter.api.*;\nclass OneTest { @Test void works() {} }\n",
+        ),
+    ]);
+    let ran = r.run(
+        &command(&gradle, &["-Dorg.gradle.unsafe.isolated-projects=true"]),
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stdout
+            .contains("hushrun: Isolated Projects is on, so hushrun looks at no test class of this build"),
+        "{}",
+        ran.stdout
+    );
+    assert!(r.newest_result().get("units").is_none(), "{}", ran.stderr);
+}
+
 /// The Android SDK and a Gradle user home that holds Android's Gradle plugin.
 fn android_sdk() -> Option<String> {
     std::env::var("HUSHRUN_TEST_ANDROID_SDK")
