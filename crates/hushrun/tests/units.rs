@@ -924,6 +924,54 @@ fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
 }
 
 // covers: C-32
+#[test]
+fn a_pytest_a_test_starts_and_stops_is_no_start_of_the_runner() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_nested starts a pytest of its own, which inherits the run's variables, and stops it
+    // before it says anything: that pytest is the test's doing, which isn't followed, never a
+    // start of the runner by COMMAND. The run's passes are kept.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_n.py",
+            "import os, subprocess, sys, time\n\ndef test_nested():\n    p = subprocess.Popen([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'slow_s.py'], env=dict(os.environ, IN_CHILD='1'))\n    time.sleep(3)\n    p.terminate()\n    p.wait()\n",
+        ),
+        (
+            "slow_s.py",
+            "import os, time\n\ndef test_s():\n    if os.environ.get('IN_CHILD'):\n        time.sleep(30)\n",
+        ),
+        ("test_b.py", "def test_b():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "test_n.py",
+            "test_b.py",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        !ran.stderr.contains("no test file or test records a pass"),
+        "{}",
+        ran.stderr
+    );
+    assert!(r.unit_results() > 0, "{}", ran.stderr);
+}
+
+// covers: C-32
 #[cfg(unix)]
 #[test]
 fn a_command_pytest_no_longer_reports_for_is_chosen_afresh_next_time() {

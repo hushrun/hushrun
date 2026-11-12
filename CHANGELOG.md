@@ -161,6 +161,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   crashes, keeps every test file and test of the run from a pass. Contract: an adapter's process
   may make `<anything>.started` in `HUSHRUN_UNITS` as it begins and remove it once its facts are
   written; pytest's does.
+- A pytest that a test of the run starts and stops no longer keeps every pass of the check out for
+  good: only a start of the runner by COMMAND says it began.
 - `hushrun why` says why a test or a test file kept no result the last time it ran here, as the
   run decided it: a skip in a run that failed (such as a Go test that skips because another
   failed), a failure no test explains, a start that died, a stale build, a test its adapter never

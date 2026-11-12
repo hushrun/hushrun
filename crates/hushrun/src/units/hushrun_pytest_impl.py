@@ -1434,12 +1434,24 @@ def _workers_removed(obs):
     return removed
 
 
+SESSION_VAR = "HUSHRUN_PYTEST_SESSION"
+
+
 def _session_started(obs, session):
     """[C-32] The main process (an xdist controller, not a worker, whose death its tests already
     say) says it began: a `.started` file it removes once its facts are written. One left after
-    COMMAND means a start died before it said what it saw."""
+    COMMAND means a start died before it said what it saw.
+
+    A pytest a test of this run started (its own process environment names this run's directory
+    in `HUSHRUN_PYTEST_SESSION`, which a session of the run sets in its own, so that only its
+    descendants have it) is the test's doing, which isn't followed, never a start of the runner by
+    COMMAND: it makes none. A second pytest COMMAND starts (`pytest a; pytest b`) doesn't inherit
+    it, and makes its own."""
     if getattr(session.config, "workerinput", None) is not None:
         return
+    if os.environ.get(SESSION_VAR) == obs.directory:
+        return
+    os.environ[SESSION_VAR] = obs.directory
     path = os.path.join(obs.directory, "pytest-%d.started" % os.getpid())
     with open(path, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))

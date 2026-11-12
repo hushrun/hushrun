@@ -284,3 +284,18 @@ first; the plugin's are in ADR 0080's Amendment 2.
   while no other tool uses `sys.monitoring`. The Consequences said more than 5,000 results in a run
   record none: a run sends 50,000 at most, failures first, and an older server keeps the first
   5,000 (ADR 0078, item 9 and Amendment 4).
+
+## Amendment 11: what the third review ran (2026-11-12)
+
+A third review ran what Amendment 10 added, on pytest 8.4.2 and 9.2. Each item is fixed with a
+test that failed first; the plugin's are in ADR 0080's Amendment 3.
+
+- **A pytest a test starts.** A passing test that started a pytest of its own and stopped it left
+  that pytest's `.started` file, since it inherits the run's variables: every run of the check
+  then kept no pass, for good. A pytest session now sets `HUSHRUN_PYTEST_SESSION` to the run's
+  directory in its own environment, which only its descendants inherit; a pytest that finds it
+  set to the run's directory makes no file. Jest's and Vitest's second-start files already tell
+  a start inside a test by a variable the first start sets (`HUSHRUN_JEST_RUN`,
+  `HUSHRUN_VITEST_START`); their adapters load only in their own COMMANDs (Jest through
+  `NODE_OPTIONS`, which a pytest COMMAND doesn't set), and CTest, `swift test`, Go, Cargo, Maven
+  and Gradle make no such file, so no other child of a test leaves one.
