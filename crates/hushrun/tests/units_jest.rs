@@ -2455,6 +2455,77 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
     }
 }
 
+// covers: C-32, C-44
+#[cfg(unix)]
+#[test]
+fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for jest in jests() {
+        let r = Repo::new(
+            &jest,
+            &[
+                file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("test/a.test.js", "test('a1', () => {});\n"),
+            ],
+        );
+        // A script that starts Jest for what runs no test file first (`jest --clearCache && jest`),
+        // with the other such forms, and then for the tests: one start ran tests.
+        let bin = r.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let jest_js = "node node_modules/jest/bin/jest.js";
+        std::fs::write(
+            bin.join("pnpm"),
+            format!(
+                "#!/bin/sh\n{jest_js} --clearCache >/dev/null && {jest_js} --showConfig >/dev/null && {jest_js} --listTests >/dev/null && {jest_js} --version >/dev/null && {jest_js} --ci --passWithNoTests no-such-test && {jest_js} --ci\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        assert!(
+            !ran.stderr.contains("records a pass"),
+            "Jest {}: {}",
+            jest.major,
+            ran.stderr
+        );
+        assert_eq!(
+            r.map()["units"]["test/a.test.js"]["tests"]["a1"],
+            "passed",
+            "Jest {}",
+            jest.major
+        );
+        // The other way round: the tests first, then what runs none.
+        r.write(
+            "test/a.test.js",
+            "test('a1', () => { expect(1).toBe(1); });\n",
+        );
+        std::fs::write(
+            bin.join("pnpm"),
+            format!(
+                "#!/bin/sh\n{jest_js} --ci && {jest_js} --clearCache >/dev/null && {jest_js} --listTests >/dev/null\n"
+            ),
+        )
+        .unwrap();
+        let after = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(after.code, 0, "Jest {}: {}", jest.major, after.out());
+        assert!(
+            !after.stderr.contains("records a pass"),
+            "Jest {}: {}",
+            jest.major,
+            after.stderr
+        );
+    }
+}
+
 /// What a run says when a second start of the runner in COMMAND wasn't observed.
 const SECOND_START: &str = "no test file or test records a pass: Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
 

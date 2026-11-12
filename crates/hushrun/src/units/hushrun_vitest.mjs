@@ -55,7 +55,12 @@ function readRun(dir) {
   }
 }
 
-// The run's directory for this process, once claimed: the first Vitest that starts with it.
+// [C-32] What a claim reads once the start that held it ran no test file.
+const RELEASED = 'released:';
+
+// The run's directory for this process, once claimed: the first Vitest that starts with it, or
+// one after a start that claimed it and ran no test file (`vitest list`, `vitest related` with
+// nothing related, a run that found no test file), whose file it removes.
 function claim(dir) {
   const file = path.join(dir, 'vitest-claim');
   try {
@@ -65,11 +70,68 @@ function claim(dir) {
     return true;
   } catch {
     try {
+      const held = fs.readFileSync(file, 'utf8').trim();
+      if (held.startsWith(RELEASED)) {
+        try {
+          fs.unlinkSync(path.join(dir, `vitest-${held.slice(RELEASED.length)}.json`));
+        } catch {
+          // It wrote nothing.
+        }
+        const temp = path.join(dir, `.vitest-claim.${process.pid}.tmp`);
+        fs.writeFileSync(temp, String(process.pid));
+        fs.renameSync(temp, file);
+      }
       return fs.readFileSync(file, 'utf8').trim() === String(process.pid);
     } catch {
       return false;
     }
   }
+}
+
+// [C-32] Gives the claim up, for a start after this one in COMMAND that runs the tests: this one
+// ran no test file. With no such start, what it wrote stands.
+function release(dir) {
+  try {
+    const temp = path.join(dir, `.vitest-claim.${process.pid}.tmp`);
+    fs.writeFileSync(temp, `${RELEASED}${process.pid}`);
+    fs.renameSync(temp, path.join(dir, 'vitest-claim'));
+  } catch {
+    // Kept: a start after it is then a second start, and keeps the run's passes out.
+  }
+}
+
+// [C-32] Another start of Vitest beside the one that claimed the run (a script's `vitest run a &&
+// vitest run b`), which no claimer above it named: once it is about to run test files, what it
+// runs isn't observed, so it leaves a `.started` file saying why, never removed, and no pass of
+// the run is kept. A start that runs none leaves nothing.
+function secondStart(dir) {
+  return {
+    name: 'hushrun',
+    configureVitest({ vitest }) {
+      try {
+        if (vitest.__hushrunSecond) return;
+        vitest.__hushrunSecond = true;
+        // A run's start with test files: `vitest list` sorts its files, and starts no run.
+        vitest.config.reporters.push({
+          onTestRunStart(specifications) {
+            if (!Array.isArray(specifications) || !specifications.length) return;
+            try {
+              fs.writeFileSync(
+                path.join(dir, `vitest-second-${process.pid}.started`),
+                JSON.stringify({
+                  why: "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
+                }),
+              );
+            } catch {
+              // Unwritable: the run's own facts still say what the first start saw.
+            }
+          },
+        });
+      } catch {
+        // Its reporters can't be told: nothing is said of it.
+      }
+    },
+  };
 }
 
 function realOrSelf(p) {
@@ -90,23 +152,8 @@ export default function hushrun() {
   const dir = process.env.HUSHRUN_UNITS;
   if (!dir || !fs.existsSync(dir)) return noop();
   if (!claim(dir)) {
-    // [C-32] Another start of Vitest beside the one that claimed the run (a script's `vitest run a
-    // && vitest run b`), which no claimer above it named: what it runs isn't observed, so it
-    // leaves a `.started` file saying why, never removed, and no pass of the run is kept. A
-    // Vitest a test starts inherits the claimer's start, and adds nothing.
-    if (!process.env.HUSHRUN_VITEST_START) {
-      try {
-        fs.writeFileSync(
-          path.join(dir, `vitest-second-${process.pid}.started`),
-          JSON.stringify({
-            why: "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
-          }),
-        );
-      } catch {
-        // Unwritable: the run's own facts still say what the first start saw.
-      }
-    }
-    return noop();
+    // A Vitest a test starts inherits the claimer's start, and adds nothing.
+    return process.env.HUSHRUN_VITEST_START ? noop() : secondStart(dir);
   }
   // [C-32] One id for this start of Vitest and every worker of it, whatever its projects or
   // --shard: only the start that claimed the run writes.
@@ -124,7 +171,17 @@ export default function hushrun() {
     refused: null,
     installed: false,
     testFiles: null,
+    ran: false,
   });
+  // A start whose reporter never heard a run end with a test file run or left out (`vitest list`,
+  // which sorts its files and runs none, `vitest related` with nothing related, a run that found
+  // no test file) gives the claim up as it ends.
+  if (!state.exitHooked) {
+    state.exitHooked = true;
+    process.on('exit', () => {
+      if (!state.ran) release(dir);
+    });
+  }
   const guard = (what, fn) => {
     try {
       return fn();
@@ -350,6 +407,7 @@ async function deselect(state, vitest, sorted) {
 // it, and a file run twice ran whole only when it did each time.
 function report(state, vitest, modules, errors, reason) {
   const units = state.units;
+  if (modules.length || state.removed.size) state.ran = true;
   for (const module of modules) {
     const unit = path.resolve(module.moduleId);
     const tests = [...module.children.allTests()];
