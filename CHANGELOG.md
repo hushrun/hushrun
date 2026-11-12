@@ -129,6 +129,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - A skipped test in a run whose command failed records nothing, and its test file records no
   pass: a suite setup that failed, or a runner that stopped, can skip what it hides. In a run that
   passed, a skip is a pass, as before. An adapter's facts may say `skipped`; pytest does.
+- A test file that failed while none of its tests failed, such as a failing `afterAll`, records
+  no pass for any of its tests: the next run runs them, and what failed runs again.
 
 ### Fixed
 

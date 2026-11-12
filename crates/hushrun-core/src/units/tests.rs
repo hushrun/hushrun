@@ -369,6 +369,13 @@ fn a_skip_in_a_run_whose_command_failed_proves_nothing() {
         ..skipped.clone()
     };
     assert_eq!(state(&skipped_failed, &failed_run), State::Failed);
+    // A test of a test file that failed with no test failing: not run, whatever COMMAND did.
+    let unexplained = Facts {
+        unexplained: true,
+        ..facts(true, false, false)
+    };
+    assert_eq!(state(&unexplained, &PASSED), State::NotRun);
+    assert_eq!(state(&unexplained, &failed_run), State::NotRun);
 }
 
 // covers: C-5

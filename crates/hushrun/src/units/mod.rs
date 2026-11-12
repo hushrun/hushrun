@@ -360,12 +360,15 @@ fn tests_that_passed(
 /// \[C-39\] Each of a test file's tests `told`, with its facts and its state by the one function:
 /// it finished, failed and was deselected as told, and what wasn't followed is what was inside its
 /// own window and `outside`, what was outside every test's window of its file. `run(id)` is what
-/// the run knows for it, the plan's listing of it included.
+/// the run knows for it, the plan's listing of it included. When its test file failed
+/// (`file_failed`) and none of `told` did, no test of it passes: the failure is unexplained.
 fn tests_decided(
     told: &BTreeMap<String, facts::MergedTest>,
     outside: &BTreeSet<units::NotFollowed>,
+    file_failed: bool,
     run: impl Fn(&str) -> RunFacts,
 ) -> BTreeMap<String, (State, Facts)> {
+    let unexplained = file_failed && told.values().all(|test| !test.failed);
     told.iter()
         .map(|(id, test)| {
             let mut not_followed = test.not_followed.clone();
@@ -377,6 +380,7 @@ fn tests_decided(
                 deselected: test.deselected,
                 tests_reused: false,
                 skipped: test.skipped,
+                unexplained,
             };
             let state = units::state(&facts, &run(id));
             (id.clone(), (state, facts))
@@ -1029,6 +1033,7 @@ impl Session {
                             let decided = tests_decided(
                                 seen.tests.as_ref()?,
                                 &seen.facts.not_followed,
+                                seen.facts.failed,
                                 |_| run,
                             );
                             return decided.get(id).map(|(state, _)| *state);
@@ -1970,7 +1975,7 @@ fn decide(
             .then_some(seen.tests.as_ref())
             .flatten()
             .map(|told| {
-                tests_decided(told, &facts.not_followed, |id| RunFacts {
+                tests_decided(told, &facts.not_followed, facts.failed, |id| RunFacts {
                     planned: planned || listed_tests(id),
                     ..run
                 })

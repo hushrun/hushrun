@@ -339,6 +339,19 @@ fn decided_by(
     plan: &Plan,
     unit: Unit,
 ) -> (Observed, Keyer<'static>) {
+    decided_run(dir, tree, seen, map, plan, unit, true)
+}
+
+/// [`decided_by`] of a run whose COMMAND passed or failed (`command_passed`).
+fn decided_run(
+    dir: &Path,
+    tree: &Tree,
+    seen: Seen,
+    map: &store::Map,
+    plan: &Plan,
+    unit: Unit,
+    command_passed: bool,
+) -> (Observed, Keyer<'static>) {
     let base = KeyBase {
         check: CheckName::new("unit").unwrap(),
         command: vec!["pytest".into()],
@@ -362,7 +375,7 @@ fn decided_by(
         base: base.clone(),
         repository: None,
         tree,
-        command_passed: true,
+        command_passed,
         counts: &counts,
         store: &results,
         root: dir,
@@ -578,6 +591,84 @@ fn a_run_whose_plan_left_tests_out_never_records_a_pass_of_their_test_file() {
             "{unit:?}"
         );
     }
+}
+
+// covers: C-39, C-32
+#[test]
+fn a_failure_no_test_explains_keeps_no_tests_pass() {
+    // Jest: a failing afterAll failed the file while each of its tests passed. Recorded one by
+    // one, the next run would leave them out, the afterAll wouldn't run, and the check would pass.
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = ["app.py", "tests/test_a.py"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tree = tree(&paths);
+    let passed = facts::MergedTest {
+        finished: true,
+        ..facts::MergedTest::default()
+    };
+    let tests = BTreeMap::from([
+        ("test_one".to_string(), passed.clone()),
+        ("test_two".to_string(), passed.clone()),
+    ]);
+    let seen = |failed: bool, tests: BTreeMap<String, facts::MergedTest>| Seen {
+        facts: Facts {
+            complete: true,
+            failed,
+            ..Facts::default()
+        },
+        reads: paths.iter().cloned().collect(),
+        duration_ms: 3,
+        tests: Some(tests),
+    };
+    let reads: BTreeSet<String> = paths.iter().cloned().collect();
+    let (o, keyer) = decided_run(
+        dir.path(),
+        &tree,
+        seen(true, tests.clone()),
+        &store::Map::default(),
+        &Plan::default(),
+        Unit::Test,
+        false,
+    );
+    // Its own fail is recorded, as before; no test's pass is.
+    let file_key = keyer.key("tests/test_a.py", &reads).unwrap();
+    assert!(
+        o.records()
+            .iter()
+            .any(|r| r.key == file_key && r.result == "fail")
+    );
+    assert!(
+        o.records().iter().all(|r| r.result != "pass"),
+        "{:?}",
+        o.records()
+    );
+    assert_eq!(o.tests["tests/test_a.py"]["test_one"], State::NotRun);
+    // A failure a test explains: the others' passes stand.
+    let mut explained = tests;
+    explained.insert(
+        "test_bad".into(),
+        facts::MergedTest {
+            failed: true,
+            ..passed
+        },
+    );
+    let (o, keyer) = decided_run(
+        dir.path(),
+        &tree,
+        seen(true, explained),
+        &store::Map::default(),
+        &Plan::default(),
+        Unit::Test,
+        false,
+    );
+    let one = keyer.test_key("tests/test_a.py", "test_one", &reads).unwrap();
+    assert!(
+        o.records()
+            .iter()
+            .any(|r| r.key == one && r.result == "pass")
+    );
 }
 
 // covers: C-39

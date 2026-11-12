@@ -145,3 +145,14 @@ run`, and a test file with any skipped test records no pass of its own; its fail
 is recorded as before. In a run that passed, nothing changes. An adapter that doesn't say
 `skipped` is read as before. pytest says it for a skip or skipif mark, a skip raised in a fixture's
 setup or in the test, and an xfail that isn't run; an xfail that ran, and failed as expected, ran.
+
+## Amendment 3: a failure no test explains keeps no test's pass (2026-11-12)
+
+Item 4 decided each test from its own facts alone. A reviewer ran this on Jest: a failing
+`afterAll` failed the test file while each of its tests passed; the tests were recorded one by
+one, the next run left them out, the `afterAll` never ran, and the check passed.
+
+The decision: a test file that failed while none of its tests failed records no pass for any of
+its tests in that run: the one state function makes them `not run`. Its own `fail` is recorded as
+before, so its next run asks its tests again and runs them. A failure one of its tests explains
+leaves the others' passes as they were.
