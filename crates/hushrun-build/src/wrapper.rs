@@ -351,17 +351,8 @@ impl Search {
             add(text.as_bytes().to_vec(), Some(*folder));
         }
         let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
-        // A machine's folder counts only where it ends a name: a home such as `/root` begins
-        // many a crate's own text (`/rootfs`, `/roots.rs`). A root counts wherever it is.
-        let needles = texts
-            .into_iter()
-            .map(|(text, kinds)| {
-                let bounded = kinds.iter().all(Option::is_some);
-                (text, bounded)
-            })
-            .collect();
         Search {
-            needles: Needles::with_bounds(needles),
+            needles: Needles::new(texts.into_iter().map(|(text, _)| text).collect()),
             kinds,
         }
     }
@@ -2170,9 +2161,11 @@ mod tests {
 
     // covers: B-10, B-24
     #[test]
-    fn a_short_home_is_found_in_an_output_only_where_it_ends_a_name() {
+    fn a_machine_folder_is_found_in_an_output_whatever_follows_it() {
+        // A proc macro that writes `$CARGO_HOME` and `_cache` into a library: another machine
+        // would print this machine's folder.
         let dir = tempfile::tempdir().unwrap();
-        let ws = "/workspace/app";
+        let ws = "/home/dev/ws";
         let paths = RootPaths {
             workspace: ws.to_string(),
             package: Some(ws.to_string()),
@@ -2186,38 +2179,22 @@ mod tests {
             target_tmpdir: None,
             bin_exe_dirs: vec![],
         };
-        // A container's root user: the home is a short, common name.
         let machine = Machine {
-            cargo_home: Some("/root/.cargo".into()),
-            toolchain: Some("/root/.rustup/toolchains/stable-x".into()),
+            cargo_home: Some("/opt/tools/cargo".into()),
+            toolchain: Some("/opt/tools/rustup/toolchains/stable-x".into()),
             toolchain_view: None,
-            rustup_home: Some("/root/.rustup".into()),
-            home: Some("/root".into()),
+            rustup_home: Some("/opt/tools/rustup".into()),
+            home: Some("/home/dev".into()),
         };
         let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
         let search = Search::new(&roots);
-        let found = |bytes: &[u8]| {
-            let path = dir.path().join("out.rlib");
-            std::fs::write(&path, bytes).unwrap();
-            search
-                .file(path, "out.rlib".into(), OutputKind::Link)
-                .unwrap()
-                .machine
-        };
-        // Names that merely begin with `/root`: a crate's own text.
-        let own = b"\0oci/rootfs/etc\0src/roots.rs\0tree/root.rs\0";
-        assert!(found(own).is_empty(), "{:?}", found(own));
-        // The home itself, as a path or the whole text.
-        assert_eq!(
-            found(b"\0/root/notes.txt\0"),
-            BTreeSet::from([Folder::Home])
-        );
-        assert_eq!(found(b"/root"), BTreeSet::from([Folder::Home]));
-        assert_eq!(found(b"-I/root/include"), BTreeSet::from([Folder::Home]));
-        assert_eq!(
-            found(b"x \"/root/.cargo/registry/src/a.rs\""),
-            BTreeSet::from([Folder::Home, Folder::CargoHome])
-        );
+        let path = dir.path().join("out.rlib");
+        std::fs::write(&path, b"\0/opt/tools/cargo_cache\0").unwrap();
+        let found = search
+            .file(path, "out.rlib".into(), OutputKind::Link)
+            .unwrap()
+            .machine;
+        assert!(found.contains(&Folder::CargoHome), "{found:?}");
     }
 
     // covers: B-2

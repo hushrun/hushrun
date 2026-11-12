@@ -176,16 +176,12 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
         reasons.insert(Reason::in_output(*folder));
     }
     // The keys' bodies and the records, as text: a value that holds a machine's folder (a
-    // variable the build script set, a flag, a message) names the machine whatever it is. Only
-    // a hit that ends a name counts, as in the outputs (B-10).
+    // variable the build script set, a flag, a message) names the machine whatever it is.
     let mut texts: Vec<String> = facts.records.to_vec();
     texts.extend(serde_json::to_string(facts.asked).ok());
     texts.extend(serde_json::to_string(facts.observed).ok());
     for (folder, needle) in facts.machine {
-        if texts
-            .iter()
-            .any(|text| crate::scan::holds_path(text.as_bytes(), needle.as_bytes()))
-        {
+        if texts.iter().any(|text| text.contains(needle.as_str())) {
             reasons.insert(Reason::in_record(*folder));
         }
     }
@@ -416,7 +412,7 @@ mod tests {
 
     // covers: B-24
     #[test]
-    fn a_short_home_names_the_machine_in_a_record_only_where_it_ends_a_name() {
+    fn a_short_home_names_the_machine_in_a_record_wherever_it_is_found() {
         let machine = vec![
             (Folder::CargoHome, "/root/.cargo".to_string()),
             (Folder::Home, "/root".to_string()),
@@ -433,12 +429,32 @@ mod tests {
                 externs: &[],
             })
         };
+        // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
+        // the block names the machine, at the price of reuse elsewhere.
         let p = decide(&["warning: see src/roots.rs and /rootfs".to_string()]);
-        assert!(p.portable, "{p:?}");
+        assert_eq!(p.reasons, vec![Reason::HomeInRecord]);
         let p = decide(&["warning: wrote /root/out.txt".to_string()]);
         assert_eq!(p.reasons, vec![Reason::HomeInRecord]);
         let p = decide(&["CFLAGS=-I/root/include".to_string()]);
         assert_eq!(p.reasons, vec![Reason::HomeInRecord]);
+    }
+
+    // covers: B-24
+    #[test]
+    fn a_machine_folder_in_a_record_names_the_machine_whatever_follows_it() {
+        let machine = vec![(Folder::CargoHome, "/opt/tools/cargo".to_string())];
+        let records = ["CACHE=/opt/tools/cargo_cache".to_string()];
+        let p = portable(&Facts {
+            class: Class::Library,
+            asked: &asked(),
+            observed: &observed(),
+            records: &records,
+            in_outputs: &BTreeSet::new(),
+            machine: &machine,
+            variable_names_base: false,
+            externs: &[],
+        });
+        assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
 
     #[test]
