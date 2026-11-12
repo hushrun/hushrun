@@ -1019,6 +1019,46 @@ fn pytest_watches_only_while_no_other_tool_uses_sys_monitoring() {
     assert!(watch.contains("sys.monitoring"), "{facts:#}");
 }
 
+// covers: C-32, C-42
+#[test]
+fn a_sqlite_database_a_test_connects_to_is_read() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) || !watches() {
+        return;
+    }
+    // sqlite3 opens the file in C: Python's only word of it is the audit event
+    // `sqlite3.connect`, which names the path. `:memory:` is no file.
+    let r = repo_of(&[
+        ("hushrun.yaml".into(), yaml("observe")),
+        (
+            "tests/test_db.py".into(),
+            "import os, sqlite3\n\n\
+             def test_db(tmp_path):\n    path = os.path.join(os.path.dirname(__file__), 'data', 'shop.sqlite')\n    with sqlite3.connect(path) as c:\n        c.execute('create table if not exists t (x)')\n    sqlite3.connect(':memory:').close()\n"
+                .into(),
+        ),
+        ("tests/data/keep.txt".into(), String::new()),
+    ]);
+    let python = python();
+    let _ = r.run(&pytest_args(&python, &[]), &[]);
+    let (code, out, facts) = watched_facts(&r, &[], &["tests/test_db.py"]);
+    assert_eq!(code, 0, "{out}");
+    let unit = unit_of(&facts, "tests/test_db.py");
+    let reads: Vec<&str> = unit["reads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(reads.contains(&"tests/data/shop.sqlite"), "{unit:#}");
+    let paths = facts["paths"].as_array().unwrap();
+    let opened: Vec<&str> = unit["tests"][0]["opened"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| paths[i.as_u64().unwrap() as usize].as_str().unwrap())
+        .collect();
+    assert!(opened.contains(&"tests/data/shop.sqlite"), "{unit:#}");
+}
+
 fn unit_of<'a>(facts: &'a Value, unit: &str) -> &'a Value {
     facts["units"]
         .as_array()

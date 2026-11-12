@@ -104,3 +104,9 @@ test that failed first.
 - **A test file skipped as it loads.** `pytest.skip(allow_module_level=True)` and
   `pytest.importorskip` skip a file's collection, which said no skip: the file ran zero of zero
   tests and passed whole in a run that failed. Now a skipped collection is one skip of its unit.
+- **A SQLite database.** sqlite3 opens its file in C, where no `open` event is raised: a test that
+  read a database in the repository read nothing of it, under both settings. The audit event
+  `sqlite3.connect` names the path, which is now read as an open (`:memory:` is none). One run each
+  found `mmap`, `shutil.copyfile`, `zipimport`, `importlib.resources` and `glob.glob` followed
+  already, through `open` or `os.scandir`; `os.stat` and `os.path.exists` raise no event, so a test
+  that only asks whether a file is there isn't taken to have read it.

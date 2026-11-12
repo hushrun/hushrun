@@ -161,6 +161,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   crashes, keeps every test file and test of the run from a pass. Contract: an adapter's process
   may make `<anything>.started` in `HUSHRUN_UNITS` as it begins and remove it once its facts are
   written; pytest's does.
+- pytest's adapter takes a SQLite database a test connects to as read, as it does a file it opens.
 - pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
   name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
   list, and runs when it changes.

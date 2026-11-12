@@ -880,12 +880,39 @@ def _audit(event, args):
         _guard(obs.on_spawn, event, args, sys._getframe(1))
     elif event == "ctypes.dlopen" and args:
         _guard(obs.on_dlopen, args[0])
+    elif event == "sqlite3.connect" and args and not getattr(_LOCAL, "busy", False):
+        # [C-32] sqlite3 opens its file in C, where no `open` event is raised: its path is read.
+        # `:memory:` and an empty name are no file; a `file:` URI names its path before `?`.
+        path = _sqlite_path(args[0])
+        if path is not None:
+            _guard(obs.on_open, (path, "r"), sys._getframe(1))
     elif event in ("os.listdir", "os.scandir") and obs.watching:
         path = args[0] if args else None
         if isinstance(path, bytes):
             path = os.fsdecode(path)
         if path is None or isinstance(path, str):
             _guard(obs.listed, path if path is not None else ".")
+
+
+def _sqlite_path(database):
+    """The file a `sqlite3.connect` names, or None for an in-memory database."""
+    try:
+        if isinstance(database, bytes):
+            database = os.fsdecode(database)
+        elif not isinstance(database, str):
+            database = os.fspath(database)
+            if isinstance(database, bytes):
+                database = os.fsdecode(database)
+    except TypeError:
+        return None
+    if database.startswith("file:"):
+        database = database[len("file:"):].split("?", 1)[0].split("#", 1)[0]
+        if database.startswith("//"):
+            database = database[2:]
+            database = database[database.find("/"):] if "/" in database else ""
+    if database in ("", ":memory:"):
+        return None
+    return database
 
 
 def _pytest_dirs():
