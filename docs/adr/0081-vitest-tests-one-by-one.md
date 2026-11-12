@@ -15,29 +15,31 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
 ## Decision
 
 1. **A test's id** is the names of its suites and its own, as Vitest formats them, joined with
-   ` > `: `cart > in euros > rounds`. The k-th test of a file whose joined name the file already
-   had is `<name> [k]`, counting in the order the file declares them (Vitest's shuffle reorders
-   runs, not declarations), the suffix RFC 0004's Jest adapter takes too. A name that holds ` > `
-   can make different suites join to one id (`describe('a > b')` and `describe('a')` ›
-   `describe('b')`): those tests, and any id still another's after the suffix, are ambiguous; they
-   are never told and never left out, so they run every time. Each case of `test.each` and
-   `describe.each` is a test of its own, named as Vitest formats it. A formatted value that differs
-   between machines (a path, a date, a random number, an object's address) makes an id that differs
-   too: on another machine it is a new test, and runs, as a renamed test does.
+   ` > `, the file excluded: `cart > in euros > rounds`. The k-th test (k from 2) of a file whose
+   joined name the file already had is `<name> [k]`, in the order the file declares them (Vitest's
+   shuffle reorders runs, not declarations). Tests whose ids collide (the same id from different
+   suites, `describe('a > b')` and `describe('a')` › `describe('b')`, or a suffixed id that still
+   equals another) are told as one entry per id: failed if any of them failed, finished only if all
+   did, never with a list of their own, and `neverLeftOut`, so hushrun records no pass of theirs and
+   no plan lists them (C-39); they run every time. RFC 0004's Jest adapter takes the same rule. Each
+   case of `test.each` and `describe.each` is a test of its own, named as Vitest formats it. A
+   formatted value that differs between machines (a path, a date, a random number, an object's
+   address) makes an id that differs too: on another machine it is a new test, and runs, as a
+   renamed test does.
 2. **Leaving out tests**, in the worker, when the runner starts the file's own suite: after
    collection and after Vitest's filters (`.only`, `-t`, a line, tags), before the file's first
    hook. Each test `reuseTests` lists that Vitest would run gets mode `skip` and a skipped result,
    and every suite all of whose tests are then skipped gets mode `skip`, which Vitest reads after
    that point: its `beforeAll` and `afterAll` don't run. A test the file skips, a todo, a test a
-   filter left out and an ambiguous one are never touched. The plugin hands the list to the workers
-   in `vitest-tests` in the run's directory, written whole in the sequencer before any worker
-   starts, and only where it may leave out test files (ADR 0071 §6: Vitest's list is the plan's,
-   coverage is off, Vitest isn't watching files); without that file no test is left out or told.
-   Vitest then prints the left-out tests as skipped (`Tests  3 passed | 1 skipped (4)`), counts a
-   suite skipped whole in its total only, since it reports no result for its tests, and prints a
-   file all of whose tests are left out as a skipped file. It exits 0 in each case, everything left
-   out included: the files were collected, so its "no test files" doesn't apply. A file all of whose
-   tests are listed is still imported; hushrun may list it whole instead (C-32).
+   filter left out and one whose id another shares are never touched. The plugin hands the list to
+   the workers in `vitest-tests` in the run's directory, written whole in the sequencer before any
+   worker starts, and only where it may leave out test files (ADR 0071 §6: Vitest's list is the
+   plan's, coverage is off, Vitest isn't watching files); without that file no test is left out or
+   told. Vitest then prints the left-out tests as skipped (`Tests  3 passed | 1 skipped (4)`),
+   counts a suite skipped whole in its total only, since it reports no result for its tests, and
+   prints a file all of whose tests are left out as a skipped file. It exits 0 in each case,
+   everything left out included: the files were collected, so its "no test files" doesn't apply. A
+   file all of whose tests are listed is still imported; hushrun may list it whole instead (C-32).
 3. **How each test ended**, written by the worker when the run's files end, after every hook:
    `finished` when its window closed (the runner's end of the test, after `beforeEach`,
    `afterEach`, `aroundEach`, fixtures and retries, or, for a test that skipped itself, the next
@@ -61,10 +63,14 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
    through getters, which are functions of the exporting module: a test that reads a constant from
    `pricing.ts` ran `pricing.ts`, and a module that built a value from another while it was
    imported ran that one while the file loaded, for every test. Files opened and directories
-   listed come from the `fs` wrapping ADR 0071 has, by window. Each module's direct imports come
-   from the worker's own module runner (`evaluatedModules`), dynamic imports included. Vitest's
-   config files and the project's setup files are in `loaded` as files whose code ran (RFC 0004
-   §3.2 rule 6). A listing in a suite's hook or while the file loaded is each test's it serves.
+   listed come from the `fs` wrapping ADR 0071 has, by window, and each open is also kept with
+   every module of the repository on its stack (`opens`), so that a file a module read once and
+   kept reaches each test that runs that module's code (RFC 0003 §3.3). Each module's direct
+   imports come from the worker's own module runner (`evaluatedModules`), dynamic imports
+   included. Vitest's config files and the project's setup files are `everyTest`: what Vitest
+   loads for every test of the file (RFC 0004 §3.2 rule 6). A listing in a suite's hook or while
+   the file loaded is each test's it serves. With `reads: test` and Vitest's coverage on, the main
+   process's facts say why no test was watched (`settings.watch`), and the run says it once.
    Paths outside the repository and below `node_modules` are left out. hushrun computes each
    test's list from these; the adapter decides nothing.
 5. **A test not watched alone.** A file with a concurrent test (`test.concurrent`,
@@ -84,12 +90,13 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
 7. **Vitest's coverage** (`--coverage`, the config, any provider) leaves out no test and watches
    none: the v8 provider shares V8's counters, and a partial run's coverage would read as a drop
    (ADR 0071 §6).
-8. **The facts.** A worker that tells tests writes `hushrun.unit-facts/v1`: its unit's `tests`,
-   `loaded` and `shared`, the file's `paths` from the repository root and `imports`; the main
-   process's file is ADR 0071's. hushrun merges a test file's workers (a file in two projects runs
-   each test in each): a test finished only where every worker that told it finished it, failed
-   where any failed it, was left out where every one left it out, and what it read is known only
-   where every one said it.
+8. **The facts.** A worker that tells tests writes `hushrun.unit-facts/v1`: its unit, named by its
+   path from the root, with `tests`, `loaded`, `everyTest` and `shared`; the file's `paths` from the
+   repository root, `imports` and `opens`. The main process's file is ADR 0071's, with
+   `settings.watch` when it says why no test was watched. hushrun merges a test file's workers (a
+   file in two projects runs each test in each): a test finished only where every worker that told
+   it finished it, failed where any failed it, was left out where every one left it out, and what it
+   read is known only where every one said it.
 9. **The cost**, measured on Node 20.20.2 and Vitest 4.1.12, forks pool, 30 test files of 10
    trivial tests each importing two of ten modules, interleaved rounds on a heavily loaded machine
    (load average 65 and 129), CPU time of Vitest and its workers, medians of 7 and 9 rounds: no
@@ -105,8 +112,12 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
 - A suite left out whole shows in Vitest's summary as tests neither passed nor skipped: Vitest
   sends no result for the tests of a suite it skips.
 - Reading through a getter counts: a constant read from another module makes that module run for
-  the test, which narrows `reads: test`'s first miss (RFC 0004 §3.2) to values copied before the
-  test file's modules were evaluated, and to registries filled through no import.
+  the test. A value two imports away, RFC 0004 §3.2's first miss and C-40's, is caught with
+  Vitest: the module that built it from another read it through that one's getter while the file
+  loaded, so every test of the file has it (a test holds it). The second miss stays: a registry
+  that a module imported only for that filled at import, read through no function of the filler.
+  A value a module copied before Vite evaluated it (a native module, a dependency in
+  `node_modules`) is outside what is watched.
 - The boundaries and the module wrapper's offset are Vitest 4's: another major version is
   `not observed` (ADR 0071 §9), and a minor version that moves them reports no tests, which only
   runs more.
