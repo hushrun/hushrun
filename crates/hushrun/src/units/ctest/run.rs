@@ -133,6 +133,8 @@ pub fn list(
 ) -> Result<Vec<select::Listed>, String> {
     let own = tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
     let kept = log.map(Kept::new);
+    // A signal while the preset's log is changed waits until it is put back, then acts.
+    let held = kept.as_ref().map(|_| HeldSignals::new());
     let output = tool(real, cwd, assigned)
         .args(args)
         .arg("--show-only=json-v1")
@@ -143,11 +145,60 @@ pub fn list(
     if let Some(kept) = kept {
         kept.put_back();
     }
+    drop(held);
     let output = output.map_err(|err| format!("can't start {}: {err}", real.display()))?;
     if !output.status.success() {
         return Err("ctest couldn't list its tests".into());
     }
     select::parse_listing(&output.stdout).map(|(listing, _)| listing.tests)
+}
+
+/// The signals that stop a process, held while it lives: one that arrives then acts once it is
+/// dropped, as it would have.
+struct HeldSignals {
+    #[cfg(unix)]
+    arrived: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(unix)]
+    ids: Vec<signal_hook::SigId>,
+}
+
+impl HeldSignals {
+    fn new() -> HeldSignals {
+        #[cfg(unix)]
+        {
+            use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+            let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ids = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
+                .into_iter()
+                .filter_map(|signal| {
+                    let value = usize::try_from(signal).ok()?;
+                    signal_hook::flag::register_usize(signal, arrived.clone(), value).ok()
+                })
+                .collect();
+            HeldSignals { arrived, ids }
+        }
+        #[cfg(not(unix))]
+        {
+            HeldSignals {}
+        }
+    }
+}
+
+impl Drop for HeldSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            for id in &self.ids {
+                signal_hook::low_level::unregister(*id);
+            }
+            let signal = self.arrived.load(std::sync::atomic::Ordering::SeqCst);
+            if let Ok(signal) = i32::try_from(signal)
+                && signal != 0
+            {
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+            }
+        }
+    }
 }
 
 /// A file as it was before a listing, to put back after it.
@@ -190,6 +241,46 @@ impl Kept {
     }
 }
 
+/// \[ADR 0087\] A listing kept in a run's directory, for the same `ctest`, words and directory: the
+/// plan's, made just before COMMAND `ctest …` starts, which hushrun's `ctest` then needn't make
+/// again (a listing runs the project's discovery scripts, `TEST_INCLUDE_FILES`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptListing {
+    schema: String,
+    real: PathBuf,
+    words: Vec<String>,
+    cwd: PathBuf,
+    tests: Vec<select::Listed>,
+}
+
+const KEPT_LISTING: &str = "ctest-listing.v1";
+const KEPT_LISTING_SCHEMA: &str = "hushrun.ctest-listing/v1";
+
+impl KeptListing {
+    fn read(dir: &Path, real: &Path, words: &[String], cwd: &Path) -> Option<Vec<select::Listed>> {
+        let bytes = std::fs::read(dir.join(KEPT_LISTING)).ok()?;
+        let kept: KeptListing = serde_json::from_slice(&bytes).ok()?;
+        (kept.schema == KEPT_LISTING_SCHEMA
+            && kept.real == real
+            && kept.words == words
+            && kept.cwd == cwd)
+            .then_some(kept.tests)
+    }
+
+    fn write(dir: &Path, real: &Path, words: &[String], cwd: &Path, tests: &[select::Listed]) {
+        let kept = KeptListing {
+            schema: KEPT_LISTING_SCHEMA.into(),
+            real: real.to_path_buf(),
+            words: words.to_vec(),
+            cwd: cwd.to_path_buf(),
+            tests: tests.to_vec(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&kept) {
+            let _ = facts::write_whole(&dir.join(KEPT_LISTING), &bytes);
+        }
+    }
+}
+
 /// The real `ctest`'s version.
 pub fn version(
     real: &Path,
@@ -214,6 +305,7 @@ pub fn listed(
     cwd: &Path,
     root: &Path,
     assigned: &[(String, String)],
+    kept: Option<&Path>,
 ) -> Result<(Vec<Test>, Option<args::Preset>, PathBuf), String> {
     let version = version(real, cwd, assigned)?;
     if version < JUNIT_SINCE {
@@ -237,13 +329,17 @@ pub fn listed(
         .as_ref()
         .and_then(|p| p.log.as_ref())
         .map(|l| cwd.join(l));
-    let tests = list(
-        real,
-        &args::listing(items, &[]),
-        cwd,
-        log.as_deref(),
-        assigned,
-    )?;
+    let words = args::listing(items, &[]);
+    let tests = match kept.and_then(|dir| KeptListing::read(dir, real, &words, cwd)) {
+        Some(tests) => tests,
+        None => {
+            let tests = list(real, &words, cwd, log.as_deref(), assigned)?;
+            if let Some(dir) = kept {
+                KeptListing::write(dir, real, &words, cwd, &tests);
+            }
+            tests
+        }
+    };
     if tests.is_empty() {
         let multi = select::build_dir(&test_dir).multi_config;
         return Err(if multi && !args::has(items, &["-C", "--build-config"]) {
@@ -280,12 +376,15 @@ pub fn walk(
                 had.refused = had.refused.take().or(built.refused);
             }
         };
-    for test in tests {
+    let mut walked: BTreeMap<PathBuf, Built> = BTreeMap::new();
+    let mut helper_done: BTreeSet<(String, usize)> = BTreeSet::new();
+    for (i, test) in tests.iter().enumerate() {
         let Program::Built { path, build, named } = &test.program else {
             continue;
         };
         if done.insert(path.clone()) {
             let built = walker.program(path, build);
+            walked.insert(path.clone(), built.clone());
             merge(&mut out, &test.unit, built);
         }
         // What the test names besides: a program it starts, a file it reads.
@@ -295,8 +394,76 @@ pub fn walk(
                 merge(&mut out, &test.unit, built);
             }
         }
+        // \[ADR 0087\] What runs before it for it: the setup and cleanup of each fixture it
+        // requires, followed through the fixtures they require, and each test it DEPENDS on. What
+        // their programs are built from, and what they name, the test reads too.
+        for h in helpers(tests, i) {
+            if !helper_done.insert((test.unit.clone(), h)) {
+                continue;
+            }
+            match &tests[h].program {
+                Program::Built { path, build, named } => {
+                    let mut built = match walked.get(path) {
+                        Some(built) => built.clone(),
+                        None => {
+                            let built = walker.program(path, build);
+                            walked.insert(path.clone(), built.clone());
+                            built
+                        }
+                    };
+                    built.own.clear();
+                    merge(&mut out, &test.unit, built);
+                    for n in named {
+                        if named_done.insert((test.unit.clone(), n.clone())) {
+                            let built = walker.named(n);
+                            merge(&mut out, &test.unit, built);
+                        }
+                    }
+                }
+                // A program not built here (a script): any built program it starts reads only
+                // sources, so the test reads every one.
+                Program::Elsewhere(_) | Program::None => {
+                    let built = Built {
+                        every_source: true,
+                        method: "every source",
+                        ..Built::default()
+                    };
+                    merge(&mut out, &test.unit, built);
+                }
+            }
+        }
     }
     out
+}
+
+/// The tests that run before test `i` for it, by index, but itself: the setup and cleanup tests of
+/// each fixture it requires (`FIXTURES_REQUIRED`, `FIXTURES_SETUP`, `FIXTURES_CLEANUP`) and the
+/// tests it `DEPENDS` on, and theirs in turn.
+fn helpers(tests: &[Test], i: usize) -> BTreeSet<usize> {
+    let mut found: BTreeSet<usize> = BTreeSet::new();
+    let mut stack = vec![i];
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        let test = &tests[at].listed;
+        let needs: BTreeSet<String> = test.words("FIXTURES_REQUIRED").into_iter().collect();
+        let after: BTreeSet<String> = test.words("DEPENDS").into_iter().collect();
+        for (j, other) in tests.iter().enumerate() {
+            let provides = other
+                .listed
+                .words("FIXTURES_SETUP")
+                .into_iter()
+                .chain(other.listed.words("FIXTURES_CLEANUP"))
+                .any(|f| needs.contains(&f));
+            if j != i && (provides || after.contains(&other.listed.name)) {
+                found.insert(j);
+                stack.push(j);
+            }
+        }
+    }
+    found
 }
 
 fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Skip> {
@@ -324,7 +491,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     };
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
-    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[])?;
+    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[], Some(units))?;
     if preset.as_ref().is_some_and(|p| p.show_only) {
         return Err(
             "the test preset sets execution.showOnly, and ctest runs no test"

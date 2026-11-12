@@ -141,7 +141,16 @@ impl Recognized {
         }
         let real = program::real("ctest", path.as_deref().unwrap_or_default())?;
         let root = std::fs::canonicalize(at.root).ok()?;
-        let (tests, _, _) = run::listed(&real, &items, at.cwd, &root, at.assigned).ok()?;
+        // Kept in the run's directory for hushrun's `ctest`, which COMMAND starts next.
+        let (tests, _, _) = run::listed(
+            &real,
+            &items,
+            at.cwd,
+            &root,
+            at.assigned,
+            self.dir.get().map(PathBuf::as_path),
+        )
+        .ok()?;
         let built = run::walk(&tests, &root, path, at.assigned);
         let mut out = Compiled::default();
         let mut programs: BTreeMap<&str, bool> = BTreeMap::new();
@@ -364,6 +373,20 @@ impl Adapter for Recognized {
         }
         let all_sources = every_source(at.tree);
         let merged = facts::merged(at.files, ADAPTER);
+        // \[ADR 0087\] An in-source build: said once in the run. When every program is of one,
+        // nothing of it can be observed, and the run says so; else each such program isn't.
+        let in_source = |m: &facts::Merged| {
+            m.not_followed
+                .iter()
+                .find(|n| n.why == "in-source build")
+                .map(|n| n.detail.clone())
+        };
+        let in_source_why = merged.values().find_map(in_source);
+        if let Some(why) = &in_source_why
+            && merged.values().all(|m| in_source(m).is_some())
+        {
+            return Err(why.clone());
+        }
         let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
         let mut named: BTreeSet<String> = BTreeSet::new();
         for (unit, m) in merged {
@@ -439,6 +462,7 @@ impl Adapter for Recognized {
             own,
             unit_files: Some(unit_files),
             received: shared.received,
+            refused: in_source_why,
             ..Read::default()
         }))
     }

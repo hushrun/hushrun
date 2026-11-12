@@ -1206,3 +1206,108 @@ fn a_program_a_test_left_running_keeps_printing_after_hushruns_swift_returns() {
     );
     assert!(facts[0]["settings"]["held"].is_string(), "{:#}", facts[0]);
 }
+
+// covers: C-48
+#[cfg(unix)]
+#[test]
+fn a_signal_after_swift_ended_ends_hushruns_swift() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let marker = root.join("listing.pid");
+    // `swift test` ends at once; the list after it takes a while, and says when it started.
+    let script = format!(
+        "#!/bin/sh\ncase \"$1 $2\" in\n\"--version \"*) echo 'Swift version 6.4.2 (fake)' ;;\n\"test list\") echo $$ > '{}'; exec sleep 20 ;;\n\"test \"*) exit 0 ;;\nesac\n",
+        marker.display()
+    );
+    std::fs::write(real.join("swift"), script).unwrap();
+    std::fs::set_permissions(real.join("swift"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "swift", "test"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let waited = std::time::Instant::now();
+    while !marker.exists() && waited.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let listing = std::fs::read_to_string(&marker).unwrap_or_default();
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    let sent = std::time::Instant::now();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    let status = child.wait().unwrap();
+    let took = sent.elapsed();
+    if let Some(pid) = listing
+        .trim()
+        .parse()
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    // swift had ended: the signal's own action ends hushrun's swift, as it would any program.
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+}
+
+// covers: C-48
+#[test]
+fn a_target_built_with_a_local_packages_plugin_reads_its_package_whole_end_to_end() {
+    let Some(swift) = swift() else {
+        tools("Swift 6", false);
+        return;
+    };
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", ".build/\n"),
+        file(
+            "Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Root\", dependencies: [.package(path: \"LocalPlug\")], targets: [\n  .target(name: \"Lib\", plugins: [.plugin(name: \"P\", package: \"LocalPlug\")]),\n  .target(name: \"Other\"),\n  .testTarget(name: \"LibTests\", dependencies: [\"Lib\"]),\n])\n",
+        ),
+        file("Sources/Lib/Lib.swift", "public let lib = 1\n"),
+        file("Sources/Other/Other.swift", "public let other = 1\n"),
+        file(
+            "Tests/LibTests/LibTests.swift",
+            "import XCTest\n@testable import Lib\n\nfinal class LibTests: XCTestCase {\n    func testLib() { XCTAssertEqual(lib, 1) }\n}\n",
+        ),
+        file(
+            "LocalPlug/Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"LocalPlug\", products: [.plugin(name: \"P\", targets: [\"P\"])], targets: [.plugin(name: \"P\", capability: .buildTool())])\n",
+        ),
+        file(
+            "LocalPlug/Plugins/P/plugin.swift",
+            "import PackagePlugin\n\n@main struct P: BuildToolPlugin {\n    func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] { [] }\n}\n",
+        ),
+    ];
+    let r = Repo::new(&swift, &files);
+    let first = r.run(SWIFT_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    let reads: Vec<String> = map["units"]["Tests/LibTests"]["reads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{map:#}"))
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    // Lib is built with LocalPlug's plugin: its package is read whole, a target no test depends
+    // on included, and so is the plugin's own code.
+    for path in [
+        "Sources/Other/Other.swift",
+        "LocalPlug/Plugins/P/plugin.swift",
+        "Sources/Lib/Lib.swift",
+    ] {
+        assert!(reads.contains(&path.to_string()), "{path}: {reads:?}");
+    }
+}

@@ -216,6 +216,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   machine's store, rather than one guessed from COMMAND: a Go test that a panic or a timeout left
   unrun is told so, not to add `-v`, and a `-v` that comes only from `GOFLAGS` is no longer asked
   for. An adapter's facts may say a test's `notKept`; the Go runner sends it.
+- Go with `unit: test`: a package whose test leaves a program holding its output past `go test`'s
+  own wait now fails with `Test I/O incomplete`, as without hushrun. The runner hands output still
+  open after the binary exits to a forwarder and exits, rather than passing it on to its end
+  itself, which made `go test` print `ok`.
 - Maven and Gradle no longer record as passed a test TestNG skipped because another class's suite
   setup failed: a skipped test, and a class skipped whole, is told skipped, and passes only in a
   run where nothing failed.
@@ -248,6 +252,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - hushrun's `swift` no longer waits for output a program `swift test` left running holds open: it
   returns with `swift test`, a forwarder of its own passes on what that program prints later, and
   that run records no pass.
+- `swift test`: an executable target is read by every test target, which may start it; hushrun's
+  `swift` stops waiting a second after swift ends whatever output keeps arriving, and keeps at most
+  16 MiB of it.
 - CTest: a header a program of the project writes (a generator built and run by the build) now
   makes each test program that includes it read what the generator is built from, on Ninja and
   Makefiles, so a change to a header the generator includes runs those programs.
@@ -266,6 +273,11 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: a test whose program isn't built here is marked so whichever test of its unit comes
   first; skipped and disabled tests are told as skipped, so in a run that failed they record no
   pass; and the plan's listing and walk get a command's own `env NAME=value` assignments.
+- CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
+  program a test program waits for or has compiled in, and a program a test names by a relative
+  path are now read; on Makefiles a source newer than its object makes the program stale; an
+  in-source build says so in the run; and for `ctest` as the command the project's discovery runs
+  once less, the plan's listing being taken.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build
@@ -274,6 +286,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   one past 255 used to end as 1.
 - On Windows, hushrun's test runner ends with a Cargo or Go test binary's exit code whole, as
   its `ctest` and `swift` do, where one past 255 used to end as 1.
+- hushrun's `ctest` and `swift` end on a signal sent after the real program ended, rather than
+  ignoring it.
 - The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
   the current directory, a relative one is from it, and a link to one of hushrun's own programs
   is passed over.

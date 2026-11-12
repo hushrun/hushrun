@@ -1083,6 +1083,9 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
     // Every file of a kind SwiftPM compiles below a target's directory: what the graph can give a
     // test target.
     let mut compiled: BTreeSet<String> = BTreeSet::new();
+    // \[C-48\] What a test can start from the build's products without depending on it: an
+    // executable's (and a macro's, a separate executable) directory, of any package described.
+    let mut startable: BTreeSet<PathBuf> = BTreeSet::new();
     let mut products: BTreeMap<String, Vec<(usize, Vec<String>)>> = BTreeMap::new();
     let mut plugin_products: BTreeSet<String> = BTreeSet::new();
     for (i, d) in described.iter().enumerate() {
@@ -1109,6 +1112,9 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             let Some(from) = relative(&dir, &root) else {
                 continue;
             };
+            if matches!(kind, "executable" | "macro") {
+                startable.insert(normalize(&dir));
+            }
             if kind != "binary" && kind != "system-target" {
                 compiled.extend(
                     below(tree, &from)
@@ -1138,7 +1144,8 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             continue;
         };
         let c99 = t["c99name"].as_str().unwrap_or(name).to_string();
-        let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+        // Every executable target is read by every test target, which may start it.
+        let mut dirs: BTreeSet<PathBuf> = startable.clone();
         let mut not_followed: BTreeSet<NotFollowed> = BTreeSet::new();
         let mut seen: BTreeSet<(usize, String)> = BTreeSet::new();
         let mut stack = vec![(0usize, name.to_string())];
@@ -2015,7 +2022,7 @@ fn facts_of(
         .as_ref()
         .and_then(|f| f.read(run.at))
         .map(|bytes| read_xunit(&bytes, listing));
-    tested(
+    let mut file = tested(
         listing,
         &console,
         events.as_ref(),
@@ -2024,8 +2031,19 @@ fn facts_of(
         parsed,
         run.copied.exit,
         package,
-        run.copied.held,
-    )
+        run.copied.held || run.copied.cut,
+    );
+    // \[C-48\] Past what hushrun keeps of its output, what it printed can't be read whole.
+    if run.copied.cut {
+        file.settings.insert(
+            "cut".to_string(),
+            Value::String(format!(
+                "swift test printed more than the {} MiB hushrun reads: no pass of it is recorded",
+                program::KEEP_MOST >> 20
+            )),
+        );
+    }
+    file
 }
 
 /// \[C-48\] The facts file of a run from what each source said (pure, for tests).
@@ -2768,6 +2786,9 @@ mod tests {
                 "Shop/Sources/CHelpers/helpers.c",
                 "Shop/Sources/CHelpers/include/helpers.h",
                 "Shop/Sources/Core/Core.swift",
+                // Executables any test target may start (ADR 0086 Amendment 2).
+                "Shop/Sources/gen-tool/main.swift",
+                "Shop/Sources/shop-cli/main.swift",
                 "Shop/Tests/CoreTests/CoreTests.swift",
             ]
         );
@@ -2921,6 +2942,49 @@ mod tests {
                 .reads
                 .contains("Shop/Sources/shop-cli/main.swift")
         );
+    }
+
+    // covers: C-48, C-30
+    #[test]
+    fn an_executable_target_is_read_by_every_test_target() {
+        let target = |name: &str, kind: &str, path: &str, deps: &[&str]| {
+            serde_json::json!({"name": name, "c99name": name, "type": kind, "path": path,
+                               "target_dependencies": deps})
+        };
+        let describe = serde_json::json!({"name": "P", "path": "/work", "dependencies": [],
+        "products": [{"name": "tool", "targets": ["Tool"], "type": {"executable": null}}],
+        "targets": [
+            target("Lib", "library", "Sources/Lib", &[]),
+            target("Tool", "executable", "Sources/Tool", &[]),
+            target("IntTests", "test", "Tests/IntTests", &["Lib"]),
+            target("ToolTests", "test", "Tests/ToolTests", &["Tool"]),
+        ]});
+        let dump = serde_json::json!({"targets": [
+            {"name": "Lib", "settings": []}, {"name": "Tool", "settings": []},
+            {"name": "IntTests", "settings": []}, {"name": "ToolTests", "settings": []}]});
+        let described = vec![Described {
+            dir: PathBuf::from("/work"),
+            describe,
+            dump: Some(dump),
+        }];
+        let tree = tree_of(&[
+            "Package.swift",
+            "Sources/Lib/Lib.swift",
+            "Sources/Tool/main.swift",
+            "Tests/IntTests/IntTests.swift",
+            "Tests/ToolTests/ToolTests.swift",
+        ]);
+        let graph = graph_of(&described, Path::new("/work"), &tree);
+        // IntTests may start the built tool from the products directory without depending on
+        // it: an executable's files are read by every test target. A library's stay its users'.
+        let reads = &graph.tests["Tests/IntTests"].reads;
+        assert!(reads.contains("Sources/Tool/main.swift"), "{reads:?}");
+        assert!(
+            !graph.tests["Tests/ToolTests"]
+                .reads
+                .contains("Sources/Lib/Lib.swift")
+        );
+        assert!(graph.named.contains("Sources/Tool/main.swift"));
     }
 
     // covers: C-48

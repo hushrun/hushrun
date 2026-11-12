@@ -228,3 +228,36 @@ hushrun's `ctest` starts the real one with its own standard output and error, an
 it returns when `ctest` does, with its code, and what a program a test left running prints later
 reaches the same output directly, as without hushrun. Nothing is held, unlike hushrun's `swift`,
 which copies standard output to read it (ADR 0086 Amendment 3).
+
+## Amendment 6: what a second review found the walk missed (2026-11-12)
+
+A second review ran these, each a test left out while real `ctest` failed after a change:
+
+- **A custom command's `DEPFILE`.** A generator that reads a header only its depfile names. On
+  Ninja, an edge whose `build.ninja` stanza sets a `depfile` is asked for Ninja's record of its
+  output (`deps = gcc`), as an object is; on Makefiles, the depfile `DependInfo.cmake` names for a
+  custom output is read. No record or no depfile: the program reads every source.
+- **Fixtures and `DEPENDS`.** A test's program reads the walks of the programs of every fixture
+  setup and cleanup it requires (through the fixtures those require) and of each test it
+  `DEPENDS` on, with what they name; a setup not built here makes it read every source.
+- **A program started by a path compiled in, or waited for.** On Ninja the walk follows a program's
+  order-only inputs through phony edges to the executables, modules and shared libraries it waits
+  for (`add_dependencies`), and reads the absolute paths in its objects' `DEFINES` and `FLAGS`; on
+  Makefiles, the targets its own waits for in `CMakeFiles/Makefile2` and the paths in its
+  `flags.make`. Each program found is walked.
+- **A relative path in a test's command** is taken from its `WORKING_DIRECTORY`, or, since the
+  listing doesn't give a test's own directory, from its program's directory and its build
+  directory.
+- **Staleness on Makefiles** compares each object (and a custom command's output) with the files
+  its depfile names, as make does, and the program with its objects.
+- **An in-source build** says so once in the run, as Amendment 1 promised: when every program of
+  the run is of one, its test files weren't observed, with why.
+- **Listings.** For `ctest …` as COMMAND the plan keeps its listing in the run's directory, and
+  hushrun's `ctest` takes it when its `ctest`, words and directory are the same. A listing runs the
+  project's discovery scripts (`TEST_INCLUDE_FILES`, how `gtest_discover_tests`' `PRE_TEST` mode
+  runs the user's program): they now run once more than without hushrun, to know which program
+  each test runs, and once more again when tests are left out, for the listing that checks what
+  is left out (and once more for each way of leaving out that fails that check).
+
+hushrun's `ctest` also ends on a signal sent after the real `ctest` ended, as any program does: the
+forwarding of signals no longer keeps them once the real one is gone.

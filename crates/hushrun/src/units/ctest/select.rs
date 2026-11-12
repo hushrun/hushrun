@@ -24,7 +24,7 @@ pub struct Listing {
 }
 
 /// One test as the listing has it.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct Listed {
     pub name: String,
     /// Absent when its program isn't built or can't be found.
@@ -34,7 +34,7 @@ pub struct Listed {
     pub properties: Vec<Property>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct Property {
     pub name: String,
     pub value: serde_json::Value,
@@ -132,8 +132,8 @@ pub enum Named {
 
 /// The paths `listed` names besides its program: each argument after the first, or its value
 /// after `=` (`--server=/b/server`), and each value of its `ENVIRONMENT` and
-/// `ENVIRONMENT_MODIFICATION`, split as `PATH` is. Only absolute paths that exist, in a build
-/// directory or the repository at `root`, and not the program itself.
+/// `ENVIRONMENT_MODIFICATION`, split as `PATH` is. Only paths that exist, absolute or from where the
+/// test runs, in a build directory or the repository at `root`, and not the program itself.
 pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
     let mut words: Vec<String> = Vec::new();
     for arg in listed.command.iter().flatten().skip(1) {
@@ -158,13 +158,32 @@ pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
             }
         }
     }
+    // \[ADR 0087\] A relative path is from where the test runs: its WORKING_DIRECTORY, else its
+    // own directory, which the listing doesn't give: the program's, and its build directory's.
+    let mut bases: Vec<PathBuf> = listed
+        .words("WORKING_DIRECTORY")
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|d| d.is_absolute())
+        .collect();
+    if bases.is_empty() {
+        bases.extend(program.parent().map(Path::to_path_buf));
+        bases.extend(build_root(program));
+    }
     let mut out: Vec<Named> = Vec::new();
     for word in words {
         let path = Path::new(&word);
-        if word.is_empty() || !path.is_absolute() {
+        if word.is_empty() || word.starts_with('-') {
             continue;
         }
-        let Ok(real) = std::fs::canonicalize(path) else {
+        let real = if path.is_absolute() {
+            std::fs::canonicalize(path).ok()
+        } else {
+            bases
+                .iter()
+                .find_map(|base| std::fs::canonicalize(base.join(path)).ok())
+        };
+        let Some(real) = real else {
             continue;
         };
         if real == program {

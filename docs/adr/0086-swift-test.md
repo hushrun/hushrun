@@ -199,13 +199,18 @@ The decision:
 ## Amendment 2: a source no test target reads is in the rest set (2026-11-12)
 
 Decision 4 made every file of a compiled kind below any target's directory a source. A target no
-test target depends on (an executable a test runs with `swift run`, a plugin nobody uses here) was
-then on no list and in no key: a change to it ran nothing, though a test may build or run it.
+test target depends on (a library nothing here uses, a plugin nobody uses here) was then on no list
+and in no key: a change to it ran nothing, though a test may build or read it.
 
 The decision, the rule: **a file of a source kind that the graph gives to no test target of the
 check is in the rest set, so a change to it runs every test target; a file the graph gives to a
 test target is on that target's list only.** Sources are the files of a compiled kind below a
-target's directory that a test target reads. A file below no target's directory (`Fixtures/`,
+target's directory that a test target reads. A test can start an executable target (or a macro's,
+a separate executable) from the build's products without depending on it, so the graph gives the
+files of every executable and macro target to every test target of the package: a change to one
+runs them all; corrected after a review found an integration test target that launches the
+package's tool reused while only the tool's own test target, which depends on it, ran. A library
+target stays its users'. A file below no target's directory (`Fixtures/`,
 `Examples/`, a nested package this one doesn't depend on) was in the rest set already, and stays
 there even when a test target reads its package whole for a plugin. A non-Swift file SwiftPM
 doesn't compile (`.metal`, a resource) is in the rest set as before; one it does (`.c`, `.m`)
@@ -235,3 +240,16 @@ test binary's output to end (up to its `WaitDelay`), so there the runner forward
 the same process, as the command without hushrun would. hushrun's `ctest` never copies output: the
 real `ctest` gets hushrun's standard output itself, so a program a test left running prints there
 directly (ADR 0087).
+
+## Amendment 4: a cap on what is kept, and signals after the end (2026-11-12)
+
+A second review left `yes` running from a test: hushrun's `swift` was still alive 10 s after swift
+ended, with no forwarder, then spent over 90 s and 401 MB reading what it had kept. The copying
+loop went on reading while output kept arriving without asking whether swift had ended, and kept
+every byte. Now every pass of the loop asks, the second after swift's end is counted whatever
+arrives, and the rest goes to the forwarder; at most 16 MiB is kept to read, what comes after is
+still passed on whole, and such a run records no pass, saying why.
+
+A signal sent once swift had ended (while hushrun's `swift` listed or read) was stored and never
+acted on: signal-hook can't put a default handler back. Each signal now also gets a default
+action that runs once forwarding stops, so it ends hushrun's `swift` as it would any program.
