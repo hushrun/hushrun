@@ -65,8 +65,9 @@ reuse nobody earned.
 - With `reads: test`, a change to a module only some tests call runs those tests; the rest of the
   file is reused one by one.
 - A value two imports away, or a registry another module filled at import, can be missed: the test
-  that read it is reused on a list without that file. The audit's second run catches it and
-  suspends reuse, as RFC 0003 §3.3 does for test files.
+  that read it is reused on a list without that file. So can a value an earlier test computed and
+  code that doesn't run again kept (Amendment 2). The audit's second run catches it and suspends
+  reuse, as RFC 0003 §3.3 does for test files.
 - Results grow by one per test where a file passes whole with `reads: test`; failures are never
   the ones a server's limit cuts.
 
@@ -91,3 +92,13 @@ re-exports from. For every file on a test's own list, the files it re-exports fr
 too, followed to the end through re-exports only, in the one function (`test_list`). An adapter
 that doesn't send it loses nothing it had. Vitest's adapter sends it; with `reads: file` the list
 is the test file's, as before.
+
+## Amendment 2: a third known miss, a value a cache kept (2026-11-12)
+
+A reviewer confirmed a third shape item 2's rules miss: a value an earlier test computed and code
+that doesn't run again kept, such as a `functools.cache` wrapper (C code, so no function of the
+way starts) or a cached property. A later test takes it from the cache with none of the code that
+computed it running, and is keyed on a list without the files that code read; which test misses
+it depends on the order the tests run in. It stands beside the two known misses, pinned by a
+test named for it (`a_known_miss_of_reads_test_a_value_an_earlier_test_computed_and_a_cache_kept`),
+and the audit's second run is what catches it.

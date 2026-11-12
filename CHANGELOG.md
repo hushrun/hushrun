@@ -156,6 +156,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   coverage.py's sysmon core, a repository's own tool): with one there it watches nothing, and when
   one appears it stops, gives back its tool id and says why once; each test then reads its test
   file's list.
+- `reads: test`'s known misses name a third: a value an earlier test computed and a cache kept,
+  such as a `functools.cache` wrapper, which a later test reads without its code running. The
+  audit's second run catches it, as it does the other two.
 
 ## [0.13.0] - 2026-11-12
 

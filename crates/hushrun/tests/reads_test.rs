@@ -1,9 +1,9 @@
 //! \[ADR 0078, 0080\] What a test read, with `tests.reads: test` (C-40, C-42): fixtures that pin
 //! the heuristic. Each changes one file so that one test, `test_target`, fails, and asks `observe`
 //! whether that test would have been reused: never with `reads: file`, whose list is its test
-//! file's; not with `reads: test` where the rule follows the change; and, for the two shapes
-//! `reads: test` is known to miss (RFC 0004 §3.2), yes, which a test names as a known miss. One
-//! more shows an audit run catching such a miss and suspending reuse.
+//! file's; not with `reads: test` where the rule follows the change; and, for the three shapes
+//! `reads: test` is known to miss (RFC 0004 §3.2, C-40), yes, which a test names as a known miss.
+//! One more shows an audit run catching such a miss and suspending reuse.
 //!
 //! They need Python 3.12 or later with pytest, to watch a test, and say so and pass otherwise,
 //! unless `HUSHRUN_TEST_TOOLS=required`, which CI sets.
@@ -599,6 +599,29 @@ fn a_known_miss_of_reads_test_a_registry_another_file_filled_at_import() {
             "from app.registry import HANDLERS\nHANDLERS['x'] = 42\n",
         ),
     );
+}
+
+/// A value test_first computed through rates.py, which a `functools.cache` wrapper (C code, so no
+/// function of the way starts again) keeps: test_target, after it, takes it from the cache, and
+/// runs nothing of rates.py. Which test misses it depends on the order they run in.
+fn a_value_a_cache_kept() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("app/rates.py", "def rate():\n    return 1\n"),
+        (
+            "app/heavy.py",
+            "import functools\nfrom app import rates\n\n@functools.cache\ndef value():\n    return rates.rate()\n",
+        ),
+        (
+            "tests/test_a.py",
+            "from app import heavy\n\ndef test_first():\n    assert heavy.value()\n\ndef test_target():\n    assert heavy.value() == 1\n",
+        ),
+    ]
+}
+
+// covers: C-40
+#[test]
+fn a_known_miss_of_reads_test_a_value_an_earlier_test_computed_and_a_cache_kept() {
+    known_miss(&a_value_a_cache_kept(), ("app/rates.py", "def rate():\n    return 2\n"));
 }
 
 // covers: C-40, C-34
