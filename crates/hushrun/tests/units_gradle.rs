@@ -1051,3 +1051,40 @@ fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
     assert!(cases.contains(&"parses [b]".to_string()), "{cases:?}");
     assert_eq!(cases.len(), 2, "{cases:?}");
 }
+
+// covers: C-39, C-46
+#[test]
+fn junit4_tests_of_a_class_in_the_default_package_leave_out_nothing_of_a_class_named_alike() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // Two classes named CalcTest, one in the default package, with tests of the same names.
+    let adds = |when: &str| -> String {
+        (1..=9)
+            .map(|n| format!("  @Test public void add{n}() {{ Assert.assertNull(System.getenv(\"{when}\")); }}\n"))
+            .collect()
+    };
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    files.extend([
+        file(
+            "app/src/test/java/CalcTest.java",
+            &format!(
+                "import org.junit.*;\npublic class CalcTest {{\n{}  @Test public void other() {{ Assert.assertNull(System.getenv(\"FAIL\")); }}\n}}\n",
+                adds("NEVER")
+            ),
+        ),
+        file(
+            "app/src/test/java/p/CalcTest.java",
+            &format!("package p;\nimport org.junit.*;\npublic class CalcTest {{\n{}}}\n", adds("P_FAIL")),
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1"), ("P_FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // The default package's add tests passed and may be left out; p.CalcTest's failed, and run.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let cases = r.xml_cases("app", "p.CalcTest");
+    assert_eq!(cases.len(), 9, "{cases:?}\n{}", second.stderr);
+}

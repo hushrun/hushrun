@@ -506,6 +506,10 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
                     how = "patterns"
                     s.leftOutTests.sort(false) { it[0] }.eachWithIndex { List<String> it, int i ->
                         if (i >= HushrunRun.MOST_PATTERN_TESTS) { notAttempted << it[0]; return }
+                        // Gradle reads a pattern that starts with an upper-case letter as a simple
+                        // class name, which matches the class of that name in every package: a
+                        // class of the default package (or a package so named) keeps its tests.
+                        if (!it[1].contains('.') || Character.isUpperCase(it[1].charAt(0))) { notAttempted << it[0]; return }
                         filter.excludeTestsMatching(it[1] + "." + it[2])
                         filter.excludeTestsMatching(it[1] + "." + it[2] + "[*]")   // Parameterized: "method[0: x=1]"
                         attempted << it[0]
