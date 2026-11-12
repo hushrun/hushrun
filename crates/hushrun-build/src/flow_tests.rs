@@ -46,6 +46,10 @@ struct Plan {
     /// Write the output folder's path into the debug bundle's DWARF file, as debug info that
     /// names a file under a root does.
     bundle_root: bool,
+    /// For a proc macro: what the linker writes around the metadata, such as its own version.
+    link_salt: Option<String>,
+    /// For a proc macro: something more in its metadata, as a crate hash that moved does.
+    metadata_salt: Option<String>,
 }
 
 type During = Box<dyn FnMut()>;
@@ -110,6 +114,7 @@ impl Fake {
         let mut remaps = Vec::new();
         let mut externs = Vec::new();
         let mut packed = false;
+        let mut crate_type = String::new();
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
@@ -120,7 +125,8 @@ impl Fake {
             match arg {
                 "--crate-name" => crate_name = value(),
                 "--out-dir" => out_dir = value(),
-                "--crate-type" | "-L" | "-l" | "--json" | "--color" | "--target" => {
+                "--crate-type" => crate_type = value(),
+                "-L" | "-l" | "--json" | "--color" | "--target" => {
                     value();
                 }
                 "-C" => {
@@ -226,11 +232,25 @@ impl Fake {
                 "dep-info" => (out.join(format!("{stem}.d")), None),
                 "metadata" => (
                     out.join(format!("lib{stem}.rmeta")),
-                    Some(format!("rmeta\n{content}")),
+                    Some(format!("rmeta\n{content}").into_bytes()),
                 ),
+                // A proc macro: a linked library, its metadata in a section of its own between
+                // what the linker wrote (`metadata`).
+                _ if crate_type == "proc-macro" => {
+                    let mut inner = b"rust\0\0\0\x0a".to_vec();
+                    inner.extend_from_slice(content.as_bytes());
+                    inner.extend_from_slice(plan.metadata_salt.as_deref().unwrap_or("").as_bytes());
+                    let mut bytes = format!("linked by {:?}\n", plan.link_salt).into_bytes();
+                    bytes.extend_from_slice(b"rust\0\0\0\x0a");
+                    bytes.extend_from_slice(&(inner.len() as u64).to_le_bytes());
+                    bytes.extend_from_slice(&inner);
+                    bytes.extend_from_slice(b"\nsymbols");
+                    let name = format!("lib{stem}.{}", std::env::consts::DLL_EXTENSION);
+                    (out.join(name), Some(bytes))
+                }
                 _ => (
                     out.join(format!("lib{stem}.rlib")),
-                    Some(format!("rlib\n{content}")),
+                    Some(format!("rlib\n{content}").into_bytes()),
                 ),
             };
             if let Some(bytes) = bytes {
@@ -2596,7 +2616,8 @@ fn a_linker_outside_every_root_ties_the_block() {
     assert_eq!(run(&one), STORED);
     assert_eq!(run(&two), STORED, "a block tied to its linker moved");
     // In its own checkout it is reused.
-    fs::remove_file(one.join("target/debug/deps/liba-xa.rlib")).unwrap();
+    let dll = std::env::consts::DLL_EXTENSION;
+    fs::remove_file(one.join(format!("target/debug/deps/liba-xa.{dll}"))).unwrap();
     assert_eq!(run(&one), REUSED);
 }
 
@@ -3456,7 +3477,11 @@ fn a_machine_with_the_standard_librarys_sources_compiles_as_one_without_them() {
     settle();
     let (reg_a, reg_b) = (a.call_reg(&ws_a), b.call_reg(&ws_b));
     assert_eq!((reg_a.outcome(), reg_b.outcome()), (STORED, STORED));
-    assert_eq!(sysroot_arg(&reg_a.seen.compiles[0]), None, "nothing to hide");
+    assert_eq!(
+        sysroot_arg(&reg_a.seen.compiles[0]),
+        None,
+        "nothing to hide"
+    );
     let view = sysroot_arg(&reg_b.seen.compiles[0]).expect("a sysroot without the sources");
     let toolchain_b = b.home.join(".rustup/toolchains").join(&b.toolchain);
     assert!(toolchain_b.join("lib/rustlib/src").is_dir());
@@ -3472,8 +3497,14 @@ fn a_machine_with_the_standard_librarys_sources_compiles_as_one_without_them() {
     assert!(sysroot_arg(&b_crate.seen.compiles[0]).is_some());
     let (keys_a, keys_b) = (a.keys(), b.keys());
     for name in ["reg", "a"] {
-        assert_eq!(keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"], "{name}");
-        assert_eq!(keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"], "{name}");
+        assert_eq!(
+            keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"],
+            "{name}"
+        );
+        assert_eq!(
+            keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"],
+            "{name}"
+        );
         assert_eq!(library_files(&ws_a, name), library_files(&ws_b, name));
     }
 }
@@ -3516,6 +3547,76 @@ fn a_proc_macro_linked_through_the_sysroot_without_sources_names_the_toolchain_a
         "{portable:?}"
     );
     assert_eq!(call(&two).outcome(), REUSED);
+}
+
+// covers: B-6, B-15
+#[test]
+fn a_dependent_of_a_proc_macro_whose_metadata_differs_elsewhere_is_built_not_reused() {
+    // Machine B builds the proc macro itself (another linker: another key), and the library
+    // that uses it could come from machine A. When B's macro has A's metadata, it does; when the
+    // metadata differs (a crate hash that moved, whatever the reason), what A's library was
+    // compiled against is not what B has, and reusing it would fail to load (E0463).
+    for (metadata_differs, expected) in [(false, REUSED), (true, STORED)] {
+        let a = a_machine("runner", "stable-aarch64-apple-darwin");
+        let b = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+        let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/libm-xm.so""#;
+        let setup = |m: &Box2, linker: &str, salt: Option<&str>| {
+            m.w.plan(
+                "m",
+                Plan {
+                    stdout: Some(format!("{line}\n")),
+                    link_salt: Some(linker.into()),
+                    metadata_salt: salt.map(str::to_string),
+                    ..Plan::default()
+                },
+            );
+            m.w.plan("a", Plan::default());
+            let ws = m.w.checkout(&format!("ws-{linker}"));
+            fs::create_dir_all(ws.join("tools")).unwrap();
+            fs::write(ws.join("tools/cc"), linker).unwrap();
+            fs::create_dir_all(ws.join("m/src")).unwrap();
+            fs::write(ws.join("m/src/lib.rs"), "// the macro\n").unwrap();
+            ws
+        };
+        let call_m = |m: &Box2, ws: &Path| {
+            let mut args = m.w.args(ws, "m", &[]);
+            let at = args.iter().position(|a| a == "lib").unwrap();
+            args[at] = "proc-macro".into();
+            m.w.call_args(ws, "m", args, |fake| m.toolchain_vars(fake))
+        };
+        let call_a = |m: &Box2, ws: &Path| {
+            let so = ws.join(format!(
+                "target/debug/deps/libm-xm.{}",
+                std::env::consts::DLL_EXTENSION
+            ));
+            let ext = format!("m={}", so.display());
+            m.w.call_with(ws, "a", &["--extern", &ext], |fake| m.toolchain_vars(fake))
+        };
+        let ws_a = setup(&a, "linker one", None);
+        settle();
+        assert_eq!(call_m(&a, &ws_a).outcome(), STORED);
+        assert_eq!(call_a(&a, &ws_a).outcome(), STORED);
+        // A's blocks in B's store.
+        let (store_a, store_b) = (&a.w.session.current().store, &b.w.session.current().store);
+        for part in ["blocks", "steps"] {
+            copy_tree(&store_a.join(part), &store_b.join(part));
+        }
+        let ws_b = setup(&b, "linker two", metadata_differs.then_some("moved"));
+        settle();
+        let macro_b = call_m(&b, &ws_b);
+        assert_eq!(macro_b.outcome(), STORED, "another linker, another key");
+        let dependent = call_a(&b, &ws_b);
+        assert_eq!(
+            dependent.outcome(),
+            expected,
+            "metadata differs: {metadata_differs}"
+        );
+        assert_eq!(dependent.entry.unwrap().found, !metadata_differs);
+        // The name is the same on both machines exactly when the metadata is.
+        let named = |m: &Box2| m.keys()["a"]["keys"]["externs"][0]["by"].clone();
+        assert_eq!(named(&a) == named(&b), !metadata_differs);
+        assert!(named(&b)["produced-by"].is_string(), "{}", named(&b));
+    }
 }
 
 /// Copies every file under `from` to the same place under `to`.

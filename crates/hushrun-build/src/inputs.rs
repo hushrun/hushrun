@@ -965,7 +965,7 @@ fn resolve_dots(path: &Path) -> Result<PathBuf, NotStored> {
 }
 
 /// Whether a file is a linked library a proc macro can be: never an `.rlib` or `.rmeta`.
-fn is_linked_library(path: &Path) -> bool {
+pub(crate) fn is_linked_library(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("dylib" | "so" | "dll")

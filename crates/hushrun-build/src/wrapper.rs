@@ -30,7 +30,7 @@ use crate::script::{self, Script};
 use crate::session::{self, Current, Entry};
 use crate::store::{Block, NewFile, Published, Store};
 use crate::unit::{self, Seen};
-use crate::{audit, compiler, inputs, link, sidecar};
+use crate::{audit, compiler, inputs, link, metadata, sidecar};
 
 /// Whether the binary was called by the wrapper's name (B-2). `main` asks this first, before it
 /// reads any setting.
@@ -1059,7 +1059,8 @@ impl Call<'_> {
                         let _ = sidecar::record_block(
                             &output.path,
                             output.sha256,
-                            produced_by,
+                            produced_by
+                                .and_then(|known| metadata::produced_by(known, &output.path)),
                             Some(cx.step),
                             false,
                             portable,

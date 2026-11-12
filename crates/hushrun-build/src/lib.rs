@@ -60,6 +60,7 @@ pub mod known;
 pub mod link;
 pub mod memo;
 pub mod messages;
+pub mod metadata;
 pub mod model;
 pub mod portable;
 pub mod regular;

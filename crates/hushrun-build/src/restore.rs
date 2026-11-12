@@ -336,7 +336,9 @@ impl Prepared {
             for file in &ready {
                 // A bundle is no dependent's input: no record, and none written inside it.
                 let Some(sha256) = file.sha256 else { continue };
-                sidecar::record_block(&file.dest, sha256, origin, Some(step), true, portable)
+                let produced_by =
+                    origin.and_then(|known| crate::metadata::produced_by(known, &file.dest));
+                sidecar::record_block(&file.dest, sha256, produced_by, Some(step), true, portable)
                     .map_err(at(&file.dest))?;
             }
             Ok(())

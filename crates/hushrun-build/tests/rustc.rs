@@ -388,3 +388,50 @@ fn a_linked_output_compiled_again_from_the_same_inputs_has_the_same_key() {
         "the second compile's key differs from the first's"
     );
 }
+
+// covers: B-6
+#[test]
+fn a_proc_macros_metadata_is_found_and_is_the_same_whichever_way_it_was_linked() {
+    // What a dependent names a movable proc macro by includes the crate metadata in it
+    // (`hushrun_build::metadata`): it must be found in what rustc and the platform's linker
+    // really write, stay the same when only the link changes, and change with the crate.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("m.rs");
+    let compile = |name: &str, text: &str, link_arg: Option<&str>| -> PathBuf {
+        write(&src, text);
+        let out = dir.path().join(name);
+        fs::create_dir_all(&out).unwrap();
+        let mut command = Command::new(real_rustc());
+        command
+            .args([
+                "--crate-name",
+                "m",
+                "--edition=2021",
+                "--crate-type",
+                "proc-macro",
+            ])
+            .args(["--extern", "proc_macro", "-C", "prefer-dynamic"])
+            .arg(&src)
+            .arg("--out-dir")
+            .arg(&out);
+        if let Some(arg) = link_arg {
+            command.arg(format!("-Clink-arg={arg}"));
+        }
+        ok(&command.output().unwrap());
+        out.join(format!("libm.{}", std::env::consts::DLL_EXTENSION))
+    };
+    const MACRO: &str = "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(_: TokenStream) -> TokenStream {\n    unreachable!(\"never {}\", 1)\n}\n";
+    // A link option that changes the library's bytes, and no crate hash: another linker's work.
+    let other_link = if cfg!(target_os = "macos") {
+        "-Wl,-headerpad,0x4000"
+    } else {
+        "-Wl,--hash-style=sysv"
+    };
+    let one = compile("one", MACRO, None);
+    let two = compile("two", MACRO, Some(other_link));
+    assert_ne!(fs::read(&one).unwrap(), fs::read(&two).unwrap());
+    let meta = hushrun_build::metadata::of(&one).expect("the metadata of a real proc macro");
+    assert_eq!(hushrun_build::metadata::of(&two), Some(meta));
+    let other = compile("other", &MACRO.replace("never", "not ever"), None);
+    assert_ne!(hushrun_build::metadata::of(&other), Some(meta));
+}

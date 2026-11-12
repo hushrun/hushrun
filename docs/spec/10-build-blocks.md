@@ -80,8 +80,15 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
   place a module of a read `.rs` file could also have been, as absent;
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
 - `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose
-  block may move (`anywhere`) is named by the key of the block that produced it, without its
-  place; a tied one is another file in each checkout, and is named by its SHA-256;
+  block may move (`anywhere`) is named by two things together: what it was built from, the key
+  of the block that produced it without its place and without the linker, the SDK and
+  `dsymutil`; and what a dependent's compiler reads from it, the SHA-256 of the crate metadata
+  rustc put in the linked file (its header, length and the metadata, found as the one place in
+  the file where they are), which holds the crate hash a dependent is compiled against and which
+  a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
+  one whose metadata came out different for any reason gives another key, never a dependent
+  that fails to load. A file in which that metadata can't be found, and a tied proc macro,
+  which is another file in each checkout, are named by their SHA-256;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
   `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A

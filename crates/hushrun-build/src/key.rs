@@ -19,8 +19,8 @@ use crate::model::{Located, RootName};
 pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 
 /// The schema of the second key. v5: reads under the cargo home and the toolchain named as
-/// bases, a proc macro named by what it was built from.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v5";
+/// bases, a proc macro named by what it was built from. v6: and by its metadata.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v6";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -116,10 +116,14 @@ impl EnvRead {
 pub enum ExternBy {
     /// By the SHA-256 of the file passed.
     Content(Digest),
-    /// A proc macro whose block may move, by what it was built from: the key of the block that
-    /// produced it without its place and without the linker, the SDK and `dsymutil`
-    /// ([`Observed::known_by`]). The same sources, dependencies, flags and compiler give a macro
-    /// that expands the same way whichever linker packed it.
+    /// A proc macro whose block may move, by what it was built from and what a dependent's
+    /// compiler reads from it ([`crate::metadata::name`]): the key of the block that produced
+    /// it without its place and without the linker, the SDK and `dsymutil`
+    /// ([`Observed::known_by`]), and the crate metadata in the file. The same sources,
+    /// dependencies, flags and compiler give a macro that expands the same way whichever linker
+    /// packed it, and the metadata is what a dependent is compiled against: a macro whose
+    /// metadata came out different for any reason gives another key, never a dependent that
+    /// fails to load.
     ProducedBy(Digest),
     /// No file was passed: `--extern proc_macro`. The name and options are all there is.
     Builtin,
@@ -759,7 +763,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "c428a04143cf810a8977deda7efcdd11f52a461b4b3e186089015ffb79673c88"
+            "2a9356781dcbd2df4de6a8cb56b801dfeb0aa4fcdb71943056bdaeb1e8915820"
         );
     }
 
