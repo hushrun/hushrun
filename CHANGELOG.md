@@ -22,6 +22,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
   that fails runs once more alone. pytest knows tests; Cargo, Go and Vitest reuse by test file and
   say so once. `reads: test` runs as `reads: file` in this version, and says so once.
+- Test by test for Maven ([ADR 0085](docs/adr/0085-maven.md)): `mvn` and `./mvnw` get an adapter that reuses test classes, and with `unit: test` single tests, through `MAVEN_OPTS`, with no file of the repository changed.
 - Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
   `unit: test`. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
   adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
