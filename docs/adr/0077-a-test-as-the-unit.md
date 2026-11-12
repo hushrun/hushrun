@@ -257,3 +257,8 @@ first; the plugin's are in ADR 0080's Amendment 2.
   `<file>.unread`, one kept) a store it can't open or write for anything but busy, and makes it
   anew, once. The missing column isn't added in place: one rule covers every shape a store can be
   in, and costs one run's map.
+- **A stored word that sticks.** Amendment 8's word kept pytest's adapter for a `make test` whose
+  Makefile had moved from pytest to `ctest`: pytest never loaded, nothing was observed for ever,
+  and a machine with a fresh cache decided otherwise. Now a run kept pytest's by the word in which
+  pytest wrote no facts forgets the check in the store's write after the run's record, and the
+  next run, `hushrun ready` and `hushrun why` choose afresh.

@@ -95,6 +95,9 @@ pub struct Session {
     /// \[C-32\] This start is the one with nothing left out, after one whose adapter left out
     /// what the plan didn't list.
     whole: bool,
+    /// \[C-32\] pytest's adapter was chosen only because this machine's store said pytest last
+    /// reported the check ([`adapter::choose_kept`]).
+    kept: bool,
     /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool an adapter starts
     /// for it gets.
     assigned: Vec<(String, String)>,
@@ -559,6 +562,10 @@ impl Session {
             Ok(adapter) => adapter,
             Err(why) => return Start::Not(why),
         };
+        // \[C-32\] Whether the stored word chose pytest where CTest or Swift would take COMMAND
+        // now: then a run in which pytest reports nothing clears it.
+        let kept = adapter.word() == pytest::WORD
+            && adapter::choose(command, cwd).is_ok_and(|fresh| fresh.word() != pytest::WORD);
         let (unit, reads, notes) = what_it_reuses(tests, adapter.as_ref());
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
@@ -608,6 +615,7 @@ impl Session {
             run_dir: dir.clone(),
             cwd: cwd.to_path_buf(),
             whole: false,
+            kept,
             assigned,
             dir,
             cache,
@@ -899,6 +907,19 @@ impl Session {
             adapter: self.adapter.word(),
             hints: self.adapter.hints(),
         };
+        // \[C-32\] Kept pytest's by the store's word, and pytest reported nothing: the word goes,
+        // in the write that follows the run's record, so the next run chooses afresh.
+        if self.kept && !files.iter().any(|f| f.adapter == pytest::WORD) {
+            return Some(Observed {
+                store: Some(at),
+                forget: true,
+                lines: vec![format!(
+                    "{}: test files weren't observed: pytest reported none, so the next run chooses how to observe them afresh",
+                    end.base.check
+                )],
+                ..Observed::default()
+            });
+        }
         let loaded = db::load(&at.path, &at.check_id);
         let map = loaded.map;
         let how = match (end.mode, &self.plan) {
@@ -1538,6 +1559,9 @@ pub struct Observed {
     pub left_out: Option<String>,
     /// \[C-32\] The runner ran on a stale build, and why: a run that passed records nothing.
     pub stale_build: Option<String>,
+    /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing: the check
+    /// goes from the store, word and map, so the next run chooses afresh.
+    forget: bool,
     /// \[C-39\] Whether tests were decided one by one in this run, and \[C-40\] what each was
     /// taken to have read: what its hint holds of them (C-41).
     by_test: bool,
@@ -1574,6 +1598,12 @@ impl Observed {
         let Some(at) = &self.store else {
             return;
         };
+        if self.forget {
+            if let Err(err) = db::forget_check(&at.path, &at.check_id) {
+                tracing::debug!("the check's adapter wasn't forgotten: {}", err.why());
+            }
+            return;
+        }
         let found: Vec<Disagreement> = self
             .disagreements
             .iter()

@@ -1199,6 +1199,22 @@ fn note_in(
     Ok(())
 }
 
+/// \[C-32\] Forgets the check `check_id`: its row, with the adapter word it names, and its map,
+/// in one transaction. Nothing when the store doesn't hold it.
+pub fn forget_check(path: &Path, check_id: &Digest) -> Result<(), Unread> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    writing(path, |conn| {
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .map_err(|e| unread(&e))?;
+        conn.execute("DELETE FROM checks WHERE check_id = ?1", [check_id.hex()])
+            .map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(())
+    })
+}
+
 /// \[C-38\] Notes `hints` as known for the check `check_id`, in one transaction: a hint sent.
 /// Nothing when the store doesn't hold the check, whose run wrote nothing.
 pub fn note_hints(

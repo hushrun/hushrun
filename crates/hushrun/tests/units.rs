@@ -890,6 +890,41 @@ fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
     );
 }
 
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn a_command_pytest_no_longer_reports_for_is_chosen_afresh_next_time() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // `make test` ran pytest, and the store says so; then the Makefile runs ctest. The stored word
+    // keeps CTest away only while pytest reports: a run in which it reported nothing clears it.
+    let python = python();
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("test_a.py", "def test_a():\n    pass\n"),
+        (
+            "Makefile",
+            &format!("test:\n\t{python} -m pytest -q -p no:cacheprovider\n"),
+        ),
+    ]);
+    let first = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let checks = || -> i64 {
+        let store = store::stores(&r.cache());
+        rusqlite::Connection::open(&store[0])
+            .unwrap()
+            .query_row("SELECT count(*) FROM checks", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(checks(), 1);
+    r.write("Makefile", "test:\n\tctest --test-dir build || true\n");
+    let second = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(checks(), 0, "{}", second.stderr);
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {
