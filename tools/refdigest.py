@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent reference implementation of hushrun's source digest v1 (D-1 ... D-8), of the
-unit key (C-31) and a test's key (C-39), and of hints (C-38): their key, tokens, address, content
-id and reader.
+unit key (C-31) and a test's key (C-39), and of hints (C-38, C-41): their key, tokens, address,
+content id, sealed tests and reader.
 
 Written from docs/spec/04-source-digest.md, not from the Rust code, so the two can check each
 other on the golden vectors. Standard library only; Python 3.9 or later.
@@ -13,8 +13,9 @@ Usage:
   refdigest.py globs FILE                check every case of a glob vector file
   refdigest.py unit-keys FILE            check every unit key vector (C-31), and a test's (C-39)
   refdigest.py unit-hints FILE [--corpus DIR]
-                                         check every hint vector (C-38); with --corpus, also write
-                                         each vector's bytes and content there, for the fuzzer
+                                         check every hint vector (C-38, C-41), and XChaCha20-Poly1305
+                                         on its draft's example; with --corpus, also write each
+                                         vector's bytes and content there, for the fuzzer
 
 Scope options (one scope; the default includes everything):
   --include PATTERN    repeatable; default "**"
@@ -591,7 +592,13 @@ def check_unit_keys(path):
 # --- Hints (C-38) -----------------------------------------------------------------------------
 
 HINT_SCHEMA = b"hushrun.unit-hints/v0\n"
+HINT_SCHEMA_V1 = b"hushrun.unit-hints/v1\n"
 HINT_KEY_DOMAIN = b"hushrun.unit-hints-key/v0"
+HINT_SEAL_DOMAIN = b"hushrun.unit-hints-seal/v1"
+HINT_NONCE_DOMAIN = b"hushrun.unit-hints-nonce/v1"
+HINT_MOST_TESTS = 50000
+HINT_MOST_ID = 4096
+HINT_NO_LIST = 0xFFFFFFFF
 HINT_ADDRESS_SCHEMA = "hushrun.unit-hints-address/v0"
 HINT_MOST_BYTES = 2 * 1024 * 1024
 HINT_MOST_CONTENT = 16 * 1024 * 1024
@@ -614,6 +621,134 @@ def hint_key(sources):
     return hmac.new(HINT_KEY_DOMAIN, shape_bytes(sources), hashlib.sha256).digest()
 
 
+# --- XChaCha20-Poly1305 (RFC 8439, with draft-irtf-cfrg-xchacha's HChaCha20), for C-41 ------
+
+def _rotl(v, c):
+    return ((v << c) & 0xFFFFFFFF) | (v >> (32 - c))
+
+
+def _quarter(x, a, b, c, d):
+    x[a] = (x[a] + x[b]) & 0xFFFFFFFF
+    x[d] = _rotl(x[d] ^ x[a], 16)
+    x[c] = (x[c] + x[d]) & 0xFFFFFFFF
+    x[b] = _rotl(x[b] ^ x[c], 12)
+    x[a] = (x[a] + x[b]) & 0xFFFFFFFF
+    x[d] = _rotl(x[d] ^ x[a], 8)
+    x[c] = (x[c] + x[d]) & 0xFFFFFFFF
+    x[b] = _rotl(x[b] ^ x[c], 7)
+
+
+def _rounds(state):
+    x = list(state)
+    for _ in range(10):
+        _quarter(x, 0, 4, 8, 12)
+        _quarter(x, 1, 5, 9, 13)
+        _quarter(x, 2, 6, 10, 14)
+        _quarter(x, 3, 7, 11, 15)
+        _quarter(x, 0, 5, 10, 15)
+        _quarter(x, 1, 6, 11, 12)
+        _quarter(x, 2, 7, 8, 13)
+        _quarter(x, 3, 4, 9, 14)
+    return x
+
+
+_SIGMA = [0x61707865, 0x3320646E, 0x79622D32, 0x6B206574]
+
+
+def _words(data):
+    return [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+
+
+def _chacha20_block(key, counter, nonce):
+    state = _SIGMA + _words(key) + [counter] + _words(nonce)
+    x = _rounds(state)
+    return b"".join(((a + b) & 0xFFFFFFFF).to_bytes(4, "little") for a, b in zip(x, state))
+
+
+def _chacha20_xor(key, counter, nonce, data):
+    out = bytearray()
+    for i in range(0, len(data), 64):
+        block = _chacha20_block(key, counter + i // 64, nonce)
+        out += bytes(a ^ b for a, b in zip(data[i:i + 64], block))
+    return bytes(out)
+
+
+def _hchacha20(key, nonce16):
+    x = _rounds(_SIGMA + _words(key) + _words(nonce16))
+    return b"".join(w.to_bytes(4, "little") for w in x[0:4] + x[12:16])
+
+
+def _poly1305(key, message):
+    r = int.from_bytes(key[:16], "little") & 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF
+    s = int.from_bytes(key[16:], "little")
+    p = (1 << 130) - 5
+    acc = 0
+    for i in range(0, len(message), 16):
+        chunk = message[i:i + 16] + b"\x01"
+        acc = (acc + int.from_bytes(chunk, "little")) * r % p
+    return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+
+def _pad16(data):
+    return b"\0" * (-len(data) % 16)
+
+
+def _aead_tag(otk, aad, ciphertext):
+    mac_data = (aad + _pad16(aad) + ciphertext + _pad16(ciphertext)
+                + len(aad).to_bytes(8, "little") + len(ciphertext).to_bytes(8, "little"))
+    return _poly1305(otk, mac_data)
+
+
+def xchacha20poly1305_seal(key, nonce24, plaintext, aad):
+    subkey = _hchacha20(key, nonce24[:16])
+    nonce = b"\0\0\0\0" + nonce24[16:]
+    otk = _chacha20_block(subkey, 0, nonce)[:32]
+    ciphertext = _chacha20_xor(subkey, 1, nonce, plaintext)
+    return ciphertext + _aead_tag(otk, aad, ciphertext)
+
+
+def xchacha20poly1305_open(key, nonce24, sealed, aad):
+    """The plaintext, or None when the tag doesn't match."""
+    if len(sealed) < 16:
+        return None
+    ciphertext, tag = sealed[:-16], sealed[-16:]
+    subkey = _hchacha20(key, nonce24[:16])
+    nonce = b"\0\0\0\0" + nonce24[16:]
+    otk = _chacha20_block(subkey, 0, nonce)[:32]
+    if not hmac.compare_digest(_aead_tag(otk, aad, ciphertext), tag):
+        return None
+    return _chacha20_xor(subkey, 1, nonce, ciphertext)
+
+
+def check_xchacha():
+    """draft-irtf-cfrg-xchacha-03's AEAD example (A.3.1) and HChaCha20's (2.2.1)."""
+    key = bytes(range(0x80, 0xA0))
+    nonce = bytes(range(0x40, 0x58))
+    aad = bytes.fromhex("50515253c0c1c2c3c4c5c6c7")
+    plaintext = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip "
+                 b"for the future, sunscreen would be it.")
+    sealed = xchacha20poly1305_seal(key, nonce, plaintext, aad)
+    sub = _hchacha20(bytes(range(32)), bytes.fromhex("000000090000004a0000000031415927"))
+    ok = (sealed[-16:].hex() == "c0875924c1c7987947deafd8780acf49"
+          and sealed[:8].hex() == "bd6d179d3e83d43b"
+          and sub.hex() == "82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc"
+          and xchacha20poly1305_open(key, nonce, sealed, aad) == plaintext)
+    print("%s xchacha20-poly1305" % ("ok  " if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+def hint_seal_key(sources):
+    """[C-41] HMAC-SHA-256 under the seal domain of the bytes shape hashes."""
+    return hmac.new(HINT_SEAL_DOMAIN, shape_bytes(sources), hashlib.sha256).digest()
+
+
+def hint_seal(seal_key, aad, plaintext):
+    """The nonce, HMAC-SHA-256 under the seal key of the nonce domain, a line feed, the
+    associated data and the plaintext, cut to 24 bytes; then the ciphertext and its tag."""
+    nonce = hmac.new(seal_key, HINT_NONCE_DOMAIN + b"\n" + aad + plaintext, hashlib.sha256).digest()[:24]
+    return nonce + xchacha20poly1305_seal(seal_key, nonce, plaintext, aad)
+
+
 def hint_token(key, path):
     return hmac.new(key, path.encode("utf-8"), hashlib.sha256).digest()[:16]
 
@@ -623,20 +758,36 @@ def hint_address(check_id, shape):
     return "sha256:" + sha256_hex(jcs({"schema": HINT_ADDRESS_SCHEMA, "check": check_id, "shape": shape}))
 
 
-def hint_content(hint, key):
-    """The canonical content of a hint ({adapter, units: {path: {reads, dirs}}, unitFiles})."""
+def hint_content(hint, key, seal_key=None):
+    """The canonical content of a hint ({adapter, units: {path: {reads, dirs}}, unitFiles}, and
+    [C-41] tests: {path: {id: null | {reads, dirs}}}, sealed under seal_key)."""
     def tokens_of(paths):
         return {hint_token(key, p) for p in paths}
 
     # Each unit by its own token; of two with one token, the first by path stays.
     kept = {}
+    kept_path = {}
     for own in sorted(hint["units"], key=lambda p: p.encode("utf-8")):
         unit = hint["units"][own]
         kept.setdefault(hint_token(key, own), (tokens_of(unit["reads"]), tokens_of(unit["dirs"])))
+        kept_path.setdefault(hint_token(key, own), own)
+    # [C-41] Each kept unit's tests: id -> None or (reads, dirs) as tokens.
+    tests_of = {}
+    for own, tests in hint.get("tests", {}).items():
+        token = hint_token(key, own)
+        if kept_path.get(token) != own or not tests:
+            continue
+        tests_of[token] = {
+            tid: (None if lst is None else (frozenset(tokens_of(lst["reads"])), frozenset(tokens_of(lst["dirs"]))))
+            for tid, lst in tests.items() if tid}
     unit_files = tokens_of(hint["unitFiles"])
     table = set(unit_files)
     for own, (reads, dirs) in kept.items():
         table |= {own} | reads | dirs
+    for tests in tests_of.values():
+        for lst in tests.values():
+            if lst is not None:
+                table |= lst[0] | lst[1]
     tokens = sorted(table)
     index = {t: i for i, t in enumerate(tokens)}
 
@@ -652,12 +803,32 @@ def hint_content(hint, key):
         return u32(len(items)) + b"".join(u32(i) for i in items)
 
     word = hint["adapter"].encode("ascii")
-    out = bytearray(HINT_SCHEMA + bytes([len(word)]) + word + u32(len(tokens)) + b"".join(tokens))
+    schema = HINT_SCHEMA_V1 if tests_of else HINT_SCHEMA
+    out = bytearray(schema + bytes([len(word)]) + word + u32(len(tokens)) + b"".join(tokens))
     out += lst(indices(unit_files))
     out += u32(len(units))
     for own in sorted(units):
         reads, dirs = units[own]
         out += u32(own) + lst(reads) + lst(dirs)
+    if not tests_of:
+        return bytes(out)
+    lists = sorted({(tuple(indices(l[0])), tuple(indices(l[1])))
+                    for tests in tests_of.values() for l in tests.values() if l is not None})
+    out += u32(len(lists))
+    for reads, dirs in lists:
+        out += lst(reads) + lst(dirs)
+    positions = sorted(units)
+    plaintext = bytearray(u32(len(tests_of)))
+    for own in sorted(tests_of, key=lambda t: index[t]):
+        tests = tests_of[own]
+        plaintext += u32(positions.index(index[own])) + u32(len(tests))
+        for tid in sorted(tests, key=lambda t: t.encode("utf-8")):
+            raw = tid.encode("utf-8")
+            l = tests[tid]
+            at = HINT_NO_LIST if l is None else lists.index((tuple(indices(l[0])), tuple(indices(l[1]))))
+            plaintext += u32(len(raw)) + raw + u32(at)
+    sealed = hint_seal(seal_key, bytes(out), bytes(plaintext))
+    out += u32(len(sealed)) + sealed
     return bytes(out)
 
 
@@ -705,7 +876,8 @@ def hint_parse(content):
             raise Unread("truncated")
         return n
 
-    if content[:len(HINT_SCHEMA)] != HINT_SCHEMA:
+    v1 = content[:len(HINT_SCHEMA_V1)] == HINT_SCHEMA_V1
+    if content[:len(HINT_SCHEMA)] != HINT_SCHEMA and not v1:
         raise Unread("schema")
     take(len(HINT_SCHEMA))
     word = take(take(1)[0])
@@ -741,18 +913,84 @@ def hint_parse(content):
         if units and units[-1][0] >= own:
             raise Unread("units out of order")
         units.append((own, lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS)))
+    lists, sealed = [], None
+    if v1:
+        for _ in range(count(HINT_MOST_TESTS, 8)):
+            pair = (lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS))
+            if lists and lists[-1] >= pair:
+                raise Unread("lists out of order")
+            lists.append(pair)
+        aad_end = pos[0]
+        n = count(HINT_MOST_CONTENT, 1)
+        raw = take(n)
+        if n < 24 + 16:
+            raise Unread("a seal too short")
+        sealed = (aad_end, raw)
     if pos[0] != len(content):
         raise Unread("bytes after its end")
     if len(used) != len(tokens):
         raise Unread("a token no index names")
-    return word.decode("ascii"), tokens, unit_files, units
+    return word.decode("ascii"), tokens, unit_files, units, lists, sealed
 
 
-def hint_read(data, key, scope, inflated=False):
+def hint_sealed_tests(plaintext, units, lists):
+    """[C-41] {unit position: [(id, list index or None)]}, or None when the plaintext isn't the
+    one canonical plaintext for that many units and lists."""
+    pos = [0]
+
+    def take(n):
+        if pos[0] + n > len(plaintext):
+            raise Unread("truncated")
+        chunk = plaintext[pos[0]:pos[0] + n]
+        pos[0] += n
+        return chunk
+
+    def u32():
+        return int.from_bytes(take(4), "big")
+
+    try:
+        out, total, used, last = {}, 0, set(), -1
+        for _ in range(u32()):
+            at = u32()
+            if at >= units or at <= last:
+                return None
+            last = at
+            k = u32()
+            total += k
+            if k == 0 or total > HINT_MOST_TESTS:
+                return None
+            tests = []
+            for _ in range(k):
+                n = u32()
+                if not 1 <= n <= HINT_MOST_ID:
+                    return None
+                raw = take(n)
+                tid = raw.decode("utf-8")
+                if tests and tests[-1][0].encode("utf-8") >= raw:
+                    return None
+                i = u32()
+                if i == HINT_NO_LIST:
+                    tests.append((tid, None))
+                elif i < lists:
+                    used.add(i)
+                    tests.append((tid, i))
+                else:
+                    return None
+            out[at] = tests
+        if pos[0] != len(plaintext) or len(used) != lists:
+            return None
+        return out
+    except (Unread, UnicodeDecodeError):
+        return None
+
+
+def hint_read(data, key, scope, inflated=False, seal_key=None):
     """The hint data holds, tokens matched against scope's files and the directories holding them
-    ("" and "." the root); a unit any token of which matches nothing, or two paths, is dropped."""
+    ("" and "." the root); a unit any token of which matches nothing, or two paths, is dropped.
+    [C-41] Its tests, when the seal opens under seal_key: a test whose list names nothing here
+    is dropped; a seal that doesn't open, or holds what doesn't read, is no tests."""
     content = data if inflated else hint_inflate(data)
-    adapter, tokens, unit_files, units = hint_parse(content)
+    adapter, tokens, unit_files, units, lists, sealed = hint_parse(content)
     candidates = [(p, "file") for p in scope]
     dirs = {"", "."}
     for p in scope:
@@ -783,14 +1021,41 @@ def hint_read(data, key, scope, inflated=False):
             continue
         read_units[own_path] = {"reads": sorted(read_paths), "dirs": sorted(dir_paths)}
     files = sorted(p for p in (match(i, ("file",)) for i in unit_files) if p is not None)
-    return {"hint": {"adapter": adapter, "units": read_units, "unitFiles": files},
-            "contentId": "sha256:" + sha256_hex(content), "dropped": len(units) - len(read_units)}
+    read_tests = {}
+    if sealed is not None and seal_key is not None:
+        aad_end, raw = sealed
+        plaintext = xchacha20poly1305_open(seal_key, raw[:24], raw[24:], content[:aad_end])
+        held = None if plaintext is None else hint_sealed_tests(plaintext, len(units), len(lists))
+        for at, tests in (held or {}).items():
+            own_path = match(units[at][0], ("file", "dir"))
+            if own_path is None or own_path not in read_units:
+                continue
+            kept = {}
+            for tid, i in tests:
+                if i is None:
+                    kept[tid] = None
+                    continue
+                reads = [match(j, ("file",)) for j in lists[i][0]]
+                dirs_ = [match(j, ("dir",)) for j in lists[i][1]]
+                if None in reads or None in dirs_:
+                    continue
+                kept[tid] = {"reads": sorted(reads), "dirs": sorted(dirs_)}
+            if kept:
+                read_tests[own_path] = kept
+    hint = {"adapter": adapter, "units": read_units, "unitFiles": files}
+    if read_tests:
+        hint["tests"] = read_tests
+    return {"hint": hint, "contentId": "sha256:" + sha256_hex(content), "dropped": len(units) - len(read_units)}
 
 
 def normalized_hint(hint):
-    return {"adapter": hint["adapter"],
-            "units": {p: {"reads": sorted(u["reads"]), "dirs": sorted(u["dirs"])} for p, u in hint["units"].items()},
-            "unitFiles": sorted(hint["unitFiles"])}
+    out = {"adapter": hint["adapter"],
+           "units": {p: {"reads": sorted(u["reads"]), "dirs": sorted(u["dirs"])} for p, u in hint["units"].items()},
+           "unitFiles": sorted(hint["unitFiles"])}
+    if hint.get("tests"):
+        out["tests"] = {p: {t: (None if l is None else {"reads": sorted(l["reads"]), "dirs": sorted(l["dirs"])})
+                            for t, l in tests.items()} for p, tests in hint["tests"].items()}
+    return out
 
 
 def check_unit_hints(path, corpus=None):
@@ -802,8 +1067,9 @@ def check_unit_hints(path, corpus=None):
     for vector in data["vectors"]:
         name, expect = vector["name"], vector["expect"]
         key = hint_key(vector["sources"])
+        seal_key = hint_seal_key(vector["sources"])
         shape = shape_digest(vector["sources"])
-        content = hint_content(vector["hint"], key)
+        content = hint_content(vector["hint"], key, seal_key)
         raw = base64.b64decode(vector["bytes"])
         got = {
             "key": key.hex(),
@@ -813,9 +1079,11 @@ def check_unit_hints(path, corpus=None):
             "content": content.hex(),
             "contentId": "sha256:" + sha256_hex(content),
         }
+        if "sealKey" in expect:
+            got["sealKey"] = seal_key.hex()
         want = {k: expect[k] for k in got}
         try:
-            read = hint_read(raw, key, vector["scope"])
+            read = hint_read(raw, key, vector["scope"], seal_key=seal_key)
             got["read"], got["dropped"] = read["hint"], read["dropped"]
             got["readContentId"] = read["contentId"]
             got["inflated"] = hint_inflate(raw) == content
@@ -837,11 +1105,27 @@ def check_unit_hints(path, corpus=None):
         name = vector["name"]
         raw = base64.b64decode(vector["bytes"])
         try:
-            hint_read(raw, hint_key(vector["sources"]), vector["scope"])
+            hint_read(raw, hint_key(vector["sources"]), vector["scope"],
+                      seal_key=hint_seal_key(vector["sources"]))
             print("FAIL %s: read, expected unread" % name)
             failures += 1
         except Unread as err:
             print("ok   %s (unread: %s)" % (name, err))
+    # [C-41] Bytes whose test files read, and whose tests don't.
+    for vector in data.get("noTests", []):
+        name = vector["name"]
+        try:
+            read = hint_read(base64.b64decode(vector["bytes"]), hint_key(vector["sources"]),
+                             vector["scope"], seal_key=hint_seal_key(vector["sources"]))
+            got = (read["hint"], read["dropped"])
+        except Unread as err:
+            got = "unread: %s" % err
+        want = (normalized_hint(vector["expect"]["read"]), vector["expect"]["dropped"])
+        if got != want or "tests" in got[0]:
+            print("FAIL %s: got %s, expected %s" % (name, got, want))
+            failures += 1
+        else:
+            print("ok   %s (no tests)" % name)
     return failures
 
 
@@ -878,7 +1162,7 @@ def main():
     if args.command == "unit-keys":
         return 1 if check_unit_keys(args.file) else 0
     if args.command == "unit-hints":
-        return 1 if check_unit_hints(args.file, args.corpus) else 0
+        return 1 if check_xchacha() or check_unit_hints(args.file, args.corpus) else 0
     try:
         scope = Scope(args.include, args.exclude, args.global_exclude)
         entries = git_entries(args.repo, args.rev) if args.command == "git" else dir_entries(args.path)

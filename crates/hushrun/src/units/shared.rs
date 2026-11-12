@@ -19,6 +19,7 @@
 //! A hint is never trusted: a list that is wrong, stale or hostile makes a key no run recorded,
 //! and that test file runs (RFC 0003 §3.4).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use hushrun_core::digest::Digest;
@@ -102,6 +103,26 @@ pub struct Asker<'a> {
     pub check_id: Digest,
     pub systems: Vec<Os>,
     pub adapter: &'static str,
+    /// \[C-41\] What the last [`Asker::fetch`] read, which an adapter asked for its test files:
+    /// the plan reads their tests from it, without asking again.
+    pub fetched: RefCell<Shared>,
+}
+
+impl<'a> Asker<'a> {
+    pub fn new(
+        store: &'a dyn UnitResults,
+        check_id: Digest,
+        systems: Vec<Os>,
+        adapter: &'static str,
+    ) -> Asker<'a> {
+        Asker {
+            store,
+            check_id,
+            systems,
+            adapter,
+            fetched: RefCell::new(Shared::default()),
+        }
+    }
 }
 
 /// \[C-38\] The hints a run read, newest first, each with the system it was asked for and only the
@@ -136,6 +157,24 @@ impl Shared {
     /// Whether any hint read names a test file.
     pub fn names_any(&self) -> bool {
         self.hints.iter().any(|(_, hint)| !hint.units.is_empty())
+    }
+
+    /// \[C-41\] The ids of the tests hints hold of `unit`.
+    pub fn test_ids(&self, unit: &str) -> BTreeSet<&str> {
+        self.hints
+            .iter()
+            .filter_map(|(_, hint)| hint.tests.get(unit))
+            .flat_map(|tests| tests.keys().map(String::as_str))
+            .collect()
+    }
+
+    /// \[C-41\] What hints say test `id` of `unit` read, newest first, each with the system it was
+    /// asked for: its own list, or `None` for its test file's.
+    pub fn test_seen(&self, unit: &str, id: &str) -> Vec<(Os, Option<&hints::Unit>)> {
+        self.hints
+            .iter()
+            .filter_map(|(os, hint)| Some((*os, hint.tests.get(unit)?.get(id)?.as_ref())))
+            .collect()
     }
 }
 
@@ -179,6 +218,7 @@ impl Asker<'_> {
                 }
             }
         }
+        *self.fetched.borrow_mut() = out.clone();
         out
     }
 }
@@ -268,6 +308,75 @@ pub fn lists(
         }
     }
     Some(out)
+}
+
+/// \[C-40, C-41\] One list a test's key may be made from, and whether it is the test's own
+/// (`reads: test`) rather than its test file's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestList {
+    pub list: List,
+    pub own: bool,
+}
+
+/// \[C-40, C-41, ADR 0078, 0079\] The lists a test's key may be made from, which the plan,
+/// `observe`, `hushrun ready` and `hushrun why` all ask. With `reads: file`, its test file's
+/// (`file_lists`, from [`lists`], which hold the hints' lists of it). With `reads: test`: the list
+/// this machine's row for it holds, every file now below a directory it listed included, or its
+/// test file's lists when the row holds none (it wasn't watched alone, and recorded on those);
+/// then what hints say it read (`seen`, newest first), its own list or, for `None`, its test
+/// file's. The same list once, and [`MOST_LISTS`] at most. With `reads: test`, a test neither a
+/// row nor a hint holds has nothing to key it by.
+pub fn test_lists(
+    reads: units::Reads,
+    file_lists: &[List],
+    row: Option<&super::store::TestRow>,
+    seen: &[(Os, Option<&hints::Unit>)],
+    tree: &Tree,
+) -> Vec<TestList> {
+    let of_file = || {
+        file_lists.iter().map(|list| TestList {
+            list: list.clone(),
+            own: false,
+        })
+    };
+    if reads == units::Reads::File {
+        return of_file().collect();
+    }
+    let own = |reads: BTreeSet<String>, dirs: &BTreeSet<String>, from: From| {
+        let mut files = reads.clone();
+        files.extend(gotest::under(tree, dirs));
+        TestList {
+            list: List {
+                files,
+                reads,
+                dirs: dirs.clone(),
+                from,
+            },
+            own: true,
+        }
+    };
+    let mut out: Vec<TestList> = Vec::new();
+    let mut add = |list: TestList| {
+        if out.len() < MOST_LISTS && !out.iter().any(|l| l.list.files == list.list.files) {
+            out.push(list);
+        }
+    };
+    match row.map(|row| &row.list) {
+        Some(Some(list)) => add(own(
+            list.reads.keys().cloned().collect(),
+            &list.dirs,
+            From::Here(Origin::SeenHere),
+        )),
+        Some(None) => of_file().for_each(&mut add),
+        None => {}
+    }
+    for (os, list) in seen {
+        match list {
+            Some(list) => add(own(list.reads.clone(), &list.dirs, From::Hint(*os))),
+            None => of_file().for_each(&mut add),
+        }
+    }
+    out
 }
 
 /// What [`choose`] decided of one test file.

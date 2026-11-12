@@ -39,7 +39,11 @@ pub fn run(global: &GlobalOpts, args: &WhyArgs) -> CmdResult {
     })?;
     let root = content.vcs.root().to_path_buf();
     let here = std::env::current_dir().unwrap_or_else(|_| root.clone());
-    let unit = from_root(&root, &here, &args.unit);
+    // \[C-39\] `UNIT::TEST`: the test file's path from the root, and the test's id as given.
+    let unit = match args.unit.split_once("::") {
+        Some((file, id)) => format!("{}::{id}", from_root(&root, &here, file)),
+        None => from_root(&root, &here, &args.unit),
+    };
     let repository = hushrun_ci::context(&Env::from_process())
         .repository
         .or_else(|| repository_of(&content));
@@ -242,6 +246,7 @@ fn answer(
                 "check": check,
                 "command": command,
                 "unit": explained.map_or(unit, |e| e.unit.as_str()),
+                "test": explained.and_then(|e| e.test.clone()),
                 "decision": explained.map_or("unknown", |e| e.decision.word()),
                 "reason": explained.map_or("unknown", |e| e.reason),
                 "says": says,

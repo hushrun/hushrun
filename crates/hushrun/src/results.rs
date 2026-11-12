@@ -1173,7 +1173,44 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
-                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10).
+                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10). \[ADR 0077\] A
+                // server from before tests as the unit refuses `savedMs` with no test file
+                // reused: the result goes again without it, so that it is never lost to that.
+                let mut result = std::borrow::Cow::Borrowed(result);
+                loop {
+                    let (status, answer) = self.post_result(server, key, &path, &result)?;
+                    if (200..300).contains(&status) {
+                        return Ok(());
+                    }
+                    if refuses_saved(status, &answer)
+                        && let Some(without) = without_saved(&result)
+                    {
+                        result = std::borrow::Cow::Owned(without);
+                        continue;
+                    }
+                    let err = server.refused(status, &answer, "recording the result");
+                    if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                        *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                            error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                        ));
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `POST {base}/{path}` with `result`, signed (ADR 0028): the status and the answer.
+    fn post_result(
+        &self,
+        server: &Server,
+        key: &Digest,
+        path: &str,
+        result: &RunResult,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        {
+            {
                 let body = serde_json::to_vec(result)?;
                 // ADR 0028: a person's or an agent's result carries this machine's signature,
                 // and without a key to sign with it isn't sent.
@@ -1187,23 +1224,56 @@ impl Backend {
                         machine.result_signature(&key.hex(), &body),
                     )
                 });
-                let (status, answer) = server
+                server
                     .ledger
-                    .json_request_with("POST", &path, Some(&body), signature)
-                    .map_err(plain)?;
-                if !(200..300).contains(&status) {
-                    let err = server.refused(status, &answer, "recording the result");
-                    if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
-                        *server.refusal.borrow_mut() = Some(Refusal::Invalid(
-                            error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
-                        ));
-                    }
-                    return Err(err);
-                }
+                    .json_request_with("POST", path, Some(&body), signature)
+                    .map_err(plain)
             }
         }
-        Ok(())
     }
+}
+
+/// \[RFC 0004 §3.8\] Whether a server refused a result's `savedMs` because no test file was
+/// reused, as one from before tests as the unit does: 400 `invalid`, its message on `units` and
+/// `savedMs`, ending `0 when none was reused`.
+fn refuses_saved(status: u16, answer: &[u8]) -> bool {
+    status == 400
+        && error_code(answer).as_deref() == Some("invalid")
+        && error_message(answer).is_some_and(|m| {
+            m.starts_with("a result's `units` is ") && m.ends_with("0 when none was reused")
+        })
+}
+
+/// `result` without `units.savedMs`, when it has one to drop.
+fn without_saved(result: &RunResult) -> Option<RunResult> {
+    let mut result = result.clone();
+    let units = result.units.as_mut()?;
+    units.saved_ms.take()?;
+    Some(result)
+}
+
+/// \[RFC 0004 §3.8\] Whether a server refused a run's results by the limits of one from before
+/// tests as the unit: 413 for a body over 1 MiB, or 400 `invalid` for more than 5,000.
+fn older_limit(status: u16, answer: &[u8]) -> bool {
+    status == 413
+        || (status == 400
+            && error_code(answer).as_deref() == Some("invalid")
+            && error_message(answer)
+                .is_some_and(|m| m.starts_with("a run records at most 5000 test files' results")))
+}
+
+/// \[RFC 0004 §3.8\] The most results of test files and tests a run sends.
+pub const MOST_RESULTS: usize = 50_000;
+/// \[RFC 0004 §3.8\] The most a server from before tests as the unit takes.
+pub const OLDER_MOST_RESULTS: usize = 5_000;
+
+/// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitsKept {
+    /// The server keeps them: false for one from before test files' results.
+    pub kept: bool,
+    /// How many of them weren't kept: past [`MOST_RESULTS`], or an older server's limit.
+    pub dropped: usize,
 }
 
 /// \[ADR 0069\] What a server answered one of the requests about a check's test files (results-v0
@@ -1270,19 +1340,74 @@ impl Backend {
     /// result is. A server from before it (404, 405) records the result alone, as
     /// [`Backend::record`] does, and keeps no test file: `Ok(false)`. A directory records the
     /// result; the caller keeps the units beside it.
+    ///
+    /// \[RFC 0004 §3.8\] `units` come in the order whatever is cut is a pass of: failures, then
+    /// test files' results, then tests' passes. At most [`MOST_RESULTS`] go; a server from before
+    /// tests as the unit, which takes [`OLDER_MOST_RESULTS`], gets the first of them again; one that
+    /// refuses `savedMs` with no test file reused gets the result again without it.
     pub fn record_with_units(
         &self,
         key: &Digest,
         result: &RunResult,
         units: &[crate::units::store::UnitRecord],
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<UnitsKept> {
         let server = match &self.store {
             Store::Server(server) if !units.is_empty() => server,
-            _ => return self.record(key, result).map(|()| true),
+            _ => {
+                return self.record(key, result).map(|()| UnitsKept {
+                    kept: true,
+                    dropped: 0,
+                });
+            }
         };
         if server.reads_as.is_some() {
             return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
         }
+        let mut sent = units.len().min(MOST_RESULTS);
+        let mut result = std::borrow::Cow::Borrowed(result);
+        loop {
+            let (status, answer) = self.post_units(server, key, &result, &units[..sent])?;
+            if status == 404 || status == 405 {
+                return self.record(key, &result).map(|()| UnitsKept {
+                    kept: false,
+                    dropped: units.len(),
+                });
+            }
+            if (200..300).contains(&status) {
+                return Ok(UnitsKept {
+                    kept: true,
+                    dropped: units.len() - sent,
+                });
+            }
+            if sent > OLDER_MOST_RESULTS && older_limit(status, &answer) {
+                sent = OLDER_MOST_RESULTS;
+                continue;
+            }
+            if refuses_saved(status, &answer)
+                && let Some(without) = without_saved(&result)
+            {
+                result = std::borrow::Cow::Owned(without);
+                continue;
+            }
+            let err = server.refused(status, &answer, "recording the result");
+            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                ));
+            }
+            return Err(err);
+        }
+    }
+
+    /// `POST {base}/v0/runs/{key}` with `result` and `units`, signed (ADR 0028): the status and
+    /// the answer.
+    fn post_units(
+        &self,
+        server: &Server,
+        key: &Digest,
+        result: &RunResult,
+        units: &[crate::units::store::UnitRecord],
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
         // Keys as the protocol has them: 64 lowercase hex characters.
         let units: Vec<serde_json::Value> = units
             .iter()
@@ -1305,7 +1430,7 @@ impl Backend {
                 machine.result_signature(&key.hex(), &body),
             )
         });
-        let (status, answer) = server
+        server
             .ledger
             .json_request_with(
                 "POST",
@@ -1313,20 +1438,7 @@ impl Backend {
                 Some(&body),
                 signature,
             )
-            .map_err(plain)?;
-        if status == 404 || status == 405 {
-            return self.record(key, result).map(|()| false);
-        }
-        if !(200..300).contains(&status) {
-            let err = server.refused(status, &answer, "recording the result");
-            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
-                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
-                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
-                ));
-            }
-            return Err(err);
-        }
-        Ok(true)
+            .map_err(plain)
     }
 }
 
