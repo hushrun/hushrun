@@ -299,3 +299,7 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   `HUSHRUN_VITEST_START`); their adapters load only in their own COMMANDs (Jest through
   `NODE_OPTIONS`, which a pytest COMMAND doesn't set), and CTest, `swift test`, Go, Cargo, Maven
   and Gradle make no such file, so no other child of a test leaves one.
+- **A word lost to a run that failed.** A `ctest --test-dir build` whose tests run pytest, kept
+  pytest's by the store's word, lost the word to one run with the build directory missing: ctest
+  failed before pytest started, and CTest took the check from then on, with one unit instead of
+  pytest's test files. Only a run whose COMMAND passed while pytest wrote nothing forgets the word.

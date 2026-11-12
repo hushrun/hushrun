@@ -1000,6 +1000,13 @@ fn a_command_pytest_no_longer_reports_for_is_chosen_afresh_next_time() {
             .unwrap()
     };
     assert_eq!(checks(), 1);
+    // A run that fails before pytest starts (no build directory) proves nothing of who reports:
+    // the word stays.
+    r.write("Makefile", "test:\n\tctest --test-dir build\n");
+    let failed = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_ne!(failed.code, 0, "{}\n{}", failed.stdout, failed.stderr);
+    assert_eq!(checks(), 1, "{}", failed.stderr);
+    // One that passes with pytest silent: the word goes.
     r.write("Makefile", "test:\n\tctest --test-dir build || true\n");
     let second = r.run(&["run", "unit", "--", "make", "test"], &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);

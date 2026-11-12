@@ -909,9 +909,11 @@ impl Session {
             adapter: self.adapter.word(),
             hints: self.adapter.hints(),
         };
-        // \[C-32\] Kept pytest's by the store's word, and pytest reported nothing: the word goes,
-        // in the write that follows the run's record, so the next run chooses afresh.
-        if self.kept && !files.iter().any(|f| f.adapter == pytest::WORD) {
+        // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
+        // the word goes, in the write that follows the run's record, so the next run chooses
+        // afresh. A run that failed proves nothing of who reports: it may have failed before
+        // pytest started.
+        if self.kept && end.command_passed && !files.iter().any(|f| f.adapter == pytest::WORD) {
             return Some(Observed {
                 store: Some(at),
                 forget: true,
