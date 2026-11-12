@@ -1906,6 +1906,28 @@ fn vitest_catches_a_value_two_imports_away_which_reads_test_may_miss_elsewhere()
     );
 }
 
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_chain_of_re_exports_to_the_end() {
+    // The test reads rate through two barrels; Vite runs `export *` through getters of its own,
+    // so no function of either barrel runs. The middle one then points at another file.
+    caught_by_vitest(
+        &[
+            ("src/index.ts", "export * from './sub/index'\n"),
+            ("src/sub/index.ts", "export * from './impl'\n"),
+            ("src/sub/impl.ts", "export function rate() { return 1 }\n"),
+            ("src/sub/impl2.ts", "export function rate() { return 2 }\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ rate }} from '../src/index'\ntest('target', () => {{ expect(rate()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/sub/index.ts", "export * from './impl2'\n"),
+    );
+}
+
 /// A registry plugins.ts fills as boot.ts imports it: the test file imports boot.ts for that and
 /// the registry, and nothing of plugins.ts, whose code runs at import only.
 fn vitest_registry() -> Vec<(&'static str, &'static str)> {

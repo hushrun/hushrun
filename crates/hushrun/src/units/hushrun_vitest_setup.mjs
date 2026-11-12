@@ -799,6 +799,16 @@ function testsFacts(F) {
     unit.everyTest = many(F.every);
     unit.shared = shared;
     facts.imports = imports(at, many);
+    // [ADR 0081, amended] What each module re-exports from, as the plugin read it: a test that
+    // reads a barrel reads what it re-exports, to the end.
+    facts.reexports = {};
+    for (const [id, targets] of Object.entries(globalThis.__hushrun_vitest_reexports || {})) {
+      const p = idPath(id);
+      const from = p && p !== SELF ? at(p) : null;
+      if (from === null || !Array.isArray(targets)) continue;
+      const to = many(targets.map(idPath).filter(Boolean)).filter((i) => i !== from);
+      if (to.length) facts.reexports[String(from)] = to;
+    }
     facts.opens = {};
     for (const [module, files] of F.kept) {
       const from = at(module);

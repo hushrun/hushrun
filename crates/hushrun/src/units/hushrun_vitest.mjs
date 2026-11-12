@@ -129,11 +129,23 @@ export default function hushrun() {
         state.projects.set(resolved.root, { plugins: unknown });
       });
     },
-    transform(code, id) {
+    async transform(code, id) {
+      if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
+      // [ADR 0081, amended] The files it re-exports from (`export * from`, `export { x } from`):
+      // Vite runs `export *` through getters of its own, so no function of a barrel runs when a
+      // test reads through it, and a test's list follows these instead, to the end.
+      let reexports = [];
+      try {
+        reexports = await reexported(this, code, id);
+      } catch (err) {
+        state.errors.push(`reexports: ${err && err.message ? err.message : String(err)}`.slice(0, 500));
+      }
       return guard('transform', () => {
-        if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
+        const told = reexports.length
+          ? `;(globalThis.__hushrun_vitest_reexports ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(reexports)};`
+          : '';
         return {
-          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});`,
+          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});${told}`,
           map: null,
         };
       });
@@ -142,6 +154,39 @@ export default function hushrun() {
       guard('configureVitest', () => configure(state, vitest, project, guard));
     },
   };
+}
+
+// [ADR 0081, amended] The specifiers a module re-exports from, by its syntax tree when it parses
+// and by its text always: a re-export read where there is none only widens a test's list.
+const REEXPORT = /export\s*(?:type\s+)?(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*(['"])([^'"]+)\1/g;
+async function reexported(context, code, id) {
+  const specifiers = new Set();
+  for (const m of code.matchAll(REEXPORT)) specifiers.add(m[2]);
+  try {
+    const ast = context.parse(code);
+    for (const node of ast.body || []) {
+      if ((node.type === 'ExportAllDeclaration' || node.type === 'ExportNamedDeclaration')
+        && node.source && typeof node.source.value === 'string') {
+        specifiers.add(node.source.value);
+      }
+    }
+  } catch {
+    // Text the parser doesn't take: what its text says stands.
+  }
+  const out = [];
+  for (const specifier of specifiers) {
+    // One that doesn't resolve is text that only looks like a re-export (a string, a comment):
+    // a real one would fail the module's own import.
+    let resolved = null;
+    try {
+      resolved = await context.resolve(specifier, id);
+    } catch {
+      resolved = null;
+    }
+    const file = resolved && typeof resolved.id === 'string' ? resolved.id.split('?')[0] : null;
+    if (file && path.isAbsolute(file) && !out.includes(file)) out.push(file);
+  }
+  return out;
 }
 
 // What a project's configuration keeps from being observed, each as `{why, detail}`.

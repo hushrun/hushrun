@@ -2134,6 +2134,26 @@ fn jest_reads_test_follows_a_file_the_test_file_read_once_and_kept() {
 
 // covers: C-40, C-44
 #[test]
+fn jest_reads_test_follows_a_chain_of_re_exports_to_the_end() {
+    // The test reads rate through two CommonJS barrels, none of whose code runs when it does. The
+    // middle one then points at another file.
+    caught(
+        &[
+            ("src/index.js", "module.exports = require('./sub');\n"),
+            ("src/sub/index.js", "module.exports = require('./impl');\n"),
+            ("src/sub/impl.js", "exports.rate = () => 1;\n"),
+            ("src/sub/impl2.js", "exports.rate = () => 2;\n"),
+            (
+                "test/a.test.js",
+                "const { rate } = require('../src');\ntest('target', () => { expect(rate()).toBe(1); });\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/sub/index.js", "module.exports = require('./impl2');\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
 fn jest_reads_test_follows_what_a_before_all_read() {
     caught(
         &[
