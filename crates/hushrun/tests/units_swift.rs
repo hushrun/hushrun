@@ -942,6 +942,8 @@ fn a_list_after_the_run_that_fails_where_tests_were_left_out_runs_again_whole() 
         .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
         .collect();
     assert_eq!(facts.len(), 1, "{facts:?}");
+    // Each hushrun's swift is a start of its own (C-32).
+    assert!(facts[0]["start"].is_string(), "{:#}", facts[0]);
     // What SwiftPM ran of what hushrun left out can't be checked: the run starts COMMAND once
     // more with nothing left out.
     assert!(

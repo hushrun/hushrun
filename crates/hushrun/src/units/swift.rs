@@ -1452,7 +1452,7 @@ impl Adapter for Swift {
             };
             let complete = match &m.tests {
                 Some(tests) => tests.values().filter(|t| !t.deselected).all(|t| t.finished),
-                None => m.finished >= m.selected,
+                None => m.complete,
             };
             let tests = m.tests.map(|tests| {
                 tests
@@ -1656,7 +1656,12 @@ fn write_facts(units: &Path, file: &FactsFile) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let path = units.join(format!("swift-{}-{nanos}.json", std::process::id()));
-    if let Ok(bytes) = serde_json::to_vec(file) {
+    // \[C-32\] Each hushrun's swift is a start of its own, and writes one file.
+    let file = FactsFile {
+        start: Some(format!("swift-{}-{nanos}", std::process::id())),
+        ..file.clone()
+    };
+    if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }
 }
