@@ -521,6 +521,21 @@ fn explain_test(
             .insert(0, "so it runs every time, and records nothing".into());
         return;
     }
+    // \[C-37\] It ran here, another test of its file failed, and it kept nothing: its COMMAND may
+    // be why.
+    let file_failed = at.map.units.get(at.unit).is_some_and(|mapped| {
+        mapped
+            .tests
+            .values()
+            .any(|test| test.state == State::Failed)
+    });
+    if row.is_some_and(|row| row.state == State::NotRun)
+        && file_failed
+        && let Some(why) = adapter.why_test_not_kept()
+    {
+        says(out, Decision::Runs, "not-kept", why.into());
+        return;
+    }
     let seen = at.shared.test_seen(at.unit, at.id);
     let lists = shared::test_lists(at.reads, at.file_lists, row, &seen, input.tree);
     if (row.is_none() && seen.is_empty()) || lists.is_empty() {

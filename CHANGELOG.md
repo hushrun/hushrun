@@ -183,6 +183,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   `test.skipIf`, `ctx.skip()`, and Go's `t.Skip()` under `-v` or `-json`) and which start of the
   runner wrote each file, so a skip in a run that failed records nothing. A Jest test file that
   two projects ran ran whole only when each of them finished it.
+- With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
+  tests: Go names only what failed, so a test that skipped because another failed looked passed.
+  The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.
 
 ## [0.13.0] - 2026-11-12
 

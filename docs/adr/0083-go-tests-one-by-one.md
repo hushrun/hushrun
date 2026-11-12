@@ -148,7 +148,36 @@ it without hushrun.
 
 A test whose own `--- SKIP` line, or a subtest's, the output holds is told `skipped`, so that in a
 run whose COMMAND failed it records no pass (ADR 0077 Amendment 2). Go prints those lines with `-v`
-and `-json` only; without them a skip can't be told from a pass, and a test that skipped because
-another failed in the same run is recorded as passed, as before. Each runner's facts name the start
+and `-json` only; without them a skip can't be told from a pass, which Amendment 3 decides. Each
+runner's facts name the start
 of `go test` that started it, by that process (`start`), so that one `go test` testing several
 packages is one start.
+
+## Amendment 3: a package that failed without `-v` keeps no pass of its other tests (2026-11-12)
+
+Without `-v` or `-json`, Go prints a line only for a test that failed: a test that passed and one
+that skipped, perhaps because another failed (`if !ready { t.Skip() }` after the setup test
+failed), look alike. Amendment 2 left such a skip recorded as a pass in a run that failed, which
+the next run would leave out.
+
+The decision, in the one function that turns a binary's output and end into its tests' facts: when
+the binary's run failed (it ended normally on `FAIL`) and its arguments don't make Go name each
+test's outcome (`-test.v`, true or `test2json`), every test it didn't name failed is told as not
+finished. The core then records nothing for them (`not run`), without saying they failed; telling
+them `skipped` would claim what wasn't seen. The tests it named failed are recorded
+failed, and the package's own fail is recorded as before. A binary that passed is unchanged: every
+listed test hushrun didn't leave out passed, a skip included. The runner's facts say why
+(`settings.note`), and the run says it once, `hushrun: <NAME>: a package that failed keeps its
+other tests' results only when go test names each one: add -v to keep them`; `hushrun why NAME
+'pkg::TestX'` gives the same reason for a test that kept nothing while another of its package
+failed, when its COMMAND has neither `-v` nor `-json`.
+
+The trade, plainly: without `-v`, Go's tests one by one save only two things. In a package that
+passed, a test that did something hushrun couldn't follow costs only itself; in a package that
+failed, nothing: every test of it runs again, as it would by package. With `-v` or `-json` each
+test's outcome is seen, and a failed package runs again only the tests that failed or read a
+changed file.
+
+Considered and not done: adding `-test.v` to the binary's arguments and filtering its lines back
+out. It changes what COMMAND prints (Go's non-verbose output holds a test's log only when it
+fails, and in other places than `-v`'s), and hushrun never changes what COMMAND prints.

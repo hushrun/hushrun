@@ -19,6 +19,7 @@
 //! after it are the runner the environment had set there, which it chains to and gives back to
 //! the test, or none.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -223,7 +224,8 @@ fn run(args: &[OsString]) -> ExitCode {
                 read_whole,
                 returned,
             };
-            Some((at.unit.clone(), super::gotest::outcome(&at, &out, ended)))
+            let (tests, note) = super::gotest::outcome(&at, &out, ended);
+            Some((at.unit.clone(), tests, note))
         }
         None => None,
     };
@@ -602,7 +604,7 @@ fn terse_list(bytes: &[u8]) -> Vec<String> {
 fn record(
     dir: &std::path::Path,
     invocation: Invocation,
-    tests: Option<(String, Vec<facts::TestFacts>)>,
+    tests: Option<(String, Vec<facts::TestFacts>, Option<&'static str>)>,
 ) {
     // \[ADR 0070\] A start `go test` asked for says where it ran.
     let adapter = if invocation.dir.is_some() {
@@ -615,8 +617,10 @@ fn record(
     } else {
         facts::FACTS_SCHEMA
     };
+    // \[ADR 0083, amended\] Why no test of it but those that failed finished, which the run says.
+    let note = tests.as_ref().and_then(|(_, _, note)| *note);
     let units = tests
-        .map(|(unit, tests)| facts::UnitFacts {
+        .map(|(unit, tests, _)| facts::UnitFacts {
             unit,
             tests: Some(tests),
             ..facts::UnitFacts::default()
@@ -631,6 +635,9 @@ fn record(
         start: (adapter == super::gotest::ADAPTER).then(go_start).flatten(),
         invocation: Some(invocation),
         units,
+        settings: note
+            .map(|note| BTreeMap::from([("note".to_string(), serde_json::json!(note))]))
+            .unwrap_or_default(),
         ..FactsFile::default()
     };
     let nanos = std::time::SystemTime::now()
