@@ -211,3 +211,27 @@ there even when a test target reads its package whole for a plugin. A non-Swift 
 doesn't compile (`.metal`, a resource) is in the rest set as before; one it does (`.c`, `.m`)
 follows the rule. Cost: a package with many targets no test reads reuses less, since each of their
 files is in every key; `tests.ignore` is how a person says a tree isn't read by any test.
+
+## Amendment 3: output a program left running prints later is passed on (2026-11-12)
+
+Amendment 1 stopped waiting for held output after 5 seconds and dropped what came after, which
+changed what COMMAND printed: without hushrun, `swift test` returns when it exits, and a program a
+test left running goes on printing to the terminal; nothing waits and nothing is lost.
+
+The decision: once the real `swift` ended, hushrun's `swift` reads its output without blocking
+until it ends, or until it has been quiet for 250 ms (at most 1 s, for output that never goes
+quiet). A quarter second only has to tell "still held open" from "closing now": what a program's
+last writers flush as they exit comes within milliseconds. Output still open then is handed, with
+what the pipe already holds, to a forwarder hushrun starts and doesn't wait for: hushrun again under
+a hidden subcommand, with the pipe's read end (or the pseudo-terminal's) as its standard input and
+hushrun's standard output as its own, copying to the end. No `fork` in a threaded process. hushrun's
+`swift` then exits with the real one's code. The run is still `held`: what it printed can't be
+read whole, so no pass of it is recorded, its failures stand, and the facts say why. Standard error
+was never copied, and isn't touched. Should the forwarder not start, hushrun's `swift` copies the
+rest itself, to its end.
+
+hushrun's target runner for `go test` (ADR 0083) differs on purpose: `go test` itself waits for a
+test binary's output to end (up to its `WaitDelay`), so there the runner forwards to the end within
+the same process, as the command without hushrun would. hushrun's `ctest` never copies output: the
+real `ctest` gets hushrun's standard output itself, so a program a test left running prints there
+directly (ADR 0087).

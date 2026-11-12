@@ -1546,3 +1546,46 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     );
     assert!(map["units"]["t_greet"]["notFollowed"].is_null(), "{map:#}");
 }
+
+// covers: C-49
+#[test]
+fn a_program_a_test_left_running_keeps_printing_after_hushruns_ctest_returns() {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("ctest"),
+        "#!/bin/sh\necho ran; (sleep 2; echo late line) & exit 8\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("ctest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let was = format!("{}:/usr/bin:/bin", bin.display());
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "ctest", "--version"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let status = child.wait().unwrap();
+    let returned = started.elapsed();
+    // hushrun's ctest hands ctest its own standard output: it returns as ctest does, and what a
+    // program left running prints later reaches the same output.
+    assert_eq!(status.code(), Some(8));
+    assert!(returned < std::time::Duration::from_secs(2), "{returned:?}");
+    let out = reader.join().unwrap();
+    assert!(out.contains("ran") && out.contains("late line"), "{out}");
+}

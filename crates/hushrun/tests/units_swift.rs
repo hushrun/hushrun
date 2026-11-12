@@ -1143,3 +1143,64 @@ fn a_swift_file_no_test_target_reads_is_in_the_rest_set() {
         second.stderr
     );
 }
+
+// covers: C-48
+#[cfg(unix)]
+#[test]
+fn a_program_a_test_left_running_keeps_printing_after_hushruns_swift_returns() {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    // `swift test` passes its one test, and leaves a program running that prints a line 2 s
+    // after it exited.
+    let script = "#!/bin/sh\ncase \"$1 $2\" in\n\"--version \"*) echo 'Swift version 6.4.2 (fake)' ;;\n\"test list\") echo 'T.C/testA' ;;\n\"test \"*) echo \"Test Case '-[T.C testA]' started.\"; echo \"Test Case '-[T.C testA]' passed (0.001 seconds).\"; (sleep 2; echo late line) & exit 3 ;;\nesac\n";
+    std::fs::write(real.join("swift"), script).unwrap();
+    std::fs::set_permissions(real.join("swift"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "swift", "test"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let status = child.wait().unwrap();
+    let returned = started.elapsed();
+    // hushrun's swift returns with swift's code as swift does, without waiting for that program.
+    assert_eq!(status.code(), Some(3));
+    assert!(returned < std::time::Duration::from_secs(2), "{returned:?}");
+    // What it prints later still comes, once that program ends.
+    let out = reader.join().unwrap();
+    assert!(out.contains("passed") && out.contains("late line"), "{out}");
+    // No pass is recorded of a run whose output was still held, and the facts say why.
+    let facts: Vec<Value> = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(
+        facts[0]["units"][0]["tests"][0]["finished"], false,
+        "{:#}",
+        facts[0]
+    );
+    assert!(facts[0]["settings"]["held"].is_string(), "{:#}", facts[0]);
+}

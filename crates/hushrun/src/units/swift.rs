@@ -2128,8 +2128,8 @@ fn tested(
         settings.insert(
             "held".to_string(),
             Value::String(format!(
-                "a program swift test started held its output {} seconds after it ended: no pass of it is recorded",
-                program::OUTPUT_GRACE.as_secs()
+                "a program swift test started still held its output {} ms after it ended: what it printed can't be read whole, and no pass of it is recorded; what it printed later was passed on",
+                program::QUIET.as_millis()
             )),
         );
     }

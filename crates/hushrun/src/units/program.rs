@@ -96,19 +96,25 @@ pub struct Copied {
     pub exit: Option<i32>,
     /// The signal that stopped it, when one did.
     pub signal: Option<i32>,
-    /// Every byte it wrote on its standard output, as written, until it ended or [`OUTPUT_GRACE`]
-    /// after.
+    /// Every byte it wrote on its standard output, as written, until it ended, or until its
+    /// output was handed to a forwarder ([`Copied::held`]).
     pub stdout: Vec<u8>,
-    /// Something it started still held its standard output [`OUTPUT_GRACE`] after it ended:
-    /// what came after isn't passed on, and what it printed can't be read whole, so no pass of
-    /// it is recorded.
+    /// \[ADR 0086\] Something it started still held its standard output after it ended: what it
+    /// printed can't be read whole, so no pass of it is recorded. What comes later is passed on
+    /// all the same, by a forwarder of its own ([`FORWARD`]).
     pub held: bool,
 }
 
-/// How long [`run_copying_stdout`] passes output on after the program ended, for what a program
-/// it started still holds open: as long as hushrun's target runner waits for a test binary's
-/// (ADR 0083), and `go test` itself by default.
-pub const OUTPUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// \[ADR 0086\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
+/// to tell "still held open by a program it left running" from "closing now": what its last
+/// writers flush as they exit comes within milliseconds, so a quarter second is ample.
+pub const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+/// The longest [`run_copying_stdout`] goes on reading after the program ended, for output that
+/// never goes quiet, before it hands the rest over.
+pub const MOST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+/// \[ADR 0086\] The hidden subcommand of the forwarder [`run_copying_stdout`] hands held output
+/// to: hushrun copying its standard input to its standard output until the end. Never typed.
+pub const FORWARD: &str = "__hushrun-forward";
 
 impl Copied {
     /// The exit code a program on `PATH` ends with for it: its own, 1 past 255, or the same
@@ -126,71 +132,187 @@ impl Copied {
 /// as it goes by, and kept: through a pseudo-terminal in raw mode, with the window's size, when
 /// this process's standard output is a terminal (a program that colors only on one, Swift Testing,
 /// still does), else through a pipe. Standard input and error are inherited untouched, and the
-/// signals that stop a process are passed on, as [`Program::args`]'s start does. Output that a
-/// program it started still holds open is passed on for [`OUTPUT_GRACE`] after it ended, and then
-/// no more ([`Copied::held`]). `Err` when it can't be started.
+/// signals that stop a process are passed on, as [`Program::args`]'s start does. `Err` when it
+/// can't be started.
+///
+/// Once the program ended, its output ends when every program holding it let it go. Output still
+/// held open after it ([`QUIET`], at most [`MOST_AFTER`]) by a program it left running is handed,
+/// with what the pipe holds, to a forwarder that hushrun starts and doesn't wait for (hushrun
+/// again, [`FORWARD`], with the read end as its standard input and this process's standard output
+/// as its own), as a shell lets that program go on printing: nothing waits, nothing is lost, and
+/// the run is [`Copied::held`].
+#[cfg(unix)]
 pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
     use std::io::{Read as _, Write as _};
+    use std::time::Instant;
     let (mut from, to) = output_channel()?;
     command.stdout(to);
     let mut child = command.spawn()?;
     // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
     drop(command);
     let forwarding = super::runner::forward_signals(child.id());
-    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (tell, done) = std::sync::mpsc::channel();
-    let shared = std::sync::Arc::clone(&kept);
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 64 * 1024];
-        let out = std::io::stdout();
-        loop {
-            match from.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Ok(mut kept) = shared.lock() {
-                        kept.extend_from_slice(&buf[..n]);
-                    }
-                    let mut out = out.lock();
-                    let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+    // Read without blocking, so that the program's end is seen while its output stays open.
+    let flags = rustix::fs::fcntl_getfl(&from)?;
+    rustix::fs::fcntl_setfl(&from, flags | rustix::fs::OFlags::NONBLOCK)?;
+    let mut kept = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let out = std::io::stdout();
+    let mut status: Option<Option<std::process::ExitStatus>> = None;
+    let mut ended_at: Option<Instant> = None;
+    let mut last = Instant::now();
+    let mut held = false;
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&buf[..n]);
+                let mut out = out.lock();
+                let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                last = Instant::now();
+                continue;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
+            Err(_) => break,
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(done)) => {
+                    status = Some(Some(done));
+                    ended_at = Some(Instant::now());
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
-                Err(_) => break,
+                Ok(None) => {}
+                Err(_) => {
+                    status = Some(None);
+                    ended_at = Some(Instant::now());
+                }
             }
         }
-        let _ = tell.send(());
-    });
-    let status = loop {
-        match child.wait() {
-            Ok(status) => break Some(status),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break None,
+        if let Some(at) = ended_at
+            && (last.max(at).elapsed() >= QUIET || at.elapsed() >= MOST_AFTER)
+        {
+            held = true;
+            break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let status = match status {
+        Some(status) => status,
+        None => loop {
+            match child.wait() {
+                Ok(done) => break Some(done),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break None,
+            }
+        },
     };
     drop(forwarding);
-    // Its output ends when every program holding it let it go: waited for a while only, so that a
-    // program it left running never holds hushrun, and COMMAND, for ever.
-    let held = done.recv_timeout(OUTPUT_GRACE).is_err();
-    let stdout = kept.lock().map(|k| k.clone()).unwrap_or_default();
+    if held {
+        // The forwarder reads as any reader does: blocking again.
+        let _ = rustix::fs::fcntl_setfl(&from, flags);
+        hand_over(from);
+    }
     Ok(match status {
         Some(status) => Copied {
             exit: status.code(),
             signal: super::runner::signal_of(&status),
-            stdout,
+            stdout: kept,
             held,
         },
         None => Copied {
-            stdout,
+            stdout: kept,
             held,
             ..Copied::default()
         },
     })
 }
 
+/// Hands `from` to a forwarder this process doesn't wait for, which copies it to this process's
+/// standard output until its end; when none can be started, copies it here, to its end.
+#[cfg(unix)]
+fn hand_over(from: std::fs::File) {
+    // A unit test's own executable is its test harness, not hushrun: there `cat` forwards.
+    #[cfg(test)]
+    let exe: std::io::Result<PathBuf> = Ok(PathBuf::from("cat"));
+    #[cfg(not(test))]
+    let exe = std::env::current_exe();
+    let started = exe.and_then(|exe| {
+        let mut command = Command::new(&exe);
+        if !cfg!(test) {
+            command.arg(FORWARD);
+        }
+        command
+            .stdin(from.try_clone()?)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    });
+    if started.is_err() {
+        forward(from);
+    }
+}
+
+/// Copies `from` to this process's standard output until its end: what the forwarder does.
+fn forward(mut from: impl std::io::Read) {
+    use std::io::Write as _;
+    let mut buf = vec![0u8; 64 * 1024];
+    let out = std::io::stdout();
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                let mut out = out.lock();
+                if out.write_all(&buf[..n]).and_then(|()| out.flush()).is_err() {
+                    return;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// [`run_copying_stdout`] where output can't be read without blocking: it is read to its end, and
+/// nothing is held.
+#[cfg(not(unix))]
+pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
+    use std::io::{Read as _, Write as _};
+    let (mut from, to) = output_channel()?;
+    command.stdout(to);
+    let mut child = command.spawn()?;
+    drop(command);
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let out = std::io::stdout();
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    kept.extend_from_slice(&buf[..n]);
+                    let mut out = out.lock();
+                    let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        kept
+    });
+    let status = child.wait().ok();
+    let stdout = reader.join().unwrap_or_default();
+    Ok(Copied {
+        exit: status.and_then(|s| s.code()),
+        signal: None,
+        stdout,
+        held: false,
+    })
+}
+
 /// The end this process reads and the end the child writes its standard output to: a
 /// pseudo-terminal when this process's standard output is a terminal, else a pipe.
 #[cfg(unix)]
-fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::process::Stdio)> {
+fn output_channel() -> std::io::Result<(std::fs::File, std::process::Stdio)> {
     use rustix::fs::{Mode, OFlags};
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
     use rustix::termios::{
@@ -198,7 +320,10 @@ fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::proc
     };
     if !isatty(std::io::stdout()) {
         let (from, to) = std::io::pipe()?;
-        return Ok((Box::new(from), to.into()));
+        return Ok((
+            std::fs::File::from(std::os::fd::OwnedFd::from(from)),
+            to.into(),
+        ));
     }
     let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
     // Never the child's: only this process reads it.
@@ -219,7 +344,7 @@ fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::proc
         let _ = tcsetwinsize(&terminal, size);
     }
     Ok((
-        Box::new(std::fs::File::from(controller)),
+        std::fs::File::from(controller),
         std::fs::File::from(terminal).into(),
     ))
 }
@@ -390,6 +515,10 @@ fn runnable(path: &Path) -> bool {
 /// [`SUBCOMMAND`] and the name; on Windows its own file is `<name>.exe` in the directory
 /// [`DIR_VAR`] names. `None` for any other start, which hushrun parses as usual.
 pub fn from_args(args: &[OsString]) -> Option<ExitCode> {
+    if args.get(1).map(OsString::as_os_str) == Some(FORWARD.as_ref()) {
+        forward(std::io::stdin().lock());
+        return Some(ExitCode::SUCCESS);
+    }
     if args.get(1).map(OsString::as_os_str) == Some(SUBCOMMAND.as_ref()) {
         let Some(name) = args.get(2).and_then(|n| n.to_str()) else {
             eprintln!("error: {SUBCOMMAND} is hushrun's own program on PATH, started by a script");
@@ -668,7 +797,7 @@ mod tests {
         // The program exits, and leaves one it started holding its standard output.
         let mut command = Command::new("sh");
         command.arg("-c").arg(format!(
-            "echo before; (sleep 2; echo late; exec sleep 40) & echo $! > '{}'; exit 3",
+            "echo before; sleep 40 & echo $! > '{}'; exit 3",
             pid.display()
         ));
         let started = std::time::Instant::now();
@@ -678,10 +807,11 @@ mod tests {
             let _ = Command::new("kill").arg(text.trim()).status();
         }
         assert_eq!(copied.exit, Some(3));
-        // What came within the grace is passed on and kept; then hushrun stops waiting.
+        // What came before it ended is passed on and kept; the rest is a forwarder's to pass on,
+        // and hushrun doesn't wait for it.
         let text = String::from_utf8_lossy(&copied.stdout).into_owned();
-        assert!(text.contains("before") && text.contains("late"), "{text}");
-        assert!(took < std::time::Duration::from_secs(20), "{took:?}");
+        assert!(text.contains("before"), "{text}");
+        assert!(took < MOST_AFTER * 2, "{took:?}");
         assert!(copied.held);
         // A program whose output ends with it isn't held.
         let mut quick = Command::new("sh");

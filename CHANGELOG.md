@@ -192,8 +192,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   XCTSkip and Swift Testing's disabled tests are told as skipped (under `--parallel`, in a run
   that failed, an XCTest pass may be one); each hushrun `swift` is a start of its own; and the
   plan's `swift package describe` gets a command's own `env NAME=value` assignments.
-- hushrun's `swift` no longer waits for ever for output a program `swift test` left running holds
-  open: it passes it on for 5 seconds after `swift test` ends, and that run records no pass.
+- hushrun's `swift` no longer waits for output a program `swift test` left running holds open: it
+  returns with `swift test`, a forwarder of its own passes on what that program prints later, and
+  that run records no pass.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build

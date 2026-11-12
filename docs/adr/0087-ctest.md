@@ -221,3 +221,10 @@ still reads them all, but makes none of them a source. The plan's file lists, fo
 leaving out, the C and C++ files of the sources and units sets only. Cost: a repository with many
 sources no program is built from reuses less, since each of them is in every key; `tests.ignore`
 is how a person says a tree isn't read by any test.
+
+## Amendment 5: output after `ctest` returns (2026-11-12)
+
+hushrun's `ctest` starts the real one with its own standard output and error, and copies neither:
+it returns when `ctest` does, with its code, and what a program a test left running prints later
+reaches the same output directly, as without hushrun. Nothing is held, unlike hushrun's `swift`,
+which copies standard output to read it (ADR 0086 Amendment 3).
