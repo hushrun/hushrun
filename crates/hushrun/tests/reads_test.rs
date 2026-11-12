@@ -548,6 +548,86 @@ fn reads_test_follows_what_a_session_hook_ran_outside_every_test() {
     );
 }
 
+/// A package that re-exports: tax.py takes RATE from `app.config`, whose `__init__.py` binds it
+/// from `.defaults`; no function of either runs. `head` is the re-exporting module's text.
+fn reexported(head: (&'static str, &'static str)) -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("app/config/defaults.py", "RATE = 0.2\nCURRENCY = 'EUR'\n"),
+        head,
+        (
+            "app/tax.py",
+            "from app.config import RATE\n\ndef tax(amount):\n    return round(amount * RATE, 2)\n",
+        ),
+        (
+            "tests/test_a.py",
+            "from app.tax import tax\n\ndef test_target():\n    assert tax(10) == 2.0\n\ndef test_plain():\n    assert True\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_what_a_packages_init_reexports() {
+    caught(
+        &reexported((
+            "app/config/__init__.py",
+            "from .defaults import RATE, CURRENCY\n",
+        )),
+        ("app/config/defaults.py", "RATE = 0.3\nCURRENCY = 'EUR'\n"),
+    );
+}
+
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_a_star_import() {
+    caught(
+        &reexported(("app/config/__init__.py", "from app.config.defaults import *\n")),
+        ("app/config/defaults.py", "RATE = 0.3\nCURRENCY = 'EUR'\n"),
+    );
+}
+
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_what_a_modules_all_reexports() {
+    // A plain module, not a package, whose `__all__` names what it took from another.
+    let mut files = reexported(("app/config/__init__.py", ""));
+    files.push((
+        "app/config/public.py",
+        "from app.config.defaults import RATE\n__all__ = ['RATE']\n",
+    ));
+    files.retain(|(p, _)| *p != "app/tax.py");
+    files.push((
+        "app/tax.py",
+        "from app.config.public import RATE\n\ndef tax(amount):\n    return round(amount * RATE, 2)\n",
+    ));
+    caught(
+        &files,
+        ("app/config/defaults.py", "RATE = 0.3\nCURRENCY = 'EUR'\n"),
+    );
+}
+
+// covers: C-40
+#[test]
+fn a_known_miss_of_reads_test_a_constant_a_plain_module_passes_on() {
+    // A plain module, neither a package's `__init__.py` nor one whose `__all__` names it, takes
+    // RATE from defaults.py, and tax.py takes it from there: no re-export C-40 follows, and no
+    // function of the way runs. Still the first known miss, two imports away.
+    let mut files = reexported(("app/config/__init__.py", ""));
+    files.push((
+        "app/config/middle.py",
+        "from app.config.defaults import RATE\n",
+    ));
+    files.retain(|(p, _)| *p != "app/tax.py");
+    files.push((
+        "app/tax.py",
+        "from app.config.middle import RATE\n\ndef tax(amount):\n    return round(amount * RATE, 2)\n",
+    ));
+    known_miss(
+        &files,
+        ("app/config/defaults.py", "RATE = 0.3\nCURRENCY = 'EUR'\n"),
+    );
+}
+
 /// Two imports away: cart.py ran and imports settings.py, which built TAX from defaults.py, with
 /// no function of either called.
 fn two_imports_away() -> Vec<(&'static str, &'static str)> {
@@ -575,10 +655,11 @@ fn a_known_miss_of_reads_test_a_value_two_imports_away() {
 }
 
 /// A registry plugins.py fills as app/__init__.py imports it: the test file imports the registry
-/// and nothing of plugins.py, whose code runs at import only.
+/// and nothing of plugins.py, whose code runs at import only. An `import` statement binds no name
+/// it re-exports (a `from app import plugins` in a package's `__init__.py` would, C-40).
 fn a_registry() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("app/__init__.py", "from app import plugins\n"),
+        ("app/__init__.py", "import app.plugins\n"),
         ("app/registry.py", "HANDLERS = {}\n"),
         (
             "app/plugins.py",

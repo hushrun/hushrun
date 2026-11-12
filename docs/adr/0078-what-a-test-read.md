@@ -102,3 +102,15 @@ computed it running, and is keyed on a list without the files that code read; wh
 it depends on the order the tests run in. It stands beside the two known misses, pinned by a
 test named for it (`a_known_miss_of_reads_test_a_value_an_earlier_test_computed_and_a_cache_kept`),
 and the audit's second run is what catches it.
+
+## Amendment 3: Python's re-exports, and what stays missed (2026-11-12)
+
+Amendment 1's `reexports` came from Vitest only: pytest sent none, and a test that took `RATE`
+through a package whose `__init__.py` binds it with `from .defaults import RATE` was reused after
+`RATE` changed. pytest now sends them, read from each repository module's source with `ast` (once a
+module, since a constant carries no origin): a package's `__init__.py` that binds names at its top
+level with `from X import …`, a module with `from X import *`, and a module whose `__all__` names
+what it bound with `from X import`. What stays missed for Python: a plain module that takes a
+constant with `from X import` and is imported for it by a third re-exports nothing, so the value
+is two imports away, the first known miss, pinned by
+`a_known_miss_of_reads_test_a_constant_a_plain_module_passes_on`.

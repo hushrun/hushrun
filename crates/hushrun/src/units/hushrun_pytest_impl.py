@@ -72,6 +72,7 @@ file, then a rename). With pytest-xdist each worker writes its own, and the cont
 test files. Standard library only; Python 3.8 or later.
 """
 
+import ast
 import builtins
 import importlib
 import inspect
@@ -199,6 +200,7 @@ class Observer(object):
         self.code_files = {}          # code filename -> repository file or None
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
+        self._reexports = {}          # [C-40] repo file -> files it re-exports from
         self.torn_ids = set()         # node ids of tests whose teardown report was logged
         self.started_file = None      # [C-32] this start's `.started` file, removed at its end
         self.finished_ids = {}        # node id -> (unit, test id) of each test that finished
@@ -806,6 +808,77 @@ class Observer(object):
             if targets:
                 opens[str(self.index(f))] = self.indices(targets)
         return imports, opens
+
+    def reexport_table(self):
+        """[C-40] The files each repository module re-exports from, by index: a package's
+        `__init__.py` that binds names at its top level with `from X import …`, a module with
+        `from X import *`, and a module whose `__all__` names what it bound with `from X import`,
+        each read from the module's source (once a module), since a value has no origin."""
+        modules = {}
+        for name, files in self.mod_files.items():
+            for f in files:
+                if f.endswith(".py"):
+                    modules.setdefault(f, set()).add(name)
+        out = {}
+        for f, names in modules.items():
+            targets = {t for t in self.reexports_of(f, min(names)) if t != f}
+            if targets:
+                out[str(self.index(f))] = self.indices(targets)
+        return out
+
+    def reexports_of(self, f, modname):
+        """[C-40] What the module at `f`, imported as `modname`, re-exports from, as files."""
+        cached = self._reexports.get(f)
+        if cached is not None:
+            return cached
+        found = set()
+        self._reexports[f] = found
+        try:
+            with open(os.path.join(self.root, *f.split("/")), "rb") as source:
+                tree = ast.parse(source.read(), filename=f)
+        except Exception:
+            return found
+        package_init = f.rsplit("/", 1)[-1] == "__init__.py"
+        package = modname if package_init else modname.rpartition(".")[0]
+
+        def files_of(name):
+            return set(self.mod_files.get(name, ())) if name else set()
+
+        def top_level(body):
+            for node in body:
+                yield node
+                if isinstance(node, (ast.If, ast.Try)):
+                    for part in (node.body, node.orelse, getattr(node, "finalbody", []),
+                                 *[h.body for h in getattr(node, "handlers", [])]):
+                        yield from top_level(part)
+
+        bound = {}
+        public = []
+        for node in top_level(tree.body):
+            if isinstance(node, ast.ImportFrom):
+                try:
+                    source_name = importlib.util.resolve_name(
+                        "." * node.level + (node.module or ""), package) \
+                        if node.level else node.module
+                except Exception:
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        found |= files_of(source_name)
+                        continue
+                    origin = files_of(source_name) | files_of(source_name + "." + alias.name)
+                    bound[alias.asname or alias.name] = origin
+                    if package_init:
+                        found |= origin
+            elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets) \
+                        and isinstance(node.value, (ast.List, ast.Tuple)):
+                    public.extend(e.value for e in node.value.elts
+                                  if isinstance(e, ast.Constant) and isinstance(e.value, str))
+        for name in public:
+            found |= bound.get(name, set())
+        return found
 
     def test_results(self, unit):
         """[ADR 0077] Each test of `unit` this process ran or deselected, in that order."""
@@ -1592,6 +1665,7 @@ def pytest_sessionfinish(session, exitstatus):
                     imports, opens = obs.watch_tables()
                     facts["imports"] = imports
                     facts["opens"] = opens
+                    facts["reexports"] = obs.reexport_table()
                     facts["paths"] = obs.paths
                 except Exception as err:
                     # Without its tables no test of this process can be told on its own.
