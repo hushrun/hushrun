@@ -43,6 +43,8 @@ hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
 rayon.workspace = true
+# \[ADR 0085\] Surefire's and Failsafe's reports, test by test. hushrun-reports builds it already.
+quick-xml.workspace = true
 # \[ADR 0072\] The local store of what test files read.
 rusqlite.workspace = true
 serde_json.workspace = true

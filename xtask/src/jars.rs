@@ -58,6 +58,29 @@ const JUNIT_PLATFORM: &[Api] = &[
     },
 ];
 
+const MAVEN: &[Api] = &[
+    Api {
+        path: "org/apache/maven/maven-core/3.6.3/maven-core-3.6.3.jar",
+        sha256: "f572ed9e2a6ea3e30522d13448c5d9b3b80ce62a23dac652111952d4941e2a3b",
+    },
+    Api {
+        path: "org/apache/maven/maven-model/3.6.3/maven-model-3.6.3.jar",
+        sha256: "17cef1f58e146ef0d7d9e96b3b92d98a1d6fd7d2b3288ba538e8ff1e0d9160cf",
+    },
+    Api {
+        path: "org/apache/maven/maven-artifact/3.6.3/maven-artifact-3.6.3.jar",
+        sha256: "61b20da4e1e3db837630d0810a6a7a5ac9fb7ea31b0a55638062aad6e479c09c",
+    },
+    Api {
+        path: "org/codehaus/plexus/plexus-utils/3.2.1/plexus-utils-3.2.1.jar",
+        sha256: "8d07b497bb8deb167ee5329cae87ef2043833bf52e4f15a5a9379cec447a5b2b",
+    },
+    Api {
+        path: "javax/inject/javax.inject/1/javax.inject-1.jar",
+        sha256: "91c77044a50c481636c32d916fd89c9118a72195390452c81065080f957de7ff",
+    },
+];
+
 /// A jar hushrun embeds: where its sources are, where it goes, and what it compiles against.
 struct Jar {
     sources: &'static str,
@@ -71,6 +94,12 @@ const JARS: &[Jar] = &[
         sources: "crates/hushrun/jvm/test-jvm-hook",
         out: "crates/hushrun/jvm/hushrun-test-jvm-hook.jar",
         api: JUNIT_PLATFORM,
+    },
+    // The Maven core extension: the reactor's model, and the hook's list from hushrun.json.
+    Jar {
+        sources: "crates/hushrun/jvm/maven-extension",
+        out: "crates/hushrun/jvm/hushrun-maven-extension.jar",
+        api: MAVEN,
     },
 ];
 
