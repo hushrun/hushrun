@@ -146,6 +146,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
   name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
   list, and runs when it changes.
+- With `reads: test`, pytest's adapter takes a test to have read what a fixture it asked for at
+  run time (`request.getfixturevalue`) read as it set up, and what a shared setup that started
+  inside its window read.
 
 ## [0.13.0] - 2026-11-12
 

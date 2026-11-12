@@ -60,3 +60,14 @@ audit hook (PEP 578) already gives the plugin each open (ADR 0068).
   events.
 - **Counting module top level per test:** it runs once, at the first import, so the first test of a
   file would read every module and the others none.
+
+## Amendment 1: what a test was served, and what ran outside every window (2026-11-12)
+
+Reviewers confirmed wrong reuses in item 4 and in what item 1 left out.
+
+- A fixture asked for at run time (`request.getfixturevalue`, which pytest-lazy-fixture and
+  parametrized fixture names use) isn't in `item.fixturenames`, so its setup's reads never reached
+  the test that asked for it: with a session fixture set up by an earlier test, the later one read
+  its value and none of its files. Now a test serves as requested every fixture its request
+  resolved by the time it ended, those asked for at run time included, and a shared setup that
+  starts inside a test's window always serves that test.

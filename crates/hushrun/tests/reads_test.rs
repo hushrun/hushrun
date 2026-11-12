@@ -470,6 +470,56 @@ fn reads_test_follows_a_module_code_outside_the_repository_loaded() {
     );
 }
 
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_a_fixture_a_test_asked_for_at_run_time() {
+    // test_first requests the session fixture and sets it up; test_target asks for it with
+    // `request.getfixturevalue`, as pytest-lazy-fixture does, and gets the value pytest kept.
+    caught(
+        &[
+            ("app/helper.py", "def make():\n    return 1\n"),
+            (
+                "app/fx.py",
+                "from app import helper\n\ndef make():\n    return helper.make()\n",
+            ),
+            (
+                "tests/conftest.py",
+                "import pytest\nfrom app import fx\n\n@pytest.fixture(scope='session')\ndef made():\n    return fx.make()\n",
+            ),
+            (
+                "tests/test_a.py",
+                "def test_first(made):\n    assert made\n\ndef test_target(request):\n    assert request.getfixturevalue('made') == 1\n",
+            ),
+        ],
+        ("app/helper.py", "def make():\n    return 2\n"),
+    );
+}
+
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_a_fixture_set_up_inside_a_tests_window() {
+    // The first to ask for the session fixture asks at run time: its setup starts inside
+    // test_target's window, and serves it.
+    caught(
+        &[
+            ("app/helper.py", "def make():\n    return 1\n"),
+            (
+                "app/fx.py",
+                "from app import helper\n\ndef make():\n    return helper.make()\n",
+            ),
+            (
+                "tests/conftest.py",
+                "import pytest\nfrom app import fx\n\n@pytest.fixture(scope='session')\ndef made():\n    return fx.make()\n",
+            ),
+            (
+                "tests/test_a.py",
+                "def test_target(request):\n    assert request.getfixturevalue('made') == 1\n\ndef test_plain():\n    assert True\n",
+            ),
+        ],
+        ("app/helper.py", "def make():\n    return 2\n"),
+    );
+}
+
 /// Two imports away: cart.py ran and imports settings.py, which built TAX from defaults.py, with
 /// no function of either called.
 fn two_imports_away() -> Vec<(&'static str, &'static str)> {

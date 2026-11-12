@@ -720,9 +720,14 @@ class Observer(object):
             served = []
             for at, test_id in enumerate(order):
                 window = self.test_window.get((unit, test_id))
-                if window is None or setup["argname"] not in window[3]:
+                if window is None:
                     continue
-                if setup["start"] <= window[1] and (setup["end"] is None or setup["end"] >= window[0]):
+                # A setup that starts inside a test's window serves that test; one it was served,
+                # by name (requested, or asked for at run time), serves it while pytest kept it.
+                inside = window[0] <= setup["start"] <= window[1]
+                kept = setup["argname"] in window[3] and setup["start"] <= window[1] \
+                    and (setup["end"] is None or setup["end"] >= window[0])
+                if inside or kept:
                     served.append(at)
             if served:
                 shared.append({"tests": served, "ran": self.indices(setup["ran"]),
@@ -1092,6 +1097,14 @@ def _protocol_start(obs, unit, test_id, fixtures):
             obs.test_window[(unit, test_id)] = [tick, tick, obs.seq, frozenset(fixtures)]
 
 
+def _served(obs, unit, test_id, fixtures):
+    """[ADR 0080] The fixtures a test was served, as its request has them once it ran: those it
+    requested and those it asked for at run time (`request.getfixturevalue`)."""
+    window = obs.test_window.get((unit, test_id))
+    if window is not None and fixtures:
+        window[3] = window[3] | frozenset(fixtures)
+
+
 def _protocol_end(obs, unit, test_id):
     obs.unit_entry(unit)["finished"] += 1
     if obs.by_test and test_id is not None:
@@ -1211,6 +1224,7 @@ def pytest_runtest_protocol(item, nextitem):
         _call(_protocol_start, unit, test_id, fixtures)
     yield
     if unit:
+        _call(_served, unit, test_id, _request_fixtures(item))
         _call(_protocol_end, unit, test_id)
 
 
@@ -1265,9 +1279,21 @@ def _teardown_shares(obs, item, nextitem):
         getattr(item, "parent", None)
 
 
+def _request_fixtures(item):
+    """The names of every fixture `item`'s request resolved, a fixture asked for at run time
+    included; none when pytest doesn't say."""
+    try:
+        return tuple(item._request.fixturenames)
+    except Exception:
+        return ()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
     _call(_teardown_shares, item, nextitem)
+    if OBSERVER is not None and not OBSERVER.done:
+        _call(lambda obs: obs.active and _served(obs, obs.active, obs.active_test,
+                                                 _request_fixtures(item)))
     yield
 
 
