@@ -772,6 +772,71 @@ fn a_program_or_a_file_a_test_names_is_read_by_its_test_program() {
     }
 }
 
+// covers: C-49
+#[test]
+fn a_test_presets_repeat_index_and_show_only_are_read() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    let mut files = shop("reuse");
+    files.push(file(
+        "CMakePresets.json",
+        r#"{"version": 3,
+            "configurePresets": [{"name": "dev", "binaryDir": "${sourceDir}/build"}],
+            "testPresets": [
+              {"name": "repeat", "configurePreset": "dev",
+               "execution": {"repeat": {"mode": "until-pass", "count": 3}}},
+              {"name": "index", "configurePreset": "dev",
+               "filter": {"include": {"index": {"start": 1, "end": 7}}}},
+              {"name": "show", "configurePreset": "dev", "execution": {"showOnly": "human"}}
+            ]}"#,
+    ));
+    let p = Project::new(&cmake, generator, &files);
+    // until-pass in the preset: a pass may have come after a failure, as with --repeat.
+    let repeat = p.shim(&["--preset", "repeat"], json!({}), None, &[]);
+    assert_eq!(repeat.code, 0, "{}", repeat.stdout);
+    assert_eq!(
+        repeat.unit("t_greet")["notFollowed"][0]["why"],
+        json!("repeat until-pass"),
+        "{:#}",
+        repeat.facts
+    );
+    // A command line's --repeat replaces the preset's.
+    let once = p.shim(
+        &["--preset", "repeat", "--repeat", "until-fail:1"],
+        json!({}),
+        None,
+        &[],
+    );
+    assert!(
+        once.unit("t_greet")["notFollowed"]
+            .as_array()
+            .is_none_or(|n| n.is_empty()),
+        "{:#}",
+        once.facts
+    );
+    // The preset picks tests by their position: nothing is left out.
+    let index = p.shim(
+        &["--preset", "index"],
+        json!({"unit": "test", "reuse": ["t_greet"]}),
+        Some(shop_plan(&["t_greet"])),
+        &[],
+    );
+    assert_eq!(index.code, 0, "{}", index.stdout);
+    assert!(index.left_out().is_empty(), "{:#}", index.facts);
+    assert_eq!(index.selection(), "observed only", "{:#}", index.facts);
+    // The preset only shows the tests: no test runs, and nothing is observed.
+    let show = p.shim(&["--preset", "show"], json!({}), None, &[]);
+    assert!(
+        show.facts["settings"]["notObserved"]
+            .as_str()
+            .is_some_and(|w| w.contains("showOnly")),
+        "{:#}",
+        show.facts
+    );
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

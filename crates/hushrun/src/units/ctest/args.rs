@@ -354,13 +354,17 @@ pub fn without(items: &[Item], drop: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// `--repeat until-pass:N` or `after-timeout:N`: a test's pass may come after it failed, and the
-/// JUnit file keeps only the last attempt.
-pub fn retries(items: &[Item]) -> bool {
-    last(items, &["--repeat"]).is_some_and(|mode| {
-        let mode = mode.to_ascii_lowercase();
-        mode.starts_with("until-pass") || mode.starts_with("after-timeout")
-    })
+/// `--repeat until-pass:N` or `after-timeout:N`, or with no `--repeat` a preset's
+/// `execution.repeat` of those modes: a test's pass may come after it failed, and the JUnit file
+/// keeps only the last attempt.
+pub fn retries(items: &[Item], preset: Option<&Preset>) -> bool {
+    match last(items, &["--repeat"]) {
+        Some(mode) => {
+            let mode = mode.to_ascii_lowercase();
+            mode.starts_with("until-pass") || mode.starts_with("after-timeout")
+        }
+        None => preset.is_some_and(|p| p.retries),
+    }
 }
 
 /// What hushrun's `ctest` must know of a test preset (ran, CMake 4.4: a command line's `-E`
@@ -374,6 +378,13 @@ pub struct Preset {
     pub junit: Option<String>,
     /// It sets `filter.exclude.fromFile`, which a command line's file would replace.
     pub exclude_file: bool,
+    /// Its `execution.repeat` is `until-pass` or `after-timeout`: a pass may come after a failure,
+    /// as with `--repeat` (which replaces it).
+    pub retries: bool,
+    /// It sets `filter.include.index`, which picks tests by their position, as `-I` does.
+    pub by_position: bool,
+    /// It sets `execution.showOnly`: `ctest --preset` runs no test.
+    pub show_only: bool,
 }
 
 /// The test preset `name` of the presets in `dir`, merged as CMake merges them (`include`,
@@ -405,6 +416,20 @@ pub fn preset(name: &str, dir: &Path) -> Result<Preset, String> {
         out.exclude_name = Some(expand(regex, name)?);
     }
     out.exclude_file = exclude.and_then(|e| e.get("fromFile")).is_some();
+    out.by_position = filter
+        .and_then(|f| f.get("include"))
+        .and_then(|i| i.get("index"))
+        .is_some();
+    let execution = tp.get("execution");
+    out.retries = execution
+        .and_then(|e| e.get("repeat"))
+        .and_then(|r| r.get("mode"))
+        .and_then(|m| m.as_str())
+        .is_some_and(|mode| matches!(mode, "until-pass" | "after-timeout"));
+    out.show_only = execution
+        .and_then(|e| e.get("showOnly"))
+        .is_some_and(|v| !v.is_null());
+
     if let Some(junit) = tp
         .get("output")
         .and_then(|o| o.get("outputJUnitFile"))
@@ -558,7 +583,7 @@ mod tests {
             last(&items, &["-E", "--exclude-regex"]),
             Some("sleep|crash")
         );
-        assert!(retries(&items));
+        assert!(retries(&items, None));
         // The listing keeps what selects and drops what only shapes the run, or writes a file.
         assert_eq!(
             listing(&items, &[]),

@@ -244,6 +244,15 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
     let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root)?;
+    if preset.as_ref().is_some_and(|p| p.show_only) {
+        return Err(
+            "the test preset sets execution.showOnly, and ctest runs no test"
+                .to_string()
+                .into(),
+        );
+    }
+    // A preset's `filter.include.index` picks tests by their position, as `-I` does.
+    let select = select && !preset.as_ref().is_some_and(|p| p.by_position);
     let built = walk(&tests, &root, path_was());
     let started = SystemTime::now();
     let nanos = started
@@ -329,7 +338,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
         junit,
         before,
         started,
-        retries: args::retries(&items),
+        retries: args::retries(&items, preset.as_ref()),
         report_tests: run.unit.as_deref() == Some("test"),
         reuse,
         selection,
