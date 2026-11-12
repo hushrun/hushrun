@@ -424,10 +424,34 @@ struct ClassSeen {
     /// From reports: each test's invocations' outcomes and time, and a failure of the class.
     cases: BTreeMap<String, (Vec<reports::Outcome>, u64)>,
     case_class_failed: bool,
+    /// From reports: the class was skipped whole (JUnit 4's `@Ignore` on it).
+    case_class_skipped: bool,
     from_reports: bool,
 }
 
 impl ClassSeen {
+    /// One test case of a report of this class: a test's invocation, or the class's own (a
+    /// failure outside its tests, or the whole class skipped).
+    fn add_case(&mut self, case: &reports::Case) {
+        self.from_reports = true;
+        let class = case.classname.as_str();
+        let top = class.split('$').next().unwrap_or(class);
+        let simple = top.rsplit('.').next().unwrap_or(top);
+        let class_level = case.name.is_empty()
+            || case.name == "initializationError"
+            || case.name == class
+            || case.name == simple;
+        if class_level {
+            self.case_class_failed |= case.outcome == reports::Outcome::Failed;
+            self.case_class_skipped |= case.outcome == reports::Outcome::Skipped;
+            return;
+        }
+        let (_, id) = jvm::test_id(class, method_of_case(&case.name), true);
+        let slot = self.cases.entry(id).or_default();
+        slot.0.push(case.outcome);
+        slot.1 = slot.1.saturating_add(case.time_ms);
+    }
+
     /// Its events or its reports say something of it failed.
     fn any_failed(&self) -> bool {
         self.events
@@ -568,21 +592,9 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 }
                 let class = case.classname.as_str();
                 let top = class.split('$').next().unwrap_or(class).to_string();
-                let entry = seen.entry((module.dir.clone(), top.clone())).or_default();
-                entry.from_reports = true;
-                let simple = top.rsplit('.').next().unwrap_or(&top);
-                let class_level = case.name.is_empty()
-                    || case.name == "initializationError"
-                    || case.name == class
-                    || case.name == simple;
-                if class_level {
-                    entry.case_class_failed |= case.outcome == reports::Outcome::Failed;
-                    continue;
-                }
-                let (_, id) = jvm::test_id(class, method_of_case(&case.name), true);
-                let slot = entry.cases.entry(id).or_default();
-                slot.0.push(case.outcome);
-                slot.1 = slot.1.saturating_add(case.time_ms);
+                seen.entry((module.dir.clone(), top))
+                    .or_default()
+                    .add_case(&case);
             }
         }
     }
@@ -839,6 +851,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
             }
         }
         class_failed = any_failed;
+        class_skipped = c.case_class_skipped;
         open = false;
         complete = true;
         deselected = false;

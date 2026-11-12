@@ -18,24 +18,9 @@ fn from_reports(files: &[&str], class: &str) -> Option<super::super::Seen> {
     let mut seen = ClassSeen::default();
     for name in files {
         for case in reports::cases(&data(name)).unwrap() {
-            let top = case.classname.split('$').next().unwrap().to_string();
-            if top != class {
-                continue;
+            if case.classname.split('$').next().unwrap() == class {
+                seen.add_case(&case);
             }
-            seen.from_reports = true;
-            let simple = top.rsplit('.').next().unwrap();
-            if case.name.is_empty()
-                || case.name == "initializationError"
-                || case.name == case.classname
-                || case.name == simple
-            {
-                seen.case_class_failed |= case.outcome == reports::Outcome::Failed;
-                continue;
-            }
-            let (_, id) = jvm::test_id(&case.classname, method_of_case(&case.name), true);
-            let slot = seen.cases.entry(id).or_default();
-            slot.0.push(case.outcome);
-            slot.1 += case.time_ms;
         }
     }
     decide_class(&seen, false)
@@ -181,12 +166,7 @@ fn a_skipped_test_is_told_and_finishes_only_in_a_run_where_nothing_failed() {
         let mut seen = ClassSeen::default();
         for case in reports::cases(report).unwrap() {
             if case.classname == name {
-                seen.from_reports = true;
-                seen.cases
-                    .entry(case.name.clone())
-                    .or_default()
-                    .0
-                    .push(case.outcome);
+                seen.add_case(&case);
             }
         }
         seen
@@ -229,6 +209,14 @@ fn a_skipped_test_is_told_and_finishes_only_in_a_run_where_nothing_failed() {
     assert!(of("p.A", false).facts.complete);
     let b = of("p.B", false);
     assert!(b.facts.complete && b.facts.skipped);
+    // A class JUnit 4 skipped whole, as Surefire's report says it: told skipped.
+    let ignored = br#"<testsuite name="p.Ignored"><testcase name="p.Ignored" classname="p.Ignored"><skipped/></testcase></testsuite>"#;
+    let mut seen = ClassSeen::default();
+    for case in reports::cases(ignored).unwrap() {
+        seen.add_case(&case);
+    }
+    let ignored = decide_class(&seen, true).unwrap();
+    assert!(ignored.facts.skipped && !ignored.facts.failed);
 }
 
 // covers: C-47
