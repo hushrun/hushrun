@@ -213,6 +213,12 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   no longer keep the first start's passes when the second fails: the second start leaves a
   `.started` file, no test file or test of that run records a pass, and the run says why once. A
   `.started` file whose content is a JSON object with a `why` gives the reason the run says.
+- A script that starts Jest or Vitest for something that runs no test file and then for the tests
+  (`jest --clearCache && jest`, `vitest list && vitest run`) is one start again, and keeps its
+  passes: a start that ran no test file gives up its claim on the run as it ends, and a start only
+  counts as a second one once it runs test files.
+- `hushrun why` says what happened when a Jest or Vitest test kept nothing after an error no test
+  owns: Jest's error it couldn't charge to a test, or Vitest's error with the file it came from.
 - With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
   tests: Go names only what failed, so a test that skipped because another failed looked passed.
   The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.

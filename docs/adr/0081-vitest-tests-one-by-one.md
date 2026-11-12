@@ -183,3 +183,21 @@ only the first start: what another start ran can't be told"}`, which the core sa
 of its own sentence: the contract now reads a `.started` file's `why`, when its content is a JSON
 object with one. No unit and no test of that run records a pass; a fail records as usual, and the
 second start's own failure is COMMAND's. A COMMAND with one start is unchanged.
+
+## Amendment 4: a start that runs no test file, and an error no test owns (2026-11-12)
+
+A reviewer ran `vitest list`, `vitest related` with nothing related and a `vitest run` that found no
+test file before the run of the tests in one script: each claimed the run when its config loaded,
+so the start that ran the tests was taken for a second start, and no pass of the script was ever
+kept. Now a start whose reporter never heard a run end with a test file run or left out gives the
+claim up as it ends (the claim file reads `released:<pid>`); a start after it takes the run and
+removes the main process's file that one wrote, and with none, that file stands. A start that finds
+the run claimed says it is a second start only when a run with test files starts (the reporter's
+`onTestRunStart`): `vitest list` sorts its files and starts no run.
+
+An error no test owns (an unhandled rejection, a timer that threw after its test) makes Vitest fail
+the run, and its main process's facts keep no pass of it (`failuresByUnit: false`). `hushrun why`
+then had nothing true to say of the tests. The main process now keeps each such error with the test
+file Vitest says it came from (`settings.unhandled`), and every test of the run that didn't fail is
+told not finished with a `notKept` sentence naming them, which the core keeps with the test's row
+(C-37). A run that records nothing stores its rows only once the core does so.
