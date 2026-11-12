@@ -257,6 +257,10 @@ pub struct TestFacts {
     /// What the adapter couldn't follow inside its own window: its alone.
     #[serde(default)]
     pub not_followed: Vec<Unfollowed>,
+    /// \[C-39\] The adapter never leaves it out, whatever `reuseTests` lists, such as one whose id
+    /// another test of its file shares: it records no key of its own, so no plan lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never_left_out: bool,
 }
 
 /// \[ADR 0077\] Files that ran and files opened, by index into the file's `paths`.
@@ -384,6 +388,8 @@ pub struct MergedTest {
     pub deselected: bool,
     pub duration_ms: u64,
     pub not_followed: BTreeSet<NotFollowed>,
+    /// \[C-39\] A process said it never leaves it out.
+    pub never_left_out: bool,
     /// What ran, was opened and listed while it ran, from the root; `None` when a process didn't
     /// say, or said it in a way that can't be read: then what it read can't be told test by test.
     pub ran: Option<BTreeSet<String>>,
@@ -507,6 +513,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, file: &FactsFile, tests:
         merged.finished |= test.finished;
         merged.failed |= test.failed;
         merged.deselected &= test.deselected;
+        merged.never_left_out |= test.never_left_out;
         merged.duration_ms = merged.duration_ms.saturating_add(test.duration_ms);
         merged
             .not_followed

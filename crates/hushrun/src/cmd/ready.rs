@@ -937,6 +937,54 @@ fn tests_note(told: &TestsTold<'_>) -> Option<String> {
     Some(match previewed {
         crate::units::Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
         crate::units::Previewed::Plan {
+            total,
+            run,
+            reused,
+            tests: Some(counted),
+            ..
+        } if counted.one_by_one > 0 || counted.tests.is_some_and(|(_, r)| r > 0) => {
+            // \[C-39\] With tests as the unit: tests, where every test file's are known here.
+            let who = if here { "a run here would" } else { "CI would" };
+            let passed = if here { "passed here" } else { "passed" };
+            let n = |n: usize| crate::cmd::usage::thousands(n as u64);
+            let files = |n: usize| if n == 1 { "test file" } else { "test files" };
+            match counted.tests {
+                Some((all, reused_tests)) => {
+                    let they = if reused_tests == 1 { "it" } else { "they" };
+                    format!(
+                        "{label}: {who} run {} of {} {}, in {} of {} {}; {} already {passed} on the files {they} read",
+                        n(all - reused_tests),
+                        n(all),
+                        if all == 1 { "test" } else { "tests" },
+                        n(counted.files_run),
+                        n(counted.files_total),
+                        files(counted.files_total),
+                        n(reused_tests),
+                    )
+                }
+                None => {
+                    let _ = (run, reused);
+                    let they = if counted.files_reused == 1 {
+                        "it"
+                    } else {
+                        "they"
+                    };
+                    format!(
+                        "{label}: {who} run {} of {total} {}; {} already {passed} on the files {they} read, and so did {} {} of the others",
+                        n(counted.files_run),
+                        files(total),
+                        n(counted.files_reused),
+                        n(counted.one_by_one),
+                        if counted.one_by_one == 1 {
+                            "test"
+                        } else {
+                            "tests"
+                        },
+                    )
+                }
+            }
+        }
+        crate::units::Previewed::Plan {
             total, run, reused, ..
         } => {
             let who = if here { "a run here would" } else { "CI would" };
