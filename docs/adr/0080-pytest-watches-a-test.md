@@ -122,3 +122,8 @@ test that failed first.
   pass. The plugin now notes what a test was served as its teardown begins, while the request is
   alive and before any fixture ends; names are the match only for a test whose teardown never
   began.
+- **Why it kept no pass.** A test a failing wider fixture served is told with `notKept`, naming
+  the fixture, so `hushrun why` says the fixture's end kept it, not that it didn't finish.
+- **A pytest a test starts.** It makes no `.started` file: the session sets
+  `HUSHRUN_PYTEST_SESSION` in its own environment, and a pytest that inherits it is a test's
+  doing (ADR 0077, Amendment 11).
