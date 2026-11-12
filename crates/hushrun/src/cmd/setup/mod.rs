@@ -389,6 +389,8 @@ struct Look {
     vitest_line: Option<String>,
     /// \[ADR 0084\] The line Gradle's settings file needs for a check whose `tests` are on.
     gradle_line: Option<String>,
+    /// \[ADR 0082\] The line Jest's config needs where a script replaces NODE_OPTIONS.
+    jest_line: Option<String>,
     /// \[C-38\] Some check of hushrun.yaml has `tests` on (`observe` or `reuse`).
     tests_on: bool,
 }
@@ -474,6 +476,16 @@ impl Look {
                 .collect();
             crate::units::gradle::proposal(root, &checks)
         });
+        // \[ADR 0082\] And in Jest's config, where a script replaces NODE_OPTIONS.
+        let jest_line = policy.as_ref().and_then(|p| {
+            let checks: Vec<String> = p
+                .tests
+                .iter()
+                .filter(|(_, t)| t.is_on())
+                .map(|(name, _)| name.to_string())
+                .collect();
+            crate::units::jest::proposal(root, &checks)
+        });
         let mut members = Vec::new();
         let mut package = package;
         if let (Some(root_package), Some(workspace)) = (&mut package, &workspace) {
@@ -553,6 +565,7 @@ impl Look {
             reports_skip,
             vitest_line,
             gradle_line,
+            jest_line,
             tests_on,
             members,
             job_runs: BTreeMap::new(),
@@ -1445,6 +1458,7 @@ impl Plan {
         }
         plan.manual.extend(look.vitest_line.clone());
         plan.manual.extend(look.gradle_line.clone());
+        plan.manual.extend(look.jest_line.clone());
         if look.unreadable_policy && !look.proposal.is_empty() {
             plan.manual.push(format!(
                 "{POLICY_FILE} doesn't parse, so init leaves it and CI's files as they are: fix it, then run hushrun init again"

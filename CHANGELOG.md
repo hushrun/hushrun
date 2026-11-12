@@ -8,7 +8,7 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 A test as the unit ([ADR 0077](docs/adr/0077-a-test-as-the-unit.md)): with `tests.unit: test`, a
 check reuses each test of a test file on its own, beside its test files, for pytest, Vitest,
-Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check asks.
+Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check asks.
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
@@ -17,13 +17,14 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 ### Added
 
 - CTest ([ADR 0087](docs/adr/0087-ctest.md)): C and C++ test programs built with CMake are observed and reused, and each CTest test with `tests.unit: test`, through a `ctest` of hushrun's first on `PATH`.
+- Jest 29 and 30 are observed, test files and tests, through `NODE_OPTIONS` ([ADR 0082](docs/adr/0082-jest.md)).
 - Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
-  that fails runs once more alone. pytest, Vitest, Go, Gradle, Maven, `swift test` and CTest know
-  tests; Cargo reuses by test binary and says so once. With `reads: test`, pytest on Python 3.12 or
-  later and Vitest watch each test, and a test is
+  that fails runs once more alone. pytest, Vitest, Jest, Go, Gradle, Maven, `swift test` and CTest
+  know tests; Cargo reuses by test binary and says so once. With `reads: test`, pytest on Python
+  3.12 or later, Vitest and Jest watch each test, and a test is
   keyed by what it read alone ([ADR 0078](docs/adr/0078-what-a-test-read.md),
   [ADR 0080](docs/adr/0080-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
   runs as `reads: file`, and says so once.

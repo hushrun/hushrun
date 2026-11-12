@@ -37,6 +37,8 @@ const BY_NAME: &[(&str, &str)] = &[
     ("cargo nextest run", "cargo"),
     ("go test ./...", "go"),
     ("npx vitest run", "vitest"),
+    ("npx jest", "jest"),
+    ("node node_modules/jest/bin/jest.js --ci", "jest"),
     ("mvn test", "maven"),
     ("./mvnw verify", "maven"),
     ("gradle test", "gradle"),
@@ -48,7 +50,7 @@ const BY_NAME: &[(&str, &str)] = &[
 
 #[test]
 fn each_adapter_gets_the_command_that_names_its_program() {
-    assert_eq!(RECOGNIZED.len(), 7);
+    assert_eq!(RECOGNIZED.len(), 8);
     let dir = loads_all();
     for (command, adapter) in BY_NAME {
         assert_eq!(
