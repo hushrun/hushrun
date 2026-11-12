@@ -730,9 +730,13 @@ pub(super) fn forward_signals(child: u32) -> Option<Forwarding> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let arrived = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicBool::new(false));
+    let mut flags = Vec::new();
     for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
         let value = usize::try_from(signal).ok()?;
-        signal_hook::flag::register_usize(signal, Arc::clone(&arrived), value).ok()?;
+        flags.push(signal_hook::flag::register_usize(signal, Arc::clone(&arrived), value).ok()?);
+        // Once forwarding stops, the signal's own action again (signal-hook can't put the
+        // default handler back): ending this process as it would have.
+        signal_hook::flag::register_conditional_default(signal, Arc::clone(&done)).ok()?;
     }
     let pid = i32::try_from(child)
         .ok()
@@ -751,17 +755,26 @@ pub(super) fn forward_signals(child: u32) -> Option<Forwarding> {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     });
-    Some(Forwarding(done))
+    Some(Forwarding(done, flags))
 }
 
-/// While it lives, signals go on to the test.
+/// While it lives, signals go on to the test; once dropped, a signal does what it would without
+/// hushrun (\[ADR 0086\]: a stand-in that lists or reads after its program ended stops on it).
 #[cfg(unix)]
-pub(super) struct Forwarding(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(super) struct Forwarding(
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    Vec<signal_hook::SigId>,
+);
 
 #[cfg(unix)]
 impl Drop for Forwarding {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The flags that pass a signal on, which would only be stored now; the default actions
+        // registered beside them stay.
+        for id in &self.1 {
+            signal_hook::low_level::unregister(*id);
+        }
     }
 }
 
