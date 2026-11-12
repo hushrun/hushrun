@@ -952,3 +952,52 @@ fn a_list_after_the_run_that_fails_where_tests_were_left_out_runs_again_whole() 
         facts[0]
     );
 }
+
+// covers: C-48, C-32
+#[test]
+fn a_skip_in_a_run_that_failed_records_nothing() {
+    let Some(swift) = swift() else {
+        tools("Swift 6", false);
+        return;
+    };
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", ".build/\n"),
+        file(
+            "Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Skips\", targets: [\n  .testTarget(name: \"XSkipTests\"),\n  .testTarget(name: \"TSkipTests\"),\n  .testTarget(name: \"FailTests\"),\n  .testTarget(name: \"OkTests\"),\n])\n",
+        ),
+        file(
+            "Tests/XSkipTests/XSkipTests.swift",
+            "import XCTest\n\nfinal class XSkipTests: XCTestCase {\n    func testOk() {}\n    func testSkip() throws { throw XCTSkip(\"not here\") }\n}\n",
+        ),
+        file(
+            "Tests/TSkipTests/TSkipTests.swift",
+            "import Testing\n\n@Test func ok() {}\n@Test(.disabled(\"off\")) func off() {}\n",
+        ),
+        file(
+            "Tests/FailTests/FailTests.swift",
+            "import XCTest\n\nfinal class FailTests: XCTestCase {\n    func testFails() { XCTFail(\"no\") }\n}\n",
+        ),
+        file(
+            "Tests/OkTests/OkTests.swift",
+            "import XCTest\n\nfinal class OkTests: XCTestCase {\n    func testOk() {}\n}\n",
+        ),
+    ];
+    let r = Repo::new(&swift, &files);
+    let ran = r.run(SWIFT_TEST, &[]);
+    assert_ne!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // FailTests failed and OkTests passed; the two targets with a skipped test record no pass,
+    // since a skip in a run that failed proves nothing.
+    let mut results = Vec::new();
+    collect(&r.cache.join("results/units/v0"), &mut results);
+    let mut results: Vec<String> = results
+        .iter()
+        .map(|p| {
+            let v: Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+            v["result"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    results.sort();
+    assert_eq!(results, ["fail", "pass"], "{}", ran.stderr);
+}

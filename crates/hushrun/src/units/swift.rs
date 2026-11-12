@@ -2045,15 +2045,19 @@ fn tested(
         } else {
             None
         };
-        let (finished, failed, duration_ms) = match outcome {
-            Some(Outcome::Passed(ms) | Outcome::Skipped(ms)) => (true, false, *ms),
-            Some(Outcome::Failed(ms)) => (true, true, *ms),
+        // \[C-32\] Under --parallel the xunit file reads an XCTSkip as a pass: in a run that
+        // failed, where a skip records nothing, an XCTest pass there may be a skip.
+        let may_skip = xctest(id) && parsed.parallel && exit != Some(0);
+        let (finished, failed, duration_ms, skipped) = match outcome {
+            Some(Outcome::Passed(ms)) => (true, false, *ms, may_skip),
+            Some(Outcome::Skipped(ms)) => (true, false, *ms, true),
+            Some(Outcome::Failed(ms)) => (true, true, *ms, false),
             // A start without an end, in a run that failed, is a crash.
             Some(Outcome::Started) => {
                 in_flight |= !xctest(id);
-                (false, exit != Some(0), 0)
+                (false, exit != Some(0), 0, false)
             }
-            None => (false, false, 0),
+            None => (false, false, 0, false),
         };
         any_failed |= failed;
         by_target
@@ -2065,6 +2069,7 @@ fn tested(
                 failed,
                 deselected: left.holds(id) && outcome.is_none(),
                 duration_ms,
+                skipped,
                 ..TestFacts::default()
             });
     }
@@ -2477,6 +2482,68 @@ mod tests {
             .find(|t| t.id == "Outer.InnerTests/testInner")
             .unwrap();
         assert_eq!(inner.finished, !cfg!(target_os = "macos"));
+    }
+
+    // covers: C-48, C-32
+    #[test]
+    fn a_skipped_test_is_told_as_skipped() {
+        let listing = Listing::parse("A.C/testSkip\nA.C/testOk\nB.s()\n");
+        let console: BTreeMap<String, Outcome> = [
+            ("A.C/testSkip".to_string(), Outcome::Skipped(1)),
+            ("A.C/testOk".to_string(), Outcome::Passed(1)),
+        ]
+        .into();
+        let events = Events {
+            outcomes: [("B.s()".to_string(), Outcome::Skipped(0))].into(),
+            runs_started: 1,
+            runs_ended: 1,
+        };
+        let parsed = parse::<&str>(&[]);
+        let file = tested(
+            &listing,
+            &console,
+            Some(&events),
+            None,
+            &LeftOut::default(),
+            &parsed,
+            Some(1),
+            Path::new("/p"),
+        );
+        let skipped: BTreeMap<String, bool> = file
+            .units
+            .iter()
+            .flat_map(|u| u.tests.iter().flatten().map(|t| (t.id.clone(), t.skipped)))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("C/testOk".to_string(), false),
+                ("C/testSkip".to_string(), true),
+                ("s()".to_string(), true)
+            ]
+            .into()
+        );
+        // Under --parallel the xunit file reads an XCTSkip as a pass: in a run that failed, any
+        // XCTest pass there may be a skip.
+        let parallel = parse(&["--parallel"]);
+        let xunit: BTreeMap<String, Outcome> =
+            [("A.C/testOk".to_string(), Outcome::Passed(1))].into();
+        for (exit, may_skip) in [(Some(1), true), (Some(0), false)] {
+            let file = tested(
+                &listing,
+                &BTreeMap::new(),
+                None,
+                Some(&xunit),
+                &LeftOut::default(),
+                &parallel,
+                exit,
+                Path::new("/p"),
+            );
+            let ok = file.units[0].tests.as_ref().unwrap();
+            let ok = ok.iter().find(|t| t.id == "C/testOk").unwrap();
+            assert!(ok.finished);
+            assert_eq!(ok.skipped, may_skip, "{exit:?}");
+        }
     }
 
     // covers: C-48
