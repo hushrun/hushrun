@@ -340,6 +340,14 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Parsed {
                     "with --enable-code-coverage, hushrun's listing after the run could add to the coverage data".into(),
                 );
             }
+            // \[C-48\] It runs the test products as an earlier build left them, which may be
+            // older than the files hushrun keys them by (a `swift build --build-tests` before,
+            // and a change since): no pass of it is known to be of these files.
+            "--skip-build" => {
+                out.refused = Some(
+                    "with --skip-build, swift test runs what an earlier build made, which may be older than the files hushrun would record it for".into(),
+                );
+            }
             "--maximum-repetitions" | "--repeat-until" => {
                 out.refused = Some(format!(
                     "with {name}, swift test runs a test more than once"
@@ -2143,6 +2151,28 @@ mod tests {
             Some(5)
         );
         assert_eq!(swift_major("Swift Package Manager - Swift 6.4.2"), Some(6));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_run_of_what_was_built_before_is_refused() {
+        // --skip-build runs the test products as they were built, which may be older than the
+        // files hushrun keys them by: nothing is left out or recorded.
+        let p = parse(&["--skip-build", "--parallel"]);
+        assert!(
+            p.refused
+                .as_deref()
+                .is_some_and(|w| w.contains("--skip-build")),
+            "{p:?}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let got = recognize(&words("swift test --skip-build"), dir.path()).unwrap();
+        assert!(
+            matches!(&got, Err(e) if e.contains("--skip-build")),
+            "{got:?}"
+        );
+        // --skip-update builds as usual.
+        assert!(parse(&["--skip-update"]).refused.is_none());
     }
 
     // covers: C-48
