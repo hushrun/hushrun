@@ -284,14 +284,17 @@ const OTHER_KEYED: [&str; 16] = [
     "SOURCE_DATE_EPOCH",
 ];
 
-/// The variables of [`OTHER_KEYED`] that only the C driver (`cc`) and the linker read. A
-/// library's compile runs neither (rustc writes the `.rlib` and `.rmeta` itself), so they are
-/// keyed for linked outputs only.
-const LINKER_ONLY: [&str; 4] = [
+/// The variables of [`OTHER_KEYED`] that only the C driver (`cc`) and the linker read, or that
+/// rustc reads only to link (the SDK: `SDKROOT`, `DEVELOPER_DIR`). A library's compile links
+/// nothing (rustc writes the `.rlib` and `.rmeta` itself), so they are keyed for linked outputs
+/// only: on macOS a library's bytes are the same under two SDKs and both developer folders.
+const LINKER_ONLY: [&str; 6] = [
     "LIBRARY_PATH",
     "LD_RUN_PATH",
     "COMPILER_PATH",
     "GCC_EXEC_PREFIX",
+    "SDKROOT",
+    "DEVELOPER_DIR",
 ];
 
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
@@ -1454,7 +1457,8 @@ pub(crate) mod tests {
     #[test]
     fn key_env_keeps_cargo_variables_but_the_named_ones() {
         let (argv, mut env) = workspace_lib();
-        env.vars.insert("SDKROOT".into(), "/sdk".into());
+        env.vars
+            .insert("MACOSX_DEPLOYMENT_TARGET".into(), "11.0".into());
         env.vars.insert("RUSTC_BOOTSTRAP".into(), "1".into());
         env.vars.insert("CARGO_SBOM_PATH".into(), "/x".into());
         env.vars
@@ -1470,8 +1474,8 @@ pub(crate) mod tests {
                 "CARGO_MANIFEST_PATH",
                 "CARGO_PKG_NAME",
                 "CARGO_PKG_VERSION",
+                "MACOSX_DEPLOYMENT_TARGET",
                 "RUSTC_BOOTSTRAP",
-                "SDKROOT",
             ]
         );
         let with = inv
@@ -1940,9 +1944,16 @@ pub(crate) mod tests {
             );
             // A library runs no C driver or linker: what only they read is not its input.
             let library = handled(&argv(&minimal("")), &env);
+            // rustc reads the SDK (`SDKROOT`, `DEVELOPER_DIR`) only to link: a library's bytes
+            // are the same with any of them (two SDKs and both developer folders tried).
             let linker_only = matches!(
                 name,
-                "LIBRARY_PATH" | "LD_RUN_PATH" | "COMPILER_PATH" | "GCC_EXEC_PREFIX"
+                "LIBRARY_PATH"
+                    | "LD_RUN_PATH"
+                    | "COMPILER_PATH"
+                    | "GCC_EXEC_PREFIX"
+                    | "SDKROOT"
+                    | "DEVELOPER_DIR"
             );
             assert_eq!(
                 library.key_env().get(name).map(String::as_str),

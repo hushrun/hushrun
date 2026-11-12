@@ -63,7 +63,9 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
 `XROS_DEPLOYMENT_TARGET`, `SDKROOT`, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
-`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`); `SOURCE_DATE_EPOCH`, which compilers and
+`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`), but for a library, which links nothing,
+neither those nor `SDKROOT` (rustc reads the SDK only to link; a library's bytes are the same
+under two SDKs); `SOURCE_DATE_EPOCH`, which compilers and
 build tools take "now" from when it is set (the wrapper never sets it); the person's extra
 variables; and what the
 wrapper adds to the compile besides the remaps (B-9), with roots replaced, so that a program
