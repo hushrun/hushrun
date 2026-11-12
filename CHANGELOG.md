@@ -216,6 +216,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   test-jar dependency now runs when those test classes change.
 - Maven: a module another module uses only through a plugin's configuration, such as the
   dependency plugin's `copy` of its jar, is now read by that module's tests.
+- Gradle: a test-classpath jar from `mavenLocal()` is no longer dropped silently: where a project
+  of the build published it, the class reads that project; otherwise the class is not observed,
+  and says why.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

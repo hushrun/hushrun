@@ -249,6 +249,23 @@ runner without events never reused whole) wasn't needed. Maven's Surefire alread
 build when a test ends its fork (`The forked VM terminated without properly saying goodbye`), and
 writes no report of that class: a test checks it.
 
+## Amendment 9: a jar of the local Maven repository (2026-11-12)
+
+A test classpath entry outside the repository and outside Gradle's user home was dropped without
+a word: a jar a project of this build published to `mavenLocal()`, which another project takes by
+its coordinates, was neither read nor not followed, and a change to the publishing project reused
+the tests that ran its jar. The decision: an entry below a file-based Maven repository the build
+resolves from (`mavenLocal()`, or any `maven { url = file(…) }`, a project's or the settings') is
+never dropped: when its path's coordinates, `group:name`, are a project of this build, the class
+reads that project as it reads a project dependency; else it is `not observed`,
+`local-maven-repository`, naming the coordinates and the repository, since what built that jar
+isn't known to hushrun. Gradle's own caches (`<Gradle user home>/caches/modules-2`) are fine as
+they were: they hold what came from a remote repository, stored by its coordinates and checksum,
+which no file of this checkout made. Maven's side: the extension names a reactor module by
+`groupId:artifactId` without its version, so a dependency on a module's coordinates at another
+version, resolved from the local repository, still reads that module's sources, which a test
+checks.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

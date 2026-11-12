@@ -1551,3 +1551,48 @@ fn a_module_a_plugin_of_another_names_is_read_by_that_modules_tests() {
         second.stdout
     );
 }
+
+// covers: C-47
+#[test]
+fn a_dependency_on_a_modules_coordinates_at_another_version_reads_that_module() {
+    let Some(maven) = maven() else { return };
+    if online() {
+        return;
+    }
+    // app takes lib at 0.9, which the local repository holds (a jar an earlier build of this
+    // checkout installed), not the reactor's 1.0.
+    let mut files = shop("reuse");
+    for (path, text) in files.iter_mut() {
+        if path == "app/pom.xml" {
+            *text = text.replace(
+                "<version>1.0</version></dependency>",
+                "<version>0.9</version></dependency>",
+            );
+        }
+        if path == "app/src/main/java/shop/app/Cart.java" {
+            *text = "package shop.app;\n\npublic class Cart {\n  public static int total(int... xs) { return 6; }\n}\n".into();
+        }
+    }
+    let r = Repo::new(&files, maven);
+    let dir = r.root.join("m2/shop/lib/0.9");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut empty = b"PK\x05\x06".to_vec();
+    empty.extend([0u8; 18]);
+    std::fs::write(dir.join("lib-0.9.jar"), &empty).unwrap();
+    std::fs::write(
+        dir.join("lib-0.9.pom"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>shop</groupId><artifactId>lib</artifactId><version>0.9</version></project>\n",
+    )
+    .unwrap();
+    let first = r.run(&[], &["test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    // The extension names a module by its coordinates without a version: app's classes read lib.
+    let map = r.map();
+    assert!(
+        map["units"][CART_TEST]["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("lib/src/main/java/shop/lib/Price.java")),
+        "{map:#}"
+    );
+}

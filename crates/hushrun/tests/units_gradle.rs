@@ -1590,3 +1590,106 @@ fn a_test_that_ends_its_jvm_records_no_pass_under_gradles_own_runners() {
         ran.stderr
     );
 }
+
+// covers: C-30, C-46
+#[test]
+fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followed() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let local = tempfile::tempdir().unwrap();
+    let m2 = std::fs::canonicalize(local.path()).unwrap();
+    // A jar of the local repository nothing here builds: an empty zip and its POM.
+    let thing = m2.join("com/other/thing/1.0");
+    std::fs::create_dir_all(&thing).unwrap();
+    let mut empty = b"PK\x05\x06".to_vec();
+    empty.extend([0u8; 18]);
+    std::fs::write(thing.join("thing-1.0.jar"), &empty).unwrap();
+    std::fs::write(
+        thing.join("thing-1.0.pom"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.other</groupId><artifactId>thing</artifactId><version>1.0</version></project>\n",
+    )
+    .unwrap();
+    // lib publishes to the local repository, and app takes it from there, not as a project.
+    let mut files = build(Framework::Junit5, &["lib", "app"], "reuse");
+    files[3] = file(
+        "build.gradle",
+        "subprojects {\n  apply plugin: 'java'\n  repositories { mavenLocal(); mavenCentral() }\n  dependencies {\n    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n  }\n  tasks.withType(Test).configureEach { useJUnitPlatform() }\n}\nproject(':lib') { apply plugin: 'maven-publish'; group = 'com.example'; version = '1.0'\n  publishing { publications { maven(MavenPublication) { from components.java } } } }\nproject(':app') {\n  dependencies { implementation 'com.example:lib:1.0'; testImplementation(System.getenv('THING') ? 'com.other:thing:1.0' : 'com.example:lib:1.0') }\n  tasks.named('compileJava') { mustRunAfter(':lib:publishToMavenLocal') }\n  tasks.named('test') { mustRunAfter(':lib:publishToMavenLocal') }\n}\n",
+    );
+    files.extend([
+        file(
+            "lib/src/main/java/lib/Lib.java",
+            "package lib;\npublic class Lib { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "lib/src/test/java/lib/LibTest.java",
+            "package lib;\nimport org.junit.jupiter.api.*;\nclass LibTest { @Test void v() { Assertions.assertTrue(Lib.v() > 0); } }\n",
+        ),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void v() { Assertions.assertEquals(1, lib.Lib.v()); } }\n",
+        ),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("app/src/test/java/app/Green{n}Test.java"),
+            &format!("package app;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    let r = Repo::new(&files);
+    let repo_local = format!("-Dmaven.repo.local={}", m2.display());
+    let args = |extra: &[&'static str]| -> Vec<String> {
+        let mut out: Vec<String> = [
+            "run",
+            "unit",
+            "--",
+            gradle.as_str(),
+            "--offline",
+            "--console=plain",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        out.push(repo_local.clone());
+        out.extend(extra.iter().map(|s| s.to_string()));
+        out
+    };
+    let run = |extra: &[&'static str], env: &[(&str, &str)]| {
+        let a = args(extra);
+        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), env)
+    };
+    let tasks = [":lib:publishToMavenLocal", "test", "--continue"];
+    let first = run(&tasks, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // app's classes read lib's sources: lib built the jar they took from the local repository.
+    let map = r.map();
+    assert!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("lib/src/main/java/lib/Lib.java")),
+        "{map:#}"
+    );
+    r.write(
+        "lib/src/main/java/lib/Lib.java",
+        "package lib;\npublic class Lib { public static int v() { return 2; } }\n",
+    );
+    let second = run(&tasks, &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("AppTest > v() FAILED"),
+        "{}",
+        second.stdout
+    );
+    // A jar of the local repository no project of the build makes: the class that ran (AppTest,
+    // which failed and runs again) isn't followed, and says why.
+    let third = run(&tasks, &[("THING", "1")]);
+    assert_eq!(third.code, 1, "{}\n{}", third.stdout, third.stderr);
+    let map = r.map();
+    assert_eq!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["notFollowed"],
+        json!(["local-maven-repository"]),
+        "{map:#}"
+    );
+}
