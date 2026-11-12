@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn finds_a_needle_at_the_start_and_at_the_very_end() {
         let dir = tempfile::tempdir().unwrap();
-        let root = b"/Users/me/work/tree-a";
+        let root = b"/home/dev/work/tree-a";
         let n = needles(&[root]).with_chunk(16);
 
         let mut start = root.to_vec();
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn a_near_miss_is_not_a_hit() {
         let dir = tempfile::tempdir().unwrap();
-        let root: &[u8] = b"/Users/me/work/tree-a";
+        let root: &[u8] = b"/home/dev/work/tree-a";
         let n = needles(&[root]).with_chunk(4);
         // Each byte of the root changed in turn, and the root cut short by one at the end.
         for i in 0..root.len() {
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn the_one_pass_hash_equals_hash_file_and_runs_to_the_end_after_a_hit() {
         let dir = tempfile::tempdir().unwrap();
-        let root: &[u8] = b"/Users/me/work/tree-a";
+        let root: &[u8] = b"/home/dev/work/tree-a";
         for len in [1usize, 1000, (1 << 20) + 13, 3 * (1 << 20) + 5] {
             let mut bytes = root.to_vec();
             bytes.extend((0..len).map(|i| (i * 31 % 251) as u8));
@@ -412,14 +412,14 @@ mod tests {
         drop(bytes);
         let n = Needles::new(
             [
-                "/Users/someone/Documents/project/.wt/feature-branch",
-                "/private/Users/someone/Documents/project/.wt/feature-branch",
-                "/Users/someone/Documents/project/.wt/feature-branch/crates/app",
-                "/private/Users/someone/Documents/project/.wt/feature-branch/crates/app",
-                "/Users/someone/Documents/project/.wt/feature-branch/target/debug/deps",
-                "/private/Users/someone/Documents/project/.wt/feature-branch/target/debug/deps",
-                "/Users/someone/Documents/project/.wt/feature-branch/target/debug/build/app-0123456789abcdef/out",
-                "/private/Users/someone/Documents/project/.wt/feature-branch/target/debug/build/app-0123456789abcdef/out",
+                "/home/dev/Documents/project/.wt/feature-branch",
+                "/private/home/dev/Documents/project/.wt/feature-branch",
+                "/home/dev/Documents/project/.wt/feature-branch/crates/app",
+                "/private/home/dev/Documents/project/.wt/feature-branch/crates/app",
+                "/home/dev/Documents/project/.wt/feature-branch/target/debug/deps",
+                "/private/home/dev/Documents/project/.wt/feature-branch/target/debug/deps",
+                "/home/dev/Documents/project/.wt/feature-branch/target/debug/build/app-0123456789abcdef/out",
+                "/private/home/dev/Documents/project/.wt/feature-branch/target/debug/build/app-0123456789abcdef/out",
             ]
             .iter()
             .map(|s| s.as_bytes().to_vec())

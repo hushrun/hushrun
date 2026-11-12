@@ -1878,8 +1878,8 @@ mod tests {
             ("OUT_DIR", "/o"),
             ("RUSTUP_TOOLCHAIN", "1.94.0"),
             ("PATH", "/usr/bin:/bin"),
-            ("HOME", "/Users/someone"),
-            ("CARGO_HOME", "/Users/someone/.cargo"),
+            ("HOME", "/home/dev"),
+            ("CARGO_HOME", "/home/dev/.cargo"),
             ("CARGO", "/bin/cargo"),
         ];
         let env = cleaned_env(
