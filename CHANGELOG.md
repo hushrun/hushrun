@@ -298,6 +298,13 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   path are now read; on Makefiles a source newer than its object makes the program stale; an
   in-source build says so in the run; and for `ctest` as the command the project's discovery runs
   once less, the plan's listing being taken.
+- CTest: whether a test program is older than what it is built from is decided once, the same on
+  Ninja and Makefiles, by the files' own times at their own resolution, and `ninja -n` is no
+  longer asked: a target that writes a header on every build (`add_custom_target(… ALL …)`) no
+  longer keeps every run from recording, a file system with coarse times no longer looks old, and
+  each program the build makes in a directory a test names must be up to date. The line names the
+  file and the object, and when make compares whole seconds and a build can't help, says to touch
+  the file.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build

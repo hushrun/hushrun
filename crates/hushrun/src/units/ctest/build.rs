@@ -3,13 +3,14 @@
 //!
 //! - **Ninja:** the build graph, walked from the program with `ninja -t query` (Ninja 1.10 has no
 //!   `-t inputs`), and each object's sources and headers as the compiler reported them, from
-//!   `ninja -t deps`. Up to date when `ninja -n <program>` has no work.
+//!   `ninja -t deps`.
 //! - **Makefiles:** every `CMakeFiles/<target>.dir/build.make`'s rules, walked from the program,
 //!   and each object's compiler depfile, `<object>.d`, a precompiled header's included (GCC
-//!   writes what the header read only there). Up to date, as make decides, when no object is older
-//!   than a file its depfile names, the program older than no object, and no file it read newer
-//!   than the program.
+//!   writes what the header read only there).
 //!   Both gave the same files in the spike.
+//! - Up to date, decided once for both by the files' own times ([`Walker::judge`]): no file of
+//!   the repository one of its objects was built from is newer than that object, and none of its
+//!   objects and libraries is newer than it.
 //! - A header or source a build rule writes (a generator the project builds and runs) reads what
 //!   that rule reads, to the end, in both: its script, its template, the program it runs, and that
 //!   program's own objects' headers from their records.
@@ -26,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The suffixes of C, C++, Objective-C and CUDA sources and headers: a test program's sources
 /// (C-30). Every other file a build names (a CMake file, a template, data) is in the rest set.
@@ -102,6 +104,8 @@ pub struct Walker<'a> {
     extras: HashMap<PathBuf, Extras>,
     /// The programs being walked, for a program another starts that starts it in turn.
     walking: BTreeSet<PathBuf>,
+    /// Each file's modification time, once read.
+    times: HashMap<PathBuf, Option<SystemTime>>,
 }
 
 /// What a build directory says of its programs beside its graph.
@@ -110,6 +114,8 @@ struct Extras {
     /// The outputs that are programs or modules (an executable's, a module's or a shared
     /// library's link), and those of phony edges (Ninja).
     programs: BTreeSet<String>,
+    /// Every link's output: the programs and modules, and the libraries, static ones included.
+    linked: BTreeSet<String>,
     phony: BTreeSet<String>,
     /// Each output's compile command's defines and flags: an object's (Ninja's `DEFINES` and
     /// `FLAGS`), or a target directory's (Makefiles' `flags.make`).
@@ -131,6 +137,8 @@ enum Dir {
         graph: BTreeMap<String, Vec<String>>,
         /// A custom command's output to its `DEPFILE`, from the top of the build directory.
         custom: BTreeMap<String, String>,
+        /// Its make compares times by the second (GNU Make 3.81, macOS's).
+        whole_seconds: bool,
     },
     Unread,
 }
@@ -156,6 +164,7 @@ impl<'a> Walker<'a> {
             assigned: assigned.to_vec(),
             extras: HashMap::new(),
             walking: BTreeSet::new(),
+            times: HashMap::new(),
         }
     }
 
@@ -187,9 +196,14 @@ impl<'a> Walker<'a> {
                 let (ninja, outputs, depfiled) = (ninja.clone(), outputs.clone(), depfiled.clone());
                 self.ninja(&ninja, &outputs, &depfiled, build, &target)
             }
-            Some(Dir::Make { graph, custom }) if graph.contains_key(&target) => {
-                let (graph, custom) = (graph.clone(), custom.clone());
-                self.make(&graph, &custom, build, &target, program)
+            Some(Dir::Make {
+                graph,
+                custom,
+                whole_seconds,
+            }) if graph.contains_key(&target) => {
+                let (graph, custom, whole_seconds) =
+                    (graph.clone(), custom.clone(), *whole_seconds);
+                self.make(&graph, &custom, whole_seconds, build, &target)
             }
             _ => None,
         };
@@ -213,9 +227,9 @@ impl<'a> Walker<'a> {
 
     /// What a path a test names beside its program adds to what that program reads: a program a
     /// build rule makes, what it is built from; a directory of the repository, every source; a
-    /// directory of a build, every source and a program that can't be told up to date (which of
-    /// its programs the test starts can't be told); a file of the repository, itself; a file of a
-    /// build directory no rule makes (data the test reads or writes), nothing.
+    /// directory of a build, every source, and each program the build makes there must be up to
+    /// date (which of them the test starts can't be told); a file of the repository, itself; a
+    /// file of a build directory no rule makes (data the test reads or writes), nothing.
     pub fn named(&mut self, named: &super::select::Named) -> Built {
         use super::select::Named;
         match named {
@@ -228,15 +242,28 @@ impl<'a> Walker<'a> {
                     Built::default()
                 }
             }
-            Named::BuildDir(dir) => Built {
-                every_source: true,
-                stale: Some(Stale::Unknown(format!(
-                    "its test names {}, a directory of a build, whose programs it may start can't be told up to date",
-                    dir.display()
-                ))),
-                method: "every source",
-                ..Built::default()
-            },
+            Named::BuildDir { dir, build } => {
+                let mut out = Built {
+                    every_source: true,
+                    method: "every source",
+                    ..Built::default()
+                };
+                match self.programs_in(dir, build) {
+                    Some(programs) => {
+                        for program in programs {
+                            let built = self.program(&build.join(program), build);
+                            out.stale = Stale::either(out.stale.take(), built.stale);
+                        }
+                    }
+                    None => {
+                        out.stale = Some(Stale::Unknown(format!(
+                            "its test names {}, a directory of a build that can't be read, whose programs it may start can't be told up to date",
+                            dir.display()
+                        )));
+                    }
+                }
+                out
+            }
             Named::RepoDir(_) => Built {
                 every_source: true,
                 method: "every source",
@@ -247,6 +274,32 @@ impl<'a> Walker<'a> {
                 ..Built::default()
             },
         }
+    }
+
+    /// The programs and modules the build in `build` makes in `dir` or under it, from the top of
+    /// the build directory; `None` when the build can't be read.
+    fn programs_in(&mut self, dir: &Path, build: &Path) -> Option<Vec<String>> {
+        if !self.dirs.contains_key(build) {
+            let opened = self.open(build);
+            self.dirs.insert(build.to_path_buf(), opened);
+        }
+        let extras = self.extras.get(build)?;
+        let programs: Vec<String> = match self.dirs.get(build) {
+            Some(Dir::Ninja { .. }) => extras.programs.iter().cloned().collect(),
+            Some(Dir::Make { .. }) => extras
+                .links
+                .values()
+                .filter(|l| !l.ends_with(".a") && !l.ends_with(".lib"))
+                .cloned()
+                .collect(),
+            _ => return None,
+        };
+        Some(
+            programs
+                .into_iter()
+                .filter(|p| build.join(p).starts_with(dir))
+                .collect(),
+        )
     }
 
     /// Whether a rule of the build directory `build` makes `path`; true where the build can't be
@@ -291,6 +344,9 @@ impl<'a> Walker<'a> {
                         || rule.contains("SHARED_LIBRARY_LINKER")
                     {
                         extras.programs.insert(output.to_string());
+                        extras.linked.insert(output.to_string());
+                    } else if rule.contains("STATIC_LIBRARY_LINKER") {
+                        extras.linked.insert(output.to_string());
                     } else if rule == "phony" {
                         extras.phony.insert(output.to_string());
                     }
@@ -308,9 +364,16 @@ impl<'a> Walker<'a> {
                 let graph = make_graph(build);
                 self.extras
                     .insert(build.to_path_buf(), make_extras(build, &graph));
+                // GNU Make before 4 compares times by the second; a make that can't say is taken
+                // for one that does, which says only more.
+                let make = PathBuf::from(&dir.make_program);
+                let version = run(&make, build, &["--version"], &self.assigned).unwrap_or_default();
+                let whole_seconds =
+                    !version.contains("GNU Make ") || version.contains("GNU Make 3.");
                 Dir::Make {
                     graph,
                     custom: make_custom_depfiles(build),
+                    whole_seconds,
                 }
             }
             _ => Dir::Unread,
@@ -340,11 +403,26 @@ impl<'a> Walker<'a> {
         Place::Outside
     }
 
-    fn every_source(&self, program: &Path) -> Built {
-        let stale = newest_source(self.root, program).map(Stale::Old);
+    /// A program whose build can't be read: it reads every source, and is old when one is newer
+    /// than it, though whether it is built from that one can't be told.
+    fn every_source(&mut self, program: &Path) -> Built {
+        let name = program.file_name().unwrap_or_default().to_string_lossy();
+        let stale = match self.time(program) {
+            None => Some(format!("{name} can't be read; build before ctest")),
+            Some(built) => sources_under(self.root).into_iter().find_map(|source| {
+                let changed = self.time(&source)?;
+                (newer(changed, built) != Newer::No).then(|| {
+                    let rel = source.strip_prefix(self.root).map_or(source.clone(), Path::to_path_buf);
+                    format!(
+                        "{} changed after {name} was made, and its build can't be read to tell whether it is built from it; if it is, build before ctest",
+                        super::select::slashed(&rel)
+                    )
+                })
+            }),
+        };
         Built {
             every_source: true,
-            stale,
+            stale: stale.map(Stale::Old),
             method: "every source",
             ..Built::default()
         }
@@ -369,6 +447,9 @@ impl<'a> Walker<'a> {
         let mut direct: BTreeSet<String> = BTreeSet::new();
         let mut configured = false;
         let mut first = true;
+        // Each edge's inputs and each record, for whether it is up to date.
+        let mut inputs_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut records: BTreeMap<String, Vec<String>> = BTreeMap::new();
         while !frontier.is_empty() {
             let edges = query(ninja, build, &frontier, &self.assigned)?;
             let mut next = Vec::new();
@@ -377,6 +458,10 @@ impl<'a> Walker<'a> {
                 let Some(edge) = edges.get(&node) else {
                     continue;
                 };
+                inputs_of.insert(
+                    node.clone(),
+                    edge.inputs.iter().map(|(i, _)| i.clone()).collect(),
+                );
                 order.extend(edge.order_only.iter().cloned());
                 let object = is_object(&node);
                 if object
@@ -449,6 +534,7 @@ impl<'a> Walker<'a> {
                         "{object}'s record of its headers is {state}"
                     )));
                 }
+                records.insert(object.clone(), files.clone());
                 for file in files {
                     match self.place(file, build) {
                         Place::Repo(rel) => {
@@ -478,11 +564,15 @@ impl<'a> Walker<'a> {
                     {
                         pending.push(node.clone());
                     }
-                    for (input, _) in edges
+                    let inputs = edges
                         .get(&node)
                         .map(|e| e.inputs.as_slice())
-                        .unwrap_or_default()
-                    {
+                        .unwrap_or_default();
+                    inputs_of.insert(
+                        node.clone(),
+                        inputs.iter().map(|(i, _)| i.clone()).collect(),
+                    );
+                    for (input, _) in inputs {
                         match self.place(input, build) {
                             Place::Repo(rel) => {
                                 out.reads.insert(rel);
@@ -505,37 +595,39 @@ impl<'a> Walker<'a> {
                 frontier = next;
             }
         }
+        let linked = self
+            .extras
+            .get(build)
+            .map(|e| e.linked.clone())
+            .unwrap_or_default();
+        let made = |rel: &str| outputs.contains(rel);
+        let judged = self.judge(
+            build,
+            target,
+            &Made {
+                inputs: &inputs_of,
+                records: &records,
+                made: &made,
+                linked: &linked,
+                whole_seconds: false,
+            },
+        );
+        out.stale = Stale::either(judged, out.stale.take());
         if configured {
             let inputs = query(ninja, build, &["build.ninja".to_string()], &self.assigned)?;
+            let mut configure = BTreeSet::new();
             for (input, _) in inputs
                 .get("build.ninja")
                 .map(|e| e.inputs.as_slice())
                 .unwrap_or_default()
             {
                 if let Place::Repo(rel) = self.place(input, build) {
-                    out.reads.insert(rel);
+                    configure.insert(rel);
                 }
             }
-        }
-        // Ninja's own word decides, whatever a record said: work to do means it ran old code.
-        if !matches!(out.stale, Some(Stale::Old(_))) {
-            match run(ninja, build, &["-n", target], &self.assigned) {
-                Some(text) if text.contains("no work to do") => {}
-                Some(_) => {
-                    let program = build.join(target);
-                    let newer = newer_than(&program, out.reads.iter().map(|r| self.root.join(r)));
-                    out.stale = Some(Stale::Old(match newer {
-                        Some(why) => format!("ninja would build it again: {why}"),
-                        None => "ninja would build it again".into(),
-                    }));
-                }
-                None if out.stale.is_none() => {
-                    out.stale = Some(Stale::Unknown(
-                        "ninja can't say whether it is up to date".into(),
-                    ));
-                }
-                None => {}
-            }
+            let reconfigured = self.reconfigured(build, &configure, target);
+            out.stale = Stale::either(out.stale.take(), reconfigured);
+            out.reads.extend(configure);
         }
         // \[ADR 0087\] What it waits for, through phony edges, that is a program or a module,
         // and what its objects' compile commands name of those.
@@ -569,9 +661,9 @@ impl<'a> Walker<'a> {
         &mut self,
         graph: &BTreeMap<String, Vec<String>>,
         custom: &BTreeMap<String, String>,
+        whole_seconds: bool,
         build: &Path,
         target: &str,
-        program: &Path,
     ) -> Option<Built> {
         let mut out = Built {
             method: "makefile",
@@ -626,8 +718,7 @@ impl<'a> Walker<'a> {
         // rule reads, to the end: its script, its template, and the program it runs, whose own
         // objects' depfiles are read in turn.
         let mut asked: BTreeSet<String> = BTreeSet::new();
-        let mut stale: Option<String> = None;
-        let mut made_files: Vec<PathBuf> = Vec::new();
+        let mut records: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut pending = objects;
         while let Some(object) = pending.pop() {
             if !asked.insert(object.clone()) {
@@ -639,14 +730,7 @@ impl<'a> Walker<'a> {
                 None => build.join(format!("{object}.d")),
             };
             let files = depfile_deps(&depfile)?;
-            // As make decides: the object (or the custom command's output) is older than a file
-            // its depfile names, so the build would make it again, and the program ran old code.
-            if stale.is_none() {
-                let made = build.join(&object);
-                stale = newer_than(&made, files.iter().map(|f| build.join(f)))
-                    .map(|why| format!("{why}, after {object} was made"));
-            }
-            made_files.push(build.join(&object));
+            records.insert(object.clone(), files.clone());
             for file in files {
                 match self.place(&file, build) {
                     Place::Repo(rel) => {
@@ -689,16 +773,27 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        let extras = self.extras.get(build).cloned().unwrap_or_default();
+        let made = |rel: &str| graph.contains_key(rel);
+        out.stale = self.judge(
+            build,
+            target,
+            &Made {
+                inputs: graph,
+                records: &records,
+                made: &made,
+                linked: &extras.linked,
+                whole_seconds,
+            },
+        );
         if configured {
-            out.reads.extend(configure_inputs_make(build, self));
+            let configure = configure_inputs_make(build, self);
+            let reconfigured = self.reconfigured(build, &configure, target);
+            out.stale = Stale::either(out.stale.take(), reconfigured);
+            out.reads.extend(configure);
         }
-        out.stale = stale
-            .or_else(|| newer_than(program, made_files.into_iter()))
-            .or_else(|| newer_than(program, out.reads.iter().map(|r| self.root.join(r))))
-            .map(Stale::Old);
         // \[ADR 0087\] The targets its own waits for (`CMakeFiles/Makefile2`) that link a
         // program or a module, and those its compile flags name.
-        let extras = self.extras.get(build).cloned().unwrap_or_default();
         let own_dir = graph
             .get(target)
             .into_iter()
@@ -1064,6 +1159,7 @@ fn make_extras(build: &Path, graph: &BTreeMap<String, Vec<String>>) -> Extras {
     for (output, deps) in graph {
         if let Some(dir) = deps.iter().find_map(|d| d.strip_suffix("/link.txt")) {
             extras.links.insert(dir.to_string(), output.clone());
+            extras.linked.insert(output.clone());
         }
     }
     let text = std::fs::read(build.join("CMakeFiles/Makefile2")).unwrap_or_default();
@@ -1195,36 +1291,215 @@ fn configure_inputs_make(build: &Path, walker: &mut Walker<'_>) -> BTreeSet<Stri
     out
 }
 
-/// Why `program` is older than one of `inputs`, when it is.
-fn newer_than(program: &Path, inputs: impl Iterator<Item = PathBuf>) -> Option<String> {
-    let built = match std::fs::metadata(program).and_then(|m| m.modified()) {
-        Ok(built) => built,
-        Err(_) => return Some("it can't be read".into()),
-    };
-    for input in inputs {
-        match std::fs::metadata(&input).and_then(|m| m.modified()) {
-            Ok(changed) if changed > built => {
-                return Some(format!(
-                    "{} changed after it was built",
-                    input.file_name().unwrap_or_default().to_string_lossy()
-                ));
-            }
-            Ok(_) => {}
-            Err(_) => {
-                return Some(format!(
-                    "{} it was built from is gone",
-                    input.file_name().unwrap_or_default().to_string_lossy()
-                ));
-            }
-        }
-    }
-    None
+/// Whether one time is later than another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Newer {
+    No,
+    Yes,
+    /// Later, in the same second: a make that compares whole seconds sees no change.
+    SameSecond,
 }
 
-/// Why `program` may be older than a C or C++ file of the repository, when it is: for a build
-/// hushrun can't read, any of them.
-fn newest_source(root: &Path, program: &Path) -> Option<String> {
-    newer_than(program, sources_under(root).into_iter())
+/// \[ADR 0087\] Whether `a` is later than `b`, strictly, at the coarser of the two times' own
+/// resolutions, read from the times themselves: no fraction of a second and an even second is
+/// FAT's two seconds, no fraction one second, whole hundredths exFAT's, whole microseconds a
+/// microsecond. Two files written in the same tick of the coarser clock are never one newer than
+/// the other: a file system that rounds a later write down isn't taken for a change.
+fn newer(a: SystemTime, b: SystemTime) -> Newer {
+    let (Ok(a), Ok(b)) = (a.duration_since(UNIX_EPOCH), b.duration_since(UNIX_EPOCH)) else {
+        return if a > b { Newer::Yes } else { Newer::No };
+    };
+    let tick = |t: std::time::Duration| -> u128 {
+        match t.subsec_nanos() {
+            0 if t.as_secs().is_multiple_of(2) => 2_000_000_000,
+            0 => 1_000_000_000,
+            n if n % 10_000_000 == 0 => 10_000_000,
+            n if n % 1_000 == 0 => 1_000,
+            _ => 1,
+        }
+    };
+    let tick = tick(a).max(tick(b));
+    if a.as_nanos() / tick <= b.as_nanos() / tick {
+        Newer::No
+    } else if a.as_secs() == b.as_secs() {
+        Newer::SameSecond
+    } else {
+        Newer::Yes
+    }
+}
+
+/// \[ADR 0087\] What one build says of the files it makes, for [`Walker::judge`].
+struct Made<'g> {
+    /// Each made file's inputs as its rule names them (Ninja's edge inputs, a Makefile rule's
+    /// prerequisites), from the top of the build directory or absolute.
+    inputs: &'g BTreeMap<String, Vec<String>>,
+    /// Each made file's record of what it read (Ninja's deps log, a depfile).
+    records: &'g BTreeMap<String, Vec<String>>,
+    /// Whether a rule makes a file of the build directory.
+    made: &'g dyn Fn(&str) -> bool,
+    /// The links' outputs: programs, modules and libraries.
+    linked: &'g BTreeSet<String>,
+    /// Its make compares times by the second.
+    whole_seconds: bool,
+}
+
+impl Walker<'_> {
+    /// A file's modification time, `None` when it can't be read.
+    fn time(&mut self, path: &Path) -> Option<SystemTime> {
+        *self
+            .times
+            .entry(path.to_path_buf())
+            .or_insert_with(|| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+    }
+
+    /// \[ADR 0087\] Whether the program `target` of `build` ran old code, the one rule for both
+    /// generators: it is old when a file of the repository one of its objects was built from is
+    /// newer than that object, or one of its objects (or a library it links) is newer than it.
+    /// A file a rule writes is never the newer side itself: it stands for the repository's files
+    /// its rule reads, to the end. Times compare strictly, at their own resolution ([`newer`]).
+    /// The reason names the file and the object or program, and says what cures it.
+    fn judge(&mut self, build: &Path, target: &str, g: &Made<'_>) -> Option<Stale> {
+        let Some(linked_at) = self.time(&build.join(target)) else {
+            return Some(Stale::Old(format!(
+                "{target} isn't built; build before ctest"
+            )));
+        };
+        // Its objects, and the libraries it links, to the end.
+        let mut objects: BTreeSet<String> = BTreeSet::new();
+        let mut parts: BTreeSet<String> = BTreeSet::new();
+        let mut stack = vec![target.to_string()];
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            for input in g.inputs.get(&node).into_iter().flatten() {
+                if bookkeeping(input) {
+                    continue;
+                }
+                if let Place::Build(rel) = self.place(input, build)
+                    && (g.made)(&rel)
+                {
+                    if is_object(&rel) {
+                        objects.insert(rel.clone());
+                        parts.insert(rel);
+                    } else if g.linked.contains(&rel) {
+                        parts.insert(rel.clone());
+                        stack.push(rel);
+                    }
+                }
+            }
+        }
+        let cure = |file: &str, newer: Newer, whole_seconds: bool| {
+            if newer == Newer::SameSecond && whole_seconds {
+                format!(
+                    ", in the same second: make compares whole seconds, and won't make it again; touch {file}, then build before ctest"
+                )
+            } else {
+                "; build before ctest".to_string()
+            }
+        };
+        let mut memo: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for object in &objects {
+            let Some(made_at) = self.time(&build.join(object)) else {
+                return Some(Stale::Old(format!(
+                    "{object} isn't made; build before ctest"
+                )));
+            };
+            for file in self.tracked(build, object, g, &mut memo) {
+                let Some(changed) = self.time(&self.root.join(&file)) else {
+                    return Some(Stale::Old(format!(
+                        "{file}, which {object} was made from, is gone; build before ctest"
+                    )));
+                };
+                let newer = newer(changed, made_at);
+                if newer != Newer::No {
+                    return Some(Stale::Old(format!(
+                        "{file} changed after {object} was made{}",
+                        cure(&file, newer, g.whole_seconds)
+                    )));
+                }
+            }
+        }
+        for part in &parts {
+            let Some(made_at) = self.time(&build.join(part)) else {
+                return Some(Stale::Old(format!("{part} isn't made; build before ctest")));
+            };
+            let newer = newer(made_at, linked_at);
+            if newer != Newer::No {
+                return Some(Stale::Old(format!(
+                    "{part} was made after {target}{}",
+                    cure(part, newer, g.whole_seconds)
+                )));
+            }
+        }
+        None
+    }
+
+    /// The repository's files `node` was made from: those its rule and its record name, and for
+    /// each file a rule of the build makes, those that file was made from, to the end.
+    fn tracked(
+        &mut self,
+        build: &Path,
+        node: &str,
+        g: &Made<'_>,
+        memo: &mut HashMap<String, BTreeSet<String>>,
+    ) -> BTreeSet<String> {
+        if let Some(done) = memo.get(node) {
+            return done.clone();
+        }
+        memo.insert(node.to_string(), BTreeSet::new());
+        let names: Vec<String> = g
+            .inputs
+            .get(node)
+            .into_iter()
+            .flatten()
+            .chain(g.records.get(node).into_iter().flatten())
+            .cloned()
+            .collect();
+        let mut out = BTreeSet::new();
+        for name in names {
+            if bookkeeping(&name) {
+                continue;
+            }
+            match self.place(&name, build) {
+                Place::Repo(rel) => {
+                    out.insert(rel);
+                }
+                Place::Build(rel) if (g.made)(&rel) => {
+                    let more = self.tracked(build, &rel, g, memo);
+                    out.extend(more);
+                }
+                _ => {}
+            }
+        }
+        memo.insert(node.to_string(), out.clone());
+        out
+    }
+
+    /// \[ADR 0087\] For a program that reads a file CMake wrote when it configured the build:
+    /// old when a file configuring read (`configure`) is newer than the build's last configure
+    /// (`CMakeFiles/cmake.check_cache`, which every configure writes again), since the build
+    /// configures again, and may write that file again, before it builds.
+    fn reconfigured(
+        &mut self,
+        build: &Path,
+        configure: &BTreeSet<String>,
+        target: &str,
+    ) -> Option<Stale> {
+        let configured_at = self.time(&build.join("CMakeFiles/cmake.check_cache"))?;
+        for file in configure {
+            let Some(changed) = self.time(&self.root.join(file)) else {
+                continue;
+            };
+            if newer(changed, configured_at) != Newer::No {
+                return Some(Stale::Old(format!(
+                    "{file} changed after the build was configured, and {target} reads a file configuring wrote; build before ctest"
+                )));
+            }
+        }
+        None
+    }
 }
 
 /// Every C and C++ file under `root`, but in `.git` and in build directories.
@@ -1299,5 +1574,34 @@ mod tests {
         assert!(bookkeeping("CMakeFiles/t.dir/flags.make"));
         assert!(!bookkeeping("../t.c"));
         assert!(is_source("a/b.hpp") && is_source("x.mm") && !is_source("CMakeLists.txt"));
+    }
+
+    // covers: C-49
+    #[test]
+    fn times_compare_strictly_at_their_own_resolution() {
+        let at = |ms: u64| UNIX_EPOCH + std::time::Duration::from_millis(1_800_000_000_000 + ms);
+        let ns =
+            |ns: u64| UNIX_EPOCH + std::time::Duration::from_nanos(1_800_000_000_000_000_000 + ns);
+        // FAT keeps two seconds: a source saved before its object, in the same tick, isn't newer;
+        // one saved a tick later is.
+        assert_eq!(newer(at(2000), at(2000)), Newer::No);
+        assert_eq!(newer(at(2000), at(4000)), Newer::No);
+        assert_eq!(newer(at(4000), at(2000)), Newer::Yes);
+        // A source of a finer file system against an object FAT rounded down, written after it:
+        // the same two seconds, so not newer.
+        assert_eq!(newer(ns(3_300_000_001), at(2000)), Newer::No);
+        assert_eq!(newer(ns(4_300_000_001), at(2000)), Newer::Yes);
+        // A whole second against a finer time compares by the second.
+        assert_eq!(newer(at(1700), at(1000)), Newer::No);
+        assert_eq!(newer(at(3000), at(1999)), Newer::Yes);
+        // exFAT's hundredths: a later write rounded down within one isn't older.
+        assert_eq!(newer(ns(1_234_567_891), at(1230)), Newer::No);
+        // Finer times compare whole; later in the same second is said, for make 3.81.
+        assert_eq!(
+            newer(ns(1_700_000_001), ns(1_200_000_001)),
+            Newer::SameSecond
+        );
+        assert_eq!(newer(ns(2_100_000_001), ns(1_900_000_001)), Newer::Yes);
+        assert_eq!(newer(ns(1_200_000_001), ns(1_200_000_001)), Newer::No);
     }
 }

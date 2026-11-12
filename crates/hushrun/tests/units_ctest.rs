@@ -768,16 +768,17 @@ fn a_program_or_a_file_a_test_names_is_read_by_its_test_program() {
             ["common/val.h", "tests/driver.c", "tools/other.c"],
             "{at}"
         );
-        // The build directory itself: any program in it may start, every source is read, and
-        // whether those programs are up to date can't be told.
+        // The build directory itself: any program in it may start, and every source is read;
+        // each program the build makes there is up to date, so the test's program is followed.
         assert!(
             reads("t_dirdriver").contains(&"tools/server.c".to_string()),
             "{at}: {map:#}"
         );
-        assert_eq!(
-            map["units"]["t_dirdriver"]["notFollowed"],
-            json!(["stale program"]),
-            "{at}"
+        assert!(
+            map["units"]["t_dirdriver"]["notFollowed"]
+                .as_array()
+                .is_none_or(|n| n.is_empty()),
+            "{at}: {map:#}"
         );
         // A file no rule builds is no program; a file of the repository is read.
         assert_eq!(reads("t_data"), ["tests/t_data.c"], "{at}");
@@ -1243,6 +1244,186 @@ fn a_pass_on_a_program_older_than_its_sources_is_not_recorded_until_it_is_built(
                     && !other.stderr.contains("isn't recorded"),
                 "{at}: {}",
                 other.stderr
+            );
+        }
+    }
+}
+
+/// The lines of a run that say its pass isn't recorded.
+fn not_recorded(ran: &Ran) -> Vec<&str> {
+    ran.stderr
+        .lines()
+        .filter(|l| l.starts_with("hushrun: unit passed, but it isn't recorded: "))
+        .collect()
+}
+
+/// Sets a file's modification time.
+fn set_time(path: &Path, time: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(time))
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_header_a_target_writes_on_every_build_leaves_the_program_that_includes_it_up_to_date() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(stamp C)\nenable_testing()\n\
+                     add_custom_target(stamp ALL COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/stamp.h -P ${CMAKE_SOURCE_DIR}/stamp.cmake BYPRODUCTS ${CMAKE_BINARY_DIR}/stamp.h)\n\
+                     add_executable(t_stamp tests/t_stamp.c)\ntarget_include_directories(t_stamp PRIVATE ${CMAKE_BINARY_DIR})\nadd_dependencies(t_stamp stamp)\n\
+                     add_executable(t_p tests/t_p.c)\n\
+                     add_test(NAME stamp COMMAND t_stamp)\nadd_test(NAME p COMMAND t_p)\n",
+                ),
+                file(
+                    "stamp.cmake",
+                    "string(TIMESTAMP T \"%s\")\nfile(WRITE ${OUT} \"#define STAMP ${T}\\n\")\n",
+                ),
+                file(
+                    "tests/t_stamp.c",
+                    "#include \"stamp.h\"\nint main(void) { return STAMP > 0 ? 0 : 1; }\n",
+                ),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        // As people run it: build, then test. The target runs on every build, and writes the
+        // header again; the program is built again after it, and is up to date.
+        p.build();
+        let ran = p.run(CTEST, &[]);
+        assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+        assert!(not_recorded(&ran).is_empty(), "{at}: {}", ran.stderr);
+        assert!(
+            ran.stderr.contains("it won't run again on this code"),
+            "{at}: {}",
+            ran.stderr
+        );
+    }
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_program_in_a_build_directory_a_test_names_is_judged_up_to_date_by_its_own_files() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(viadir C)\nenable_testing()\n\
+                     add_executable(helper tools/helper.c)\n\
+                     set_target_properties(helper PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)\n\
+                     add_executable(t_run tests/t_run.c)\nadd_test(NAME viadir COMMAND t_run ${CMAKE_BINARY_DIR}/bin)\n\
+                     add_executable(t_p tests/t_p.c)\nadd_test(NAME p COMMAND t_p)\n",
+                ),
+                file("tools/helper.c", "int main(void) { return 0; }\n"),
+                file(
+                    "tests/t_run.c",
+                    "#include <stdio.h>\n#include <stdlib.h>\n\
+                     int main(int argc, char **argv) {\n  char line[4096];\n\
+                     \x20 snprintf(line, sizeof line, \"%s/helper\", argc > 1 ? argv[1] : \".\");\n  return system(line);\n}\n",
+                ),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+        assert!(not_recorded(&first).is_empty(), "{at}: {}", first.stderr);
+        // The helper the test starts from the directory it names changes, and nothing builds:
+        // the test ran the helper as it was.
+        p.write("tools/helper.c", "int main(void) { return 0; } /* 2 */\n");
+        let stale = p.run(CTEST, &[]);
+        assert_eq!(stale.code, 0, "{at}: {}", stale.stderr);
+        let said = not_recorded(&stale);
+        assert_eq!(said.len(), 1, "{at}: {}", stale.stderr);
+        assert!(
+            said[0].contains("tools/helper.c")
+                && said[0].contains("helper.c.o")
+                && said[0].ends_with("build before ctest"),
+            "{at}: {}",
+            said[0]
+        );
+        // Built, it records.
+        p.build();
+        let built = p.run(CTEST, &[]);
+        assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
+        assert!(
+            built.stderr.contains("it won't run again on this code"),
+            "{at}: {}",
+            built.stderr
+        );
+    }
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_source_saved_in_the_second_its_object_was_made_says_what_cures_it() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(&cmake, generator, &shop("reuse"));
+        // tests/t_misc.c was saved after its object was made, in the same second; the program
+        // was linked later. The program ran old code. Ninja compares the times whole, and
+        // builds it again; make 3.81 compares whole seconds, and never does.
+        let second = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 100;
+        let at_ms =
+            |ms: u64| std::time::UNIX_EPOCH + std::time::Duration::from_millis(second * 1000 + ms);
+        set_time(
+            &p.repo.join("build/CMakeFiles/t_misc.dir/tests/t_misc.c.o"),
+            at_ms(200),
+        );
+        set_time(&p.repo.join("tests/t_misc.c"), at_ms(700));
+        set_time(&p.repo.join("build/t_misc"), at_ms(5000));
+        let ran = p.run(CTEST, &[]);
+        assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+        let said = not_recorded(&ran);
+        assert_eq!(said.len(), 1, "{at}: {}", ran.stderr);
+        assert!(
+            said[0].contains("t_misc ran old code: tests/t_misc.c changed after CMakeFiles/t_misc.dir/tests/t_misc.c.o was made"),
+            "{at}: {}",
+            said[0]
+        );
+        if generator == "Ninja" {
+            assert!(
+                said[0].ends_with("; build before ctest") && !said[0].contains("touch"),
+                "{at}: {}",
+                said[0]
+            );
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
+        } else {
+            assert!(
+                said[0].ends_with(
+                    "in the same second: make compares whole seconds, and won't make it again; touch tests/t_misc.c, then build before ctest"
+                ),
+                "{at}: {}",
+                said[0]
             );
         }
     }
@@ -2073,7 +2254,7 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     // check's pass included, and the run says why.
     assert!(
         stale.stderr.contains(
-            "hushrun: unit passed, but it isn't recorded: t_util is older than what it is built from ("
+            "hushrun: unit passed, but it isn't recorded: t_util ran old code: src/util.h changed after CMakeFiles/t_util.dir/tests/t_util.c.o was made; build before ctest"
         ),
         "{}",
         stale.stderr

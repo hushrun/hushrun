@@ -121,9 +121,9 @@ pub enum Named {
     /// A file of a CMake build directory, by its real path and that directory's: a program the
     /// test starts when a build rule makes it (`$<TARGET_FILE:server>`), else a file it reads.
     Built { path: PathBuf, build: PathBuf },
-    /// A directory of a build directory: which of its programs the test starts, and whether they
-    /// are up to date, can't be told.
-    BuildDir(PathBuf),
+    /// A directory of a build directory, and that directory's: which of its programs the test
+    /// starts can't be told, so each the build makes there must be up to date.
+    BuildDir { dir: PathBuf, build: PathBuf },
     /// A directory of the repository: which of its files the test reads can't be told.
     RepoDir(PathBuf),
     /// A file of the repository, from its root: one the test reads.
@@ -195,8 +195,8 @@ pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
             build_root(&real)
         };
         let found = if real.is_dir() {
-            if in_build.is_some() {
-                Some(Named::BuildDir(real))
+            if let Some(build) = in_build {
+                Some(Named::BuildDir { dir: real, build })
             } else {
                 real.starts_with(root).then_some(Named::RepoDir(real))
             }

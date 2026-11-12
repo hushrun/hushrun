@@ -870,10 +870,7 @@ fn record(p: &Pending) {
                 && let Some(super::build::Stale::Old(why)) =
                     p.built.get(&test.unit).and_then(|b| b.stale.as_ref())
             {
-                stale_build = Some(format!(
-                    "{} is older than what it is built from ({why}): build before ctest",
-                    test.unit
-                ));
+                stale_build = Some(format!("{} ran old code: {why}", test.unit));
             }
         }
         if unit.tests.is_none() {
