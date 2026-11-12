@@ -311,3 +311,6 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   not a database, corrupt); read-only, full, I/O and permission errors read as no map for that run
   and change nothing on disk. The rename happens under the lock beside the store, and only while
   its path names the file that failed.
+- **A reader that left files.** `ready` and `why` opened the schema-1 file read-only to read its
+  adapter word, which left `-shm` and `-wal` beside it. They now read it from a copy outside the
+  cache, as the import does, and the directory is as it was.

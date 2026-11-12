@@ -542,20 +542,26 @@ pub fn upgrade(path: &Path) -> Option<String> {
     }
 }
 
+/// \[C-36\] A copy of the store of schema 1 at `old` in `dir`, with its WAL, which opening the copy
+/// recovers: the older file is never opened, so nothing is made beside it.
+fn copy_of(old: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let copy = dir.join("old.sqlite");
+    std::fs::copy(old, &copy).map_err(|err| err.to_string())?;
+    let mut wal = old.as_os_str().to_os_string();
+    wal.push("-wal");
+    if Path::new(&wal).is_file() {
+        std::fs::copy(&wal, dir.join("old.sqlite-wal")).map_err(|err| err.to_string())?;
+    }
+    Ok(copy)
+}
+
 fn import(old: &Path, path: &Path) -> Result<(), String> {
     let dir = path.parent().ok_or("a store has a directory")?;
     let work = tempfile::Builder::new()
         .prefix(".import-")
         .tempdir_in(dir)
         .map_err(|err| err.to_string())?;
-    // A copy, with its WAL, which opening it recovers: the older file is never opened.
-    let copy = work.path().join("old.sqlite");
-    std::fs::copy(old, &copy).map_err(|err| err.to_string())?;
-    let mut wal = old.as_os_str().to_os_string();
-    wal.push("-wal");
-    if Path::new(&wal).is_file() {
-        std::fs::copy(&wal, work.path().join("old.sqlite-wal")).map_err(|err| err.to_string())?;
-    }
+    let copy = copy_of(old, work.path())?;
     let made = work.path().join("new.sqlite");
     {
         let mut conn = Connection::open(&made).map_err(|e| e.to_string())?;
@@ -629,9 +635,16 @@ pub fn adapter_of(path: &Path, check_id: &Digest) -> Option<String> {
     if !path.exists()
         && let Some(old) = older(path).filter(|old| old.is_file())
     {
+        // \[C-36, ADR 0061\] From a copy outside the cache, as the import reads it: a reader that
+        // writes nothing leaves no `-shm` or `-wal` beside the older file.
+        let work = tempfile::Builder::new()
+            .prefix("hushrun-v1-")
+            .tempdir()
+            .ok()?;
+        let copy = copy_of(&old, work.path()).ok()?;
         let conn = Connection::open_with_flags(
-            &old,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            &copy,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .ok()?;
         if ids(&conn).ok()? != (APPLICATION_ID, 1) {

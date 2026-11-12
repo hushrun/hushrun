@@ -989,8 +989,20 @@ fn readers_that_write_nothing_read_the_adapter_of_a_schema_1_store_without_impor
     let check_id = id("unit");
     schema_1_store(&old, &check_id);
     let before = std::fs::read(&old).unwrap();
+    let listing = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let listed = listing();
     assert_eq!(adapter_of(&path, &check_id).as_deref(), Some("pytest"));
     assert_eq!(adapter_of(&path, &id("other")), None);
     assert!(!path.exists());
     assert_eq!(std::fs::read(&old).unwrap(), before);
+    // Not a file more beside it: no `-shm`, no `-wal` (C-36, ADR 0061).
+    assert_eq!(listing(), listed);
 }
