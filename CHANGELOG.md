@@ -148,7 +148,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   list, and runs when it changes.
 - With `reads: test`, pytest's adapter takes a test to have read what a fixture it asked for at
   run time (`request.getfixturevalue`) read as it set up, and what a shared setup that started
-  inside its window read.
+  inside its window read; and what ran while no test's window was open, such as a
+  `pytest_configure` of a `conftest.py`, is every test's.
 
 ## [0.13.0] - 2026-11-12
 

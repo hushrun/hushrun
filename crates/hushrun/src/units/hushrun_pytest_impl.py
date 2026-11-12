@@ -198,6 +198,8 @@ class Observer(object):
         self.code_files = {}          # code filename -> repository file or None
         self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
+        self.session_ran = set()      # [ADR 0080] files a function of which started outside every
+        self.session_opened = set()   # window, and files opened there: every test reads them
 
     # --- paths -------------------------------------------------------------------------
 
@@ -428,8 +430,11 @@ class Observer(object):
         if self.active:
             self.add_root(self.active, f=r)
             self.touched("opened", {r})
-        elif owner != "repo":
-            self.make_ambient(f=r, why="opened outside any test file by code outside the repository")
+        else:
+            # [ADR 0080] Opened while no window is open: every test of the session reads it.
+            self.touched("opened", {r})
+            if owner != "repo":
+                self.make_ambient(f=r, why="opened outside any test file by code outside the repository")
 
     def owner(self, frame):
         """Who an open belongs to: the first frame, from the open outwards, that is the import
@@ -514,6 +519,11 @@ class Observer(object):
         elif self.active:
             target = self.loaded_ran if kind == "ran" else self.loaded_opened
             target.setdefault(self.active, set()).update(files)
+        else:
+            # No window is open: a session hook (pytest_configure, pytest_sessionstart,
+            # pytest_collection_modifyitems, pytest_collection_finish) of a conftest.py or a
+            # plugin of the repository. What runs then is read by every test of the session.
+            (self.session_ran if kind == "ran" else self.session_opened).update(files)
 
     def listed(self, path):
         if not self.watching or self.active_test is None or not self.active or self.setup_stack:
@@ -555,6 +565,9 @@ class Observer(object):
         if self.active:
             self.unit_last_seq[self.active] = self.seq
         self.active = None
+        # What runs outside every window from here is the session's: seen anew.
+        if self.watching:
+            _restart_watch()
 
     def unit_entry(self, unit):
         return self.units.setdefault(unit, {"collected": 0, "selected": 0, "finished": 0,
@@ -693,6 +706,9 @@ class Observer(object):
             ran = set(self.test_ran.get(key, ()))
             ran.update(self.resolve(self.test_names.get(key, ())))
             opened = set(self.test_opened.get(key, ()))
+            # What ran, or was opened, while no window was open: every test's.
+            ran.update(self.session_ran)
+            opened.update(self.session_opened)
             last_seq = window[2]
             # A module code outside the repository loaded is read by the test running then and
             # every test after it in the process (RFC 0003 §3.3).

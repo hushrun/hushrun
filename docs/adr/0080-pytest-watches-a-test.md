@@ -71,3 +71,9 @@ Reviewers confirmed wrong reuses in item 4 and in what item 1 left out.
   its value and none of its files. Now a test serves as requested every fixture its request
   resolved by the time it ended, those asked for at run time included, and a shared setup that
   starts inside a test's window always serves that test.
+- Functions that session-level hooks call outside every test's window (`pytest_configure`,
+  `pytest_sessionstart`, `pytest_collection_modifyitems`, `pytest_collection_finish` in a
+  `conftest.py` or a repository plugin) landed on no test's list, while a value they kept reached a
+  test. Now what runs, or is opened, while no window is open is read by every test of the
+  process, and events are restarted when a window ends too, so a function seen in a window is
+  seen again outside it.

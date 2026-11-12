@@ -520,6 +520,32 @@ fn reads_test_follows_a_fixture_set_up_inside_a_tests_window() {
     );
 }
 
+// covers: C-40, C-42
+#[test]
+fn reads_test_follows_what_a_session_hook_ran_outside_every_test() {
+    // conftest.py's pytest_configure, before any test, calls into app/setup.py, which keeps what
+    // app/calc.py computes; test_target reads the kept value, and runs neither.
+    caught(
+        &[
+            ("app/state.py", "VALUE = None\n"),
+            ("app/calc.py", "def value():\n    return 1\n"),
+            (
+                "app/setup.py",
+                "from app import calc, state\n\ndef configure():\n    state.VALUE = calc.value()\n",
+            ),
+            (
+                "tests/conftest.py",
+                "from app import setup\n\ndef pytest_configure(config):\n    setup.configure()\n",
+            ),
+            (
+                "tests/test_a.py",
+                "from app import state\n\ndef test_target():\n    assert state.VALUE == 1\n\ndef test_plain():\n    assert True\n",
+            ),
+        ],
+        ("app/calc.py", "def value():\n    return 2\n"),
+    );
+}
+
 /// Two imports away: cart.py ran and imports settings.py, which built TAX from defaults.py, with
 /// no function of either called.
 fn two_imports_away() -> Vec<(&'static str, &'static str)> {
