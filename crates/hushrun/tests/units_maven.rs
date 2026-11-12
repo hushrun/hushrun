@@ -1094,3 +1094,182 @@ fn a_maven_wrapper_that_starts_maven_again_records_neither_start() {
     );
     assert!(r.unit_results().is_empty(), "{stderr}");
 }
+
+/// \[C-39\] Test classes whose tests look alike: `Base`'s `inherited`, which `ATest`, `BTest`,
+/// `OuterTest` and `OuterTest.Inner` each inherit, failing in a class whose simple name with
+/// `_FAIL` is set; and `same`, a method of `OuterTest` and of its nested `Inner`. `FLIP` fails
+/// `ATest` and `OuterTest`, so their other tests are listed one by one; `o1` to `o9` keep the audit
+/// off the look-alikes, mostly.
+const LOOK_ALIKE_J5: &[(&str, &str)] = &[
+    (
+        "shop/Base.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\npublic abstract class Base {\n  @Test void inherited() { Assertions.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n}\n",
+    ),
+    (
+        "shop/ATest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass ATest extends Base {\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FLIP\")); }\n  @Test void o1() {}\n  @Test void o2() {}\n  @Test void o3() {}\n  @Test void o4() {}\n  @Test void o5() {}\n  @Test void o6() {}\n  @Test void o7() {}\n  @Test void o8() {}\n  @Test void o9() {}\n}\n",
+    ),
+    (
+        "shop/BTest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass BTest extends Base {\n  @Test void own() {}\n}\n",
+    ),
+    (
+        "shop/OuterTest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass OuterTest extends Base {\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FLIP\")); }\n  @Test void same() {}\n  @Nested class Inner extends Base {\n    @Test void same() { Assertions.assertNull(System.getenv(\"INNER_FAIL\")); }\n  }\n}\n",
+    ),
+];
+/// Run 1's variables: the flips, and the look-alikes that fail and so aren't listed.
+const LOOK_ALIKE_FIRST: &[(&str, &str)] = &[
+    ("FLIP", "1"),
+    ("BTest_FAIL", "1"),
+    ("Inner_FAIL", "1"),
+    ("INNER_FAIL", "1"),
+];
+/// Run 2's: the flips fixed, the look-alikes not listed still failing.
+const LOOK_ALIKE_SECOND: &[(&str, &str)] = &[
+    ("BTest_FAIL", "1"),
+    ("Inner_FAIL", "1"),
+    ("INNER_FAIL", "1"),
+];
+
+// covers: C-39, C-47
+#[test]
+fn junit5_tests_that_look_alike_in_subclasses_and_nested_classes_are_left_out_one_by_one() {
+    let Some(maven) = maven() else { return };
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("pom.xml", &parent(&["core"], "5", "3.5.4")),
+        file("core/pom.xml", &module_pom("core", &[])),
+    ];
+    for (path, text) in LOOK_ALIKE_J5 {
+        files.push(file(&format!("core/src/test/java/{path}"), text));
+    }
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], LOOK_ALIKE_FIRST);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    // ATest's, OuterTest's and their inherited tests passed and are listed; BTest's and Inner's
+    // look-alikes failed, aren't, and run again, and fail again.
+    let second = r.run(&[], &["test"], LOOK_ALIKE_SECOND);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    let failed: Vec<&str> = second
+        .stdout
+        .lines()
+        .filter(|l| l.contains("<<< FAILURE!") && l.starts_with("[ERROR] shop."))
+        .map(|l| l["[ERROR] ".len()..].split(' ').next().unwrap())
+        .collect();
+    // The look-alikes that passed were listed, and left out: all 13 that passed but the audit's.
+    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.stderr);
+    // Surefire names a nested class's test by its outer class: OuterTest's own `inherited` and
+    // `same` never fail, so these are Inner's.
+    for name in [
+        "shop.BTest.inherited",
+        "shop.OuterTest.inherited",
+        "shop.OuterTest.same",
+    ] {
+        assert!(
+            failed.contains(&name),
+            "{name}: {failed:?}\n{}",
+            second.stdout
+        );
+    }
+}
+
+/// \[C-39\] JUnit 4 test classes whose tests look alike: abstract `Base`'s `inherited`, which
+/// `ATest` and `BTest` inherit; concrete `BaseTest`, whose `inherited` and `flip` `SubTest`
+/// inherits; and concrete `Base2Test` and `Sub2Test`, the same. `inherited` fails in a class whose
+/// simple name with `_FAIL` is set; `FLIP` fails `flip`.
+const LOOK_ALIKE_J4: &[(&str, &str)] = &[
+    (
+        "shop/Base.java",
+        "package shop;\nimport org.junit.*;\npublic abstract class Base {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n}\n",
+    ),
+    (
+        "shop/ATest.java",
+        "package shop;\nimport org.junit.*;\npublic class ATest extends Base {\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n  @Test public void o1() {}\n  @Test public void o2() {}\n  @Test public void o3() {}\n  @Test public void o4() {}\n  @Test public void o5() {}\n  @Test public void o6() {}\n  @Test public void o7() {}\n  @Test public void o8() {}\n  @Test public void o9() {}\n}\n",
+    ),
+    (
+        "shop/BTest.java",
+        "package shop;\nimport org.junit.*;\npublic class BTest extends Base {\n  @Test public void own() {}\n}\n",
+    ),
+    (
+        "shop/BaseTest.java",
+        "package shop;\nimport org.junit.*;\npublic class BaseTest {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n}\n",
+    ),
+    (
+        "shop/SubTest.java",
+        "package shop;\npublic class SubTest extends BaseTest {}\n",
+    ),
+    (
+        "shop/Base2Test.java",
+        "package shop;\nimport org.junit.*;\npublic class Base2Test {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n}\n",
+    ),
+    (
+        "shop/Sub2Test.java",
+        "package shop;\npublic class Sub2Test extends Base2Test {}\n",
+    ),
+];
+/// Run 1's variables: the flips, and the look-alikes that fail and so aren't listed.
+const LOOK_ALIKE_J4_FIRST: &[(&str, &str)] = &[
+    ("FLIP", "1"),
+    ("BTest_FAIL", "1"),
+    ("SubTest_FAIL", "1"),
+    ("Base2Test_FAIL", "1"),
+];
+/// Run 2's: the flips fixed, the look-alikes not listed still failing.
+const LOOK_ALIKE_J4_SECOND: &[(&str, &str)] = &[
+    ("BTest_FAIL", "1"),
+    ("SubTest_FAIL", "1"),
+    ("Base2Test_FAIL", "1"),
+];
+
+// covers: C-39, C-47
+#[test]
+fn junit4_tests_that_look_alike_in_subclasses_are_left_out_one_by_one_through_vintage() {
+    let Some(maven) = maven() else { return };
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(
+            "pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>shop</groupId><artifactId>vintage</artifactId><version>1.0</version>
+  <properties><maven.compiler.release>11</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+  <dependencies>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
+    <dependency><groupId>org.junit.vintage</groupId><artifactId>junit-vintage-engine</artifactId><version>5.14.4</version><scope>test</scope></dependency>
+  </dependencies>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version></plugin></plugins></build>
+</project>
+"#,
+        ),
+    ];
+    for (path, text) in LOOK_ALIKE_J4 {
+        files.push(file(&format!("src/test/java/{path}"), text));
+    }
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], LOOK_ALIKE_J4_FIRST);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    let second = r.run(&[], &["test"], LOOK_ALIKE_J4_SECOND);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    // The look-alikes that passed were listed, and left out: all 13 that passed but the audit's.
+    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.stderr);
+    let failed: Vec<&str> = second
+        .stdout
+        .lines()
+        .filter(|l| l.contains("<<< FAILURE!") && l.starts_with("[ERROR] shop."))
+        .map(|l| l["[ERROR] ".len()..].split(' ').next().unwrap())
+        .collect();
+    for name in [
+        "shop.BTest.inherited",
+        "shop.SubTest.inherited",
+        "shop.Base2Test.inherited",
+    ] {
+        assert!(
+            failed.contains(&name),
+            "{name}: {failed:?}\n{}",
+            second.stdout
+        );
+    }
+}
