@@ -12,8 +12,9 @@
 //! - The script reports facts and decides nothing: one file per Test task in `HUSHRUN_UNITS`, a
 //!   `hushrun.unit-facts/v1` file of no unit whose `settings.gradle` is the task's report
 //!   ([`Report`]): Gradle's own test events as they came, how the task ended, the names of its test
-//!   classes, what it left out and its classpath mapped to the build's projects. Everything else
-//!   is decided here, in [`observe`].
+//!   classes, what it left out and its classpath mapped to the build's projects, and where its test
+//!   JVMs wrote the hook's events, which are read here too. Each start of Gradle keeps its own
+//!   files. Everything else is decided here, in [`observe`].
 //! - Selection: a class reused whole by an exclusion Gradle evaluates while it looks at the task's
 //!   class files; a test reused one by one by the hook for the JUnit Platform and TestNG, and by
 //!   Gradle's own filter patterns for JUnit 4, up to 250 tests a task.
@@ -30,6 +31,7 @@ use super::adapter::{
     Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
 use super::facts::{FactsFile, MergedTest, Unfollowed};
+use super::jvm::{self, JvmEvents};
 use super::shared::Shared;
 use super::store::Map;
 
@@ -57,6 +59,14 @@ const SETTINGS_NAMES: &[&str] = &["settings.gradle.kts", "settings.gradle"];
 /// `@BeforeAll` or a Spock `setupSpec` that failed, a class JUnit 4 refuses), Gradle's JUnit 4
 /// runner's `classMethod` (`@BeforeClass`, `@AfterClass`), Kotest's `executionError`.
 const CLASS_LEVEL: &[&str] = &["initializationError", "classMethod", "executionError"];
+
+/// The exception classes of a Test task's failure that say its test process ended badly: what
+/// Gradle's test executer throws, and the process's own.
+const DIED_TYPES: &[&str] = &[
+    "TestSuiteExecutionException",
+    "ProcessExecutionException",
+    "ExecException",
+];
 
 /// COMMAND, when it is Gradle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +247,12 @@ pub struct Report {
     pub reads: ReportReads,
     /// What the script couldn't follow of the task: every test class of it.
     pub not_followed: Vec<Unfollowed>,
+    /// The directory this run's test JVMs of the task wrote the hook's events to.
+    pub events_dir: Option<String>,
+    /// The messages of the task's failure and its causes, when it failed.
+    pub task_failures: Vec<String>,
+    /// The exception class of the task's failure and of each of its causes, when it failed.
+    pub task_failure_types: Vec<String>,
 }
 
 /// What a task left out.
@@ -249,6 +265,10 @@ pub struct LeftOut {
     pub tests: Vec<String>,
     /// Tests `reuseTests` listed that it couldn't leave out: they run.
     pub not_attempted: Vec<String>,
+    /// How it left tests out: `hook` or `patterns`.
+    pub how: Option<String>,
+    /// The test-JVM hook's list, `class#method` a line, when it went through the hook.
+    pub hook: Vec<String>,
 }
 
 /// One test invocation, as Gradle's `afterTest` gave it.
@@ -364,6 +384,8 @@ struct TestSaw {
     finished: bool,
     failed: bool,
     deselected: bool,
+    /// \[C-32\] An invocation of it was skipped: its body didn't run.
+    skipped: bool,
     duration_ms: u64,
 }
 
@@ -374,6 +396,8 @@ struct UnitSaw {
     complete: bool,
     failed: bool,
     deselected: bool,
+    /// \[C-32\] A test of it was skipped.
+    skipped: bool,
     duration_ms: u64,
     not_followed: BTreeSet<NotFollowed>,
     dirs: BTreeSet<String>,
@@ -400,6 +424,7 @@ impl UnitSaw {
         self.complete &= one.complete || one.deselected;
         self.failed |= one.failed;
         self.deselected &= one.deselected;
+        self.skipped |= one.skipped;
         self.duration_ms = self.duration_ms.saturating_add(one.duration_ms);
         self.not_followed.extend(one.not_followed);
         self.dirs.extend(one.dirs);
@@ -421,6 +446,7 @@ impl UnitSaw {
                         };
                     }
                     had.failed |= saw.failed;
+                    had.skipped |= saw.skipped;
                     had.deselected &= saw.deselected;
                     had.duration_ms = had.duration_ms.saturating_add(saw.duration_ms);
                 }
@@ -441,6 +467,8 @@ pub struct Observed {
     pub own: BTreeMap<String, Vec<String>>,
     /// The directories some unit read: where the sources are (C-30).
     pub known_dirs: BTreeSet<String>,
+    /// \[C-32\] Why a task left out what the plan didn't list.
+    pub left_out: Option<String>,
 }
 
 /// A task's report, from one facts file, with its errors.
@@ -460,8 +488,65 @@ fn report_of(file: &FactsFile) -> Result<Report, String> {
     Ok(report)
 }
 
-/// Each unit one task's report speaks of, as that task saw it, with its tests.
-fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
+/// \[C-32\] Why a task's hook left out what its list didn't list, or found no test its list named
+/// in a class that ran (it neither left it out nor saw it run): then what ran can't be told.
+fn left_out_unlisted(report: &Report, events: &BTreeMap<String, JvmEvents>) -> Option<String> {
+    let listed: BTreeSet<String> = report.left_out.hook.iter().cloned().collect();
+    if let Some(why) = jvm::left_out_unlisted(events.values(), &listed) {
+        return Some(why);
+    }
+    if report.left_out.how.as_deref() != Some("hook") {
+        return None;
+    }
+    let left_out: BTreeSet<&str> = events
+        .values()
+        .flat_map(|jvm| &jvm.left_out)
+        .filter_map(|out| out.entry.as_deref())
+        .collect();
+    let ran: BTreeSet<String> = report.invocations.iter().filter_map(test_id).collect();
+    let classes_ran: BTreeSet<&str> = report
+        .invocations
+        .iter()
+        .filter_map(|inv| inv.c.as_deref().map(outer_of))
+        .collect();
+    for line in &report.left_out.hook {
+        let Some((class, method)) = line.split_once('#') else {
+            continue;
+        };
+        if classes_ran.contains(outer_of(class))
+            && !left_out.contains(line.as_str())
+            && !ran.contains(&format!("{class}.{method}"))
+        {
+            return Some(format!(
+                "the test-JVM hook found no test {line} that its list named, in a class that ran"
+            ));
+        }
+    }
+    None
+}
+
+/// Whether something a task's report speaks of failed: the task, a test, or a suite.
+fn report_failed(report: &Report) -> bool {
+    report.task_failed
+        || !report.suite_failures.is_empty()
+        || report.invocations.iter().any(|inv| inv.r == "FAILURE")
+}
+
+/// Each unit one task's report speaks of, as that task saw it, with its tests. \[C-32\] A skipped
+/// test is told `skipped`; it counts as finished only when nothing of the run failed
+/// (`run_failed`): TestNG skips every test of a suite whose configuration failed, in any class,
+/// and a JVM that died leaves the test in flight skipped. Then its class didn't run whole either.
+///
+/// A test JVM that died ran nothing of its task whole: the task failed and no test or suite of it
+/// did, or Gradle said its test process ended badly (it calls the test in flight skipped, and
+/// says nothing of a class whose `@AfterAll` never ended). A class the hook's events (`events`,
+/// this task's JVMs') started and never ended didn't run whole either.
+fn units_of(
+    report: &Report,
+    errors: &[String],
+    run_failed: bool,
+    events: &Result<BTreeMap<String, JvmEvents>, String>,
+) -> Vec<(String, UnitSaw)> {
     let mut out = Vec::new();
     if report.outcome == "not-followed" {
         return out;
@@ -474,7 +559,31 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
             && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
     // A failure outside any class: no test of the task is known to have run whole.
     let outside = report.suite_failures.iter().any(|s| s.c.is_none());
-    let whole = whole && !outside;
+    // A test JVM that died: the type of the task's failure says so (Gradle's test executer
+    // wraps a test process that ended badly in a `TestSuiteExecutionException`, caused by the
+    // process's `ProcessExecutionException`, an `ExecException` before Gradle 9); or a failure no
+    // test or suite explains; or, last, the words of Gradle's message, for a failure whose
+    // description names no type.
+    let died = report
+        .task_failure_types
+        .iter()
+        .any(|t| DIED_TYPES.contains(&t.rsplit('.').next().unwrap_or(t)))
+        || (report.task_failed
+            && report.suite_failures.is_empty()
+            && !report.invocations.iter().any(|inv| inv.r == "FAILURE"))
+        || report
+            .task_failures
+            .iter()
+            .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"));
+    let whole = whole && !outside && !died && events.is_ok();
+    // The classes a test JVM started and never ended, by their outer class.
+    let open: BTreeSet<&str> = events
+        .iter()
+        .flat_map(BTreeMap::values)
+        .flat_map(|jvm| jvm.classes.iter())
+        .filter(|(_, class)| class.open)
+        .map(|(outer, _)| outer.as_str())
+        .collect();
     let mut task_not_followed: BTreeSet<NotFollowed> =
         report.not_followed.iter().map(NotFollowed::from).collect();
     if let Some(error) = errors.first() {
@@ -529,26 +638,32 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
             continue;
         }
         one.deselected = left_out_classes.contains(outer.as_str()) && events.is_none();
-        one.complete = whole;
+        let class_whole = whole && !open.contains(outer.as_str());
+        one.complete = class_whole;
         one.failed = class_failed.contains(outer.as_str());
         // A class left out whole ran nothing, and Gradle never named its tests.
         one.told = !one.deselected;
-        let testng = report.framework.as_deref() == Some("testng");
         let any_failed =
             events.is_some_and(|tests| tests.values().flatten().any(|inv| inv.r == "FAILURE"));
         for (id, invs) in events.into_iter().flatten() {
             let failed = invs.iter().any(|inv| inv.r == "FAILURE");
-            let skipped = invs.iter().all(|inv| inv.r == "SKIPPED");
-            // A test skipped in a class whose setup failed didn't earn a pass: TestNG reports a
-            // failing configuration method as a failed test and skips the rest of its class.
-            let cascade = skipped && (one.failed || (testng && any_failed));
+            let skipped = !failed && invs.iter().any(|inv| inv.r == "SKIPPED");
+            // A test skipped in a class or a run where something failed didn't earn a pass:
+            // TestNG reports a failing configuration method as a failed test and skips what it
+            // guards, in its class or in every class of its suite.
+            let cascade = skipped && (one.failed || any_failed || run_failed);
             let saw = TestSaw {
-                finished: whole && !cascade,
+                finished: class_whole && !cascade,
                 failed,
                 deselected: false,
+                skipped,
                 duration_ms: invs.iter().map(|inv| inv.ms).fold(0, u64::saturating_add),
             };
             one.failed |= failed;
+            one.skipped |= skipped;
+            if cascade {
+                one.complete = false;
+            }
             one.duration_ms = one.duration_ms.saturating_add(saw.duration_ms);
             one.tests.insert(id.clone(), saw);
         }
@@ -563,6 +678,7 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
                 finished: false,
                 failed: false,
                 deselected: whole,
+                skipped: false,
                 duration_ms: 0,
             });
         }
@@ -578,14 +694,36 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
     if mine.is_empty() {
         return Ok(None);
     }
+    let reports = mine
+        .iter()
+        .map(|file| Ok((report_of(file)?, &file.errors)))
+        .collect::<Result<Vec<_>, String>>()?;
+    // \[C-32\] Each task's hook events; none for a task whose JVMs wrote none (JUnit 4, TestNG).
+    let events: Vec<Result<BTreeMap<String, JvmEvents>, String>> = reports
+        .iter()
+        .map(|(report, _)| match &report.events_dir {
+            Some(dir) => jvm::read_events_dir(Path::new(dir)),
+            None => Ok(BTreeMap::new()),
+        })
+        .collect();
+    // \[C-32\] Something of this run's tasks failed.
+    let run_failed = reports.iter().any(|(report, _)| report_failed(report));
     let mut merged: BTreeMap<String, UnitSaw> = BTreeMap::new();
-    for file in mine {
-        let report = report_of(file)?;
-        for (name, one) in units_of(&report, &file.errors) {
+    for ((report, errors), events) in reports.iter().zip(&events) {
+        for (name, one) in units_of(report, errors, run_failed, events) {
             merged.entry(name).or_insert_with(UnitSaw::unseen).add(one);
         }
     }
-    let mut out = Observed::default();
+    let mut out = Observed {
+        left_out: reports
+            .iter()
+            .zip(&events)
+            .find_map(|((report, _), events)| {
+                left_out_unlisted(report, events.as_ref().ok()?)
+                    .map(|why| format!("{}: {why}", report.task))
+            }),
+        ..Observed::default()
+    };
     for (unit, saw) in merged {
         let mut not_followed = saw.not_followed.clone();
         let mut dirs = saw.dirs.clone();
@@ -622,6 +760,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                     failed: saw.failed,
                     not_followed,
                     deselected: saw.deselected,
+                    skipped: saw.skipped,
                     ..Facts::default()
                 },
                 reads,
@@ -634,6 +773,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                                 finished: t.finished,
                                 failed: t.failed,
                                 deselected: t.deselected,
+                                skipped: t.skipped,
                                 duration_ms: t.duration_ms,
                                 ..MergedTest::default()
                             };
@@ -861,6 +1001,7 @@ impl Adapter for Recognized {
             dirs: observed.dirs,
             unit_files: Some(observed.unit_files),
             received: shared.received,
+            left_out: observed.left_out,
             ..Read::default()
         }))
     }

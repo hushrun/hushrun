@@ -9,7 +9,8 @@ import org.testng.ITestNGMethod;
 
 /**
  * TestNG's method interceptor, which TestNG finds through {@code META-INF/services} as a listener: it
- * leaves out the test methods {@link LeaveOut} lists, by their class and method. Only TestNG loads
+ * leaves out the test methods {@link LeaveOut} lists, by the class they run as a test of (a method
+ * inherited from a base class is its subclass's) and their method. Only TestNG loads
  * this class, so where TestNG isn't on the classpath nothing refers to a TestNG type.
  *
  * <p>When a method of the test context depends on other methods or groups, it leaves nothing of that
@@ -28,21 +29,41 @@ public final class TestNGInterceptor implements IMethodInterceptor {
             List<IMethodInstance> kept = new ArrayList<>(methods.size());
             for (IMethodInstance m : methods) {
                 ITestNGMethod t = m.getMethod();
-                String cls = t.getRealClass().getName();
+                String cls = testClass(m);
                 String name = t.getMethodName();
-                if (!list.listed(cls, name)) {
+                String entry = list.entry(cls, name, false);
+                if (entry == null) {
                     kept.add(m);
                 } else if (dependency != null) {
                     Events.get().notLeftOut(BY, cls, name, dependency);
                     kept.add(m);
                 } else {
-                    Events.get().leftOut(BY, cls, name);
+                    Events.get().leftOut(BY, null, cls, name, entry);
                 }
             }
             return kept;
         } catch (Throwable e) {
             return methods;
         }
+    }
+
+    /**
+     * The class a method runs as a test of: its instance's, which for a method inherited from a
+     * base class is the subclass, a test of its own. {@code getRealClass()} is the class that
+     * declares it.
+     */
+    static String testClass(IMethodInstance m) {
+        ITestNGMethod t = m.getMethod();
+        try {
+            if (t.getTestClass() != null && t.getTestClass().getRealClass() != null) {
+                return t.getTestClass().getRealClass().getName();
+            }
+        } catch (RuntimeException e) {
+            // An older TestNG: the instance says.
+        }
+        Object instance = m.getInstance();
+        if (instance != null) return instance.getClass().getName();
+        return t.getRealClass().getName();
     }
 
     /** Why nothing of the context may be left out, or null. */

@@ -71,12 +71,17 @@ class HushrunRun {
 
     static String key(String buildRoot, String taskPath) { sha1(buildRoot + "\n" + taskPath).substring(0, 12) }
 
-    /** The task's facts file in this run's directory. */
-    static File facts(String buildRoot, String taskPath) {
+    /**
+     * The task's facts file in this run's directory: as its own actions write it, and, `start`
+     * given, as the build service keeps it for one start of Gradle, which a second start under
+     * the same COMMAND never overwrites.
+     */
+    static File facts(String buildRoot, String taskPath, String start = null) {
         String u = units()
         if (u == null) return null
         String safe = taskPath.replaceAll(/[^A-Za-z0-9]+/, "_").replaceAll(/^_+/, "")
-        return new File(u, "gradle-" + safe + "-" + key(buildRoot, taskPath) + ".json")
+        String name = "gradle-" + safe + "-" + key(buildRoot, taskPath) + (start == null ? "" : "-" + start)
+        return new File(u, name + ".json")
     }
 
     /** The task's own directory in this run's directory: its list for the hook, the hook's events. */
@@ -115,10 +120,12 @@ class HushrunRun {
         return m.length() > 300 ? m.substring(0, 300) : m
     }
 
-    /** The facts file around a report. */
-    static String factsText(Map report, List<String> errors) {
-        JsonOutput.toJson([schema: FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
-                           settings: [gradle: report], errors: errors ?: []])
+    /** The facts file around a report, of one start of Gradle when `start` says which. */
+    static String factsText(Map report, List<String> errors, String start = null) {
+        Map facts = [schema: FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
+                     settings: [gradle: report], errors: errors ?: []]
+        if (start != null) facts.start = start
+        JsonOutput.toJson(facts)
     }
 }
 
@@ -159,10 +166,20 @@ class HushrunShared implements Serializable {
     String gradleUserHome
     String gradleVersion
     Map<String, String> buildDirToProjectDir = [:]     // canonical build dir -> canonical project dir
-    Map<String, List<String>> extraDirs = [:]           // canonical project dir -> its source dirs outside it
+    Map<String, List<String>> sourceDirs = [:]          // canonical project dir -> every source dir of it
     Map<String, List<String>> testSourceDirs = [:]      // canonical project dir -> its test source dirs
     Map<String, String> sourceDirsHow = [:]             // canonical project dir -> where they came from
+    // canonical project dir -> [canonical project dir, configuration] of each project dependency it declares
+    Map<String, List<List<String>>> projectDeps = [:]
     List<String> includedBuildDirs = []
+
+    /** A configuration only a project's own tests use: another project's tests never read through it. */
+    static boolean testOnly(String configuration) {
+        String c = configuration ?: ""
+        if (c.startsWith("testFixtures")) return false
+        return c.startsWith("test") || c.startsWith("androidTest") || c.startsWith("kaptTest") || c.startsWith("kspTest") ||
+                c.contains("UnitTest") || c.contains("AndroidTest")
+    }
 }
 
 /** One Test task, as configured. */
@@ -271,17 +288,31 @@ class HushrunSelection {
         Set<String> paths = new TreeSet<>()
         List<Map> notFollowed = []
         HushrunShared shared = info.shared
+        // A project is read as its source directories, every source set's: a file of a JVM kind
+        // below the project's directory but in none of them is no project's, and so the rest.
+        // A project whose source sets can't be told is read as its whole directory.
         Closure addProject = { String projectDir ->
-            String r = HushrunRun.rel(root, projectDir)
-            if (r == null) { notFollowed << [why: "outside-repository", detail: projectDir]; return }
-            dirs << r
-            (shared.extraDirs[projectDir] ?: []).each { String extra ->
-                String e = HushrunRun.rel(root, extra)
-                if (e == null) notFollowed << [why: "outside-repository", detail: extra] else dirs << e
+            List<String> mine = shared.sourceDirs[projectDir] ?: [projectDir]
+            mine.each { String dir ->
+                String r = HushrunRun.rel(root, dir)
+                if (r == null) notFollowed << [why: "outside-repository", detail: dir] else dirs << r
             }
         }
         try {
             addProject(info.projectDir)
+            // Every project the task's project declares in any configuration (an annotation
+            // processor, kapt, ksp, compileOnly, a platform), and what those declare outside their
+            // tests, whether or not the test classpath holds it: its compilers run them.
+            Set<String> seen = new HashSet<>([info.projectDir])
+            Deque<List> todo = new ArrayDeque<>()
+            todo.add([info.projectDir, true])
+            while (!todo.isEmpty()) {
+                List next = todo.poll()
+                (shared.projectDeps[next[0] as String] ?: []).each { List<String> dep ->
+                    if (!(next[1] as boolean) && HushrunShared.testOnly(dep[1])) return
+                    if (seen.add(dep[0])) { addProject(dep[0]); todo.add([dep[0], false]) }
+                }
+            }
             String guh = shared.gradleUserHome
             info.classpath.files.each { File f ->
                 String p = HushrunRun.canonical(f.absolutePath)
@@ -444,6 +475,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
     transient List<String> narrowedBy
     transient List<String> attempted
     transient List<String> notAttempted
+    transient List<String> hookLines
     transient String how
     transient boolean rootDone
     transient String rootResult
@@ -456,6 +488,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         narrowedBy = []
         attempted = []
         notAttempted = []
+        hookLines = []
         errors = []
         how = null
         rootDone = false
@@ -481,6 +514,10 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
                     how = "patterns"
                     s.leftOutTests.sort(false) { it[0] }.eachWithIndex { List<String> it, int i ->
                         if (i >= HushrunRun.MOST_PATTERN_TESTS) { notAttempted << it[0]; return }
+                        // Gradle reads a pattern that starts with an upper-case letter as a simple
+                        // class name, which matches the class of that name in every package: a
+                        // class of the default package (or a package so named) keeps its tests.
+                        if (!it[1].contains('.') || Character.isUpperCase(it[1].charAt(0))) { notAttempted << it[0]; return }
                         filter.excludeTestsMatching(it[1] + "." + it[2])
                         filter.excludeTestsMatching(it[1] + "." + it[2] + "[*]")   // Parameterized: "method[0: x=1]"
                         attempted << it[0]
@@ -491,6 +528,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
             }
             File work = HushrunRun.work(info.shared.buildRoot, info.taskPath)
             if (work != null) HushrunRun.writeWhole(new File(work, "leave-out.txt"), hook.join("\n") + "\n")
+            hookLines.addAll(hook)
             // A task left with no test by this run must not fail for that.
             if (s != null && s.leavesOut()) filter.failOnNoMatchingTests = false
         } catch (Throwable e) {
@@ -548,6 +586,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         report.leftOut.tests = attempted
         report.leftOut.notAttempted = notAttempted
         report.leftOut.how = how
+        report.leftOut.hook = hookLines
         report.invocations = new ArrayList(invocations)
         report.suiteFailures = new ArrayList(suiteFailures)
         Set<String> outers = new TreeSet<>()
@@ -573,6 +612,9 @@ class HushrunReport {
                       names: [:], invocations: [], suiteFailures: [], narrowedBy: [],
                       reads: [dirs: reads.dirs, paths: reads.paths],
                       notFollowed: new ArrayList(reads.notFollowed as List), sourceDirsHow: info.sourceDirsHow]
+        // Where this run's test JVMs of the task write the hook's events, from HUSHRUN_UNITS now.
+        File work = HushrunRun.work(info.shared.buildRoot, info.taskPath)
+        report.eventsDir = work == null ? null : new File(work, "events").path
         addNames(report, s, s?.leftOutClasses ?: [])
         (s?.leftOutTests ?: []).each { addNames(report, s, [HushrunRun.outerOf(it[1])]) }
         return report
@@ -601,7 +643,10 @@ class HushrunAfter implements Action<Task>, Serializable {
 
 // Hears how every task ended: a Test task that was up to date, came from the build cache, had no
 // source or failed before its tests, and test tasks this script can't follow.
+// One instance a build, so one start of Gradle: its id names the facts files it keeps.
 abstract class HushrunService implements BuildService<Params>, OperationCompletionListener {
+    final String start = UUID.randomUUID().toString()
+
     interface Params extends BuildServiceParameters {
         MapProperty<String, String> getStored()          // task path -> its stored report
         MapProperty<String, String> getUnfollowed()      // task path -> why
@@ -635,6 +680,7 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
                 report.invocations = []         // Gradle kept these; they didn't run now
                 report.suiteFailures = []
                 report.rootDone = false
+                report.eventsDir = null
             } else {
                 // No event and no report: what the class exclusion decided, when it ran.
                 HushrunSelection s = HushrunSelection.decided(path)
@@ -644,9 +690,43 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             }
             report.outcome = outcome
             report.taskFailed = failed
-            HushrunRun.writeWhole(target, HushrunRun.factsText(report, errors))
+            report.taskFailures = failed ? HushrunService.messages(res.failures, 0) : []
+            report.taskFailureTypes = failed ? HushrunService.types(res.failures, 0) : []
+            HushrunRun.writeWhole(HushrunRun.facts(root, path, start), HushrunRun.factsText(report, errors, start))
+            target.delete()
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * The exception class of each of a task's failures and their causes, at most 20: the name
+     * that starts its description (its stack trace), which no locale changes.
+     */
+    static List<String> types(def failures, int depth) {
+        List<String> out = []
+        try {
+            (failures ?: []).each { f ->
+                if (out.size() >= 20 || depth > 8) return
+                def m = ((f.description ?: "") =~ /^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)(?::|\s|$)/)
+                if (m.find()) out << m.group(1)
+                out.addAll(types(f.causes, depth + 1))
+            }
+        } catch (Throwable ignored) {}
+        return out.size() > 20 ? out.subList(0, 20) : out
+    }
+
+    /** The messages of a task's failures and their causes, at most 20. */
+    static List<String> messages(def failures, int depth) {
+        List<String> out = []
+        try {
+            (failures ?: []).each { f ->
+                if (out.size() >= 20 || depth > 8) return
+                String m = f.message ?: ""
+                out << (m.length() > 300 ? m.substring(0, 300) : m)
+                out.addAll(messages(f.causes, depth + 1))
+            }
+        } catch (Throwable ignored) {}
+        return out.size() > 20 ? out.subList(0, 20) : out
     }
 
     private void notFollowed(String path) {
@@ -659,7 +739,7 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
         if (why == null) return
         String root = parameters.root.get()["root"]
         Map report = [schema: HushrunRun.REPORT_SCHEMA, task: path, outcome: "not-followed", notFollowed: [[why: "task", detail: why]]]
-        HushrunRun.writeWhole(HushrunRun.facts(root, path), HushrunRun.factsText(report, []))
+        HushrunRun.writeWhole(HushrunRun.facts(root, path, start), HushrunRun.factsText(report, [], start))
     }
 }
 
@@ -788,10 +868,28 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
                 how << "kotlin"
             } catch (Throwable ignored) {}
         }
+        try {
+            List<List<String>> deps = []
+            p.configurations.each { c ->
+                c.dependencies.each { d ->
+                    if (!(d instanceof org.gradle.api.artifacts.ProjectDependency)) return
+                    String path = null
+                    try { path = d.path } catch (Throwable ignored) {}          // Gradle 8.11 and later
+                    if (path == null) try { path = d.dependencyProject.path } catch (Throwable ignored) {}
+                    def target = path == null ? null : p.rootProject.findProject(path)
+                    if (target != null) deps << [target.projectDir.canonicalPath, c.name]
+                }
+            }
+            shared.projectDeps[projectDir] = deps
+        } catch (Throwable ignored) {}
         if (tests.isEmpty()) { tests << projectDir; how << "project directory" }
         shared.testSourceDirs[projectDir] = tests.unique()
         shared.sourceDirsHow[projectDir] = how.join("+")
-        shared.extraDirs[projectDir] = all.findAll { it != projectDir && !it.startsWith(projectDir + File.separator) && new File(it).exists() } as List
+        if (!all.isEmpty()) {
+            // Inside the project, every declared one, so that a first file in one is a source;
+            // outside it, those there.
+            shared.sourceDirs[projectDir] = all.findAll { it == projectDir || it.startsWith(projectDir + File.separator) || new File(it).exists() } as List
+        }
     }
 }
 

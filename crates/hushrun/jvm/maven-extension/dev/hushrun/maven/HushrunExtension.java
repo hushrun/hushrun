@@ -36,9 +36,11 @@ import org.codehaus.plexus.util.xml.Xpp3Dom;
  * <ul>
  *   <li>writes what Maven's own model says to {@code $HUSHRUN_UNITS/maven-<pid>-<nanos>.json}, a
  *       {@code hushrun.unit-facts/v1} file whose {@code settings.maven} holds every project of the
- *       reactor: its directory, source and test source roots, the reactor projects it depends on,
- *       those it needs that this build doesn't build, its Surefire's and Failsafe's versions and
- *       settings, and the reports already in their reports directories;
+ *       reactor: its directory, source and test source roots, the reactor projects it depends on
+ *       (through dependencies of every scope, its parent, its plugins' dependencies and the
+ *       annotation processors its compiler runs), those of them this build doesn't build, its
+ *       Surefire's and Failsafe's versions and settings, and the reports already in their reports
+ *       directories;
  *   <li>turns {@code hushrun.json}'s {@code reuse} and {@code reuseTests} into the test-JVM hook's
  *       list, {@code $HUSHRUN_UNITS/test-jvm/leave-out.txt}, one {@code @<directory>} section a
  *       project, unless a list is there already.
@@ -102,7 +104,10 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
     private static String graph(MavenSession session, List<MavenProject> all, long started, String unitsDir,
                                 String leaveOut, List<String> errors) {
         StringBuilder b = new StringBuilder();
-        b.append("{\"schema\":\"hushrun.unit-facts/v1\",\"adapter\":\"maven\",\"settings\":{\"maven\":{");
+        // One start of Maven: every fork and module of it is this one build.
+        String start = pid() + "-" + System.nanoTime();
+        b.append("{\"schema\":\"hushrun.unit-facts/v1\",\"adapter\":\"maven\",\"start\":").append(Json.q(start));
+        b.append(",\"settings\":{\"maven\":{");
         b.append("\"version\":1,\"mavenVersion\":").append(Json.q(mavenVersion()));
         b.append(",\"startedMs\":").append(started);
         b.append(",\"pid\":").append(Json.q(pid()));
@@ -134,12 +139,15 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
             if (built) {
                 try {
                     for (MavenProject u : session.getProjectDependencyGraph().getUpstreamProjects(p, true)) {
-                        upstream.add(id(u));
+                        if (!upstream.contains(id(u))) upstream.add(id(u));
                     }
                 } catch (Throwable e) {
                     errors.add(id(p) + ": the reactor's graph: " + e);
                 }
+                // What the reactor's graph may not hold: the projects its plugins run, an annotation
+                // processor among them, and theirs. Its tests read what those generate or check.
                 for (MavenProject r : closure(byId, p)) {
+                    if (!upstream.contains(id(r))) upstream.add(id(r));
                     if (!session.getProjects().contains(r)) notBuilt.add(id(r));
                 }
             }
@@ -354,7 +362,11 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
         return null;
     }
 
-    /** Every reactor project p depends on, through dependencies or parents, transitively. */
+    /**
+     * Every reactor project p depends on, transitively: through dependencies of every scope, its
+     * parent, its plugins' own dependencies and the annotation processors its compiler names
+     * ({@code annotationProcessorPaths}, on the plugin or in any execution).
+     */
     private static Set<MavenProject> closure(Map<String, MavenProject> byId, MavenProject p) {
         Set<MavenProject> seen = new LinkedHashSet<>();
         Deque<MavenProject> todo = new ArrayDeque<>();
@@ -364,12 +376,41 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
             List<String> ids = new ArrayList<>();
             for (Dependency d : c.getDependencies()) ids.add(d.getGroupId() + ":" + d.getArtifactId());
             if (c.getParent() != null) ids.add(id(c.getParent()));
+            try {
+                for (Plugin pl : c.getBuildPlugins()) {
+                    for (Dependency d : pl.getDependencies()) ids.add(d.getGroupId() + ":" + d.getArtifactId());
+                    ids.addAll(processorPaths(pl));
+                }
+            } catch (Throwable e) {
+                // A model without build plugins: its dependencies and parent are all it says.
+            }
             for (String id : ids) {
                 MavenProject r = byId.get(id);
                 if (r != null && r != p && seen.add(r)) todo.add(r);
             }
         }
         return seen;
+    }
+
+    /** The {@code groupId:artifactId} of each {@code annotationProcessorPaths} entry of a plugin's configuration. */
+    static List<String> processorPaths(Plugin pl) {
+        List<String> out = new ArrayList<>();
+        List<Object> confs = new ArrayList<>();
+        confs.add(pl.getConfiguration());
+        for (PluginExecution e : pl.getExecutions()) confs.add(e.getConfiguration());
+        for (Object c : confs) {
+            if (!(c instanceof Xpp3Dom)) continue;
+            Xpp3Dom paths = ((Xpp3Dom) c).getChild("annotationProcessorPaths");
+            if (paths == null) continue;
+            for (Xpp3Dom path : paths.getChildren()) {
+                Xpp3Dom g = path.getChild("groupId");
+                Xpp3Dom a = path.getChild("artifactId");
+                if (g != null && a != null && g.getValue() != null && a.getValue() != null) {
+                    out.add(g.getValue().trim() + ":" + a.getValue().trim());
+                }
+            }
+        }
+        return out;
     }
 
     /** The reactor projects whose test classes p's tests read: a test-jar dependency on them. */

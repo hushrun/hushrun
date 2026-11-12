@@ -18,35 +18,23 @@ fn from_reports(files: &[&str], class: &str) -> Option<super::super::Seen> {
     let mut seen = ClassSeen::default();
     for name in files {
         for case in reports::cases(&data(name)).unwrap() {
-            let top = case.classname.split('$').next().unwrap().to_string();
-            if top != class {
-                continue;
+            if case.classname.split('$').next().unwrap() == class {
+                seen.add_case(&case);
             }
-            seen.from_reports = true;
-            let simple = top.rsplit('.').next().unwrap();
-            if case.name.is_empty()
-                || case.name == "initializationError"
-                || case.name == case.classname
-                || case.name == simple
-            {
-                seen.case_class_failed |= case.outcome == reports::Outcome::Failed;
-                continue;
-            }
-            let (_, id) = jvm::test_id(&case.classname, method_of_case(&case.name));
-            let slot = seen.cases.entry(id).or_default();
-            slot.0.push(case.outcome);
-            slot.1 += case.time_ms;
         }
     }
-    decide_class(&seen)
+    decide_class(&seen, false)
 }
 
 fn from_events(name: &str, class: &str) -> Option<super::super::Seen> {
     let events = jvm::read_events(&data(name));
-    decide_class(&ClassSeen {
-        events: events.classes.get(class).cloned(),
-        ..ClassSeen::default()
-    })
+    decide_class(
+        &ClassSeen {
+            events: events.classes.get(class).cloned(),
+            ..ClassSeen::default()
+        },
+        false,
+    )
 }
 
 fn test<'a>(seen: &'a super::super::Seen, id: &str) -> &'a MergedTest {
@@ -151,7 +139,8 @@ fn a_report_names_tests_by_method_and_nested_class_and_a_skipped_test_passes_onl
             "passes"
         ]
     );
-    assert!(seen.facts.failed && seen.facts.complete);
+    // Its skipped tests didn't finish, so it didn't run whole; it failed all the same.
+    assert!(seen.facts.failed && !seen.facts.complete);
     assert!(test(&seen, "errors").failed);
     assert!(test(&seen, "paramCustom").failed, "one invocation failed");
     assert!(test(&seen, "passes").finished && !test(&seen, "passes").failed);
@@ -159,6 +148,75 @@ fn a_report_names_tests_by_method_and_nested_class_and_a_skipped_test_passes_onl
     // Disabled and assumed tests are skipped: a pass only in a class where nothing failed.
     assert!(!test(&seen, "disabled").finished);
     assert!(!test(&seen, "assumed").finished);
+    assert!(test(&seen, "disabled").skipped && test(&seen, "assumed").skipped);
+    assert!(!test(&seen, "passes").skipped && seen.facts.skipped);
+}
+
+// covers: C-32, C-47
+#[test]
+fn a_skipped_test_is_told_and_finishes_only_in_a_run_where_nothing_failed() {
+    // TestNG skipped OrderTest's test because another class's @BeforeSuite failed: its own class
+    // holds no failure.
+    let report = br#"<testsuite name="TestSuite">
+<testcase name="db" classname="ng.SetupTest"><failure message="no database"/></testcase>
+<testcase name="total" classname="ng.OrderTest"><skipped message="no database"/></testcase>
+<testcase name="green" classname="ng.GreenTest"/>
+</testsuite>"#;
+    let class = |name: &str| {
+        let mut seen = ClassSeen::default();
+        for case in reports::cases(report).unwrap() {
+            if case.classname == name {
+                seen.add_case(&case);
+            }
+        }
+        seen
+    };
+    let order = class("ng.OrderTest");
+    let failed_run = decide_class(&order, true).unwrap();
+    assert!(!test(&failed_run, "total").finished && test(&failed_run, "total").skipped);
+    assert!(!failed_run.facts.complete && failed_run.facts.skipped);
+    assert!(class("ng.SetupTest").any_failed() && !order.any_failed());
+    // Where nothing failed, a skip is a pass, and the class ran whole; it is still told skipped.
+    let passed_run = decide_class(&order, false).unwrap();
+    assert!(test(&passed_run, "total").finished && test(&passed_run, "total").skipped);
+    assert!(passed_run.facts.complete && passed_run.facts.skipped);
+    let green = decide_class(&class("ng.GreenTest"), true).unwrap();
+    assert!(green.facts.complete && !green.facts.skipped);
+    // The hook's events say the same of a skipped test and of a skipped class.
+    let events = jvm::read_events(
+        br#"{"e":"jvm","pid":"1","dir":"/w","basedir":"/w"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:p.A]","class":"p.A","method":null,"params":null}
+{"e":"skipped","test":true,"uid":"[engine:junit-jupiter]/[class:p.A]/[method:off()]","class":"p.A","method":"off","params":"","reason":"disabled"}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.A]/[method:on()]","class":"p.A","method":"on","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:p.A]/[method:on()]","class":"p.A","method":"on","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:p.A]","class":"p.A","method":null,"params":null,"status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"skipped","test":false,"uid":"[engine:junit-jupiter]/[class:p.B]","class":"p.B","method":null,"params":null,"reason":"disabled"}
+"#,
+    );
+    let of = |name: &str, run_failed: bool| {
+        decide_class(
+            &ClassSeen {
+                events: events.classes.get(name).cloned(),
+                ..ClassSeen::default()
+            },
+            run_failed,
+        )
+        .unwrap()
+    };
+    let a = of("p.A", true);
+    assert!(test(&a, "off").skipped && !test(&a, "off").finished);
+    assert!(test(&a, "on").finished && !a.facts.complete && a.facts.skipped);
+    assert!(of("p.A", false).facts.complete);
+    let b = of("p.B", false);
+    assert!(b.facts.complete && b.facts.skipped);
+    // A class JUnit 4 skipped whole, as Surefire's report says it: told skipped.
+    let ignored = br#"<testsuite name="p.Ignored"><testcase name="p.Ignored" classname="p.Ignored"><skipped/></testcase></testsuite>"#;
+    let mut seen = ClassSeen::default();
+    for case in reports::cases(ignored).unwrap() {
+        seen.add_case(&case);
+    }
+    let ignored = decide_class(&seen, true).unwrap();
+    assert!(ignored.facts.skipped && !ignored.facts.failed);
 }
 
 // covers: C-47
@@ -274,7 +332,8 @@ fn the_hooks_events_say_what_it_left_out_and_what_ran() {
     assert!(test(&calc, "passes").finished && !test(&calc, "passes").deselected);
     assert!(test(&calc, "errors").failed);
     assert!(test(&calc, "over").finished, "both overloads are one test");
-    assert!(calc.facts.failed && calc.facts.complete && !calc.facts.deselected);
+    // It failed; its skipped tests didn't finish in a class with a failure, so it didn't run whole.
+    assert!(calc.facts.failed && !calc.facts.complete && !calc.facts.deselected);
     // A class left out whole: nothing of it started.
     let green = from_events("events-junit5-leave-out.jsonl", "com.example.lib.GreenTest").unwrap();
     assert!(green.facts.deselected && !green.facts.complete);
@@ -432,7 +491,56 @@ fn what_testngs_interceptor_left_out_is_told_beside_what_its_reports_say_ran() {
             slot.0.push(case.outcome);
         }
     }
-    let green = decide_class(&seen).unwrap();
+    let green = decide_class(&seen, false).unwrap();
     assert!(test(&green, "green1").deselected);
     assert!(test(&green, "green2").finished && !test(&green, "green2").deselected);
+}
+
+// covers: C-32, C-47
+#[test]
+fn a_module_whose_hook_left_out_what_its_list_didnt_name_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let abs = real(dir.path());
+    let at = abs.to_string_lossy().into_owned();
+    let graph = |lines: &[&str]| -> Graph {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "startedMs": 0, "unitsDir": "/u", "projects": [],
+            "leaveOut": {"written": true, "listed": {at.clone(): lines}}
+        }))
+        .unwrap()
+    };
+    let modules = BTreeMap::from([(
+        "lib".to_string(),
+        Module {
+            dir: "lib".into(),
+            abs: abs.clone(),
+            ..Module::default()
+        },
+    )]);
+    let events = |lines: &str| {
+        BTreeMap::from([(
+            "1.jsonl".to_string(),
+            jvm::read_events(
+                format!(
+                    "{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":{at:?},\"basedir\":{at:?}}}\n{lines}"
+                )
+                .as_bytes(),
+            ),
+        )])
+    };
+    let ran = BTreeMap::from([(("lib".to_string(), "p.A".to_string()), BTreeSet::new())]);
+    let left_b = r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.A","method":"b","entry":"p.A#b"}"#;
+    let started_c = r#"{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.A]/[method:c()]","class":"p.A","method":"c","params":""}"#;
+    // b left out, c ran: as listed.
+    let both = events(&format!("{left_b}\n{started_c}\n"));
+    assert_eq!(
+        left_out_unlisted(&graph(&["p.A#b"]), &modules, &both, &ran),
+        None
+    );
+    // b left out though only c was listed.
+    let why = left_out_unlisted(&graph(&["p.A#c"]), &modules, &both, &ran).unwrap();
+    assert!(why.contains("left out p.A#b"), "{why}");
+    // d listed, in a class that ran, and neither left out nor started.
+    let why = left_out_unlisted(&graph(&["p.A#b", "p.A#d"]), &modules, &both, &ran).unwrap();
+    assert!(why.contains("found no test p.A#d"), "{why}");
 }

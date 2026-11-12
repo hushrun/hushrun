@@ -166,6 +166,19 @@ impl Repo {
         serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
     }
 
+    /// Every unit result this machine recorded, `pass` or `fail`, by count.
+    fn unit_results(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut files = Vec::new();
+        collect(&self.cache.join("results/units/v0"), &mut files);
+        let mut out = std::collections::BTreeMap::new();
+        for f in files {
+            let v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            let result = v["result"].as_str().unwrap_or("?").to_string();
+            *out.entry(result).or_default() += 1;
+        }
+        out
+    }
+
     /// The test cases of a class Gradle's XML report says ran, by name.
     fn xml_cases(&self, project: &str, class: &str) -> Vec<String> {
         let path = self
@@ -404,7 +417,20 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
             PRICE,
         ]
     );
-    assert_eq!(map["units"][CART]["dirs"], json!(["app", "lib"]));
+    // A project is read as its source directories (ADR 0084).
+    assert_eq!(
+        map["units"][CART]["dirs"],
+        json!([
+            "app/src/main/java",
+            "app/src/main/resources",
+            "app/src/test/java",
+            "app/src/test/resources",
+            "lib/src/main/java",
+            "lib/src/main/resources",
+            "lib/src/test/java",
+            "lib/src/test/resources"
+        ])
+    );
     assert_eq!(
         reads("other/src/test/java/shop/other/ATest.java"),
         [
@@ -804,5 +830,713 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     assert_eq!(
         line(&second, "hushrun: unit: "),
         "hushrun: unit: 2 of 3 tests run, in 1 of 1 test file; 1 already passed on the files it read, and 1 more that did runs as a check"
+    );
+}
+
+/// A TestNG build: `SetupTest`'s `@BeforeSuite` fails without a database (`NO_DB`), which skips
+/// every test of the suite; `OrderTest.total` fails whenever it runs; nine green classes.
+fn testng_build(tests: &str) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'ng'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'org.testng:testng:7.10.2' }\ntest { useTestNG() }\n",
+        ),
+        file(
+            "src/test/java/ng/SetupTest.java",
+            "package ng;\nimport org.testng.annotations.*;\npublic class SetupTest {\n  @BeforeSuite public void db() { if (System.getenv(\"NO_DB\") != null) throw new IllegalStateException(\"no database\"); }\n  @Test public void setupWorks() {}\n}\n",
+        ),
+        file(
+            "src/test/java/ng/OrderTest.java",
+            "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class OrderTest {\n  @Test public void total() { assertEquals(1, 2); }\n}\n",
+        ),
+    ];
+    for n in 1..=9 {
+        files.push(file(
+            &format!("src/test/java/ng/Green{n}Test.java"),
+            &format!("package ng;\nimport org.testng.annotations.*;\npublic class Green{n}Test {{\n  @Test public void green() {{}}\n}}\n"),
+        ));
+    }
+    files
+}
+
+// covers: C-32, C-46
+#[test]
+fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&testng_build("reuse"));
+    // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
+    let first = r.run(&command(&gradle, &[]), &[("NO_DB", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Only the setup's failure is recorded: no skipped class passed.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("fail".into(), 1)]),
+        "{}\n{}",
+        first.stdout,
+        first.stderr
+    );
+    // The database is back: OrderTest runs, and fails, as plain Gradle says.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("OrderTest > total FAILED"),
+        "{}",
+        second.stdout
+    );
+}
+
+/// `proc`'s annotation processor generates `app.GenValue`, whose `value()` is `proc.Values.VALUE`;
+/// `app` names `proc` only as its `annotationProcessor`. Nine green classes in app.
+fn processor_build(value: u32) -> Vec<(String, String)> {
+    let mut files = build(Framework::Junit5, &["proc", "app"], "reuse");
+    files.extend([
+        file(
+            "app/build.gradle",
+            "dependencies { annotationProcessor project(':proc') }\n",
+        ),
+        file(
+            "proc/src/main/java/proc/GenProcessor.java",
+            r#"package proc;
+import java.io.Writer;
+import java.util.Set;
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.TypeElement;
+@SupportedAnnotationTypes("*")
+public class GenProcessor extends AbstractProcessor {
+  private boolean done;
+  @Override public SourceVersion getSupportedSourceVersion() { return SourceVersion.latestSupported(); }
+  @Override public boolean process(Set<? extends TypeElement> a, RoundEnvironment env) {
+    if (done) return false; done = true;
+    try (Writer w = processingEnv.getFiler().createSourceFile("app.GenValue").openWriter()) {
+      w.write("package app; public class GenValue { public static int value() { return " + Values.VALUE + "; } }");
+    } catch (Exception e) { throw new RuntimeException(e); }
+    return false;
+  }
+}
+"#,
+        ),
+        file(
+            "proc/src/main/resources/META-INF/services/javax.annotation.processing.Processor",
+            "proc.GenProcessor\n",
+        ),
+        file(
+            "proc/src/test/java/proc/ProcTest.java",
+            "package proc;\nimport org.junit.jupiter.api.*;\nclass ProcTest { @Test void loads() { new GenProcessor(); } }\n",
+        ),
+        file("app/src/main/java/app/App.java", "package app;\npublic class App {}\n"),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void generated() { Assertions.assertEquals(1, GenValue.value()); } }\n",
+        ),
+        processor_values(value),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("app/src/test/java/app/Green{n}Test.java"),
+            &format!("package app;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    files
+}
+
+fn processor_values(value: u32) -> (String, String) {
+    file(
+        "proc/src/main/java/proc/Values.java",
+        &format!(
+            "package proc;\npublic class Values {{ public static final int VALUE = {value}; }}\n"
+        ),
+    )
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_it_generates() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&processor_build(1));
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // app's classes read proc, whose processor app's compiler runs.
+    let map = r.map();
+    assert_eq!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["dirs"],
+        json!([
+            "app/src/main/java",
+            "app/src/main/resources",
+            "app/src/test/java",
+            "app/src/test/resources",
+            "proc/src/main/java",
+            "proc/src/main/resources",
+            "proc/src/test/java",
+            "proc/src/test/resources"
+        ]),
+        "{map:#}"
+    );
+    let (path, text) = processor_values(2);
+    r.write(&path, &text);
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("AppTest > generated() FAILED"),
+        "{}",
+        second.stdout
+    );
+}
+
+/// `app`'s `CrashTest`, whose test JVM dies when `CRASH` names where: `after` in its `@AfterAll`,
+/// once both its tests passed, `test` inside its second test. Nine green classes in `other`.
+fn crash_build() -> Vec<(String, String)> {
+    let mut files = build(Framework::Junit5, &["app", "other"], "reuse");
+    files.push(file(
+        "app/src/test/java/shop/app/CrashTest.java",
+        "package shop.app;\nimport org.junit.jupiter.api.*;\n@TestMethodOrder(MethodOrderer.MethodName.class)\nclass CrashTest {\n  static void crashIf(String where) { if (where.equals(System.getenv(\"CRASH\"))) Runtime.getRuntime().halt(3); }\n  @Test void a() {}\n  @Test void b() { crashIf(\"test\"); }\n  @AfterAll static void after() { crashIf(\"after\"); }\n}\n",
+    ));
+    for n in 1..=9 {
+        files.push(file(
+            &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+            &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    files
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_that_died_records_no_pass_for_the_class_it_was_in() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    for (round, place) in ["after", "test"].into_iter().enumerate() {
+        let r = Repo::new(&crash_build());
+        // The test JVM dies: Gradle fails the task, and no test of it failed.
+        let ran = r.run(&command(&gradle, &[]), &[("CRASH", place)]);
+        assert_eq!(ran.code, 1, "{place}: {}\n{}", ran.stdout, ran.stderr);
+        assert!(
+            ran.stderr.contains("finished with non-zero exit value 3"),
+            "{place}: {}",
+            ran.stderr
+        );
+        // other's classes passed; CrashTest recorded nothing.
+        assert_eq!(
+            r.unit_results(),
+            std::collections::BTreeMap::from([("pass".into(), 9)]),
+            "{place} ({round}): {}\n{}",
+            ran.stdout,
+            ran.stderr
+        );
+    }
+}
+
+// covers: C-39, C-46
+#[test]
+fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'spock'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'groovy' }\nrepositories { mavenCentral() }\ndependencies {\n  testImplementation platform('org.spockframework:spock-bom:2.3-groovy-4.0')\n  testImplementation 'org.spockframework:spock-core'\n  testImplementation 'org.apache.groovy:groovy:4.0.24'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n",
+        ),
+        file(
+            "src/test/groovy/ex/ParseSpec.groovy",
+            "package ex\nimport spock.lang.*\nclass ParseSpec extends Specification {\n  def \"parses [a]\"() { expect: true }\n  def \"parses [c]\"() { expect: true }\n  def \"parses [b]\"() { expect: 1 == 2 }\n}\n",
+        ),
+    ]);
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Nothing changed: one of the two that passed is left out, the other runs as a check, and
+    // the one that failed runs, and fails again.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let cases = r.xml_cases(".", "ex.ParseSpec");
+    assert!(cases.contains(&"parses [b]".to_string()), "{cases:?}");
+    assert_eq!(cases.len(), 2, "{cases:?}");
+}
+
+// covers: C-39, C-46
+#[test]
+fn junit4_tests_of_a_class_in_the_default_package_leave_out_nothing_of_a_class_named_alike() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // Two classes named CalcTest, one in the default package, with tests of the same names.
+    let adds = |when: &str| -> String {
+        (1..=9)
+            .map(|n| format!("  @Test public void add{n}() {{ Assert.assertNull(System.getenv(\"{when}\")); }}\n"))
+            .collect()
+    };
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    files.extend([
+        file(
+            "app/src/test/java/CalcTest.java",
+            &format!(
+                "import org.junit.*;\npublic class CalcTest {{\n{}  @Test public void other() {{ Assert.assertNull(System.getenv(\"FAIL\")); }}\n}}\n",
+                adds("NEVER")
+            ),
+        ),
+        file(
+            "app/src/test/java/p/CalcTest.java",
+            &format!("package p;\nimport org.junit.*;\npublic class CalcTest {{\n{}}}\n", adds("P_FAIL")),
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1"), ("P_FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // The default package's add tests passed and may be left out; p.CalcTest's failed, and run.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let cases = r.xml_cases("app", "p.CalcTest");
+    assert_eq!(cases.len(), 9, "{cases:?}\n{}", second.stderr);
+}
+
+// covers: C-32, C-46
+#[cfg(unix)]
+#[test]
+fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let counts = tempfile::tempdir().unwrap();
+    let count_dir = counts.path().to_string_lossy().into_owned();
+    // A wrapper that starts Gradle again when it fails, and a test that fails the first time.
+    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
+    files.extend([
+        file(
+            "gradlew",
+            "#!/bin/sh\n\"$REAL_GRADLE\" \"$@\" || \"$REAL_GRADLE\" \"$@\"\n",
+        ),
+        file(
+            "app/src/test/java/shop/app/FlakyTest.java",
+            "package shop.app;\nimport org.junit.jupiter.api.*;\nimport java.nio.file.*;\nclass FlakyTest {\n  @Test void flaky() throws Exception { Path p = Paths.get(System.getenv(\"COUNTS\"), \"ran\"); boolean again = Files.exists(p); Files.write(p, new byte[0]); Assertions.assertTrue(again); }\n  @Test void steady() {}\n}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    std::fs::set_permissions(
+        r.repo.join("gradlew"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            "./gradlew",
+            "--offline",
+            "--console=plain",
+            "test",
+            "--continue",
+        ],
+        &[("REAL_GRADLE", &gradle), ("COUNTS", &count_dir)],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(
+        ran.stdout.matches("FlakyTest > flaky() FAILED").count(),
+        1,
+        "{}",
+        ran.stdout
+    );
+    // The second start passed it; the first failed it: a flaky test is a failed one.
+    assert_eq!(
+        r.map()["units"]["app/src/test/java/shop/app/FlakyTest.java"]["tests"],
+        json!({"shop.app.FlakyTest.flaky": "failed", "shop.app.FlakyTest.steady": "passed"}),
+        "{}",
+        ran.stderr
+    );
+}
+
+/// \[C-39\] Test classes whose tests look alike: `Base`'s `inherited`, which `ATest`, `BTest`,
+/// `OuterTest` and `OuterTest.Inner` each inherit, failing in a class whose simple name with
+/// `_FAIL` is set; and `same`, a method of `OuterTest` and of its nested `Inner`. `FLIP` fails
+/// `ATest` and `OuterTest`, so their other tests are listed one by one; `o1` to `o9` keep the audit
+/// off the look-alikes, mostly.
+const LOOK_ALIKE_J5: &[(&str, &str)] = &[
+    (
+        "shop/Base.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\npublic abstract class Base {\n  @Test void inherited() { Assertions.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n}\n",
+    ),
+    (
+        "shop/ATest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass ATest extends Base {\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FLIP\")); }\n  @Test void o1() {}\n  @Test void o2() {}\n  @Test void o3() {}\n  @Test void o4() {}\n  @Test void o5() {}\n  @Test void o6() {}\n  @Test void o7() {}\n  @Test void o8() {}\n  @Test void o9() {}\n}\n",
+    ),
+    (
+        "shop/BTest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass BTest extends Base {\n  @Test void own() {}\n}\n",
+    ),
+    (
+        "shop/OuterTest.java",
+        "package shop;\nimport org.junit.jupiter.api.*;\nclass OuterTest extends Base {\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FLIP\")); }\n  @Test void same() {}\n  @Nested class Inner extends Base {\n    @Test void same() { Assertions.assertNull(System.getenv(\"INNER_FAIL\")); }\n  }\n}\n",
+    ),
+];
+/// Run 1's variables: the flips, and the look-alikes that fail and so aren't listed.
+const LOOK_ALIKE_FIRST: &[(&str, &str)] = &[
+    ("FLIP", "1"),
+    ("BTest_FAIL", "1"),
+    ("Inner_FAIL", "1"),
+    ("INNER_FAIL", "1"),
+];
+/// Run 2's: the flips fixed, the look-alikes not listed still failing.
+const LOOK_ALIKE_SECOND: &[(&str, &str)] = &[
+    ("BTest_FAIL", "1"),
+    ("Inner_FAIL", "1"),
+    ("INNER_FAIL", "1"),
+];
+
+// covers: C-39, C-46
+#[test]
+fn junit5_tests_that_look_alike_in_subclasses_and_nested_classes_are_left_out_one_by_one() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
+    for (path, text) in LOOK_ALIKE_J5 {
+        files.push(file(&format!("app/src/test/java/{path}"), text));
+    }
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), LOOK_ALIKE_FIRST);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(&command(&gradle, &[]), LOOK_ALIKE_SECOND);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    // The look-alikes that passed were listed, and left out: all 13 that passed but the audit's.
+    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.stderr);
+    let failed = |class: &str, test: &str| {
+        let path = r
+            .repo
+            .join(format!("app/build/test-results/test/TEST-{class}.xml"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        text.split("<testcase ")
+            .any(|case| case.starts_with(&format!("name=\"{test}\"")) && case.contains("<failure"))
+    };
+    for (class, test) in [
+        ("shop.BTest", "inherited()"),
+        ("shop.OuterTest$Inner", "inherited()"),
+        ("shop.OuterTest$Inner", "same()"),
+    ] {
+        assert!(failed(class, test), "{class} {test}\n{}", second.stdout);
+    }
+}
+
+/// \[C-39\] JUnit 4 test classes whose tests look alike: abstract `Base`'s `inherited`, which
+/// `ATest` and `BTest` inherit; concrete `BaseTest`, whose `inherited` and `flip` `SubTest`
+/// inherits; and concrete `Base2Test` and `Sub2Test`, the same. `inherited` fails in a class whose
+/// simple name with `_FAIL` is set; `FLIP` fails `flip`.
+const LOOK_ALIKE_J4: &[(&str, &str)] = &[
+    (
+        "shop/Base.java",
+        "package shop;\nimport org.junit.*;\npublic abstract class Base {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n}\n",
+    ),
+    (
+        "shop/ATest.java",
+        "package shop;\nimport org.junit.*;\npublic class ATest extends Base {\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n  @Test public void o1() {}\n  @Test public void o2() {}\n  @Test public void o3() {}\n  @Test public void o4() {}\n  @Test public void o5() {}\n  @Test public void o6() {}\n  @Test public void o7() {}\n  @Test public void o8() {}\n  @Test public void o9() {}\n}\n",
+    ),
+    (
+        "shop/BTest.java",
+        "package shop;\nimport org.junit.*;\npublic class BTest extends Base {\n  @Test public void own() {}\n}\n",
+    ),
+    (
+        "shop/BaseTest.java",
+        "package shop;\nimport org.junit.*;\npublic class BaseTest {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n}\n",
+    ),
+    (
+        "shop/SubTest.java",
+        "package shop;\npublic class SubTest extends BaseTest {}\n",
+    ),
+    (
+        "shop/Base2Test.java",
+        "package shop;\nimport org.junit.*;\npublic class Base2Test {\n  @Test public void inherited() { Assert.assertNull(System.getenv(getClass().getSimpleName() + \"_FAIL\")); }\n  @Test public void flip() { Assert.assertNull(System.getenv(\"FLIP\")); }\n}\n",
+    ),
+    (
+        "shop/Sub2Test.java",
+        "package shop;\npublic class Sub2Test extends Base2Test {}\n",
+    ),
+];
+/// Run 1's variables: the flips, and the look-alikes that fail and so aren't listed.
+const LOOK_ALIKE_J4_FIRST: &[(&str, &str)] = &[
+    ("FLIP", "1"),
+    ("BTest_FAIL", "1"),
+    ("SubTest_FAIL", "1"),
+    ("Base2Test_FAIL", "1"),
+];
+/// Run 2's: the flips fixed, the look-alikes not listed still failing.
+const LOOK_ALIKE_J4_SECOND: &[(&str, &str)] = &[
+    ("BTest_FAIL", "1"),
+    ("SubTest_FAIL", "1"),
+    ("Base2Test_FAIL", "1"),
+];
+
+// covers: C-39, C-46
+#[test]
+fn junit4_tests_that_look_alike_in_subclasses_are_left_out_one_by_one_through_patterns() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    for (path, text) in LOOK_ALIKE_J4 {
+        files.push(file(&format!("app/src/test/java/{path}"), text));
+    }
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), LOOK_ALIKE_J4_FIRST);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(&command(&gradle, &[]), LOOK_ALIKE_J4_SECOND);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
+    assert_eq!(reused, 12, "{}", second.stderr);
+    for class in ["shop.BTest", "shop.SubTest", "shop.Base2Test"] {
+        let path = r
+            .repo
+            .join(format!("app/build/test-results/test/TEST-{class}.xml"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            text.split("<testcase ")
+                .any(|case| case.starts_with("name=\"inherited\"") && case.contains("<failure")),
+            "{class}: {text}\n{}",
+            second.stdout
+        );
+    }
+}
+
+// covers: C-39, C-46
+#[test]
+fn spock_features_specs_inherit_are_left_out_one_by_one() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let feature = "  def \"inherited\"() { expect: System.getenv(getClass().simpleName + \"_FAIL\") == null }\n";
+    let flip = "  def \"flip\"() { expect: System.getenv(\"FLIP\") == null }\n";
+    let others: String = (1..=9)
+        .map(|n| format!("  def \"o{n}\"() {{ expect: true }}\n"))
+        .collect();
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'spock'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'groovy' }\nrepositories { mavenCentral() }\ndependencies {\n  testImplementation platform('org.spockframework:spock-bom:2.3-groovy-4.0')\n  testImplementation 'org.spockframework:spock-core'\n  testImplementation 'org.apache.groovy:groovy:4.0.24'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n",
+        ),
+        // An abstract base spec two specs extend, and a concrete one a spec extends.
+        file(
+            "src/test/groovy/ex/BaseSpec.groovy",
+            &format!(
+                "package ex\nimport spock.lang.*\nabstract class BaseSpec extends Specification {{\n{feature}}}\n"
+            ),
+        ),
+        file(
+            "src/test/groovy/ex/ASpec.groovy",
+            &format!("package ex\nclass ASpec extends BaseSpec {{\n{flip}{others}}}\n"),
+        ),
+        file(
+            "src/test/groovy/ex/BSpec.groovy",
+            "package ex\nclass BSpec extends BaseSpec {\n  def \"own\"() { expect: true }\n}\n",
+        ),
+        file(
+            "src/test/groovy/ex/Base2Spec.groovy",
+            &format!(
+                "package ex\nimport spock.lang.*\nclass Base2Spec extends Specification {{\n{feature}{flip}}}\n"
+            ),
+        ),
+        file(
+            "src/test/groovy/ex/Sub2Spec.groovy",
+            "package ex\nclass Sub2Spec extends Base2Spec {}\n",
+        ),
+    ]);
+    let first = r.run(
+        &command(&gradle, &[]),
+        &[("FLIP", "1"), ("BSpec_FAIL", "1"), ("Sub2Spec_FAIL", "1")],
+    );
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(
+        &command(&gradle, &[]),
+        &[("BSpec_FAIL", "1"), ("Sub2Spec_FAIL", "1")],
+    );
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    // ASpec's ten and BSpec's own, and Base2Spec's inherited: all 12 but the audit's.
+    let reused = r.newest_result()["units"]["tests"]["reused"].clone();
+    assert_eq!(reused, 11, "{}\n{}", second.stderr, second.stdout);
+    for class in ["ex.BSpec", "ex.Sub2Spec"] {
+        let path = r
+            .repo
+            .join(format!("build/test-results/test/TEST-{class}.xml"));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            text.split("<testcase ")
+                .any(|case| case.starts_with("name=\"inherited\"") && case.contains("<failure")),
+            "{class}: {text}\n{}",
+            second.stdout
+        );
+    }
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_jvm_file_no_project_of_the_build_owns_is_the_rest() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // A tool beside app's sources, which a script builds and publishes, not app's build; one at
+    // the root; and a second build of its own, below app, that nothing here includes.
+    let mut files = shop("reuse");
+    files.extend([
+        file(
+            "app/tools/Gen.java",
+            "package tools;\npublic class Gen { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "tools/Root.java",
+            "package tools;\npublic class Root { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "app/plugin/settings.gradle",
+            "rootProject.name = 'plugin'\n",
+        ),
+        file(
+            "app/plugin/src/main/java/plugin/P.java",
+            "package plugin;\npublic class P {}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    for path in [
+        "app/tools/Gen.java",
+        "tools/Root.java",
+        "app/plugin/src/main/java/plugin/P.java",
+    ] {
+        assert!(map["rest"][path].is_string(), "{path}: {map:#}");
+    }
+    // A change to one runs every test class, as far as hushrun goes: Gradle finds the tasks up
+    // to date, since the file is none of their inputs.
+    r.write(
+        "app/tools/Gen.java",
+        "package tools;\npublic class Gen { public static int v() { return 2; } }\n",
+    );
+    let changed = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        line(&changed, "hushrun: unit: "),
+        "hushrun: unit: all 5 test files run: app/tools/Gen.java changed, and any test may read it"
+    );
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&shop("reuse"));
+    let only = |args: &[&'static str]| -> Vec<&'static str> {
+        let mut out = vec!["run", "unit", "--"];
+        out.extend_from_slice(args);
+        out
+    };
+    let g: &'static str = Box::leak(gradle.into_boxed_str());
+    // Only app's tests: lib's sources, which app's classes read, are on their list.
+    let first = r.run(
+        &only(&[g, "--offline", "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    let reads = map["units"][CART]["reads"].as_array().unwrap().clone();
+    assert!(
+        reads.contains(&json!("lib/src/main/java/shop/lib/Price.java")),
+        "{map:#}"
+    );
+    // lib changes: app's tests run.
+    r.write(
+        "lib/src/main/java/shop/lib/Price.java",
+        "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
+    );
+    let second = r.run(
+        &only(&[g, "--offline", "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("CartTest") || r.xml_cases("app", "shop.app.CartTest").len() >= 2,
+        "{}",
+        second.stdout
+    );
+    assert_eq!(
+        r.newest_result()["units"]["reused"],
+        json!(0),
+        "{}",
+        second.stderr
+    );
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_junit4_test_jvm_that_died_beside_a_genuine_failure_records_no_pass_for_its_class() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // JUnit 4 on Gradle's own runner, which loads no hook: one class fails for real, and the JVM
+    // dies in another's class teardown once its tests passed. Nine green classes in `other`.
+    let mut files = build(Framework::Junit4, &["app", "other"], "reuse");
+    files.extend([
+        // A JVM a class, so that the failure is reported before the other JVM dies.
+        file("app/build.gradle", "tasks.named('test') { forkEvery = 1 }\n"),
+        file(
+            "app/src/test/java/shop/app/AFailTest.java",
+            "package shop.app;\nimport org.junit.*;\npublic class AFailTest { @Test public void fails() { Assert.fail(\"for real\"); } }\n",
+        ),
+        file(
+            "app/src/test/java/shop/app/CrashTest.java",
+            "package shop.app;\nimport org.junit.*;\npublic class CrashTest {\n  @Test public void a() {}\n  @Test public void b() {}\n  @AfterClass public static void after() { if (System.getenv(\"CRASH\") != null) Runtime.getRuntime().halt(3); }\n}\n",
+        ),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+            &format!("package shop.other;\nimport org.junit.*;\npublic class Green{n}Test {{ @Test public void green() {{}} }}\n"),
+        ));
+    }
+    let r = Repo::new(&files);
+    let ran = r.run(&command(&gradle, &[]), &[("CRASH", "1")]);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // AFailTest failed; other's passed; CrashTest recorded nothing.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("fail".into(), 1), ("pass".into(), 9)]),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
     );
 }

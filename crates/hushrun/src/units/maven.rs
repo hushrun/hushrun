@@ -424,7 +424,45 @@ struct ClassSeen {
     /// From reports: each test's invocations' outcomes and time, and a failure of the class.
     cases: BTreeMap<String, (Vec<reports::Outcome>, u64)>,
     case_class_failed: bool,
+    /// From reports: the class was skipped whole (JUnit 4's `@Ignore` on it).
+    case_class_skipped: bool,
     from_reports: bool,
+}
+
+impl ClassSeen {
+    /// One test case of a report of this class: a test's invocation, or the class's own (a
+    /// failure outside its tests, or the whole class skipped).
+    fn add_case(&mut self, case: &reports::Case) {
+        self.from_reports = true;
+        let class = case.classname.as_str();
+        let top = class.split('$').next().unwrap_or(class);
+        let simple = top.rsplit('.').next().unwrap_or(top);
+        let class_level = case.name.is_empty()
+            || case.name == "initializationError"
+            || case.name == class
+            || case.name == simple;
+        if class_level {
+            self.case_class_failed |= case.outcome == reports::Outcome::Failed;
+            self.case_class_skipped |= case.outcome == reports::Outcome::Skipped;
+            return;
+        }
+        let (_, id) = jvm::test_id(class, method_of_case(&case.name), true);
+        let slot = self.cases.entry(id).or_default();
+        slot.0.push(case.outcome);
+        slot.1 = slot.1.saturating_add(case.time_ms);
+    }
+
+    /// Its events or its reports say something of it failed.
+    fn any_failed(&self) -> bool {
+        self.events
+            .as_ref()
+            .is_some_and(|e| e.failed || e.tests.values().any(|t| t.failed))
+            || self.case_class_failed
+            || self
+                .cases
+                .values()
+                .any(|(o, _)| o.contains(&reports::Outcome::Failed))
+    }
 }
 
 /// A report's test name up to its parameters or invocation: `param(int)[1]` is `param`.
@@ -480,6 +518,8 @@ pub struct Observed {
     pub unit_files: BTreeSet<String>,
     pub failures_by_unit: bool,
     pub refused: Option<String>,
+    /// \[C-32\] Why the hook left out what the plan didn't list.
+    pub left_out: Option<String>,
 }
 
 /// Reads what the extension, the hook and the reports say of a run in the repository at `root`
@@ -552,21 +592,9 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 }
                 let class = case.classname.as_str();
                 let top = class.split('$').next().unwrap_or(class).to_string();
-                let entry = seen.entry((module.dir.clone(), top.clone())).or_default();
-                entry.from_reports = true;
-                let simple = top.rsplit('.').next().unwrap_or(&top);
-                let class_level = case.name.is_empty()
-                    || case.name == "initializationError"
-                    || case.name == class
-                    || case.name == simple;
-                if class_level {
-                    entry.case_class_failed |= case.outcome == reports::Outcome::Failed;
-                    continue;
-                }
-                let (_, id) = jvm::test_id(class, method_of_case(&case.name));
-                let slot = entry.cases.entry(id).or_default();
-                slot.0.push(case.outcome);
-                slot.1 = slot.1.saturating_add(case.time_ms);
+                seen.entry((module.dir.clone(), top))
+                    .or_default()
+                    .add_case(&case);
             }
         }
     }
@@ -575,11 +603,24 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         failures_by_unit: unattributed == 0,
         ..Observed::default()
     };
+    // \[C-32\] Something of this run failed: a failure no class owns, or any class's.
+    let run_failed = unattributed > 0 || seen.values().any(ClassSeen::any_failed);
+    // Each class that ran, by module and top-level class, with the ids its reports name.
+    let seen_ran: BTreeMap<(String, String), BTreeSet<String>> = seen
+        .iter()
+        .filter(|(_, c)| {
+            !c.cases.is_empty()
+                || c.events
+                    .as_ref()
+                    .is_some_and(|e| e.started || e.tests.values().any(|t| t.started))
+        })
+        .map(|(k, c)| (k.clone(), c.cases.keys().cloned().collect()))
+        .collect();
     for ((module_dir, class), class_seen) in seen {
         let Some(module) = modules.get(&module_dir) else {
             continue;
         };
-        let Some(mut seen_unit) = decide_class(&class_seen) else {
+        let Some(mut seen_unit) = decide_class(&class_seen, run_failed) else {
             continue;
         };
         if !module.not_built.is_empty() {
@@ -613,6 +654,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             }
         }
     }
+    out.left_out = left_out_unlisted(&graph, &modules, &events, &seen_ran);
     let listed = graph
         .leave_out
         .as_ref()
@@ -625,6 +667,66 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         _ => None,
     };
     Ok(Some(out))
+}
+
+/// \[C-32\] Why the hook left out, in some module's JVM, what the extension's list for that module
+/// didn't list; or found no test a method entry named in a class that ran, which it neither left
+/// out nor saw start (`ran`: the classes that ran, with the ids their reports name).
+fn left_out_unlisted(
+    graph: &Graph,
+    modules: &BTreeMap<String, Module>,
+    events: &BTreeMap<String, jvm::JvmEvents>,
+    ran: &BTreeMap<(String, String), BTreeSet<String>>,
+) -> Option<String> {
+    let listed = graph.leave_out.as_ref().map(|l| &l.listed);
+    for module in modules.values() {
+        let abs = module.abs.to_string_lossy().into_owned();
+        let lines: BTreeSet<String> = listed
+            .and_then(|l| l.get(&abs))
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let mine: Vec<&jvm::JvmEvents> = events
+            .values()
+            .filter(|e| {
+                e.basedir
+                    .as_ref()
+                    .or(e.dir.as_ref())
+                    .is_some_and(|d| real(Path::new(d)) == module.abs)
+            })
+            .collect();
+        if let Some(why) = jvm::left_out_unlisted(mine.iter().copied(), &lines) {
+            return Some(why);
+        }
+        let left_out: BTreeSet<&str> = mine
+            .iter()
+            .flat_map(|e| &e.left_out)
+            .filter_map(|o| o.entry.as_deref())
+            .collect();
+        for line in &lines {
+            let Some((class, method)) = line.split_once('#') else {
+                continue;
+            };
+            let (top, id) = jvm::test_id(class, method, true);
+            let Some(ids) = ran.get(&(module.dir.clone(), top)) else {
+                continue;
+            };
+            let started = mine.iter().any(|e| {
+                e.seen.iter().any(|s| {
+                    s == line
+                        || s.strip_prefix(line.as_str())
+                            .is_some_and(|rest| rest.starts_with('['))
+                })
+            });
+            if !left_out.contains(line.as_str()) && !started && !ids.contains(&id) {
+                return Some(format!(
+                    "the test-JVM hook found no test {line} that its list named, in a class that ran"
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn merge_events(mut a: ClassEvents, b: &ClassEvents) -> ClassEvents {
@@ -651,13 +753,17 @@ fn merge_events(mut a: ClassEvents, b: &ClassEvents) -> ClassEvents {
 
 /// \[C-47\] What one test class's events, or else its reports, come to as facts: hushrun's facts,
 /// never a state. A test is finished only when every invocation of it finished; a failure is a
-/// failure; a skipped test counts as finished only in a class with no failure (TestNG skips the
-/// tests of a class whose setup failed); a class that failed outside its tests, or something of
-/// which never finished, finishes none of its tests but those that failed. `None` when neither
-/// says anything of it.
-fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
+/// failure; a class that failed outside its tests, or something of which never finished,
+/// finishes none of its tests but those that failed.
+///
+/// \[C-32\] A skipped test is told `skipped`, and so is its class. It counts as finished only
+/// when nothing of the run failed (`run_failed`): TestNG skips every test of a suite whose
+/// configuration failed, in any class, and the tests that depend on a method that failed; then
+/// its class didn't run whole either. `None` when neither says anything of it.
+fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
     let mut tests: BTreeMap<String, MergedTest> = BTreeMap::new();
-    let (class_failed, open, complete, deselected, unnamed);
+    let (class_failed, open, mut complete, deselected, unnamed);
+    let mut class_skipped = false;
     if let Some(e) = c.events.as_ref().filter(|e| {
         e.started
             || e.finished
@@ -669,7 +775,7 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         let any_open = e.open || e.tests.values().any(|t| t.open);
         for (id, t) in &e.tests {
             let mut finished = t.finished && !t.open;
-            if (t.skipped && any_failed) || ((e.failed || any_open) && !t.failed) {
+            if (t.skipped && (any_failed || run_failed)) || ((e.failed || any_open) && !t.failed) {
                 finished = false;
             }
             tests.insert(
@@ -678,11 +784,13 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
                     finished: finished || t.failed,
                     failed: t.failed,
                     deselected: t.left_out && !t.started,
+                    skipped: t.skipped && !t.failed,
                     duration_ms: t.duration_ms,
                     ..MergedTest::default()
                 },
             );
         }
+        class_skipped = e.skipped;
         class_failed = any_failed;
         open = any_open;
         let all_done = !e.tests.is_empty()
@@ -716,12 +824,14 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         for (id, (outcomes, ms)) in &c.cases {
             let failed = outcomes.contains(&reports::Outcome::Failed);
             let skipped = outcomes.contains(&reports::Outcome::Skipped);
-            let finished = failed || !((skipped && any_failed) || c.case_class_failed);
+            let finished =
+                failed || !((skipped && (any_failed || run_failed)) || c.case_class_failed);
             tests.insert(
                 id.clone(),
                 MergedTest {
                     finished,
                     failed,
+                    skipped: skipped && !failed,
                     duration_ms: *ms,
                     ..MergedTest::default()
                 },
@@ -741,6 +851,7 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
             }
         }
         class_failed = any_failed;
+        class_skipped = c.case_class_skipped;
         open = false;
         complete = true;
         deselected = false;
@@ -752,11 +863,17 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         .values()
         .map(|t| t.duration_ms)
         .fold(0, u64::saturating_add);
+    // \[C-32\] A skip that didn't count as finished: the class didn't run whole.
+    if tests.values().any(|t| t.skipped && !t.finished) {
+        complete = false;
+    }
+    let skipped = class_skipped || tests.values().any(|t| t.skipped && !t.deselected);
     Some(super::Seen {
         facts: Facts {
             complete: complete && !open,
             failed: class_failed,
             deselected,
+            skipped,
             ..Facts::default()
         },
         reads: BTreeSet::new(),
@@ -886,6 +1003,7 @@ impl Adapter for Recognized {
             dirs: observed.dirs,
             unit_files: Some(observed.unit_files),
             refused: observed.refused,
+            left_out: observed.left_out,
             received: shared.received,
             ..Read::default()
         }))

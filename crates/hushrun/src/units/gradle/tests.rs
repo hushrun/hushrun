@@ -396,15 +396,24 @@ fn a_junit5_task_reports_classes_and_tests_left_out_and_class_failures() {
     for id in [
         "ex.app.CalcTest$Inner$Deeper.deep",
         "ex.app.CalcTest$Inner.innerPasses",
-        "ex.app.CalcTest.abortedByAssumption",
-        "ex.app.CalcTest.disabled",
         "ex.app.CalcTest.overloaded",
         "ex.app.CalcTest.paramNamed",
         "ex.app.CalcTest.repeated",
     ] {
         assert_eq!(states[id], units::State::Passed, "{id}");
     }
-    assert!(!calc.facts.failed && calc.facts.complete);
+    // \[C-32\] Skipped in a run where other classes failed: told skipped, and not finished, so
+    // the class didn't run whole.
+    let tests = calc.tests.as_ref().unwrap();
+    for id in [
+        "ex.app.CalcTest.abortedByAssumption",
+        "ex.app.CalcTest.disabled",
+    ] {
+        assert_eq!(states[id], units::State::NotRun, "{id}");
+        assert!(tests[id].skipped, "{id}");
+    }
+    assert!(!tests["ex.app.CalcTest.repeated"].skipped);
+    assert!(!calc.facts.failed && !calc.facts.complete && calc.facts.skipped);
     // What a class read: every file below its project's directory and below each project its
     // classpath is built from, build logic and other projects left out.
     assert!(calc.reads.contains("lib/src/main/java/ex/lib/Lib.java"));
@@ -693,7 +702,13 @@ fn a_task_gradle_didnt_run_whole_records_nothing() {
 #[test]
 fn what_the_script_couldnt_follow_makes_its_task_not_observed() {
     let t = junit5_tree();
-    let app = captured(JUNIT5_APP);
+    // Without the skipped tests, which other classes' failures keep from finishing (C-32).
+    let app = changed(&captured(JUNIT5_APP), |r| {
+        r["invocations"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|inv| inv["r"] != "SKIPPED");
+    });
     // A test framework the script doesn't know; the script's own error.
     let unknown = changed(&app, |r| {
         r["notFollowed"] = serde_json::json!([{"why": "test-framework", "detail": "x"}]);
@@ -827,4 +842,182 @@ fn a_plan_knows_the_last_runs_test_classes_and_the_directories_they_read() {
     assert_eq!(files, set(&["app/src/test/java/ex/app/CalcTest.java"]));
     assert_eq!(unnamed, set(&["app::ex.app.Gen"]));
     assert_eq!(dirs, set(&["app", "lib"]));
+}
+
+/// A task's facts file: `invocations` as `[class, name, result]`, and the rest of its report.
+fn task(invocations: &[(&str, &str, &str)], rest: serde_json::Value) -> FactsFile {
+    let mut report = serde_json::json!({
+        "schema": REPORT_SCHEMA, "task": ":test", "projectDir": ".", "outcome": "executed",
+        "rootDone": true, "framework": "junit-platform",
+        "names": {"p.CrashTest": "src/test/java/p/CrashTest.java",
+                  "p.FailTest": "src/test/java/p/FailTest.java"},
+        "invocations": invocations.iter().map(|(c, n, r)| serde_json::json!({
+            "c": c, "n": n, "r": r, "p": [[c, c]], "ms": 1})).collect::<Vec<_>>(),
+        "reads": {"dirs": ["."]}
+    });
+    for (k, v) in rest.as_object().unwrap() {
+        report[k] = v.clone();
+    }
+    serde_json::from_value(serde_json::json!({
+        "schema": "hushrun.unit-facts/v1", "adapter": "gradle", "units": [],
+        "settings": {"gradle": report}
+    }))
+    .unwrap()
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_that_died_leaves_the_class_it_was_in_not_run() {
+    let t = tree(&[
+        "src/test/java/p/CrashTest.java",
+        "src/test/java/p/FailTest.java",
+    ]);
+    let ran = [
+        ("p.CrashTest", "a()", "SUCCESS"),
+        ("p.CrashTest", "b()", "SUCCESS"),
+        ("p.FailTest", "fails()", "FAILURE"),
+    ];
+    let crash = "src/test/java/p/CrashTest.java";
+    // The task failed with a failed test, and the hook's events say CrashTest started and never
+    // ended: its JVM died in its @AfterAll.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("1-1.jsonl"),
+        r#"{"e":"jvm","pid":"1","dir":"/w","basedir":null}
+{"e":"plan-started"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]","class":"p.CrashTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:a()]","class":"p.CrashTest","method":"a","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:a()]","class":"p.CrashTest","method":"a","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:b()]","class":"p.CrashTest","method":"b","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:b()]","class":"p.CrashTest","method":"b","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+"#,
+    )
+    .unwrap();
+    let events = serde_json::json!(dir.path().to_string_lossy());
+    let observed = observe(
+        &[task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "eventsDir": events}),
+        )],
+        &t,
+    )
+    .unwrap()
+    .unwrap();
+    let crashed = &observed.units[crash];
+    assert_eq!(state(crashed, false), units::State::NotRun);
+    assert!(
+        crashed
+            .tests
+            .as_ref()
+            .unwrap()
+            .values()
+            .all(|t| !t.finished)
+    );
+    // Without the events, the same task, whose failure is the failed test's: CrashTest ran whole
+    // as far as Gradle says.
+    let observed = observe(&[task(&ran, serde_json::json!({"taskFailed": true}))], &t)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state(&observed.units[crash], false), units::State::Passed);
+    // A failed task no failed test explains, the type of its failure that says its test process
+    // ended badly, or, last, Gradle's words for it: no class of it ran whole.
+    let green = [
+        ("p.CrashTest", "a()", "SUCCESS"),
+        ("p.CrashTest", "b()", "SUCCESS"),
+    ];
+    for file in [
+        task(&green, serde_json::json!({"taskFailed": true})),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailureTypes": [
+                "org.gradle.api.tasks.TaskExecutionException",
+                "org.gradle.process.ProcessExecutionException"]}),
+        ),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailureTypes": [
+                "org.gradle.api.tasks.TaskExecutionException",
+                "org.gradle.api.internal.tasks.testing.TestSuiteExecutionException"]}),
+        ),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailures": [
+                "Execution failed for task ':test'.",
+                "Process 'Gradle Test Executor 3' finished with non-zero exit value 3"]}),
+        ),
+    ] {
+        let observed = observe(&[file], &t).unwrap().unwrap();
+        assert_eq!(state(&observed.units[crash], false), units::State::NotRun);
+    }
+    // A events directory that can't be read: nothing of the task ran whole.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("events");
+    std::fs::write(&file, "not a directory").unwrap();
+    let observed = observe(
+        &[task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "eventsDir": file.to_string_lossy()}),
+        )],
+        &t,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(state(&observed.units[crash], false), units::State::NotRun);
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_task_whose_hook_left_out_what_its_list_didnt_name_says_so() {
+    let t = tree(&[
+        "src/test/java/p/CrashTest.java",
+        "src/test/java/p/FailTest.java",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let events = |lines: &str| {
+        std::fs::write(
+            dir.path().join("1-1.jsonl"),
+            format!("{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":\"/w\",\"basedir\":null}}\n{lines}"),
+        )
+        .unwrap();
+    };
+    let ran = [("p.CrashTest", "a()", "SUCCESS")];
+    let file = || {
+        task(
+            &ran,
+            serde_json::json!({
+                "eventsDir": dir.path().to_string_lossy(),
+                "leftOut": {"classes": [], "tests": ["p.CrashTest.b", "p.CrashTest.c"],
+                            "how": "hook", "hook": ["p.CrashTest#b", "p.CrashTest#c"]}
+            }),
+        )
+    };
+    // b and c left out, as listed: nothing to say.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"c","entry":"p.CrashTest#c"}"#,
+        "\n",
+    ));
+    assert_eq!(observe(&[file()], &t).unwrap().unwrap().left_out, None);
+    // c neither left out nor run, in a class that ran.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+    ));
+    let why = observe(&[file()], &t).unwrap().unwrap().left_out.unwrap();
+    assert!(why.contains("found no test p.CrashTest#c"), "{why}");
+    // a, which ran, and d, which nobody listed, left out for b's entry.
+    events(concat!(
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"b","entry":"p.CrashTest#b"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"c","entry":"p.CrashTest#c"}"#,
+        "\n",
+        r#"{"e":"left-out","by":"junit-platform","uid":"u","class":"p.CrashTest","method":"d","entry":"p.CrashTest#b"}"#,
+        "\n",
+    ));
+    let why = observe(&[file()], &t).unwrap().unwrap().left_out.unwrap();
+    assert!(
+        why.starts_with(":test: the test-JVM hook left out p.CrashTest#d"),
+        "{why}"
+    );
 }

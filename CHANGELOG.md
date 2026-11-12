@@ -190,6 +190,27 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   machine's store, rather than one guessed from COMMAND: a Go test that a panic or a timeout left
   unrun is told so, not to add `-v`, and a `-v` that comes only from `GOFLAGS` is no longer asked
   for. An adapter's facts may say a test's `notKept`; the Go runner sends it.
+- Maven and Gradle no longer record as passed a test TestNG skipped because another class's suite
+  setup failed: a skipped test, and a class skipped whole, is told skipped, and passes only in a
+  run where nothing failed.
+- A change to an annotation processor of the build, or to any project a module or project names
+  only to its build (`annotationProcessorPaths`, plugin dependencies, `annotationProcessor`,
+  `kapt`, `ksp`, `compileOnly`), now runs the tests of the code it generates, under Maven and
+  Gradle.
+- Gradle: a class whose test JVM died (a crash, `System.exit`, a kill) records no pass. The
+  adapter now reads the test-JVM hook's events and the task's failure.
+- The test-JVM hook matches a listed test by its whole name: Spock features, parametrized display
+  names and Kotest names that differ after a `[` are no longer all left out for one entry; and
+  TestNG's interceptor leaves out an inherited test by the subclass it runs in. A test the hook
+  left out that its list didn't name makes the run start COMMAND once more with nothing left out.
+- Gradle leaves out no JUnit 4 test of a class in the default package by a filter pattern, which
+  also left out the test of that name in every class of the same simple name.
+- Gradle: a file of a JVM kind that no project of the build compiles, such as a tool beside a
+  project's sources that a script builds and publishes to `mavenLocal()`, is now the rest, so a
+  change to it runs every test class: a project is read as its source directories, not its whole
+  directory. Maven read modules so already.
+- A `gradlew` script that starts Gradle again after a failure no longer has its second start's
+  pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
   passes hushrun recorded for the files as they were.
 - `swift test`: a target built with a build-tool plugin of another package reads its package
