@@ -426,6 +426,9 @@ fn cargo_builds_through_the_wrapper() {
         .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        // Plain lines to read: CI sets `CARGO_TERM_COLOR=always`, and cargo's colours put an
+        // escape between `Running` and the command.
+        .env("CARGO_TERM_COLOR", "never")
         .args(["run", "b", "--", "cargo", "build", "--offline", "-v"]);
     let ran = Ran::of(&mut cmd);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
