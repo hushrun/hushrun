@@ -86,10 +86,11 @@ use it, for both units, as a spike proved it on CTest 3.22.1 and 4.4.5, on macOS
    passed held every file the code came from, whatever the build directory's configuration did in
    between. For `ctest …` itself the plan lists and walks before COMMAND, as Go's asks `go list`, and
    reuses with no map at all.
-9. **Which COMMANDs.** `ctest …` by name; a shell's `-c` line, a script or a non-CMake Makefile
-   COMMAND names whose text starts `ctest` by name and no pytest (pytest keeps those, as today:
-   CTest projects whose tests are pytest are rare, and losing pytest's reuse would cost those that
-   aren't). Refused, said once: `ctest` by its path, which `PATH` can't stand in for; and
+9. **Which COMMANDs.** `ctest …` by name; a wrapper (a shell's `-c` line, a `#!` script, a
+   non-CMake Makefile) whose own text starts `ctest` by name and names no other runner: no pytest
+   word, and no `swift test` (C-32's one rule, shared with the `swift test` adapter). pytest keeps
+   any other wrapper, as before: CTest projects whose tests are pytest are rare, and losing
+   pytest's reuse would cost those that aren't. Refused, said once: `ctest` by its path, which `PATH` can't stand in for; and
    `cmake --build … --target test`, `make test` and `ninja test` in a CMake build directory, which
    start CTest by its full path; `ctest --test-dir build` can be observed. A multi-config build
    lists its tests only with `-C`: without it nothing is listed, and the run says so.

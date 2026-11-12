@@ -34,7 +34,7 @@ use hushrun_core::units::{self, Facts, Set, Sets, Sources};
 
 use super::Seen;
 use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
-use super::command::program_name;
+use super::command::{self, program_name};
 use super::facts;
 use super::program;
 
@@ -70,8 +70,8 @@ pub struct Recognized {
 }
 
 /// \[ADR 0087\] The CTest adapter for a COMMAND that starts `ctest` by name (C-49): `ctest …`
-/// itself; a shell's `-c` line, a script or a Makefile COMMAND names whose text starts `ctest`
-/// and no pytest. `Some(Err)` for `ctest` started by its path and for CMake's own `test` targets,
+/// itself, or a wrapper whose text starts `ctest` and no other runner
+/// ([`command::wrapper_starts`]); never a Makefile CMake wrote. `Some(Err)` for `ctest` started by its path and for CMake's own `test` targets,
 /// which bypass `PATH`. `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let found = recognize(command, cwd)?;
@@ -113,48 +113,15 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
             if program_name(first) == "ninja" || dir.join("CMakeCache.txt").is_file() {
                 return None;
             }
-            let makefile = ["GNUmakefile", "makefile", "Makefile"]
-                .iter()
-                .map(|f| dir.join(f))
-                .find(|p| p.is_file())?;
-            let text = std::fs::read(&makefile).ok()?;
-            starts_ctest(&String::from_utf8_lossy(&text)).then_some(Ok(None))
+            wrapped(command, cwd)
         }
-        "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-            let at = rest
-                .iter()
-                .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))?;
-            let line = rest.get(at + 1)?;
-            starts_ctest(line).then_some(Ok(None))
-        }
-        _ => {
-            let path = cwd.join(first);
-            if !first.contains('/') || !path.is_file() {
-                return None;
-            }
-            let mut bytes = std::fs::read(&path).ok()?;
-            bytes.truncate(256 * 1024);
-            if !bytes.starts_with(b"#!") {
-                return None;
-            }
-            starts_ctest(&String::from_utf8_lossy(&bytes)).then_some(Ok(None))
-        }
+        _ => wrapped(command, cwd),
     }
 }
 
-/// Whether a shell line, script or Makefile starts `ctest` by name, and no pytest, which keeps
-/// the adapter every other COMMAND gets.
-fn starts_ctest(text: &str) -> bool {
-    let words: Vec<&str> = text
-        .split(|c: char| {
-            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\'')
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
-    let pytest = words
-        .iter()
-        .any(|w| matches!(program_name(w), "pytest" | "py.test" | "tox" | "nox"));
-    words.contains(&"ctest") && !pytest
+/// A wrapper COMMAND that starts `ctest` by name, by the one rule.
+fn wrapped(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
+    command::wrapper_starts(command, cwd, command::Runner::Ctest).then_some(Ok(None))
 }
 
 impl Recognized {

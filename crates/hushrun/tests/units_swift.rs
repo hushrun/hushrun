@@ -429,7 +429,8 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
         "hushrun: unit: 1 of 3 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
     );
 
-    // The forms hushrun's swift doesn't stand in front of say that nothing was observed.
+    // A wrapper that says swift test but starts swift by its path goes round hushrun's swift:
+    // nothing was observed, and the run says so.
     let real = which(&swift, &r.path);
     let bypassed = r.run(
         &[
@@ -439,7 +440,7 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
             "--",
             "sh",
             "-c",
-            &format!("'{}' build", real.display()),
+            &format!("echo swift test; '{}' build", real.display()),
         ],
         &[],
     );
@@ -462,8 +463,10 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
         ],
         &[],
     );
+    // \[C-32\] Not `swift test`, and no wrapper whose text says it: not Swift's adapter's, and
+    // nothing is said of Swift.
     assert!(
-        direct.stderr.contains("test files weren't observed"),
+        !direct.stderr.contains("test files weren't observed") && !direct.stderr.contains("swift"),
         "{}",
         direct.stderr
     );

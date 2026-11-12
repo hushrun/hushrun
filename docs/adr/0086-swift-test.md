@@ -62,8 +62,11 @@ and on Linux, found what can be relied on and what can't; this decision is what 
    `swift test list`, `last`, `--help`, `--version`, `--list-tests`, `--show-codecov-path`,
    `--debugger`, passes through untouched. The real `swift` gets `PATH` as COMMAND had it, so a
    `swift test` that a test starts never reaches hushrun: that is the child's mark. The adapter is
-   chosen for `swift test …`, `swift-test …`, and any other COMMAND run where a `Package.swift`
-   is, but one that starts pytest.
+   chosen for `swift test …`, `swift-test …`, and, where a `Package.swift` is, a wrapper (a
+   shell's `-c` line, a `#!` script, `make` with its Makefile) whose own text starts `swift test`
+   or `swift-test` and names no other runner (C-32's one rule, shared with CTest's adapter). Any
+   other COMMAND beside a `Package.swift` keeps the pytest adapter, as before this adapter: a
+   wrapper that runs pytest loses nothing.
 6. **What the person sees** is what `swift test` printed, and its exit code. Standard output goes
    through a pseudo-terminal in raw mode, with the window's size, when the person's is a terminal
    (Swift Testing colors only on one), else a pipe, and is copied as it goes by; standard error is

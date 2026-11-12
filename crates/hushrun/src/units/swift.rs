@@ -38,7 +38,7 @@ use super::Seen;
 use super::adapter::{
     Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
-use super::command::program_name;
+use super::command::{self, program_name};
 use super::facts::{self, FactsFile, RunFile, TestFacts, UnitFacts};
 use super::program::{self, Call, Copied, Program};
 use super::store::Map;
@@ -113,17 +113,12 @@ fn swift_here() -> Command {
     command
 }
 
-/// \[ADR 0086\] The adapter for `swift test …`, `swift-test …`, or a command in a directory that
-/// holds a `Package.swift` (a script, a Makefile); `None` for any other COMMAND.
+/// \[ADR 0086\] The adapter for `swift test …`, `swift-test …`, or, in a directory that holds a
+/// `Package.swift`, a wrapper whose text starts `swift test` or `swift-test` and no other runner
+/// ([`command::wrapper_starts`]); `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     Some(recognize(command, cwd)?.map(|s| Box::new(s) as Box<dyn Adapter>))
 }
-
-/// Starts of programs that run pytest, which another adapter is for.
-const PYTHON: &[&str] = &[
-    "python", "pytest", "py.test", "uv", "uvx", "poetry", "pdm", "hatch", "tox", "nox", "pipenv",
-    "rye", "coverage",
-];
 
 /// What `command` in `cwd` is for the adapter: `None` when it isn't its; `Some(Err(why))` when it
 /// is, in a form hushrun can't observe.
@@ -162,7 +157,9 @@ pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>
             .map_or_else(|| cwd.to_path_buf(), |p| cwd.join(p));
         return Some(Ok(Swift::new(real(&package))));
     }
-    if cwd.join("Package.swift").is_file() && !PYTHON.iter().any(|p| name.starts_with(p)) {
+    if cwd.join("Package.swift").is_file()
+        && command::wrapper_starts(command, cwd, command::Runner::SwiftTest)
+    {
         if cfg!(windows) {
             return Some(Err(WINDOWS.into()));
         }
@@ -2128,10 +2125,13 @@ mod tests {
             .unwrap()
             .is_ok()
         );
-        // Other commands: only where a package is, and never pytest's.
+        // A wrapper: only where a package is, and only when its text starts swift test.
+        std::fs::write(cwd.join("Makefile"), "test:\n\tswift test\n").unwrap();
         assert!(recognize(&words("make test"), cwd).is_none());
         std::fs::write(cwd.join("Package.swift"), "// swift-tools-version: 6.0\n").unwrap();
         assert!(recognize(&words("make test"), cwd).unwrap().is_ok());
+        std::fs::write(cwd.join("Makefile"), "test:\n\t./run-tests\n").unwrap();
+        assert!(recognize(&words("make test"), cwd).is_none());
         assert!(recognize(&words("python -m pytest"), cwd).is_none());
         assert!(recognize(&words("uv run pytest"), cwd).is_none());
         assert_eq!(

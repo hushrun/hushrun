@@ -89,10 +89,72 @@ fn the_wider_matches_come_after_every_match_by_name() {
     let plain = loads_all();
     let shell = ["sh", "-c", "pytest && ctest"].map(str::to_string);
     assert_eq!(chosen(&shell, plain.path()), Ok("pytest"));
-    // In a Swift package, Swift's match takes any COMMAND that doesn't start pytest by its first
-    // word, as it does today (ADR 0086).
-    assert_eq!(chosen(&shell, dir.path()), Ok("swift"));
+    // And in a Swift package: a wrapper is claimed only for what its text starts.
+    assert_eq!(chosen(&shell, dir.path()), Ok("pytest"));
     assert_eq!(chosen(&words("pytest -q"), dir.path()), Ok("pytest"));
+}
+
+/// The one rule for a wrapper COMMAND (C-32): a shell's `-c` line, a `#!` script named by its
+/// path, or `make` with its Makefile goes to an adapter that loads through `PATH` only when its
+/// own text starts that adapter's program by name and names no other runner with an adapter.
+#[test]
+fn a_wrapper_goes_to_the_runner_its_text_starts_and_no_other() {
+    let package = loads_all();
+    std::fs::write(
+        package.path().join("Package.swift"),
+        "// swift-tools-version:5.9\n",
+    )
+    .unwrap();
+    let plain = loads_all();
+    let sh = |line: &str| ["sh", "-c", line].map(str::to_string).to_vec();
+    for (dir, command, adapter) in [
+        // Swift's: only what says `swift test` or `swift-test`.
+        (
+            &package,
+            sh("swift build && swift test --parallel"),
+            "swift",
+        ),
+        (&package, sh("swift-test"), "swift"),
+        (&package, words("npm test"), "pytest"),
+        (&package, words("bazel test //..."), "pytest"),
+        (&package, sh("python -m pytest tests"), "pytest"),
+        (&package, sh("swift test && pytest"), "pytest"),
+        (&package, sh("swift test; ctest --test-dir build"), "pytest"),
+        // CTest's, as before.
+        (
+            &plain,
+            sh("cmake --build build && ctest --test-dir build"),
+            "ctest",
+        ),
+        (&plain, sh("ctest && tox"), "pytest"),
+        (&plain, sh("echo hi"), "pytest"),
+    ] {
+        assert_eq!(chosen(&command, dir.path()), Ok(adapter), "{command:?}");
+    }
+    // make, by its Makefile.
+    for (makefile, adapter) in [
+        ("test:\n\tswift test\n", "swift"),
+        ("test:\n\tctest --test-dir build\n", "ctest"),
+        ("test:\n\tswift test\n\tctest --test-dir build\n", "pytest"),
+        ("test:\n\tpytest\n", "pytest"),
+        ("test:\n\techo nothing\n", "pytest"),
+    ] {
+        std::fs::write(package.path().join("Makefile"), makefile).unwrap();
+        assert_eq!(
+            chosen(&words("make test"), package.path()),
+            Ok(adapter),
+            "{makefile:?}"
+        );
+    }
+    // A #! script named by its path.
+    std::fs::write(
+        package.path().join("t.sh"),
+        "#!/bin/sh\nset -e\nswift test\n",
+    )
+    .unwrap();
+    assert_eq!(chosen(&words("./t.sh"), package.path()), Ok("swift"));
+    std::fs::write(package.path().join("t.sh"), "#!/bin/sh\nexec npm test\n").unwrap();
+    assert_eq!(chosen(&words("./t.sh"), package.path()), Ok("pytest"));
 }
 
 #[test]
