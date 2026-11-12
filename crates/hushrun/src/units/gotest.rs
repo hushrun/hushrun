@@ -964,6 +964,8 @@ pub struct BinaryFlags {
     pub failfast: bool,
     /// `-test.paniconexit0`, which `go test` passes: `os.Exit(0)` in a test is a panic.
     pub panic_on_exit0: bool,
+    /// COMMAND's own `-memprofile`, which would take the place of the one hushrun reads.
+    pub memprofile: bool,
 }
 
 /// Go's `strconv.ParseBool`, as the `flag` package reads a boolean flag's value.
@@ -994,6 +996,7 @@ pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
         };
         match name {
             "run" | "skip" | "list" | "fuzz" => out.chooses = true,
+            "memprofile" => out.memprofile = true,
             "count" => {
                 let value = inline.or_else(|| words.next());
                 if !value
@@ -1108,7 +1111,7 @@ pub fn prepare(
 ) -> Option<TestsAt> {
     let flags = binary_flags(args);
     // COMMAND chose its own tests, or a TestMain would run once more only to list them.
-    if flags.chooses || has_test_main(binary) != Some(false) {
+    if flags.chooses || flags.memprofile || has_test_main(binary) != Some(false) {
         return None;
     }
     // `-test.skip` is Go 1.20's: a binary from before refuses it, and still lists.
@@ -1241,10 +1244,7 @@ impl Output {
             self.failed.insert(top_level(&text[start..]));
             from = start;
         }
-        let (marked, own) = match text.strip_prefix('\u{16}') {
-            Some(own) => (true, own),
-            None => (false, text),
-        };
+        let own = text.strip_prefix('\u{16}').unwrap_or(text);
         for word in ["--- PASS: ", "--- FAIL: ", "--- SKIP: "] {
             if let Some(rest) = own.strip_prefix(word)
                 && let Some((name, time)) = rest.split_once(" (")
@@ -1259,13 +1259,25 @@ impl Output {
                 *entry = entry.saturating_add(ms);
             }
         }
-        let summary = match own {
-            "PASS" => Some(Summary::Pass),
-            "FAIL" => Some(Summary::Fail),
-            _ => None,
+        // Go's summary is its last line but coverage. A test's output with no newline may come
+        // before it on the line; with `-json` Go marks it, after anything before it.
+        let tail = if self.json {
+            text.rsplit_once('\u{16}').map(|(_, own)| own)
+        } else {
+            Some(text)
         };
+        let summary = tail.and_then(|tail| {
+            if tail.ends_with("PASS") {
+                Some(Summary::Pass)
+            } else if tail.ends_with("FAIL") {
+                Some(Summary::Fail)
+            } else {
+                None
+            }
+        });
+        let exact = tail.is_some_and(|tail| tail == "PASS" || tail == "FAIL");
         if let Some(summary) = summary
-            && marked == self.json
+            && (exact || !self.json)
         {
             self.summary = Some(summary);
         } else if !own.starts_with("coverage: ") {
@@ -1289,17 +1301,22 @@ pub struct Ended {
     pub signal: Option<i32>,
     /// Its output was read to its end.
     pub read_whole: bool,
+    /// Go's test main returned from running the tests: `M.Run` wrote the `-test.memprofile`
+    /// hushrun asked for, which it does only in the end it defers, after its summary. A test that
+    /// calls `os.Exit`, a panic, a timeout or a signal never gets there.
+    pub returned: bool,
 }
 
 /// \[ADR 0083\] Whether a test binary's run ended as Go's test main ends one, so that every test it
-/// ran and didn't name failed passed: its output read to the end, whole and readable, on Go's own
-/// summary (marked, with `-json`) with nothing after it but coverage, and
+/// ran and didn't name failed passed: `M.Run` [returned](Ended::returned), its output was read to
+/// the end and readable, the last line Go's own summary (marked, with `-json`) with nothing after it
+/// but coverage, and
 ///
 /// - `PASS` with exit 0, `os.Exit(0)` in a test being a panic (`-test.paniconexit0`);
 /// - or `FAIL` with exit 1, a `--- FAIL: ` seen, every name a `--- FAIL: ` gave one the binary
 ///   listed, and no `-failfast`, which leaves tests unstarted that nothing names.
 pub fn ended_normally(at: &TestsAt, out: &Output, ended: Ended) -> bool {
-    if !ended.read_whole || !out.readable() || ended.signal.is_some() {
+    if !ended.returned || !ended.read_whole || !out.readable() || ended.signal.is_some() {
         return false;
     }
     if !out.failed.iter().all(|name| at.listed.contains(name)) {

@@ -105,8 +105,20 @@ fn run(args: &[OsString]) -> ExitCode {
         arg.push(log);
         args.push(arg);
     }
-    // First, before any argument of COMMAND's that isn't a flag, where `flag` stops.
+    // First, before any argument of COMMAND's that isn't a flag, where `flag` stops: the tests
+    // left out, and the profile Go's test main writes only once it returned from running them.
+    let returned = watch.as_ref().zip(dir.as_ref()).map(|(_, dir)| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        dir.join(format!(".go-{}-{nanos}.memprofile", std::process::id()))
+    });
     args.extend(watch.as_ref().and_then(|(at, _)| at.skip_arg()));
+    if let Some(path) = &returned {
+        let mut arg = OsString::from("-test.memprofile=");
+        arg.push(path);
+        args.push(arg);
+    }
     args.extend(told.args.iter().cloned());
     let (program, mut command) = command_for(&told, go, &args);
     let listing = !go && told.args.iter().any(|a| a == "--list");
@@ -196,10 +208,16 @@ fn run(args: &[OsString]) -> ExitCode {
     // \[ADR 0083\] What each test came to, from what the binary printed and how it ended.
     let tests = reading.map(|(at, reading)| {
         let (out, read_whole) = reading.finish();
+        let returned = returned.as_ref().is_some_and(|path| {
+            let written = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+            let _ = std::fs::remove_file(path);
+            written
+        });
         let ended = super::gotest::Ended {
             exit,
             signal,
             read_whole,
+            returned,
         };
         (at.unit.clone(), super::gotest::outcome(&at, &out, ended))
     });

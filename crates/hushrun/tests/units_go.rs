@@ -1176,3 +1176,215 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
         serde_json::json!({"total": 6, "ran": 1, "reused": 5})
     );
 }
+
+/// One package, `p`, whose `TestMid` does what `MODE` says, between two tests that pass; an
+/// example and a fuzz target's seed that fail when `MODE` says so; and a benchmark, which isn't a
+/// test.
+fn shapes() -> Vec<(String, String)> {
+    vec![
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: observe, unit: test}"),
+        ),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n\nfunc One() int { return 1 }\n"),
+        file(
+            "p/p_test.go",
+            r#"package p
+
+import (
+	"fmt"
+	"os"
+	"testing"
+	"time"
+)
+
+func mode() string { return os.Getenv("MODE") }
+
+func TestFirst(t *testing.T) {}
+
+func TestMid(t *testing.T) {
+	switch mode() {
+	case "fail":
+		t.Error("boom")
+	case "panic":
+		panic("boom")
+	case "exit0":
+		os.Exit(0)
+	case "exit1":
+		os.Exit(1)
+	case "hang":
+		time.Sleep(time.Minute)
+	case "glued-fail":
+		fmt.Print("no newline")
+		t.Error("boom")
+	case "glued-pass":
+		fmt.Print("no newline")
+	case "skip":
+		t.Skip("skipped")
+	case "short":
+		if testing.Short() {
+			t.Skip("short")
+		}
+		t.Error("not short")
+	case "parallel":
+		for _, n := range []string{"a", "b"} {
+			t.Run(n, func(t *testing.T) {
+				t.Parallel()
+				if n == "b" {
+					t.Fatal("b")
+				}
+			})
+		}
+	case "spoof-pass":
+		fmt.Println("--- FAIL: TestFirst (0.00s)")
+		fmt.Println("PASS")
+	case "spoof-exit":
+		fmt.Println("--- FAIL: TestFirst (0.00s)")
+		fmt.Println("FAIL")
+		os.Exit(1)
+	}
+}
+
+func TestLast(t *testing.T) {}
+
+func Example_e() {
+	if mode() == "example" {
+		fmt.Println("bad")
+	} else {
+		fmt.Println("ok")
+	}
+	// Output: ok
+}
+
+func FuzzF(f *testing.F) {
+	f.Add(1)
+	f.Fuzz(func(t *testing.T, i int) {
+		if mode() == "fuzz" {
+			t.Fatal("seed")
+		}
+	})
+}
+
+func BenchmarkB(b *testing.B) {}
+"#,
+        ),
+    ]
+}
+
+impl Repo {
+    /// `hushrun run unit -- go test <flags> ./...` with `MODE` set, on a cache of its own, and
+    /// what its store says of `p`'s tests after it.
+    fn shape(&self, n: usize, mode: &str, flags: &[&str]) -> (Ran, Value) {
+        let cache = self.root.join(format!("cache-{n}"));
+        let mut args = vec!["run", "unit", "--", "go", "test"];
+        args.extend(flags);
+        args.push("./...");
+        let cache_text = cache.display().to_string();
+        let ran = self.run(&args, &[("MODE", mode), ("HUSHRUN_CACHE_DIR", &cache_text)]);
+        (ran, store::map(&cache)["units"]["p"]["tests"].clone())
+    }
+}
+
+/// Each test's state as the store holds it: `passed`, `failed` or `not-run` for each of
+/// `Example_e`, `FuzzF`, `TestFirst`, `TestLast`, `TestMid`, in that order.
+fn states(example: &str, fuzz: &str, first: &str, last: &str, mid: &str) -> Value {
+    serde_json::json!({"Example_e": example, "FuzzF": fuzz, "TestFirst": first,
+                       "TestLast": last, "TestMid": mid})
+}
+
+// covers: C-45
+#[test]
+fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let r = Repo::new(&shapes());
+    let all = states("passed", "passed", "passed", "passed", "passed");
+    let mid = states("passed", "passed", "passed", "passed", "failed");
+    // A binary that ended on Go's own summary, with its exit code: every test it ran passed but
+    // those it named failed, with or without -v or -json, however many times or in whatever
+    // order. Benchmarks aren't tests; a skipped test passed.
+    let cases: &[(&str, &[&str], &Value)] = &[
+        ("", &[], &all),
+        ("", &["-json"], &all),
+        ("fail", &[], &mid),
+        ("fail", &["-v"], &mid),
+        ("fail", &["-json"], &mid),
+        ("fail", &["-count=2"], &mid),
+        ("fail", &["-shuffle=on", "-parallel=1"], &mid),
+        ("fail", &["-bench=."], &mid),
+        ("parallel", &["-parallel=2"], &mid),
+        ("skip", &[], &all),
+        ("short", &["-short"], &all),
+        ("glued-fail", &[], &mid),
+        ("glued-fail", &["-json"], &mid),
+        ("glued-pass", &[], &all),
+        ("glued-pass", &["-json"], &all),
+    ];
+    for (n, (mode, flags, want)) in cases.iter().enumerate() {
+        let (ran, got) = r.shape(n, mode, flags);
+        assert_eq!(&got, *want, "MODE={mode} {flags:?}\n{}", ran.stderr);
+    }
+    // A failing example and a fuzz target's failing seed are named, as tests are.
+    let (ran, got) = r.shape(100, "example", &[]);
+    assert_eq!(
+        got,
+        states("failed", "passed", "passed", "passed", "passed"),
+        "{}",
+        ran.stderr
+    );
+    let (ran, got) = r.shape(101, "fuzz", &["-json"]);
+    assert_eq!(
+        got,
+        states("passed", "failed", "passed", "passed", "passed"),
+        "{}",
+        ran.stderr
+    );
+    // A test that prints Go's words itself: what it names failed is read as failed, which only
+    // runs that test again; and its "PASS" isn't the last line, Go's is.
+    let (ran, got) = r.shape(102, "spoof-pass", &[]);
+    assert_eq!(
+        got,
+        states("passed", "passed", "failed", "passed", "passed"),
+        "{}",
+        ran.stderr
+    );
+}
+
+// covers: C-45
+#[test]
+fn a_go_binary_that_ended_any_other_way_records_its_named_failures_and_no_pass() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let r = Repo::new(&shapes());
+    let none = states("not-run", "not-run", "not-run", "not-run", "not-run");
+    let mid = states("not-run", "not-run", "not-run", "not-run", "failed");
+    let cases: &[(&str, &[&str], &Value)] = &[
+        // A panic: Go names the test that panicked, and stops.
+        ("panic", &[], &mid),
+        ("panic", &["-json"], &mid),
+        // os.Exit(0) in a test is a panic under `go test`.
+        ("exit0", &[], &mid),
+        // os.Exit(1): no summary, nothing named.
+        ("exit1", &[], &none),
+        ("exit1", &["-v"], &none),
+        // A timeout names the running test as running, not failed.
+        ("hang", &["-timeout=2s"], &none),
+        // -failfast leaves tests unstarted that nothing names.
+        ("fail", &["-failfast"], &mid),
+        // A test prints Go's failure and summary, then exits as a failed run would: Go's test
+        // main never returned, so no test passed, whatever the output says.
+        (
+            "spoof-exit",
+            &[],
+            &states("not-run", "not-run", "failed", "not-run", "not-run"),
+        ),
+    ];
+    for (n, (mode, flags, want)) in cases.iter().enumerate() {
+        let (ran, got) = r.shape(n, mode, flags);
+        assert_eq!(&got, *want, "MODE={mode} {flags:?}\n{}", ran.stderr);
+        assert_ne!(ran.code, 0, "MODE={mode} {flags:?}\n{}", ran.stderr);
+    }
+}
