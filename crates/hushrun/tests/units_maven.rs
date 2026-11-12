@@ -1273,3 +1273,85 @@ fn junit4_tests_that_look_alike_in_subclasses_are_left_out_one_by_one_through_vi
         );
     }
 }
+
+// covers: C-30, C-47
+#[test]
+fn a_jvm_file_no_module_of_the_build_owns_is_the_rest() {
+    let Some(maven) = maven() else { return };
+    // A module the reactor leaves out, one in a profile that isn't active, and a tool beside
+    // app's sources that a script builds.
+    let mut files = shop("reuse");
+    for (path, text) in files.iter_mut() {
+        if path == "pom.xml" {
+            *text = text.replace(
+                "</modules>",
+                "</modules>\n  <profiles><profile><id>extra</id><modules><module>prof</module></modules></profile></profiles>",
+            );
+        }
+    }
+    files.extend([
+        file("extra/pom.xml", &module_pom("extra", &[])),
+        file(
+            "extra/src/main/java/shop/extra/E.java",
+            "package shop.extra;\npublic class E {}\n",
+        ),
+        file("prof/pom.xml", &module_pom("prof", &[])),
+        file(
+            "prof/src/main/java/shop/prof/P.java",
+            "package shop.prof;\npublic class P {}\n",
+        ),
+        file(
+            "app/tools/Gen.java",
+            "package tools;\npublic class Gen {}\n",
+        ),
+    ]);
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let map = r.map();
+    for path in [
+        "extra/src/main/java/shop/extra/E.java",
+        "prof/src/main/java/shop/prof/P.java",
+        "app/tools/Gen.java",
+    ] {
+        assert!(map["rest"][path].is_string(), "{path}: {map:#}");
+    }
+    r.write(
+        "extra/src/main/java/shop/extra/E.java",
+        "package shop.extra;\npublic class E { int x; }\n",
+    );
+    let changed = r.run(&[], &["test"], &[]);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stderr, changed.stdout);
+    assert_eq!(changed.ran().len(), 6, "{:?}", changed.ran());
+}
+
+// covers: C-30, C-47
+#[test]
+fn a_module_this_command_didnt_build_keeps_its_sources_on_the_lists_of_the_tests_that_read_them() {
+    let Some(maven) = maven() else { return };
+    let r = Repo::new(&shop("reuse"), maven);
+    // app and what it depends on: lib's sources are on app's list, other's are the rest.
+    let first = r.run(&[], &["-pl", "app", "-am", "test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let map = r.map();
+    let reads = map["units"][CART_TEST]["reads"].as_array().unwrap().clone();
+    assert!(
+        reads.contains(&serde_json::json!("lib/src/main/java/shop/lib/Price.java")),
+        "{map:#}"
+    );
+    assert!(
+        map["rest"]["other/src/main/java/shop/other/Greet.java"].is_string(),
+        "{map:#}"
+    );
+    r.write(
+        "lib/src/main/java/shop/lib/Price.java",
+        "package shop.lib;\n\npublic class Price {\n  public static int of(int x) { return x + x; }\n}\n",
+    );
+    let second = r.run(&[], &["-pl", "app", "-am", "test"], &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.ran().contains_key("shop.app.CartTest"),
+        "{:?}",
+        second.ran()
+    );
+}

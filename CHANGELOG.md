@@ -177,6 +177,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   left out that its list didn't name makes the run start COMMAND once more with nothing left out.
 - Gradle leaves out no JUnit 4 test of a class in the default package by a filter pattern, which
   also left out the test of that name in every class of the same simple name.
+- Gradle: a file of a JVM kind that no project of the build compiles, such as a tool beside a
+  project's sources that a script builds and publishes to `mavenLocal()`, is now the rest, so a
+  change to it runs every test class: a project is read as its source directories, not its whole
+  directory. Maven read modules so already.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - A `ctest`, `swift test` or wrapper COMMAND that CTest's or `swift test`'s adapter now takes,

@@ -189,6 +189,22 @@ file, and Maven `<method>` under a unit that is its class, so the same test has 
 each adapter, and no result is shared between them. An audited class whose task is up to date
 doesn't run in that run (item 8): the audit waits for a run in which Gradle executes the task.
 
+## Amendment 6: a JVM file no project owns is the rest (2026-11-12)
+
+Item 10 read a project as every file below its directory, so a file of a JVM kind there that is in
+none of its source sets (a tool a script compiles and publishes to `mavenLocal()`, which another
+project then takes as a jar) was a source on the project's own tests' lists only: a change to it
+ran those, and reused the tests of the project that takes its jar. The decision: a project is read
+as its source directories, every source set's (Java, Groovy, Kotlin, resources; Android's and
+Kotlin's), the declared ones inside its directory and those outside it that are there, and as its
+whole directory only when its source sets can't be told. So a file of a JVM kind that no project of
+this build owns, below a project's directory or not, is below no directory a test read, and is the
+rest: a change to one runs everything. A source's ownership has to come from the build, since only
+the build knows which of its files it compiles, and what it doesn't compile may reach a test by a
+road hushrun doesn't see. A second build of the repository was the rest already (a directory with
+a settings file of its own). A task of one project (`:app:test`) keeps the sources of the projects
+its classes read on their list, which a test checks.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

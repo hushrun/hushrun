@@ -417,7 +417,20 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
             PRICE,
         ]
     );
-    assert_eq!(map["units"][CART]["dirs"], json!(["app", "lib"]));
+    // A project is read as its source directories (ADR 0084).
+    assert_eq!(
+        map["units"][CART]["dirs"],
+        json!([
+            "app/src/main/java",
+            "app/src/main/resources",
+            "app/src/test/java",
+            "app/src/test/resources",
+            "lib/src/main/java",
+            "lib/src/main/resources",
+            "lib/src/test/java",
+            "lib/src/test/resources"
+        ])
+    );
     assert_eq!(
         reads("other/src/test/java/shop/other/ATest.java"),
         [
@@ -959,7 +972,16 @@ fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_i
     let map = r.map();
     assert_eq!(
         map["units"]["app/src/test/java/app/AppTest.java"]["dirs"],
-        json!(["app", "proc"]),
+        json!([
+            "app/src/main/java",
+            "app/src/main/resources",
+            "app/src/test/java",
+            "app/src/test/resources",
+            "proc/src/main/java",
+            "proc/src/main/resources",
+            "proc/src/test/java",
+            "proc/src/test/resources"
+        ]),
         "{map:#}"
     );
     let (path, text) = processor_values(2);
@@ -1374,4 +1396,106 @@ fn spock_features_specs_inherit_are_left_out_one_by_one() {
             second.stdout
         );
     }
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_jvm_file_no_project_of_the_build_owns_is_the_rest() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // A tool beside app's sources, which a script builds and publishes, not app's build; one at
+    // the root; and a second build of its own, below app, that nothing here includes.
+    let mut files = shop("reuse");
+    files.extend([
+        file(
+            "app/tools/Gen.java",
+            "package tools;\npublic class Gen { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "tools/Root.java",
+            "package tools;\npublic class Root { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "app/plugin/settings.gradle",
+            "rootProject.name = 'plugin'\n",
+        ),
+        file(
+            "app/plugin/src/main/java/plugin/P.java",
+            "package plugin;\npublic class P {}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    for path in [
+        "app/tools/Gen.java",
+        "tools/Root.java",
+        "app/plugin/src/main/java/plugin/P.java",
+    ] {
+        assert!(map["rest"][path].is_string(), "{path}: {map:#}");
+    }
+    // A change to one runs every test class, as far as hushrun goes: Gradle finds the tasks up
+    // to date, since the file is none of their inputs.
+    r.write(
+        "app/tools/Gen.java",
+        "package tools;\npublic class Gen { public static int v() { return 2; } }\n",
+    );
+    let changed = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        line(&changed, "hushrun: unit: "),
+        "hushrun: unit: all 5 test files run: app/tools/Gen.java changed, and any test may read it"
+    );
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&shop("reuse"));
+    let only = |args: &[&'static str]| -> Vec<&'static str> {
+        let mut out = vec!["run", "unit", "--"];
+        out.extend_from_slice(args);
+        out
+    };
+    let g: &'static str = Box::leak(gradle.into_boxed_str());
+    // Only app's tests: lib's sources, which app's classes read, are on their list.
+    let first = r.run(
+        &only(&[g, "--offline", "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    let reads = map["units"][CART]["reads"].as_array().unwrap().clone();
+    assert!(
+        reads.contains(&json!("lib/src/main/java/shop/lib/Price.java")),
+        "{map:#}"
+    );
+    // lib changes: app's tests run.
+    r.write(
+        "lib/src/main/java/shop/lib/Price.java",
+        "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
+    );
+    let second = r.run(
+        &only(&[g, "--offline", "--console=plain", ":app:test"]),
+        &[],
+    );
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("CartTest") || r.xml_cases("app", "shop.app.CartTest").len() >= 2,
+        "{}",
+        second.stdout
+    );
+    assert_eq!(
+        r.newest_result()["units"]["reused"],
+        json!(0),
+        "{}",
+        second.stderr
+    );
 }

@@ -166,7 +166,7 @@ class HushrunShared implements Serializable {
     String gradleUserHome
     String gradleVersion
     Map<String, String> buildDirToProjectDir = [:]     // canonical build dir -> canonical project dir
-    Map<String, List<String>> extraDirs = [:]           // canonical project dir -> its source dirs outside it
+    Map<String, List<String>> sourceDirs = [:]          // canonical project dir -> every source dir of it
     Map<String, List<String>> testSourceDirs = [:]      // canonical project dir -> its test source dirs
     Map<String, String> sourceDirsHow = [:]             // canonical project dir -> where they came from
     // canonical project dir -> [canonical project dir, configuration] of each project dependency it declares
@@ -288,13 +288,14 @@ class HushrunSelection {
         Set<String> paths = new TreeSet<>()
         List<Map> notFollowed = []
         HushrunShared shared = info.shared
+        // A project is read as its source directories, every source set's: a file of a JVM kind
+        // below the project's directory but in none of them is no project's, and so the rest.
+        // A project whose source sets can't be told is read as its whole directory.
         Closure addProject = { String projectDir ->
-            String r = HushrunRun.rel(root, projectDir)
-            if (r == null) { notFollowed << [why: "outside-repository", detail: projectDir]; return }
-            dirs << r
-            (shared.extraDirs[projectDir] ?: []).each { String extra ->
-                String e = HushrunRun.rel(root, extra)
-                if (e == null) notFollowed << [why: "outside-repository", detail: extra] else dirs << e
+            List<String> mine = shared.sourceDirs[projectDir] ?: [projectDir]
+            mine.each { String dir ->
+                String r = HushrunRun.rel(root, dir)
+                if (r == null) notFollowed << [why: "outside-repository", detail: dir] else dirs << r
             }
         }
         try {
@@ -866,7 +867,11 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
         if (tests.isEmpty()) { tests << projectDir; how << "project directory" }
         shared.testSourceDirs[projectDir] = tests.unique()
         shared.sourceDirsHow[projectDir] = how.join("+")
-        shared.extraDirs[projectDir] = all.findAll { it != projectDir && !it.startsWith(projectDir + File.separator) && new File(it).exists() } as List
+        if (!all.isEmpty()) {
+            // Inside the project, every declared one, so that a first file in one is a source;
+            // outside it, those there.
+            shared.sourceDirs[projectDir] = all.findAll { it == projectDir || it.startsWith(projectDir + File.separator) || new File(it).exists() } as List
+        }
     }
 }
 

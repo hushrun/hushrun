@@ -142,6 +142,16 @@ Known, and left as it is: Maven names a test `<method>` under a unit that is its
 `<class>.<method>` under its source file, so the same test has another id under each adapter (ADR
 0084, Amendment 5).
 
+## Amendment 4: a JVM file no module owns is the rest (2026-11-12)
+
+The rule Gradle's adapter gained (ADR 0084, Amendment 6) holds here already, and tests now show
+it: a module is read as its source roots, from Maven's model, so a file of a JVM kind in none of
+them (a module the reactor leaves out, one in a profile that isn't active, a tool beside a module's
+sources) is below no directory a unit read, and is the rest; a change to one runs everything. Only
+the build knows which files it compiles, and a file it doesn't may reach a test by a road hushrun
+doesn't see, such as a jar in the local repository. With `-pl app -am`, the modules app depends on
+keep their sources on app's classes' lists.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0
