@@ -7,8 +7,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 ## [Unreleased]
 
 A test as the unit ([ADR 0077](docs/adr/0077-a-test-as-the-unit.md)): with `tests.unit: test`, a
-check reuses each test of a test file on its own, beside its test files, for pytest. New, and off
-unless a check asks.
+check reuses each test of a test file on its own, beside its test files, for pytest, Go, Gradle,
+Maven, `swift test` and CTest. New, and off unless a check asks.
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
 the compiler already built from the same inputs is reused, in this worktree or another on the same
@@ -21,8 +21,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
-  that fails runs once more alone. pytest knows tests; Cargo, Go and Vitest reuse by test file and
-  say so once. `reads: test` runs as `reads: file` in this version, and says so once.
+  that fails runs once more alone. pytest, Go, Gradle, Maven, `swift test` and CTest know tests;
+  Cargo and Vitest reuse by test file and say so once. `reads: test` runs as `reads: file` in this version, and says so once.
 - `go test`'s tests one by one ([ADR 0083](docs/adr/0083-go-tests-one-by-one.md)): with
   `tests.unit: test`, a Go package's tests are listed, left out with `-test.skip` and read from the
   binary's own output; with COMMAND's own `-run` or `-skip`, by package.
