@@ -1448,12 +1448,14 @@ impl Observed {
     }
 
     /// \[C-38\] Sends what this machine's store now says this run's test files read, as a hint
-    /// under this machine's system: every test file it executed and fully observed, and every one
-    /// it reused, with the list whose key hit. After [`Observed::keep`], for a run recorded on a
+    /// under this machine's system: every test file it executed and fully observed, \[C-41\] or ran
+    /// but for tests reused one by one, and every one it reused, with the list whose key hit; and
+    /// their tests (`hint_tests`). After [`Observed::keep`], for a run recorded on a
     /// server that keeps test files' results. One `PUT`, and none when this machine already sent
     /// or received a hint with its content id for the address and system. A `PUT` that fails
     /// leaves no note, so the next run of the check sends it again; it is said for debug only, as
-    /// the store's errors are. `Some` line to say once when the hint is too large to send.
+    /// the store's errors are. `Some` line to say once when the hint is too large to send, or
+    /// \[C-41\] went without tests' lists or tests to fit.
     pub fn share(&self, results: &dyn UnitResults, now: Time) -> Option<String> {
         let (Some(at), Some(place), Some(os)) =
             (&self.store, &self.share, hushrun_core::hints::Os::this())
