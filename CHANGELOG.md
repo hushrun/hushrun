@@ -88,8 +88,14 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   content (the SHA-256 of `rustc`, its libraries and the standard library, and `rustc -vV`), not
   by its path and dates; the cargo home and the toolchain are named in keys like the workspace,
   and every compile's paths under the cargo home read `/hushrun/cargo`; a proc macro is named by
-  what it was built from and by the crate metadata in it. Nothing leaves the machine yet. Every
-  local key changes once, so blocks stored before are built again and expire.
+  what it was built from and by the crate metadata in it. A library's key no longer holds the
+  SDK or the linker's variables, nor the bytes of the static libraries beside it when its `.rlib`
+  holds only its own objects. Nothing leaves the machine yet. Every local key changes once, so
+  blocks stored before are built again and expire.
+- A block whose bytes or records hold a folder of the machine (the cargo home, the rustup home,
+  the home folder, or a toolchain a variable names) is reused only where that folder has the same
+  value. Before, two people sharing one store, or one person who changed `CARGO_HOME`, could get a
+  library built with the other cargo home. Each value now compiles once and keeps its own block.
 - Where the toolchain has rustup's `rust-src` (or `rustc-dev`), compiles inside `hushrun run`
   are given a view of the toolchain without those sources (`--sysroot`), since with them rustc
   gives some crates another crate hash and one machine's blocks failed to load on another. For

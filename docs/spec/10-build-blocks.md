@@ -65,8 +65,16 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
 `DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`), but for a library, which links nothing,
 neither those nor `SDKROOT` (rustc reads the SDK only to link; a library's bytes are the same
-under two SDKs); `SOURCE_DATE_EPOCH`, which compilers and
-build tools take "now" from when it is set (the wrapper never sets it); the person's extra
+under two SDKs). *Rests on:* rustc writing a library's `.rlib` and `.rmeta` itself, running no C
+driver or linker for it, and taking from the SDK nothing but what links (1.94.0 on macOS: the
+same bytes with `SDKROOT` unset, set to two SDK versions, and `DEVELOPER_DIR` naming either;
+`MACOSX_DEPLOYMENT_TARGET`, which does change a library, stays keyed). *Breaks if:* a rustc
+read the SDK's version or a file under it for a library, or ran a linker to write one.
+`SOURCE_DATE_EPOCH`, which compilers and build tools take "now" from when it is set (the
+wrapper never sets it), is keyed for every compile, a library's too: rustc doesn't read it, but
+a proc macro runs inside rustc and may, and a library's command line doesn't show every macro it
+expands (a derive re-exported by another library comes through `-L dependency=`); the person's
+extra
 variables; and what the
 wrapper adds to the compile besides the remaps (B-9), with roots replaced, so that a program
 compiled `movable` and one compiled `tied` (B-21) never share a key. No other
@@ -90,7 +98,11 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
   one whose metadata came out different for any reason gives another key, never a dependent
   that fails to load. The digest is taken from the bytes that are stored, in the read that hashes
-them, and the block records it; a reuse names the file by that record. A file in which that
+them, and the block records it; a reuse names the file by that record. *Rests on:* a macro's
+expansion following from its sources, dependencies, flags and compiler (all in what it was
+built from) and not from how it was linked, and a dependent reading from the file only its
+metadata. *Breaks if:* a linker changed the code a macro runs (a different C library linked
+into it is in what it was built from, `link`'s libraries, so that doesn't). A file in which that
 metadata can't be found, and a tied proc macro,
   which is another file in each checkout, are named by their SHA-256;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
@@ -168,7 +180,13 @@ keyed variables, reads and hints, so that keys and hints name no machine's folde
 root, a base is the same for every checkout of one person: it never ties a block to a
 checkout, and B-10 doesn't search for it to decide a place. A block whose bytes or records hold
 a base's value is keyed by that value (`bound`, B-24), since two people on one store, or one who
-moves the base, have another. Where a root and a base hold the same path, the root names it.
+moves the base, have another. *Rests on:* a path under a base meaning the same file in any
+install of the same packages (the registry's unpacked sources, the toolchain's files, each read
+by content), every compile's paths under the cargo home remapped (B-9), and B-10 finding a base's
+value wherever a block holds it. *Breaks if:* a block held a base's value where neither the
+search nor the proof of a variable sees it; then it is still not portable for the variable that
+named the base, and it would be reused on its own machine as if the base had one value. Where a
+root and a base hold the same path, the root names it.
 
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
 adds `--remap-path-prefix` for the cargo home, as `/hushrun/cargo`, for the workspace, as `.`,
@@ -316,7 +334,12 @@ first wrapper that needs it. It is whole or absent: a maker fills a folder whose
 last and renames it into place, removing nothing it did not make. Each call checks the view it
 finds with a few `stat`s (the marker, and each target's `lib/` through its link); one that is not
 whole is moved aside and made again under a lock on its name. One that can't be made is a
-compiler of unknown identity. The compiler's built-in targets are the output of
+compiler of unknown identity. *Rests on:* a compiler's behaviour following from those bytes and
+from no file outside them, and rustc reading from a sysroot nothing but `lib/rustlib/<target>`
+and the sources (strace of real builds on rustup's layout and Debian's `/usr`). *Breaks if:* a
+toolchain loaded code or data from a file the identity doesn't hash (a plugin elsewhere, a
+codegen backend outside `lib/`), or a rustc read another part of the sysroot, which the view
+would then lack. The compiler's built-in targets are the output of
 `rustc --print target-list`. The content, `-vV` and the target list are kept per compiler and
 target in a memo named by the compiler's path, size and dates, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`
 and the stamps of the `lib/` folders, and computed again when a standard library folder, a `lib/`

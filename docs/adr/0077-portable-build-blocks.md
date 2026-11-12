@@ -32,7 +32,17 @@ differed under equal keys with no path in them.
   hints, like roots, but never tie a block. Every compile gets `--remap-path-prefix` for the
   cargo home, to `/hushrun/cargo` (B-9).
 - **The machine's folders are searched for** (B-10): every output is searched for the cargo home,
-  the rustup home and the home folder, in the pass that already searches for the roots.
+  the rustup home and the home folder, in the pass that already searches for the roots, as raw
+  bytes wherever they lie. A short home such as `/root` is also found in a crate's own text
+  (`/rootfs`), which keeps that library on its machine: lost reuse, never a leak. Counting a
+  folder only where it ends a name was tried and taken back, since `$CARGO_HOME` followed by
+  `_cache` is that folder too.
+- **A block that holds a machine's folder is keyed by its value** (B-8, B-24): when a block's
+  bytes or records hold the cargo home, the rustup home or the home folder, or a variable it read
+  names a base, its second key holds those folders' values (`bound`), and its hint names which
+  folders so a lookup fills in its own. Two people on one store, or one person who moves
+  `CARGO_HOME`, each compile once and keep a block of their own; neither reuses the other's
+  bytes, and neither is refused.
 - **One function decides whether a block may leave** (B-24), with named reasons, recorded in the
   block and in every log line. Linked outputs (programs, proc macros, build-script binaries) never
   may yet: their link environment has no content identity.
@@ -46,6 +56,13 @@ differed under equal keys with no path in them.
   `--sysroot` naming a view of the toolchain that holds only its target folders, as links. It is
   made whole or not at all, checked each time it is found, made as `hushrun run` begins, and
   swept like unused blocks (B-14). A link through it is judged by the toolchain's file (B-11).
+- **What reaches only some compiles stays out of the others' keys** (B-5, B-6): a library's key
+  holds neither the linker's variables nor the SDK (`SDKROOT`, `DEVELOPER_DIR`), since rustc
+  writes a library itself; and a library whose `.rlib` holds only `lib.rmeta` and objects named
+  with its own crate name and extra filename bundled nothing, so the static libraries in its
+  native folders are named by their entries, not their bytes. `SOURCE_DATE_EPOCH` stays in every
+  key: a proc macro runs inside rustc and can read it, and a library's command line doesn't show
+  a macro re-exported by another library.
 - **The audit can be set for a run** (B-16): `HUSHRUN_BUILD_AUDIT=every` for replays that compare
   machines, `none` for tests; a run with `none` says so.
 
@@ -59,6 +76,10 @@ differed under equal keys with no path in them.
   the owner.
 - Nothing leaves a machine yet. This is what a later server and relay need: the blocks that may
   leave, and keys that agree between machines.
-- Lost on purpose, for now: libraries that inherit a C library's folder through `-L native=`, the
-  C-bundling crates whose objects hold absolute paths, and every linked output between machines
-  with other linkers.
+- Lost on purpose, for now: the C-bundling crates whose objects hold absolute paths (hushrun
+  would have to change the C compiler's flags, and only machines with the same C compiler would
+  gain), libraries whose bytes hold a short home by accident, libraries of two repositories that
+  set `SOURCE_DATE_EPOCH` differently, and every linked output between machines with other
+  linkers.
+- Each rule that takes something out of a key says in the spec what it rests on and what would
+  break it.
