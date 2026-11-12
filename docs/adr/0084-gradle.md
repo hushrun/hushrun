@@ -49,10 +49,10 @@ and C-46 hold over §4.5.
    9's `failOnNoDiscoveredTests` gets a lazy convention.
 4. **Test tasks**: every `Test` task of every project, Android's `test<Variant>UnitTest` and Kotlin
    Multiplatform's `jvmTest` included. Not followed, each said in the facts: a test task of an
-   included build or of `buildSrc` (other builds, whose settings have no line), an
+   included build (another build, whose settings have no line; known by its name), an
    `AbstractTestTask` that isn't a `Test` (Kotlin/Native, Kotlin/JS), a framework the script
-   doesn't know. Not seen at all: a `JavaExec` that runs tests, Android's instrumented tests (no
-   `Test` task; §6 of the RFC). With Isolated Projects on, the script says so in Gradle's output and
+   doesn't know. Not seen at all: `buildSrc`'s tests, a `JavaExec` that runs tests, Android's
+   instrumented tests (no `Test` task; §6 of the RFC). With Isolated Projects on, the script says so in Gradle's output and
    observes nothing: its configuration crosses projects.
 5. **Names** (C-30). A test class is named by its source file: its outer class's `SourceFile`
    attribute, then exactly one file of that name at its package's path under the project's test
