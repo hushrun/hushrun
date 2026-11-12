@@ -270,3 +270,17 @@ program swift started still held after swift ended, each test of the run with no
 says it once, through its facts' `settings.note`, with the size: `hushrun: unit: swift test
 printed 17.0 MiB of `Test Case` lines, more than the 16 MiB hushrun reads: none of its tests is
 recorded`. A line longer than 64 KiB is kept up to there.
+
+## Amendment 6: what stays unseen (2026-11-12)
+
+Two limits a third review found are kept, and said here rather than fixed:
+
+- **`swift test --skip-build` records the check's pass.** Amendment 1 made such a run not
+  observed, so none of its targets' or tests' passes is recorded, but the check's own pass still
+  is, on the files as they are, though the products it ran may be older than them. Whether those
+  products are up to date can't be told from outside SwiftPM's build; a plain `swift test` builds
+  first, and is what a check should run.
+- **A file changed with its time put back** (`touch -r`, a tool that restores times, an archive
+  extracted with its times) isn't built again by SwiftPM, whose build goes by times, and the run
+  tests what was built before. hushrun keys a target by the files' contents, so the next run's key
+  is the new one, but nothing tells it the products are old.

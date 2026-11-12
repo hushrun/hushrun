@@ -346,3 +346,11 @@ and every start under a wrapper, lists for itself.
 A failed case in CTest's JUnit file that names no test of the listing (a discovery script added it
 after the listing ran) is a failure no listed test explains (C-39), of a program that can't be
 told: no unit of that start keeps a pass, said as the adapter's error.
+
+## Amendment 11: a header with its time put back (2026-11-12)
+
+As Amendment 8 says, a header (or any file) changed with its modification time put back is missed:
+ninja and make don't build its objects again either, so the program runs what was built before,
+and Amendment 8's rule, which goes by the same times, can't tell. hushrun keys each program by the
+files' contents, so the key is the new one; only the program's being old goes unseen. This is kept,
+not fixed: telling it would mean hashing every file a program was built from at every run.
