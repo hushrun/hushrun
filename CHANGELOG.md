@@ -76,6 +76,26 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   file system can't clone, as on ext4, a reuse is a copy: three checkouts took 38,997 MB of disk
   with reuse on against 35,164 MB without, while a further checkout built in about 23 s against
   74 to 87 s. Not tested: x86-64, other file systems, other linkers, musl.
+- Contract: **`HUSHRUN_BUILD_AUDIT`**, read as `hushrun run` begins: `every` compares every
+  compile that could be reused with its block, `none` none (for tests; it removes the check
+  that catches two compiles with one key and different bytes, and the run ends with `build: the
+  audit is off for this run`), anything else one in fifty. `HUSHRUN_BUILD_KEY_LOG`, an absolute
+  file, gets one JSON line per compile with each key's parts, whether it found a block, whether it
+  differed, and the run's audit setting.
+- **Portable blocks** ([ADR 0077](docs/adr/0077-portable-build-blocks.md)): keys no longer name
+  the machine, so the same toolchain and sources give the same keys on two machines, and each
+  block records whether it may ever leave the machine and why not. The compiler is known by its
+  content (the SHA-256 of `rustc`, its libraries and the standard library, and `rustc -vV`), not
+  by its path and dates; the cargo home and the toolchain are named in keys like the workspace,
+  and every compile's paths under the cargo home read `/hushrun/cargo`; a proc macro is named by
+  what it was built from and by the crate metadata in it. Nothing leaves the machine yet. Every
+  local key changes once, so blocks stored before are built again and expire.
+- Where the toolchain has rustup's `rust-src` (or `rustc-dev`), compiles inside `hushrun run`
+  are given a view of the toolchain without those sources (`--sysroot`), since with them rustc
+  gives some crates another crate hash and one machine's blocks failed to load on another. For
+  those compiles, an error that points into the standard library shows `/rustc/<commit>/…` and
+  no source line, and debug info names the standard library's files that way. The view is a
+  folder of links in the store, made as `hushrun run` begins and swept like unused blocks.
 
 ## [0.13.0] - 2026-11-12
 

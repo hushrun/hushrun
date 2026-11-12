@@ -145,10 +145,21 @@ so a symlink at its end is hashed through whatever it points at now; when that r
 not what removing the `..` gives (a linked folder before it), the read can't be placed and the
 compile is `built, not stored`.
 
+Two more folders are **bases**: the cargo home (`CARGO_HOME`, else `~/.cargo`, as `hushrun run`
+found it) and the toolchain (the compiler's sysroot, B-17, and its view without sources, B-9).
+A path under a base is recorded, like one under a root, as the base's name and the rest
+(`{hushrun:cargo-home}/registry/src/…`, `{hushrun:toolchain}/lib/rustlib/…`) in arguments,
+keyed variables, reads and hints, so that keys and hints name no machine's folder. Unlike a
+root, a base is the same for every checkout on the machine: it never ties a block, and B-10
+doesn't search for it to decide a place. Where a root and a base hold the same path, the root
+names it.
+
 **B-9 What the wrapper changes in a compile.** For a compile it doesn't pass through, the wrapper
-adds `--remap-path-prefix` for the workspace, as `.`, and for the build script's output, as a
-fixed stand-in that names the package; each in its given and its resolved form, the workspace
-first, with the scope left whole. It leaves `-C incremental` out. On Apple targets it also gives
+adds `--remap-path-prefix` for the cargo home, as `/hushrun/cargo`, for the workspace, as `.`,
+and for the build script's output, as a fixed stand-in that names the package; each in its given
+and its resolved form, ordered by length so that of two folders that hold a path the inner one
+wins (as B-8 places it), with the scope left whole. A registry or git crate's paths then name no
+machine. It leaves `-C incremental` out. On Apple targets it also gives
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
 gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
 debugs those, and without it each holds the folder it was linked in. A program (a `bin` that is
@@ -189,7 +200,10 @@ that can't be searched (`-C lto`, `-C linker-plugin-lto`, `-C embed-bitcode=yes`
 sections): the place is the roots, and the block is reused only where they are the same. A
 compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
 only if a second compile, with that variable naming a link to the same folder, gives the same
-bytes.
+bytes. In the same pass every output is searched for the folders that name the machine: the cargo
+home, the rustup home and the home folder, each in its given and resolved forms. Those don't
+change the place, which is about this machine's checkouts; they decide whether the block may
+leave the machine (B-24).
 
 **B-11 Changed while compiling.** The wrapper records each read file's size, dates, inode and
 device around the compile and around its hashing. A compile is stored only if no read file
@@ -400,3 +414,28 @@ wrapper answers by content as usual. Nothing is asked of the person.
   table of known macros doesn't name, and a file the link line names (B-18), are not watched. A
   name added to a watched folder that a fresh compile would also see as an input (an editor's
   swap file beside a source) rebuilds the crate, as its key says.
+
+**B-24 Portable.** A block is **portable**, and is the only kind that may ever leave the machine
+that built it, when nothing in its keys, its hint, its record or its bytes names that machine.
+One function decides it, from the compile's facts, and records the answer with every reason
+that holds in the block's description and in the run's log; a block is reused on its own machine
+exactly as before, whatever the answer. The reasons:
+
+- `linked`: a program, a proc macro or a build-script binary. Its linker, C runtime and SDK have
+  no content identity yet.
+- `tied`: its place is its roots (B-10).
+- `read-outside`: a read lies outside every root, base and shared folder.
+- `read-in-shared-folder`: a read lies in a shared folder that is not a base (a system folder,
+  the rustup home outside the toolchain), whose path is this machine's.
+- `cargo-home-in-output`, `rustup-home-in-output`, `home-in-output`: an output holds that folder
+  (B-10).
+- `cargo-home-in-record`, `rustup-home-in-record`, `home-in-record`: a key, the hint or what the
+  block records beside its files (its dep-info, its messages) holds that folder.
+- `variable-names-base`: a variable the compile read names a base, and a second compile with it
+  naming another folder didn't give the same bytes, or couldn't be made.
+- `extern`: a proc macro among its externs is one a dependent on another machine would name
+  differently (B-6): it is tied, or what names it holds this machine.
+
+A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
+portable gives the block another key on another machine, never a wrong block. A proc macro whose
+block is not portable only because it is `linked` is still named alike on two machines (B-6).
