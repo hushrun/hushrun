@@ -2,17 +2,18 @@
 //! by its source file, a test is one of its methods, and what a class read is every source file
 //! below its project and each project its classpath is built from.
 //!
-//! The fixtures are generated multi-project builds with JUnit 5 or JUnit 4, run by the Gradle that
-//! `HUSHRUN_TEST_GRADLE` names (a `gradle` program) with `--offline`, against the Gradle user home
-//! `HUSHRUN_TEST_GRADLE_USER_HOME` names, which holds JUnit 5.11.4 and JUnit 4.13.2: CI fills it
-//! once before the tests. They say so and pass where either is missing, unless
-//! `HUSHRUN_TEST_TOOLS=required`, which CI sets. Daemons stay warm between tests, as they do on a
-//! person's machine.
+//! The fixtures are generated builds (JUnit 5, JUnit 4, TestNG, Spock, Kotest), run by the Gradle
+//! that `HUSHRUN_TEST_GRADLE` names (a `gradle` program) with `--offline`, against the Gradle user
+//! home `HUSHRUN_TEST_GRADLE_USER_HOME` names, which must hold every library and plugin they use.
+//! With `HUSHRUN_TEST_GRADLE_ONLINE=1` they run online and fill that home instead, which is how CI
+//! fills it once before its test run: what the tests need is the tests' own builds, never a list
+//! beside them. They say so and pass where Gradle is missing, unless `HUSHRUN_TEST_TOOLS=required`,
+//! which CI sets. Daemons stay warm between tests, as they do on a person's machine.
 //!
-//! The Android test needs Android's SDK as well, named by `HUSHRUN_TEST_ANDROID_SDK`, and a Gradle
-//! user home that holds Android's Gradle plugin, 9.1.1 or the version `HUSHRUN_TEST_ANDROID_PLUGIN`
-//! names (8.13.2 for Gradle 8); without the SDK it says so and passes, even when tools are
-//! required.
+//! The Android test needs Android's SDK as well, named by `HUSHRUN_TEST_ANDROID_SDK`, and Android's
+//! Gradle plugin, 9.1.1 or the version `HUSHRUN_TEST_ANDROID_PLUGIN` names (8.13.2 for Gradle 8).
+//! Without the SDK it fails under `HUSHRUN_TEST_TOOLS=required`, as every tool does, unless the run
+//! opts out of it by name with `HUSHRUN_TEST_ANDROID=skip`.
 
 #[path = "common/store.rs"]
 mod store;
@@ -256,6 +257,17 @@ fn tools(what: &str, here: bool) -> bool {
     false
 }
 
+/// `--offline`, the tests' Gradle option, but with `HUSHRUN_TEST_GRADLE_ONLINE=1`: then Gradle runs
+/// online and fills the Gradle user home with what the tests' builds need, which is how CI fills
+/// it once before its test run (a system property nothing reads stands in).
+fn offline() -> &'static str {
+    if std::env::var("HUSHRUN_TEST_GRADLE_ONLINE").as_deref() == Ok("1") {
+        "-Dhushrun.tests.online=true"
+    } else {
+        "--offline"
+    }
+}
+
 /// The Gradle the tests run.
 fn gradle() -> String {
     std::env::var("HUSHRUN_TEST_GRADLE").unwrap_or_else(|_| "gradle".into())
@@ -368,7 +380,7 @@ fn command<'a>(gradle: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
         "unit",
         "--",
         gradle,
-        "--offline",
+        offline(),
         "--console=plain",
         "test",
         "--continue",
@@ -767,8 +779,15 @@ fn android_sdk() -> Option<String> {
 #[test]
 fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     let Some(sdk) = android_sdk() else {
-        eprintln!(
-            "note: skipping: HUSHRUN_TEST_ANDROID_SDK names no Android SDK (a manual check, ADR 0084)"
+        // Missing, it fails under HUSHRUN_TEST_TOOLS=required, as every tool does, unless the
+        // run opts out of it by name: HUSHRUN_TEST_ANDROID=skip.
+        if std::env::var("HUSHRUN_TEST_ANDROID").as_deref() == Ok("skip") {
+            eprintln!("note: skipping: HUSHRUN_TEST_ANDROID=skip (ADR 0084)");
+            return;
+        }
+        tools(
+            "the Android SDK (HUSHRUN_TEST_ANDROID_SDK), or HUSHRUN_TEST_ANDROID=skip",
+            false,
         );
         return;
     };
@@ -813,7 +832,7 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
         "unit",
         "--",
         gradle.as_str(),
-        "--offline",
+        offline(),
         "--console=plain",
         ":core:testDebugUnitTest",
     ];
@@ -1070,7 +1089,12 @@ fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
     let second = r.run(&command(&gradle, &[]), &[]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
     let cases = r.xml_cases(".", "ex.ParseSpec");
-    assert!(cases.contains(&"parses [b]".to_string()), "{cases:?}");
+    assert!(
+        cases.contains(&"parses [b]".to_string()),
+        "{cases:?}\n{}\n{}",
+        second.stdout,
+        second.stderr
+    );
     assert_eq!(cases.len(), 2, "{cases:?}");
 }
 
@@ -1146,7 +1170,7 @@ fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed()
             "unit",
             "--",
             "./gradlew",
-            "--offline",
+            offline(),
             "--console=plain",
             "test",
             "--continue",
@@ -1466,10 +1490,7 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
     };
     let g: &'static str = Box::leak(gradle.into_boxed_str());
     // Only app's tests: lib's sources, which app's classes read, are on their list.
-    let first = r.run(
-        &only(&[g, "--offline", "--console=plain", ":app:test"]),
-        &[],
-    );
+    let first = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
     let map = r.map();
     let reads = map["units"][CART]["reads"].as_array().unwrap().clone();
@@ -1482,10 +1503,7 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
         "lib/src/main/java/shop/lib/Price.java",
         "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
     );
-    let second = r.run(
-        &only(&[g, "--offline", "--console=plain", ":app:test"]),
-        &[],
-    );
+    let second = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert!(
         second.stdout.contains("CartTest") || r.xml_cases("app", "shop.app.CartTest").len() >= 2,
@@ -1645,7 +1663,7 @@ fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followe
             "unit",
             "--",
             gradle.as_str(),
-            "--offline",
+            offline(),
             "--console=plain",
         ]
         .iter()
