@@ -92,10 +92,25 @@ mod tests {
 
     #[test]
     fn what_changes_a_runner_is_scrubbed_and_tool_paths_are_kept() {
-        for name in ["PYTEST_ADDOPTS", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "NODE_OPTIONS", "CMAKE_GENERATOR", "CTEST_PARALLEL_LEVEL", "GOFLAGS"] {
+        for name in [
+            "PYTEST_ADDOPTS",
+            "PYTHONPATH",
+            "PYTHONDONTWRITEBYTECODE",
+            "NODE_OPTIONS",
+            "CMAKE_GENERATOR",
+            "CTEST_PARALLEL_LEVEL",
+            "GOFLAGS",
+        ] {
             assert!(scrubs(name), "{name}");
         }
-        for name in ["PATH", "HOME", "JAVA_HOME", "HUSHRUN_TEST_PYTHON", "HUSHRUN_TEST_CMAKE", "GOPATH"] {
+        for name in [
+            "PATH",
+            "HOME",
+            "JAVA_HOME",
+            "HUSHRUN_TEST_PYTHON",
+            "HUSHRUN_TEST_CMAKE",
+            "GOPATH",
+        ] {
             assert!(!scrubs(name), "{name}");
         }
         let mut cmd = std::process::Command::new("true");

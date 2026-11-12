@@ -785,12 +785,25 @@ fn a_test_file_whose_last_test_pytest_exit_cut_short_didnt_run_whole() {
             "conftest.py",
             "import pytest\n\n@pytest.fixture\ndef db():\n    pytest.exit('database not reachable', returncode=3)\n",
         ),
-        ("test_k.py", "def test_1():\n    pass\n\ndef test_db(db):\n    pass\n"),
+        (
+            "test_k.py",
+            "def test_1():\n    pass\n\ndef test_db(db):\n    pass\n",
+        ),
         ("test_z.py", "def test_z():\n    pass\n"),
     ]);
     let python = python();
     let ran = r.run(
-        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
         &[],
     );
     assert_eq!(ran.code, 3, "{}\n{}", ran.stdout, ran.stderr);
@@ -819,7 +832,17 @@ fn a_session_fixture_whose_end_fails_keeps_every_file_it_served_from_a_pass() {
     ]);
     let python = python();
     let ran = r.run(
-        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
         &[],
     );
     assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
@@ -850,7 +873,17 @@ fn a_test_file_skipped_whole_as_it_loads_records_no_pass_in_a_run_that_failed() 
     ]);
     let python = python();
     let ran = r.run(
-        &["run", "unit", "--", &python, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
         &[],
     );
     assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);

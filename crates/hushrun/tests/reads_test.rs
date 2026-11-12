@@ -581,7 +581,10 @@ fn reads_test_follows_what_a_packages_init_reexports() {
 #[test]
 fn reads_test_follows_a_star_import() {
     caught(
-        &reexported(("app/config/__init__.py", "from app.config.defaults import *\n")),
+        &reexported((
+            "app/config/__init__.py",
+            "from app.config.defaults import *\n",
+        )),
         ("app/config/defaults.py", "RATE = 0.3\nCURRENCY = 'EUR'\n"),
     );
 }
