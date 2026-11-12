@@ -605,8 +605,11 @@ fn go_reuses_what_already_passed_and_audits_it() {
         units,
         serde_json::json!({"total": 7, "ran": 3, "reused": 4, "savedMs": units["savedMs"]})
     );
+    // What reuse saved, from the reused packages' recorded times: below a second it says only how
+    // many, from a second on how long too, which a loaded machine reaches.
     assert!(
-        second.stderr.contains("4 test files reused"),
+        second.stderr.contains("; 4 test files reused")
+            || second.stderr.contains("reusing 4 test files saved about"),
         "{}",
         second.stderr
     );
