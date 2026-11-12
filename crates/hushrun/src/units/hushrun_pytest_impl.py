@@ -41,6 +41,14 @@ everything left was deselected by it, pytest's "no tests collected" (exit 5) wou
 a fail, so that process's exit status becomes 0, and only then: any failure or error gives pytest
 another status first.
 
+Tests one by one (ADR 0077): when `hushrun.json`'s `unit` is `test`, it reports each test of each
+test file, its id being its node id after `<path>::`: whether it finished, failed or was deselected,
+and how long it took. It deselects, besides the test files `reuse` lists, the tests `reuseTests`
+lists, by their file and id, under the same rules. What it couldn't follow inside one test's window
+(its setup, body and teardown) is that test's alone; outside every window (collecting, importing, a
+fixture of module, class or session scope, a teardown that may end one) it is the test file's.
+Its file is then `hushrun.unit-facts/v1`. It decides nothing of tests either.
+
 It never changes pytest's outcome on its own error: every hook is guarded, any error of its own is
 reported, which makes hushrun record nothing for the test files this process saw, and an error
 while selecting deselects nothing.
@@ -67,10 +75,13 @@ __all__ = [
     "pytest_collection_finish",
     "pytest_runtest_protocol",
     "pytest_runtest_logreport",
+    "pytest_fixture_setup",
+    "pytest_runtest_teardown",
     "pytest_sessionfinish",
 ]
 
 SCHEMA = "hushrun.unit-facts/v0"
+SCHEMA_V1 = "hushrun.unit-facts/v1"
 RUN_SCHEMA = "hushrun.units/v0"
 ENV_DIR = "HUSHRUN_UNITS"
 
@@ -144,6 +155,14 @@ class Observer(object):
         self._import_seen = set()
         self._scanned = 0
         self.unit_roots = {}          # unit -> the files it read directly, as results() found them
+        self.by_test = False          # hushrun.json's unit is test: tests are reported one by one
+        self.reuse_tests = {}         # unit -> frozenset(ids) hushrun.json lets this run deselect
+        self.tests = {}               # unit -> {id: facts of the test being gathered}
+        self.test_order = {}          # unit -> [ids, in the order they started or were deselected]
+        self.active_test = None       # the id of the test whose protocol is running
+        self.shared_depth = 0         # >0 while a fixture of a wider scope than a test sets up
+        self.shared_teardown = False  # a teardown that may end fixtures of a wider scope
+        self.test_not_followed = {}   # (unit, id) -> {reason: set(details)}
 
     # --- paths -------------------------------------------------------------------------
 
@@ -395,7 +414,7 @@ class Observer(object):
         except Exception:
             pass
         if self.active:
-            target = self.not_followed.setdefault(self.active, {})
+            target = self.not_followed_target()
         elif self.repo_frames(frame):
             # Outside any test file, by the repository's own code (a conftest.py that generates
             # files as it loads): it may change what every test file reads.
@@ -411,9 +430,24 @@ class Observer(object):
             name = os.fsdecode(name)
         r = self.rel(name) if isinstance(name, str) and os.path.sep in name else None
         if r:
-            target = self.not_followed.setdefault(self.active, {}) if self.active \
-                else self.session_not_followed
+            target = self.not_followed_target() if self.active else self.session_not_followed
             target.setdefault("native", set()).add(r)
+
+    def not_followed_target(self):
+        """Where something not followed while a unit is active goes: the running test's own, with
+        tests one by one and inside its window alone; else the unit's, for all its tests."""
+        if self.by_test and self.active_test is not None and not self.shared_depth \
+                and not self.shared_teardown:
+            return self.test_not_followed.setdefault((self.active, self.active_test), {})
+        return self.not_followed.setdefault(self.active, {})
+
+    def test_entry(self, unit, test_id):
+        tests = self.tests.setdefault(unit, {})
+        if test_id not in tests:
+            tests[test_id] = {"finished": False, "failed": False, "deselected": False,
+                              "duration": 0.0}
+            self.test_order.setdefault(unit, []).append(test_id)
+        return tests[test_id]
 
     # --- phases ------------------------------------------------------------------------
 
@@ -523,7 +557,7 @@ class Observer(object):
             for f in sorted(reads & native_files):
                 not_followed.append({"why": "native", "detail": f})
             selected = info["selected"] if self.collection_finished else info["collected"]
-            out.append({
+            entry = {
                 "unit": unit,
                 "selected": selected,
                 "finished": info["finished"],
@@ -532,6 +566,27 @@ class Observer(object):
                 "durationMs": int(round(info["duration"] * 1000)),
                 "reads": sorted(reads),
                 "notFollowed": not_followed,
+            }
+            if self.by_test:
+                entry["tests"] = self.test_results(unit)
+            out.append(entry)
+        return out
+
+    def test_results(self, unit):
+        """[ADR 0077] Each test of `unit` this process ran or deselected, in that order."""
+        out = []
+        tests = self.tests.get(unit, {})
+        for test_id in self.test_order.get(unit, []):
+            facts = tests[test_id]
+            out.append({
+                "id": test_id,
+                "finished": bool(facts["finished"]),
+                "failed": bool(facts["failed"]),
+                "deselected": bool(facts["deselected"]),
+                "durationMs": int(round(facts["duration"] * 1000)),
+                "notFollowed": [{"why": k, "detail": d}
+                                for k, v in sorted(self.test_not_followed.get((unit, test_id), {}).items())
+                                for d in sorted(v)],
             })
         return out
 
@@ -642,6 +697,14 @@ def _install():
     python_files = run.get("pythonFiles")
     if isinstance(python_files, list) and all(isinstance(p, str) for p in python_files):
         observer.python_files = list(python_files)
+    # [ADR 0077] Tests one by one, and the tests the plan lets this run deselect.
+    observer.by_test = run.get("unit") == "test"
+    reuse_tests = run.get("reuseTests") or {}
+    if observer.by_test and isinstance(reuse_tests, dict):
+        observer.reuse_tests = {
+            unit: frozenset(ids) for unit, ids in reuse_tests.items()
+            if isinstance(unit, str) and isinstance(ids, list) and all(isinstance(i, str) for i in ids)
+        }
     observer.claimed, observer.claimant = _claim(directory)
     # Repository modules loaded before the adapter (a .pth file, sitecustomize) are ambient.
     for name, module in list(sys.modules.items()):
@@ -674,6 +737,13 @@ def _unit_of(node):
     if not p or OBSERVER is None:
         return None
     return OBSERVER.rel(p)
+
+
+def _test_id(nodeid):
+    """[ADR 0077] A test's id: its node id after its file's path and `::`; None when it has none."""
+    if not isinstance(nodeid, str) or "::" not in nodeid:
+        return None
+    return nodeid.split("::", 1)[1] or None
 
 
 def _call(fn, *args):
@@ -742,19 +812,35 @@ def _logreport(obs, report):
     if not unit:
         return
     entry = obs.unit_entry(unit)
-    entry["duration"] += getattr(report, "duration", 0.0) or 0.0
+    duration = getattr(report, "duration", 0.0) or 0.0
+    entry["duration"] += duration
     if report.failed:
         # A failure, or an error in setup or teardown; pytest reports a strict xpass failed too.
         entry["failed"] = True
+    if obs.by_test and obs.active_test is not None:
+        test = obs.test_entry(unit, obs.active_test)
+        test["duration"] += duration
+        if report.failed:
+            test["failed"] = True
 
 
-def _protocol_start(obs, unit):
+def _protocol_start(obs, unit, test_id):
     obs.unit_entry(unit)
     obs.start(unit)
+    obs.active_test = test_id
+    obs.shared_depth = 0
+    obs.shared_teardown = False
+    if obs.by_test and test_id is not None:
+        obs.test_entry(unit, test_id)
 
 
-def _protocol_end(obs, unit):
+def _protocol_end(obs, unit, test_id):
     obs.unit_entry(unit)["finished"] += 1
+    if obs.by_test and test_id is not None:
+        obs.test_entry(unit, test_id)["finished"] = True
+    obs.active_test = None
+    obs.shared_depth = 0
+    obs.shared_teardown = False
     obs.stop()
 
 
@@ -762,7 +848,7 @@ def _may_deselect(obs, config):
     """Whether this process may deselect what hushrun.json lists: the one that claimed the run's
     directory, or a pytest-xdist worker it started; and only when pytest's python_files is the one
     hushrun read, so that the plan's test files are pytest's."""
-    if not obs.reuse or obs.python_files is None:
+    if not (obs.reuse or obs.reuse_tests) or obs.python_files is None:
         return False
     worker = getattr(config, "workerinput", None)
     if worker is None:
@@ -775,12 +861,19 @@ def _may_deselect(obs, config):
 def _modifyitems(obs, config, items):
     if not _may_deselect(obs, config):
         return
-    keep, gone, by_unit = [], [], {}
+    keep, gone, by_unit, tests_gone = [], [], {}, []
     for item in items:
         unit = _unit_of(item)
+        test_id = _test_id(getattr(item, "nodeid", None)) if obs.by_test else None
         if unit is not None and unit in obs.reuse:
             gone.append(item)
             by_unit[unit] = by_unit.get(unit, 0) + 1
+            if test_id is not None:
+                tests_gone.append((unit, test_id))
+        elif unit is not None and test_id is not None and test_id in obs.reuse_tests.get(unit, ()):
+            # [ADR 0077] A test the plan lists one by one: its file runs, without it.
+            gone.append(item)
+            tests_gone.append((unit, test_id))
         else:
             keep.append(item)
     if not gone:
@@ -791,6 +884,8 @@ def _modifyitems(obs, config, items):
     obs.removed += len(gone)
     for unit, n in by_unit.items():
         obs.deselected[unit] = obs.deselected.get(unit, 0) + n
+    for unit, test_id in tests_gone:
+        obs.test_entry(unit, test_id)["deselected"] = True
 
 
 def _workers_removed(obs):
@@ -838,16 +933,47 @@ def pytest_runtest_logreport(report):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     unit = None
+    test_id = None
     if OBSERVER is not None and not OBSERVER.done:
         try:
             unit = _unit_of(item)
+            test_id = _test_id(getattr(item, "nodeid", None))
         except Exception:
             unit = None
     if unit:
-        _call(_protocol_start, unit)
+        _call(_protocol_start, unit, test_id)
     yield
     if unit:
-        _call(_protocol_end, unit)
+        _call(_protocol_end, unit, test_id)
+
+
+def _shared_setup(obs, fixturedef, step):
+    """[ADR 0077] A fixture of a wider scope than one test sets up: what happens meanwhile serves
+    every test that requests it, and is the test file's."""
+    if getattr(fixturedef, "scope", "function") != "function":
+        obs.shared_depth = max(0, obs.shared_depth + step)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    _call(_shared_setup, fixturedef, 1)
+    try:
+        yield
+    finally:
+        _call(_shared_setup, fixturedef, -1)
+
+
+def _teardown_shares(obs, item, nextitem):
+    """[ADR 0077] A teardown that may end fixtures of a wider scope: the last test of its file or
+    class, or of the session. What happens meanwhile is the test file's."""
+    obs.shared_teardown = nextitem is None or getattr(nextitem, "parent", None) is not \
+        getattr(item, "parent", None)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    _call(_teardown_shares, item, nextitem)
+    yield
 
 
 @pytest.hookimpl(trylast=True)
@@ -887,7 +1013,7 @@ def pytest_sessionfinish(session, exitstatus):
             except Exception:
                 edges = []
             facts = {
-                "schema": SCHEMA,
+                "schema": SCHEMA_V1 if obs.by_test else SCHEMA,
                 "adapter": "pytest",
                 "pid": os.getpid(),
                 "worker": (worker or {}).get("workerid") if worker else None,

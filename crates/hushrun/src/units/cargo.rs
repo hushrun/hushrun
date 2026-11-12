@@ -462,6 +462,7 @@ pub fn observe(
                 },
                 reads: b.reads,
                 duration_ms,
+                tests: None,
             },
         );
         executables.insert(unit, b.executable);

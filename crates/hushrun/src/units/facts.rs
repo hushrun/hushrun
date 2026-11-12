@@ -9,6 +9,12 @@
 //!   that reads none of these three deselects only whole units, which runs more and never less.
 //! - `<anything>.json`, an adapter's, one per process: `{"schema": "hushrun.unit-facts/v0", …}`,
 //!   [`FactsFile`]. A name that starts with `.` is a file being written, and is never read.
+//!   \[ADR 0077\] Or `hushrun.unit-facts/v1`, which adds to each unit its `tests` ([`TestFacts`]),
+//!   what loading it ran and opened (`loaded`), and what shared setups ran and opened for which of
+//!   its tests (`shared`); and to the file one `paths` table, which `ran`, `opened`, `dirs` and
+//!   `imports` index, with `imports`, each file's direct imports (C-39). A `v0` file reads as it
+//!   always did. Every list is parsed and merged across an adapter's processes ([`merged`]);
+//!   which of it a run uses is the reader's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +27,8 @@ use hushrun_core::units::NotFollowed;
 pub const RUN_SCHEMA: &str = "hushrun.units/v0";
 /// The schema of an adapter's file.
 pub const FACTS_SCHEMA: &str = "hushrun.unit-facts/v0";
+/// \[ADR 0077\] The schema of an adapter's file that reports tests one by one (C-39).
+pub const FACTS_SCHEMA_V1: &str = "hushrun.unit-facts/v1";
 /// hushrun's own file in the directory.
 pub const RUN_FILE: &str = "hushrun.json";
 /// The most adapter files a run reads: past it, hushrun records no unit (C-32).
@@ -121,6 +129,25 @@ pub struct FactsFile {
     /// `kind` `import`, `open` or `read`: what `hushrun why` shows a path with, never a key.
     #[serde(default, deserialize_with = "edges")]
     pub edges: Vec<(String, String, String)>,
+    /// \[ADR 0077\] The paths, from the repository root, that this file's `ran`, `opened`, `dirs`
+    /// and `imports` name by their index.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// \[ADR 0077\] Each file's direct imports: the index of a file, as a string, to the indices
+    /// of the files it imports.
+    #[serde(default)]
+    pub imports: BTreeMap<String, Vec<usize>>,
+}
+
+impl FactsFile {
+    /// \[ADR 0077\] The paths `indices` name in this file's table; `None` when one names none,
+    /// and then the list can't be told.
+    pub fn resolve(&self, indices: &[usize]) -> Option<BTreeSet<String>> {
+        indices
+            .iter()
+            .map(|i| self.paths.get(*i).cloned())
+            .collect()
+    }
 }
 
 /// A file's `edges`, or none when they don't read: they explain, and never stop a run.
@@ -178,6 +205,69 @@ pub struct UnitFacts {
     /// file below each.
     #[serde(default)]
     pub dirs: Vec<String>,
+    /// \[ADR 0077\] Its tests, each on its own: present in a `v1` file whose run's `unit` is
+    /// `test` (C-39). Absent, the adapter told nothing of its tests.
+    #[serde(default)]
+    pub tests: Option<Vec<TestFacts>>,
+    /// \[ADR 0077\] What loading it ran and opened, outside any test's window.
+    #[serde(default)]
+    pub loaded: Option<Touched>,
+    /// \[ADR 0077\] What each shared setup ran and opened (a fixture of module, class or session
+    /// scope, a `beforeAll`), with the tests it served, by their index in `tests`.
+    #[serde(default)]
+    pub shared: Vec<SharedSetup>,
+}
+
+/// \[ADR 0077\] What an adapter saw of one test in one process (C-39). An adapter that knows tests
+/// and not what each read sends `id`, `finished`, `failed`, `deselected` and `durationMs` only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TestFacts {
+    /// Its id within its unit: for pytest, its node id after `<path>::`.
+    pub id: String,
+    /// It finished, pass or fail: its setup, body and teardown ran.
+    #[serde(default)]
+    pub finished: bool,
+    /// It failed or errored, in setup, body or teardown.
+    #[serde(default)]
+    pub failed: bool,
+    /// The adapter deselected it, as `hushrun.json` listed it or its unit.
+    #[serde(default)]
+    pub deselected: bool,
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// The files whose functions were called while it ran, by index into `paths`.
+    #[serde(default)]
+    pub ran: Option<Vec<usize>>,
+    /// The files it opened, by index into `paths`.
+    #[serde(default)]
+    pub opened: Option<Vec<usize>>,
+    /// The directories it listed, by index into `paths`.
+    #[serde(default)]
+    pub dirs: Option<Vec<usize>>,
+    /// What the adapter couldn't follow inside its own window: its alone.
+    #[serde(default)]
+    pub not_followed: Vec<Unfollowed>,
+}
+
+/// \[ADR 0077\] Files that ran and files opened, by index into the file's `paths`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Touched {
+    #[serde(default)]
+    pub ran: Vec<usize>,
+    #[serde(default)]
+    pub opened: Vec<usize>,
+}
+
+/// \[ADR 0077\] A shared setup: the tests it served, by index into its unit's `tests`, and what it
+/// ran and opened.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedSetup {
+    pub tests: Vec<usize>,
+    #[serde(default)]
+    pub ran: Vec<usize>,
+    #[serde(default)]
+    pub opened: Vec<usize>,
 }
 
 /// One start of a test binary by hushrun's target runner.
@@ -236,7 +326,7 @@ pub fn read_all(dir: &Path) -> Option<Vec<FactsFile>> {
                 let file: FactsFile = serde_json::from_slice(&bytes)
                     .map_err(|err| tracing::debug!("{}: {err}", path.display()))
                     .ok()?;
-                (file.schema == FACTS_SCHEMA).then_some(file)
+                (file.schema == FACTS_SCHEMA || file.schema == FACTS_SCHEMA_V1).then_some(file)
             })
             .collect(),
     )
@@ -246,6 +336,10 @@ pub fn read_all(dir: &Path) -> Option<Vec<FactsFile>> {
 /// selected, since each collects them all; the tests every process finished; deselected only when
 /// every process that saw it deselected it; and the union of everything else.
 #[derive(Debug, Clone, Default)]
+#[allow(
+    dead_code,
+    reason = "`loaded` and `shared` are what `reads: test` reads"
+)]
 pub struct Merged {
     pub selected: u64,
     pub finished: u64,
@@ -255,6 +349,95 @@ pub struct Merged {
     pub reads: BTreeSet<String>,
     pub not_followed: BTreeSet<NotFollowed>,
     pub failures_by_unit: bool,
+    /// \[ADR 0077\] Its tests, merged across the processes that reported them, by id; `None` when
+    /// no process told its tests (C-39).
+    pub tests: Option<BTreeMap<String, MergedTest>>,
+    /// \[ADR 0077\] What loading it ran and opened, from every process that said; `None` when
+    /// none did, or `loaded_broken`.
+    pub loaded: Option<(BTreeSet<String>, BTreeSet<String>)>,
+    /// \[ADR 0077\] A process sent a `loaded` that can't be read: what loading it touched can't
+    /// be told.
+    pub loaded_broken: bool,
+    /// \[ADR 0077\] Each shared setup: the ids of the tests it served, what it ran and opened.
+    pub shared: Vec<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>,
+}
+
+/// \[ADR 0077\] What every process saw of one test: it finished or failed in any; deselected only
+/// when every process that reported it deselected it, as a unit is; the union of the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "`ran`, `opened` and `dirs` are what `reads: test` reads"
+)]
+pub struct MergedTest {
+    pub finished: bool,
+    pub failed: bool,
+    pub deselected: bool,
+    pub duration_ms: u64,
+    pub not_followed: BTreeSet<NotFollowed>,
+    /// What ran, was opened and listed while it ran, from the root; `None` when a process didn't
+    /// say, or said it in a way that can't be read: then what it read can't be told test by test.
+    pub ran: Option<BTreeSet<String>>,
+    pub opened: Option<BTreeSet<String>>,
+    pub dirs: Option<BTreeSet<String>>,
+}
+
+/// \[ADR 0077\] Each file's direct imports in `adapter`'s files, from the root, over its processes.
+/// A file whose table names nothing for an index adds nothing.
+#[allow(
+    dead_code,
+    reason = "what a test read with `reads: test` is made from it"
+)]
+pub fn imports(files: &[FactsFile], adapter: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for file in files
+        .iter()
+        .filter(|f| f.adapter == adapter && !f.controller)
+    {
+        for (from, to) in &file.imports {
+            let Some(from) = from.parse::<usize>().ok().and_then(|i| file.paths.get(i)) else {
+                continue;
+            };
+            if let Some(to) = file.resolve(to) {
+                out.entry(from.clone()).or_default().extend(to);
+            }
+        }
+    }
+    out
+}
+
+/// \[ADR 0077\] Merges one process's tests of a unit into `into`.
+fn merge_tests(into: &mut BTreeMap<String, MergedTest>, file: &FactsFile, tests: &[TestFacts]) {
+    let list = |indices: &Option<Vec<usize>>| indices.as_ref().and_then(|i| file.resolve(i));
+    for test in tests {
+        let first = !into.contains_key(&test.id);
+        let merged = into.entry(test.id.clone()).or_insert_with(|| MergedTest {
+            deselected: true,
+            ..MergedTest::default()
+        });
+        merged.finished |= test.finished;
+        merged.failed |= test.failed;
+        merged.deselected &= test.deselected;
+        merged.duration_ms = merged.duration_ms.saturating_add(test.duration_ms);
+        merged
+            .not_followed
+            .extend(test.not_followed.iter().map(NotFollowed::from));
+        // What it read is known only when every process that reported it said it.
+        for (into, from) in [
+            (&mut merged.ran, list(&test.ran)),
+            (&mut merged.opened, list(&test.opened)),
+            (&mut merged.dirs, list(&test.dirs)),
+        ] {
+            *into = match (first, into.take(), from) {
+                (true, _, from) => from,
+                (false, Some(mut had), Some(from)) => {
+                    had.extend(from);
+                    Some(had)
+                }
+                (false, _, _) => None,
+            };
+        }
+    }
 }
 
 /// The units of `adapter`'s files, merged across its processes (C-32).
@@ -290,6 +473,35 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
                 .extend(unit.not_followed.iter().map(NotFollowed::from));
             merged.not_followed.extend(whole.iter().cloned());
             merged.failures_by_unit &= file.failures_by_unit;
+            // \[ADR 0077\] Tests, and what loading it and its shared setups touched (C-39).
+            if let Some(tests) = &unit.tests {
+                merge_tests(merged.tests.get_or_insert_with(BTreeMap::new), file, tests);
+            }
+            if let Some(loaded) = &unit.loaded {
+                match file.resolve(&loaded.ran).zip(file.resolve(&loaded.opened)) {
+                    Some((ran, opened)) if !merged.loaded_broken => {
+                        let into = merged.loaded.get_or_insert_with(Default::default);
+                        into.0.extend(ran);
+                        into.1.extend(opened);
+                    }
+                    _ => {
+                        merged.loaded_broken = true;
+                        merged.loaded = None;
+                    }
+                }
+            }
+            for setup in &unit.shared {
+                let ids: Option<BTreeSet<String>> = setup
+                    .tests
+                    .iter()
+                    .map(|i| unit.tests.as_ref()?.get(*i).map(|t| t.id.clone()))
+                    .collect();
+                if let (Some(ids), Some(ran), Some(opened)) =
+                    (ids, file.resolve(&setup.ran), file.resolve(&setup.opened))
+                {
+                    merged.shared.push((ids, ran, opened));
+                }
+            }
         }
     }
     out
@@ -457,5 +669,86 @@ mod tests {
                 .contains(".tmp")
                 || e.file_name() == ".pytest-2.json.tmp")
         );
+    }
+
+    // covers: C-39
+    #[test]
+    fn a_v1_file_reports_tests_and_merges_them_across_processes() {
+        // Two xdist workers: each collected the file's two tests, deselected the one the plan
+        // listed, and ran one of the others. One saw a subprocess inside its test's window.
+        let worker = |ran: &str, saw: Option<&str>| -> FactsFile {
+            serde_json::from_value(serde_json::json!({
+                "schema": FACTS_SCHEMA_V1,
+                "adapter": "pytest",
+                "failuresByUnit": true,
+                "paths": ["tests/test_a.py", "app/x.py", "data.json", "app/y.py"],
+                "imports": {"0": [1], "1": [3], "9": [1]},
+                "units": [{
+                    "unit": "tests/test_a.py", "selected": 1, "finished": 1,
+                    "loaded": {"ran": [0], "opened": []},
+                    "shared": [{"tests": [0, 1], "ran": [1], "opened": [2]}],
+                    "tests": [
+                        {"id": "test_reused", "deselected": true},
+                        {"id": ran, "finished": true, "durationMs": 5, "ran": [0, 1],
+                         "opened": [2], "dirs": [],
+                         "notFollowed": saw.map(|d| vec![serde_json::json!({"why": "subprocess", "detail": d})]).unwrap_or_default()},
+                    ],
+                }],
+            }))
+            .unwrap()
+        };
+        let files = [worker("test_one", None), worker("test_two", Some("git"))];
+        let merged = merged(&files, "pytest");
+        let m = &merged["tests/test_a.py"];
+        let tests = m.tests.as_ref().unwrap();
+        assert_eq!(
+            tests.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["test_one", "test_reused", "test_two"]
+        );
+        // Deselected only when every process that reported it deselected it.
+        assert!(tests["test_reused"].deselected && !tests["test_reused"].finished);
+        assert!(tests["test_one"].finished && !tests["test_one"].deselected);
+        // What wasn't followed inside a test's window is that test's alone.
+        assert!(tests["test_one"].not_followed.is_empty());
+        assert_eq!(tests["test_two"].not_followed.len(), 1);
+        assert!(m.not_followed.is_empty());
+        // Lists come through the file's table.
+        assert_eq!(
+            tests["test_one"]
+                .opened
+                .as_ref()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            ["data.json"]
+        );
+        assert_eq!(tests["test_reused"].ran, None);
+        assert_eq!(m.shared.len(), 2);
+        assert!(m.loaded.as_ref().unwrap().0.contains("tests/test_a.py"));
+        let imports = imports(&files, "pytest");
+        assert_eq!(imports["app/x.py"].iter().collect::<Vec<_>>(), ["app/y.py"]);
+        assert!(!imports.contains_key("9"));
+        // An index the table doesn't hold: what it read can't be told, and nothing else changes.
+        let mut broken = worker("test_one", None);
+        broken.units[0].tests.as_mut().unwrap()[1].ran = Some(vec![42]);
+        let merged = super::merged(&[broken], "pytest");
+        let t = &merged["tests/test_a.py"].tests.as_ref().unwrap()["test_one"];
+        assert_eq!(t.ran, None);
+        assert!(t.finished);
+        // A v0 file says nothing of tests, and reads as it always did.
+        let v0 = file("pytest", vec![unit("tests/test_a.py", 1, 1, &[])]);
+        assert!(
+            super::merged(&[v0], "pytest")["tests/test_a.py"]
+                .tests
+                .is_none()
+        );
+        // A `tests` that isn't a list of tests: the file isn't read at all.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pytest-1.json"),
+            br#"{"schema":"hushrun.unit-facts/v1","adapter":"pytest","units":[{"unit":"t.py","tests":[{"finished":true}]}]}"#,
+        )
+        .unwrap();
+        assert!(read_all(dir.path()).unwrap().is_empty());
     }
 }

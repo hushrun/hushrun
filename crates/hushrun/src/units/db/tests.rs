@@ -460,7 +460,16 @@ fn impossible_rows_cant_be_written() {
     for bad in [
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES ('x', 'a', '[]', '', 'default', 'pytest', 0)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '\"pytest\"', '', 'default', 'pytest', 0)",
-        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'jest', 0)",
+        // [ADR 0077] An adapter's word is 1 to 32 of a-z, 0-9 and -, whichever adapter it is.
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'Jest', 0)",
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', '', 0)",
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'swift test', 0)",
+        // [ADR 0077] A test has an id, a state a run records, and no negative duration.
+        "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, '', 'passed', 0)",
+        "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, 'test_a', 'reused', 0)",
+        "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, 'test_a', 'passed', -1)",
+        "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (999, 'test_a', 'passed', 0)",
+        "INSERT INTO test (unit_ref, test_id, state, duration_ms, list_ref) VALUES (1, 'test_a', 'passed', 0, 999)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'pytest', 'yesterday')",
         "INSERT INTO version (path_ref, entry) VALUES (1, 'not a hash')",
         "INSERT INTO edge (check_ref, from_ref, to_ref, kind) VALUES (1, 1, 1, 'calls')",
@@ -483,7 +492,66 @@ fn the_store_of_a_repository_is_one_file_and_the_sweep_leaves_it() {
     assert_ne!(a, path(cache, Some("example.com/acme/web")));
     assert_ne!(a, path(cache, None));
     let name = a.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(name.ends_with(".v1.sqlite"));
+    assert!(name.ends_with(".v2.sqlite"));
     assert!(is_store_file(&name) && is_store_file(&format!("{name}-wal")));
-    assert!(!is_store_file("x.map.json") && !is_store_file("x.v2.sqlite"));
+    assert!(!is_store_file("x.map.json") && !is_store_file("x.v1.sqlite"));
+}
+
+// covers: C-36, C-39
+#[test]
+fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
+    use super::super::store::TestRow;
+    use hushrun_core::units::State;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.v2.sqlite");
+    let row = |state: State, ms: u64, why: Option<&str>| TestRow {
+        state,
+        duration_ms: ms,
+        not_followed: why
+            .map(|w| NotFollowed {
+                why: w.into(),
+                detail: "git".into(),
+            })
+            .into_iter()
+            .collect(),
+    };
+    let mut with_tests = mapped(&[("tests/test_a.py", HASH_A)]);
+    with_tests.tests = BTreeMap::from([
+        ("test_one".to_string(), row(State::Passed, 4, None)),
+        (
+            "TestA::test_two[x y]".to_string(),
+            row(State::Failed, 9, None),
+        ),
+        (
+            "test_spawns".to_string(),
+            row(State::NotObserved, 1, Some("subprocess")),
+        ),
+    ]);
+    let r = run(
+        "unit",
+        &[("tests/test_a.py", with_tests.clone())],
+        &["tests/test_a.py"],
+    );
+    write_run(&path, &r).unwrap();
+    let map = load(&path, &id("unit")).map;
+    assert_eq!(map.units["tests/test_a.py"].tests, with_tests.tests);
+    // A run that saw the test file again replaces its tests with what it saw.
+    let mut fewer = mapped(&[("tests/test_a.py", HASH_A)]);
+    fewer.tests = BTreeMap::from([("test_one".to_string(), row(State::NotRun, 0, None))]);
+    let r = run(
+        "unit",
+        &[("tests/test_a.py", fewer.clone())],
+        &["tests/test_a.py"],
+    );
+    write_run(&path, &r).unwrap();
+    let map = load(&path, &id("unit")).map;
+    assert_eq!(map.units["tests/test_a.py"].tests, fewer.tests);
+    // A test file that left the scope takes its tests with it.
+    let r = run("unit", &[], &["tests/other.py"]);
+    write_run(&path, &r).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let left: i64 = conn
+        .query_row("SELECT count(*) FROM test", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
 }

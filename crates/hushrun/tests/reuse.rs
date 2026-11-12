@@ -817,7 +817,7 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
     for entry in std::fs::read_dir(r.cache.join("units")).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // \[ADR 0072\] The store, as a cache step saves it once hushrun has exited.
-        if name.ends_with(".v1.sqlite") {
+        if name.ends_with(".v2.sqlite") {
             std::fs::copy(entry.path(), ci.cache.join("units").join(name)).unwrap();
         }
     }

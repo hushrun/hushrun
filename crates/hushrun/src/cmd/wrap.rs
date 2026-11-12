@@ -483,8 +483,15 @@ fn skip_or_run(
                 job.as_deref(),
                 started_at,
             ) {
-                Some(units::Planned::Plan(line)) if line.is_empty() => {}
-                Some(units::Planned::Plan(line)) => say.line(format_args!("{line}")),
+                Some(units::Planned::Plan(line)) => {
+                    // \[C-39\] What the plan says once, before its line: past the limit of tests.
+                    for note in session.plan_notes() {
+                        say.line(format_args!("{note}"));
+                    }
+                    if !line.is_empty() {
+                        say.line(format_args!("{line}"));
+                    }
+                }
                 Some(units::Planned::Everything(why)) => {
                     say.line(format_args!("{check}: every test file runs: {why}"));
                     if why.contains("suspended") {
@@ -569,25 +576,32 @@ fn skip_or_run(
         .map_or(0, |c| c.reused);
     // \[ADR 0048\] What the reports this run wrote say, read after it, pass or fail (C-27).
     let mut reports = code.reports_of(dir, started, command, reader_paths);
+    // \[C-39\] Tests reused one by one, whose test files may all have run in part.
+    let reused_tests = observed
+        .as_ref()
+        .and_then(|(o, _)| Some(o.counts.as_ref()?.tests.as_ref()?.reused))
+        .unwrap_or(0);
     // \[ADR 0069\] Coverage of the test files that ran isn't the check's: a partial figure would
-    // read as a drop (C-27).
-    if reused > 0
+    // read as a drop (C-27); \[C-39\] nor of the tests that ran.
+    if (reused > 0 || reused_tests > 0)
         && let Some(reports) = reports.as_mut()
     {
         reports.coverage = None;
     }
     write_outputs(&runner, verdict, reports.as_ref());
     let mut summary = said(reports.as_ref());
-    // \[ADR 0069\] What reuse saved, from the reused test files' recorded durations.
-    if reused > 0 {
+    // \[ADR 0069\] What reuse saved, from the reused test files' recorded durations; \[C-39\] with
+    // tests one by one, the reused tests'.
+    if reused > 0 || reused_tests > 0 {
         let saved = observed
             .as_ref()
             .and_then(|(o, _)| o.counts.as_ref()?.saved_ms)
             .unwrap_or(0);
-        let files = if reused == 1 {
-            "1 test file".to_string()
-        } else {
-            format!("{reused} test files")
+        let files = match (reused_tests, reused) {
+            (0, 1) => "1 test file".to_string(),
+            (0, reused) => format!("{reused} test files"),
+            (1, _) => "1 test".to_string(),
+            (tests, _) => format!("{} tests", crate::cmd::usage::thousands(tests)),
         };
         if saved >= 1000 {
             summary.push_str(&format!("; reusing {files} saved about {}", took(saved)));

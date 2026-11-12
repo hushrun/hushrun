@@ -14,7 +14,7 @@ pub fn stores(cache: &Path) -> Vec<PathBuf> {
             entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.to_string_lossy().ends_with(".v1.sqlite"))
+                .filter(|p| p.to_string_lossy().ends_with(".v2.sqlite"))
                 .collect()
         })
         .unwrap_or_default();
@@ -81,6 +81,27 @@ pub fn map(cache: &Path) -> Value {
             .as_array_mut()
             .unwrap()
             .push(json!(dir));
+    }
+    // \[ADR 0077\] Each test of a test file, by id, with its last state, when it has any.
+    let mut tests = conn
+        .prepare(
+            "SELECT p.path, t.test_id, t.state FROM test t JOIN unit u ON u.id = t.unit_ref
+             JOIN path p ON p.id = u.path_ref ORDER BY t.test_id",
+        )
+        .unwrap();
+    let found: Vec<(String, String, String)> = tests
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (unit, test, state) in found {
+        let entry = units[&unit].as_object_mut().unwrap();
+        entry
+            .entry("tests")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(test, json!(state));
     }
     let rest: Map<String, Value> = rows(
         "SELECT p.path, v.entry FROM check_rest c JOIN version v ON v.id = c.version_ref

@@ -493,6 +493,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 },
                 reads,
                 duration_ms,
+                tests: None,
             },
         );
     }

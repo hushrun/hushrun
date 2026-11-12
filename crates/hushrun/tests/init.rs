@@ -6441,7 +6441,7 @@ fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files(
 }
 
 /// \[C-38\] What init says a GitHub job needs, for a backend that keeps no hints.
-const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.v1.sqlite`";
+const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.v2.sqlite`";
 
 /// A shop whose `test` check reuses test files.
 fn shop_with_tests() -> Repo {

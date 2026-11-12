@@ -436,7 +436,7 @@ fn why_says_a_suspension_and_a_store_it_cant_read() {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.to_string_lossy().ends_with(".v1.sqlite"))
+        .find(|p| p.to_string_lossy().ends_with(".v2.sqlite"))
         .expect("a store");
     for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", store.display()));

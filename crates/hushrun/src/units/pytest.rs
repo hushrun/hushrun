@@ -404,6 +404,7 @@ impl Adapter for Pytest {
                     facts,
                     reads: m.reads,
                     duration_ms: m.duration_ms,
+                    tests: m.tests,
                 };
                 (unit, seen)
             })

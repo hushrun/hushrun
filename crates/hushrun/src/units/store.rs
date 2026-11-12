@@ -830,6 +830,34 @@ pub struct Mapped {
     pub dirs: BTreeSet<String>,
     /// \[C-38\] Whether it ran here, or another machine saw it read these files.
     pub origin: Origin,
+    /// \[ADR 0077\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:
+    /// the ids a plan keys before COMMAND (C-39).
+    pub tests: BTreeMap<String, TestRow>,
+}
+
+/// \[ADR 0077\] One test as it last ran here (C-39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRow {
+    /// Its state then: never `reused`, since a test reused keeps the row of the run it stands on.
+    pub state: hushrun_core::units::State,
+    pub duration_ms: u64,
+    /// What wasn't followed inside its own window.
+    pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
+}
+
+impl TestRow {
+    /// The state a row's `state` column holds, `None` for one the store's CHECK refuses.
+    pub fn state_from_word(word: &str) -> Option<hushrun_core::units::State> {
+        use hushrun_core::units::State;
+        [
+            State::Passed,
+            State::Failed,
+            State::NotObserved,
+            State::NotRun,
+        ]
+        .into_iter()
+        .find(|state| state.word() == word)
+    }
 }
 
 /// One test file that would have been reused and failed.

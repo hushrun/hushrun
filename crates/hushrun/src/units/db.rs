@@ -1,6 +1,7 @@
 //! \[ADR 0072\] This machine's store of what test files read: one SQLite file per repository,
-//! `<cache dir>/units/<repository id>.v1.sqlite`, in WAL mode, opened by any number of hushrun
-//! processes at once (C-36).
+//! `<cache dir>/units/<repository id>.v2.sqlite`, in WAL mode, opened by any number of hushrun
+//! processes at once (C-36). \[ADR 0077\] Schema 2 adds each test file's tests; a `v1` file is left
+//! for an older hushrun, and read by none.
 //!
 //! It holds the map and what explains it, and nothing that decides:
 //!
@@ -12,7 +13,10 @@
 //!   walks to show a path, and no key ever reads;
 //! - **the audit**: each test file that would have been reused and failed;
 //! - \[C-38\] **hints known**: the content id of each hint this machine sent or received, by its
-//!   address and system, so that the same hint isn't sent twice.
+//!   address and system, so that the same hint isn't sent twice;
+//! - \[ADR 0077\] **tests**: for a check with `tests.unit: test`, each test of a test file that ran
+//!   here, by its id, with its last state and duration and what wasn't followed inside it; and, for
+//!   `reads: test`, a list it read, one row per distinct list, which tests share (C-39).
 //!
 //! \[C-38\] A test file's row is `seen here`, what it read when it ran here, or `shared`, a list
 //! another machine saw it read whose key had a pass that counted here, which reused it; the next
@@ -38,11 +42,11 @@ use serde_json::json;
 use hushrun_core::digest::Digest;
 use hushrun_core::units::{KeyBase, NotFollowed};
 
-use super::store::{Disagreement, Map, Mapped, Origin};
+use super::store::{Disagreement, Map, Mapped, Origin, TestRow};
 
 /// The schema this hushrun reads and writes, in the file's name and its `user_version`. A
 /// hushrun with another schema keeps another file.
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 2;
 /// `PRAGMA application_id`: "hush".
 const APPLICATION_ID: i64 = 0x6875_7368;
 /// How long a write waits for another hushrun's transaction.
@@ -78,7 +82,10 @@ CREATE TABLE checks (
     command    TEXT NOT NULL CHECK (json_valid(command) AND json_type(command) = 'array'),
     cwd        TEXT NOT NULL,
     scope      TEXT NOT NULL CHECK (scope <> ''),
-    adapter    TEXT NOT NULL CHECK (adapter IN ('pytest', 'cargo', 'go', 'vitest')),
+    -- [ADR 0077] The adapter's word: 1 to 32 of a-z, 0-9 and -, so that a new adapter needs no
+    -- new schema.
+    adapter    TEXT NOT NULL CHECK (length(adapter) BETWEEN 1 AND 32
+                                    AND adapter NOT GLOB '*[^a-z0-9-]*'),
     -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
     written_at INTEGER NOT NULL
 ) STRICT;
@@ -157,6 +164,44 @@ CREATE TABLE hint_known (
     PRIMARY KEY (check_ref, address, os, content_id)
 ) STRICT, WITHOUT ROWID;
 
+-- [ADR 0077] What a test read with `reads: test`: one row per distinct list, which any number of
+-- tests share, by the SHA-256 of its paths and their versions.
+CREATE TABLE test_list (
+    id     INTEGER PRIMARY KEY,
+    digest TEXT NOT NULL UNIQUE CHECK (length(digest) = 64)
+) STRICT;
+CREATE TABLE test_list_read (
+    list_ref    INTEGER NOT NULL REFERENCES test_list (id) ON DELETE CASCADE,
+    version_ref INTEGER NOT NULL REFERENCES version (id),
+    PRIMARY KEY (list_ref, version_ref)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE test_list_dir (
+    list_ref INTEGER NOT NULL REFERENCES test_list (id) ON DELETE CASCADE,
+    path_ref INTEGER NOT NULL REFERENCES path (id),
+    PRIMARY KEY (list_ref, path_ref)
+) STRICT, WITHOUT ROWID;
+
+-- [ADR 0077] Each test of a test file, as it last ran here (C-39): its id, its last state (a test
+-- reused keeps the row of the run it stands on), its duration, and with `reads: test` the list it
+-- read; none with `reads: file`, where it read what its test file read.
+CREATE TABLE test (
+    id          INTEGER PRIMARY KEY,
+    unit_ref    INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    test_id     TEXT NOT NULL CHECK (test_id <> ''),
+    state       TEXT NOT NULL CHECK (state IN ('passed', 'failed', 'not-observed', 'not-run')),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    list_ref    INTEGER REFERENCES test_list (id),
+    UNIQUE (unit_ref, test_id)
+) STRICT;
+CREATE INDEX test_by_list ON test (list_ref);
+-- What the adapter couldn't follow inside the test's own window.
+CREATE TABLE test_not_followed (
+    test_ref INTEGER NOT NULL REFERENCES test (id) ON DELETE CASCADE,
+    why      TEXT NOT NULL CHECK (why <> ''),
+    detail   TEXT NOT NULL,
+    PRIMARY KEY (test_ref, why, detail)
+) STRICT, WITHOUT ROWID;
+
 -- [C-34] Each test file that would have been reused and failed: the newest 200 of a check.
 CREATE TABLE disagreement (
     id        INTEGER PRIMARY KEY,
@@ -168,7 +213,7 @@ CREATE TABLE disagreement (
 ) STRICT;
 ";
 
-/// Where a repository's store is: `<cache dir>/units/<id>.v1.sqlite`, the id the SHA-256 of the
+/// Where a repository's store is: `<cache dir>/units/<id>.v2.sqlite`, the id the SHA-256 of the
 /// JCS form of `{"schema": "hushrun.unit-store-id/v1", "repository"}`, the repository as the run
 /// names it (C-10), lowercase, `""` for none.
 pub fn path(cache: &Path, repository: Option<&str>) -> PathBuf {
@@ -441,6 +486,55 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             mapped.dirs.insert(dir);
         }
     }
+    // \[ADR 0077\] Each test file's tests, as they last ran here.
+    let mut tests = conn.prepare(
+        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms FROM test t
+         JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
+    )?;
+    let mut test_names: HashMap<i64, (i64, String)> = HashMap::new();
+    for row in tests.query_map([check], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })? {
+        let (id, unit, test, state, duration): (i64, i64, String, String, i64) = row?;
+        let Some(state) = TestRow::state_from_word(&state) else {
+            continue;
+        };
+        if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+            mapped.tests.insert(
+                test.clone(),
+                TestRow {
+                    state,
+                    duration_ms: u64::try_from(duration).unwrap_or_default(),
+                    not_followed: BTreeSet::new(),
+                },
+            );
+            test_names.insert(id, (unit, test));
+        }
+    }
+    let mut test_not_followed = conn.prepare(
+        "SELECT n.test_ref, n.why, n.detail FROM test_not_followed n
+         JOIN test t ON t.id = n.test_ref JOIN unit u ON u.id = t.unit_ref
+         WHERE u.check_ref = ?1",
+    )?;
+    for row in
+        test_not_followed.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+    {
+        let (test, why, detail): (i64, String, String) = row?;
+        if let Some((unit, id)) = test_names.get(&test)
+            && let Some(row) = names
+                .get(unit)
+                .and_then(|n| map.units.get_mut(n))
+                .and_then(|m| m.tests.get_mut(id))
+        {
+            row.not_followed.insert(NotFollowed { why, detail });
+        }
+    }
     let mut rest = conn.prepare(
         "SELECT p.path, v.entry FROM check_rest c JOIN version v ON v.id = c.version_ref
          JOIN path p ON p.id = v.path_ref WHERE c.check_ref = ?1",
@@ -565,7 +659,7 @@ fn write_waiting(path: &Path, w: &Write<'_>, busy: Duration) -> Result<(), Unrea
 
 /// Moves what a write committed into the one file, when no reader holds the WAL: what a cache of
 /// the file alone keeps (CI's, C-15, RFC 0003 §3.11). Every write ends with it, so a run that ends
-/// leaves the store whole in `<id>.v1.sqlite`. One that can't now is done by a later write, or the
+/// leaves the store whole in `<id>.v2.sqlite`. One that can't now is done by a later write, or the
 /// last connection's close.
 fn checkpoint(conn: &Connection) {
     if let Err(err) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
@@ -697,6 +791,26 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 params![unit, dir],
             )?;
         }
+        // \[ADR 0077\] Its tests, with `reads: file` and no list of their own.
+        for (id, row) in &mapped.tests {
+            tx.execute(
+                "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    unit,
+                    id,
+                    row.state.word(),
+                    i64::try_from(row.duration_ms).unwrap_or(i64::MAX)
+                ],
+            )?;
+            let test = tx.last_insert_rowid();
+            for n in &row.not_followed {
+                tx.execute(
+                    "INSERT OR IGNORE INTO test_not_followed (test_ref, why, detail)
+                     VALUES (?1, ?2, ?3)",
+                    params![test, n.why, n.detail],
+                )?;
+            }
+        }
     }
     tx.execute("DELETE FROM check_rest WHERE check_ref = ?1", [check])?;
     for (path, entry) in w.rest {
@@ -765,9 +879,12 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     // What no row needs any more: versions of files that changed, and the paths of files gone.
     let _ = pruned;
     tx.execute_batch(
-        "DELETE FROM version WHERE NOT EXISTS (SELECT 1 FROM unit_read r WHERE r.version_ref = version.id)
-             AND NOT EXISTS (SELECT 1 FROM check_rest c WHERE c.version_ref = version.id);
+        "DELETE FROM test_list WHERE NOT EXISTS (SELECT 1 FROM test t WHERE t.list_ref = test_list.id);
+         DELETE FROM version WHERE NOT EXISTS (SELECT 1 FROM unit_read r WHERE r.version_ref = version.id)
+             AND NOT EXISTS (SELECT 1 FROM check_rest c WHERE c.version_ref = version.id)
+             AND NOT EXISTS (SELECT 1 FROM test_list_read t WHERE t.version_ref = version.id);
          DELETE FROM path WHERE NOT EXISTS (SELECT 1 FROM version v WHERE v.path_ref = path.id)
+             AND NOT EXISTS (SELECT 1 FROM test_list_dir t WHERE t.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM unit u WHERE u.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM unit_dir d WHERE d.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM check_source c WHERE c.path_ref = path.id)

@@ -766,6 +766,7 @@ pub fn observe(
                 },
                 reads,
                 duration_ms,
+                tests: None,
             },
         );
     }
