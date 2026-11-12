@@ -1361,6 +1361,58 @@ fn a_program_a_test_program_starts_by_a_compiled_in_path_or_waits_for_is_read() 
     }
 }
 
+// covers: C-49
+#[test]
+fn the_projects_discovery_runs_once_more_and_once_more_again_when_tests_are_left_out() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    // A script CTest runs each time it reads the tests (how DISCOVERY_MODE PRE_TEST works):
+    // it counts.
+    let mut files = shop("reuse");
+    for (path, text) in &mut files {
+        if path == "CMakeLists.txt" {
+            text.push_str(
+                "file(WRITE ${CMAKE_BINARY_DIR}/count.cmake \"file(APPEND \\\"${CMAKE_BINARY_DIR}/count.txt\\\" \\\"x\\\\n\\\")\")\n\
+                 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES ${CMAKE_BINARY_DIR}/count.cmake)\n",
+            );
+        }
+    }
+    let p = Project::new(&cmake, generator, &files);
+    let count = p.repo.join("build/count.txt");
+    let counted = || {
+        let n = std::fs::read_to_string(&count).map_or(0, |t| t.lines().count());
+        let _ = std::fs::remove_file(&count);
+        n
+    };
+    let plain = p
+        .tool("ctest")
+        .args(["--test-dir", "build"])
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    assert_eq!(counted(), 1, "plain ctest");
+    // Nothing to leave out: one listing beside the run, to know which program each test runs.
+    let first = p.run(CTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(counted(), 2, "{}", first.stderr);
+    // Tests left out: one listing more, to check what is left out.
+    p.write(
+        "src/greet.h",
+        "static const char *greet(void) { return \"hey\"; }\n",
+    );
+    p.build();
+    let second = p.run(CTEST, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stderr.contains("already passed"),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(counted(), 3, "{}", second.stderr);
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

@@ -24,7 +24,7 @@ pub struct Listing {
 }
 
 /// One test as the listing has it.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct Listed {
     pub name: String,
     /// Absent when its program isn't built or can't be found.
@@ -34,7 +34,7 @@ pub struct Listed {
     pub properties: Vec<Property>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct Property {
     pub name: String,
     pub value: serde_json::Value,

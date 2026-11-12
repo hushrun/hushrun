@@ -190,6 +190,46 @@ impl Kept {
     }
 }
 
+/// \[ADR 0087\] A listing kept in a run's directory, for the same `ctest`, words and directory: the
+/// plan's, made just before COMMAND `ctest …` starts, which hushrun's `ctest` then needn't make
+/// again (a listing runs the project's discovery scripts, `TEST_INCLUDE_FILES`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptListing {
+    schema: String,
+    real: PathBuf,
+    words: Vec<String>,
+    cwd: PathBuf,
+    tests: Vec<select::Listed>,
+}
+
+const KEPT_LISTING: &str = "ctest-listing.v1";
+const KEPT_LISTING_SCHEMA: &str = "hushrun.ctest-listing/v1";
+
+impl KeptListing {
+    fn read(dir: &Path, real: &Path, words: &[String], cwd: &Path) -> Option<Vec<select::Listed>> {
+        let bytes = std::fs::read(dir.join(KEPT_LISTING)).ok()?;
+        let kept: KeptListing = serde_json::from_slice(&bytes).ok()?;
+        (kept.schema == KEPT_LISTING_SCHEMA
+            && kept.real == real
+            && kept.words == words
+            && kept.cwd == cwd)
+            .then_some(kept.tests)
+    }
+
+    fn write(dir: &Path, real: &Path, words: &[String], cwd: &Path, tests: &[select::Listed]) {
+        let kept = KeptListing {
+            schema: KEPT_LISTING_SCHEMA.into(),
+            real: real.to_path_buf(),
+            words: words.to_vec(),
+            cwd: cwd.to_path_buf(),
+            tests: tests.to_vec(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&kept) {
+            let _ = facts::write_whole(&dir.join(KEPT_LISTING), &bytes);
+        }
+    }
+}
+
 /// The real `ctest`'s version.
 pub fn version(
     real: &Path,
@@ -214,6 +254,7 @@ pub fn listed(
     cwd: &Path,
     root: &Path,
     assigned: &[(String, String)],
+    kept: Option<&Path>,
 ) -> Result<(Vec<Test>, Option<args::Preset>, PathBuf), String> {
     let version = version(real, cwd, assigned)?;
     if version < JUNIT_SINCE {
@@ -237,13 +278,17 @@ pub fn listed(
         .as_ref()
         .and_then(|p| p.log.as_ref())
         .map(|l| cwd.join(l));
-    let tests = list(
-        real,
-        &args::listing(items, &[]),
-        cwd,
-        log.as_deref(),
-        assigned,
-    )?;
+    let words = args::listing(items, &[]);
+    let tests = match kept.and_then(|dir| KeptListing::read(dir, real, &words, cwd)) {
+        Some(tests) => tests,
+        None => {
+            let tests = list(real, &words, cwd, log.as_deref(), assigned)?;
+            if let Some(dir) = kept {
+                KeptListing::write(dir, real, &words, cwd, &tests);
+            }
+            tests
+        }
+    };
     if tests.is_empty() {
         let multi = select::build_dir(&test_dir).multi_config;
         return Err(if multi && !args::has(items, &["-C", "--build-config"]) {
@@ -395,7 +440,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     };
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
-    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[])?;
+    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[], Some(units))?;
     if preset.as_ref().is_some_and(|p| p.show_only) {
         return Err(
             "the test preset sets execution.showOnly, and ctest runs no test"

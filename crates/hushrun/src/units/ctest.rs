@@ -141,7 +141,16 @@ impl Recognized {
         }
         let real = program::real("ctest", path.as_deref().unwrap_or_default())?;
         let root = std::fs::canonicalize(at.root).ok()?;
-        let (tests, _, _) = run::listed(&real, &items, at.cwd, &root, at.assigned).ok()?;
+        // Kept in the run's directory for hushrun's `ctest`, which COMMAND starts next.
+        let (tests, _, _) = run::listed(
+            &real,
+            &items,
+            at.cwd,
+            &root,
+            at.assigned,
+            self.dir.get().map(PathBuf::as_path),
+        )
+        .ok()?;
         let built = run::walk(&tests, &root, path, at.assigned);
         let mut out = Compiled::default();
         let mut programs: BTreeMap<&str, bool> = BTreeMap::new();
