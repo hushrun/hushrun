@@ -507,7 +507,11 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         key_log: (start.env)(KEY_LOG)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute()),
-        audit: Audit::from_var((start.env)(crate::audit::VAR).as_deref().and_then(OsStr::to_str)),
+        audit: Audit::from_var(
+            (start.env)(crate::audit::VAR)
+                .as_deref()
+                .and_then(OsStr::to_str),
+        ),
         folder,
     };
     let file = current.folder.join(SESSION_FILE);

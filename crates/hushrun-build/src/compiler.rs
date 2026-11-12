@@ -500,7 +500,12 @@ fn without_sources(sysroot: &Path, dir: &Path) -> Result<Option<PathBuf>, Unknow
         let filled = link_all(sysroot, &temp, &top, &["lib"])
             .and_then(|()| link_all(&lib, &temp.join("lib"), &in_lib, &["rustlib"]))
             .and_then(|()| {
-                link_all(&rustlib, &temp.join("lib").join("rustlib"), &in_rustlib, &SOURCES)
+                link_all(
+                    &rustlib,
+                    &temp.join("lib").join("rustlib"),
+                    &in_rustlib,
+                    &SOURCES,
+                )
             })
             .and_then(|()| fs::rename(&temp, &view));
         if filled.is_err() {
@@ -1540,7 +1545,11 @@ mod tests {
         let (home_b, toolchain_b) = toolchain_at(&root.join("home/bob"), "1.94.0-x", 9_000);
         let lib_rs = "lib/rustlib/src/rust/library/std/src/lib.rs";
         write(&toolchain_b.join(lib_rs), b"//! std", 9_000);
-        write(&toolchain_b.join("lib/rustlib/manifest-rust-src"), b"x", 9_000);
+        write(
+            &toolchain_b.join("lib/rustlib/manifest-rust-src"),
+            b"x",
+            9_000,
+        );
         write(&toolchain_b.join("share/doc/README"), b"doc", 9_000);
         settle();
         let fake = Fake::new();
@@ -1578,7 +1587,10 @@ mod tests {
         assert!(!view.join("lib/rustlib/src").exists());
         assert!(fs::symlink_metadata(view.join("lib/rustlib/src")).is_err());
         // The same one at the next call, and the same one when it was made by a call before.
-        assert_eq!(at(&home_b, "1.94.0-x", &toolchain_b).hidden_sources, Some(view.clone()));
+        assert_eq!(
+            at(&home_b, "1.94.0-x", &toolchain_b).hidden_sources,
+            Some(view.clone())
+        );
         // The compiler's sources (`rustc-dev`) are hidden too.
         write(
             &toolchain_a.join("lib/rustlib/rustc-src/rust/compiler/rustc/src/main.rs"),
@@ -1589,16 +1601,25 @@ mod tests {
         assert_eq!(a2.digest, a.digest);
         let view_a = a2.hidden_sources.unwrap();
         assert!(fs::symlink_metadata(view_a.join("lib/rustlib/rustc-src")).is_err());
-        assert!(view_a.join("lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib").is_file());
+        assert!(
+            view_a
+                .join("lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib")
+                .is_file()
+        );
         // A target installed later is in a new view.
         write(
             &toolchain_b.join("lib/rustlib/x86_64-apple-darwin/lib/libstd-77.rlib"),
             b"std for x86",
             9_000,
         );
-        let b2 = at(&home_b, "1.94.0-x", &toolchain_b).hidden_sources.unwrap();
+        let b2 = at(&home_b, "1.94.0-x", &toolchain_b)
+            .hidden_sources
+            .unwrap();
         assert_ne!(b2, view);
-        assert!(b2.join("lib/rustlib/x86_64-apple-darwin/lib/libstd-77.rlib").is_file());
+        assert!(
+            b2.join("lib/rustlib/x86_64-apple-darwin/lib/libstd-77.rlib")
+                .is_file()
+        );
     }
 
     // covers: B-17
