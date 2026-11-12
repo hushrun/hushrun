@@ -399,6 +399,7 @@ fn close_and_report() {
     round_trip(
         &CloseRequest {
             kind: "rustc/1".into(),
+            run: hex(23),
             repository: None,
             check: Some(hex(20)),
             platform: "x86_64-unknown-linux-gnu".into(),
@@ -415,7 +416,8 @@ fn close_and_report() {
             },
         },
         json!({
-            "kind": "rustc/1", "check": "14".repeat(32), "platform": "x86_64-unknown-linux-gnu",
+            "kind": "rustc/1", "run": "17".repeat(32), "check": "14".repeat(32),
+            "platform": "x86_64-unknown-linux-gnu",
             "manifest": ["15".repeat(32)],
             "counts": {
                 "reusedLocal": 1, "reusedShared": 2, "built": 3, "uploaded": 4, "bytesDown": 5,
@@ -425,7 +427,8 @@ fn close_and_report() {
     );
     // Counts a client doesn't send are zero.
     let sparse: CloseRequest = serde_json::from_value(json!({
-        "kind": "rustc/1", "platform": "aarch64-apple-darwin", "counts": {"built": 2},
+        "kind": "rustc/1", "run": "17".repeat(32), "platform": "aarch64-apple-darwin",
+        "counts": {"built": 2},
     }))
     .unwrap();
     assert_eq!(sparse.counts.built, 2);

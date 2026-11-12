@@ -559,11 +559,14 @@ pub struct Counts {
     pub unused_downloads: u64,
 }
 
-/// `POST v0/build/close`: once per run, at its end.
+/// `POST v0/build/close`: once per run, at its end. Sent again with the same `run`, it counts
+/// once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloseRequest {
     pub kind: String,
+    /// 32 random bytes the run chose, the same in every try.
+    pub run: Hex32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
