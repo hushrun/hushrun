@@ -784,12 +784,24 @@ fn skip_or_run(
         backend
             .record_with_units(&code.key, &result, unit_records)
             .map(|kept| {
-                units_kept = kept;
-                if !kept {
+                units_kept = kept.kept;
+                if !kept.kept {
                     say.line(format_args!(
                         "{check}: test files' results weren't kept: {} {}",
                         backend.org().unwrap_or_default(),
                         "doesn't keep them yet, so no test file is reused"
+                    ));
+                } else if kept.dropped > 0 {
+                    // \[RFC 0004 §3.8\] Past what the server takes in one run: what was cut is
+                    // passes only, which the next run of those tests records again.
+                    say.line(format_args!(
+                        "{check}: {} of its {} results of test files and tests weren't kept: {} keeps {} a run",
+                        crate::cmd::usage::thousands(kept.dropped as u64),
+                        crate::cmd::usage::thousands(unit_records.len() as u64),
+                        backend.org().unwrap_or_default(),
+                        crate::cmd::usage::thousands(
+                            (unit_records.len() - kept.dropped) as u64
+                        ),
                     ));
                 }
             })

@@ -322,9 +322,11 @@ impl Adapter for Pytest {
     }
 
     fn tests(&self) -> KnowsTests {
+        // \[ADR 0080\] It watches each test on Python 3.12 or later, and below says why it
+        // doesn't (`settings.watch`), each test then reading its test file's list.
         KnowsTests {
             unit: true,
-            reads: false,
+            reads: true,
         }
     }
 

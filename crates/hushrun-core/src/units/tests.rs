@@ -406,3 +406,106 @@ fn audits_take_two_percent_at_least_one_chosen_by_key_and_start() {
     assert_ne!(one, pick("2026-11-10T12:00:00.001Z"));
     assert!(audited([], "x").is_empty());
 }
+
+fn set(paths: &[&str]) -> BTreeSet<String> {
+    paths.iter().map(|p| p.to_string()).collect()
+}
+
+// covers: C-40
+#[test]
+fn a_tests_list_is_what_ran_what_that_imports_directly_and_what_it_opened() {
+    let file = set(&[
+        "tests/test_a.py",
+        "app/cart.py",
+        "app/settings.py",
+        "app/defaults.py",
+    ]);
+    let none = BTreeSet::new();
+    let imports = BTreeMap::from([
+        (
+            "tests/test_a.py".to_string(),
+            set(&["app/cart.py", "app/greet.py"]),
+        ),
+        ("app/cart.py".to_string(), set(&["app/settings.py"])),
+        ("app/settings.py".to_string(), set(&["app/defaults.py"])),
+        ("app/fixtures.py".to_string(), set(&["app/db.py"])),
+    ]);
+    let opens = BTreeMap::from([("app/prices.py".to_string(), set(&["prices.json"]))]);
+    let (loaded_ran, loaded_opened) = (set(&["app/registry.py"]), set(&["schema.json"]));
+    let every = set(&["conftest.py"]);
+    let shared = vec![(
+        set(&["test_x"]),
+        set(&["app/fixtures.py"]),
+        set(&["fixture.json"]),
+    )];
+    let watch = FileWatch {
+        unit: "tests/test_a.py",
+        file: &file,
+        file_dirs: &none,
+        imports: &imports,
+        opens: &opens,
+        loaded: Some((&loaded_ran, &loaded_opened)),
+        every: &every,
+        shared: &shared,
+    };
+    let (ran, opened, dirs) = (
+        set(&["app/cart.py", "app/prices.py"]),
+        set(&["data.txt"]),
+        set(&["tests/data"]),
+    );
+    let test = |id| TestWatch {
+        id,
+        ran: Some(&ran),
+        opened: Some(&opened),
+        dirs: Some(&dirs),
+    };
+    let list = test_list(Reads::Test, &watch, &test("test_x"));
+    assert!(list.own);
+    assert_eq!(
+        list.files,
+        set(&[
+            // 1. its own file, and 3. what that imports directly
+            "tests/test_a.py",
+            "app/greet.py",
+            // 2. what ran, 3. what that imports directly, and 4. what it opened and kept
+            "app/cart.py",
+            "app/settings.py",
+            "app/prices.py",
+            "prices.json",
+            // 4. what the test opened
+            "data.txt",
+            // what ran and was opened while its file was loaded
+            "app/registry.py",
+            "schema.json",
+            // what the runner loads for every test
+            "conftest.py",
+            // the shared setup that served it: what it ran, imports and opened
+            "app/fixtures.py",
+            "app/db.py",
+            "fixture.json",
+        ])
+    );
+    assert_eq!(list.dirs, dirs);
+    // Two imports away with no function of the way called: a known miss of `reads: test`.
+    assert!(!list.files.contains("app/defaults.py"));
+    // A shared setup that didn't serve it isn't its.
+    let other = test_list(Reads::Test, &watch, &test("test_y"));
+    assert!(!other.files.contains("app/fixtures.py"));
+    // `reads: file`, a test not watched alone, or a file whose loading wasn't said: its file's.
+    let whole = TestList {
+        files: file.clone(),
+        dirs: none.clone(),
+        own: false,
+    };
+    assert_eq!(test_list(Reads::File, &watch, &test("test_x")), whole);
+    let unwatched = TestWatch {
+        ran: None,
+        ..test("test_x")
+    };
+    assert_eq!(test_list(Reads::Test, &watch, &unwatched), whole);
+    let no_loaded = FileWatch {
+        loaded: None,
+        ..watch
+    };
+    assert_eq!(test_list(Reads::Test, &no_loaded, &test("test_x")), whole);
+}

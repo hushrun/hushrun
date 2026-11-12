@@ -22,9 +22,22 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its
   own (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
   that fails runs once more alone. pytest knows tests; Cargo, Go and Vitest reuse by test file and
-  say so once. `reads: test` runs as `reads: file` in this version, and says so once.
+  say so once. With `reads: test`, pytest on Python 3.12 or later watches each test, and a test is
+  keyed by what it read alone ([ADR 0078](docs/adr/0078-what-a-test-read.md),
+  [ADR 0080](docs/adr/0080-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
+  runs as `reads: file`, and says so once.
+- Hints hold tests ([ADR 0079](docs/adr/0079-hints-with-tests.md)): `hushrun.unit-hints/v1`
+  carries a check's tests, their ids sealed with XChaCha20-Poly1305 under a key the server never
+  has, so a machine with an empty cache reuses single tests on its first run. A hint with no tests
+  is version 0, as before.
+- `hushrun why NAME UNIT::TEST` explains one test; its JSON gains `test`. `hushrun ready` counts
+  tests where tests are the unit.
+- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens`,
+  `settings.watch`, and each test's `neverLeftOut`.
 - Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
-  `unit: test`. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
+  `unit: test`. A run sends its results failures first, up to 50,000 and 8 MiB; an older server's
+  5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
+  file reused gets the run without it. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
   adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
 - Contract: this machine's store of what test files read is now
   `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left

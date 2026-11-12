@@ -25,6 +25,7 @@ fn this() -> Os {
 /// A hint of this machine's system.
 fn hint(units: &[(&str, &[&str])]) -> (Os, hints::Hint) {
     let hint = hints::Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".into(),
         units: units
             .iter()

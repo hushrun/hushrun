@@ -301,7 +301,7 @@ pub struct WhyArgs {
     pub check: CheckName,
 
     /// The test file, from here or the repository's root; for go test, a package's directory or
-    /// one of its test files.
+    /// one of its test files. With `tests.unit: test`, one of its tests: `TEST_FILE::TEST`.
     #[arg(value_name = "TEST_FILE")]
     pub unit: String,
 
@@ -321,7 +321,9 @@ const WHY_HELP: &str = "Examples:
   hushrun why unit tests/test_cart.py -- pytest -q
                                     For the run of this command, not the newest run here
   hushrun why unit tests/test_cart.py --format json
-                                    The same as data (hushrun.why/v1)";
+                                    The same as data (hushrun.why/v1)
+  hushrun why unit tests/test_cart.py::test_total
+                                    One test, with `tests.unit: test`";
 
 /// `hushrun build` (B-1, B-21).
 #[derive(Debug, Args)]

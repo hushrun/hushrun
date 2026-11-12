@@ -11,6 +11,7 @@ mod store;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::git;
 use serde_json::{Value, json};
 
@@ -198,6 +199,18 @@ fn has_pytest() -> bool {
         .args([
             "-c",
             "import sys, pytest, xdist; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Whether the Python the tests run has `sys.monitoring` (3.12 and later), with which pytest's
+/// adapter watches each test (ADR 0080).
+fn watches() -> bool {
+    Command::new(python())
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if hasattr(sys, 'monitoring') else 1)",
         ])
         .output()
         .is_ok_and(|o| o.status.success())
@@ -489,27 +502,29 @@ fn observe_says_what_reusing_tests_would_have_done_and_test_files_stay_as_they_w
         r.newest_result()["units"]["tests"],
         json!({"total": 13, "ran": 13, "reused": 0})
     );
-    // `reads: test` parses, and pytest says once that it takes a test to have read its file's
-    // list in this version.
+    // \[ADR 0080\] `reads: test`: pytest watches each test on Python 3.12 and later, and says
+    // nothing; below, it says once why each test is taken to have read its test file's list.
     r.write(
         "hushrun.yaml",
         &yaml("{mode: observe, unit: test, reads: test}"),
     );
     let reads = r.run(&pytest_args(&python, &[]), &[]);
-    assert!(
-        reads.stderr.contains(
-            "hushrun: unit: each test is taken to have read what its test file read: pytest can't be watched test by test yet\n"
-        ),
-        "{}",
-        reads.stderr
-    );
-    assert_eq!(
-        reads
-            .stderr
-            .matches("can't be watched test by test")
-            .count(),
-        1
-    );
+    let said = reads
+        .stderr
+        .matches("each test is taken to have read what its test file read")
+        .count();
+    if watches() {
+        assert_eq!(said, 0, "{}", reads.stderr);
+    } else {
+        assert_eq!(said, 1, "{}", reads.stderr);
+        assert!(
+            reads
+                .stderr
+                .contains("has no sys.monitoring, which watching a test needs"),
+            "{}",
+            reads.stderr
+        );
+    }
     // Test files, as before: no test is told, and the counts are test files'.
     r.write("hushrun.yaml", &yaml("observe"));
     r.write("app/greet.py", "def hello():\n    return 'hi'  # changed\n");
@@ -695,4 +710,370 @@ fn the_plugin_reports_each_test_and_deselects_the_tests_it_is_told() {
     );
     let child = unit_of(&facts[0], "tests/test_child.py");
     assert_eq!(child["notFollowed"][0]["why"], "subprocess");
+}
+
+fn with_server(results: &FakeResults) -> Vec<(&'static str, String)> {
+    vec![
+        ("HUSHRUN_BACKEND", results.url()),
+        ("HUSHRUN_TOKEN", FakeResults::TOKEN.to_string()),
+    ]
+}
+
+fn envs<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pairs.iter().map(|(n, v)| (*n, v.as_str())).collect()
+}
+
+/// A test file of 6,000 tests, one of which fails while `FAIL` is set, and one more test file.
+fn many(tests: &str) -> Vec<(String, String)> {
+    vec![
+        ("hushrun.yaml".into(), yaml(tests)),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\n".into()),
+        (
+            "tests/test_many.py".into(),
+            "import os\nimport pytest\n\n@pytest.mark.parametrize('n', range(5999))\ndef test_n(n):\n    pass\n\ndef test_flips():\n    assert not os.environ.get('FAIL')\n".into(),
+        ),
+        ("tests/test_other.py".into(), "def test_other():\n    pass\n".into()),
+    ]
+}
+
+// covers: C-39, C-12
+#[test]
+fn an_older_server_keeps_the_first_5000_results_failures_first_and_a_saving_without_a_reused_file()
+{
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    results.take_older_limits();
+    let server = with_server(&results);
+    let r = repo_of(&many("{mode: reuse, unit: test}"));
+    let python = python();
+    let mut env = envs(&server);
+    env.push(("FAIL", "1"));
+    // test_many.py failed: its own fail and each of its 6,000 tests, and test_other.py's pass:
+    // 6,002 results, past the 5,000 the server takes. They go again, the first 5,000, the two
+    // failures first, and the run says once what wasn't kept.
+    let first = r.run(&pytest_args(&python, &[]), &env);
+    assert_eq!(first.code, 1, "{}", first.stderr);
+    assert!(
+        first.stderr.contains(
+            "hushrun: unit: 1,002 of its 6,002 results of test files and tests weren't kept: acme keeps 5,000 a run"
+        ),
+        "{}",
+        first.stderr
+    );
+    assert_eq!(results.unit_results(), 5_000);
+    assert_eq!(results.unit_results_that("fail"), 2);
+    assert_eq!(results.recorded().len(), 1);
+    // The flip fixed: test_many.py's other tests, whose passes the server kept, are reused one by
+    // one and no test file whole. The server refuses `savedMs` then, and the result goes again
+    // without it: it is recorded, with its tests' counts.
+    let second = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let recorded = results.recorded();
+    let newest = recorded
+        .iter()
+        .find(|r| r["result"] == "pass")
+        .expect("the pass is recorded");
+    assert!(newest["units"].get("savedMs").is_none(), "{newest:#}");
+    assert!(
+        newest["units"]["tests"]["reused"].as_u64() > Some(0),
+        "{newest:#}"
+    );
+    assert!(!second.stderr.contains("not recorded"), "{}", second.stderr);
+}
+
+// covers: C-12
+#[test]
+fn a_body_too_large_for_an_older_server_goes_again_as_the_first_5000() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    // A server from before tests, whose limit on a body (1 MiB) came first.
+    results.answer(
+        "POST",
+        "v0/runs/",
+        413,
+        json!("Failed to buffer the request body: length limit exceeded"),
+        1,
+    );
+    let server = with_server(&results);
+    let r = repo_of(&many("{mode: reuse, unit: test}"));
+    let mut env = envs(&server);
+    env.push(("FAIL", "1"));
+    let first = r.run(&pytest_args(&python(), &[]), &env);
+    assert_eq!(first.code, 1, "{}", first.stderr);
+    assert_eq!(results.unit_results(), 5_000);
+    assert_eq!(results.unit_results_that("fail"), 2);
+    assert!(
+        first.stderr.contains("1,002 of its 6,002 results"),
+        "{}",
+        first.stderr
+    );
+}
+
+/// `hushrun why unit <asked> --format json`, read.
+fn why_json(r: &Repo, asked: &str) -> Value {
+    let ran = r.run(&["why", "unit", asked, "--format", "json"], &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    serde_json::from_str(&ran.stdout).unwrap_or_else(|_| panic!("{}", ran.stdout))
+}
+
+// covers: C-37, C-39
+#[test]
+fn why_explains_one_test_and_a_test_file_with_a_test_not_followed() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let child = "import os, subprocess, sys\nfrom app.cart import total\n\n\
+                 def test_spawns():\n    if os.environ.get('SPAWN'):\n        subprocess.run([sys.executable, '-c', 'pass'])\n\n\
+                 def test_a():\n    assert total([1]) == 1\n";
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        (
+            "pytest.ini".into(),
+            "[pytest]\ntestpaths = tests\npythonpath = .\n".into(),
+        ),
+        ("app/__init__.py".into(), String::new()),
+        (
+            "app/cart.py".into(),
+            "def total(xs):\n    return sum(xs)\n".into(),
+        ),
+        (
+            "tests/test_cart.py".into(),
+            "import os\nfrom app.cart import total\n\n\
+             def test_one():\n    assert total([1]) == 1\n\n\
+             def test_flips():\n    assert not os.environ.get('FAIL')\n"
+                .into(),
+        ),
+        ("tests/test_child.py".into(), child.into()),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[("FAIL", "1")]).code, 1);
+
+    // test_cart.py failed: each of its tests is explained on its own.
+    let one = why_json(&r, "tests/test_cart.py::test_one");
+    assert_eq!(
+        (&one["unit"], &one["test"], &one["decision"], &one["reason"]),
+        (
+            &json!("tests/test_cart.py"),
+            &json!("test_one"),
+            &json!("reused"),
+            &json!("reused")
+        ),
+        "{one:#}"
+    );
+    assert_eq!(
+        one["says"],
+        "tests/test_cart.py::test_one would be reused: it passed on the files it read, and none of them has changed since"
+    );
+    let flips = why_json(&r, "tests/test_cart.py::test_flips");
+    assert_eq!(
+        flips["says"],
+        "tests/test_cart.py::test_flips runs: its newest result on the files it reads now failed"
+    );
+    let nope = why_json(&r, "tests/test_cart.py::test_nope");
+    assert_eq!(nope["reason"], "never-ran-here", "{nope:#}");
+    // test_child.py passed whole: its tests go with it.
+    let a = why_json(&r, "tests/test_child.py::test_a");
+    assert_eq!(
+        a["says"],
+        "tests/test_child.py::test_a would be reused: its test file passed whole on the files it read, and none of them has changed since"
+    );
+
+    // test_spawns starts a process in a run where test_child.py changed; then test_child.py is
+    // as it was, so its own key has its pass, but it isn't reused whole.
+    r.write("tests/test_child.py", &format!("{child}# changed\n"));
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[("SPAWN", "1")]).code, 0);
+    r.write("tests/test_child.py", child);
+    let whole = why_json(&r, "tests/test_child.py");
+    assert_eq!(whole["decision"], "runs", "{whole:#}");
+    assert_eq!(whole["reason"], "test-not-observed", "{whole:#}");
+    assert!(
+        whole["says"]
+            .as_str()
+            .unwrap()
+            .contains("its test test_spawns read the last time it ran here"),
+        "{whole:#}"
+    );
+    let spawns = why_json(&r, "tests/test_child.py::test_spawns");
+    assert_eq!(spawns["reason"], "not-observed", "{spawns:#}");
+    let a = why_json(&r, "tests/test_child.py::test_a");
+    assert!(
+        a["detail"].as_array().unwrap().iter().any(|l| l
+            .as_str()
+            .unwrap()
+            .starts_with("its test file isn't reused whole")),
+        "{a:#}"
+    );
+}
+
+// covers: C-22, C-39
+#[test]
+fn ready_counts_tests_where_tests_are_the_unit() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let python = python();
+    let mut files = shop("{mode: reuse, unit: test}");
+    files.push((
+        "package.json".into(),
+        format!(
+            "{{\"name\": \"shop\", \"private\": true, \"scripts\": {{\"test\": \"hushrun run unit -- {python} -m pytest -q -p no:cacheprovider\"}}}}\n"
+        ),
+    ));
+    let r = repo_of(&files);
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[("FAIL", "1")]).code, 1);
+    // cart.py changes, committed: what a run would do is said with tests, as its line says it.
+    r.write(
+        "app/cart.py",
+        "def total(xs):\n    return sum(xs)  # changed\n",
+    );
+    git::commit_all(&r.repo, "change");
+    let ready = r.run(&["ready"], &[]);
+    let line = ready
+        .stdout
+        .lines()
+        .find(|l| l.contains("a run here would"))
+        .unwrap_or_else(|| panic!("{}\n{}", ready.stdout, ready.stderr))
+        .trim()
+        .to_string();
+    assert!(
+        line.ends_with(
+            "a run here would run 11 of 13 tests, in 3 of 5 test files; 2 already passed here on the files they read"
+        ),
+        "{line}"
+    );
+}
+
+// covers: C-39
+#[test]
+fn observe_counts_the_tests_it_couldnt_follow_where_it_counts_tests() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: observe, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        (
+            "pytest.ini".into(),
+            "[pytest]\ntestpaths = tests\npythonpath = .\n".into(),
+        ),
+        (
+            "tests/test_child.py".into(),
+            "import subprocess, sys\n\n\
+             def test_one():\n    subprocess.run([sys.executable, '-c', 'pass'])\n\n\
+             def test_two():\n    subprocess.run([sys.executable, '-c', 'pass'])\n\n\
+             def test_ok():\n    assert True\n"
+                .into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[]).code, 0);
+    // A new test file: the check runs again, and test_ok would have been reused.
+    r.write("tests/test_new.py", "def test_new():\n    assert True\n");
+    let second = r.run(&pytest_args(&python, &[]), &[]);
+    let said = line(&second, "hushrun: unit: with `tests: reuse`");
+    assert!(
+        said.starts_with("hushrun: unit: with `tests: reuse`, 3 of 4 tests would have run"),
+        "{said}"
+    );
+    assert!(
+        said.contains("; hushrun couldn't follow all that 2 of them read"),
+        "{said}"
+    );
+    assert!(said.ends_with("so they would always run"), "{said}");
+}
+
+// covers: C-39, C-32
+#[test]
+fn with_xdist_each_worker_leaves_out_the_tests_the_plan_lists() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The first test's runs, with two xdist workers: each worker leaves out the tests
+    // `reuseTests` lists and reports its own, and the run comes to the same plan and result.
+    let r = repo_of(&shop("{mode: reuse, unit: test}"));
+    let python = python();
+    let xdist = ["-n", "2"];
+    let first = r.run(&pytest_args(&python, &xdist), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(&pytest_args(&python, &xdist), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        line(&second, "hushrun: unit: "),
+        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that did run as a check"
+    );
+    assert!(second.stdout.contains("4 passed"), "{}", second.stdout);
+    let result = r.newest_result();
+    assert_eq!(result["result"], "pass");
+    assert_eq!(
+        result["units"]["tests"],
+        json!({"total": 13, "ran": 4, "reused": 9}),
+        "{}",
+        second.stderr
+    );
+}
+
+// covers: C-39
+#[test]
+fn a_plan_that_doesnt_know_every_test_files_tests_counts_test_files() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // A test file new since the last run: its tests aren't known here, so the line counts test
+    // files, with the tests reused one by one beside them.
+    let r = repo_of(&shop("{mode: reuse, unit: test}"));
+    let python = python();
+    assert_eq!(r.run(&pytest_args(&python, &[]), &[("FAIL", "1")]).code, 1);
+    r.write("tests/test_new.py", "def test_new():\n    assert True\n");
+    let second = r.run(&pytest_args(&python, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        line(&second, "hushrun: unit: "),
+        "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 7 tests of the others, and 2 more that did run as a check"
+    );
+}
+
+// covers: C-39
+#[test]
+fn past_50000_tests_a_run_counts_by_test_file_and_says_so() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: observe, unit: test}")),
+        (
+            ".gitignore".into(),
+            "__pycache__/\n.pytest_cache/\n".into(),
+        ),
+        (
+            "pytest.ini".into(),
+            "[pytest]\ntestpaths = tests\n".into(),
+        ),
+        (
+            "tests/test_big.py".into(),
+            "import pytest\n\n@pytest.mark.parametrize('n', range(50001))\ndef test_n(n):\n    pass\n"
+                .into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let ran = r.run(&pytest_args(&python(), &[]), &[]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert!(
+        ran.stderr.lines().any(|l| l
+            == "hushrun: unit: its tests are reused by test file in this run: it has 50,001 tests, more than the 50,000 this version reuses one by one"),
+        "{}",
+        ran.stderr
+    );
+    // Counted by test file: the run's units say nothing of tests, and its test file recorded its
+    // own pass.
+    let units = &r.newest_result()["units"];
+    assert!(units.get("tests").is_none(), "{units}");
+    assert_eq!(units["ran"], 1, "{units}");
 }
