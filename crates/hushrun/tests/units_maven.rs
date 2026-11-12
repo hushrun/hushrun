@@ -878,3 +878,132 @@ fn a_reused_testng_base_class_leaves_out_none_of_the_tests_its_subclasses_inheri
         second.stdout
     );
 }
+
+/// A processor's module, `proc`, and `app`, whose tests read only what `proc`'s processor
+/// generates: `app` names `proc` in its compiler's `annotationProcessorPaths`, never as a
+/// dependency. `VALUE` is what the generated `GenValue.value()` returns.
+fn processor(value: u32) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(
+            "pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>shop</groupId><artifactId>parent</artifactId><version>1.0</version><packaging>pom</packaging>
+  <modules><module>proc</module><module>app</module></modules>
+  <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+  <dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.11.4</version><scope>test</scope></dependency></dependencies>
+  <build><plugins>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version></plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.15.0</version></plugin>
+  </plugins></build>
+</project>
+"#,
+        ),
+        file(
+            "proc/pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>shop</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>proc</artifactId>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><configuration><proc>none</proc></configuration></plugin></plugins></build>
+</project>
+"#,
+        ),
+        file(
+            "proc/src/main/java/proc/GenProcessor.java",
+            r#"package proc;
+import java.io.Writer;
+import java.util.Set;
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.TypeElement;
+@SupportedAnnotationTypes("*")
+public class GenProcessor extends AbstractProcessor {
+  private boolean done;
+  @Override public SourceVersion getSupportedSourceVersion() { return SourceVersion.latestSupported(); }
+  @Override public boolean process(Set<? extends TypeElement> a, RoundEnvironment env) {
+    if (done) return false; done = true;
+    try (Writer w = processingEnv.getFiler().createSourceFile("app.GenValue").openWriter()) {
+      w.write("package app; public class GenValue { public static int value() { return " + Values.VALUE + "; } }");
+    } catch (Exception e) { throw new RuntimeException(e); }
+    return false;
+  }
+}
+"#,
+        ),
+        file(
+            "proc/src/main/resources/META-INF/services/javax.annotation.processing.Processor",
+            "proc.GenProcessor\n",
+        ),
+        file(
+            "proc/src/test/java/proc/ProcTest.java",
+            "package proc;\nimport org.junit.jupiter.api.Test;\nclass ProcTest { @Test void loads() { new GenProcessor(); } }\n",
+        ),
+        file(
+            "app/pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>shop</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>app</artifactId>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId>
+    <configuration><annotationProcessorPaths><path><groupId>shop</groupId><artifactId>proc</artifactId><version>1.0</version></path></annotationProcessorPaths></configuration>
+  </plugin></plugins></build>
+</project>
+"#,
+        ),
+        file(
+            "app/src/main/java/app/App.java",
+            "package app;\npublic class App {}\n",
+        ),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\nclass AppTest { @Test void generated() { assertEquals(1, GenValue.value()); } }\n",
+        ),
+    ];
+    files.push(values(value));
+    for n in 1..=9 {
+        files.push(file(
+            &format!("app/src/test/java/app/Green{n}Test.java"),
+            &format!("package app;\nimport org.junit.jupiter.api.Test;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    files
+}
+
+fn values(value: u32) -> (String, String) {
+    file(
+        "proc/src/main/java/proc/Values.java",
+        &format!(
+            "package proc;\npublic class Values {{ public static final int VALUE = {value}; }}\n"
+        ),
+    )
+}
+
+// covers: C-47
+#[test]
+fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_it_generates() {
+    let Some(maven) = maven() else { return };
+    let r = Repo::new(&processor(1), maven);
+    let first = r.run(&[], &["clean", "test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    // app's classes read proc's sources, which its compiler runs.
+    let map = r.map();
+    let reads = map["units"]["app/src/test/java/app/AppTest.java"]["reads"].clone();
+    assert!(
+        reads
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("proc/src/main/java/proc/Values.java")),
+        "{map:#}"
+    );
+    let (path, text) = values(2);
+    r.write(&path, &text);
+    let second = r.run(&[], &["clean", "test"], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.stdout.contains("app.AppTest.generated"),
+        "{}",
+        second.stdout
+    );
+}

@@ -162,7 +162,17 @@ class HushrunShared implements Serializable {
     Map<String, List<String>> extraDirs = [:]           // canonical project dir -> its source dirs outside it
     Map<String, List<String>> testSourceDirs = [:]      // canonical project dir -> its test source dirs
     Map<String, String> sourceDirsHow = [:]             // canonical project dir -> where they came from
+    // canonical project dir -> [canonical project dir, configuration] of each project dependency it declares
+    Map<String, List<List<String>>> projectDeps = [:]
     List<String> includedBuildDirs = []
+
+    /** A configuration only a project's own tests use: another project's tests never read through it. */
+    static boolean testOnly(String configuration) {
+        String c = configuration ?: ""
+        if (c.startsWith("testFixtures")) return false
+        return c.startsWith("test") || c.startsWith("androidTest") || c.startsWith("kaptTest") || c.startsWith("kspTest") ||
+                c.contains("UnitTest") || c.contains("AndroidTest")
+    }
 }
 
 /** One Test task, as configured. */
@@ -282,6 +292,19 @@ class HushrunSelection {
         }
         try {
             addProject(info.projectDir)
+            // Every project the task's project declares in any configuration (an annotation
+            // processor, kapt, ksp, compileOnly, a platform), and what those declare outside their
+            // tests, whether or not the test classpath holds it: its compilers run them.
+            Set<String> seen = new HashSet<>([info.projectDir])
+            Deque<List> todo = new ArrayDeque<>()
+            todo.add([info.projectDir, true])
+            while (!todo.isEmpty()) {
+                List next = todo.poll()
+                (shared.projectDeps[next[0] as String] ?: []).each { List<String> dep ->
+                    if (!(next[1] as boolean) && HushrunShared.testOnly(dep[1])) return
+                    if (seen.add(dep[0])) { addProject(dep[0]); todo.add([dep[0], false]) }
+                }
+            }
             String guh = shared.gradleUserHome
             info.classpath.files.each { File f ->
                 String p = HushrunRun.canonical(f.absolutePath)
@@ -788,6 +811,20 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
                 how << "kotlin"
             } catch (Throwable ignored) {}
         }
+        try {
+            List<List<String>> deps = []
+            p.configurations.each { c ->
+                c.dependencies.each { d ->
+                    if (!(d instanceof org.gradle.api.artifacts.ProjectDependency)) return
+                    String path = null
+                    try { path = d.path } catch (Throwable ignored) {}          // Gradle 8.11 and later
+                    if (path == null) try { path = d.dependencyProject.path } catch (Throwable ignored) {}
+                    def target = path == null ? null : p.rootProject.findProject(path)
+                    if (target != null) deps << [target.projectDir.canonicalPath, c.name]
+                }
+            }
+            shared.projectDeps[projectDir] = deps
+        } catch (Throwable ignored) {}
         if (tests.isEmpty()) { tests << projectDir; how << "project directory" }
         shared.testSourceDirs[projectDir] = tests.unique()
         shared.sourceDirsHow[projectDir] = how.join("+")

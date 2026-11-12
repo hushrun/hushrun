@@ -880,3 +880,95 @@ fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
         second.stdout
     );
 }
+
+/// `proc`'s annotation processor generates `app.GenValue`, whose `value()` is `proc.Values.VALUE`;
+/// `app` names `proc` only as its `annotationProcessor`. Nine green classes in app.
+fn processor_build(value: u32) -> Vec<(String, String)> {
+    let mut files = build(Framework::Junit5, &["proc", "app"], "reuse");
+    files.extend([
+        file(
+            "app/build.gradle",
+            "dependencies { annotationProcessor project(':proc') }\n",
+        ),
+        file(
+            "proc/src/main/java/proc/GenProcessor.java",
+            r#"package proc;
+import java.io.Writer;
+import java.util.Set;
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.TypeElement;
+@SupportedAnnotationTypes("*")
+public class GenProcessor extends AbstractProcessor {
+  private boolean done;
+  @Override public SourceVersion getSupportedSourceVersion() { return SourceVersion.latestSupported(); }
+  @Override public boolean process(Set<? extends TypeElement> a, RoundEnvironment env) {
+    if (done) return false; done = true;
+    try (Writer w = processingEnv.getFiler().createSourceFile("app.GenValue").openWriter()) {
+      w.write("package app; public class GenValue { public static int value() { return " + Values.VALUE + "; } }");
+    } catch (Exception e) { throw new RuntimeException(e); }
+    return false;
+  }
+}
+"#,
+        ),
+        file(
+            "proc/src/main/resources/META-INF/services/javax.annotation.processing.Processor",
+            "proc.GenProcessor\n",
+        ),
+        file(
+            "proc/src/test/java/proc/ProcTest.java",
+            "package proc;\nimport org.junit.jupiter.api.*;\nclass ProcTest { @Test void loads() { new GenProcessor(); } }\n",
+        ),
+        file("app/src/main/java/app/App.java", "package app;\npublic class App {}\n"),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void generated() { Assertions.assertEquals(1, GenValue.value()); } }\n",
+        ),
+        processor_values(value),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("app/src/test/java/app/Green{n}Test.java"),
+            &format!("package app;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    files
+}
+
+fn processor_values(value: u32) -> (String, String) {
+    file(
+        "proc/src/main/java/proc/Values.java",
+        &format!(
+            "package proc;\npublic class Values {{ public static final int VALUE = {value}; }}\n"
+        ),
+    )
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_it_generates() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&processor_build(1));
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // app's classes read proc, whose processor app's compiler runs.
+    let map = r.map();
+    assert_eq!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["dirs"],
+        json!(["app", "proc"]),
+        "{map:#}"
+    );
+    let (path, text) = processor_values(2);
+    r.write(&path, &text);
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("AppTest > generated() FAILED"),
+        "{}",
+        second.stdout
+    );
+}
