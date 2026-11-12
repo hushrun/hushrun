@@ -172,3 +172,11 @@ results are dropped. When the second start can't be set up, or says the same aga
 recorded for the check or any unit, and hushrun fails, saying why: what ran can't be told from what
 a broken run left out. `swift test`'s own run again, inside its program, stays as it is; this is
 for adapters that learn it only after COMMAND.
+
+## Amendment 5: a wider fixture's end is its test file's wherever it happens (2026-11-12)
+
+Item 4 says something not followed in a teardown that may end a fixture of a wider scope is the
+test file's. pytest ends a parametrized fixture of a wider scope that switches its value inside
+the next test's setup, not in a teardown, and a reviewer confirmed in the facts a process started
+there charged to that one test alone. Now what isn't followed while a fixture of a wider scope
+ends is the test file's, wherever pytest ends it.

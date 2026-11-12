@@ -200,6 +200,7 @@ class Observer(object):
         self.skipped_ids = set()      # node ids of tests whose body didn't run: skipped
         self.session_ran = set()      # [ADR 0080] files a function of which started outside every
         self.session_opened = set()   # window, and files opened there: every test reads them
+        self.shared_finishing = 0     # >0 while a fixture of a wider scope than a test is ended
 
     # --- paths -------------------------------------------------------------------------
 
@@ -492,7 +493,7 @@ class Observer(object):
         """Where something not followed while a unit is active goes: the running test's own, with
         tests one by one and inside its window alone; else the unit's, for all its tests."""
         if self.by_test and self.active_test is not None and not self.shared_depth \
-                and not self.shared_teardown:
+                and not self.shared_teardown and not self.shared_finishing:
             return self.test_not_followed.setdefault((self.active, self.active_test), {})
         return self.not_followed.setdefault(self.active, {})
 
@@ -939,6 +940,36 @@ def _stop_watching():
     WATCH_TOOL = None
 
 
+def _shared_finishing(obs, step):
+    obs.shared_finishing = max(0, obs.shared_finishing + step)
+
+
+def _wrap_fixture_finish():
+    """[ADR 0077] A fixture of a wider scope than one test ends where pytest says, which for a
+    parametrized one switching its value is inside the next test's setup: what isn't followed
+    while it ends is the test file's, as a teardown that may end one is, never that test's."""
+    try:
+        from _pytest.fixtures import FixtureDef
+    except Exception:
+        return
+    original = FixtureDef.finish
+    if getattr(original, "_hushrun", False):
+        return
+
+    def finish(self, *args, **kwargs):
+        wide = getattr(self, "scope", "function") != "function"
+        if wide:
+            _call(_shared_finishing, 1)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            if wide:
+                _call(_shared_finishing, -1)
+
+    finish._hushrun = True
+    FixtureDef.finish = finish
+
+
 def _install():
     global OBSERVER, PYTEST_DIRS
     directory = os.environ.get(ENV_DIR)
@@ -973,6 +1004,8 @@ def _install():
             observer.note_module(name)
             observer.make_ambient(name=name, why="loaded before the adapter")
     OBSERVER = observer
+    if observer.by_test:
+        _wrap_fixture_finish()
     if wants_watch:
         try:
             observer.watch_reason = _start_watching(observer)

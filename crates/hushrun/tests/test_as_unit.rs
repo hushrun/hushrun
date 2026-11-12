@@ -715,6 +715,46 @@ fn plugin_pytest(r: &Repo, units: &Path, run: Value, args: &[&str]) -> (i32, Str
     )
 }
 
+// covers: C-39, C-42
+#[test]
+fn a_wider_fixture_that_switches_its_parameter_ends_the_old_one_for_the_test_file() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // pytest ends the module fixture's first value inside test_x[2]'s setup, where its teardown
+    // starts a process: that is the test file's, as a teardown that may end a wider fixture is,
+    // and never test_x[2]'s alone.
+    let r = repo_of(&[
+        ("hushrun.yaml".into(), yaml("observe")),
+        (
+            "tests/test_p.py".into(),
+            "import subprocess, sys\nimport pytest\n\n\
+             @pytest.fixture(scope='module', params=[1, 2])\ndef p(request):\n    yield request.param\n    if request.param == 1:\n        subprocess.run([sys.executable, '-c', 'pass'])\n\n\
+             def test_x(p):\n    assert p\n\ndef test_y(p):\n    assert p\n"
+                .into(),
+        ),
+    ]);
+    let python = python();
+    // Writes the plugin into the cache.
+    let _ = r.run(&pytest_args(&python, &[]), &[]);
+    let units = r.root.join("units");
+    let run = json!({"schema": "hushrun.units/v0", "root": r.repo, "reuse": [], "unit": "test"});
+    let (code, out, facts) = plugin_pytest(&r, &units, run, &["tests/test_p.py"]);
+    assert_eq!(code, 0, "{out}");
+    let unit = unit_of(&facts[0], "tests/test_p.py");
+    for test in unit["tests"].as_array().unwrap() {
+        assert_eq!(test["notFollowed"], json!([]), "{test:#}");
+    }
+    assert!(
+        unit["notFollowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["why"] == "subprocess"),
+        "{unit:#}"
+    );
+}
+
 fn unit_of<'a>(facts: &'a Value, unit: &str) -> &'a Value {
     facts["units"]
         .as_array()
