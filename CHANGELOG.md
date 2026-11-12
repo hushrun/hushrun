@@ -16,6 +16,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Added
 
+- CTest ([ADR 0087](docs/adr/0087-ctest.md)): C and C++ test programs built with CMake are observed and reused, and each CTest test with `tests.unit: test`, through a `ctest` of hushrun's first on `PATH`.
 - Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its

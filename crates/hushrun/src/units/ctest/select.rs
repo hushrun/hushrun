@@ -62,7 +62,10 @@ impl Listed {
 
     /// `DISABLED`: it never runs.
     pub fn disabled(&self) -> bool {
-        matches!(self.property("DISABLED"), Some(serde_json::Value::Bool(true)))
+        matches!(
+            self.property("DISABLED"),
+            Some(serde_json::Value::Bool(true))
+        )
     }
 
     /// The listing's identity of it, which a second listing must give back.
@@ -376,7 +379,11 @@ pub fn anchored(name: &str) -> String {
 /// Names as one alternation with no group: CMake 3.22 takes at most 9 (ran: 10 is "Too many
 /// parentheses", and the filter is dropped).
 pub fn alternation<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
-    names.into_iter().map(anchored).collect::<Vec<_>>().join("|")
+    names
+        .into_iter()
+        .map(anchored)
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// What one alternation of `names`, after `user`'s own expression, costs CMake's compiler: about
@@ -502,7 +509,11 @@ pub fn version(stdout: &[u8]) -> Option<(u32, u32, u32)> {
         .split(|c: char| !c.is_ascii_digit())
         .filter(|p| !p.is_empty())
         .map(|p| p.parse::<u32>().ok());
-    Some((parts.next()??, parts.next()??, parts.next().flatten().unwrap_or(0)))
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+    ))
 }
 
 #[cfg(test)]
@@ -575,10 +586,17 @@ mod tests {
         let all = mechanisms(&at);
         assert_eq!(
             all.iter().map(|s| s.mechanism.clone()).collect::<Vec<_>>(),
-            [Mechanism::ExcludeFile, Mechanism::Exclude, Mechanism::Include]
+            [
+                Mechanism::ExcludeFile,
+                Mechanism::Exclude,
+                Mechanism::Include
+            ]
         );
         // The user's file's lines come first, and names keep their spaces.
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old\n spaced \nadd\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "old\n spaced \nadd\n"
+        );
         assert_eq!(all[1].add, ["-E", "sleep|crash|^ spaced $|^add$"]);
         assert_eq!(all[2].add, ["-R", "^mul$"]);
         // Before 3.29, or beside a preset's own file: no file.
@@ -610,9 +628,21 @@ mod tests {
     #[test]
     fn a_fixture_a_kept_test_needs_a_duplicated_name_and_a_whole_unit_stay() {
         let tests = vec![
-            test("db_setup", "t_db", &[("FIXTURES_SETUP", serde_json::json!(["DB"]))]),
-            test("db_query", "t_db", &[("FIXTURES_REQUIRED", serde_json::json!(["DB"]))]),
-            test("db_write", "t_db", &[("FIXTURES_REQUIRED", serde_json::json!("DB"))]),
+            test(
+                "db_setup",
+                "t_db",
+                &[("FIXTURES_SETUP", serde_json::json!(["DB"]))],
+            ),
+            test(
+                "db_query",
+                "t_db",
+                &[("FIXTURES_REQUIRED", serde_json::json!(["DB"]))],
+            ),
+            test(
+                "db_write",
+                "t_db",
+                &[("FIXTURES_REQUIRED", serde_json::json!("DB"))],
+            ),
             test("add", "t_add", &[]),
             test("add", "sub/t_add", &[]),
             test("solo", "t_solo", &[]),
@@ -623,7 +653,10 @@ mod tests {
         let leave = left_out(&tests, &planned, &|unit| unit == "t_whole");
         // db_setup stays for db_write; add's two copies are left out together; t_whole can't be
         // left out whole (a name with a line break), so none of it is.
-        let names: Vec<&str> = leave.iter().map(|i| tests[*i].listed.name.as_str()).collect();
+        let names: Vec<&str> = leave
+            .iter()
+            .map(|i| tests[*i].listed.name.as_str())
+            .collect();
         assert_eq!(names, ["db_query", "add", "add", "solo"]);
         let planned = |t: &Test| t.unit != "sub/t_add";
         let leave = left_out(&tests, &planned, &|_| false);
@@ -655,7 +688,10 @@ mod tests {
                 name: "Container/std::vector<int,std::__1::allocator<int>>.StartsEmpty".into(),
                 command: cmd(
                     "calc",
-                    &["--gtest_filter=Container/0.StartsEmpty", "--gtest_also_run_disabled_tests"],
+                    &[
+                        "--gtest_filter=Container/0.StartsEmpty",
+                        "--gtest_also_run_disabled_tests",
+                    ],
                 ),
                 properties: vec![],
             },

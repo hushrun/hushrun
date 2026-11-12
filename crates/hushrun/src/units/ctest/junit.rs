@@ -26,7 +26,9 @@ pub enum Outcome {
     NotRun,
     /// Its name has as many cases as tests nowhere: which is which can't be told. `failed` when
     /// any case of the name failed, which then counts as each test's failure.
-    Unknown { failed: bool },
+    Unknown {
+        failed: bool,
+    },
 }
 
 /// One `<testcase>`.
@@ -198,7 +200,8 @@ mod tests {
     #[test]
     fn the_reader_reads_each_status_and_never_a_pass_from_absence() {
         let cases = read(WRITTEN.as_bytes()).unwrap();
-        let got: Vec<(&str, Outcome)> = cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect();
+        let got: Vec<(&str, Outcome)> =
+            cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect();
         assert_eq!(
             got,
             [
@@ -219,7 +222,11 @@ mod tests {
         assert!(read(&WRITTEN.as_bytes()[..400]).is_err());
         assert!(read(b"stale").is_err());
         // An empty run writes tests="0", which reads as no case.
-        assert!(read(b"<testsuite tests=\"0\"></testsuite>").unwrap().is_empty());
+        assert!(
+            read(b"<testsuite tests=\"0\"></testsuite>")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // covers: C-49

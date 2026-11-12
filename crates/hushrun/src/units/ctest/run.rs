@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use super::super::facts::{self, FactsFile, RunFile, TestFacts, UnitFacts, Unfollowed};
+use super::super::facts::{self, FactsFile, RunFile, TestFacts, Unfollowed, UnitFacts};
 use super::super::program::{self, Call};
 use super::args::{self, Mode};
 use super::build::{self, Built, Walker};
@@ -418,18 +418,23 @@ fn choose(
     cwd: &Path,
     own_dir: &Path,
 ) -> Option<(Vec<String>, &'static str)> {
-    let left: BTreeSet<String> = leave.iter().map(|i| tests[*i].listed.name.clone()).collect();
+    let left: BTreeSet<String> = leave
+        .iter()
+        .map(|i| tests[*i].listed.name.clone())
+        .collect();
     let kept: BTreeSet<String> = tests
         .iter()
         .enumerate()
         .filter(|(i, _)| !leave.contains(i))
         .map(|(_, t)| t.listed.name.clone())
         .collect();
-    let user_exclude = args::last(items, &["-E", "--exclude-regex"]).map(str::to_string).or_else(|| {
-        (!args::has(items, &["-E", "--exclude-regex"]))
-            .then(|| preset.and_then(|p| p.exclude_name.clone()))
-            .flatten()
-    });
+    let user_exclude = args::last(items, &["-E", "--exclude-regex"])
+        .map(str::to_string)
+        .or_else(|| {
+            (!args::has(items, &["-E", "--exclude-regex"]))
+                .then(|| preset.and_then(|p| p.exclude_name.clone()))
+                .flatten()
+        });
     let user_file: Option<Vec<String>> = match args::last(items, &["--exclude-from-file"]) {
         Some(file) => {
             let bytes = std::fs::read(cwd.join(file)).ok()?;
@@ -506,7 +511,10 @@ fn record(p: &Pending) {
         .filter(|(i, _)| !p.leave.contains(i))
         .map(|(_, t)| t.listed.name.as_str())
         .collect();
-    let outcomes = read.as_ref().ok().map(|cases| junit::matched(&names, cases));
+    let outcomes = read
+        .as_ref()
+        .ok()
+        .map(|cases| junit::matched(&names, cases));
     let mut outcome_of: BTreeMap<usize, (Outcome, u64)> = BTreeMap::new();
     if let Some(outcomes) = &outcomes {
         let ran = (0..p.tests.len()).filter(|i| !p.leave.contains(i));
@@ -556,7 +564,10 @@ fn record(p: &Pending) {
         } else {
             outcome_of.get(&i).copied().unwrap_or((Outcome::NotRun, 0))
         };
-        let finished = matches!(outcome, Outcome::Passed | Outcome::Failed | Outcome::Skipped);
+        let finished = matches!(
+            outcome,
+            Outcome::Passed | Outcome::Failed | Outcome::Skipped
+        );
         let failed = matches!(outcome, Outcome::Failed | Outcome::Unknown { failed: true });
         let mut not_followed = Vec::new();
         if p.retries && matches!(outcome, Outcome::Passed | Outcome::Skipped) {

@@ -292,10 +292,12 @@ pub fn has(items: &[Item], names: &[&str]) -> bool {
 pub fn mode(items: &[Item]) -> Mode {
     for item in items {
         let Some(opt) = item.opt.as_deref() else {
-            return Mode::Unread(format!("ctest's argument {} isn't one hushrun reads", item.raw[0]));
+            return Mode::Unread(format!(
+                "ctest's argument {} isn't one hushrun reads",
+                item.raw[0]
+            ));
         };
-        if PASSTHROUGH.contains(&opt) || opt.starts_with("--build-") || opt.starts_with("--help")
-        {
+        if PASSTHROUGH.contains(&opt) || opt.starts_with("--build-") || opt.starts_with("--help") {
             return Mode::Passthrough;
         }
         if matches!(opt, "-T" | "--test-action")
@@ -310,7 +312,10 @@ pub fn mode(items: &[Item]) -> Mode {
     for item in items {
         let opt = item.opt.as_deref().unwrap_or_default();
         if !(VALUED.contains(&opt) || FLAGS.contains(&opt) || PARALLEL.contains(&opt)) {
-            return Mode::Unread(format!("ctest's argument {} isn't one hushrun reads", item.raw[0]));
+            return Mode::Unread(format!(
+                "ctest's argument {} isn't one hushrun reads",
+                item.raw[0]
+            ));
         }
         if VALUED.contains(&opt) && item.value.is_none() {
             return Mode::Unread(format!("ctest's {opt} has no value"));
@@ -344,12 +349,7 @@ pub fn listing(items: &[Item], drop: &[&str]) -> Vec<String> {
 pub fn without(items: &[Item], drop: &[&str]) -> Vec<String> {
     items
         .iter()
-        .filter(|item| {
-            !item
-                .opt
-                .as_deref()
-                .is_some_and(|opt| drop.contains(&opt))
-        })
+        .filter(|item| !item.opt.as_deref().is_some_and(|opt| drop.contains(&opt)))
         .flat_map(|item| item.raw.iter().cloned())
         .collect()
 }
@@ -434,14 +434,25 @@ fn load(path: &Path, seen: &mut Vec<PathBuf>, into: &mut Presets) -> Result<(), 
         ("configurePresets", &mut into.configure),
         ("testPresets", &mut into.test),
     ] {
-        for preset in doc.get(kind).and_then(|v| v.as_array()).into_iter().flatten() {
+        for preset in doc
+            .get(kind)
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             if let Some(name) = preset.get("name").and_then(|v| v.as_str()) {
-                map.entry(name.to_string()).or_insert_with(|| preset.clone());
+                map.entry(name.to_string())
+                    .or_insert_with(|| preset.clone());
             }
         }
     }
     let base = path.parent().unwrap_or(Path::new("."));
-    for include in doc.get("include").and_then(|v| v.as_array()).into_iter().flatten() {
+    for include in doc
+        .get("include")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         if let Some(file) = include.as_str() {
             load(&base.join(file), seen, into)?;
         }
@@ -521,7 +532,9 @@ fn expand(text: &str, dir: &Path, preset: &str) -> Result<String, String> {
         out.replace_range(start..start + 6 + len, &value);
     }
     if out.contains("${") || out.contains("$penv{") || out.contains("$vendor{") {
-        return Err(format!("a preset's {text} holds a macro hushrun doesn't expand"));
+        return Err(format!(
+            "a preset's {text} holds a macro hushrun doesn't expand"
+        ));
     }
     Ok(out)
 }
@@ -541,7 +554,10 @@ mod tests {
             "--test-dir build -j8 -R ^add --output-on-failure -O log.txt --repeat until-pass:3 -E sleep|crash --no-tests=error",
         ));
         assert_eq!(mode(&items), Mode::Select);
-        assert_eq!(last(&items, &["-E", "--exclude-regex"]), Some("sleep|crash"));
+        assert_eq!(
+            last(&items, &["-E", "--exclude-regex"]),
+            Some("sleep|crash")
+        );
         assert!(retries(&items));
         // The listing keeps what selects and drops what only shapes the run, or writes a file.
         assert_eq!(
@@ -565,7 +581,11 @@ mod tests {
             "--print-labels",
             "-D Experimental",
         ] {
-            assert_eq!(mode(&parse(&words(passthrough))), Mode::Passthrough, "{passthrough}");
+            assert_eq!(
+                mode(&parse(&words(passthrough))),
+                Mode::Passthrough,
+                "{passthrough}"
+            );
         }
         assert_eq!(mode(&parse(&words("-T Test -E x"))), Mode::Select);
         for observe in ["--rerun-failed", "-I 1,3", "--tests-information 0,0,0,2"] {

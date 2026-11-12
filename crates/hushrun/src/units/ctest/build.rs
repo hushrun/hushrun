@@ -114,7 +114,10 @@ impl<'a> Walker<'a> {
                 let ninja = Some(PathBuf::from(&dir.make_program))
                     .filter(|p| p.is_file())
                     .or_else(|| {
-                        super::super::program::real("ninja", self.path.as_deref().unwrap_or_default())
+                        super::super::program::real(
+                            "ninja",
+                            self.path.as_deref().unwrap_or_default(),
+                        )
                     });
                 let Some(ninja) = ninja else {
                     return Dir::Unread;
@@ -258,13 +261,20 @@ impl<'a> Walker<'a> {
             }
         }
         // A header a build rule writes: what that rule reads, to the end.
-        let mut frontier: Vec<String> = generated.into_iter().filter(|g| !seen.contains(g)).collect();
+        let mut frontier: Vec<String> = generated
+            .into_iter()
+            .filter(|g| !seen.contains(g))
+            .collect();
         while !frontier.is_empty() {
             let edges = query(ninja, build, &frontier)?;
             let mut next = Vec::new();
             for node in std::mem::take(&mut frontier) {
                 seen.insert(node.clone());
-                for (input, _) in edges.get(&node).map(|e| e.inputs.as_slice()).unwrap_or_default() {
+                for (input, _) in edges
+                    .get(&node)
+                    .map(|e| e.inputs.as_slice())
+                    .unwrap_or_default()
+                {
                     match self.place(input, build) {
                         Place::Repo(rel) => {
                             out.reads.insert(rel);
@@ -592,7 +602,9 @@ fn unescape_make(text: &str) -> String {
 /// The files a compiler depfile names, every rule's; `None` when there is none, or it is empty.
 pub fn depfile_deps(path: &Path) -> Option<Vec<String>> {
     let bytes = std::fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&bytes).replace("\\\r\n", " ").replace("\\\n", " ");
+    let text = String::from_utf8_lossy(&bytes)
+        .replace("\\\r\n", " ")
+        .replace("\\\n", " ");
     let mut out = Vec::new();
     for line in text.lines() {
         let Some((_, rhs)) = split_depfile_rule(line) else {
@@ -639,7 +651,9 @@ fn split_depfile_rule(line: &str) -> Option<(&str, &str)> {
             i += 2;
             continue;
         }
-        if bytes[i] == b':' && (i + 1 == bytes.len() || bytes[i + 1] == b' ' || bytes[i + 1] == b'\t') {
+        if bytes[i] == b':'
+            && (i + 1 == bytes.len() || bytes[i + 1] == b' ' || bytes[i + 1] == b'\t')
+        {
             return Some((&line[..i], &line[i + 1..]));
         }
         i += 1;

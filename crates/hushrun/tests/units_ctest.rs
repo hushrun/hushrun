@@ -96,7 +96,10 @@ fn cmakes() -> Vec<Cmake> {
     dirs.iter()
         .filter(|d| d.join("cmake").is_file() && d.join("ctest").is_file())
         .filter_map(|d| {
-            let out = Command::new(d.join("cmake")).arg("--version").output().ok()?;
+            let out = Command::new(d.join("cmake"))
+                .arg("--version")
+                .output()
+                .ok()?;
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
             let v = text.split("version ").nth(1)?;
             let mut parts = v.split('.').map(|p| {
@@ -110,7 +113,9 @@ fn cmakes() -> Vec<Cmake> {
             let own = d.join("ninja");
             Some(Cmake {
                 bin: d.clone(),
-                ninja: Some(own).filter(|n| n.is_file()).or_else(|| any_ninja.clone()),
+                ninja: Some(own)
+                    .filter(|n| n.is_file())
+                    .or_else(|| any_ninja.clone()),
                 version,
             })
         })
@@ -137,7 +142,10 @@ fn tools(what: &str, here: bool) -> bool {
 /// The CMakes to run with, or none, said.
 fn with_cmake() -> Vec<Cmake> {
     let found = cmakes();
-    if tools("CMake 3.21 or later (HUSHRUN_TEST_CMAKE)", !found.is_empty()) {
+    if tools(
+        "CMake 3.21 or later (HUSHRUN_TEST_CMAKE)",
+        !found.is_empty(),
+    ) {
         found
     } else {
         Vec::new()
@@ -551,7 +559,11 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
             // the headers it includes, and a library's source and headers.
             let map = store::map(&p.cache);
             for unit in ["t_price", "t_cart", "t_greet", "t_util", "t_misc"] {
-                assert_eq!(map["units"][unit]["reads"], json!(reads(unit)), "{at}: {map:#}");
+                assert_eq!(
+                    map["units"][unit]["reads"],
+                    json!(reads(unit)),
+                    "{at}: {map:#}"
+                );
             }
             assert!(map["rest"]["CMakeLists.txt"].is_string(), "{at}: {map:#}");
             assert_eq!(
@@ -624,7 +636,10 @@ fn an_audited_program_that_fails_again_alone_suspends_the_checks_reuse() {
     // one of them fails while FAIL_HIDDEN is set, which no file says: the audited one fails, runs
     // again alone in a second run of its own (whose directory is another, and whose hushrun's
     // ctest finds the plan the first run's wrote), fails again, and the check's reuse stops.
-    p.write("src/greet.h", "static const char *greet(void) { return \"hey\"; }\n");
+    p.write(
+        "src/greet.h",
+        "static const char *greet(void) { return \"hey\"; }\n",
+    );
     p.build();
     let caught = p.run(CTEST, &[("FAIL_HIDDEN", "1")]);
     assert_ne!(caught.code, 0, "{}", caught.stdout);
@@ -653,7 +668,9 @@ fn an_audited_program_that_fails_again_alone_suspends_the_checks_reuse() {
     p.build();
     let after = p.run(CTEST, &[]);
     assert!(
-        after.stderr.contains("reuse of its test files is suspended"),
+        after
+            .stderr
+            .contains("reuse of its test files is suspended"),
         "{}",
         after.stderr
     );
@@ -673,7 +690,12 @@ fn hushruns_ctest_leaves_out_what_it_is_told_once_it_checked_each_program() {
         // t_util's list in the plan isn't what it is built from now: it runs.
         let mut plan = shop_plan(&["t_greet", "t_cart"]);
         plan["units"]["t_util"] = json!([["src/util.h", "tests/t_util.c", "src/greet.h"]]);
-        let shim = p.shim(&["--test-dir", "build"], run.clone(), Some(plan.clone()), &[]);
+        let shim = p.shim(
+            &["--test-dir", "build"],
+            run.clone(),
+            Some(plan.clone()),
+            &[],
+        );
         assert_eq!(shim.code, 0, "{at}\n{}", shim.stdout);
         assert_eq!(
             shim.left_out(),
@@ -690,18 +712,22 @@ fn hushruns_ctest_leaves_out_what_it_is_told_once_it_checked_each_program() {
         assert_eq!(shim.unit("t_cart")["deselected"], json!(false), "{at}");
         assert_eq!(shim.unit("t_cart")["selected"], json!(2), "{at}");
         assert_eq!(shim.unit("t_cart")["finished"], json!(2), "{at}");
-        assert_eq!(
-            shim.unit("t_cart")["reads"],
-            json!(reads("t_cart")),
-            "{at}"
-        );
+        assert_eq!(shim.unit("t_cart")["reads"], json!(reads("t_cart")), "{at}");
         // With no plan's file, or a program built again after it, nothing is left out.
         let none = p.shim(&["--test-dir", "build"], run.clone(), None, &[]);
         assert!(none.left_out().is_empty(), "{at}");
         // A program whose source changed and wasn't built again ran old code: it isn't left out,
         // and none of its tests is observed.
-        p.write("src/greet.h", "static const char *greet(void) { return \"ho\"; }\n");
-        let stale = p.shim(&["--test-dir", "build"], run.clone(), Some(plan.clone()), &[]);
+        p.write(
+            "src/greet.h",
+            "static const char *greet(void) { return \"ho\"; }\n",
+        );
+        let stale = p.shim(
+            &["--test-dir", "build"],
+            run.clone(),
+            Some(plan.clone()),
+            &[],
+        );
         assert_eq!(stale.left_out(), ["t_cart::cart_empty"], "{at}");
         assert_eq!(
             stale.unit("t_greet")["notFollowed"][0]["why"],
@@ -710,7 +736,12 @@ fn hushruns_ctest_leaves_out_what_it_is_told_once_it_checked_each_program() {
         );
         // Built again before the plan: it is left out; built again after it, it runs.
         p.build();
-        let rebuilt = p.shim(&["--test-dir", "build"], run.clone(), Some(plan.clone()), &[]);
+        let rebuilt = p.shim(
+            &["--test-dir", "build"],
+            run.clone(),
+            Some(plan.clone()),
+            &[],
+        );
         assert_eq!(
             rebuilt.left_out(),
             ["t_cart::cart_empty", "t_greet::greet"],
@@ -755,7 +786,11 @@ fn a_ctest_that_ignores_every_filter_runs_the_command_unchanged() {
     let build = root.join("repo/build");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&build).unwrap();
-    std::fs::write(build.join("CMakeCache.txt"), "CMAKE_GENERATOR:INTERNAL=Ninja\n").unwrap();
+    std::fs::write(
+        build.join("CMakeCache.txt"),
+        "CMAKE_GENERATOR:INTERNAL=Ninja\n",
+    )
+    .unwrap();
     for program in ["t_a", "t_b"] {
         std::fs::write(build.join(program), "").unwrap();
     }
@@ -807,7 +842,9 @@ fn a_ctest_that_ignores_every_filter_runs_the_command_unchanged() {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|e| e == "json") && p.file_name().unwrap() != "hushrun.json")
+        .find(|p| {
+            p.extension().is_some_and(|e| e == "json") && p.file_name().unwrap() != "hushrun.json"
+        })
         .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
         .unwrap();
     assert_eq!(
@@ -944,7 +981,9 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     let generator = generators(&cmake)[0];
     let p = Project::new(&cmake, generator, &shop("observe"));
     let bypassed = p.run(
-        &["run", "unit", "--", "cmake", "--build", "build", "--target", "test"],
+        &[
+            "run", "unit", "--", "cmake", "--build", "build", "--target", "test",
+        ],
         &[],
     );
     assert_eq!(bypassed.code, 0, "{}", bypassed.stderr);
@@ -968,7 +1007,15 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     let p = Project::new(&cmake, generator, &shop("observe"));
     p.write("src/util.h", "static int twice(int x) { return x << 1; }\n");
     let stale = p.run(
-        &["run", "--force", "unit", "--", "ctest", "--test-dir", "build"],
+        &[
+            "run",
+            "--force",
+            "unit",
+            "--",
+            "ctest",
+            "--test-dir",
+            "build",
+        ],
         &[],
     );
     assert_eq!(stale.code, 0, "{}", stale.stderr);

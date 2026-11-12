@@ -100,9 +100,10 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
         "ctest" => Some(Ok(Some(rest.to_vec()))),
         "cmake" => {
             let build = rest.iter().any(|w| w == "--build");
-            let test = rest.windows(2).any(|w| {
-                matches!(w[0].as_str(), "--target" | "-t") && w[1] == "test"
-            }) || rest.iter().any(|w| w == "--target=test");
+            let test = rest
+                .windows(2)
+                .any(|w| matches!(w[0].as_str(), "--target" | "-t") && w[1] == "test")
+                || rest.iter().any(|w| w == "--target=test");
             (build && test).then(|| Err(BYPASSED.to_string()))
         }
         "make" | "gmake" | "ninja" => {
@@ -125,9 +126,9 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
             starts_ctest(&String::from_utf8_lossy(&text)).then_some(Ok(None))
         }
         "sh" | "bash" | "zsh" | "dash" | "ksh" => {
-            let at = rest.iter().position(|w| {
-                w.starts_with('-') && !w.starts_with("--") && w.contains('c')
-            })?;
+            let at = rest
+                .iter()
+                .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))?;
             let line = rest.get(at + 1)?;
             starts_ctest(line).then_some(Ok(None))
         }
@@ -150,7 +151,9 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
 /// the adapter every other COMMAND gets.
 fn starts_ctest(text: &str) -> bool {
     let words: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\''))
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\'')
+        })
         .filter(|w| !w.is_empty())
         .collect();
     let pytest = words
@@ -190,7 +193,8 @@ impl Recognized {
             } else {
                 b.reads.clone()
             };
-            out.named.extend(reads.iter().filter(|f| build::is_source(f)).cloned());
+            out.named
+                .extend(reads.iter().filter(|f| build::is_source(f)).cloned());
             out.unit_files.extend(b.own.iter().cloned());
             out.units
                 .insert(unit.to_string(), Some((reads, b.own.clone())));
@@ -224,8 +228,11 @@ impl Recognized {
                         .as_ref()
                         .filter(|(_, own)| own.iter().all(|f| at.tree.contains(f)))
                         .and_then(|(reads, _)| {
-                            let compiled: BTreeSet<String> =
-                                reads.iter().filter(|f| build::is_source(f)).cloned().collect();
+                            let compiled: BTreeSet<String> = reads
+                                .iter()
+                                .filter(|f| build::is_source(f))
+                                .cloned()
+                                .collect();
                             super::shared::lists(
                                 unit,
                                 at.map.units.get(unit),
@@ -242,13 +249,8 @@ impl Recognized {
                 .units
                 .keys()
                 .map(|unit| {
-                    let lists = super::shared::lists(
-                        unit,
-                        at.map.units.get(unit),
-                        &shared,
-                        at.tree,
-                        None,
-                    );
+                    let lists =
+                        super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
                     (unit.clone(), lists)
                 })
                 .collect(),
@@ -262,10 +264,13 @@ impl Recognized {
     }
 }
 
+/// What a unit's programs are built from, and of those its own files.
+type Made = (BTreeSet<String>, BTreeSet<String>);
+
 /// What a plan's walk says each unit is built from: `None` for one that can't be keyed.
 #[derive(Debug, Default)]
 struct Compiled {
-    units: BTreeMap<String, Option<(BTreeSet<String>, BTreeSet<String>)>>,
+    units: BTreeMap<String, Option<Made>>,
     named: BTreeSet<String>,
     unit_files: BTreeSet<String>,
 }
@@ -429,8 +434,12 @@ impl Adapter for Recognized {
             .iter()
             .filter(|(_, s)| s.facts.not_followed.is_empty())
             .filter_map(|(unit, s)| {
-                let compiled: BTreeSet<String> =
-                    s.reads.iter().filter(|f| build::is_source(f)).cloned().collect();
+                let compiled: BTreeSet<String> = s
+                    .reads
+                    .iter()
+                    .filter(|f| build::is_source(f))
+                    .cloned()
+                    .collect();
                 let lists = super::shared::lists(
                     unit,
                     at.map.units.get(unit),
@@ -477,9 +486,7 @@ impl Adapter for Recognized {
     }
 
     fn why_known_from(&self) -> Option<&'static str> {
-        Some(
-            "its test programs and what each is built from are those of its last ctest here",
-        )
+        Some("its test programs and what each is built from are those of its last ctest here")
     }
 
     fn why_asks_hints(&self, map: &super::store::Map) -> bool {
@@ -514,12 +521,21 @@ mod tests {
             "cmake --build build -t test",
             "cmake --build build --target=test",
         ] {
-            assert!(matches!(recognize(&words(refused), cwd), Some(Err(_))), "{refused}");
+            assert!(
+                matches!(recognize(&words(refused), cwd), Some(Err(_))),
+                "{refused}"
+            );
         }
         std::fs::create_dir_all(cwd.join("build")).unwrap();
         std::fs::write(cwd.join("build/CMakeCache.txt"), "").unwrap();
-        assert!(matches!(recognize(&words("make -C build test"), cwd), Some(Err(_))));
-        assert!(matches!(recognize(&words("ninja -C build test"), cwd), Some(Err(_))));
+        assert!(matches!(
+            recognize(&words("make -C build test"), cwd),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            recognize(&words("ninja -C build test"), cwd),
+            Some(Err(_))
+        ));
         assert!(recognize(&words("ninja -C build"), cwd).is_none());
         // A shell line, a script and a Makefile that start ctest by name; not one that runs pytest.
         let sh = |line: &str| vec!["sh".to_string(), "-c".to_string(), line.to_string()];
@@ -529,10 +545,20 @@ mod tests {
         ));
         assert!(recognize(&sh("ctest && pytest"), cwd).is_none());
         assert!(recognize(&sh("cmake --build build"), cwd).is_none());
-        std::fs::write(cwd.join("check.sh"), "#!/bin/sh\nset -e\nctest --test-dir build\n").unwrap();
-        assert!(matches!(recognize(&words("./check.sh"), cwd), Some(Ok(None))));
+        std::fs::write(
+            cwd.join("check.sh"),
+            "#!/bin/sh\nset -e\nctest --test-dir build\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            recognize(&words("./check.sh"), cwd),
+            Some(Ok(None))
+        ));
         std::fs::write(cwd.join("Makefile"), "check:\n\tctest --test-dir build\n").unwrap();
-        assert!(matches!(recognize(&words("make check"), cwd), Some(Ok(None))));
+        assert!(matches!(
+            recognize(&words("make check"), cwd),
+            Some(Ok(None))
+        ));
         assert!(recognize(&words("go test ./..."), cwd).is_none());
         assert!(recognize(&words("pytest"), cwd).is_none());
     }
