@@ -195,7 +195,10 @@ start is taken as file dates count it: on Linux, which dates files from a clock 
 tick and lags the real one, it is the date the file system gives a file the wrapper creates in
 the output folder just before the compile (for a reuse, as the call begins), so that a file
 written a moment before the compile, such as a build script's output, is not taken for one
-written during it; where that file can't be made, it is 20 ms before the real start.
+written during it; where that file can't be made, it is 20 ms before the real start. A path
+under the toolchain's view without sources (B-9) is judged by the toolchain's file it leads to:
+the view's links are new whenever a run makes them, and the compiler's identity holds the
+toolchain by content (B-17).
 
 **B-12 Reuse.** Each file of the block is cloned (copied where the file system can't clone) under
 a temporary name that doesn't begin with `lib`, in the output folder, and renamed into place: a
@@ -257,7 +260,9 @@ the compiler memos, whose `lib/rustlib/<target>` is a link to the toolchain's fo
 folder it has (each folder of `lib/rustlib/` that holds a `lib/`, but the sources), and nothing
 else: that is all rustc reads from a sysroot it is given. It is named by the toolchain's path
 and those target folders, so a target installed later gives a new one and nothing else in the
-toolchain's folder renames it, and it is made once per store for each such toolchain, by the
+toolchain's folder renames it, and it is made once per store for each such toolchain: as
+`hushrun run` begins, for the compiler cargo will call there (`RUSTC`, else `rustc` on `PATH`,
+asked `--print sysroot` in the run's folder), so that the wrappers only read it; else by the
 first wrapper that needs it. It is whole or absent: a maker fills a folder whose name only it uses, writes a marker
 last and renames it into place, removing nothing it did not make. Each call checks the view it
 finds with a few `stat`s (the marker, and each target's `lib/` through its link); one that is not

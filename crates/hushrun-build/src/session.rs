@@ -527,6 +527,22 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
 }
 
 impl Session {
+    /// Makes, before COMMAND starts, the sysroot without sources the compiles of this run will
+    /// be given for the toolchain at `sysroot`, when it has sources (B-9, B-17), so that the
+    /// wrappers find it whole and only read it. `None` when it has none or the view can't be
+    /// made: a wrapper then makes it, or passes its compile through.
+    pub fn hide_sources(&self, sysroot: &Path) -> Option<PathBuf> {
+        let used = UNIX_EPOCH + Duration::from_millis(self.current.started_ms);
+        let dir = self
+            .current
+            .store
+            .join(crate::compiler::MEMOS)
+            .join(crate::compiler::SYSROOTS);
+        crate::compiler::hidden_sources(sysroot, &dir, Some(used))
+            .ok()
+            .flatten()
+    }
+
     /// What to set on COMMAND: the wrapper for cargo, and the session for the wrapper.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         vec![
@@ -750,6 +766,24 @@ mod tests {
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(found.programs, Programs::Tied);
         assert_eq!(found.audit, Audit::OneIn);
+        session.finish(UNIX_EPOCH);
+
+        // The view of a toolchain with sources is made as the run begins, before any compile
+        // (B-9), and found by the wrappers whole; a toolchain without sources has none.
+        let toolchain = dir.path().join("toolchain");
+        std::fs::create_dir_all(toolchain.join("lib/rustlib/x86_64-unknown-linux-gnu/lib"))
+            .unwrap();
+        let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        assert_eq!(session.hide_sources(&toolchain), None);
+        std::fs::create_dir_all(toolchain.join("lib/rustlib/src/rust/library")).unwrap();
+        let view = session.hide_sources(&toolchain).unwrap();
+        assert!(view.starts_with(&session.current().store));
+        assert!(view.join(crate::compiler::VIEW_MARKER).is_file());
+        assert!(
+            view.join("lib/rustlib/x86_64-unknown-linux-gnu/lib")
+                .is_dir()
+        );
+        assert!(!view.join("lib/rustlib/src").exists());
         session.finish(UNIX_EPOCH);
 
         // How many compiles the run audits is read once, as it begins (B-16).

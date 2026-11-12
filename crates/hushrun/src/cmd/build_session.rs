@@ -42,8 +42,28 @@ pub(crate) fn begin(now: SystemTime, repository: Option<&str>) -> Result<Session
         env: &env,
         now,
         folder: std::env::current_dir().ok(),
+        sysroot: &|folder| rustc_sysroot(folder, &env),
     };
     begin_with(&here, std::env::current_exe())
+}
+
+/// The sysroot of the rustc cargo will call in `folder`: `RUSTC`, else `rustc` on `PATH` (the
+/// rustup proxy picks the folder's toolchain), as `rustc --print sysroot` says. `None` when it
+/// can't be run.
+fn rustc_sysroot(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let rustc = env("RUSTC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from("rustc"));
+    let out = std::process::Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .current_dir(folder)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let sysroot = PathBuf::from(text.trim());
+    (out.status.success() && sysroot.is_absolute()).then_some(sysroot)
 }
 
 /// `time` as the build blocks take it.
@@ -64,6 +84,9 @@ struct Here<'a> {
     /// The folder `hushrun run` runs in: the check before COMMAND looks at the target folders
     /// of its crates (B-23).
     folder: Option<PathBuf>,
+    /// The sysroot of the compiler cargo will call in a folder, to make the toolchain's view
+    /// without sources before COMMAND starts (B-9).
+    sysroot: &'a dyn Fn(&Path) -> Option<PathBuf>,
 }
 
 impl<'a> Here<'a> {
@@ -108,6 +131,11 @@ fn begin_with(here: &Here<'_>, exe: std::io::Result<PathBuf>) -> Result<Session,
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
+        // B-9: the view without sources is made now, before any compile, so wrappers only
+        // read it.
+        if let Some(sysroot) = (here.sysroot)(folder) {
+            session.hide_sources(&sysroot);
+        }
     }
     Ok(session)
 }
@@ -144,6 +172,7 @@ mod tests {
             env,
             now: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
             folder: None,
+            sysroot: &|_| None,
         }
     }
 

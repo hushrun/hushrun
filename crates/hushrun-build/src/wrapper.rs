@@ -169,6 +169,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         link_extra: Vec::new(),
         sysroot: None,
         hide_sources: None,
+        view: None,
         bundle: false,
         clear_bundle: false,
         keys: std::cell::RefCell::new(KeyLine::default()),
@@ -243,6 +244,9 @@ struct Call<'a> {
     sysroot: Option<PathBuf>,
     /// `--sysroot=<the toolchain without its sources>`, when it has sources (B-9, B-17).
     hide_sources: Option<OsString>,
+    /// That view and the toolchain it leads into: a path under the view is judged by what it
+    /// points at, the toolchain's own file (B-11).
+    view: Option<(PathBuf, PathBuf)>,
     /// A program that gets a debug bundle and may move (B-9): its compile is changed so, and
     /// its block carries the bundle.
     bundle: bool,
@@ -643,7 +647,8 @@ impl Call<'_> {
             return self.pass(PassedThrough::Compiler);
         };
         self.sysroot = identity.sysroot.clone();
-        // Every compile sees the toolchain as one without sources does (B-9, B-17).
+        // Every compile sees the toolchain as one without sources does (B-9, B-17). `hushrun
+        // run` made the view as it began; a toolchain it couldn't foresee gets one here.
         let used =
             std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.current.started_ms);
         let view = match &identity.sysroot {
@@ -662,6 +667,7 @@ impl Call<'_> {
             arg.push(view);
             arg
         });
+        self.view = view.clone().zip(identity.sysroot.clone());
         // A target that is not one of the compiler's own is a file rustc loads (B-4).
         if inv
             .target()
@@ -1451,9 +1457,20 @@ impl Call<'_> {
         let mut outside = false;
         let mut changed = false;
         let mut links = std::collections::BTreeSet::new();
+        let view = self.view.clone();
         let mut moved = |path: &Path, stat: Option<&Stat>| {
+            // A path under the view is the toolchain's file it leads to: the view's links are
+            // new when the run made them, and the compiler's identity holds the toolchain by
+            // content (B-11, B-17).
+            let path = match &view {
+                Some((view, sysroot)) => match path.strip_prefix(view) {
+                    Ok(rest) => sysroot.join(rest),
+                    Err(_) => path.to_path_buf(),
+                },
+                None => path.to_path_buf(),
+            };
             stat.is_some_and(|stat| inputs::dated_after(stat, start))
-                || inputs::links_changed(path, start, &mut links)
+                || inputs::links_changed(&path, start, &mut links)
         };
         // The linker, the one `-fuse-ld` names and the SDK, located like every other path, so a
         // path under another checkout is never recorded as it is (B-8).

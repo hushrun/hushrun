@@ -3705,6 +3705,53 @@ fn a_dotenv_search_above_a_cargo_home_in_a_shared_folder_is_keyed_as_above_a_hom
     assert!(!r.entry.unwrap().found);
 }
 
+// covers: B-9, B-11, B-18
+#[test]
+fn a_link_through_the_sysroot_without_sources_is_judged_by_the_toolchains_files() {
+    // The view's links are new whenever a run made them, possibly in the very tick a linked
+    // compile starts (build scripts start together on a cold build). What a link through them
+    // reads is the toolchain's file, which the compiler's identity holds by content: links made
+    // during the compile don't make it "changed while compiling".
+    let m = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&m);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "{sysroot}/lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let ws = m.w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    settle();
+    let sysroots = m.w.session.current().store.join("compilers/sysroots");
+    let mut args = m.w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = m.w.call_args(&ws, "a", args, |fake| {
+        m.toolchain_vars(fake);
+        // While it compiles, the view's links are made again (the same targets).
+        fake.during = Some(Box::new(move || {
+            for view in fs::read_dir(&sysroots).unwrap().flatten() {
+                let rustlib = view.path().join("lib/rustlib");
+                let Ok(entries) = fs::read_dir(&rustlib) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let link = entry.path();
+                    let target = fs::read_link(&link).unwrap();
+                    fs::remove_file(&link).unwrap();
+                    std::os::unix::fs::symlink(&target, &link).unwrap();
+                }
+            }
+        }));
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(sysroot_arg(&r.seen.compiles[0]).is_some());
+}
+
 /// Copies every file under `from` to the same place under `to`.
 fn copy_tree(from: &Path, to: &Path) {
     for file in walk(from) {
