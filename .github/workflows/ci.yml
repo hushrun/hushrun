@@ -128,6 +128,25 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
+      # published checksum, and a Gradle user home holding what their builds need (JUnit 5.11.4
+      # and 4.13.2), filled by one build here: the tests run offline against it.
+      - name: Install Gradle for the test-class tests
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
+          unzip -q gradle-9.3.1-bin.zip
+          mkdir -p deps/j5/src/test/java deps/j4/src/test/java
+          printf "include 'j5', 'j4'\n" > deps/settings.gradle
+          printf "subprojects { apply plugin: 'java'; repositories { mavenCentral() } }\n" > deps/build.gradle
+          printf "dependencies {\n  testImplementation platform('org.junit:junit-bom:5.11.4')\n  testImplementation 'org.junit.jupiter:junit-jupiter'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n" > deps/j5/build.gradle
+          printf "dependencies { testImplementation 'junit:junit:4.13.2' }\ntest { useJUnit() }\n" > deps/j4/build.gradle
+          printf "class T5Test { @org.junit.jupiter.api.Test void t() {} }\n" > deps/j5/src/test/java/T5Test.java
+          printf "public class T4Test { @org.junit.Test public void t() {} }\n" > deps/j4/src/test/java/T4Test.java
+          GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" -p deps --no-daemon -q test
+          echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -234,6 +253,25 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
+      # published checksum, and a Gradle user home holding what their builds need (JUnit 5.11.4
+      # and 4.13.2), filled by one build here: the tests run offline against it.
+      - name: Install Gradle for the test-class tests
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
+          unzip -q gradle-9.3.1-bin.zip
+          mkdir -p deps/j5/src/test/java deps/j4/src/test/java
+          printf "include 'j5', 'j4'\n" > deps/settings.gradle
+          printf "subprojects { apply plugin: 'java'; repositories { mavenCentral() } }\n" > deps/build.gradle
+          printf "dependencies {\n  testImplementation platform('org.junit:junit-bom:5.11.4')\n  testImplementation 'org.junit.jupiter:junit-jupiter'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n" > deps/j5/build.gradle
+          printf "dependencies { testImplementation 'junit:junit:4.13.2' }\ntest { useJUnit() }\n" > deps/j4/build.gradle
+          printf "class T5Test { @org.junit.jupiter.api.Test void t() {} }\n" > deps/j5/src/test/java/T5Test.java
+          printf "public class T4Test { @org.junit.Test public void t() {} }\n" > deps/j4/src/test/java/T4Test.java
+          GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" -p deps --no-daemon -q test
+          echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass

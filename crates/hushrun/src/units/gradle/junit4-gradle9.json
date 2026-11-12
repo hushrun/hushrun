@@ -1,0 +1,231 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit4",
+   "gradle": "9.3.1",
+   "invocations": [
+    {
+     "c": "ex.app.BeforeClassFailTest",
+     "f": "java.lang.IllegalStateException: beforeClass failed",
+     "ms": 34,
+     "n": "classMethod",
+     "p": [
+      [
+       "ex.app.BeforeClassFailTest",
+       "ex.app.BeforeClassFailTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.CalcTest$Nested",
+     "f": "java.lang.AssertionError: nested",
+     "ms": 1,
+     "n": "nestedFails",
+     "p": [
+      [
+       "ex.app.CalcTest$Nested",
+       "ex.app.CalcTest$Nested"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.CalcTest$Nested",
+     "ms": 0,
+     "n": "nestedPasses",
+     "p": [
+      [
+       "ex.app.CalcTest$Nested",
+       "ex.app.CalcTest$Nested"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 1,
+     "n": "greets",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 6,
+     "n": "assumption",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 0,
+     "n": "passes",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "f": "java.lang.AssertionError: expected:<5> but was:<4>",
+     "ms": 1,
+     "n": "fails",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 0,
+     "n": "ignored",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.app.EnclosedTest$Inner",
+     "ms": 0,
+     "n": "innerPasses",
+     "p": [
+      [
+       "ex.app.EnclosedTest$Inner",
+       "ex.app.EnclosedTest$Inner"
+      ],
+      [
+       "ex.app.EnclosedTest",
+       "ex.app.EnclosedTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.EnclosedTest$Inner",
+     "f": "java.lang.AssertionError: inner",
+     "ms": 0,
+     "n": "innerFails",
+     "p": [
+      [
+       "ex.app.EnclosedTest$Inner",
+       "ex.app.EnclosedTest$Inner"
+      ],
+      [
+       "ex.app.EnclosedTest",
+       "ex.app.EnclosedTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.FirstExtraTest",
+     "f": "org.gradle.internal.serialize.PlaceholderException: Invalid test class 'ex.app.FirstExtraTest':\n  1. The class ex.app.FirstExtraTest is not public.\n  2. Test class should have exactly one public constructor",
+     "ms": 0,
+     "n": "initializationError",
+     "p": [
+      [
+       "ex.app.FirstExtraTest",
+       "ex.app.FirstExtraTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "ms": 2,
+     "n": "small[0: x=1]",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "ms": 0,
+     "n": "positive[0: x=1]",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "ms": 0,
+     "n": "small[1: x=2]",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "ms": 0,
+     "n": "positive[1: x=2]",
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "f": "java.lang.AssertionError: ",
+     "ms": 0,
+     "n": "small[2: x=3]",
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.ParamTest",
+     "ms": 0,
+     "n": "positive[2: x=3]",
+     "r": "SUCCESS"
+    }
+   ],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.app.BeforeClassFailTest": "app/src/test/java/ex/app/BeforeClassFailTest.java",
+    "ex.app.CalcTest": "app/src/test/java/ex/app/CalcTest.java",
+    "ex.app.EnclosedTest": "app/src/test/java/ex/app/EnclosedTest.java",
+    "ex.app.FirstExtraTest": "app/src/test/java/ex/app/Extras.java",
+    "ex.app.ParamTest": "app/src/test/java/ex/app/ParamTest.java"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": "app",
+   "reads": {
+    "dirs": [
+     "app",
+     "lib",
+     "shared-lib/greeter"
+    ],
+    "paths": [
+     "libs/local.jar"
+    ]
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":app:test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}

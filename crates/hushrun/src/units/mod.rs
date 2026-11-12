@@ -30,6 +30,7 @@ pub mod ctest;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod gradle;
 pub mod jvm;
 pub mod maven;
 pub mod program;

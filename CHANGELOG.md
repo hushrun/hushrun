@@ -27,6 +27,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   `tests.unit: test`, a Go package's tests are listed, left out with `-test.skip` and read from the
   binary's own output; with COMMAND's own `-run` or `-skip`, by package.
 - Test by test for Maven ([ADR 0085](docs/adr/0085-maven.md)): `mvn` and `./mvnw` get an adapter that reuses test classes, and with `unit: test` single tests, through `MAVEN_OPTS`, with no file of the repository changed.
+- **Gradle** ([ADR 0084](docs/adr/0084-gradle.md)): test classes and, with `unit: test`, their methods for Java, Kotlin and Android's local unit tests, on Gradle 8.14 and 9, after one line in the settings file that `hushrun init` proposes.
 - Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
   `unit: test`. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and `reuseTests`, and an
   adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.

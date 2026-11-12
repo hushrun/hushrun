@@ -32,7 +32,7 @@ use super::db::{Edge, HintKnown};
 use super::facts::FactsFile;
 use super::shared::{Asker, List, Shared};
 use super::store::Map;
-use super::{Seen, cargo, ctest, gotest, maven, pytest, swift, vitest};
+use super::{Seen, cargo, ctest, gotest, gradle, maven, pytest, swift, vitest};
 
 /// How a module says COMMAND is its runner's: `None` when it isn't, `Some(Err)` with why it is but
 /// the adapter can't load safely, which the run says once.
@@ -47,6 +47,7 @@ pub const RECOGNIZED: &[Recognize] = &[
     ctest::recognized,
     swift::recognized,
     maven::recognized,
+    gradle::recognized,
 ];
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that

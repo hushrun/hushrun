@@ -1,0 +1,117 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit-platform",
+   "gradle": "9.3.1",
+   "invocations": [
+    {
+     "c": "ex.retry.FlakyTest",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: always",
+     "ms": 14,
+     "n": "alwaysFails()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.retry.FlakyTest",
+     "ms": 1,
+     "n": "stable()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.retry.FlakyTest",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: first try fails",
+     "ms": 2,
+     "n": "flaky()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.retry.FlakyTest",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: always",
+     "ms": 67,
+     "n": "alwaysFails()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.retry.FlakyTest",
+     "ms": 1,
+     "n": "flaky()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.retry.FlakyTest",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: always",
+     "ms": 31,
+     "n": "alwaysFails()",
+     "p": [
+      [
+       "ex.retry.FlakyTest",
+       "ex.retry.FlakyTest"
+      ]
+     ],
+     "r": "FAILURE"
+    }
+   ],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.retry.FlakyTest": "src/test/java/ex/retry/FlakyTest.java"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": ".",
+   "reads": {
+    "dirs": [
+     "."
+    ],
+    "paths": []
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}

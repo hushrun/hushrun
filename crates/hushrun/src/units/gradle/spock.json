@@ -1,0 +1,165 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit-platform",
+   "gradle": "9.3.1",
+   "invocations": [
+    {
+     "c": "ex.spock.CalcSpec$Inner",
+     "ms": 252,
+     "n": "inner works",
+     "p": [
+      [
+       "ex.spock.CalcSpec$Inner",
+       "ex.spock.CalcSpec$Inner"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "ms": 61,
+     "n": "passes",
+     "p": [
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: Condition not satisfied:\n\n1 + 1 == 3\n  |   |\n  2   false\n",
+     "ms": 973,
+     "n": "fails",
+     "p": [
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "ms": 0,
+     "n": "ignored",
+     "p": [
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "ms": 2,
+     "n": "param 1",
+     "p": [
+      [
+       "param #x",
+       "ex.spock.CalcSpec"
+      ],
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "ms": 2,
+     "n": "param 2",
+     "p": [
+      [
+       "param #x",
+       "ex.spock.CalcSpec"
+      ],
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "f": "org.gradle.internal.serialize.PlaceholderAssertionError: Condition not satisfied:\n\nx < 3\n| |\n3 false\n",
+     "ms": 23,
+     "n": "param 3",
+     "p": [
+      [
+       "param #x",
+       "ex.spock.CalcSpec"
+      ],
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.spock.CalcSpec",
+     "ms": 51,
+     "n": "rolled #x",
+     "p": [
+      [
+       "ex.spock.CalcSpec",
+       "ex.spock.CalcSpec"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.spock.SetupSpecFailSpec",
+     "f": "java.lang.IllegalStateException: setupSpec failed",
+     "ms": 0,
+     "n": "initializationError",
+     "p": [
+      [
+       "ex.spock.SetupSpecFailSpec",
+       "ex.spock.SetupSpecFailSpec"
+      ]
+     ],
+     "r": "FAILURE"
+    }
+   ],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.spock.CalcSpec": "spock/src/test/groovy/ex/spock/CalcSpec.groovy",
+    "ex.spock.SetupSpecFailSpec": "spock/src/test/groovy/ex/spock/SetupSpecFailSpec.groovy"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": "spock",
+   "reads": {
+    "dirs": [
+     "spock"
+    ],
+    "paths": []
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":spock:test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}
