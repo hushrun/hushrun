@@ -448,6 +448,15 @@ function install(S) {
       this.fileBucket = bucket('file');
       this.current = this.fileBucket;
       this.hooks = [];
+      // [ADR 0082, amended] What failed outside every test: the describe blocks whose afterAll
+      // failed, the errors jest-circus took as theirs, and errors it couldn't attribute (an
+      // uncaught exception, an unhandled rejection: Jest 29 charges one to whatever test runs
+      // when it arrives, which may not be the test that caused it).
+      this.afterAllFailed = [];
+      this.hookErrors = new Set();
+      this.uncaught = 0;
+      this.rejections = new Set();
+      this.circus = null;
       const run = S.run;
       // Leave out tests only when the main process that claimed the run allowed it.
       this.mayDeselect = process.env.HUSHRUN_JEST_DESELECT === '1';
@@ -593,6 +602,7 @@ function install(S) {
     }
     handle(event, state) {
       this.sawEvents = true;
+      if (state && typeof state === 'object') this.circus = state;
       switch (event.name) {
         case 'run_start':
           this.sawRunStart = true;
@@ -614,6 +624,12 @@ function install(S) {
           if (event.name === 'hook_failure' && (t === 'beforeAll' || t === 'afterAll')) {
             // A failing beforeAll or afterAll fails the file.
             this.fileFailures.push({ in: t, describe: describePath(event.hook.parent), message: errMessage(event.error) });
+            // jest-circus fails each test under a failing beforeAll, and none under an afterAll:
+            // the tests under that block failed with it, a root-level afterAll's being all.
+            if (t === 'afterAll') {
+              this.afterAllFailed.push(event.hook.parent || event.describeBlock || null);
+              this.hookErrors.add(event.error);
+            }
           }
           if (t === 'beforeAll' || t === 'afterAll') this.switchTo(this.fileBucket);
           break;
@@ -642,12 +658,37 @@ function install(S) {
           this.switchTo(this.fileBucket);
           break;
         }
+        case 'error':
+          // An uncaught exception or unhandled rejection: whose it is can't be told. A
+          // rejection handled later (Jest 30's `error_handled`) is no error.
+          if (event.promise) this.rejections.add(event.promise);
+          else this.uncaught += 1;
+          break;
+        case 'error_handled':
+          this.rejections.delete(event.promise);
+          break;
         case 'run_finish':
           this.switchTo(this.fileBucket);
           for (const e of state.unhandledErrors || []) this.fileFailures.push({ in: 'unhandled', message: errMessage(e) });
           break;
         default:
       }
+    }
+    // [ADR 0082, amended] Each test's outcome as the file ended, not as its test_done said: an
+    // error jest-circus attached to a test after its end (Jest 30 charges a late one to the test
+    // whose code raised it), a failing afterAll above it, and an error no test can be charged with,
+    // after which no test of the file is told as finished.
+    settle() {
+      const unhandled = (this.circus && this.circus.unhandledErrors) || [];
+      const unattributed = this.uncaught > 0 || this.rejections.size > 0
+        || unhandled.some((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      for (const [test, r] of this.tests) {
+        if (r.status === 'passed') {
+          if ((test.errors && test.errors.length) || this.afterAllFailed.some((b) => b && under(test, b))) r.status = 'failed';
+        }
+        if (unattributed) r.unsure = true;
+      }
+      if (unattributed) this.fileFailures.push({ in: 'unattributed', message: 'an error no test can be charged with' });
     }
     finish() {
       if (this.done) return;
@@ -658,6 +699,7 @@ function install(S) {
       for (const b of this.hooks) unitNf.push(...b.nf);
       if (!this.sawEvents) unitNf.push({ why: 'events', detail: "no jest-circus event reached hushrun's adapter (an environment it didn't wrap)" });
       if (this.sawEvents && !this.sawRunStart) this.fileFailures.push({ in: 'collection', message: 'the test file failed before its tests ran' });
+      this.settle();
       // Process-level code: every test file of this process runs it.
       for (const f of S.processFiles) this.reads.add(f);
       const typeAware = S.typeAware || (S.tsJest && !S.tsCompilerSeen);
@@ -723,7 +765,7 @@ function install(S) {
           groups.get(r.id).push(r);
         }
         const place = new Map([...groups.keys()].map((id, i) => [id, i]));
-        const done = (r) => r.status === 'passed' || r.status === 'failed' || r.status === 'skipped';
+        const done = (r) => !r.unsure && (r.status === 'passed' || r.status === 'failed' || r.status === 'skipped');
         unit.tests = [...groups.values()].map((rs) => {
           const r = rs[0];
           if (rs.length > 1 || r.ambiguous) {

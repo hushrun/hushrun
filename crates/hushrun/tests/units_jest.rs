@@ -510,6 +510,88 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     }
 }
 
+/// Each test's state the store holds for `unit`, by id.
+fn tests_of(r: &Repo, unit: &str) -> serde_json::Map<String, Value> {
+    r.map()["units"][unit]["tests"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+}
+
+// covers: C-39, C-44
+#[test]
+fn a_failing_after_all_or_an_error_no_test_owns_leaves_no_test_of_its_file_passed() {
+    // Each file has a test that always fails, so that its failure is never "unexplained": the
+    // adapter itself must charge the tests under a failing afterAll, and every test of a file in
+    // which an error arrived that no test can be charged with (a timer one test left throws while
+    // another runs: Jest 29 fails the one running, Jest 30 the one that left it).
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/hooks.test.js",
+            "describe('blk', () => {\n  afterAll(() => { throw new Error('block teardown'); });\n  test('one', () => {});\n  test('two', () => {});\n});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+        file(
+            "test/root.test.js",
+            "afterAll(() => { throw new Error('root teardown'); });\ntest('r1', () => {});\ntest('r2', () => {});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+        file(
+            "test/leak.test.js",
+            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\ntest('bad', () => { expect(1).toBe(2); });\n",
+        ),
+    ];
+    files.push(file("test/fine.test.js", "test('fine', () => {});\n"));
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        let failed = |id: &str| (id.to_string(), json!("failed"));
+        assert_eq!(
+            tests_of(&r, "test/hooks.test.js"),
+            [failed("blk > one"), failed("blk > two"), failed("bad")]
+                .into_iter()
+                .collect(),
+            "Jest {}",
+            jest.major
+        );
+        assert_eq!(
+            tests_of(&r, "test/root.test.js"),
+            [failed("r1"), failed("r2"), failed("bad")]
+                .into_iter()
+                .collect(),
+            "Jest {}",
+            jest.major
+        );
+        let leak = tests_of(&r, "test/leak.test.js");
+        assert_eq!(leak.len(), 4, "{leak:?}");
+        assert!(
+            leak.values().all(|state| state != "passed"),
+            "Jest {}: {leak:?}",
+            jest.major
+        );
+        // The same code again: every one of them runs, and the teardowns and the timer fail again.
+        let second = r.run(JEST_RUN);
+        assert_eq!(second.code, 1, "{}", second.out());
+        for said in ["block teardown", "root teardown", "late timer"] {
+            assert!(
+                second.out().contains(said),
+                "Jest {}: {said}:\n{}",
+                jest.major,
+                second.out()
+            );
+        }
+        assert_eq!(
+            tests_of(&r, "test/hooks.test.js")["blk > one"],
+            "failed",
+            "Jest {}",
+            jest.major
+        );
+    }
+}
+
 /// The newest run result this cache holds.
 fn store_result(r: &Repo) -> Value {
     let mut found = Vec::new();
