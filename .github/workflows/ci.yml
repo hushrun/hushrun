@@ -400,6 +400,22 @@ jobs:
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run trace -- cargo xtask trace
 
+  # The JVM jars hushrun embeds (ADR 0085) are what their Java sources build: built again with the
+  # JDK they were built with, against the API jars pinned by SHA-256, and compared byte for byte.
+  jars:
+    name: JVM jars
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo xtask jars --check
+
   # THIRD-PARTY-NOTICES.md names every crate the release binaries are built with, for every
   # release target, with its license texts: it must be what Cargo.lock gives.
   notices:
