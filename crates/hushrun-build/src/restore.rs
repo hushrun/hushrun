@@ -397,7 +397,9 @@ fn finish_file(path: &Path, start: SystemTime) -> Result<(), RestoreError> {
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(perms.mode() | 0o200);
     }
+    // Elsewhere this clears the read-only attribute, which is all the owner needs to write.
     #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
     perms.set_readonly(false);
     fs::set_permissions(path, perms).map_err(at(path))?;
     File::options()
