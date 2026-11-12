@@ -326,3 +326,9 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   says which wider fixture's end kept a test, where before `why` said it didn't finish), a
   `.started` file's `why`, and a facts file's own `notKept` for a failed run whose failures
   aren't told by unit.
+- **A unit that isn't a file.** After a run that reused a CTest program, `hushrun why unit
+  test_5` said it isn't a file of the scope: a write forgot every row whose name no file or
+  directory of the scope holds when the run didn't run it, though the run had reused it. The
+  store now keeps such a row while the run's adapter tells the unit, run, reused or not run; and
+  `why` splits `UNIT::TEST` where the unit is one the store knows, so a Gradle or Maven class of
+  no file (`<project directory>::<class>`) is found whole, with its tests after it.

@@ -550,6 +550,14 @@ fn a_change_runs_the_classes_of_its_module_and_of_the_modules_that_depend_on_it_
         units,
         serde_json::json!({"total": 6, "ran": 4, "reused": 2, "savedMs": units["savedMs"]})
     );
+    // \[C-37\] `hushrun why` knows a class by the name the store keeps, the reused ones too.
+    let why = r
+        .hushrun()
+        .args(["why", "unit", "lib/src/test/java/shop/lib/PriceTest.java"])
+        .output()
+        .expect("hushrun");
+    let said = String::from_utf8_lossy(&why.stdout);
+    assert!(said.contains("PriceTest.java would be reused"), "{said}");
 
     // A change in `lib` runs lib's classes and app's, which depends on it, never other's.
     r.write(

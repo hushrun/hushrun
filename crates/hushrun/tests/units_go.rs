@@ -616,6 +616,14 @@ fn go_reuses_what_already_passed_and_audits_it() {
     // A reused package stays in the map, though its name is a directory: what it opened is the
     // next plan's hint.
     assert!(r.map()["units"]["greet"].is_object(), "{:#}", r.map());
+    // \[C-37\] `hushrun why` knows a reused package by its directory.
+    let reused = r.run(&["why", "unit", "extra1"], &[]);
+    assert!(
+        reused.stdout.contains("extra1 would be reused"),
+        "{}\n{}",
+        reused.stdout,
+        reused.stderr
+    );
     // \[ADR 0073\] Why, for a package: by its directory or a test file of it, with the imports
     // between it and what changed, as far as this machine knows without go list.
     r.write(

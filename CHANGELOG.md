@@ -171,6 +171,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   Jest, a failed Vitest run with an error no test owns, a stale build, what was left out twice):
   every one the run decided keeps a row with why. Contract: an adapter's facts file may say
   `notKept`, why no pass of a failed run whose failures aren't told by unit is kept.
+- `hushrun why` finds a unit no file of the scope names, such as a CTest program, by the name its
+  adapter gives it, after a run that reused it: this machine's store no longer forgets it, and a
+  Gradle or Maven class of no file (`<project directory>::<class>`) is found whole.
 - `hushrun why` says why a test or a test file kept no result the last time it ran here, as the
   run decided it: a skip in a run that failed (such as a Go test that skips because another
   failed), a failure no test explains, a start that died, a stale build, a test its adapter never

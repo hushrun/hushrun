@@ -407,6 +407,16 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
         "{}",
         second.stderr
     );
+    // \[C-37\] `hushrun why` knows a test target by its directory, the reused one too.
+    for unit in ["Tests/CartTests", "Tests/CoreTests"] {
+        let why = r.run(&["why", "unit", unit], &[]);
+        assert!(
+            why.stdout.contains(&format!("{unit} would be reused")),
+            "{}\n{}",
+            why.stdout,
+            why.stderr
+        );
+    }
 
     // Core changes: Cart's and Core's tests read it, and run; Greet's runs as a check.
     r.write(

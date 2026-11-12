@@ -146,10 +146,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     // \[C-39\] `UNIT::TEST`: a test, when tests are the unit; else its test file, said so. A
     // name without `::` is a test file's, whatever its runner calls its items.
     let (unit_mode, reads_mode, notes) = what_it_reuses(tests, adapter.as_ref());
-    let (asked, test) = match asked.split_once("::") {
-        Some((file, id)) if !id.is_empty() => (file, Some(id.to_string())),
-        _ => (asked, None),
-    };
+    let (asked, test) = split_asked(asked, &map, input.tree, adapter.as_ref());
     let test = match test {
         Some(_) if unit_mode == Unit::File => {
             let why = notes
@@ -485,6 +482,34 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         }
     }
     out
+}
+
+/// \[C-37, C-39\] `UNIT` or `UNIT::TEST`, split where the unit is one this machine's store
+/// knows, by the adapter's own name for it, or a file of the scope: a unit whose name holds `::`
+/// itself (a Gradle or Maven class of no file, `<project directory>::<class>`) is found whole,
+/// and its tests after it. Else at the first `::`, as a test file's path never holds one.
+fn split_asked<'a>(
+    asked: &'a str,
+    map: &Map,
+    tree: &Tree,
+    adapter: &dyn Adapter,
+) -> (&'a str, Option<String>) {
+    let known = |unit: &str| {
+        let unit = adapter.why_unit(unit);
+        map.units.contains_key(&unit) || tree.contains(&unit)
+    };
+    if known(asked) {
+        return (asked, None);
+    }
+    let cuts: Vec<usize> = asked.match_indices("::").map(|(at, _)| at).collect();
+    let split = |at: usize| (&asked[..at], Some(asked[at + 2..].to_string()));
+    match cuts.iter().find(|at| known(&asked[..**at])) {
+        Some(at) if *at + 2 < asked.len() => split(*at),
+        _ => match cuts.first() {
+            Some(at) if *at + 2 < asked.len() => split(*at),
+            _ => (asked, None),
+        },
+    }
 }
 
 /// What was not followed, for people.
@@ -938,4 +963,45 @@ fn shortest(
         }
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(paths: &[&str]) -> Tree {
+        let mut bytes = format!("{}\n", hushrun_core::CANONICALIZATION).into_bytes();
+        let mut sorted = paths.to_vec();
+        sorted.sort();
+        for (n, path) in sorted.iter().enumerate() {
+            bytes.extend_from_slice(format!("f {:064x} {path}", n + 1).as_bytes());
+            bytes.push(0);
+        }
+        Tree::from_manifest(&bytes).unwrap()
+    }
+
+    // covers: C-37, C-39
+    #[test]
+    fn a_unit_whose_name_holds_two_colons_is_found_whole_with_its_tests_after_it() {
+        let adapter = adapter::choose_kept(&["pytest".to_string()], Path::new("."), None).unwrap();
+        let mut map = Map::default();
+        map.units
+            .insert("app::ex.app.Gen".into(), store::Mapped::default());
+        let t = tree(&["tests/test_a.py"]);
+        let split = |asked| split_asked(asked, &map, &t, adapter.as_ref());
+        // A class of no file, by the name the store keeps; then one of its tests.
+        assert_eq!(split("app::ex.app.Gen"), ("app::ex.app.Gen", None));
+        assert_eq!(
+            split("app::ex.app.Gen::testX"),
+            ("app::ex.app.Gen", Some("testX".to_string()))
+        );
+        // A test file of the scope, and a test whose id holds `::` (a class's method).
+        assert_eq!(
+            split("tests/test_a.py::TestC::test_c1"),
+            ("tests/test_a.py", Some("TestC::test_c1".to_string()))
+        );
+        // Nothing known: at the first `::`, as before.
+        assert_eq!(split("gone.py::t"), ("gone.py", Some("t".to_string())));
+        assert_eq!(split("gone.py"), ("gone.py", None));
+    }
 }

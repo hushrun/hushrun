@@ -623,6 +623,16 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
             let result = p.newest_result();
             assert_eq!(result["units"]["reused"], json!(2), "{at}: {result:#}");
             assert_eq!(result["units"]["ran"], json!(3), "{at}: {result:#}");
+            // \[C-37\] `hushrun why` knows a program by its name, the reused ones too.
+            for unit in ["t_greet", "t_util", "t_misc"] {
+                let why = p.run(&["why", "unit", unit], &[]);
+                assert!(
+                    why.stdout.contains(&format!("{unit} would be reused")),
+                    "{at}: {}\n{}",
+                    why.stdout,
+                    why.stderr
+                );
+            }
         }
     }
 }

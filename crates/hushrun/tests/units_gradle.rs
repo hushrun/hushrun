@@ -494,6 +494,14 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
         })
         .count();
     assert_eq!(ran_in_other, 1, "{}", changed.stdout);
+    // \[C-37\] `hushrun why` knows a class by the name the store keeps, the reused ones too.
+    let why = r
+        .hushrun()
+        .args(["why", "unit", "other/src/test/java/shop/other/BTest.java"])
+        .output()
+        .expect("hushrun");
+    let said = String::from_utf8_lossy(&why.stdout);
+    assert!(said.contains("BTest.java would be reused"), "{said}");
 }
 
 // covers: C-39, C-46, C-32

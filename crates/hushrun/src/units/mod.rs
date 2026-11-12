@@ -1649,6 +1649,8 @@ impl Observed {
                 at: now,
             })
             .collect();
+        // \[C-37\] Every unit the run's adapter told, whatever became of it.
+        let known: BTreeSet<String> = self.units.keys().cloned().collect();
         let write = db::Write {
             check_id: at.check_id,
             base: &at.base,
@@ -1658,6 +1660,7 @@ impl Observed {
             rest: &self.rest,
             sources: &self.sources,
             unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
+            known: &known,
             edges: &self.edges,
             disagreements: &found,
             hints: &self.received,

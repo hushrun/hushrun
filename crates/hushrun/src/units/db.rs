@@ -938,6 +938,10 @@ pub struct Write<'a> {
     pub sources: &'a BTreeSet<String>,
     /// \[ADR 0071\] Vitest's list of test files, when this run's adapter gave one.
     pub unit_files: Option<&'a BTreeSet<String>>,
+    /// \[C-37\] Every unit this run's adapter told, run, reused or not: a unit no file of the
+    /// scope names (a CTest program, a Cargo test binary, a class of no file) is still there while
+    /// a run knows it.
+    pub known: &'a BTreeSet<String>,
     /// The edges this run saw.
     pub edges: &'a BTreeSet<Edge>,
     pub disagreements: &'a [Disagreement],
@@ -1125,7 +1129,7 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             .collect::<rusqlite::Result<_>>()?
     };
     for (id, name) in &known {
-        if !still_there(w.tree, name) || w.seen.contains_key(name) {
+        if w.seen.contains_key(name) || !(still_there(w.tree, name) || w.known.contains(name)) {
             tx.execute("DELETE FROM unit WHERE id = ?1", [id])?;
         }
     }

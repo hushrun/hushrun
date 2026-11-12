@@ -41,6 +41,8 @@ fn mapped(reads: &[(&str, &str)]) -> Mapped {
 }
 
 struct Run<'a> {
+    /// Every unit the run's adapter told, run, reused or not run.
+    known: BTreeSet<String>,
     check: &'a str,
     seen: BTreeMap<String, Mapped>,
     tree: Tree,
@@ -51,6 +53,7 @@ struct Run<'a> {
 
 fn run<'a>(check: &'a str, seen: &[(&str, Mapped)], tree_paths: &[&str]) -> Run<'a> {
     Run {
+        known: seen.iter().map(|(u, _)| u.to_string()).collect(),
         check,
         seen: seen
             .iter()
@@ -83,6 +86,7 @@ fn write_run(path: &Path, r: &Run<'_>) -> Result<(), Unread> {
             rest: &rest,
             sources: &sources,
             unit_files: Some(&listed),
+            known: &r.known,
             edges: &r.edges,
             disagreements: &r.disagreements,
             hints: &[],
@@ -249,6 +253,7 @@ fn hushrun_processes_writing_at_once_keep_each_others_checks() {
                 let check = format!("check{n}");
                 let unit = format!("tests/test_{n}.py");
                 let r = Run {
+                    known: BTreeSet::from([unit.clone()]),
                     check: Box::leak(check.into_boxed_str()),
                     seen: BTreeMap::from([(unit.clone(), mapped(&[("app/a.py", HASH_A)]))]),
                     tree: tree(&[&unit, "app/a.py"]),
@@ -353,6 +358,7 @@ fn a_store_another_hushrun_holds_is_busy_and_nothing_is_written() {
         rest: &BTreeMap::new(),
         sources: &BTreeSet::new(),
         unit_files: None,
+        known: &r.known,
         edges: &BTreeSet::new(),
         disagreements: &[],
         hints: &[],
@@ -852,6 +858,29 @@ fn a_store_that_cant_be_read_is_set_aside_and_made_anew_by_the_next_write() {
     let mut aside = path.as_os_str().to_os_string();
     aside.push(".unread");
     assert!(std::path::Path::new(&aside).is_file());
+}
+
+// covers: C-36, C-37
+#[test]
+fn a_unit_that_isnt_a_file_keeps_its_row_through_a_run_that_reused_it() {
+    // A CTest program, named from the build directory, which no file of the scope is: a run that
+    // reused it saw it and wrote nothing of it, and its row stays for `hushrun why`. A run that
+    // no longer knows it forgets it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    let first = run(
+        "unit",
+        &[("test_5", mapped(&[("src/five.c", HASH_A)]))],
+        &["src/five.c"],
+    );
+    write_run(&path, &first).unwrap();
+    let mut reused = run("unit", &[], &["src/five.c"]);
+    reused.known.insert("test_5".to_string());
+    write_run(&path, &reused).unwrap();
+    assert!(load(&path, &id("unit")).map.units.contains_key("test_5"));
+    let gone = run("unit", &[], &["src/five.c"]);
+    write_run(&path, &gone).unwrap();
+    assert!(!load(&path, &id("unit")).map.units.contains_key("test_5"));
 }
 
 /// `path` with `.unread` after it.
