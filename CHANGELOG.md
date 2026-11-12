@@ -166,6 +166,23 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   which pytest's adapter took before, stays pytest's where this machine's store says pytest
   reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the
   check, CTest or `swift test` observes it, and what pytest ran under it is no longer observed.
+- Jest's adapter fails every test under a failing `afterAll`, which jest-circus doesn't, so a file
+  with another failing test no longer keeps those tests' passes and leaves them out next time,
+  their `afterAll` with them. After an uncaught exception or an unhandled rejection, which Jest 29
+  charges to whatever test is running, no test of its file passes.
+- With `reads: test`, Jest's adapter keeps a file opened with every repository file on the stack,
+  the test file included: a cache one module above the one that read it, or in the test file,
+  reaches each later test that reads it.
+- With `reads: test`, a test that reads through a chain of barrels (`export * from`, a CommonJS
+  `module.exports = require(…)`) lists every barrel of it, for Jest and Vitest: their adapters send
+  `reexports`.
+- With `unit: test`, the Go runner passes a test binary's output on until every program the test
+  left running lets it go, as `go test` does, instead of stopping 5 seconds after the binary
+  exited; such a package's tests still record no pass.
+- Jest, Vitest and Go say which tests were skipped (`test.skip`, `describe.skip`, `test.todo`,
+  `test.skipIf`, `ctx.skip()`, and Go's `t.Skip()` under `-v` or `-json`) and which start of the
+  runner wrote each file, so a skip in a run that failed records nothing. A Jest test file that
+  two projects ran ran whole only when each of them finished it.
 
 ## [0.13.0] - 2026-11-12
 

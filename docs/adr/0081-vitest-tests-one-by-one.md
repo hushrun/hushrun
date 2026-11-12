@@ -114,7 +114,8 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
 - Reading through a getter counts: a constant read from another module makes that module run for
   the test. A value two imports away, RFC 0004 §3.2's first miss and C-40's, is caught with
   Vitest: the module that built it from another read it through that one's getter while the file
-  loaded, so every test of the file has it (a test holds it). The second miss stays: a registry
+  loaded, so every test of the file has it (a test holds it), but not through a chain of `export *`
+  barrels, which Amendment 1 follows by `reexports`. The second miss stays: a registry
   that a module imported only for that filled at import, read through no function of the filler.
   A value a module copied before Vite evaluated it (a native module, a dependency in
   `node_modules`) is outside what is watched.
@@ -133,3 +134,39 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
 - **A take at every test's start:** one more take a test, for Vitest's own code.
 - **Leaving out tests through `-t` or test ids:** that is COMMAND's own filter, and a test it
   leaves out isn't one hushrun reused.
+
+## Amendment 1: re-exports are followed, and what a value two imports away still misses (2026-11-12)
+
+The Consequences said a value two imports away is caught with Vitest. A reviewer showed it isn't
+for a chain of barrels: the test imports `rate` from `src/index.js`, which has `export * from
+'./sub/index.js'`, which has `export * from './impl.js'`. Vite runs `export *` through getters of
+its own runtime, below `node_modules`, so no function of either barrel runs when the test reads
+`rate`; the test's list held the outer barrel (the test file imports it) and `impl.js` (its
+function ran), not the middle one, and pointing the middle one at another file left the test
+reusable, and the check passed.
+
+The decision: the plugin reads each module Vite makes, outside `node_modules`, for `export * from`
+and `export { x } from` (its syntax tree, and its text, since a re-export read where there is none
+only widens a list), resolves each through Vite, and appends one statement that hands the result to
+the worker; the worker sends it as the facts' `reexports`, which a test's list follows to the end
+(C-40). A specifier that doesn't resolve is text that only looks like a re-export.
+
+What is caught, then: a value read through a getter of the module that exported it (a named
+export, an `export { x } from`, which Vite compiles to a getter in the barrel), a value a module
+built from another while the file loaded (every test of the file has the module that read it), and
+a chain of re-exports, however long. What isn't: a registry filled at import (the second miss), a
+value two imports away that a module outside the repository or Vite's evaluation copied, and a value
+copied into a module through something that is neither an import, a getter nor a re-export, read by
+no function of the way. Each stands under audit runs, as RFC 0004 §3.2 has it.
+
+## Amendment 2: skips and starts (2026-11-12)
+
+Each test the file skips (`test.skip`, `describe.skip`, `test.todo`, `test.skipIf`) and each that
+skipped itself (`ctx.skip()`) is told `skipped`, and the main process's file counts each test file's
+skipped tests (`skipped`), so that in a run whose COMMAND failed none of them, and no file with one,
+records a pass (ADR 0077 Amendment 2). The plugin names the start of Vitest that claimed the run
+(`start`, in its file and, through `HUSHRUN_VITEST_START`, in each worker's); only that start writes,
+so a second Vitest in one COMMAND adds nothing. Its own merge keeps C-32's rules: a test file ran
+whole only when it did in every project that ran it, and a test finished only where every worker
+that told it, and didn't leave it out, finished it. When Vitest says its run ended more than once,
+the main process's file adds each end to the earlier ones instead of replacing them.

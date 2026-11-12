@@ -52,8 +52,8 @@ package's: RFC 0004 §6.
    - a test **passed** only when the binary's run **ended normally** and the test was listed, not
      left out by hushrun, and named by no `--- FAIL: `. A run ended normally when Go's test main
      returned from running the tests (below); the output was read to its end, every line shorter
-     than 1 MiB, within 5 seconds of the binary's exit (what `go test` itself waits by default for
-     a program the test left holding it); its last line but `coverage: …` lines is Go's summary,
+     than 1 MiB, within 5 seconds of the binary's exit (Amendment 1: `go test` itself waits longer,
+     and the runner passes the output on to its end); its last line but `coverage: …` lines is Go's summary,
      marked with `\x16` under `-json` (`-test.v=test2json`, where Go marks its own lines) and
      possibly after a test's output with no newline otherwise; and the summary is `PASS` with
      exit 0 and `-test.paniconexit0` (so `os.Exit(0)` in a test is a panic), or `FAIL` with exit
@@ -129,3 +129,26 @@ package's: RFC 0004 §6.
   certain. COMMAND is in every key, so a check with `-run` still reuses by package.
 - **Listing a package reused whole:** it would start a binary whose package the plan reuses, and
   run its `init`, only to count its tests.
+
+## Amendment 1: a test binary's output is passed on to its end (2026-11-12)
+
+§4 read the binary's output for 5 seconds after it exited, "what `go test` itself waits by default
+for a program the test left holding it", and the runner then exited. A reviewer showed the premise
+wrong: with a test that started `sh -c "sleep 12; echo late"` on its standard output, Go 1.27's `go
+test` printed `late` and waited the full 12 s, with hushrun's `unit: file` too, but with `unit:
+test` it printed nothing late and stopped after 5 s, since the output went through the runner's
+pipe and the runner had exited.
+
+The decision: the runner decides the tests as before (no test of the start passes when the output
+was still open 5 seconds after the binary exited: a program holding it may print anything into it),
+writes its facts, and then passes the output on until every program lets it go, as `go test` reads
+it without hushrun.
+
+## Amendment 2: skips and starts (2026-11-12)
+
+A test whose own `--- SKIP` line, or a subtest's, the output holds is told `skipped`, so that in a
+run whose COMMAND failed it records no pass (ADR 0077 Amendment 2). Go prints those lines with `-v`
+and `-json` only; without them a skip can't be told from a pass, and a test that skipped because
+another failed in the same run is recorded as passed, as before. Each runner's facts name the start
+of `go test` that started it, by that process (`start`), so that one `go test` testing several
+packages is one start.
