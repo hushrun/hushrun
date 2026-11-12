@@ -498,12 +498,21 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
             jest.major
         );
         // Jest left out what the plan listed, before any of their hooks, and says so, beside the
-        // test the file skips itself.
+        // test the file skips itself: whichever of the five the audit picks (by its key and the
+        // run's start), four are left out and the skipped test runs. Before a run that failed
+        // stopped recording a skip as a pass, the skipped test was a sixth that could be picked,
+        // and Jest then said 6.
         assert!(
             second.stderr.contains("5 skipped"),
             "Jest {}: {}",
             jest.major,
             second.stderr
+        );
+        assert_eq!(
+            r.map()["units"]["test/cart.test.js"]["tests"]["skipped"],
+            "passed",
+            "Jest {}: the skipped test ran again",
+            jest.major
         );
         let result = store_result(&r);
         assert_eq!(result["units"]["tests"]["reused"], 4, "{result:#}");
