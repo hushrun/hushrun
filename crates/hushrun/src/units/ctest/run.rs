@@ -235,7 +235,11 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
         .ok_or_else(|| "ctest's arguments aren't all UTF-8".to_string())?;
     let items = args::parse(&words);
     let select = match args::mode(&items) {
-        Mode::Passthrough => return Err(Skip::Passthrough),
+        Mode::Passthrough => {
+            return Err("ctest was started for something other than a test run"
+                .to_string()
+                .into());
+        }
         Mode::Unread(why) => return Err(why.into()),
         Mode::Observe(_) => false,
         Mode::Select => true,
