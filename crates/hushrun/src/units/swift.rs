@@ -554,9 +554,11 @@ fn millis(seconds: f64) -> u64 {
 /// \[C-48\] What a serial XCTest run printed on standard output, its only record: each listed
 /// test that started, and how it ended. macOS prints `Test Case '-[Target.Class method]' passed
 /// (0.001 seconds).`, a nested class by its mangled name; Linux `Test Case 'Class.method' passed
-/// (0.0 seconds)`, with no target, which names a listed test only when one target has it.
+/// (0.0 seconds)`, with no target, which names a listed test only when one target has it. A pass
+/// or a skip counts only after the test's `started` line.
 pub fn read_console(bytes: &[u8], listing: &Listing) -> BTreeMap<String, Outcome> {
     let mut out = BTreeMap::new();
+    let mut open: BTreeSet<String> = BTreeSet::new();
     let text = plain(bytes);
     for line in text.split(['\n', '\r']) {
         let mut from = 0;
@@ -582,11 +584,20 @@ pub fn read_console(bytes: &[u8], listing: &Listing) -> BTreeMap<String, Outcome
                 .and_then(|(_, r)| r.split_once(" seconds"))
                 .and_then(|(n, _)| n.trim().parse::<f64>().ok())
                 .unwrap_or(0.0);
+            // A pass or a skip counts only as the end of a start this console said: a line
+            // printed for a test that never started (by a test that prints XCTest's words, or a
+            // sibling after a crash) is no pass. A failure counts whatever comes before it.
             let outcome = match verb {
-                "started" => Outcome::Started,
-                "passed" => Outcome::Passed(millis(seconds)),
-                "failed" => Outcome::Failed(millis(seconds)),
-                "skipped" => Outcome::Skipped(millis(seconds)),
+                "started" => {
+                    open.insert(id.clone());
+                    Outcome::Started
+                }
+                "passed" if open.remove(&id) => Outcome::Passed(millis(seconds)),
+                "skipped" if open.remove(&id) => Outcome::Skipped(millis(seconds)),
+                "failed" => {
+                    open.remove(&id);
+                    Outcome::Failed(millis(seconds))
+                }
                 _ => continue,
             };
             out.insert(id, outcome);
@@ -2307,7 +2318,7 @@ mod tests {
         ));
         let shared = Listing::parse("A.Same/testX\nB.Same/testX\nA.Only/testY\n");
         let both = read_console(
-            b"Test Case 'Same.testX' passed (0.0 seconds)\nTest Case 'Only.testY' passed (0.1 seconds)\n",
+            b"Test Case 'Same.testX' started at x\nTest Case 'Same.testX' passed (0.0 seconds)\nTest Case 'Only.testY' started at x\nTest Case 'Only.testY' passed (0.1 seconds)\n",
             &shared,
         );
         assert_eq!(both.len(), 1);
@@ -2318,6 +2329,23 @@ mod tests {
             &shared,
         );
         assert_eq!(colored["A.Only/testY"], Outcome::Failed(2));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_console_pass_counts_only_after_its_test_started() {
+        let listing = Listing::parse("A.Only/testY\nA.Only/testZ\n");
+        // A line that says a test passed, printed by a sibling that never started it (a test
+        // that prints XCTest's words, a crash before its start): no pass.
+        let told = read_console(
+            b"Test Case 'Only.testZ' started at x\nTest Case 'Only.testY' passed (0.1 seconds)\nTest Case 'Only.testZ' passed (0.2 seconds)\nTest Case 'Only.testZ' passed (0.3 seconds)\n",
+            &listing,
+        );
+        assert!(!told.contains_key("A.Only/testY"), "{told:?}");
+        assert_eq!(told["A.Only/testZ"], Outcome::Passed(200));
+        // A failure counts with no start: it never makes a pass.
+        let failed = read_console(b"Test Case 'Only.testY' failed (0.1 seconds)\n", &listing);
+        assert_eq!(failed["A.Only/testY"], Outcome::Failed(100));
     }
 
     // covers: C-48
