@@ -173,11 +173,23 @@ struct Project {
     path: std::ffi::OsString,
     /// When the last build ended.
     built: std::cell::Cell<Option<std::time::SystemTime>>,
+    /// The build directory, from the repository.
+    build_dir: String,
 }
 
 impl Project {
     /// A repository of `files`, configured in `build` with `generator` and built.
     fn new(cmake: &Cmake, generator: &str, files: &[(String, String)]) -> Project {
+        Project::new_in(cmake, generator, files, "build")
+    }
+
+    /// [`Project::new`], built in `build_dir`.
+    fn new_in(
+        cmake: &Cmake,
+        generator: &str,
+        files: &[(String, String)],
+        build_dir: &str,
+    ) -> Project {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("real path");
         let repo = root.join("repo");
@@ -203,13 +215,14 @@ impl Project {
             cmake: cmake.clone(),
             path,
             built: std::cell::Cell::new(None),
+            build_dir: build_dir.to_string(),
         };
         for (path, text) in files {
             p.write(path, text);
         }
         git::commit_all(&p.repo, "init");
         let mut configure = p.tool("cmake");
-        configure.args(["-S", ".", "-B", "build", "-G", generator]);
+        configure.args(["-S", ".", "-B", build_dir, "-G", generator]);
         if generator == "Ninja" {
             configure.arg(format!(
                 "-DCMAKE_MAKE_PROGRAM={}",
@@ -238,7 +251,7 @@ impl Project {
     fn build(&self) {
         let out = self
             .tool("cmake")
-            .args(["--build", "build"])
+            .args(["--build", &self.build_dir])
             .output()
             .expect("cmake --build");
         assert!(
@@ -608,6 +621,496 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
             assert_eq!(result["units"]["ran"], json!(3), "{at}: {result:#}");
         }
     }
+}
+
+/// A program of the project that writes a header (`gen.h`) a test program includes: the
+/// generator's source and the header it includes are what that test program reads.
+fn generated() -> Vec<(String, String)> {
+    vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "build/\n"),
+        file(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.19)\nproject(gen C)\nenable_testing()\n\
+             add_executable(gen tools/gen.c)\ntarget_include_directories(gen PRIVATE common)\n\
+             add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gen.h COMMAND gen ${CMAKE_BINARY_DIR}/gen.h DEPENDS gen)\n\
+             add_executable(t_u tests/t_u.c ${CMAKE_BINARY_DIR}/gen.h)\ntarget_include_directories(t_u PRIVATE ${CMAKE_BINARY_DIR})\n\
+             add_executable(t_s tests/t_s.c)\ntarget_include_directories(t_s PRIVATE common)\n\
+             add_executable(t_p tests/t_p.c)\n\
+             add_test(NAME u COMMAND t_u)\nadd_test(NAME s COMMAND t_s)\nadd_test(NAME p COMMAND t_p)\n",
+        ),
+        file("common/val.h", "#define VAL 1\n"),
+        file(
+            "tools/gen.c",
+            "#include <stdio.h>\n#include \"val.h\"\nint main(int argc, char **argv) {\n\
+             \x20 FILE *f = fopen(argv[1], \"w\"); if (!f) return 1;\n\
+             \x20 fprintf(f, \"#define GEN_VAL %d\\n\", VAL); fclose(f); return 0;\n}\n",
+        ),
+        file(
+            "tests/t_u.c",
+            "#include \"gen.h\"\nint main(void) { return GEN_VAL == 1 ? 0 : 1; }\n",
+        ),
+        file(
+            "tests/t_s.c",
+            "#include \"val.h\"\nint main(void) { return VAL > 0 ? 0 : 1; }\n",
+        ),
+        file("tests/t_p.c", "int main(void) { return 0; }\n"),
+    ]
+}
+
+// covers: C-49, C-30
+#[test]
+fn a_header_a_program_of_the_project_writes_reads_what_that_program_is_built_from() {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let p = Project::new(&cmake, generator, &generated());
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+            // t_u includes gen.h, which gen writes: it reads gen's source and the header gen.c
+            // includes, as much as its own source.
+            let map = store::map(&p.cache);
+            let reads = map["units"]["t_u"]["reads"].clone();
+            for file in ["common/val.h", "tests/t_u.c", "tools/gen.c"] {
+                assert!(
+                    reads.as_array().unwrap().contains(&json!(file)),
+                    "{at}: t_u read {reads}"
+                );
+            }
+            // val.h changes, and the build writes another gen.h: t_u runs, and fails.
+            p.write("common/val.h", "#define VAL 2\n");
+            git::commit_all(&p.repo, "val");
+            p.build();
+            let second = p.run(CTEST, &[]);
+            assert!(
+                second.ran().contains(&"u".to_string()),
+                "{at}\n{}\n{}",
+                second.stdout,
+                second.stderr
+            );
+            assert_ne!(second.code, 0, "{at}\n{}", second.stdout);
+        }
+    }
+}
+
+// covers: C-49, C-30
+#[test]
+fn a_program_or_a_file_a_test_names_is_read_by_its_test_program() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let driver = "#include <unistd.h>\n#include <stdlib.h>\nint main(int argc, char **argv) {\n\
+            \x20 const char *p = argc > 1 ? argv[1] : getenv(\"SERVER\");\n\
+            \x20 if (!p) return 0;\n  execv(p, (char *const[]){(char *)p, 0}); return 2;\n}\n";
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(drv C)\nenable_testing()\n\
+                     file(WRITE ${CMAKE_BINARY_DIR}/data.txt \"x\")\n\
+                     add_executable(server tools/server.c)\ntarget_include_directories(server PRIVATE common)\n\
+                     add_executable(other tools/other.c)\ntarget_include_directories(other PRIVATE common)\n\
+                     foreach(t t_driver t_envdriver)\n  add_executable(${t} tests/driver.c)\nendforeach()\n\
+                     add_executable(t_dirdriver tests/t_data.c)\n\
+                     add_executable(t_data tests/t_data.c)\nadd_executable(t_input tests/t_input.c)\n\
+                     add_test(NAME integ COMMAND t_driver $<TARGET_FILE:server>)\n\
+                     add_test(NAME env COMMAND t_envdriver)\n\
+                     set_tests_properties(env PROPERTIES ENVIRONMENT \"SERVER=$<TARGET_FILE:other>\")\n\
+                     add_test(NAME dir COMMAND t_dirdriver --dir=${CMAKE_BINARY_DIR})\n\
+                     add_test(NAME data COMMAND t_data ${CMAKE_BINARY_DIR}/data.txt)\n\
+                     add_test(NAME input COMMAND t_input ${CMAKE_SOURCE_DIR}/tests/input.c)\n",
+                ),
+                file("common/val.h", "#define VAL 1\n"),
+                file(
+                    "tools/server.c",
+                    "#include \"val.h\"\nint main(void) { return VAL == 1 ? 0 : 1; }\n",
+                ),
+                file(
+                    "tools/other.c",
+                    "#include \"val.h\"\nint main(void) { return VAL == 1 ? 0 : 1; }\n",
+                ),
+                file("tests/driver.c", driver),
+                file("tests/t_data.c", "int main(void) { return 0; }\n"),
+                file("tests/t_input.c", "int main(void) { return 0; }\n"),
+                file("tests/input.c", "int unused;\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = |unit: &str| -> Vec<String> {
+            map["units"][unit]["reads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{at}: {unit}: {map:#}"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        // A program a test starts by its path on the command line, or from a variable its test
+        // sets, is read by the test's program.
+        assert_eq!(
+            reads("t_driver"),
+            ["common/val.h", "tests/driver.c", "tools/server.c"],
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_envdriver"),
+            ["common/val.h", "tests/driver.c", "tools/other.c"],
+            "{at}"
+        );
+        // The build directory itself: any program in it may start, every source is read, and
+        // whether those programs are up to date can't be told.
+        assert!(
+            reads("t_dirdriver").contains(&"tools/server.c".to_string()),
+            "{at}: {map:#}"
+        );
+        assert_eq!(
+            map["units"]["t_dirdriver"]["notFollowed"],
+            json!(["stale program"]),
+            "{at}"
+        );
+        // A file no rule builds is no program; a file of the repository is read.
+        assert_eq!(reads("t_data"), ["tests/t_data.c"], "{at}");
+        assert_eq!(
+            reads("t_input"),
+            ["tests/input.c", "tests/t_input.c"],
+            "{at}"
+        );
+    }
+}
+
+// covers: C-49
+#[test]
+fn a_test_presets_repeat_index_and_show_only_are_read() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    let mut files = shop("reuse");
+    files.push(file(
+        "CMakePresets.json",
+        r#"{"version": 3,
+            "configurePresets": [{"name": "dev", "binaryDir": "${sourceDir}/build"}],
+            "testPresets": [
+              {"name": "repeat", "configurePreset": "dev",
+               "execution": {"repeat": {"mode": "until-pass", "count": 3}}},
+              {"name": "index", "configurePreset": "dev",
+               "filter": {"include": {"index": {"start": 1, "end": 7}}}},
+              {"name": "show", "configurePreset": "dev", "execution": {"showOnly": "human"}}
+            ]}"#,
+    ));
+    let p = Project::new(&cmake, generator, &files);
+    // until-pass in the preset: a pass may have come after a failure, as with --repeat.
+    let repeat = p.shim(&["--preset", "repeat"], json!({}), None, &[]);
+    assert_eq!(repeat.code, 0, "{}", repeat.stdout);
+    assert_eq!(
+        repeat.unit("t_greet")["notFollowed"][0]["why"],
+        json!("repeat until-pass"),
+        "{:#}",
+        repeat.facts
+    );
+    // A command line's --repeat replaces the preset's.
+    let once = p.shim(
+        &["--preset", "repeat", "--repeat", "until-fail:1"],
+        json!({}),
+        None,
+        &[],
+    );
+    assert!(
+        once.unit("t_greet")["notFollowed"]
+            .as_array()
+            .is_none_or(|n| n.is_empty()),
+        "{:#}",
+        once.facts
+    );
+    // The preset picks tests by their position: nothing is left out.
+    let index = p.shim(
+        &["--preset", "index"],
+        json!({"unit": "test", "reuse": ["t_greet"]}),
+        Some(shop_plan(&["t_greet"])),
+        &[],
+    );
+    assert_eq!(index.code, 0, "{}", index.stdout);
+    assert!(index.left_out().is_empty(), "{:#}", index.facts);
+    assert_eq!(index.selection(), "observed only", "{:#}", index.facts);
+    // The preset only shows the tests: no test runs, and nothing is observed.
+    let show = p.shim(&["--preset", "show"], json!({}), None, &[]);
+    assert!(
+        show.facts["settings"]["notObserved"]
+            .as_str()
+            .is_some_and(|w| w.contains("showOnly")),
+        "{:#}",
+        show.facts
+    );
+}
+
+// covers: C-49
+#[test]
+fn hushruns_listings_write_no_file_a_preset_or_the_command_line_names() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for cmake in with_cmake() {
+        let generator = generators(&cmake)[0];
+        let at = format!("CMake {:?}", cmake.version);
+        let mut files = shop("reuse");
+        // A preset's JUnit file came in version 6 (CMake 3.25).
+        let (version, junit) = if cmake.version >= (3, 25) {
+            (6, r#", "outputJUnitFile": "pj.xml""#)
+        } else {
+            (3, "")
+        };
+        files.push(file(
+            "CMakePresets.json",
+            &format!(
+                r#"{{"version": {version},
+                "configurePresets": [{{"name": "dev", "binaryDir": "${{sourceDir}}/build"}}],
+                "testPresets": [{{"name": "log", "configurePreset": "dev",
+                  "output": {{"outputLogFile": "mylog.txt"{junit}}}}}]}}"#
+            ),
+        ));
+        let p = Project::new(&cmake, generator, &files);
+        // The user's own log and JUnit file from before.
+        p.write("mylog.txt", "mine\n");
+        p.write("build/pj.xml", "<mine/>\n");
+        // A ctest in front of the real one that says when, as the run starts, a file the user
+        // reads isn't as it was before hushrun's first listing.
+        let wrap = p.root.join("wrap");
+        std::fs::create_dir_all(&wrap).unwrap();
+        let marker = p.root.join("changed.txt");
+        let first = p.root.join("first.txt");
+        let watched = "mylog.txt build/mylog.txt pj.xml build/pj.xml";
+        let script = format!(
+            "#!/bin/sh\nsum() {{ for f in {watched}; do cksum \"$f\" 2>/dev/null; done; }}\n\
+             [ -f '{first}' ] || sum > '{first}'\n\
+             case \"$*\" in *--show-only*|*--version*) ;; *) sum | cmp -s - '{first}' || echo \"$*\" >> '{marker}' ;; esac\n\
+             exec '{real}' \"$@\"\n",
+            real = cmake.bin.join("ctest").display(),
+            marker = marker.display(),
+            first = first.display()
+        );
+        std::fs::write(wrap.join("ctest"), script).unwrap();
+        std::fs::set_permissions(wrap.join("ctest"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let mut was = std::ffi::OsString::from("=");
+        was.push(wrap.as_os_str());
+        was.push(":");
+        was.push(&p.path);
+        let was = was.into_string().unwrap();
+        let shim = p.shim(
+            &["--preset", "log", "-O", "cli.log"],
+            json!({"unit": "test", "reuse": ["t_greet"]}),
+            Some(shop_plan(&["t_greet"])),
+            &[("HUSHRUN_PROGRAMS_PATH", was.as_str())],
+        );
+        assert_eq!(shim.code, 0, "{at}\n{}", shim.stdout);
+        assert_eq!(shim.left_out(), ["t_greet::greet"], "{at}");
+        assert!(
+            !marker.exists(),
+            "{at}: a listing changed a file before: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+    }
+}
+
+// covers: C-49
+#[test]
+fn an_in_source_build_says_why_nothing_is_reused() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let mut files = shop("reuse");
+        files.retain(|(path, _)| path != ".gitignore");
+        files.push(file(
+            ".gitignore",
+            "CMakeFiles/\nCMakeCache.txt\n*.cmake\nMakefile\n*.ninja\n.ninja_*\nTesting/\nlib*.a\nt_*\n!tests/\n",
+        ));
+        let p = Project::new_in(&cmake, generator, &files, ".");
+        let first = p.run(&["run", "unit", "--", "ctest"], &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        // Its build directory is the repository: what each program is built from can't be told
+        // apart from the repository's files, and the run says so of each program.
+        let map = store::map(&p.cache);
+        for unit in ["t_price", "t_greet"] {
+            assert_eq!(
+                map["units"][unit]["notFollowed"],
+                json!(["in-source build"]),
+                "{at}: {map:#}"
+            );
+        }
+    }
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_skipped_test_in_a_run_that_failed_records_no_pass() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    let p = Project::new(
+        &cmake,
+        generator,
+        &[
+            file("hushrun.yaml", &yaml("reuse")),
+            file(".gitignore", "build/\n"),
+            file(
+                "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.19)\nproject(skip C)\nenable_testing()\n\
+                 add_executable(t_skip tests/t_skip.c)\nadd_executable(t_fail tests/t_fail.c)\n\
+                 add_executable(t_ok tests/t_ok.c)\n\
+                 add_test(NAME skip COMMAND t_skip)\nadd_test(NAME fail COMMAND t_fail)\nadd_test(NAME ok COMMAND t_ok)\n\
+                 set_tests_properties(skip PROPERTIES SKIP_RETURN_CODE 77)\n",
+            ),
+            file("tests/t_skip.c", "int main(void) { return 77; }\n"),
+            file("tests/t_fail.c", "int main(void) { return 1; }\n"),
+            file("tests/t_ok.c", "int main(void) { return 0; }\n"),
+        ],
+    );
+    let ran = p.run(CTEST, &[]);
+    assert_ne!(ran.code, 0, "{}", ran.stdout);
+    // t_fail failed and t_ok passed; t_skip's test was skipped in a run that failed, which
+    // proves nothing: it records no pass.
+    assert_eq!(
+        unit_results(&p.cache),
+        ["fail", "pass"],
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+}
+
+// covers: C-49, C-30
+#[test]
+fn a_source_no_program_is_built_from_is_in_the_rest_set() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        // t_case reads cases/one.c at run time, by a path it was built with, which no build
+        // edge names; t_all names the repository's cases directory, and reads every source; a
+        // custom command no test program depends on compiles tools/embed.c; include_copy/x.h is
+        // a header nothing includes.
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(own C)\nenable_testing()\n\
+                     add_executable(t_case tests/t_case.c)\n\
+                     target_compile_definitions(t_case PRIVATE CASE=\"${CMAKE_SOURCE_DIR}/cases/one.c\")\n\
+                     add_executable(t_all tests/t_all.c)\nadd_executable(t_p tests/t_p.c)\n\
+                     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/embed.txt COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/tools/embed.c ${CMAKE_BINARY_DIR}/embed.txt DEPENDS tools/embed.c)\n\
+                     add_custom_target(embed ALL DEPENDS ${CMAKE_BINARY_DIR}/embed.txt)\n\
+                     add_test(NAME case COMMAND t_case)\nadd_test(NAME all COMMAND t_all ${CMAKE_SOURCE_DIR}/cases)\n\
+                     add_test(NAME p COMMAND t_p)\n",
+                ),
+                file("cases/one.c", "int one = 1;\n"),
+                file("tools/embed.c", "int embed;\n"),
+                file("include_copy/x.h", "int x;\n"),
+                file(
+                    "tests/t_case.c",
+                    "#include <stdio.h>\n#include <string.h>\nint main(void) {\n\
+                     \x20 char line[64] = {0}; FILE *f = fopen(CASE, \"r\"); if (!f) return 1;\n\
+                     \x20 fgets(line, sizeof line, f); fclose(f); return strcmp(line, \"int one = 1;\\n\") != 0;\n}\n",
+                ),
+                file("tests/t_all.c", "int main(void) { return 0; }\n"),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        // No program's build gives these files to it: they are in the rest set, so a change to
+        // one runs every program; t_all reading every source doesn't make them sources.
+        let map = store::map(&p.cache);
+        for path in ["cases/one.c", "tools/embed.c", "include_copy/x.h"] {
+            assert!(map["rest"][path].is_string(), "{at}: {path}: {map:#}");
+        }
+        assert!(map["rest"]["tests/t_case.c"].is_null(), "{at}: {map:#}");
+        // cases/one.c changes: t_case runs, and fails.
+        p.write("cases/one.c", "int one = 2;\n");
+        let second = p.run(CTEST, &[]);
+        assert!(
+            second.ran().contains(&"case".to_string()),
+            "{at}\n{}\n{}",
+            second.stdout,
+            second.stderr
+        );
+        assert_ne!(second.code, 0, "{at}");
+    }
+}
+
+// covers: C-49, C-32
+#[test]
+fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    let generator = generators(&cmake)[0];
+    // t_u's `a` runs in the first start; its `d` and `c` in the second, where t_v fails first
+    // and --stop-on-failure stops it before `c`, which always fails.
+    let p = Project::new(
+        &cmake,
+        generator,
+        &[
+            file("hushrun.yaml", &yaml("reuse")),
+            file(".gitignore", "build/\n"),
+            file(
+                "CMakeLists.txt",
+                "cmake_minimum_required(VERSION 3.19)\nproject(two C)\nenable_testing()\n\
+                 add_executable(t_u tests/t_u.c)\nadd_executable(t_v tests/t_v.c)\n\
+                 add_test(NAME a COMMAND t_u a)\nadd_test(NAME d COMMAND t_u d)\n\
+                 add_test(NAME vfail COMMAND t_v)\nadd_test(NAME c COMMAND t_u c)\n\
+                 set_tests_properties(a PROPERTIES LABELS L1)\n\
+                 set_tests_properties(d vfail c PROPERTIES LABELS L2)\n",
+            ),
+            file(
+                "tests/t_u.c",
+                "#include <string.h>\nint main(int argc, char **argv) { return argc > 1 && strcmp(argv[1], \"c\") == 0; }\n",
+            ),
+            file(
+                "tests/t_v.c",
+                "#include <stdlib.h>\nint main(void) { return getenv(\"FAIL_V\") != 0; }\n",
+            ),
+        ],
+    );
+    let line = "ctest --test-dir build -L L1; ctest --test-dir build -L L2 --stop-on-failure -j1";
+    let first = p.run(&["run", "unit", "--", "sh", "-c", line], &[("FAIL_V", "1")]);
+    assert_ne!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(!first.ran().contains(&"c".to_string()), "{}", first.stdout);
+    // Each start ran a share of t_u, and neither ran it whole: it records no pass. t_v failed.
+    assert_eq!(
+        unit_results(&p.cache),
+        ["fail"],
+        "{}\n{}",
+        first.stdout,
+        first.stderr
+    );
+}
+
+/// The result of each unit result this machine recorded, `pass` or `fail`, sorted.
+fn unit_results(cache: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    collect(&cache.join("results/units/v0"), &mut files);
+    let mut out: Vec<String> = files
+        .iter()
+        .map(|path| {
+            let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            value["result"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 // covers: C-49, C-39
@@ -1042,4 +1545,47 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
         "{map:#}"
     );
     assert!(map["units"]["t_greet"]["notFollowed"].is_null(), "{map:#}");
+}
+
+// covers: C-49
+#[test]
+fn a_program_a_test_left_running_keeps_printing_after_hushruns_ctest_returns() {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("ctest"),
+        "#!/bin/sh\necho ran; (sleep 2; echo late line) & exit 8\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("ctest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let was = format!("{}:/usr/bin:/bin", bin.display());
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "ctest", "--version"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let status = child.wait().unwrap();
+    let returned = started.elapsed();
+    // hushrun's ctest hands ctest its own standard output: it returns as ctest does, and what a
+    // program left running prints later reaches the same output.
+    assert_eq!(status.code(), Some(8));
+    assert!(returned < std::time::Duration::from_secs(2), "{returned:?}");
+    let out = reader.join().unwrap();
+    assert!(out.contains("ran") && out.contains("late line"), "{out}");
 }

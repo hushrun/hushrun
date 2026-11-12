@@ -101,13 +101,100 @@ pub fn parse_listing(stdout: &[u8]) -> Result<(Listing, Vec<String>), String> {
 /// What a test's program is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Program {
-    /// Built in a CMake build directory: its real path and that directory's.
-    Built { path: PathBuf, build: PathBuf },
+    /// Built in a CMake build directory: its real path and that directory's, and the paths its
+    /// test names besides (in its arguments and its `ENVIRONMENT`), which it may start or read.
+    Built {
+        path: PathBuf,
+        build: PathBuf,
+        named: Vec<Named>,
+    },
     /// Anything else (`sh`, `python3`, a program outside any build directory): what it reads
     /// can't be told.
     Elsewhere(String),
     /// The listing names none: it isn't built, or can't be found.
     None,
+}
+
+/// A path a test names beside its program, that exists: what its program may start or read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Named {
+    /// A file of a CMake build directory, by its real path and that directory's: a program the
+    /// test starts when a build rule makes it (`$<TARGET_FILE:server>`), else a file it reads.
+    Built { path: PathBuf, build: PathBuf },
+    /// A directory of a build directory: which of its programs the test starts, and whether they
+    /// are up to date, can't be told.
+    BuildDir(PathBuf),
+    /// A directory of the repository: which of its files the test reads can't be told.
+    RepoDir(PathBuf),
+    /// A file of the repository, from its root: one the test reads.
+    Repo(String),
+}
+
+/// The paths `listed` names besides its program: each argument after the first, or its value
+/// after `=` (`--server=/b/server`), and each value of its `ENVIRONMENT` and
+/// `ENVIRONMENT_MODIFICATION`, split as `PATH` is. Only absolute paths that exist, in a build
+/// directory or the repository at `root`, and not the program itself.
+pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
+    let mut words: Vec<String> = Vec::new();
+    for arg in listed.command.iter().flatten().skip(1) {
+        words.push(arg.clone());
+        if let Some((_, value)) = arg.split_once('=') {
+            words.push(value.to_string());
+        }
+    }
+    for property in ["ENVIRONMENT", "ENVIRONMENT_MODIFICATION"] {
+        for entry in listed.words(property) {
+            let value = entry.split_once('=').map_or(entry.as_str(), |(_, v)| v);
+            // `NAME=op:value` for a modification.
+            let value = match property {
+                "ENVIRONMENT_MODIFICATION" => value.split_once(':').map_or(value, |(_, v)| v),
+                _ => value,
+            };
+            words.push(value.to_string());
+            if cfg!(unix) {
+                words.extend(value.split([':', ';']).map(str::to_string));
+            } else {
+                words.extend(value.split(';').map(str::to_string));
+            }
+        }
+    }
+    let mut out: Vec<Named> = Vec::new();
+    for word in words {
+        let path = Path::new(&word);
+        if word.is_empty() || !path.is_absolute() {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        if real == program {
+            continue;
+        }
+        let in_build = if real.join("CMakeCache.txt").is_file() {
+            Some(real.clone())
+        } else {
+            build_root(&real)
+        };
+        let found = if real.is_dir() {
+            if in_build.is_some() {
+                Some(Named::BuildDir(real))
+            } else {
+                real.starts_with(root).then_some(Named::RepoDir(real))
+            }
+        } else if let Some(build) = in_build {
+            Some(Named::Built { path: real, build })
+        } else {
+            real.strip_prefix(root)
+                .ok()
+                .map(|inside| Named::Repo(slashed(inside)))
+        };
+        if let Some(found) = found
+            && !out.contains(&found)
+        {
+            out.push(found);
+        }
+    }
+    out
 }
 
 /// A listed test with its unit and its id.
@@ -281,7 +368,15 @@ fn unit_of(
     if let Some(configuration) = configuration {
         name = format!("{name} ({configuration})");
     }
-    (name, Program::Built { path: real, build })
+    let named = named(listed, &real, root);
+    (
+        name,
+        Program::Built {
+            path: real,
+            build,
+            named,
+        },
+    )
 }
 
 /// A path's parts joined with `/`.

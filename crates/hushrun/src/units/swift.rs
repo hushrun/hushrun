@@ -85,8 +85,17 @@ impl Swift {
         }
     }
 
-    /// The target map of the package at `package` for the files `tree`, described once.
-    fn graph(&self, package: &Path, root: &Path, tree: &Tree) -> Result<Arc<Graph>, String> {
+    /// The target map of the package at `package` for the files `tree`, described once, by a
+    /// `swift` started in `cwd` with \[C-32\] COMMAND's own `env NAME=value` assignments
+    /// (`assigned`): a manifest may read the environment (`Context.environment`).
+    fn graph(
+        &self,
+        package: &Path,
+        root: &Path,
+        tree: &Tree,
+        cwd: &Path,
+        assigned: &[(String, String)],
+    ) -> Result<Arc<Graph>, String> {
         let key = Digest::of(
             format!("{}\0{}", package.display(), tree.digest(tree.paths()).hex()).as_bytes(),
         );
@@ -98,20 +107,14 @@ impl Swift {
         }
         let scratch =
             tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
-        let described = describe_all(&swift_here, package, scratch.path())?;
+        let swift = || command::tool("swift", cwd, assigned);
+        let described = describe_all(&swift, package, scratch.path())?;
         let graph = Arc::new(graph_of(&described, root, tree));
         if let Ok(mut cached) = self.graph.lock() {
             *cached = Some((key, Arc::clone(&graph)));
         }
         Ok(graph)
     }
-}
-
-/// `swift`, as COMMAND's environment finds it, with none of hushrun's variables.
-fn swift_here() -> Command {
-    let mut command = Command::new("swift");
-    command.env_remove(super::runner::UNITS_VAR);
-    command
 }
 
 /// \[ADR 0086\] The adapter for `swift test …`, `swift-test …`, or, in a directory that holds a
@@ -340,6 +343,14 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Parsed {
                     "with --enable-code-coverage, hushrun's listing after the run could add to the coverage data".into(),
                 );
             }
+            // \[C-48\] It runs the test products as an earlier build left them, which may be
+            // older than the files hushrun keys them by (a `swift build --build-tests` before,
+            // and a change since): no pass of it is known to be of these files.
+            "--skip-build" => {
+                out.refused = Some(
+                    "with --skip-build, swift test runs what an earlier build made, which may be older than the files hushrun would record it for".into(),
+                );
+            }
             "--maximum-repetitions" | "--repeat-until" => {
                 out.refused = Some(format!(
                     "with {name}, swift test runs a test more than once"
@@ -546,9 +557,11 @@ fn millis(seconds: f64) -> u64 {
 /// \[C-48\] What a serial XCTest run printed on standard output, its only record: each listed
 /// test that started, and how it ended. macOS prints `Test Case '-[Target.Class method]' passed
 /// (0.001 seconds).`, a nested class by its mangled name; Linux `Test Case 'Class.method' passed
-/// (0.0 seconds)`, with no target, which names a listed test only when one target has it.
+/// (0.0 seconds)`, with no target, which names a listed test only when one target has it. A pass
+/// or a skip counts only after the test's `started` line.
 pub fn read_console(bytes: &[u8], listing: &Listing) -> BTreeMap<String, Outcome> {
     let mut out = BTreeMap::new();
+    let mut open: BTreeSet<String> = BTreeSet::new();
     let text = plain(bytes);
     for line in text.split(['\n', '\r']) {
         let mut from = 0;
@@ -574,11 +587,20 @@ pub fn read_console(bytes: &[u8], listing: &Listing) -> BTreeMap<String, Outcome
                 .and_then(|(_, r)| r.split_once(" seconds"))
                 .and_then(|(n, _)| n.trim().parse::<f64>().ok())
                 .unwrap_or(0.0);
+            // A pass or a skip counts only as the end of a start this console said: a line
+            // printed for a test that never started (by a test that prints XCTest's words, or a
+            // sibling after a crash) is no pass. A failure counts whatever comes before it.
             let outcome = match verb {
-                "started" => Outcome::Started,
-                "passed" => Outcome::Passed(millis(seconds)),
-                "failed" => Outcome::Failed(millis(seconds)),
-                "skipped" => Outcome::Skipped(millis(seconds)),
+                "started" => {
+                    open.insert(id.clone());
+                    Outcome::Started
+                }
+                "passed" if open.remove(&id) => Outcome::Passed(millis(seconds)),
+                "skipped" if open.remove(&id) => Outcome::Skipped(millis(seconds)),
+                "failed" => {
+                    open.remove(&id);
+                    Outcome::Failed(millis(seconds))
+                }
                 _ => continue,
             };
             out.insert(id, outcome);
@@ -964,8 +986,8 @@ pub struct Graph {
     pub tests: BTreeMap<String, TestTarget>,
     /// Their directories, by module name.
     pub by_c99: BTreeMap<String, String>,
-    /// Every file of a kind SwiftPM compiles below a target's directory (a binary or system
-    /// library target aside): the sources (C-30).
+    /// The sources (C-30): every file of a kind SwiftPM compiles below a target's directory (a
+    /// binary or system library target aside) that a test target reads.
     pub named: BTreeSet<String>,
     /// Which target's directory depends on which, for `hushrun why`.
     pub edges: BTreeSet<super::db::Edge>,
@@ -1046,9 +1068,30 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             .find(|t| t["name"] == name)?;
         Some(target["settings"].as_array().cloned().unwrap_or_default())
     };
+    // \[C-48\] Whether `dump-package` says a target is built with a plugin, of its package or
+    // another's: `pluginUsages`, which `describe` leaves out for another package's.
+    let uses_plugin = |i: usize, name: &str| -> bool {
+        described[i].dump.as_ref().is_some_and(|dump| {
+            dump["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|t| t["name"] == name)
+                .any(|t| t["pluginUsages"].as_array().is_some_and(|u| !u.is_empty()))
+        })
+    };
+    // Every file of a kind SwiftPM compiles below a target's directory: what the graph can give a
+    // test target.
+    let mut compiled: BTreeSet<String> = BTreeSet::new();
     let mut products: BTreeMap<String, Vec<(usize, Vec<String>)>> = BTreeMap::new();
+    let mut plugin_products: BTreeSet<String> = BTreeSet::new();
     for (i, d) in described.iter().enumerate() {
         for p in d.describe["products"].as_array().into_iter().flatten() {
+            if let Some(name) = p["name"].as_str()
+                && p["type"].get("plugin").is_some()
+            {
+                plugin_products.insert(name.to_string());
+            }
             let names = strings(&p["targets"]);
             if let Some(name) = p["name"].as_str() {
                 products
@@ -1067,7 +1110,7 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
                 continue;
             };
             if kind != "binary" && kind != "system-target" {
-                out.named.extend(
+                compiled.extend(
                     below(tree, &from)
                         .filter(|p| of_kind(p))
                         .map(str::to_string),
@@ -1147,8 +1190,16 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
                     });
                 }
             }
+            // A build-tool plugin may read any file of the package of the target it builds,
+            // whichever package the plugin is of.
+            if uses_plugin(i, &name)
+                || strings(&t["product_dependencies"])
+                    .iter()
+                    .any(|p| plugin_products.contains(p))
+            {
+                dirs.insert(pkg.dir.clone());
+            }
             for dep in strings(&t["target_dependencies"]) {
-                // A build-tool plugin may read any file of its package.
                 if find(i, &dep).is_some_and(|d| d["type"] == "plugin") {
                     dirs.insert(pkg.dir.clone());
                 }
@@ -1196,6 +1247,12 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             .filter(|p| of_kind(p))
             .map(str::to_string)
             .collect();
+        // \[C-30\] Sources are the files the graph gives a test target: of a compiled kind, below a
+        // target's directory, and read by one. Any other file of a compiled kind (a target no test
+        // target depends on, an `Examples/` or `Fixtures/` tree, a package this one doesn't
+        // depend on) is in the rest set, so a change to it runs every test target.
+        out.named
+            .extend(reads.iter().filter(|p| compiled.contains(*p)).cloned());
         out.by_c99.insert(c99.clone(), unit.clone());
         out.tests.insert(
             unit,
@@ -1300,7 +1357,7 @@ impl Adapter for Swift {
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        let graph = self.graph(&self.package, at.root, at.tree)?;
+        let graph = self.graph(&self.package, at.root, at.tree, at.cwd, at.assigned)?;
         leaves_nothing_out(at.map, &graph)?;
         let sets = units::classify(
             at.tree.paths(),
@@ -1361,7 +1418,7 @@ impl Adapter for Swift {
             let this = match graphs.get(&package) {
                 Some(g) => Arc::clone(g),
                 None => {
-                    let g = self.graph(&package, at.root, at.tree)?;
+                    let g = self.graph(&package, at.root, at.tree, at.cwd, at.assigned)?;
                     graphs.insert(package.clone(), Arc::clone(&g));
                     graph.merge(&g);
                     g
@@ -1404,7 +1461,7 @@ impl Adapter for Swift {
             };
             let complete = match &m.tests {
                 Some(tests) => tests.values().filter(|t| !t.deselected).all(|t| t.finished),
-                None => m.finished >= m.selected,
+                None => m.complete,
             };
             let tests = m.tests.map(|tests| {
                 tests
@@ -1608,7 +1665,12 @@ fn write_facts(units: &Path, file: &FactsFile) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let path = units.join(format!("swift-{}-{nanos}.json", std::process::id()));
-    if let Ok(bytes) = serde_json::to_vec(file) {
+    // \[C-32\] Each hushrun's swift is a start of its own, and writes one file.
+    let file = FactsFile {
+        start: Some(format!("swift-{}-{nanos}", std::process::id())),
+        ..file.clone()
+    };
+    if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }
 }
@@ -1911,7 +1973,18 @@ fn observe(
     }
     let file = match &listing {
         Some(listing) => facts_of(listing, &started, &left, parsed, &package),
-        None => refusal("swift test list didn't list the tests after the run".into()),
+        None => {
+            let mut file = refusal("swift test list didn't list the tests after the run".into());
+            // \[C-32\] What SwiftPM ran of what hushrun left out can't be checked against the
+            // list (a nested class, a test added since): the run starts COMMAND once more with
+            // nothing left out.
+            if !left.patterns.is_empty() {
+                file.left_out_unlisted = Some(
+                    "swift test list didn't list the tests after the run, so what swift test ran of those left out can't be checked".into(),
+                );
+            }
+            file
+        }
     };
     write_facts(units, &file);
     let _ = std::fs::remove_dir_all(&work);
@@ -1951,6 +2024,7 @@ fn facts_of(
         parsed,
         run.copied.exit,
         package,
+        run.copied.held,
     )
 }
 
@@ -1965,6 +2039,7 @@ fn tested(
     parsed: &Parsed,
     exit: Option<i32>,
     package: &Path,
+    held: bool,
 ) -> FactsFile {
     // On macOS, with any `--skip` or `--filter`, a nested XCTest class doesn't run, and the
     // parallel xunit says it passed: nothing of it counts.
@@ -1989,16 +2064,23 @@ fn tested(
         } else {
             None
         };
-        let (finished, failed, duration_ms) = match outcome {
-            Some(Outcome::Passed(ms) | Outcome::Skipped(ms)) => (true, false, *ms),
-            Some(Outcome::Failed(ms)) => (true, true, *ms),
+        // \[C-32\] Under --parallel the xunit file reads an XCTSkip as a pass: in a run that
+        // failed, where a skip records nothing, an XCTest pass there may be a skip.
+        let may_skip = xctest(id) && parsed.parallel && exit != Some(0);
+        let (finished, failed, duration_ms, skipped) = match outcome {
+            Some(Outcome::Passed(ms)) => (true, false, *ms, may_skip),
+            Some(Outcome::Skipped(ms)) => (true, false, *ms, true),
+            Some(Outcome::Failed(ms)) => (true, true, *ms, false),
             // A start without an end, in a run that failed, is a crash.
             Some(Outcome::Started) => {
                 in_flight |= !xctest(id);
-                (false, exit != Some(0), 0)
+                (false, exit != Some(0), 0, false)
             }
-            None => (false, false, 0),
+            None => (false, false, 0, false),
         };
+        // \[C-48\] Output a program swift test started held past its end: what it printed can't
+        // be read whole, and no pass of it is recorded. A failure seen is a failure.
+        let finished = finished && (failed || !held);
         any_failed |= failed;
         by_target
             .entry(target.to_string())
@@ -2009,6 +2091,7 @@ fn tested(
                 failed,
                 deselected: left.holds(id) && outcome.is_none(),
                 duration_ms,
+                skipped,
                 ..TestFacts::default()
             });
     }
@@ -2040,6 +2123,15 @@ fn tested(
     );
     if let Some(why) = &left.refused {
         settings.insert("refused".to_string(), Value::String(why.clone()));
+    }
+    if held {
+        settings.insert(
+            "held".to_string(),
+            Value::String(format!(
+                "a program swift test started still held its output {} ms after it ended: what it printed can't be read whole, and no pass of it is recorded; what it printed later was passed on",
+                program::QUIET.as_millis()
+            )),
+        );
     }
     FactsFile {
         schema: facts::FACTS_SCHEMA_V1.into(),
@@ -2143,6 +2235,28 @@ mod tests {
             Some(5)
         );
         assert_eq!(swift_major("Swift Package Manager - Swift 6.4.2"), Some(6));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_run_of_what_was_built_before_is_refused() {
+        // --skip-build runs the test products as they were built, which may be older than the
+        // files hushrun keys them by: nothing is left out or recorded.
+        let p = parse(&["--skip-build", "--parallel"]);
+        assert!(
+            p.refused
+                .as_deref()
+                .is_some_and(|w| w.contains("--skip-build")),
+            "{p:?}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let got = recognize(&words("swift test --skip-build"), dir.path()).unwrap();
+        assert!(
+            matches!(&got, Err(e) if e.contains("--skip-build")),
+            "{got:?}"
+        );
+        // --skip-update builds as usual.
+        assert!(parse(&["--skip-update"]).refused.is_none());
     }
 
     // covers: C-48
@@ -2251,7 +2365,7 @@ mod tests {
         ));
         let shared = Listing::parse("A.Same/testX\nB.Same/testX\nA.Only/testY\n");
         let both = read_console(
-            b"Test Case 'Same.testX' passed (0.0 seconds)\nTest Case 'Only.testY' passed (0.1 seconds)\n",
+            b"Test Case 'Same.testX' started at x\nTest Case 'Same.testX' passed (0.0 seconds)\nTest Case 'Only.testY' started at x\nTest Case 'Only.testY' passed (0.1 seconds)\n",
             &shared,
         );
         assert_eq!(both.len(), 1);
@@ -2262,6 +2376,23 @@ mod tests {
             &shared,
         );
         assert_eq!(colored["A.Only/testY"], Outcome::Failed(2));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_console_pass_counts_only_after_its_test_started() {
+        let listing = Listing::parse("A.Only/testY\nA.Only/testZ\n");
+        // A line that says a test passed, printed by a sibling that never started it (a test
+        // that prints XCTest's words, a crash before its start): no pass.
+        let told = read_console(
+            b"Test Case 'Only.testZ' started at x\nTest Case 'Only.testY' passed (0.1 seconds)\nTest Case 'Only.testZ' passed (0.2 seconds)\nTest Case 'Only.testZ' passed (0.3 seconds)\n",
+            &listing,
+        );
+        assert!(!told.contains_key("A.Only/testY"), "{told:?}");
+        assert_eq!(told["A.Only/testZ"], Outcome::Passed(200));
+        // A failure counts with no start: it never makes a pass.
+        let failed = read_console(b"Test Case 'Only.testY' failed (0.1 seconds)\n", &listing);
+        assert_eq!(failed["A.Only/testY"], Outcome::Failed(100));
     }
 
     // covers: C-48
@@ -2372,6 +2503,7 @@ mod tests {
             &parsed,
             Some(0),
             Path::new("/work/Shop"),
+            false,
         );
         let cart = file.units.iter().find(|u| u.unit == "CartTests").unwrap();
         let inner = cart
@@ -2382,6 +2514,98 @@ mod tests {
             .find(|t| t.id == "Outer.InnerTests/testInner")
             .unwrap();
         assert_eq!(inner.finished, !cfg!(target_os = "macos"));
+    }
+
+    // covers: C-48
+    #[test]
+    fn output_held_past_the_end_records_no_pass() {
+        let listing = Listing::parse("A.C/testOk\nA.C/testBad\n");
+        let console: BTreeMap<String, Outcome> = [
+            ("A.C/testOk".to_string(), Outcome::Passed(1)),
+            ("A.C/testBad".to_string(), Outcome::Failed(1)),
+        ]
+        .into();
+        let parsed = parse::<&str>(&[]);
+        let file = tested(
+            &listing,
+            &console,
+            None,
+            None,
+            &LeftOut::default(),
+            &parsed,
+            Some(1),
+            Path::new("/p"),
+            true,
+        );
+        let tests = file.units[0].tests.as_ref().unwrap();
+        let of = |id: &str| tests.iter().find(|t| t.id == id).unwrap().clone();
+        assert!(!of("C/testOk").finished);
+        assert!(of("C/testBad").finished && of("C/testBad").failed);
+        assert!(file.settings.contains_key("held"));
+    }
+
+    // covers: C-48, C-32
+    #[test]
+    fn a_skipped_test_is_told_as_skipped() {
+        let listing = Listing::parse("A.C/testSkip\nA.C/testOk\nB.s()\n");
+        let console: BTreeMap<String, Outcome> = [
+            ("A.C/testSkip".to_string(), Outcome::Skipped(1)),
+            ("A.C/testOk".to_string(), Outcome::Passed(1)),
+        ]
+        .into();
+        let events = Events {
+            outcomes: [("B.s()".to_string(), Outcome::Skipped(0))].into(),
+            runs_started: 1,
+            runs_ended: 1,
+        };
+        let parsed = parse::<&str>(&[]);
+        let file = tested(
+            &listing,
+            &console,
+            Some(&events),
+            None,
+            &LeftOut::default(),
+            &parsed,
+            Some(1),
+            Path::new("/p"),
+            false,
+        );
+        let skipped: BTreeMap<String, bool> = file
+            .units
+            .iter()
+            .flat_map(|u| u.tests.iter().flatten().map(|t| (t.id.clone(), t.skipped)))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("C/testOk".to_string(), false),
+                ("C/testSkip".to_string(), true),
+                ("s()".to_string(), true)
+            ]
+            .into()
+        );
+        // Under --parallel the xunit file reads an XCTSkip as a pass: in a run that failed, any
+        // XCTest pass there may be a skip.
+        let parallel = parse(&["--parallel"]);
+        let xunit: BTreeMap<String, Outcome> =
+            [("A.C/testOk".to_string(), Outcome::Passed(1))].into();
+        for (exit, may_skip) in [(Some(1), true), (Some(0), false)] {
+            let file = tested(
+                &listing,
+                &BTreeMap::new(),
+                None,
+                Some(&xunit),
+                &LeftOut::default(),
+                &parallel,
+                exit,
+                Path::new("/p"),
+                false,
+            );
+            let ok = file.units[0].tests.as_ref().unwrap();
+            let ok = ok.iter().find(|t| t.id == "C/testOk").unwrap();
+            assert!(ok.finished);
+            assert_eq!(ok.skipped, may_skip, "{exit:?}");
+        }
     }
 
     // covers: C-48
@@ -2407,6 +2631,7 @@ mod tests {
             &parsed,
             Some(1),
             Path::new("/p"),
+            false,
         );
         let unit = |name: &str| file.units.iter().find(|u| u.unit == name).unwrap();
         let test = |u: &str, id: &str| {
@@ -2438,6 +2663,7 @@ mod tests {
             &parsed,
             Some(0),
             Path::new("/p"),
+            false,
         );
         let crashed = quiet
             .units
@@ -2462,6 +2688,7 @@ mod tests {
             &parsed,
             Some(1),
             Path::new("/p"),
+            false,
         );
         assert!(!none.failures_by_unit);
         assert!(none.units.iter().all(|u| u.finished == 0));
@@ -2630,6 +2857,70 @@ mod tests {
                 .any(|n| n.why == "unsafe-flags")
         );
         assert!(names_a_path("-Iinclude") && !names_a_path("-enable-upcoming-feature"));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_build_tool_plugin_of_another_package_makes_its_target_read_its_package_whole() {
+        let root = Path::new("/work");
+        let mut described = vec![
+            Described {
+                dir: PathBuf::from("/work/Shop"),
+                describe: fixture("describe-shop.json"),
+                dump: Some(fixture("dump-shop.json")),
+            },
+            Described {
+                dir: PathBuf::from("/work/LocalMoney"),
+                describe: fixture("describe-localmoney.json"),
+                dump: Some(fixture("dump-localmoney.json")),
+            },
+        ];
+        // Core is built with a plugin of another package: `describe` names it only among its
+        // product dependencies, and `dump-package` among its plugin usages.
+        for t in described[0].dump.as_mut().unwrap()["targets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if t["name"] == "Core" {
+                t["pluginUsages"] = serde_json::json!([{"plugin": {"_0": "P", "_1": "LocalPlug"}}]);
+            }
+        }
+        let files = [
+            "Shop/Package.swift",
+            "Shop/Package.resolved",
+            "Shop/Sources/Core/Core.swift",
+            "Shop/Sources/shop-cli/main.swift",
+            "Shop/Tests/CoreTests/CoreTests.swift",
+            "LocalMoney/Package.swift",
+            "LocalMoney/Sources/Money/Money.swift",
+            "LocalMoney/Sources/MoneyFormat/Format.swift",
+        ];
+        let graph = graph_of(&described, root, &tree_of(&files));
+        let core = &graph.tests["Shop/Tests/CoreTests"];
+        assert!(
+            core.reads.contains("Shop/Sources/shop-cli/main.swift"),
+            "{:?}",
+            core.reads
+        );
+        // The same from `describe` alone, when `dump-package` names no plugin usage: a product
+        // dependency that is a plugin product.
+        for t in described[0].dump.as_mut().unwrap()["targets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            t.as_object_mut().unwrap().remove("pluginUsages");
+        }
+        for t in described[1].describe["products"].as_array_mut().unwrap() {
+            if t["name"] == "Money" {
+                t["type"] = serde_json::json!({"plugin": null});
+            }
+        }
+        let graph = graph_of(&described, root, &tree_of(&files));
+        assert!(
+            graph.tests["Shop/Tests/CoreTests"]
+                .reads
+                .contains("Shop/Sources/shop-cli/main.swift")
+        );
     }
 
     // covers: C-48

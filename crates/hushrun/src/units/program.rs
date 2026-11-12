@@ -69,6 +69,13 @@ pub const PROGRAMS: &[&dyn Program] = &[
 /// nothing it starts reaches a program of hushrun's.
 pub fn real_command(real: &Path) -> Command {
     let mut command = Command::new(real);
+    as_command_had(&mut command);
+    command
+}
+
+/// \[C-32\] Gives `command` the environment COMMAND had, as [`real_command`] does: `PATH` as it
+/// was, and neither of this module's variables. Nothing changes outside a program on `PATH`.
+pub fn as_command_had(command: &mut Command) {
     match path_was(std::env::var_os(PATH_WAS)) {
         Some(Some(path)) => {
             command.env("PATH", path);
@@ -79,7 +86,6 @@ pub fn real_command(real: &Path) -> Command {
         None => {}
     }
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
-    command
 }
 
 /// \[ADR 0086\] How a real program run by [`run_copying_stdout`] ended, and what it wrote on its
@@ -90,16 +96,64 @@ pub struct Copied {
     pub exit: Option<i32>,
     /// The signal that stopped it, when one did.
     pub signal: Option<i32>,
-    /// Every byte it wrote on its standard output, as written.
+    /// Every byte it wrote on its standard output, as written, until it ended, or until its
+    /// output was handed to a forwarder ([`Copied::held`]).
     pub stdout: Vec<u8>,
+    /// \[ADR 0086\] Something it started still held its standard output after it ended: what it
+    /// printed can't be read whole, so no pass of it is recorded. What comes later is passed on
+    /// all the same, by a forwarder of its own ([`FORWARD`]).
+    pub held: bool,
+}
+
+/// \[ADR 0086\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
+/// to tell "still held open by a program it left running" from "closing now": what its last
+/// writers flush as they exit comes within milliseconds, so a quarter second is ample.
+pub const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+/// The longest [`run_copying_stdout`] goes on reading after the program ended, for output that
+/// never goes quiet, before it hands the rest over.
+pub const MOST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+/// \[ADR 0086\] The hidden subcommand of the forwarder [`run_copying_stdout`] hands held output
+/// to: hushrun copying its standard input to its standard output until the end. Never typed.
+pub const FORWARD: &str = "__hushrun-forward";
+
+/// How a program on `PATH` ends with the real program's exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// An exit code `ExitCode` holds: 0 to 255.
+    Code(u8),
+    /// One it doesn't, which ends the process with `std::process::exit`.
+    Whole(i32),
+}
+
+/// The way to end with `code`, where the system's exit codes are wider than a byte (`wide`, as on
+/// Windows): one past 255 passes through whole there, rather than as 1; elsewhere none is wider.
+fn exit_of(code: i32, wide: bool) -> Exit {
+    match u8::try_from(code) {
+        Ok(byte) => Exit::Code(byte),
+        Err(_) if wide => Exit::Whole(code),
+        Err(_) => Exit::Code(1),
+    }
+}
+
+/// Ends as the real program did, with its exit code `code`.
+fn end_with(code: i32) -> ExitCode {
+    match exit_of(code, cfg!(windows)) {
+        Exit::Code(byte) => ExitCode::from(byte),
+        Exit::Whole(code) => {
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            std::process::exit(code)
+        }
+    }
 }
 
 impl Copied {
-    /// The exit code a program on `PATH` ends with for it: its own, 1 past 255, or the same
-    /// signal.
+    /// The exit code a program on `PATH` ends with for it: its own, whole (on Windows past 255
+    /// too), or the same signal.
     pub fn exit_code(&self) -> ExitCode {
         match (self.exit, self.signal) {
-            (Some(code), _) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            (Some(code), _) => end_with(code),
             (None, Some(signal)) => super::runner::end_as(signal),
             (None, None) => ExitCode::from(1),
         }
@@ -112,14 +166,153 @@ impl Copied {
 /// still does), else through a pipe. Standard input and error are inherited untouched, and the
 /// signals that stop a process are passed on, as [`Program::args`]'s start does. `Err` when it
 /// can't be started.
+///
+/// Once the program ended, its output ends when every program holding it let it go. Output still
+/// held open after it ([`QUIET`], at most [`MOST_AFTER`]) by a program it left running is handed,
+/// with what the pipe holds, to a forwarder that hushrun starts and doesn't wait for (hushrun
+/// again, [`FORWARD`], with the read end as its standard input and this process's standard output
+/// as its own), as a shell lets that program go on printing: nothing waits, nothing is lost, and
+/// the run is [`Copied::held`].
+#[cfg(unix)]
 pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
     use std::io::{Read as _, Write as _};
+    use std::time::Instant;
     let (mut from, to) = output_channel()?;
     command.stdout(to);
     let mut child = command.spawn()?;
     // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
     drop(command);
     let forwarding = super::runner::forward_signals(child.id());
+    // Read without blocking, so that the program's end is seen while its output stays open.
+    let flags = rustix::fs::fcntl_getfl(&from)?;
+    rustix::fs::fcntl_setfl(&from, flags | rustix::fs::OFlags::NONBLOCK)?;
+    let mut kept = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let out = std::io::stdout();
+    let mut status: Option<Option<std::process::ExitStatus>> = None;
+    let mut ended_at: Option<Instant> = None;
+    let mut last = Instant::now();
+    let mut held = false;
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&buf[..n]);
+                let mut out = out.lock();
+                let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                last = Instant::now();
+                continue;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
+            Err(_) => break,
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(done)) => {
+                    status = Some(Some(done));
+                    ended_at = Some(Instant::now());
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    status = Some(None);
+                    ended_at = Some(Instant::now());
+                }
+            }
+        }
+        if let Some(at) = ended_at
+            && (last.max(at).elapsed() >= QUIET || at.elapsed() >= MOST_AFTER)
+        {
+            held = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let status = match status {
+        Some(status) => status,
+        None => loop {
+            match child.wait() {
+                Ok(done) => break Some(done),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break None,
+            }
+        },
+    };
+    drop(forwarding);
+    if held {
+        // The forwarder reads as any reader does: blocking again.
+        let _ = rustix::fs::fcntl_setfl(&from, flags);
+        hand_over(from);
+    }
+    Ok(match status {
+        Some(status) => Copied {
+            exit: status.code(),
+            signal: super::runner::signal_of(&status),
+            stdout: kept,
+            held,
+        },
+        None => Copied {
+            stdout: kept,
+            held,
+            ..Copied::default()
+        },
+    })
+}
+
+/// Hands `from` to a forwarder this process doesn't wait for, which copies it to this process's
+/// standard output until its end; when none can be started, copies it here, to its end.
+#[cfg(unix)]
+fn hand_over(from: std::fs::File) {
+    // A unit test's own executable is its test harness, not hushrun: there `cat` forwards.
+    #[cfg(test)]
+    let exe: std::io::Result<PathBuf> = Ok(PathBuf::from("cat"));
+    #[cfg(not(test))]
+    let exe = std::env::current_exe();
+    let started = exe.and_then(|exe| {
+        let mut command = Command::new(&exe);
+        if !cfg!(test) {
+            command.arg(FORWARD);
+        }
+        command
+            .stdin(from.try_clone()?)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    });
+    if started.is_err() {
+        forward(from);
+    }
+}
+
+/// Copies `from` to this process's standard output until its end: what the forwarder does.
+fn forward(mut from: impl std::io::Read) {
+    use std::io::Write as _;
+    let mut buf = vec![0u8; 64 * 1024];
+    let out = std::io::stdout();
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                let mut out = out.lock();
+                if out.write_all(&buf[..n]).and_then(|()| out.flush()).is_err() {
+                    return;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// [`run_copying_stdout`] where output can't be read without blocking: it is read to its end, and
+/// nothing is held.
+#[cfg(not(unix))]
+pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
+    use std::io::{Read as _, Write as _};
+    let (mut from, to) = output_channel()?;
+    command.stdout(to);
+    let mut child = command.spawn()?;
+    drop(command);
     let reader = std::thread::spawn(move || {
         let mut kept = Vec::new();
         let mut buf = vec![0u8; 64 * 1024];
@@ -133,38 +326,25 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
                     let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
                 Err(_) => break,
             }
         }
         kept
     });
-    let status = loop {
-        match child.wait() {
-            Ok(status) => break Some(status),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break None,
-        }
-    };
-    drop(forwarding);
+    let status = child.wait().ok();
     let stdout = reader.join().unwrap_or_default();
-    Ok(match status {
-        Some(status) => Copied {
-            exit: status.code(),
-            signal: super::runner::signal_of(&status),
-            stdout,
-        },
-        None => Copied {
-            stdout,
-            ..Copied::default()
-        },
+    Ok(Copied {
+        exit: status.and_then(|s| s.code()),
+        signal: None,
+        stdout,
+        held: false,
     })
 }
 
 /// The end this process reads and the end the child writes its standard output to: a
 /// pseudo-terminal when this process's standard output is a terminal, else a pipe.
 #[cfg(unix)]
-fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::process::Stdio)> {
+fn output_channel() -> std::io::Result<(std::fs::File, std::process::Stdio)> {
     use rustix::fs::{Mode, OFlags};
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
     use rustix::termios::{
@@ -172,7 +352,10 @@ fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::proc
     };
     if !isatty(std::io::stdout()) {
         let (from, to) = std::io::pipe()?;
-        return Ok((Box::new(from), to.into()));
+        return Ok((
+            std::fs::File::from(std::os::fd::OwnedFd::from(from)),
+            to.into(),
+        ));
     }
     let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
     // Never the child's: only this process reads it.
@@ -193,7 +376,7 @@ fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::proc
         let _ = tcsetwinsize(&terminal, size);
     }
     Ok((
-        Box::new(std::fs::File::from(controller)),
+        std::fs::File::from(controller),
         std::fs::File::from(terminal).into(),
     ))
 }
@@ -300,15 +483,34 @@ pub(super) fn path_was(value: Option<OsString>) -> Option<Option<OsString>> {
 }
 
 /// The real program named `name`: the first file of that name, executable, in a directory of
-/// `path` that isn't a directory of programs (it holds no [`MARKER`]); on Windows with one of
-/// `PATHEXT`'s extensions, `.exe` and `.com` without it.
+/// `path` that isn't a directory of programs (it holds no [`MARKER`]), and that isn't a link into
+/// one; on Windows with one of `PATHEXT`'s extensions, `.exe` and `.com` without it. As a shell
+/// reads `PATH`, an empty entry is the current directory and a relative one is from it: the real
+/// program is the one COMMAND would have started.
 pub fn real(name: &str, path: &OsStr) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    real_in(name, path, &cwd)
+}
+
+/// [`real`], from the current directory `cwd`.
+fn real_in(name: &str, path: &OsStr, cwd: &Path) -> Option<PathBuf> {
+    let programs = |dir: &Path| dir.join(MARKER).exists();
     for dir in std::env::split_paths(path) {
-        if dir.as_os_str().is_empty() || dir.join(MARKER).exists() {
+        let dir = if dir.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else {
+            cwd.join(dir)
+        };
+        if programs(&dir) {
             continue;
         }
         for candidate in candidates(&dir, name) {
-            if runnable(&candidate) {
+            // A link to one of hushrun's programs would start hushrun again, for ever.
+            let into_programs = std::fs::canonicalize(&candidate)
+                .ok()
+                .and_then(|real| real.parent().map(programs))
+                .unwrap_or(false);
+            if runnable(&candidate) && !into_programs {
                 return Some(candidate);
             }
         }
@@ -345,6 +547,10 @@ fn runnable(path: &Path) -> bool {
 /// [`SUBCOMMAND`] and the name; on Windows its own file is `<name>.exe` in the directory
 /// [`DIR_VAR`] names. `None` for any other start, which hushrun parses as usual.
 pub fn from_args(args: &[OsString]) -> Option<ExitCode> {
+    if args.get(1).map(OsString::as_os_str) == Some(FORWARD.as_ref()) {
+        forward(std::io::stdin().lock());
+        return Some(ExitCode::SUCCESS);
+    }
     if args.get(1).map(OsString::as_os_str) == Some(SUBCOMMAND.as_ref()) {
         let Some(name) = args.get(2).and_then(|n| n.to_str()) else {
             eprintln!("error: {SUBCOMMAND} is hushrun's own program on PATH, started by a script");
@@ -386,12 +592,13 @@ fn run_with(
     was: Option<Option<OsString>>,
     units: Option<&Path>,
 ) -> ExitCode {
+    // With no PATH at all nothing is searched (an empty PATH is the current directory).
     let search = match &was {
-        Some(Some(path)) => path.clone(),
-        Some(None) => OsString::new(),
-        None => std::env::var_os("PATH").unwrap_or_default(),
+        Some(Some(path)) => Some(path.clone()),
+        Some(None) => None,
+        None => std::env::var_os("PATH"),
     };
-    let Some(real) = real(name, &search) else {
+    let Some(real) = search.and_then(|search| real(name, &search)) else {
         eprintln!("error: {name}: command not found on PATH");
         return ExitCode::from(127);
     };
@@ -454,7 +661,7 @@ fn run_with(
         program.ended(&call, &start, exit);
     }
     match (exit, signal) {
-        (Some(code), _) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        (Some(code), _) => end_with(code),
         (None, Some(signal)) => super::runner::end_as(signal),
         (None, None) => ExitCode::from(1),
     }
@@ -573,6 +780,102 @@ mod tests {
         // A program no PATH holds: 127, as a shell says.
         let gone = run_with("nothere", &[], None, Some(Some(had)), Some(&units));
         assert_eq!(gone, ExitCode::from(127));
+    }
+
+    // covers: C-39
+    #[cfg(unix)]
+    #[test]
+    fn the_real_program_is_the_one_a_shell_would_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let out = root.join("out.txt");
+        // An empty entry of PATH is the current directory, and a relative one is from it.
+        fake_tool(&root.join("here"), "faketool", &out);
+        fake_tool(&root.join("here/rel"), "faketool", &out);
+        let here = root.join("here");
+        assert_eq!(
+            real_in("faketool", OsStr::new(":/nowhere"), &here),
+            Some(here.join("faketool"))
+        );
+        assert_eq!(
+            real_in("faketool", OsStr::new("/nowhere::/usr/bin"), &here),
+            Some(here.join("faketool"))
+        );
+        assert_eq!(
+            real_in("faketool", OsStr::new("rel"), &here),
+            Some(here.join("rel/faketool"))
+        );
+        // hushrun's own directory of programs, however PATH names it, is never the real one;
+        // nor a program that is a link into it.
+        let programs = make(&root.join("run"), Path::new("/opt/hushrun"), &["faketool"]).unwrap();
+        assert_eq!(real_in("faketool", OsStr::new(""), &programs), None);
+        assert_eq!(real_in("faketool", OsStr::new("."), &programs), None);
+        let linked = root.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(programs.join("faketool"), linked.join("faketool")).unwrap();
+        let path = std::env::join_paths([linked.clone(), root.join("here/rel")]).unwrap();
+        assert_eq!(
+            real_in("faketool", &path, &root),
+            Some(root.join("here/rel/faketool"))
+        );
+    }
+
+    // covers: C-48
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_keeps_output_open_past_its_end_is_waited_for_a_while_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        // The program exits, and leaves one it started holding its standard output.
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo before; sleep 40 & echo $! > '{}'; exit 3",
+            pid.display()
+        ));
+        let started = std::time::Instant::now();
+        let copied = run_copying_stdout(command).unwrap();
+        let took = started.elapsed();
+        if let Ok(text) = std::fs::read_to_string(&pid) {
+            let _ = Command::new("kill").arg(text.trim()).status();
+        }
+        assert_eq!(copied.exit, Some(3));
+        // What came before it ended is passed on and kept; the rest is a forwarder's to pass on,
+        // and hushrun doesn't wait for it.
+        let text = String::from_utf8_lossy(&copied.stdout).into_owned();
+        assert!(text.contains("before"), "{text}");
+        assert!(took < MOST_AFTER * 2, "{took:?}");
+        assert!(copied.held);
+        // A program whose output ends with it isn't held.
+        let mut quick = Command::new("sh");
+        quick.arg("-c").arg("echo done");
+        assert!(!run_copying_stdout(quick).unwrap().held);
+    }
+
+    // covers: C-39
+    #[test]
+    fn an_exit_code_wider_than_a_byte_passes_through_whole() {
+        assert_eq!(exit_of(0, true), Exit::Code(0));
+        assert_eq!(exit_of(8, false), Exit::Code(8));
+        assert_eq!(exit_of(255, true), Exit::Code(255));
+        // Windows: a test runner's 300, or an NTSTATUS such as 0xC0000005, comes back whole.
+        assert_eq!(exit_of(300, true), Exit::Whole(300));
+        assert_eq!(
+            exit_of(0xC000_0005_u32 as i32, true),
+            Exit::Whole(0xC000_0005_u32 as i32)
+        );
+        // Where codes are a byte, none is wider; one that were would end as 1.
+        assert_eq!(exit_of(300, false), Exit::Code(1));
+    }
+
+    // covers: C-39
+    #[cfg(windows)]
+    #[test]
+    fn a_program_on_path_ends_with_a_windows_exit_code_whole() {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit 300"]);
+        let copied = run_copying_stdout(command).unwrap();
+        assert_eq!(copied.exit, Some(300));
+        assert_eq!(exit_of(300, cfg!(windows)), Exit::Whole(300));
     }
 
     // covers: C-39

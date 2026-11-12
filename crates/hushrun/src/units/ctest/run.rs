@@ -101,9 +101,12 @@ impl From<String> for Skip {
     }
 }
 
-/// The real `ctest`, or another tool, with the environment COMMAND had: `PATH` as it was.
-fn tool(program: &Path) -> Command {
-    let mut command = program::real_command(program);
+/// The real `ctest`, or another tool, in `cwd` with the environment COMMAND had: `PATH` as it
+/// was, and \[C-32\] COMMAND's own `env NAME=value` assignments (`assigned`), which the plan's
+/// listing, made before COMMAND, needs given (inside COMMAND they are there already).
+pub fn tool(program: &Path, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    let mut command = super::super::command::tool(program, cwd, assigned);
+    program::as_command_had(&mut command);
     command.stdin(Stdio::null()).stderr(Stdio::null());
     command
 }
@@ -116,23 +119,84 @@ fn path_was() -> Option<OsString> {
     }
 }
 
-/// The real `ctest`'s listing with `args`: its tests, and the lines it printed before them.
-pub fn list(real: &Path, args: &[String], cwd: &Path) -> Result<Vec<select::Listed>, String> {
-    let output = tool(real)
+/// The real `ctest`'s listing with `args`: its tests. A listing writes a test preset's
+/// `outputJUnitFile` and `outputLogFile` (ran, CMake 4.4): it is given a JUnit file of its own,
+/// in a directory of its own, which replaces the preset's; and the preset's log, `log`, which a
+/// command line's `-O` doesn't replace (and on CMake 3.22 makes a listing write), is put back as
+/// it was, so that no file the user reads is left changed by hushrun.
+pub fn list(
+    real: &Path,
+    args: &[String],
+    cwd: &Path,
+    log: Option<&Path>,
+    assigned: &[(String, String)],
+) -> Result<Vec<select::Listed>, String> {
+    let own = tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
+    let kept = log.map(Kept::new);
+    let output = tool(real, cwd, assigned)
         .args(args)
         .arg("--show-only=json-v1")
+        .arg("--output-junit")
+        .arg(own.path().join("listing.xml"))
         .current_dir(cwd)
-        .output()
-        .map_err(|err| format!("can't start {}: {err}", real.display()))?;
+        .output();
+    if let Some(kept) = kept {
+        kept.put_back();
+    }
+    let output = output.map_err(|err| format!("can't start {}: {err}", real.display()))?;
     if !output.status.success() {
         return Err("ctest couldn't list its tests".into());
     }
     select::parse_listing(&output.stdout).map(|(listing, _)| listing.tests)
 }
 
+/// A file as it was before a listing, to put back after it.
+struct Kept {
+    path: PathBuf,
+    was: Option<(Vec<u8>, SystemTime)>,
+}
+
+impl Kept {
+    fn new(path: &Path) -> Kept {
+        let was = std::fs::read(path).ok().and_then(|bytes| {
+            let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+            Some((bytes, modified))
+        });
+        Kept {
+            path: path.to_path_buf(),
+            was,
+        }
+    }
+
+    /// The file as it was: gone if it wasn't there, else its bytes and its time, whole.
+    fn put_back(self) {
+        match self.was {
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            Some((bytes, modified)) => {
+                let same = std::fs::read(&self.path).is_ok_and(|now| now == bytes)
+                    && std::fs::metadata(&self.path)
+                        .and_then(|m| m.modified())
+                        .is_ok_and(|m| m == modified);
+                if !same
+                    && facts::write_whole(&self.path, &bytes).is_ok()
+                    && let Ok(file) = std::fs::File::options().write(true).open(&self.path)
+                {
+                    let _ = file.set_modified(modified);
+                }
+            }
+        }
+    }
+}
+
 /// The real `ctest`'s version.
-pub fn version(real: &Path) -> Result<(u32, u32, u32), String> {
-    let output = tool(real)
+pub fn version(
+    real: &Path,
+    cwd: &Path,
+    assigned: &[(String, String)],
+) -> Result<(u32, u32, u32), String> {
+    let output = tool(real, cwd, assigned)
         .arg("--version")
         .output()
         .map_err(|err| format!("can't start {}: {err}", real.display()))?;
@@ -149,8 +213,9 @@ pub fn listed(
     items: &[args::Item],
     cwd: &Path,
     root: &Path,
+    assigned: &[(String, String)],
 ) -> Result<(Vec<Test>, Option<args::Preset>, PathBuf), String> {
-    let version = version(real)?;
+    let version = version(real, cwd, assigned)?;
     if version < JUNIT_SINCE {
         return Err(format!(
             "ctest {}.{}.{} writes no JUnit file (--output-junit came in CMake 3.21)",
@@ -168,7 +233,17 @@ pub fn listed(
             .and_then(|p| p.binary_dir.clone())
             .unwrap_or_else(|| cwd.to_path_buf()),
     };
-    let tests = list(real, &args::listing(items, &[]), cwd)?;
+    let log = preset
+        .as_ref()
+        .and_then(|p| p.log.as_ref())
+        .map(|l| cwd.join(l));
+    let tests = list(
+        real,
+        &args::listing(items, &[]),
+        cwd,
+        log.as_deref(),
+        assigned,
+    )?;
     if tests.is_empty() {
         let multi = select::build_dir(&test_dir).multi_config;
         return Err(if multi && !args::has(items, &["-C", "--build-config"]) {
@@ -182,27 +257,42 @@ pub fn listed(
 }
 
 /// What each unit's programs are built from, merged.
-pub fn walk(tests: &[Test], root: &Path, path: Option<OsString>) -> BTreeMap<String, Built> {
-    let mut walker = Walker::new(root, path);
+pub fn walk(
+    tests: &[Test],
+    root: &Path,
+    path: Option<OsString>,
+    assigned: &[(String, String)],
+) -> BTreeMap<String, Built> {
+    let mut walker = Walker::new(root, path, assigned);
     let mut out: BTreeMap<String, Built> = BTreeMap::new();
     let mut done: BTreeSet<PathBuf> = BTreeSet::new();
-    for test in tests {
-        let Program::Built { path, build } = &test.program else {
-            continue;
-        };
-        if !done.insert(path.clone()) {
-            continue;
-        }
-        let built = walker.program(path, build);
-        match out.get_mut(&test.unit) {
+    let mut named_done: BTreeSet<(String, select::Named)> = BTreeSet::new();
+    let merge =
+        |out: &mut BTreeMap<String, Built>, unit: &str, built: Built| match out.get_mut(unit) {
             None => {
-                out.insert(test.unit.clone(), built);
+                out.insert(unit.to_string(), built);
             }
             Some(had) => {
                 had.reads.extend(built.reads);
                 had.own.extend(built.own);
                 had.every_source |= built.every_source;
                 had.stale = had.stale.take().or(built.stale);
+                had.refused = had.refused.take().or(built.refused);
+            }
+        };
+    for test in tests {
+        let Program::Built { path, build, named } = &test.program else {
+            continue;
+        };
+        if done.insert(path.clone()) {
+            let built = walker.program(path, build);
+            merge(&mut out, &test.unit, built);
+        }
+        // What the test names besides: a program it starts, a file it reads.
+        for n in named {
+            if named_done.insert((test.unit.clone(), n.clone())) {
+                let built = walker.named(n);
+                merge(&mut out, &test.unit, built);
             }
         }
     }
@@ -234,8 +324,17 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
     };
     let root = std::fs::canonicalize(&run.root).map_err(|err| format!("the repository: {err}"))?;
     let cwd = std::env::current_dir().map_err(|err| format!("where ctest runs: {err}"))?;
-    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root)?;
-    let built = walk(&tests, &root, path_was());
+    let (tests, preset, test_dir) = listed(call.real, &items, &cwd, &root, &[])?;
+    if preset.as_ref().is_some_and(|p| p.show_only) {
+        return Err(
+            "the test preset sets execution.showOnly, and ctest runs no test"
+                .to_string()
+                .into(),
+        );
+    }
+    // A preset's `filter.include.index` picks tests by their position, as `-I` does.
+    let select = select && !preset.as_ref().is_some_and(|p| p.by_position);
+    let built = walk(&tests, &root, path_was(), &[]);
     let started = SystemTime::now();
     let nanos = started
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -320,7 +419,7 @@ fn prepare(call: &Call<'_>, units: &Path) -> Result<(Vec<OsString>, Pending), Sk
         junit,
         before,
         started,
-        retries: args::retries(&items),
+        retries: args::retries(&items, preset.as_ref()),
         report_tests: run.unit.as_deref() == Some("test"),
         reuse,
         selection,
@@ -364,18 +463,24 @@ fn verify(
     let Some(built) = built.get(unit) else {
         return false;
     };
-    if built.stale.is_some() {
+    if built.stale.is_some() || built.refused.is_some() {
         return false;
     }
     for test in tests.iter().filter(|t| t.unit == unit) {
-        let Program::Built { path, .. } = &test.program else {
+        let Program::Built { path, named, .. } = &test.program else {
             return false;
         };
-        let rebuilt = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map_or(true, |m| m > *planned_at);
-        if rebuilt {
-            return false;
+        let programs = std::iter::once(path).chain(named.iter().filter_map(|n| match n {
+            select::Named::Built { path, .. } => Some(path),
+            _ => None,
+        }));
+        for program in programs {
+            let rebuilt = std::fs::metadata(program)
+                .and_then(|m| m.modified())
+                .map_or(true, |m| m > *planned_at);
+            if rebuilt {
+                return false;
+            }
         }
     }
     let scope: BTreeSet<&str> = plan.scope.iter().map(String::as_str).collect();
@@ -439,7 +544,7 @@ fn choose(
         }
         None => None,
     };
-    let version = version(real).ok()?;
+    let version = version(real, cwd, &[]).ok()?;
     let file = own_dir.join("exclude.txt");
     let at = SelectAt {
         version,
@@ -464,7 +569,14 @@ fn choose(
             // Everything left out: a pass stays a pass (ran: the last --no-tests wins).
             words.push("--no-tests=ignore".into());
         }
-        let Ok(again) = list(real, &args::listing(&args::parse(&words), &[]), cwd) else {
+        let log = preset.and_then(|p| p.log.as_ref()).map(|l| cwd.join(l));
+        let Ok(again) = list(
+            real,
+            &args::listing(&args::parse(&words), &[]),
+            cwd,
+            log.as_deref(),
+            &[],
+        ) else {
             continue;
         };
         let mut got: Vec<(String, String)> = again.iter().map(select::Listed::identity).collect();
@@ -524,15 +636,14 @@ fn record(p: &Pending) {
                 deselected: true,
                 ..UnitFacts::default()
             };
-            match &test.program {
-                Program::Elsewhere(program) => facts.not_followed.push(Unfollowed {
-                    why: "not built here".into(),
-                    detail: program.clone(),
-                }),
-                Program::Built { .. } | Program::None => {}
-            }
             if let Some(built) = p.built.get(&test.unit) {
                 facts.reads = built.reads.iter().cloned().collect();
+                if let Some(why) = &built.refused {
+                    facts.not_followed.push(Unfollowed {
+                        why: "in-source build".into(),
+                        detail: why.clone(),
+                    });
+                }
                 if let Some(why) = &built.stale {
                     facts.not_followed.push(Unfollowed {
                         why: "stale program".into(),
@@ -562,6 +673,14 @@ fn record(p: &Pending) {
         );
         let failed = matches!(outcome, Outcome::Failed | Outcome::Unknown { failed: true });
         let mut not_followed = Vec::new();
+        // Each test's own program: one not built here is that test's, whichever test of its unit
+        // comes first.
+        if let Program::Elsewhere(program) = &test.program {
+            not_followed.push(Unfollowed {
+                why: "not built here".into(),
+                detail: program.clone(),
+            });
+        }
         if p.retries && matches!(outcome, Outcome::Passed | Outcome::Skipped) {
             not_followed.push(Unfollowed {
                 why: "repeat until-pass".into(),
@@ -570,9 +689,15 @@ fn record(p: &Pending) {
         }
         // A whole unit is deselected when `reuse` listed it and every test of it was left out.
         unit.deselected &= left && p.reuse.contains(&test.unit);
+        // \[C-32\] Its body didn't run: CTest skipped it (`SKIP_RETURN_CODE`,
+        // `SKIP_REGULAR_EXPRESSION`), or it is disabled. In a run that failed, it proves nothing.
+        let skipped = !left && (disabled || matches!(outcome, Outcome::Skipped));
         if !left && !disabled {
             unit.selected += 1;
             unit.finished += u64::from(finished);
+        }
+        if unit.tests.is_none() {
+            unit.skipped += u64::from(skipped);
         }
         unit.failed |= failed;
         unit.duration_ms = unit.duration_ms.saturating_add(duration_ms);
@@ -584,6 +709,7 @@ fn record(p: &Pending) {
                 deselected: left,
                 duration_ms,
                 not_followed,
+                skipped,
                 ..TestFacts::default()
             }),
             None => {
@@ -626,6 +752,9 @@ fn write_facts(
     settings: BTreeMap<String, serde_json::Value>,
     tests: bool,
 ) {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let file = FactsFile {
         schema: if tests {
             facts::FACTS_SCHEMA_V1
@@ -637,13 +766,105 @@ fn write_facts(
         failures_by_unit: true,
         settings,
         units,
+        // \[C-32\] Each `ctest` is a start of its own, and writes one file: a program counts as
+        // run whole only when each start that ran any of it ran it whole.
+        start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
         ..FactsFile::default()
     };
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
     let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test(name: &str, unit: &str, program: Program) -> Test {
+        Test {
+            listed: select::Listed {
+                name: name.into(),
+                command: Some(vec![format!("/b/{name}")]),
+                properties: Vec::new(),
+            },
+            unit: unit.into(),
+            id: name.into(),
+            program,
+        }
+    }
+
+    fn recorded(tests: Vec<Test>, report_tests: bool) -> serde_json::Value {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = Pending {
+            units_dir: dir.path().to_path_buf(),
+            tests,
+            leave: BTreeSet::new(),
+            built: BTreeMap::new(),
+            junit: dir.path().join("none.xml"),
+            before: None,
+            started: SystemTime::now(),
+            retries: false,
+            report_tests,
+            reuse: BTreeSet::new(),
+            selection: String::new(),
+        };
+        record(&pending);
+        let file = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .unwrap();
+        serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap()
+    }
+
+    // covers: C-49
+    #[test]
+    fn a_program_not_built_here_marks_its_own_test_whichever_comes_first() {
+        // Two programs one unit's name: one built here, one found on PATH (a name clash when the
+        // build names no configuration). The one not built here is told, whichever is first.
+        let built = || Program::Built {
+            path: "/b/t_x".into(),
+            build: "/b".into(),
+            named: Vec::new(),
+        };
+        let facts = recorded(
+            vec![
+                test("a", "t_x", built()),
+                test("b", "t_x", Program::Elsewhere("t_x".into())),
+            ],
+            false,
+        );
+        assert_eq!(
+            facts["units"][0]["notFollowed"][0]["why"],
+            serde_json::json!("not built here"),
+            "{facts:#}"
+        );
+        // Told one by one: the test whose program isn't built here, and not the other.
+        let facts = recorded(
+            vec![
+                test("a", "t_x", Program::Elsewhere("t_x".into())),
+                test("b", "t_x", built()),
+            ],
+            true,
+        );
+        let unit = &facts["units"][0];
+        assert_eq!(
+            unit["notFollowed"].as_array().map_or(0, Vec::len),
+            0,
+            "{facts:#}"
+        );
+        assert_eq!(
+            unit["tests"][0]["notFollowed"][0]["why"],
+            serde_json::json!("not built here"),
+            "{facts:#}"
+        );
+        assert_eq!(
+            unit["tests"][1]["notFollowed"]
+                .as_array()
+                .map_or(0, Vec::len),
+            0,
+            "{facts:#}"
+        );
     }
 }

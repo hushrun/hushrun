@@ -8,17 +8,22 @@
 //!   and each object's compiler depfile, `<object>.d`, a precompiled header's included (GCC
 //!   writes what the header read only there). Up to date when no file it read is newer than it.
 //!   Both gave the same files in the spike.
+//! - A header or source a build rule writes (a generator the project builds and runs) reads what
+//!   that rule reads, to the end, in both: its script, its template, the program it runs, and that
+//!   program's own objects' headers from their records.
 //! - A file in the build directory with no rule that makes it was written when CMake configured
 //!   the build (`configure_file`): the program reads every file configuring read.
 //! - Sources fetched into the build directory (`FetchContent`, under `_deps/`) aren't the
 //!   repository's: their identity is their declaration, in a CMake file, in the rest set.
+//! - An in-source build (its build directory holds the repository) isn't read: what the build
+//!   wrote can't be told from the repository's files, and its programs aren't observed.
 //! - With neither readable (another generator, a program the graph doesn't know, an object with
 //!   no record of its headers), the program reads every C and C++ file of the scope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The suffixes of C, C++, Objective-C and CUDA sources and headers: a test program's sources
 /// (C-30). Every other file a build names (a CMake file, a template, data) is in the rest set.
@@ -44,6 +49,8 @@ pub struct Built {
     pub every_source: bool,
     /// Why it isn't up to date, when it isn't: it ran old code.
     pub stale: Option<String>,
+    /// Why what it is built from can't be told at all, when it can't: it isn't observed.
+    pub refused: Option<String>,
     /// How it was read: `ninja`, `makefile` or `every source`.
     pub method: &'static str,
 }
@@ -56,6 +63,8 @@ pub struct Walker<'a> {
     path: Option<OsString>,
     dirs: HashMap<PathBuf, Dir>,
     real: HashMap<PathBuf, Option<PathBuf>>,
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which `ninja` gets.
+    assigned: Vec<(String, String)>,
 }
 
 enum Dir {
@@ -77,17 +86,34 @@ enum Place {
 }
 
 impl<'a> Walker<'a> {
-    pub fn new(root: &'a Path, path: Option<OsString>) -> Walker<'a> {
+    pub fn new(
+        root: &'a Path,
+        path: Option<OsString>,
+        assigned: &[(String, String)],
+    ) -> Walker<'a> {
         Walker {
             root,
             path,
             dirs: HashMap::new(),
             real: HashMap::new(),
+            assigned: assigned.to_vec(),
         }
     }
 
     /// What `program`, in the build directory `build`, is built from.
     pub fn program(&mut self, program: &Path, build: &Path) -> Built {
+        // An in-source build: its build directory holds the repository, so a file the build
+        // writes can't be told from one of the repository's, and its records name both alike.
+        if self.root.starts_with(build) {
+            return Built {
+                refused: Some(format!(
+                    "its build directory, {}, is the repository's: what it is built from can't be told from the repository's own files; a build directory of its own (cmake -B build) can be read",
+                    build.display()
+                )),
+                method: "every source",
+                ..Built::default()
+            };
+        }
         let target = super::select::slashed(program.strip_prefix(build).unwrap_or(program));
         if !self.dirs.contains_key(build) {
             let dir = self.open(build);
@@ -107,6 +133,59 @@ impl<'a> Walker<'a> {
         read.unwrap_or_else(|| self.every_source(program))
     }
 
+    /// What a path a test names beside its program adds to what that program reads: a program a
+    /// build rule makes, what it is built from; a directory of the repository, every source; a
+    /// directory of a build, every source and a program that can't be told up to date (which of
+    /// its programs the test starts can't be told); a file of the repository, itself; a file of a
+    /// build directory no rule makes (data the test reads or writes), nothing.
+    pub fn named(&mut self, named: &super::select::Named) -> Built {
+        use super::select::Named;
+        match named {
+            Named::Built { path, build } => {
+                if self.makes(path, build) {
+                    let mut built = self.program(path, build);
+                    built.own.clear();
+                    built
+                } else {
+                    Built::default()
+                }
+            }
+            Named::BuildDir(dir) => Built {
+                every_source: true,
+                stale: Some(format!(
+                    "its test names {}, a directory of a build, whose programs it may start can't be told up to date",
+                    dir.display()
+                )),
+                method: "every source",
+                ..Built::default()
+            },
+            Named::RepoDir(_) => Built {
+                every_source: true,
+                method: "every source",
+                ..Built::default()
+            },
+            Named::Repo(rel) => Built {
+                reads: [rel.clone()].into(),
+                ..Built::default()
+            },
+        }
+    }
+
+    /// Whether a rule of the build directory `build` makes `path`; true where the build can't be
+    /// read, which can't tell.
+    fn makes(&mut self, path: &Path, build: &Path) -> bool {
+        let target = super::select::slashed(path.strip_prefix(build).unwrap_or(path));
+        if !self.dirs.contains_key(build) {
+            let dir = self.open(build);
+            self.dirs.insert(build.to_path_buf(), dir);
+        }
+        match self.dirs.get(build) {
+            Some(Dir::Ninja { outputs, .. }) => outputs.contains(&target),
+            Some(Dir::Make { graph }) => graph.contains_key(&target),
+            _ => true,
+        }
+    }
+
     fn open(&self, build: &Path) -> Dir {
         let dir = super::select::build_dir(build);
         match dir.generator.as_str() {
@@ -122,7 +201,8 @@ impl<'a> Walker<'a> {
                 let Some(ninja) = ninja else {
                     return Dir::Unread;
                 };
-                let Some(out) = run(&ninja, build, &["-t", "targets", "all"]) else {
+                let Some(out) = run(&ninja, build, &["-t", "targets", "all"], &self.assigned)
+                else {
                     return Dir::Unread;
                 };
                 let outputs = out
@@ -189,7 +269,7 @@ impl<'a> Walker<'a> {
         let mut configured = false;
         let mut first = true;
         while !frontier.is_empty() {
-            let edges = query(ninja, build, &frontier)?;
+            let edges = query(ninja, build, &frontier, &self.assigned)?;
             let mut next = Vec::new();
             for node in std::mem::take(&mut frontier) {
                 seen.insert(node.clone());
@@ -239,59 +319,81 @@ impl<'a> Walker<'a> {
         if objects.is_empty() {
             return None;
         }
-        let deps = deps(ninja, build, &objects)?;
-        let mut generated: Vec<String> = Vec::new();
-        for object in &objects {
-            let Some((state, files)) = deps.get(object).filter(|(_, f)| !f.is_empty()) else {
-                // No record of what it included: its headers can't be told.
-                return None;
-            };
-            if state != "VALID" {
-                out.stale = Some(format!("{object}'s record of its headers is {state}"));
+        // Each object's headers, from its record; a header a build rule writes reads what that
+        // rule reads, to the end: its script, its template, and the program it runs, whose own
+        // objects' headers are read again from their records, and so on (a generated header the
+        // generator's own sources include among them).
+        let mut asked: BTreeSet<String> = BTreeSet::new();
+        let mut pending = objects;
+        while !pending.is_empty() {
+            pending.retain(|o| asked.insert(o.clone()));
+            if pending.is_empty() {
+                break;
             }
-            for file in files {
-                match self.place(file, build) {
-                    Place::Repo(rel) => {
-                        out.reads.insert(rel);
-                    }
-                    Place::Outside => {}
-                    Place::Build(rel) if outputs.contains(&rel) => generated.push(rel),
-                    Place::Build(rel) => configured |= !fetched(&rel) && !cmake_own(&rel),
+            let deps = deps(ninja, build, &pending, &self.assigned)?;
+            let mut generated: Vec<String> = Vec::new();
+            for object in std::mem::take(&mut pending) {
+                let Some((state, files)) = deps.get(&object).filter(|(_, f)| !f.is_empty()) else {
+                    // No record of what it included: its headers can't be told.
+                    return None;
+                };
+                if state != "VALID" {
+                    out.stale = Some(format!("{object}'s record of its headers is {state}"));
                 }
-            }
-        }
-        // A header a build rule writes: what that rule reads, to the end.
-        let mut frontier: Vec<String> = generated
-            .into_iter()
-            .filter(|g| !seen.contains(g))
-            .collect();
-        while !frontier.is_empty() {
-            let edges = query(ninja, build, &frontier)?;
-            let mut next = Vec::new();
-            for node in std::mem::take(&mut frontier) {
-                seen.insert(node.clone());
-                for (input, _) in edges
-                    .get(&node)
-                    .map(|e| e.inputs.as_slice())
-                    .unwrap_or_default()
-                {
-                    match self.place(input, build) {
+                for file in files {
+                    match self.place(file, build) {
                         Place::Repo(rel) => {
                             out.reads.insert(rel);
                         }
-                        Place::Build(rel) if outputs.contains(&rel) && !seen.contains(&rel) => {
-                            next.push(rel);
-                        }
-                        _ => {}
+                        Place::Outside => {}
+                        Place::Build(rel) if outputs.contains(&rel) => generated.push(rel),
+                        Place::Build(rel) => configured |= !fetched(&rel) && !cmake_own(&rel),
                     }
                 }
             }
-            next.sort();
-            next.dedup();
-            frontier = next;
+            let mut frontier: Vec<String> = generated
+                .into_iter()
+                .filter(|g| !seen.contains(g))
+                .collect();
+            frontier.sort();
+            frontier.dedup();
+            while !frontier.is_empty() {
+                let edges = query(ninja, build, &frontier, &self.assigned)?;
+                let mut next = Vec::new();
+                for node in std::mem::take(&mut frontier) {
+                    seen.insert(node.clone());
+                    if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch") {
+                        pending.push(node.clone());
+                    }
+                    for (input, _) in edges
+                        .get(&node)
+                        .map(|e| e.inputs.as_slice())
+                        .unwrap_or_default()
+                    {
+                        match self.place(input, build) {
+                            Place::Repo(rel) => {
+                                out.reads.insert(rel);
+                            }
+                            Place::Outside => {}
+                            Place::Build(rel) if outputs.contains(&rel) => {
+                                if !seen.contains(&rel) {
+                                    next.push(rel);
+                                }
+                            }
+                            Place::Build(rel) => {
+                                configured |= !fetched(&rel) && !cmake_own(&rel);
+                            }
+                        }
+                    }
+                }
+                next.sort();
+                next.dedup();
+                next.retain(|n| !seen.contains(n));
+                frontier = next;
+            }
         }
         if configured {
-            let inputs = query(ninja, build, &["build.ninja".to_string()])?;
+            let inputs = query(ninja, build, &["build.ninja".to_string()], &self.assigned)?;
             for (input, _) in inputs
                 .get("build.ninja")
                 .map(|e| e.inputs.as_slice())
@@ -303,7 +405,7 @@ impl<'a> Walker<'a> {
             }
         }
         if out.stale.is_none() {
-            match run(ninja, build, &["-n", target]) {
+            match run(ninja, build, &["-n", target], &self.assigned) {
                 Some(text) if text.contains("no work to do") => {}
                 Some(_) => out.stale = Some("ninja would build it again".into()),
                 None => out.stale = Some("ninja can't say whether it is up to date".into()),
@@ -364,7 +466,15 @@ impl<'a> Walker<'a> {
         if objects.is_empty() {
             return None;
         }
-        for object in &objects {
+        // Each object's headers, from its depfile; a header a build rule writes reads what that
+        // rule reads, to the end: its script, its template, and the program it runs, whose own
+        // objects' depfiles are read in turn.
+        let mut asked: BTreeSet<String> = BTreeSet::new();
+        let mut pending = objects;
+        while let Some(object) = pending.pop() {
+            if !asked.insert(object.clone()) {
+                continue;
+            }
             let depfile = build.join(format!("{object}.d"));
             let files = depfile_deps(&depfile)?;
             for file in files {
@@ -373,16 +483,35 @@ impl<'a> Walker<'a> {
                         out.reads.insert(rel);
                     }
                     Place::Outside => {}
-                    Place::Build(rel) => {
-                        if let Some(inputs) = graph.get(&rel) {
-                            for input in inputs.iter().filter(|i| !bookkeeping(i)) {
-                                if let Place::Repo(r) = self.place(input, build) {
-                                    out.reads.insert(r);
+                    Place::Build(rel) if graph.contains_key(&rel) => {
+                        let mut stack = vec![rel];
+                        while let Some(node) = stack.pop() {
+                            if !seen.insert(node.clone()) {
+                                continue;
+                            }
+                            if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch")
+                            {
+                                pending.push(node.clone());
+                            }
+                            for dep in graph.get(&node).into_iter().flatten() {
+                                if bookkeeping(dep) {
+                                    continue;
+                                }
+                                match self.place(dep, build) {
+                                    Place::Repo(r) => {
+                                        out.reads.insert(r);
+                                    }
+                                    Place::Outside => {}
+                                    Place::Build(r) if graph.contains_key(&r) => stack.push(r),
+                                    Place::Build(r) => {
+                                        configured |= !fetched(&r) && !cmake_own(&r);
+                                    }
                                 }
                             }
-                        } else {
-                            configured |= !fetched(&rel) && !cmake_own(&rel);
                         }
+                    }
+                    Place::Build(rel) => {
+                        configured |= !fetched(&rel) && !cmake_own(&rel);
                     }
                 }
             }
@@ -433,13 +562,18 @@ struct Edge {
     inputs: Vec<(String, bool)>,
 }
 
-fn query(ninja: &Path, build: &Path, targets: &[String]) -> Option<BTreeMap<String, Edge>> {
+fn query(
+    ninja: &Path,
+    build: &Path,
+    targets: &[String],
+    assigned: &[(String, String)],
+) -> Option<BTreeMap<String, Edge>> {
     let mut out = BTreeMap::new();
     for chunk in targets.chunks(500) {
         let mut args = vec!["-t".to_string(), "query".to_string()];
         args.extend(chunk.iter().cloned());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = run(ninja, build, &args)?;
+        let text = run(ninja, build, &args, assigned)?;
         let mut current: Option<String> = None;
         let mut inputs = false;
         for line in text.lines() {
@@ -475,13 +609,14 @@ fn deps(
     ninja: &Path,
     build: &Path,
     objects: &[String],
+    assigned: &[(String, String)],
 ) -> Option<BTreeMap<String, (String, Vec<String>)>> {
     let mut out: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     for chunk in objects.chunks(500) {
         let mut args = vec!["-t".to_string(), "deps".to_string()];
         args.extend(chunk.iter().cloned());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = run(ninja, build, &args)?;
+        let text = run(ninja, build, &args, assigned)?;
         let mut current: Option<String> = None;
         for line in text.lines() {
             if line.is_empty() {
@@ -509,9 +644,10 @@ fn deps(
     Some(out)
 }
 
-/// `program`'s output in `dir`, when it exits 0.
-fn run(program: &Path, dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
+/// `program`'s output in `dir`, when it exits 0, with COMMAND's environment and its own
+/// assignments (`assigned`).
+fn run(program: &Path, dir: &Path, args: &[&str], assigned: &[(String, String)]) -> Option<String> {
+    let output = super::run::tool(program, dir, assigned)
         .arg("-C")
         .arg(dir)
         .args(args)

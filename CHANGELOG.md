@@ -186,6 +186,44 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
   tests: Go names only what failed, so a test that skipped because another failed looked passed.
   The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.
+- `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
+  passes hushrun recorded for the files as they were.
+- `swift test`: a target built with a build-tool plugin of another package reads its package
+  whole; a console `passed` line counts only after the test's `started` line; a list after the
+  run that fails, where tests were left out, runs the command again with nothing left out;
+  XCTSkip and Swift Testing's disabled tests are told as skipped (under `--parallel`, in a run
+  that failed, an XCTest pass may be one); each hushrun `swift` is a start of its own; and the
+  plan's `swift package describe` gets a command's own `env NAME=value` assignments.
+- hushrun's `swift` no longer waits for output a program `swift test` left running holds open: it
+  returns with `swift test`, a forwarder of its own passes on what that program prints later, and
+  that run records no pass.
+- CTest: a header a program of the project writes (a generator built and run by the build) now
+  makes each test program that includes it read what the generator is built from, on Ninja and
+  Makefiles, so a change to a header the generator includes runs those programs.
+- CTest: a program or file a test names in its arguments or its `ENVIRONMENT`
+  (`add_test(NAME x COMMAND driver $<TARGET_FILE:server>)`) is read by its test program; a
+  directory of a build named there makes it read every source and not up to date.
+- CTest: each `ctest` of a command is a start of its own, so two of them never add up to a test
+  program that ran whole.
+- CTest: a test preset's `execution.repeat` of `until-pass` no longer records a pass that came
+  after a failure, its `filter.include.index` leaves nothing out, and its `execution.showOnly`
+  is not observed.
+- CTest: hushrun's own listings no longer overwrite a test preset's `outputLogFile` or
+  `outputJUnitFile`.
+- CTest: an in-source build (`cmake -B .`) is said not to be observed, rather than silently
+  reusing nothing.
+- CTest: a test whose program isn't built here is marked so whichever test of its unit comes
+  first; skipped and disabled tests are told as skipped, so in a run that failed they record no
+  pass; and the plan's listing and walk get a command's own `env NAME=value` assignments.
+- CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
+  or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
+  `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build
+  couldn't be read no longer makes every C and C++ file a source.
+- On Windows, hushrun's `ctest` and `swift` end with the real program's exit code whole, where
+  one past 255 used to end as 1.
+- The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
+  the current directory, a relative one is from it, and a link to one of hushrun's own programs
+  is passed over.
 
 ## [0.13.0] - 2026-11-12
 

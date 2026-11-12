@@ -882,3 +882,325 @@ fn hushruns_swift_passes_output_through_a_terminal_byte_for_byte() {
     assert_eq!(facts.len(), 2, "{facts:?}");
     assert!(facts.iter().all(|f| f["units"][0]["tests"][0]["finished"] == false && f["failuresByUnit"] == false), "{facts:?}");
 }
+
+/// A `swift` for hushrun's own `swift` alone: a package with one test target, `ATests`, whose
+/// `test list` exits 1 when `LIST_FAILS` is set; `test` prints its arguments and exits 0.
+#[cfg(unix)]
+fn fake_package_swift(dir: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let describe = json!({"name": "Fake", "path": root, "dependencies": [], "products": [],
+        "targets": [{"name": "ATests", "c99name": "ATests", "type": "test", "path": "Tests/ATests"}]});
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Swift version 6.4.2 (fake)' ;;\n\
+         *describe*) echo '{describe}' ;;\n*dump-package*) echo '{{\"targets\": []}}' ;;\n\
+         'test list'*) [ -n \"$LIST_FAILS\" ] && exit 1; echo 'ATests.ATests/testA' ;;\n\
+         test*) echo \"args:$*\" ;;\nesac\n"
+    );
+    let path = dir.join("swift");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: C-48, C-32
+#[cfg(unix)]
+#[test]
+fn a_list_after_the_run_that_fails_where_tests_were_left_out_runs_again_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("Tests/ATests")).unwrap();
+    let real = root.join("real");
+    fake_package_swift(&real, &root);
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("hushrun.json"),
+        json!({"schema": "hushrun.units/v0", "root": root, "reuse": ["Tests/ATests"], "unit": "file"})
+            .to_string(),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "swift", "test"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .env("LIST_FAILS", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("--skip ^ATests\\."), "{stdout}");
+    let facts: Vec<Value> = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("swift-"))
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    // Each hushrun's swift is a start of its own (C-32).
+    assert!(facts[0]["start"].is_string(), "{:#}", facts[0]);
+    // What SwiftPM ran of what hushrun left out can't be checked: the run starts COMMAND once
+    // more with nothing left out.
+    assert!(
+        facts[0]["leftOutUnlisted"]
+            .as_str()
+            .is_some_and(|w| w.contains("swift test list")),
+        "{:#}",
+        facts[0]
+    );
+}
+
+// covers: C-48, C-32
+#[test]
+fn a_skip_in_a_run_that_failed_records_nothing() {
+    let Some(swift) = swift() else {
+        tools("Swift 6", false);
+        return;
+    };
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", ".build/\n"),
+        file(
+            "Package.swift",
+            "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Skips\", targets: [\n  .testTarget(name: \"XSkipTests\"),\n  .testTarget(name: \"TSkipTests\"),\n  .testTarget(name: \"FailTests\"),\n  .testTarget(name: \"OkTests\"),\n])\n",
+        ),
+        file(
+            "Tests/XSkipTests/XSkipTests.swift",
+            "import XCTest\n\nfinal class XSkipTests: XCTestCase {\n    func testOk() {}\n    func testSkip() throws { throw XCTSkip(\"not here\") }\n}\n",
+        ),
+        file(
+            "Tests/TSkipTests/TSkipTests.swift",
+            "import Testing\n\n@Test func ok() {}\n@Test(.disabled(\"off\")) func off() {}\n",
+        ),
+        file(
+            "Tests/FailTests/FailTests.swift",
+            "import XCTest\n\nfinal class FailTests: XCTestCase {\n    func testFails() { XCTFail(\"no\") }\n}\n",
+        ),
+        file(
+            "Tests/OkTests/OkTests.swift",
+            "import XCTest\n\nfinal class OkTests: XCTestCase {\n    func testOk() {}\n}\n",
+        ),
+    ];
+    let r = Repo::new(&swift, &files);
+    let ran = r.run(SWIFT_TEST, &[]);
+    assert_ne!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // FailTests failed and OkTests passed; the two targets with a skipped test record no pass,
+    // since a skip in a run that failed proves nothing.
+    let mut results = Vec::new();
+    collect(&r.cache.join("results/units/v0"), &mut results);
+    let mut results: Vec<String> = results
+        .iter()
+        .map(|p| {
+            let v: Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+            v["result"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    results.sort();
+    assert_eq!(results, ["fail", "pass"], "{}", ran.stderr);
+}
+
+/// A `swift` for a whole run: a package whose `CoreTests` depends on `Extra` only when the
+/// environment has `WITH_EXTRA`, as a manifest that reads `Context.environment` may say, and
+/// whose XCTest tests print as macOS prints them, but those a `--skip` leaves out.
+#[cfg(unix)]
+fn fake_env_swift(dir: &Path, root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let target = |name: &str, kind: &str, path: &str, deps: &str| {
+        format!(
+            r#"{{"name": "{name}", "c99name": "{name}", "type": "{kind}", "path": "{path}", "target_dependencies": [{deps}]}}"#
+        )
+    };
+    let describe = |core_deps: &str| {
+        format!(
+            r#"{{"name": "Fake", "path": "{}", "dependencies": [], "products": [], "targets": [{}, {}, {}, {}, {}]}}"#,
+            root.display(),
+            target("CoreTests", "test", "Tests/CoreTests", core_deps),
+            target("GreetTests", "test", "Tests/GreetTests", r#""Greet""#),
+            target("Core", "library", "Sources/Core", ""),
+            target("Extra", "library", "Sources/Extra", ""),
+            target("Greet", "library", "Sources/Greet", ""),
+        )
+    };
+    let dump = r#"{"targets": [{"name": "CoreTests", "settings": []}, {"name": "GreetTests", "settings": []}, {"name": "Core", "settings": []}, {"name": "Extra", "settings": []}, {"name": "Greet", "settings": []}]}"#;
+    let test = |target: &str, method: &str| {
+        format!(
+            "case \"$*\" in *'^{target}'*) ;; *) echo \"Test Case '-[{target}.{target} {method}]' started.\"; echo \"Test Case '-[{target}.{target} {method}]' passed (0.001 seconds).\" ;; esac\n"
+        )
+    };
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Swift version 6.4.2 (fake)'; exit 0 ;;\n\
+         *describe*) if [ -n \"$WITH_EXTRA\" ]; then echo '{with}'; else echo '{without}'; fi; exit 0 ;;\n\
+         *dump-package*) echo '{dump}'; exit 0 ;;\n\
+         'test list'*) printf 'CoreTests.CoreTests/testA\\nGreetTests.GreetTests/testB\\n'; exit 0 ;;\n\
+         esac\n{a}{b}",
+        with = describe(r#""Core", "Extra""#),
+        without = describe(r#""Core""#),
+        a = test("CoreTests", "testA"),
+        b = test("GreetTests", "testB"),
+    );
+    let path = dir.join("swift");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: C-48, C-32
+#[cfg(unix)]
+#[test]
+fn the_tools_hushrun_starts_for_swift_get_commands_own_env_assignments() {
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file("Package.swift", "// swift-tools-version: 6.0\n"),
+        file("Sources/Core/Core.swift", "public let core = 1\n"),
+        file("Sources/Extra/Extra.swift", "public let extra = 1\n"),
+        file("Sources/Greet/Greet.swift", "public let greet = 1\n"),
+        file("Tests/CoreTests/CoreTests.swift", "// a\n"),
+        file("Tests/GreetTests/GreetTests.swift", "// b\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fake = std::fs::canonicalize(dir.path()).unwrap().join("swift");
+    let r = Repo::new(&fake, &files);
+    fake_env_swift(&fake.parent().unwrap().join("bin"), &r.repo);
+    let fake = fake.parent().unwrap().join("bin/swift");
+    let r = Repo {
+        path: std::env::join_paths([
+            fake.parent().unwrap(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap(),
+        ..r
+    };
+    let command = ["run", "unit", "--", "env", "WITH_EXTRA=1", "swift", "test"];
+    let first = r.run(&command, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // `swift package describe`, which the plan starts before COMMAND, sees the WITH_EXTRA COMMAND
+    // sets: CoreTests reads Extra, and runs when Extra changes.
+    r.write("Sources/Extra/Extra.swift", "public let extra = 2\n");
+    let second = r.run(&command, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        second.line("hushrun: unit: "),
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+    );
+}
+
+// covers: C-48, C-30
+#[cfg(unix)]
+#[test]
+fn a_swift_file_no_test_target_reads_is_in_the_rest_set() {
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file("Package.swift", "// swift-tools-version: 6.0\n"),
+        file("Sources/Core/Core.swift", "public let core = 1\n"),
+        file("Sources/Extra/Extra.swift", "public let extra = 1\n"),
+        file("Sources/Greet/Greet.swift", "public let greet = 1\n"),
+        file("Tests/CoreTests/CoreTests.swift", "// a\n"),
+        file("Tests/GreetTests/GreetTests.swift", "// b\n"),
+        file("Fixtures/case.swift", "let fixture = 1\n"),
+        file("Examples/Demo/main.swift", "print(1)\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fake = std::fs::canonicalize(dir.path()).unwrap().join("swift");
+    let r = Repo::new(&fake, &files);
+    fake_env_swift(&fake.parent().unwrap().join("bin"), &r.repo);
+    let fake = fake.parent().unwrap().join("bin/swift");
+    let r = Repo {
+        path: std::env::join_paths([
+            fake.parent().unwrap(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap(),
+        ..r
+    };
+    let first = r.run(SWIFT_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // Extra is a target no test target depends on here, and Fixtures and Examples are below no
+    // target: a test may read or build them at run time, so they are in the rest set and a change
+    // to one runs every test target. What a test target reads stays a source.
+    let map = r.map();
+    for path in [
+        "Sources/Extra/Extra.swift",
+        "Fixtures/case.swift",
+        "Examples/Demo/main.swift",
+    ] {
+        assert!(map["rest"][path].is_string(), "{path}: {map:#}");
+    }
+    assert!(map["rest"]["Sources/Core/Core.swift"].is_null(), "{map:#}");
+    r.write("Sources/Extra/Extra.swift", "public let extra = 2\n");
+    let second = r.run(SWIFT_TEST, &[]);
+    assert!(
+        second
+            .line("hushrun: unit: ")
+            .starts_with("hushrun: unit: all 2 test files run"),
+        "{}",
+        second.stderr
+    );
+}
+
+// covers: C-48
+#[cfg(unix)]
+#[test]
+fn a_program_a_test_left_running_keeps_printing_after_hushruns_swift_returns() {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    // `swift test` passes its one test, and leaves a program running that prints a line 2 s
+    // after it exited.
+    let script = "#!/bin/sh\ncase \"$1 $2\" in\n\"--version \"*) echo 'Swift version 6.4.2 (fake)' ;;\n\"test list\") echo 'T.C/testA' ;;\n\"test \"*) echo \"Test Case '-[T.C testA]' started.\"; echo \"Test Case '-[T.C testA]' passed (0.001 seconds).\"; (sleep 2; echo late line) & exit 3 ;;\nesac\n";
+    std::fs::write(real.join("swift"), script).unwrap();
+    std::fs::set_permissions(real.join("swift"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .args(["__hushrun-program", "swift", "test"])
+        .current_dir(&root)
+        .env("PATH", &was)
+        .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let status = child.wait().unwrap();
+    let returned = started.elapsed();
+    // hushrun's swift returns with swift's code as swift does, without waiting for that program.
+    assert_eq!(status.code(), Some(3));
+    assert!(returned < std::time::Duration::from_secs(2), "{returned:?}");
+    // What it prints later still comes, once that program ends.
+    let out = reader.join().unwrap();
+    assert!(out.contains("passed") && out.contains("late line"), "{out}");
+    // No pass is recorded of a run whose output was still held, and the facts say why.
+    let facts: Vec<Value> = std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(
+        facts[0]["units"][0]["tests"][0]["finished"], false,
+        "{:#}",
+        facts[0]
+    );
+    assert!(facts[0]["settings"]["held"].is_string(), "{:#}", facts[0]);
+}

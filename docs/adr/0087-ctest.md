@@ -132,3 +132,99 @@ use it, for both units, as a spike proved it on CTest 3.22.1 and 4.4.5, on macOS
   builds; decision 8's check, made when `ctest` runs, holds to what was built.
 - **A unit per build directory:** RFC 0004 names a test program by its program; the configuration
   in the name separates the builds that matter.
+
+## Amendment 1: what the walk follows (2026-11-12)
+
+Decision 4 read a test program from its build directory's records: each object's headers, and a
+header a build rule writes followed one step. Reviewers showed three ways a program read more than
+its key held, each a test left out while it failed on the code as it was:
+
+- **A generated header's generator.** A project builds `gen`, runs it to write `gen.h`, and a test
+  program includes `gen.h`. On Ninja the walk asked `ninja -t query` for the rule's inputs and
+  never read the records of `gen`'s own objects; on Makefiles it took only the repository files the
+  rule named. A header `gen.c` includes was missing, so a change to it reused the program although
+  the build wrote another `gen.h`.
+- **A program a test names.** `add_test(NAME x COMMAND driver $<TARGET_FILE:server>)`: the unit is
+  `driver`, and `server`, which it starts, was never walked.
+- **An in-source build.** With `cmake -B .` every file the build named was taken for a file of the
+  build: each program read nothing, nothing was reused, and nothing said why.
+
+The decision:
+
+- A file a build rule writes is followed to the end on both generators: the rule's inputs, the
+  program it runs, and the headers of every object reached that way, from `ninja -t deps` or the
+  object's depfile. The staleness check on Makefiles compares those files too; Ninja's `-n` already
+  knew them.
+- Each argument of a test's command (and its value after `=`), and each value of its `ENVIRONMENT`
+  and `ENVIRONMENT_MODIFICATION`, that is an absolute path that exists adds to what its program
+  read: a program a build rule makes adds what it is built from, and must not have been built after
+  the plan either; a file of the repository adds itself; a directory of the repository adds every
+  source; a directory of a build adds every source and makes the program not up to date, since
+  which of its programs runs, and whether it was built again, can't be told. A file of a build
+  directory no rule makes is data the test reads or writes, and adds nothing. A program a test
+  starts by any other way (a path it builds itself, a file it reads) isn't seen, as files a test
+  opens aren't (Consequences).
+- An in-source build (a build directory that holds the repository) isn't read: each of its
+  programs is not followed as `in-source build`, with a line that says a build directory of its own
+  can be read.
+
+## Amendment 2: one start per `ctest`, and presets (2026-11-12)
+
+Decision 7 counted every `ctest` of a COMMAND as one start, and ADR 0077 Amendment 1 showed two
+starts adding up to a program that ran whole. Decision 3 read only the command line for what a
+test preset can say too: a preset's `execution.repeat` of `until-pass` recorded a pass that came
+after a failure, its `filter.include.index` picks tests by their position, and its
+`execution.showOnly` runs no test. And hushrun's own listings wrote the user's files: with
+`--preset`, CTest writes the preset's `outputLogFile`, and on 4.4 its `outputJUnitFile`, even for
+`--show-only` (ran).
+
+The decision:
+
+- Each hushrun `ctest` names a start of its own in its facts file.
+- A preset's `until-pass` or `after-timeout` leaves each pass not followed, as `--repeat` does (a
+  command line's `--repeat` replaces it); its `filter.include.index` makes hushrun observe and leave
+  nothing out, as `-I` does; its `showOnly` makes the run not observed. Every other field that
+  chooses tests is honoured by the listings, which take `--preset` as the run does, and the second
+  listing checks what a mechanism keeps.
+- A listing gets a JUnit file of its own in a temporary directory, which replaces the preset's. A
+  command line's `-O` doesn't stop CTest writing the preset's log (ran: 4.4 writes both; 3.22
+  writes the preset's only when `-O` is given), so the preset's log is kept before each listing
+  and put back after it, bytes and time.
+
+## Amendment 3: skips, each test's program, and COMMAND's assignments (2026-11-12)
+
+- CTest's skips (`SKIP_RETURN_CODE`, `SKIP_REGULAR_EXPRESSION`) and disabled tests are told as
+  skipped (ADR 0077 Amendment 2), and counted for a program told without its tests: in a run that
+  failed they record no pass. They used to read as passed.
+- `not built here` is each test's own: a unit whose name two programs share (one built here, one
+  found on `PATH`, when the build names no configuration) used to miss it when the built one came
+  first.
+- The plan's listing and walk start `ctest` and `ninja` with COMMAND's own `env NAME=value`
+  assignments (ADR 0077 Amendment 7), so that `env CTEST_CONFIGURATION_TYPE=Release ctest` lists
+  what its `ctest` will.
+- The real `ctest` is the one a shell would start: an empty `PATH` entry is the current directory
+  and a relative one is from it, and a link into a directory of hushrun's programs is passed over.
+
+## Amendment 4: a source no program is built from is in the rest set (2026-11-12)
+
+Decision 5 made a file of a source kind a source when some program read it; with a program whose
+build couldn't be read, "every source" counted too, so one such program (a test that names the
+repository's directory, another generator) made every file of a source kind a source. A test that
+reads such a file at run time (a compiler's test suite feeding `cases/*.c` to its program, a header
+a script copies) then didn't run when it changed: the file was on the "every source" program's list
+only.
+
+The decision, the rule: **a file of a source kind that a build's graph gives to no program of the
+check is in the rest set, so a change to it runs everything; a file the graph gives to a program is
+on that program's list only.** Sources are what the walks found; a program that reads every source
+still reads them all, but makes none of them a source. The plan's file lists, for its check before
+leaving out, the C and C++ files of the sources and units sets only. Cost: a repository with many
+sources no program is built from reuses less, since each of them is in every key; `tests.ignore`
+is how a person says a tree isn't read by any test.
+
+## Amendment 5: output after `ctest` returns (2026-11-12)
+
+hushrun's `ctest` starts the real one with its own standard output and error, and copies neither:
+it returns when `ctest` does, with its code, and what a program a test left running prints later
+reaches the same output directly, as without hushrun. Nothing is held, unlike hushrun's `swift`,
+which copies standard output to read it (ADR 0086 Amendment 3).
