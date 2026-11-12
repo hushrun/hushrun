@@ -1922,8 +1922,8 @@ fn observe(
         if let Ok(again) = start(real_swift, prefix, test, parsed, &[], &work, 2) {
             started = again;
             listing = list(real_swift, prefix, parsed);
+            left = LeftOut::refused(why);
         }
-        left = LeftOut::refused(why);
     }
     let file = match &listing {
         Some(listing) => facts_of(listing, &started, &left, parsed, &package),
