@@ -553,6 +553,16 @@ mod tests {
         // Braces are literal in CMake's expressions, and stay as they are.
         assert_eq!(anchored("a{2}"), "^a{2}$");
         assert_eq!(anchored("add.x"), "^add\\.x$");
+        // Catch2's names as the spike captured them: brackets, a backslash, Unicode, spaces at
+        // both ends, all kept.
+        assert_eq!(
+            anchored(" spaced [tag] a\\b, ü "),
+            "^ spaced \\[tag\\] a\\\\b, ü $"
+        );
+        assert_eq!(
+            anchored("templated - std::vector<int>"),
+            "^templated - std::vector<int>$"
+        );
         assert_eq!(alternation(["a", "b c"]), "^a$|^b c$");
         // No group, whatever the names: 3.22 takes nine.
         let many: Vec<String> = (0..20).map(|i| format!("t({i})")).collect();
