@@ -216,6 +216,42 @@ pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
     out
 }
 
+/// \[ADR 0087\] What a test whose program isn't built here (`cmake -E`, `sh`, a script) names,
+/// for a test it runs before: its program when that is a file of the repository (a script it
+/// runs), and what its arguments and environment name ([`named`]). A program of the system
+/// (`cmake -E`, `sh -c`, `rm`) names nothing itself.
+pub fn named_elsewhere(listed: &Listed, root: &Path) -> Vec<Named> {
+    let Some(first) = listed.command.as_ref().and_then(|c| c.first()) else {
+        return Vec::new();
+    };
+    let path = Path::new(first);
+    let real = if path.is_absolute() {
+        std::fs::canonicalize(path).ok()
+    } else {
+        listed
+            .words("WORKING_DIRECTORY")
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .find_map(|d| std::fs::canonicalize(d.join(path)).ok())
+    };
+    let program = real.clone().unwrap_or_else(|| PathBuf::from(first));
+    let mut out = Vec::new();
+    if let Some(real) = &real
+        && real.is_file()
+        && build_root(real).is_none()
+        && let Ok(inside) = real.strip_prefix(root)
+    {
+        out.push(Named::Repo(slashed(inside)));
+    }
+    for named in named(listed, &program, root) {
+        if !out.contains(&named) {
+            out.push(named);
+        }
+    }
+    out
+}
+
 /// A listed test with its unit and its id.
 #[derive(Debug, Clone)]
 pub struct Test {

@@ -421,16 +421,18 @@ pub fn walk(
                         }
                     }
                 }
-                // A program not built here (a script): any built program it starts reads only
-                // sources, so the test reads every one.
-                Program::Elsewhere(_) | Program::None => {
-                    let built = Built {
-                        every_source: true,
-                        method: "every source",
-                        ..Built::default()
-                    };
-                    merge(&mut out, &test.unit, built);
+                // A program not built here: only what its command names, a script of the
+                // repository it runs included; `cmake -E`, `sh -c` or a tool of the system adds
+                // nothing.
+                Program::Elsewhere(_) => {
+                    for n in select::named_elsewhere(&tests[h].listed, root) {
+                        if named_done.insert((test.unit.clone(), n.clone())) {
+                            let built = walker.named(&n);
+                            merge(&mut out, &test.unit, built);
+                        }
+                    }
                 }
+                Program::None => {}
             }
         }
     }
@@ -439,7 +441,9 @@ pub fn walk(
 
 /// The tests that run before test `i` for it, by index, but itself: the setup and cleanup tests of
 /// each fixture it requires (`FIXTURES_REQUIRED`, `FIXTURES_SETUP`, `FIXTURES_CLEANUP`) and the
-/// tests it `DEPENDS` on, and theirs in turn.
+/// tests it `DEPENDS` on, and theirs in turn. CTest's listing puts in a cleanup's `DEPENDS` every
+/// test that requires its fixture, to run it last: those are left out, since they don't run for
+/// the test, but beside it.
 fn helpers(tests: &[Test], i: usize) -> BTreeSet<usize> {
     let mut found: BTreeSet<usize> = BTreeSet::new();
     let mut stack = vec![i];
@@ -450,7 +454,21 @@ fn helpers(tests: &[Test], i: usize) -> BTreeSet<usize> {
         }
         let test = &tests[at].listed;
         let needs: BTreeSet<String> = test.words("FIXTURES_REQUIRED").into_iter().collect();
-        let after: BTreeSet<String> = test.words("DEPENDS").into_iter().collect();
+        let cleans: BTreeSet<String> = test.words("FIXTURES_CLEANUP").into_iter().collect();
+        let after: BTreeSet<String> = test
+            .words("DEPENDS")
+            .into_iter()
+            .filter(|name| {
+                cleans.is_empty()
+                    || !tests.iter().any(|t| {
+                        t.listed.name == *name
+                            && t.listed
+                                .words("FIXTURES_REQUIRED")
+                                .iter()
+                                .any(|f| cleans.contains(f))
+                    })
+            })
+            .collect();
         for (j, other) in tests.iter().enumerate() {
             let provides = other
                 .listed

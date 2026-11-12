@@ -305,6 +305,11 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   each program the build makes in a directory a test names must be up to date. The line names the
   file and the object, and when make compares whole seconds and a build can't help, says to touch
   the file.
+- CTest: a fixture or a test depended on whose program isn't built here (`cmake -E
+  make_directory`, `sh -c`) no longer makes every test that needs it read every source: it adds
+  only what its command names, a script of the repository included; and a test no longer reads
+  the programs of the other tests that require the same fixture. In a project of 21 programs, a
+  change to one library ran 6 again rather than 10.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build

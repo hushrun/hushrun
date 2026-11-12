@@ -1431,6 +1431,108 @@ fn a_source_saved_in_the_second_its_object_was_made_says_what_cures_it() {
 
 // covers: C-49, C-30
 #[test]
+fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        // As the reviewer's project: libraries, programs that link them, a fixture made and
+        // removed by `cmake -E`, and one set up by a script of the repository.
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(fxe C)\nenable_testing()\n\
+                     foreach(l core fmt util)\n  add_library(${l} STATIC lib/${l}.c)\nendforeach()\n\
+                     add_test(NAME tmp_setup COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/tmp)\n\
+                     add_test(NAME tmp_cleanup COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}/tmp)\n\
+                     set_tests_properties(tmp_setup PROPERTIES FIXTURES_SETUP tmp)\n\
+                     set_tests_properties(tmp_cleanup PROPERTIES FIXTURES_CLEANUP tmp)\n\
+                     add_test(NAME seed COMMAND ${CMAKE_SOURCE_DIR}/tests/seed.sh)\n\
+                     set_tests_properties(seed PROPERTIES FIXTURES_SETUP seed)\n\
+                     foreach(t core fmt fmt2 util plain seeded)\n  add_executable(t_${t} tests/t_${t}.c)\n  add_test(NAME ${t} COMMAND t_${t})\nendforeach()\n\
+                     target_link_libraries(t_core PRIVATE core)\ntarget_link_libraries(t_fmt PRIVATE fmt)\n\
+                     target_link_libraries(t_fmt2 PRIVATE fmt)\ntarget_link_libraries(t_util PRIVATE util)\n\
+                     set_tests_properties(fmt2 plain PROPERTIES FIXTURES_REQUIRED tmp)\n\
+                     set_tests_properties(seeded PROPERTIES FIXTURES_REQUIRED seed)\n",
+                ),
+                file("lib/core.c", "int core(void) { return 0; }\n"),
+                file("lib/fmt.c", "int fmt(void) { return 0; }\n"),
+                file("lib/util.c", "int util(void) { return 0; }\n"),
+                file("tests/seed.sh", "#!/bin/sh\nexit 0\n"),
+                file(
+                    "tests/t_core.c",
+                    "int core(void);\nint main(void) { return core(); }\n",
+                ),
+                file(
+                    "tests/t_fmt.c",
+                    "int fmt(void);\nint main(void) { return fmt(); }\n",
+                ),
+                file(
+                    "tests/t_fmt2.c",
+                    "int fmt(void);\nint main(void) { return fmt(); }\n",
+                ),
+                file(
+                    "tests/t_util.c",
+                    "int util(void);\nint main(void) { return util(); }\n",
+                ),
+                file("tests/t_plain.c", "int main(void) { return 0; }\n"),
+                file("tests/t_seeded.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                p.repo.join("tests/seed.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = |unit: &str| map["units"][unit]["reads"].clone();
+        // `cmake -E` names nothing of the repository: its tests read only their own programs.
+        assert_eq!(reads("t_plain"), json!(["tests/t_plain.c"]), "{at}");
+        assert_eq!(
+            reads("t_fmt2"),
+            json!(["lib/fmt.c", "tests/t_fmt2.c"]),
+            "{at}"
+        );
+        // A script of the repository the setup runs is read too; of no source kind, it is in
+        // the rest set, so a change to it runs everything.
+        assert_eq!(reads("t_seeded"), json!(["tests/t_seeded.c"]), "{at}");
+        // A change to one library runs only the programs that link it, and the fixture they
+        // need.
+        p.write("lib/fmt.c", "int fmt(void) { return 0 * 2; }\n");
+        git::commit_all(&p.repo, "fmt");
+        p.build();
+        // Of the eight test files (six programs, `cmake` and the script, which always run), the
+        // two that link it run, and one of the four reused runs as a check.
+        let changed = p.run(CTEST, &[]);
+        assert_eq!(
+            changed.line("hushrun: unit: "),
+            "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that did runs as a check",
+            "{at}"
+        );
+        let ran = changed.ran();
+        assert!(
+            ran.contains(&"fmt".to_string()) && ran.contains(&"fmt2".to_string()),
+            "{at}: {ran:?}"
+        );
+        p.write("tests/seed.sh", "#!/bin/sh\n# 2\nexit 0\n");
+        git::commit_all(&p.repo, "seed");
+        assert_eq!(p.run(CTEST, &[]).ran().len(), 9, "{at}");
+    }
+}
+
+// covers: C-49, C-30
+#[test]
 fn a_test_reads_the_programs_of_the_fixtures_and_tests_it_depends_on() {
     let Some(cmake) = with_cmake().into_iter().next() else {
         return;

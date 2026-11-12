@@ -316,3 +316,20 @@ other way: a rule that leaves its output untouched when it would write the same 
 Ninja's `restat`) leaves its inputs newer than the object, which the rule takes for old until the
 object is touched. A record that isn't `VALID` still makes the program one whose being up to date
 can't be told (`not observed`), which doesn't keep the run's pass.
+
+## Amendment 9: a fixture not built here adds what its command names (2026-11-12)
+
+Amendment 6 made a test read what its fixtures' and dependencies' programs are built from, and a
+helper whose program isn't built here (`add_test(NAME tmp_setup COMMAND ${CMAKE_COMMAND} -E
+make_directory …)`) read every source, so every test that required `tmp` ran on any change. Such a
+helper now adds only what its command names: its program when that is a file of the repository
+(a script it runs), and what its arguments and environment name, as a test's own command does;
+`cmake -E`, `sh -c` or a tool of the system adds nothing. A script that starts a built program
+without naming it is missed, as a test program's own start of one is.
+
+The same review's project showed a second loss: CTest's listing puts in a cleanup's `DEPENDS`
+every test that requires its fixture (to run the cleanup last), so following the cleanup's
+`DEPENDS` made each such test read the others' programs. Those aren't followed: they run beside
+the test, not for it. In the reviewer's project (21 programs, 5 requiring a `cmake -E` fixture),
+a change to a leaf library ran 6 programs again rather than 10, and a header two include 4 rather
+than 9, as before Amendment 6.
