@@ -40,8 +40,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   program and about twice the bytes stored on a first build. `tied`: a program is compiled as
   asked and reused only in the target folder that built it. **`hushrun build status`** shows the
   setting, as `programs` in its text and in its JSON.
-- Contract: **`SOURCE_DATE_EPOCH` is part of every compile's key**, since compilers and build tools
-  take "now" from it when it is set. hushrun never sets it.
+- Contract: **`SOURCE_DATE_EPOCH` is part of a compile's key** where a date can reach its output
+  (a program, a build script, a proc macro, and a library that expands a proc macro), since
+  compilers and build tools take "now" from it when it is set. rustc itself never reads it, so a
+  library that expands no proc macro is the same compile under any value. hushrun never sets it.
 - Contract: **the `build` folder in the cache directory** is the store: `blocks/`, the hints and
   suspensions under `steps/`, `tmp/`, `trash/`, the runs' `sessions/`, the output folders the
   wrapper has written records in under `out-dirs/`, the wrapper's link under `bin/` and the

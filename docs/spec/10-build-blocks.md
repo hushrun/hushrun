@@ -66,7 +66,9 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`), but for a library, which links nothing,
 neither those nor `SDKROOT` (rustc reads the SDK only to link; a library's bytes are the same
 under two SDKs); `SOURCE_DATE_EPOCH`, which compilers and
-build tools take "now" from when it is set (the wrapper never sets it); the person's extra
+build tools take "now" from when it is set (the wrapper never sets it), but for a library that
+takes no proc macro (no `--extern` naming a linked library): rustc never reads it, and only a
+proc macro, which runs inside rustc, could put it in a library's bytes; the person's extra
 variables; and what the
 wrapper adds to the compile besides the remaps (B-9), with roots replaced, so that a program
 compiled `movable` and one compiled `tied` (B-21) never share a key. No other
