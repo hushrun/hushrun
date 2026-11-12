@@ -1688,6 +1688,25 @@ fn jest_projects_snapshots_and_worker_threads() {
             "Jest {}: {map:#}",
             jest.major
         );
+        // A runner other than jest-circus, even one that hands over to it: no test file is
+        // observed.
+        r.write(
+            "test/runner.js",
+            "module.exports = require('jest-circus/runner');\n",
+        );
+        r.write(
+            "jest.config.js",
+            "module.exports = { testEnvironment: 'node', transform: {}, testRunner: './test/runner.js' };\n",
+        );
+        let other = r.run(JEST_RUN);
+        assert_eq!(other.code, 0, "{}", other.out());
+        let map = r.map();
+        assert_eq!(
+            map["units"]["test/cart.test.js"]["notFollowed"],
+            json!(["runner"]),
+            "Jest {}: {map:#}",
+            jest.major
+        );
     }
 }
 
