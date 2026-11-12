@@ -166,6 +166,37 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   which pytest's adapter took before, stays pytest's where this machine's store says pytest
   reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the
   check, CTest or `swift test` observes it, and what pytest ran under it is no longer observed.
+- CTest: a header a program of the project writes (a generator built and run by the build) now
+  makes each test program that includes it read what the generator is built from, on Ninja and
+  Makefiles, so a change to a header the generator includes runs those programs.
+- CTest: a program or file a test names in its arguments or its `ENVIRONMENT`
+  (`add_test(NAME x COMMAND driver $<TARGET_FILE:server>)`) is read by its test program; a
+  directory of a build named there makes it read every source and not up to date.
+- CTest: each `ctest` of a command is a start of its own, so two of them never add up to a test
+  program that ran whole.
+- CTest: a test preset's `execution.repeat` of `until-pass` no longer records a pass that came
+  after a failure, its `filter.include.index` leaves nothing out, and its `execution.showOnly`
+  is not observed.
+- CTest: hushrun's own listings no longer overwrite a test preset's `outputLogFile` or
+  `outputJUnitFile`.
+- CTest: an in-source build (`cmake -B .`) is said not to be observed, rather than silently
+  reusing nothing.
+- CTest: a test whose program isn't built here is marked so whichever test of its unit comes
+  first; skipped and disabled tests are told as skipped, so in a run that failed they record no
+  pass; and the plan's listing and walk get a command's own `env NAME=value` assignments.
+- `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
+  passes hushrun recorded for the files as they were.
+- `swift test`: a target built with a build-tool plugin of another package reads its package
+  whole; a console `passed` line counts only after the test's `started` line; a list after the
+  run that fails, where tests were left out, runs the command again with nothing left out;
+  XCTSkip and Swift Testing's disabled tests are told as skipped (under `--parallel`, in a run
+  that failed, an XCTest pass may be one); each hushrun `swift` is a start of its own; and the
+  plan's `swift package describe` gets a command's own `env NAME=value` assignments.
+- hushrun's `swift` no longer waits for ever for output a program `swift test` left running holds
+  open: it passes it on for 5 seconds after `swift test` ends, and that run records no pass.
+- The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
+  the current directory, a relative one is from it, and a link to one of hushrun's own programs
+  is passed over.
 
 ## [0.13.0] - 2026-11-12
 

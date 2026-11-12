@@ -152,3 +152,46 @@ own graph, not `describe`. None of it is built.
   test took 22 s and more, for 4,000 of 8,000 tests.
 - **Reading the manifest as text** for unsafe flags and paths: `dump-package` gives them as SwiftPM
   reads them.
+
+## Amendment 1: what makes a pass of `swift test` (2026-11-12)
+
+Reviewers found five ways a test target or a test was left out, or recorded as passed, when it
+should have run:
+
+- **`--skip-build`** runs the test products an earlier build left. `swift build --build-tests`, a
+  change, then `swift test --skip-build` recorded the old products' passes for the files as they
+  were, and the next run reused a target that fails on them. CTest's adapter has its `stale
+  program`; SwiftPM says nothing of whether its products are up to date.
+- **A build-tool plugin of another package** shows in `describe` only as a product dependency, so a
+  target built with it didn't read its package whole, as decision 4 says a plugin's target does.
+- **A console pass with no start**: a `Test Case '…' passed` line counted for a test the console
+  never said started, as a test that prints XCTest's words, or a line after a crash, can print.
+- **A list after the run that fails** after something was left out left that run's result standing,
+  although what SwiftPM ran of what was left out couldn't be checked.
+- **Skips** read as passes, in a run that failed too.
+
+The decision:
+
+- `--skip-build` makes the run not observed, with a line saying why: nothing is left out and
+  nothing recorded. A plain `swift test` builds first, whatever `--build-path` or `--scratch-path`
+  names, so it stays observed; `--skip-update` builds as usual.
+- A target whose `dump-package` names any plugin usage, or that depends on a product `describe`
+  says is a plugin, makes what depends on it read its package whole.
+- A pass or a skip counts only as the end of a start the console said, once; a failure counts
+  whatever came before it.
+- When the list after the run fails and the run left something out, the facts file says so as left
+  out but not listed (ADR 0077 Amendment 4): COMMAND starts once more with nothing left out.
+- XCTSkip, and Swift Testing's disabled tests and conditions, are told as skipped (ADR 0077
+  Amendment 2). Under `--parallel` the xunit file reads an XCTSkip as a pass, which can't be told
+  apart: in a run that failed, each XCTest pass read there is told as possibly skipped, so none
+  records a pass; in a run that passed nothing changes.
+- Output a program `swift test` started still holds 5 seconds after it ended is no longer waited
+  for: hushrun's `swift` stops passing it on then, as hushrun's target runner does for a test
+  binary (ADR 0083), and records no pass of that run (its failures stand). It used to wait for the
+  end of output, for ever if a program left running kept it open.
+- Each hushrun `swift` names a start of its own in its facts file, and the plan's `describe` and
+  `dump-package` get COMMAND's own `env NAME=value` assignments (ADR 0077 Amendment 7): a manifest
+  can read the environment, so `env WITH_EXTRA=1 swift test` may build a target with a dependency
+  only it names.
+- The real `swift` is the one a shell would start: an empty `PATH` entry is the current directory
+  and a relative one is from it, and a link into a directory of hushrun's programs is passed over.
