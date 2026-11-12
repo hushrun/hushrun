@@ -1054,9 +1054,27 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             .find(|t| t["name"] == name)?;
         Some(target["settings"].as_array().cloned().unwrap_or_default())
     };
+    // \[C-48\] Whether `dump-package` says a target is built with a plugin, of its package or
+    // another's: `pluginUsages`, which `describe` leaves out for another package's.
+    let uses_plugin = |i: usize, name: &str| -> bool {
+        described[i].dump.as_ref().is_some_and(|dump| {
+            dump["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|t| t["name"] == name)
+                .any(|t| t["pluginUsages"].as_array().is_some_and(|u| !u.is_empty()))
+        })
+    };
     let mut products: BTreeMap<String, Vec<(usize, Vec<String>)>> = BTreeMap::new();
+    let mut plugin_products: BTreeSet<String> = BTreeSet::new();
     for (i, d) in described.iter().enumerate() {
         for p in d.describe["products"].as_array().into_iter().flatten() {
+            if let Some(name) = p["name"].as_str()
+                && p["type"].get("plugin").is_some()
+            {
+                plugin_products.insert(name.to_string());
+            }
             let names = strings(&p["targets"]);
             if let Some(name) = p["name"].as_str() {
                 products
@@ -1155,8 +1173,16 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
                     });
                 }
             }
+            // A build-tool plugin may read any file of the package of the target it builds,
+            // whichever package the plugin is of.
+            if uses_plugin(i, &name)
+                || strings(&t["product_dependencies"])
+                    .iter()
+                    .any(|p| plugin_products.contains(p))
+            {
+                dirs.insert(pkg.dir.clone());
+            }
             for dep in strings(&t["target_dependencies"]) {
-                // A build-tool plugin may read any file of its package.
                 if find(i, &dep).is_some_and(|d| d["type"] == "plugin") {
                     dirs.insert(pkg.dir.clone());
                 }
@@ -2660,6 +2686,70 @@ mod tests {
                 .any(|n| n.why == "unsafe-flags")
         );
         assert!(names_a_path("-Iinclude") && !names_a_path("-enable-upcoming-feature"));
+    }
+
+    // covers: C-48
+    #[test]
+    fn a_build_tool_plugin_of_another_package_makes_its_target_read_its_package_whole() {
+        let root = Path::new("/work");
+        let mut described = vec![
+            Described {
+                dir: PathBuf::from("/work/Shop"),
+                describe: fixture("describe-shop.json"),
+                dump: Some(fixture("dump-shop.json")),
+            },
+            Described {
+                dir: PathBuf::from("/work/LocalMoney"),
+                describe: fixture("describe-localmoney.json"),
+                dump: Some(fixture("dump-localmoney.json")),
+            },
+        ];
+        // Core is built with a plugin of another package: `describe` names it only among its
+        // product dependencies, and `dump-package` among its plugin usages.
+        for t in described[0].dump.as_mut().unwrap()["targets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if t["name"] == "Core" {
+                t["pluginUsages"] = serde_json::json!([{"plugin": {"_0": "P", "_1": "LocalPlug"}}]);
+            }
+        }
+        let files = [
+            "Shop/Package.swift",
+            "Shop/Package.resolved",
+            "Shop/Sources/Core/Core.swift",
+            "Shop/Sources/shop-cli/main.swift",
+            "Shop/Tests/CoreTests/CoreTests.swift",
+            "LocalMoney/Package.swift",
+            "LocalMoney/Sources/Money/Money.swift",
+            "LocalMoney/Sources/MoneyFormat/Format.swift",
+        ];
+        let graph = graph_of(&described, root, &tree_of(&files));
+        let core = &graph.tests["Shop/Tests/CoreTests"];
+        assert!(
+            core.reads.contains("Shop/Sources/shop-cli/main.swift"),
+            "{:?}",
+            core.reads
+        );
+        // The same from `describe` alone, when `dump-package` names no plugin usage: a product
+        // dependency that is a plugin product.
+        for t in described[0].dump.as_mut().unwrap()["targets"]
+            .as_array_mut()
+            .unwrap()
+        {
+            t.as_object_mut().unwrap().remove("pluginUsages");
+        }
+        for t in described[1].describe["products"].as_array_mut().unwrap() {
+            if t["name"] == "Money" {
+                t["type"] = serde_json::json!({"plugin": null});
+            }
+        }
+        let graph = graph_of(&described, root, &tree_of(&files));
+        assert!(
+            graph.tests["Shop/Tests/CoreTests"]
+                .reads
+                .contains("Shop/Sources/shop-cli/main.swift")
+        );
     }
 
     // covers: C-48
