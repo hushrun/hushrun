@@ -262,3 +262,6 @@ first; the plugin's are in ADR 0080's Amendment 2.
   and a machine with a fresh cache decided otherwise. Now a run kept pytest's by the word in which
   pytest wrote no facts forgets the check in the store's write after the run's record, and the
   next run, `hushrun ready` and `hushrun why` choose afresh.
+- **`ready` and `why` before an import.** They write nothing, so they never import a schema-1
+  store, and read no adapter word: they could choose CTest where the run, which imports first,
+  chooses pytest. They now read the word from the schema-1 file, read only.

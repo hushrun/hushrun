@@ -849,3 +849,21 @@ fn a_store_that_cant_be_read_is_set_aside_and_made_anew_by_the_next_write() {
     aside.push(".unread");
     assert!(std::path::Path::new(&aside).is_file());
 }
+
+// covers: C-22, C-32
+#[test]
+fn readers_that_write_nothing_read_the_adapter_of_a_schema_1_store_without_importing() {
+    // `hushrun ready` and `hushrun why` never import: they read the word from the older file, so
+    // they choose the adapter the run, which imports first, chooses.
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = older(&path).unwrap();
+    let check_id = id("unit");
+    schema_1_store(&old, &check_id);
+    let before = std::fs::read(&old).unwrap();
+    assert_eq!(adapter_of(&path, &check_id).as_deref(), Some("pytest"));
+    assert_eq!(adapter_of(&path, &id("other")), None);
+    assert!(!path.exists());
+    assert_eq!(std::fs::read(&old).unwrap(), before);
+}

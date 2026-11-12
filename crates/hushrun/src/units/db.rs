@@ -560,8 +560,31 @@ fn remove(path: &Path) {
 }
 
 /// \[C-32\] The adapter that last reported the check `check_id`'s test files in the store at
-/// `path`, by its word: `None` when the store doesn't hold the check, or can't be read.
+/// `path`, by its word: `None` when the store doesn't hold the check, or can't be read. With no
+/// store of this schema, the one of schema 1 an older hushrun keeps beside it, read only and never
+/// imported: `hushrun ready` and `hushrun why`, which write nothing, choose as the run, which
+/// imports first, does.
 pub fn adapter_of(path: &Path, check_id: &Digest) -> Option<String> {
+    if !path.exists()
+        && let Some(old) = older(path).filter(|old| old.is_file())
+    {
+        let conn = Connection::open_with_flags(
+            &old,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        if ids(&conn).ok()? != (APPLICATION_ID, 1) {
+            return None;
+        }
+        return conn
+            .query_row(
+                "SELECT adapter FROM checks WHERE check_id = ?1",
+                [check_id.hex()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()?;
+    }
     let conn = open_to_read(path).ok()??;
     conn.query_row(
         "SELECT adapter FROM checks WHERE check_id = ?1",
