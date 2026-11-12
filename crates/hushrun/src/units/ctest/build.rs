@@ -846,10 +846,11 @@ pub fn make_graph(build: &Path) -> BTreeMap<String, Vec<String>> {
                 continue;
             };
             if kind.is_dir() {
-                if path.file_name().is_some_and(|n| n == "_deps") && dir == build {
-                    continue;
+                // A build of its own inside this one (an ExternalProject's) has its own top: its
+                // rules aren't this build's. FetchContent's `_deps/` are this build's.
+                if !path.join("CMakeCache.txt").exists() {
+                    stack.push(path);
                 }
-                stack.push(path);
             } else if path.file_name().is_some_and(|n| n == "build.make")
                 && path
                     .parent()
@@ -952,7 +953,7 @@ fn make_custom_depfiles(build: &Path) -> BTreeMap<String, String> {
                 continue;
             };
             if kind.is_dir() {
-                if !(path.file_name().is_some_and(|n| n == "_deps") && dir == build) {
+                if !path.join("CMakeCache.txt").exists() {
                     stack.push(path);
                 }
                 continue;

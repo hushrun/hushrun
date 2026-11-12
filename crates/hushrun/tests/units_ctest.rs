@@ -1413,6 +1413,87 @@ fn the_projects_discovery_runs_once_more_and_once_more_again_when_tests_are_left
     assert_eq!(counted(), 3, "{}", second.stderr);
 }
 
+// covers: C-49, C-30
+#[test]
+fn sources_fetched_from_the_repository_built_apart_or_globbed_are_read_or_in_the_rest_set() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(far C)\nenable_testing()\n\
+                     include(FetchContent)\n\
+                     FetchContent_Declare(dep SOURCE_DIR ${CMAKE_SOURCE_DIR}/third/dep)\nFetchContent_MakeAvailable(dep)\n\
+                     include(ExternalProject)\n\
+                     ExternalProject_Add(ext SOURCE_DIR ${CMAKE_SOURCE_DIR}/third/ext BINARY_DIR ${CMAKE_BINARY_DIR}/ext-build\n\
+                     \x20 INSTALL_COMMAND \"\" BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/ext-build/${CMAKE_STATIC_LIBRARY_PREFIX}ext${CMAKE_STATIC_LIBRARY_SUFFIX})\n\
+                     add_library(extlib STATIC IMPORTED)\n\
+                     set_target_properties(extlib PROPERTIES IMPORTED_LOCATION ${CMAKE_BINARY_DIR}/ext-build/${CMAKE_STATIC_LIBRARY_PREFIX}ext${CMAKE_STATIC_LIBRARY_SUFFIX})\n\
+                     add_dependencies(extlib ext)\n\
+                     file(GLOB cases ${CMAKE_SOURCE_DIR}/cases/*.c)\n\
+                     add_executable(t_dep tests/t_dep.c)\ntarget_link_libraries(t_dep dep)\n\
+                     add_executable(t_ext tests/t_ext.c)\ntarget_link_libraries(t_ext extlib)\nadd_dependencies(t_ext ext)\n\
+                     add_executable(t_case tests/t_case.c ${cases})\n\
+                     foreach(t dep ext case)\n  add_test(NAME ${t} COMMAND t_${t})\nendforeach()\n",
+                ),
+                file(
+                    "third/dep/CMakeLists.txt",
+                    "add_library(dep STATIC dep.c)\n",
+                ),
+                file("third/dep/dep.c", "int dep(void) { return 0; }\n"),
+                file(
+                    "third/ext/CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(ext C)\nadd_library(ext STATIC ext.c)\n",
+                ),
+                file("third/ext/ext.c", "int ext(void) { return 0; }\n"),
+                file("cases/one.c", "int one(void) { return 0; }\n"),
+                file(
+                    "tests/t_dep.c",
+                    "int dep(void);\nint main(void) { return dep(); }\n",
+                ),
+                file(
+                    "tests/t_ext.c",
+                    "int ext(void);\nint main(void) { return ext(); }\n",
+                ),
+                file("tests/t_case.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        // A file the glob would take, added since the build was configured: no build compiles it.
+        p.write("cases/two.c", "int two(void) { return 0; }\n");
+        git::commit_all(&p.repo, "two");
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        // Fetched from the repository and built in this build: read by its user.
+        assert!(
+            map["units"]["t_dep"]["reads"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("third/dep/dep.c")),
+            "{at}: {map:#}"
+        );
+        assert!(
+            map["units"]["t_case"]["reads"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("cases/one.c")),
+            "{at}: {map:#}"
+        );
+        // Built by a build of its own, which this one's records don't name, and a globbed file the
+        // build doesn't compile yet: in the rest set, so a change to either runs everything.
+        assert!(map["rest"]["third/ext/ext.c"].is_string(), "{at}: {map:#}");
+        assert!(map["rest"]["cases/two.c"].is_string(), "{at}: {map:#}");
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
