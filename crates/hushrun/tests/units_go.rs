@@ -525,6 +525,39 @@ fn go_test_in_a_form_hushrun_doesnt_read_is_left_alone_and_says_why() {
     );
 }
 
+// covers: C-32, C-35
+#[test]
+fn the_tools_hushrun_starts_for_go_get_commands_own_env_assignments() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // `env GOARCH=<another> go test`: `go env` and `go list`, which hushrun starts, see the
+    // GOARCH COMMAND sets, so hushrun knows it tests for another target, and loads nothing, rather
+    // than keying packages on the files `go list` names for this one.
+    let host = Command::new("go")
+        .args(["env", "GOHOSTARCH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let other = if host == "arm64" { "amd64" } else { "arm64" };
+    let r = Repo::new(&shop("observe"));
+    let goarch = format!("GOARCH={other}");
+    let ran = r.run(
+        &[
+            "run", "unit", "--", "env", &goarch, "go", "test", "-count=1", "./greet",
+        ],
+        &[],
+    );
+    assert!(
+        ran.stderr.contains(&format!(
+            "hushrun: unit: test files aren't observed: it tests for {}/{other} on",
+            std::env::consts::OS.replace("macos", "darwin")
+        )),
+        "{}",
+        ran.stderr
+    );
+}
+
 // covers: C-34, C-35
 #[test]
 fn go_reuses_what_already_passed_and_audits_it() {

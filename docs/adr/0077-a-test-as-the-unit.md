@@ -189,3 +189,13 @@ back to `unit: file` then reused the file whole on an older pass of its own key,
 that started a process never earned again. The guard now holds for either unit, in the one
 predicate the plan, `observe`, `hushrun ready` and `hushrun why` ask; the file's next run, whole,
 replaces the row.
+
+## Amendment 7: the tools an adapter starts get COMMAND's own assignments (2026-11-12)
+
+The registry reads a COMMAND that starts `env NAME=value …` by what follows the assignments, but
+the tools adapters start themselves (Cargo's plan build, `go env` and `go list`, `swift package
+describe`, CTest's listing) didn't get them: `env GOARCH=386 go test` would key a package on the
+files `go list` names for this machine's target. Now every such tool is built through one helper
+(`units::command::tool`), which applies COMMAND's own assignments (`StartAt`, `PlanAt` and `ReadAt`
+carry them as `assigned`), and an adapter reads COMMAND's environment with them first. And a
+program's name is compared in lower case on Windows, whose file system ignores case.

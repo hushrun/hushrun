@@ -1,22 +1,37 @@
 //! \[C-32\] What every recognizer reads of a COMMAND the same way, beside the registry
 //! ([`super::adapter::RECOGNIZED`]).
 
+use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::path::Path;
+use std::process::Command;
 
 /// The program `word` names: its file name, without its directory and without a Windows `.exe`,
-/// `.cmd` or `.bat`, in any case.
-pub fn program_name(word: &str) -> &str {
+/// `.cmd` or `.bat`, in any case; \[C-32\] on Windows, whose file system ignores case, in lower
+/// case, so that `MVN.CMD` is `mvn` there.
+pub fn program_name(word: &str) -> Cow<'_, str> {
+    program_name_on(word, cfg!(windows))
+}
+
+/// [`program_name`] on a file system that ignores case (`folds`) or not.
+fn program_name_on(word: &str, folds: bool) -> Cow<'_, str> {
     let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    let mut name = file;
     for ext in [".exe", ".cmd", ".bat"] {
         if let Some(at) = file.len().checked_sub(ext.len())
             && at > 0
             && file.is_char_boundary(at)
             && file[at..].eq_ignore_ascii_case(ext)
         {
-            return &file[..at];
+            name = &file[..at];
+            break;
         }
     }
-    file
+    if folds && name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// COMMAND after `env NAME=value …`, which starts what follows with those variables added: what
@@ -41,6 +56,34 @@ pub fn without_env(command: &[String]) -> &[String] {
     }
 }
 
+/// \[C-32\] The `NAME=value` assignments COMMAND makes with `env NAME=value …` before the program
+/// [`without_env`] reads through, in order: what that program's environment has beside hushrun's.
+/// None when COMMAND doesn't start so.
+pub fn assignments(command: &[String]) -> Vec<(String, String)> {
+    let after = without_env(command);
+    if after.len() == command.len() {
+        return Vec::new();
+    }
+    command[1..command.len() - after.len()]
+        .iter()
+        .filter_map(|word| word.split_once('='))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+/// \[C-32\] The one way an adapter starts a tool of its own for COMMAND (Cargo's plan build and
+/// `cargo metadata`, `go env` and `go list`, `swift package describe`, CTest's listing): `program`
+/// in `cwd`, with COMMAND's own assignments (`assigned`, [`assignments`]) over hushrun's
+/// environment, as COMMAND's program will have them, and without hushrun's `HUSHRUN_UNITS`. The
+/// caller adds the tool's arguments and what else it needs.
+pub fn tool(program: impl AsRef<OsStr>, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    let mut command = Command::new(program);
+    command.current_dir(cwd);
+    command.envs(assigned.iter().map(|(name, value)| (name, value)));
+    command.env_remove(super::runner::UNITS_VAR);
+    command
+}
+
 /// A test runner a wrapper COMMAND's text can start by name: pytest, which any COMMAND nobody else
 /// takes gets, and the two hushrun can only get into through `PATH` ([`super::program`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +105,7 @@ impl Runner {
         match self {
             Runner::Pytest => words
                 .iter()
-                .any(|w| matches!(program_name(w), "pytest" | "py.test" | "tox" | "nox")),
+                .any(|w| matches!(&*program_name(w), "pytest" | "py.test" | "tox" | "nox")),
             Runner::Ctest => words.contains(&"ctest"),
             Runner::SwiftTest => {
                 words.contains(&"swift-test") || words.windows(2).any(|w| w == ["swift", "test"])
@@ -78,7 +121,7 @@ impl Runner {
 pub fn wrapper_text(command: &[String], cwd: &Path) -> Option<String> {
     let first = command.first()?;
     let rest = &command[1..];
-    match program_name(first) {
+    match &*program_name(first) {
         "sh" | "bash" | "zsh" | "dash" | "ksh" => {
             let at = rest
                 .iter()
@@ -144,6 +187,38 @@ mod tests {
         assert_eq!(program_name("jest.js"), "jest.js");
         assert_eq!(program_name(".exe"), ".exe");
         assert_eq!(program_name("tox.ini"), "tox.ini");
+        // Where the file system ignores case, so does a program's name.
+        assert_eq!(program_name_on("C:\\tools\\MVN.CMD", true), "mvn");
+        assert_eq!(program_name_on("Gradlew.Bat", true), "gradlew");
+        assert_eq!(program_name_on("MVN.CMD", false), "MVN");
+    }
+
+    #[test]
+    fn a_tool_gets_commands_own_assignments() {
+        let words = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        let assigned = assignments(&words("env GOARCH=386 GOFLAGS=-tags=x go test ./..."));
+        assert_eq!(
+            assigned,
+            [
+                ("GOARCH".to_string(), "386".to_string()),
+                ("GOFLAGS".to_string(), "-tags=x".to_string())
+            ]
+        );
+        assert!(assignments(&words("go test")).is_empty());
+        assert!(assignments(&words("env -i A=1 go test")).is_empty());
+        let tool = tool("go", Path::new("/r"), &assigned);
+        let envs: Vec<(String, Option<String>)> = tool
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("GOARCH".into(), Some("386".into()))));
+        assert!(envs.contains(&(super::super::runner::UNITS_VAR.into(), None)));
+        assert_eq!(tool.get_current_dir(), Some(Path::new("/r")));
     }
 
     #[test]

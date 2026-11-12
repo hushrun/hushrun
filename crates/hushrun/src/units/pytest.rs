@@ -79,6 +79,7 @@ pub fn unsafe_for(command: &[String]) -> Option<&'static str> {
     let mut after_python = false;
     for word in command {
         let file = super::command::program_name(word);
+        let file = &*file;
         if file == "tox" || file.starts_with("tox.") || file == "nox" {
             return Some("tox and nox choose what reaches their environments");
         }

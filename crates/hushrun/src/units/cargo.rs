@@ -125,6 +125,7 @@ const NEXTEST_VALUED: &[&str] = &[
 pub fn recognize(command: &[String]) -> Option<Recognized> {
     let program = command.first()?;
     let file = super::command::program_name(program);
+    let file = &*file;
     let mut rest = &command[1..];
     let mut toolchain = None;
     let nextest = match file {
@@ -210,6 +211,7 @@ pub fn runner_variables(
     exe: &Path,
     cwd: &Path,
     env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
 ) -> Result<Vec<(String, String)>, String> {
     let exe_text = exe
         .to_str()
@@ -228,7 +230,7 @@ pub fn runner_variables(
     if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
         triples.insert(target);
     }
-    triples.insert(host(recognized, env)?);
+    triples.insert(host(recognized, cwd, env, assigned)?);
     let mut out = Vec::new();
     for triple in triples {
         let key: String = triple
@@ -256,11 +258,16 @@ pub fn runner_variables(
 }
 
 /// The host triple, as the `rustc` COMMAND's toolchain runs says.
-fn host(recognized: &Recognized, env: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+fn host(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> Result<String, String> {
     let rustc = env("RUSTC")
         .filter(|r| !r.is_empty())
         .unwrap_or("rustc".into());
-    let mut command = Command::new(&rustc);
+    let mut command = super::command::tool(&rustc, cwd, assigned);
     if let Some(tc) = &recognized.toolchain {
         command.arg(format!("+{tc}"));
     }
@@ -346,9 +353,10 @@ pub fn plan_build(
     root: &Path,
     cwd: &Path,
     env: &[(OsString, OsString)],
+    assigned: &[(String, String)],
 ) -> Result<Built, String> {
-    let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, true, env)?;
+    let metadata = metadata(recognized, cwd, assigned)?;
+    let artifacts = build(recognized, cwd, true, env, assigned)?;
     Ok(read_build(&metadata, artifacts, root))
 }
 
@@ -425,14 +433,15 @@ pub fn observe(
     root: &Path,
     cwd: &Path,
     command_passed: bool,
+    assigned: &[(String, String)],
 ) -> Result<Observed, String> {
     let invocations: Vec<&Invocation> = files
         .iter()
         .filter(|f| f.adapter == ADAPTER)
         .filter_map(|f| f.invocation.as_ref())
         .collect();
-    let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, false, &[])?;
+    let metadata = metadata(recognized, cwd, assigned)?;
+    let artifacts = build(recognized, cwd, false, &[], assigned)?;
     let built = read_build(&metadata, artifacts, root);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
@@ -679,8 +688,12 @@ fn ended(
 
 /// `cargo metadata --no-deps`: the workspace's members, their targets and path dependencies.
 /// It resolves nothing, so it reads no network and writes no lockfile.
-fn metadata(recognized: &Recognized, cwd: &Path) -> Result<Metadata, String> {
-    let mut command = cargo(recognized, cwd);
+fn metadata(
+    recognized: &Recognized,
+    cwd: &Path,
+    assigned: &[(String, String)],
+) -> Result<Metadata, String> {
+    let mut command = cargo(recognized, cwd, assigned);
     command.args(["metadata", "--format-version", "1", "--no-deps"]);
     let mut words = recognized.build.iter();
     while let Some(word) = words.next() {
@@ -706,12 +719,13 @@ fn metadata(recognized: &Recognized, cwd: &Path) -> Result<Metadata, String> {
     serde_json::from_slice(&output.stdout).map_err(|err| format!("cargo metadata: {err}"))
 }
 
-fn cargo(recognized: &Recognized, cwd: &Path) -> Command {
-    let mut command = Command::new(&recognized.cargo);
+/// \[C-32\] A `cargo` command hushrun asks, as COMMAND's `cargo` will run: in `cwd`, with COMMAND's
+/// own `env NAME=value` assignments (`assigned`), and none of hushrun's own variables.
+fn cargo(recognized: &Recognized, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    let mut command = super::command::tool(&recognized.cargo, cwd, assigned);
     if let Some(tc) = &recognized.toolchain {
         command.arg(format!("+{tc}"));
     }
-    command.current_dir(cwd);
     command
 }
 
@@ -724,8 +738,9 @@ fn build(
     cwd: &Path,
     plan: bool,
     env: &[(OsString, OsString)],
+    assigned: &[(String, String)],
 ) -> Result<Vec<Artifact>, String> {
-    let mut command = cargo(recognized, cwd);
+    let mut command = cargo(recognized, cwd, assigned);
     command.envs(env.iter().map(|(name, value)| (name, value)));
     command.args(["test", "--no-run", "--message-format=json"]);
     if !recognized
@@ -975,7 +990,7 @@ impl Adapter for Recognized {
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let exe = at.exe()?;
         let env = |name: &str| (at.env)(name).and_then(|v| v.into_string().ok());
-        runner_variables(self, &exe, at.cwd, &env).map(|vars| {
+        runner_variables(self, &exe, at.cwd, &env, at.assigned).map(|vars| {
             vars.into_iter()
                 .map(|(name, value)| (name, OsString::from(value)))
                 .collect()
@@ -983,7 +998,7 @@ impl Adapter for Recognized {
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        let b = plan_build(self, at.root, at.cwd, at.compile_env)?;
+        let b = plan_build(self, at.root, at.cwd, at.compile_env, at.assigned)?;
         let sets = units::classify(
             at.tree.paths(),
             &|path| b.unit_files.contains(path),
@@ -1016,7 +1031,14 @@ impl Adapter for Recognized {
         if !at.files.iter().any(|f| f.adapter == ADAPTER) {
             return Ok(None);
         }
-        let observed = observe(self, at.files, at.root, at.cwd, at.command_passed)?;
+        let observed = observe(
+            self,
+            at.files,
+            at.root,
+            at.cwd,
+            at.command_passed,
+            at.assigned,
+        )?;
         let sets = units::classify(
             at.tree.paths(),
             &|path| observed.unit_files.contains(path),

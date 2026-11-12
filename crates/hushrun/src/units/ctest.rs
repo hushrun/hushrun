@@ -88,7 +88,7 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
 fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
     let first = command.first()?;
     let rest = &command[1..];
-    match program_name(first) {
+    match &*program_name(first) {
         "ctest" if first.contains(['/', '\\']) => Some(Err(format!(
             "COMMAND starts ctest by its path ({first}), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
         ))),

@@ -129,6 +129,7 @@ const VALUE_FLAGS: &[(&str, bool)] = &[
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     let program = command.first()?;
     let file = super::command::program_name(program);
+    let file = &*file;
     if file != "go" || command.get(1).map(String::as_str) != Some("test") {
         return None;
     }
@@ -255,8 +256,9 @@ pub fn variables(
     exe: &Path,
     cwd: &Path,
     goflags: Option<OsString>,
+    assigned: &[(String, String)],
 ) -> Result<Vec<(String, OsString)>, String> {
-    let output = go(recognized, cwd)
+    let output = go(recognized, cwd, assigned)
         .args([
             "env",
             "-json",
@@ -372,12 +374,11 @@ pub fn split_quoted(text: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn go(recognized: &Recognized, cwd: &Path) -> Command {
-    let mut command = Command::new(&recognized.go);
-    command.current_dir(cwd);
-    // hushrun's own variables never reach the go commands it asks.
-    command.env_remove(runner::UNITS_VAR);
-    command
+/// \[C-32\] A `go` command hushrun asks, as COMMAND's `go` will run: in `cwd`, with COMMAND's own
+/// `env NAME=value` assignments (`assigned`: a `GOARCH`, a `GOFLAGS` with build tags), and none
+/// of hushrun's own variables.
+fn go(recognized: &Recognized, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    super::command::tool(&recognized.go, cwd, assigned)
 }
 
 /// One package as `go list -json` writes it, the fields hushrun reads.
@@ -445,8 +446,13 @@ pub struct ListedUnit {
 /// `go list -e -deps -test -json` with COMMAND's build flags and packages, in `cwd`, with
 /// hushrun's environment, which is COMMAND's but for what hushrun adds; read for the repository
 /// at `root`. `Err` says why nothing can be told.
-pub fn list(recognized: &Recognized, root: &Path, cwd: &Path) -> Result<Listed, String> {
-    let mut command = go(recognized, cwd);
+pub fn list(
+    recognized: &Recognized,
+    root: &Path,
+    cwd: &Path,
+    assigned: &[(String, String)],
+) -> Result<Listed, String> {
+    let mut command = go(recognized, cwd, assigned);
     command.arg("list");
     if let Some(dir) = &recognized.dir {
         // `-C` must come first.
@@ -684,8 +690,9 @@ pub fn observe(
     root: &Path,
     cwd: &Path,
     tree: &Tree,
+    assigned: &[(String, String)],
 ) -> Result<Observed, String> {
-    let listed = list(recognized, root, cwd)?;
+    let listed = list(recognized, root, cwd, assigned)?;
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let real_root = real(root);
     let mut starts: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
@@ -1383,11 +1390,11 @@ impl Adapter for Recognized {
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let exe = at.exe()?;
-        variables(self, &exe, at.cwd, (at.env)("GOFLAGS"))
+        variables(self, &exe, at.cwd, (at.env)("GOFLAGS"), at.assigned)
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        let listed = list(self, at.root, at.cwd)?;
+        let listed = list(self, at.root, at.cwd, at.assigned)?;
         let sets = units::classify(
             at.tree.paths(),
             &|path| listed.unit_files.contains(path),
@@ -1426,7 +1433,7 @@ impl Adapter for Recognized {
         if !at.files.iter().any(|f| f.adapter == ADAPTER) {
             return Ok(None);
         }
-        let mut observed = observe(self, at.files, at.root, at.cwd, at.tree)?;
+        let mut observed = observe(self, at.files, at.root, at.cwd, at.tree, at.assigned)?;
         // \[ADR 0083\] Tests one by one, as the runner told them (C-39). A package of which the
         // runner left a test out didn't run whole. One it didn't start, reused whole, tells none:
         // the core counts the tests this machine knows of it (C-39).

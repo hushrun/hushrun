@@ -97,6 +97,7 @@ const NODE_VALUES: &[&str] = &[
 /// Whether `word` names Jest's own program: `jest`, a path to it, or `jest/bin/jest.js`.
 fn is_jest(word: &str) -> bool {
     let name = program_name(word);
+    let name = &*name;
     if name == "jest" {
         return true;
     }
@@ -113,7 +114,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         if is_jest(first) {
             break;
         }
-        match program_name(first) {
+        match &*program_name(first) {
             "node" | "nodejs" => {
                 // `node [options] node_modules/jest/bin/jest.js`, the way to Jest's ESM mode.
                 let mut next = &rest[1..];
@@ -132,6 +133,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             "pnpm" | "yarn" | "bun" | "npm" => {
                 // `pnpm jest`, `pnpm exec jest`, `yarn jest`, `bun x jest`, `npm exec -- jest`.
                 let manager = program_name(first);
+                let manager = &*manager;
                 let mut next = &rest[1..];
                 if manager == "bun" && next.first().map(String::as_str) == Some("--bun") {
                     return Some(Err("Jest under Bun's own runtime doesn't load Node's options, which hushrun's adapter needs".into()));

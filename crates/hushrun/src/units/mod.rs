@@ -92,6 +92,9 @@ pub struct Session {
     run_dir: PathBuf,
     /// Where COMMAND runs.
     cwd: PathBuf,
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool an adapter starts
+    /// for it gets.
+    assigned: Vec<(String, String)>,
     cache: PathBuf,
     adapter: Box<dyn Adapter>,
     variables: Vec<(String, OsString)>,
@@ -559,12 +562,23 @@ impl Session {
             let _ = std::fs::remove_dir_all(&dir);
             return Start::Not(format!("can't make {}: {err}", dir.display()));
         }
-        let env = |name: &str| std::env::var_os(name);
+        // \[C-32\] COMMAND's own `env NAME=value` assignments: in its environment as an adapter
+        // reads it, and in every tool an adapter starts for it.
+        let assigned = command::assignments(command);
+        let env = |name: &str| {
+            assigned
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| OsString::from(value))
+                .or_else(|| std::env::var_os(name))
+        };
         let at = StartAt {
             cache: &cache,
             cwd,
             dir: &dir,
             env: &env,
+            assigned: &assigned,
         };
         let mut variables = match adapter.variables(&at) {
             Ok(variables) => variables,
@@ -581,6 +595,7 @@ impl Session {
             plan_notes: Vec::new(),
             run_dir: dir.clone(),
             cwd: cwd.to_path_buf(),
+            assigned,
             dir,
             cache,
             adapter,
@@ -634,6 +649,7 @@ impl Session {
             asker: asker.as_ref(),
             ignore: &self.tests.ignore,
             compile_env: &self.compile_env,
+            assigned: &self.assigned,
         };
         let planning = match self.adapter.plan(&at) {
             Ok(Some(planning)) => planning,
@@ -948,6 +964,7 @@ impl Session {
             map,
             asker,
             ignore: &self.tests.ignore,
+            assigned: &self.assigned,
         })
     }
 
@@ -958,7 +975,8 @@ impl Session {
     /// alone. `Err` why it can't be set up.
     pub fn whole_again(&mut self) -> Result<(), String> {
         let dir = self.dir.join("whole");
-        std::fs::create_dir_all(&dir).map_err(|err| format!("can't make {}: {err}", dir.display()))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("can't make {}: {err}", dir.display()))?;
         let unit_files = BTreeSet::new();
         let listed = Listed {
             extras: self.adapter.again(&self.root, &self.cwd, &unit_files),
@@ -1168,6 +1186,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             asker: asker.as_ref(),
             ignore: &p.tests.ignore,
             compile_env: &[],
+            assigned: &command::assignments(p.command),
         })
         .ok()??;
     let total = found.known.len();

@@ -127,6 +127,7 @@ pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
     let first = *words.first()?;
     let name = program_name(first);
+    let name = &*name;
     let args: Option<Vec<&str>> = match name {
         "swift" if words.get(1) == Some(&"test") => Some(words[2..].to_vec()),
         "swift-test" => Some(words[1..].to_vec()),

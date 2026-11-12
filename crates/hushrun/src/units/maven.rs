@@ -85,6 +85,7 @@ fn properties(args: &[String]) -> BTreeMap<String, String> {
 /// when it does in a way hushrun can't observe, which the run says.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     let launcher = program_name(command.first()?);
+    let launcher = &*launcher;
     match launcher {
         "mvn" | "mvnw" => {}
         "mvnd" | "mvnd.sh" => {

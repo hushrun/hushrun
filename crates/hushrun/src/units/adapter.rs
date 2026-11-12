@@ -100,8 +100,11 @@ pub struct StartAt<'a> {
     /// The run's own directory, removed when the run ends: where a directory of programs for
     /// `PATH` goes ([`super::program::make`]).
     pub dir: &'a Path,
-    /// COMMAND's environment as hushrun has it.
+    /// COMMAND's environment as hushrun has it, its own `env NAME=value` assignments first.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool the adapter starts
+    /// gets: start them through [`super::command::tool`].
+    pub assigned: &'a [(String, String)],
 }
 
 impl StartAt<'_> {
@@ -125,6 +128,9 @@ pub struct PlanAt<'a> {
     pub ignore: &'a [Pattern],
     /// What COMMAND's compiles get besides (B-2), for a plan that builds first.
     pub compile_env: &'a [(OsString, OsString)],
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool the adapter starts
+    /// gets: start them through [`super::command::tool`].
+    pub assigned: &'a [(String, String)],
 }
 
 /// The units a plan knows of, each with the lists of files its key may be made from (C-38): `None`
@@ -166,6 +172,9 @@ pub struct ReadAt<'a> {
     pub map: &'a Map,
     pub asker: Option<&'a Asker<'a>>,
     pub ignore: &'a [Pattern],
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool the adapter starts
+    /// gets: start them through [`super::command::tool`].
+    pub assigned: &'a [(String, String)],
 }
 
 /// What an adapter's files came to, before any state is decided.

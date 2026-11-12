@@ -72,6 +72,7 @@ pub struct Recognized {
 /// hushrun doesn't observe.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     let file = super::command::program_name(command.first()?);
+    let file = &*file;
     if file != "gradle" && file != "gradlew" {
         return None;
     }
