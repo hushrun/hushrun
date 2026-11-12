@@ -759,4 +759,6 @@ What **read** means: a unit read a file when it imported it, directly or through
 
 **C-40 What a test read.** [ADR 0078] One function gives a test's list, for both values of `tests.reads`, and every reader calls it: the plan, the record, `observe`, `hushrun ready` and `hushrun why`.
 
+**C-41 Hints with tests.** [ADR 0079] A hint can hold a check's tests, by id, sealed, and with `tests.reads: test` each test's own list (C-38, C-40).
+
 **C-42 pytest watches a test.** [ADR 0080] With `tests.unit: test` and `tests.reads: test`, on Python 3.12 or later, the pytest adapter reports what each test touched (C-40).

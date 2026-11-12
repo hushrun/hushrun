@@ -61,6 +61,7 @@ fn sample() -> (Hint, Vec<&'static str>) {
         ),
     );
     let hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".to_string(),
         units,
         unit_files: BTreeSet::new(),
@@ -242,6 +243,7 @@ fn a_directory_names_a_go_package_and_the_root_is_dot_or_empty() {
     );
     units.insert(".".to_string(), unit(&["main_test.go"], &["."]));
     let hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "go".to_string(),
         units,
         unit_files: BTreeSet::new(),
@@ -278,6 +280,7 @@ fn a_unit_file_gone_leaves_the_list_and_drops_no_unit() {
         unit(&["src/a.ts", "src/a.test.ts"], &[]),
     );
     let hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "vitest".to_string(),
         units,
         unit_files: set(&["src/a.test.ts", "src/b.test.ts"]),
@@ -303,20 +306,21 @@ fn two_paths_of_the_scope_with_one_token_drop_every_test_file_that_uses_it() {
     units.insert("t1".to_string(), unit(&["t1", "ab"], &[]));
     units.insert("t2".to_string(), unit(&["t2", "x"], &[]));
     let hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".to_string(),
         units,
         unit_files: set(&["ab", "x"]),
     };
-    let content = encode(&hint, &weak).unwrap();
+    let content = encode(&hint, &weak, &|_, _| None).unwrap();
     // Without "ba" in the scope, every unit reads.
-    let read = decode(&content, &weak, ["t1", "t2", "ab", "x"]).unwrap();
+    let read = decode(&content, &weak, &|_, _| None, ["t1", "t2", "ab", "x"]).unwrap();
     assert_eq!(read.hint, hint);
     // With it, t1 goes, and so does "ab" from the unit files.
-    let read = decode(&content, &weak, ["t1", "t2", "ab", "ba", "x"]).unwrap();
+    let read = decode(&content, &weak, &|_, _| None, ["t1", "t2", "ab", "ba", "x"]).unwrap();
     assert_eq!(read.hint.units.keys().collect::<Vec<_>>(), ["t2"]);
     assert_eq!(read.hint.unit_files, set(&["x"]));
     // A path given twice is one path.
-    let read = decode(&content, &weak, ["t1", "t2", "ab", "ab", "x"]).unwrap();
+    let read = decode(&content, &weak, &|_, _| None, ["t1", "t2", "ab", "ab", "x"]).unwrap();
     assert_eq!(read.hint, hint);
 }
 
@@ -328,13 +332,14 @@ fn of_two_test_files_with_one_token_the_writer_keeps_the_first_and_its_paths_onl
     units.insert("ab".to_string(), unit(&["ab"], &[]));
     units.insert("ba".to_string(), unit(&["ba", "q"], &[]));
     let hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".to_string(),
         units,
         unit_files: BTreeSet::new(),
     };
-    let content = encode(&hint, &weak).unwrap();
+    let content = encode(&hint, &weak, &|_, _| None).unwrap();
     // The table holds no token for "q", so the content is canonical and reads.
-    let read = decode(&content, &weak, ["ab", "q"]).unwrap();
+    let read = decode(&content, &weak, &|_, _| None, ["ab", "q"]).unwrap();
     assert_eq!(read.hint.units.keys().collect::<Vec<_>>(), ["ab"]);
 }
 
@@ -343,6 +348,7 @@ fn of_two_test_files_with_one_token_the_writer_keeps_the_first_and_its_paths_onl
 fn the_writer_says_too_large_past_a_bound() {
     let key = Key::derive(sources());
     let mut hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".to_string(),
         ..Hint::default()
     };
@@ -360,6 +366,7 @@ fn the_writer_says_too_large_past_a_bound() {
     ));
     // Paths that compress poorly: 5,000 units each reading 30 files of their own is past 2 MiB.
     let mut hint = Hint {
+        tests: BTreeMap::new(),
         adapter: "pytest".to_string(),
         ..Hint::default()
     };
@@ -383,6 +390,7 @@ fn the_writer_says_too_large_past_a_bound() {
     }
     for word in ["", "PyTest", "py test", &"a".repeat(33)] {
         let hint = Hint {
+            tests: BTreeMap::new(),
             adapter: word.to_string(),
             ..Hint::default()
         };
@@ -430,7 +438,7 @@ fn the_reader_refuses_what_isnt_one_hint() {
 
     let good = content(&hint, &key).unwrap();
     let mut other = good.clone();
-    other[SCHEMA.len() - 1] = b'1';
+    other[SCHEMA.len() - 1] = b'7';
     assert_eq!(read(&zlib(&other)), Err(Unread::Schema));
     assert_eq!(read(&zlib(b"hushrun.unit-hints/v0")), Err(Unread::Schema));
     // Every cut of the content short of its end is damaged, never a panic.
@@ -447,6 +455,215 @@ fn the_reader_refuses_what_isnt_one_hint() {
         read(&zlib(&longer)),
         Err(Unread::Damaged("bytes after its end"))
     );
+}
+
+/// [`sample`] with tests: two of `tests/test_cart.py`'s with lists of their own, one that read
+/// its test file's, and a test of `tests/test_pricing.py`'s.
+fn sample_with_tests() -> (Hint, Vec<&'static str>) {
+    let (mut hint, scope) = sample();
+    let mut cart = BTreeMap::new();
+    cart.insert(
+        "test_total".to_string(),
+        Some(unit(&["shop/cart.py", "tests/test_cart.py"], &[])),
+    );
+    cart.insert(
+        "test_discount[10%]".to_string(),
+        Some(unit(
+            &["shop/pricing.py", "tests/test_cart.py"],
+            &["tests/data"],
+        )),
+    );
+    cart.insert("test_empty".to_string(), None);
+    hint.tests.insert("tests/test_cart.py".to_string(), cart);
+    let mut pricing = BTreeMap::new();
+    pricing.insert(
+        "TestPrice::test_rounds".to_string(),
+        Some(unit(&["shop/cart.py", "tests/test_cart.py"], &[])),
+    );
+    hint.tests
+        .insert("tests/test_pricing.py".to_string(), pricing);
+    (hint, scope)
+}
+
+// covers: C-41
+#[test]
+fn a_hint_with_tests_reads_back_and_seals_their_ids() {
+    let (hint, scope) = sample_with_tests();
+    let key = Key::derive(sources());
+    let written = write(&hint, &key).unwrap();
+    // The same hint seals to the same bytes: its content id stays one.
+    assert_eq!(write(&hint, &key).unwrap(), written, "deterministic");
+    let content = content(&hint, &key).unwrap();
+    assert!(content.starts_with(format!("{SCHEMA_V1}\n").as_bytes()));
+    assert_eq!(written.content_id, Digest::of(&content));
+    let read = read(&written.bytes, &key, scope.iter().copied()).unwrap();
+    assert_eq!(read.hint, hint);
+    // No path, and no test's id, is in the content.
+    for needle in
+        scope
+            .iter()
+            .copied()
+            .chain(["test_total", "test_discount", "test_empty", "TestPrice"])
+    {
+        let needle = needle.as_bytes();
+        assert!(
+            !content.windows(needle.len()).any(|w| w == needle),
+            "{}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+    assert_ne!(key.seal_bytes(), key.as_bytes());
+    // Without tests it is a hint of version 0, as it was; with them, the same units follow v1.
+    let (plain, _) = sample();
+    let v0 = super::content(&plain, &key).unwrap();
+    assert!(v0.starts_with(format!("{SCHEMA}\n").as_bytes()));
+    assert!(content[SCHEMA.len()..].starts_with(&v0[SCHEMA.len()..]));
+}
+
+// covers: C-41
+#[test]
+fn a_seal_that_doesnt_open_reads_as_no_tests_never_an_error() {
+    let (hint, scope) = sample_with_tests();
+    let key = Key::derive(sources());
+    let good = content(&hint, &key).unwrap();
+    let units_only = Hint {
+        tests: BTreeMap::new(),
+        ..hint.clone()
+    };
+    // Every byte of the seal flipped: the units stand, the tests are gone.
+    let seal_at = (0..good.len())
+        .rev()
+        .find(|&at| {
+            at + 4 <= good.len()
+                && usize::try_from(u32::from_be_bytes(good[at..at + 4].try_into().unwrap()))
+                    .unwrap()
+                    == good.len() - at - 4
+        })
+        .unwrap();
+    for at in seal_at + 4..good.len() {
+        let mut flipped = good.clone();
+        flipped[at] ^= 0x01;
+        let read = read_content(&flipped, &key, scope.iter().copied()).unwrap();
+        assert_eq!(read.hint, units_only, "{at}");
+    }
+    // A byte of the clear part the seal covers, flipped where the content still reads: no tests.
+    let mut adapter = good.clone();
+    adapter[SCHEMA_V1.len() + 2] = b'q';
+    let changed = read_content(&adapter, &key, scope.iter().copied()).unwrap();
+    assert!(changed.hint.tests.is_empty());
+    // Another key reads nothing.
+    let bytes = write(&hint, &key).unwrap().bytes;
+    let other = read(&bytes, &Key::derive(["x"]), scope.iter().copied()).unwrap();
+    assert!(other.hint.units.is_empty() && other.hint.tests.is_empty());
+}
+
+// covers: C-41
+#[test]
+fn a_test_whose_list_names_a_file_gone_is_dropped_and_the_others_stay() {
+    let (hint, mut scope) = sample_with_tests();
+    let key = Key::derive(sources());
+    let written = write(&hint, &key).unwrap();
+    // tests/data is gone: test_discount's list and its test file's unit name it.
+    scope.retain(|path| *path != "tests/data/prices.json");
+    let read = read(&written.bytes, &key, scope.iter().copied()).unwrap();
+    assert_eq!(
+        read.hint.units.keys().collect::<Vec<_>>(),
+        ["tests/test_cart.py"]
+    );
+    let cart = &read.hint.tests["tests/test_cart.py"];
+    assert_eq!(
+        cart.keys().collect::<Vec<_>>(),
+        ["test_empty", "test_total"]
+    );
+    assert!(!read.hint.tests.contains_key("tests/test_pricing.py"));
+}
+
+// covers: C-41
+#[test]
+fn a_hint_too_large_with_tests_leaves_out_lists_first_then_tests() {
+    let key = Key::derive(sources());
+    let (small, _) = sample_with_tests();
+    let (written, trimmed) = write_fitting(&small, &key).unwrap();
+    assert_eq!(trimmed, Trimmed::Nothing);
+    assert_eq!(written, write(&small, &key).unwrap());
+
+    // 40,000 tests, each with a list of its own of 4 files that compress poorly: too large with
+    // lists, fits with ids alone.
+    let mut hint = Hint {
+        adapter: "pytest".to_string(),
+        ..Hint::default()
+    };
+    hint.units.insert(
+        "tests/test_a.py".to_string(),
+        unit(&["tests/test_a.py"], &[]),
+    );
+    let mut tests = BTreeMap::new();
+    for n in 0..40_000 {
+        tests.insert(
+            format!("t{n}"),
+            Some(unit(
+                &[
+                    "tests/test_a.py",
+                    &format!("src/{n}/a.py"),
+                    &format!("src/{n}/b.py"),
+                    &format!("src/{n}/c.py"),
+                ],
+                &[],
+            )),
+        );
+    }
+    hint.tests.insert("tests/test_a.py".to_string(), tests);
+    assert!(matches!(
+        write(&hint, &key),
+        Err(Unwritable::TooLarge { .. })
+    ));
+    let (written, trimmed) = write_fitting(&hint, &key).unwrap();
+    assert_eq!(trimmed, Trimmed::Lists);
+    let scope = ["tests/test_a.py"];
+    let lists_left = read(&written.bytes, &key, scope).unwrap();
+    assert_eq!(lists_left.hint.tests["tests/test_a.py"].len(), 40_000);
+    assert!(
+        lists_left.hint.tests["tests/test_a.py"]
+            .values()
+            .all(Option::is_none)
+    );
+
+    // Ids that alone are too large: the tests are left out.
+    let mut hint = Hint {
+        adapter: "pytest".to_string(),
+        ..Hint::default()
+    };
+    hint.units.insert(
+        "tests/test_a.py".to_string(),
+        unit(&["tests/test_a.py"], &[]),
+    );
+    let mut tests = BTreeMap::new();
+    for n in 0..MOST_TESTS {
+        tests.insert(
+            format!("{n}-{}", Digest::of(n.to_string().as_bytes())),
+            None,
+        );
+    }
+    hint.tests.insert("tests/test_a.py".to_string(), tests);
+    let (written, trimmed) = write_fitting(&hint, &key).unwrap();
+    assert_eq!(trimmed, Trimmed::Tests);
+    let read = read(&written.bytes, &key, scope).unwrap();
+    assert!(read.hint.tests.is_empty());
+    assert_eq!(read.hint.units.len(), 1);
+
+    // Past the most tests is too large, as is an id past 4,096 bytes.
+    let mut hint = sample_with_tests().0;
+    hint.tests
+        .get_mut("tests/test_cart.py")
+        .unwrap()
+        .insert("x".repeat(MOST_ID + 1), None);
+    assert!(matches!(
+        write(&hint, &key),
+        Err(Unwritable::TooLarge {
+            what: "bytes of a test's id",
+            ..
+        })
+    ));
 }
 
 /// A content written by hand: two tokens, then the lists given.
@@ -547,6 +764,9 @@ fn hints_match_the_golden_vectors() {
         let scope = strings(&vector["scope"]);
         let key = Key::derive(sources.iter().map(String::as_str));
         assert_eq!(to_hex(key.as_bytes()), expect["key"], "{name}: key");
+        if let Some(seal) = expect.get("sealKey") {
+            assert_eq!(&to_hex(key.seal_bytes()), seal, "{name}: seal key");
+        }
         let shape = shape(sources.iter().map(String::as_str));
         assert_eq!(shape.to_string(), expect["shape"], "{name}: shape");
         let check_id = Digest::parse(vector["checkId"].as_str().unwrap()).unwrap();
@@ -589,6 +809,19 @@ fn hints_match_the_golden_vectors() {
         let unread = read(&bytes, &key, scope.iter().map(String::as_str));
         assert!(unread.is_err(), "{name}: {unread:?}");
     }
+    // [C-41] Bytes whose test files read, and whose tests don't.
+    let no_tests = doc["noTests"].as_array().unwrap();
+    assert!(no_tests.len() >= 3);
+    for vector in no_tests {
+        let name = vector["name"].as_str().unwrap();
+        let sources = strings(&vector["sources"]);
+        let scope = strings(&vector["scope"]);
+        let key = Key::derive(sources.iter().map(String::as_str));
+        let bytes = base64.decode(vector["bytes"].as_str().unwrap()).unwrap();
+        let read = read(&bytes, &key, scope.iter().map(String::as_str)).unwrap();
+        assert!(read.hint.tests.is_empty(), "{name}");
+        assert_eq!(read.hint, hint_of(&vector["expect"]["read"]), "{name}");
+    }
 }
 
 fn hint_of(value: &Value) -> Hint {
@@ -600,7 +833,30 @@ fn hint_of(value: &Value) -> Hint {
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
     };
+    let tests = value.get("tests").map_or_else(BTreeMap::new, |tests| {
+        tests
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(path, tests)| {
+                let tests = tests
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, list)| {
+                        let list = (!list.is_null()).then(|| Unit {
+                            reads: strings(&list["reads"]),
+                            dirs: strings(&list["dirs"]),
+                        });
+                        (id.clone(), list)
+                    })
+                    .collect();
+                (path.clone(), tests)
+            })
+            .collect()
+    });
     Hint {
+        tests,
         adapter: value["adapter"].as_str().unwrap().to_string(),
         units: value["units"]
             .as_object()
@@ -640,21 +896,51 @@ fn file_path() -> impl Strategy<Value = String> {
         })
 }
 
-fn hint() -> impl Strategy<Value = Hint> {
-    let unit = (
+fn unit_of_paths() -> impl Strategy<Value = Unit> {
+    (
         proptest::collection::btree_set(file_path(), 0..6),
         proptest::collection::btree_set(dir_path(), 0..3),
     )
-        .prop_map(|(reads, dirs)| Unit { reads, dirs });
+        .prop_map(|(reads, dirs)| Unit { reads, dirs })
+}
+
+/// A unit's tests: a few ids, each with a list of its own or its test file's.
+fn tests_of_unit() -> impl Strategy<Value = BTreeMap<String, Option<Unit>>> {
+    let id = prop_oneof!["t", "test_a", "test_b[1]", "Tést::x", "a b"];
+    proptest::collection::btree_map(id, proptest::option::of(unit_of_paths()), 1..4)
+}
+
+fn hint() -> impl Strategy<Value = Hint> {
     (
         prop_oneof!["pytest", "go", "vitest"],
-        proptest::collection::btree_map(prop_oneof![file_path(), dir_path()], unit, 0..8),
+        proptest::collection::btree_map(
+            prop_oneof![file_path(), dir_path()],
+            unit_of_paths(),
+            0..8,
+        ),
         proptest::collection::btree_set(file_path(), 0..4),
     )
-        .prop_map(|(adapter, units, unit_files)| Hint {
-            adapter,
-            units,
-            unit_files,
+        .prop_flat_map(move |(adapter, units, unit_files)| {
+            let owns: Vec<String> = units.keys().cloned().collect();
+            let tests =
+                proptest::collection::vec(proptest::option::of(tests_of_unit()), owns.len());
+            (Just((adapter, units, unit_files)), tests).prop_map(
+                move |((adapter, units, unit_files), tests)| Hint {
+                    tests: owns
+                        .iter()
+                        .cloned()
+                        .zip(tests)
+                        .filter_map(
+                            |(own, tests): (String, Option<BTreeMap<String, Option<Unit>>>)| {
+                                tests.map(|tests| (own, tests))
+                            },
+                        )
+                        .collect(),
+                    adapter,
+                    units,
+                    unit_files,
+                },
+            )
         })
 }
 
@@ -689,18 +975,28 @@ fn files_of(hint: &Hint) -> BTreeSet<String> {
         files.extend(unit.dirs.iter().map(|d| below(d)));
         files.insert(if is_dir(own) { below(own) } else { own.clone() });
     }
+    for list in hint.tests.values().flat_map(BTreeMap::values).flatten() {
+        files.extend(list.reads.iter().cloned());
+        files.extend(list.dirs.iter().map(|d| below(d)));
+    }
     files
 }
 
 /// Whether everything `hint` names is a file of `files` or a directory holding one.
 fn within(hint: &Hint, files: &BTreeSet<String>) -> bool {
     let dirs = dirs_of(files);
+    let list = |unit: &Unit| {
+        unit.reads.iter().all(|r| files.contains(r)) && unit.dirs.iter().all(|d| dirs.contains(d))
+    };
     hint.unit_files.iter().all(|f| files.contains(f))
-        && hint.units.iter().all(|(own, unit)| {
-            (files.contains(own) || dirs.contains(own))
-                && unit.reads.iter().all(|r| files.contains(r))
-                && unit.dirs.iter().all(|d| dirs.contains(d))
-        })
+        && hint
+            .units
+            .iter()
+            .all(|(own, unit)| (files.contains(own) || dirs.contains(own)) && list(unit))
+        && hint
+            .tests
+            .iter()
+            .all(|(own, tests)| hint.units.contains_key(own) && tests.values().flatten().all(list))
 }
 
 proptest! {
@@ -749,6 +1045,22 @@ proptest! {
             .map(|(own, unit)| (own.clone(), unit.clone()))
             .collect();
         prop_assert_eq!(&read.hint.units, &kept);
+        // A kept unit's tests stay, but those whose own list named it.
+        let tests: BTreeMap<String, BTreeMap<String, Option<Unit>>> = hint
+            .tests
+            .iter()
+            .filter(|(own, _)| kept.contains_key(*own))
+            .map(|(own, tests)| {
+                let tests: BTreeMap<String, Option<Unit>> = tests
+                    .iter()
+                    .filter(|(_, list)| list.as_ref().is_none_or(|list| !named(&String::new(), list)))
+                    .map(|(id, list)| (id.clone(), list.clone()))
+                    .collect();
+                (own.clone(), tests)
+            })
+            .filter(|(_, tests)| !tests.is_empty())
+            .collect();
+        prop_assert_eq!(&read.hint.tests, &tests);
         let unit_files: BTreeSet<String> = hint.unit_files.iter().filter(|f| **f != gone).cloned().collect();
         prop_assert_eq!(&read.hint.unit_files, &unit_files);
         prop_assert!(within(&read.hint, &files));
@@ -775,8 +1087,9 @@ proptest! {
         cut in any::<prop::sample::Index>(),
         flips in proptest::collection::vec((any::<prop::sample::Index>(), 0u8..8), 0..4),
         compressed in any::<bool>(),
+        with_tests in any::<bool>(),
     ) {
-        let (hint, scope) = sample();
+        let (hint, scope) = if with_tests { sample_with_tests() } else { sample() };
         let key = Key::derive(sources());
         let mut bytes = if compressed { write(&hint, &key).unwrap().bytes } else { content(&hint, &key).unwrap() };
         bytes.truncate(cut.index(bytes.len() + 1).max(1));

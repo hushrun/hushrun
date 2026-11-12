@@ -2,7 +2,9 @@
 //! inflated, never a panic, within libFuzzer's memory limit, and nothing read that names a path
 //! outside the scope's files and their directories. The key and scope are those of the `pytest`
 //! vector in `testdata/digest/unit-hints.json`, whose bytes seed the corpus
-//! (`tools/refdigest.py unit-hints … --corpus`), so that mutations keep tokens that match.
+//! (`tools/refdigest.py unit-hints … --corpus`), so that mutations keep tokens that match; the
+//! `pytest-tests` vector's seal opens under the same key, so tests read (C-41) are held to the
+//! same bound: a unit read, and lists within the scope.
 #![no_main]
 
 use std::collections::BTreeSet;
@@ -41,6 +43,20 @@ fn within(hint: &Hint, files: &BTreeSet<&str>) {
         }
         for dir in &unit.dirs {
             assert!(dirs.contains(dir.as_str()), "{dir}");
+        }
+    }
+    for (own, tests) in &hint.tests {
+        assert!(hint.units.contains_key(own), "{own}");
+        assert!(!tests.is_empty(), "{own}");
+        for (id, list) in tests {
+            assert!(!id.is_empty() && id.len() <= 4096);
+            let Some(list) = list else { continue };
+            for read in &list.reads {
+                assert!(files.contains(read.as_str()), "{read}");
+            }
+            for dir in &list.dirs {
+                assert!(dirs.contains(dir.as_str()), "{dir}");
+            }
         }
     }
 }

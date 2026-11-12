@@ -1363,6 +1363,7 @@ impl Observed {
             Hints::None | Hints::Sources => BTreeSet::new(),
         };
         let hint = hushrun_core::hints::Hint {
+            tests: BTreeMap::new(),
             adapter: at.adapter.to_string(),
             units,
             unit_files,
