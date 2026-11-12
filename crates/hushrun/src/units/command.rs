@@ -17,6 +17,28 @@ pub fn program_name(word: &str) -> &str {
     file
 }
 
+/// COMMAND after `env NAME=value …`, which starts what follows with those variables added: what
+/// recognizers read. COMMAND itself when it doesn't start so, or when `env` has an option of its
+/// own (`-i`, `-u`, `-S`, `--`…), which can change what reaches the command, hushrun's variables
+/// included. Only recognizing reads it: a unit's key holds COMMAND as written (C-31).
+pub fn without_env(command: &[String]) -> &[String] {
+    let Some(first) = command.first() else {
+        return command;
+    };
+    if program_name(first) != "env" {
+        return command;
+    }
+    let rest = &command[1..];
+    let at = rest
+        .iter()
+        .position(|w| !(w.contains('=') && !w.starts_with('-') && !w.starts_with('=')))
+        .unwrap_or(rest.len());
+    match rest.get(at) {
+        Some(next) if !next.starts_with('-') => &rest[at..],
+        _ => command,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31,5 +53,25 @@ mod tests {
         assert_eq!(program_name("jest.js"), "jest.js");
         assert_eq!(program_name(".exe"), ".exe");
         assert_eq!(program_name("tox.ini"), "tox.ini");
+    }
+
+    #[test]
+    fn env_with_variables_is_read_through_and_env_with_options_is_not() {
+        let words = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(without_env(&words("env A=1 B= go test")), words("go test"));
+        assert_eq!(
+            without_env(&words("/usr/bin/env go test")),
+            words("go test")
+        );
+        assert_eq!(without_env(&words("go test")), words("go test"));
+        for kept in [
+            "env -i go test",
+            "env A=1 -u B go test",
+            "env A=1",
+            "env",
+            "env -- go",
+        ] {
+            assert_eq!(without_env(&words(kept)), words(kept), "{kept}");
+        }
     }
 }

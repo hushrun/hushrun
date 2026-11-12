@@ -128,16 +128,7 @@ const PYTHON: &[&str] = &[
 /// What `command` in `cwd` is for the adapter: `None` when it isn't its; `Some(Err(why))` when it
 /// is, in a form hushrun can't observe.
 pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>> {
-    let mut words: Vec<&str> = command.iter().map(String::as_str).collect();
-    if words.first().map(|w| program_name(w)) == Some("env") {
-        words.remove(0);
-        while words
-            .first()
-            .is_some_and(|w| w.contains('=') && !w.starts_with('-'))
-        {
-            words.remove(0);
-        }
-    }
+    let words: Vec<&str> = command.iter().map(String::as_str).collect();
     let first = *words.first()?;
     let name = program_name(first);
     let args: Option<Vec<&str>> = match name {
@@ -2130,9 +2121,12 @@ mod tests {
             );
         }
         assert!(
-            recognize(&words("env FOO=1 swift-test --parallel"), cwd)
-                .unwrap()
-                .is_ok()
+            recognize(
+                crate::units::command::without_env(&words("env FOO=1 swift-test --parallel")),
+                cwd
+            )
+            .unwrap()
+            .is_ok()
         );
         // Other commands: only where a package is, and never pytest's.
         assert!(recognize(&words("make test"), cwd).is_none());

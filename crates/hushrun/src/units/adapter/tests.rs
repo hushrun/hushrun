@@ -115,3 +115,25 @@ fn a_program_is_known_by_its_name_whatever_its_directory_and_windows_extension()
         );
     }
 }
+
+#[test]
+fn env_with_variables_before_a_command_is_read_through_for_every_adapter() {
+    let dir = loads_all();
+    for (command, adapter) in BY_NAME {
+        let with_env = format!("env FOO=1 BAR=a=b {command}");
+        assert_eq!(
+            chosen(&words(&with_env), dir.path()),
+            Ok(*adapter),
+            "{with_env}"
+        );
+    }
+    // An option of env's own, `-i` above all, changes what reaches the command: nothing is read
+    // through.
+    assert_eq!(
+        chosen(&words("env -i cargo test"), dir.path()),
+        Ok("pytest")
+    );
+    assert_eq!(chosen(&words("/usr/bin/env"), dir.path()), Ok("pytest"));
+    // pytest's own checks still see the Python's options.
+    assert!(chosen(&words("env A=1 python -I -m pytest"), dir.path()).is_err());
+}

@@ -60,6 +60,7 @@ pub const RECOGNIZED: &[Recognize] = &[
 /// takes it, else pytest's; `Err` says why the one it would get can't load safely. The run,
 /// `hushrun ready` and `hushrun why` all ask it.
 pub fn choose(command: &[String], cwd: &Path) -> Result<Box<dyn Adapter>, String> {
+    let command = super::command::without_env(command);
     for recognize in RECOGNIZED {
         if let Some(found) = recognize(command, cwd) {
             return found;
