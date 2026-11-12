@@ -403,6 +403,7 @@ fn decided_run(
         watches: &watches,
         unwatched: None,
         shared: &Shared::default(),
+        words: RunWords::default(),
     };
     let observed = decide(
         &end,

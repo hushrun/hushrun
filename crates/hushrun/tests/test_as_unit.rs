@@ -410,6 +410,11 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
          def test_ran():\n    assert True\n"
             .into(),
     ));
+    files.push((
+        "tests/test_skipmod.py".into(),
+        "import os\nimport pytest\n\nif os.environ.get('SKIP'):\n    pytest.skip('not here', allow_module_level=True)\n\ndef test_m():\n    assert True\n"
+            .into(),
+    ));
     let r = repo_of(&files);
     let python = python();
     let first = r.run(&pytest_args(&python, &[]), &[("FAIL", "1"), ("SKIP", "1")]);
@@ -438,6 +443,10 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
         "tests/test_skips.py runs: one of its tests was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides",
         "{file:#}"
     );
+    // A test file skipped whole as it loads, which no test of it says: the same reason, not that
+    // it never ran here.
+    let whole = why_json(&r, "tests/test_skipmod.py");
+    assert_eq!(whole["reason"], "not-kept", "{whole:#}");
     // In a run that passed, a skip is a pass, as before.
     let passed = r.run(&pytest_args(&python, &[]), &[("SKIP", "1")]);
     assert_eq!(passed.code, 0, "{}\n{}", passed.stdout, passed.stderr);
@@ -628,6 +637,16 @@ fn a_failing_teardown_of_a_wider_fixture_keeps_every_test_it_served_from_a_pass(
     let tests = &map["units"]["tests/test_leak.py"]["tests"];
     assert_ne!(tests["test_opens"], "passed", "{map:#}");
     assert_ne!(tests["test_more[3]"], "passed", "{map:#}");
+    // \[C-37\] `hushrun why` says the fixture's end kept it, not that it didn't finish.
+    let why = why_json(&r, "tests/test_leak.py::test_opens");
+    assert_eq!(why["reason"], "not-kept", "{why:#}");
+    assert!(
+        why["says"]
+            .as_str()
+            .unwrap()
+            .contains("a fixture of a wider scope it was served (no_leaks) failed as it ended"),
+        "{why:#}"
+    );
     // Run again on the same code: the leak is caught again.
     let second = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
@@ -1506,6 +1525,285 @@ fn a_413_in_any_words_goes_again_as_the_first_5000_and_a_second_is_a_refusal() {
             kept > 0,
             "{}",
             first.stderr
+        );
+    }
+}
+
+/// A runner that writes pytest's facts itself with tests as the unit: `FAKE_UNITS` as its units,
+/// a test file the run's `hushrun.json` lists in `reuse`, and a test it lists in `reuseTests`, left
+/// out; `failuresByUnit` unless `FAKE_BY_UNIT` is `0`; `staleBuild`, `notKept` and
+/// `leftOutUnlisted` from `FAKE_STALE`, `FAKE_NOT_KEPT` and `FAKE_LEFT_OUT`; a `.started` file
+/// left with `FAKE_STARTED` as its content; and `FAKE_EXIT` as its exit code.
+const RULES_RUNNER: &str = r#"import json, os, sys
+d = os.environ["HUSHRUN_UNITS"]
+with open(os.path.join(d, "hushrun.json")) as f:
+    run = json.load(f)
+n = len([x for x in os.listdir(d) if x.startswith("fake-")]) + 1
+units = json.loads(os.environ["FAKE_UNITS"])
+whole = run.get("reuse") or []
+listed = run.get("reuseTests") or {}
+for u in units:
+    if u["unit"] in whole:
+        u.update(deselected=True, finished=0, failed=False)
+    for t in u.get("tests", []):
+        if u["unit"] in whole or t["id"] in listed.get(u["unit"], []):
+            t.update(finished=False, deselected=True, failed=False)
+facts = {"schema": "hushrun.unit-facts/v1", "adapter": "pytest",
+         "failuresByUnit": os.environ.get("FAKE_BY_UNIT", "1") == "1",
+         "settings": {"pythonFiles": ["test_*.py", "*_test.py"]}, "units": units}
+for env, key in [("FAKE_STALE", "staleBuild"), ("FAKE_NOT_KEPT", "notKept"),
+                 ("FAKE_LEFT_OUT", "leftOutUnlisted")]:
+    if os.environ.get(env):
+        facts[key] = os.environ[env]
+with open(os.path.join(d, "fake-%d.json" % n), "w") as f:
+    json.dump(facts, f)
+if os.environ.get("FAKE_STARTED"):
+    with open(os.path.join(d, "fake-%d.started" % n), "w") as f:
+        f.write(os.environ["FAKE_STARTED"])
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+"#;
+
+/// `test_a.py`'s facts: `ran` its tests (`t1`, `t2`, and `t3` when it fails), and `extra` over it.
+fn rules_units(tests: Value, extra: Value) -> String {
+    let n = tests.as_array().map_or(0, Vec::len);
+    let mut unit = json!({"unit": "test_a.py", "selected": n, "finished": n, "reads": ["test_a.py"], "tests": tests});
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        unit[k] = v;
+    }
+    json!([unit, {"unit": "test_b.py", "selected": 1, "finished": 1, "reads": ["test_b.py"],
+                  "tests": [{"id": "tb", "finished": true}]}])
+    .to_string()
+}
+
+// covers: C-32, C-37
+#[test]
+fn each_rule_that_keeps_a_result_says_why_through_hushrun_why() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let ok = |id: &str| json!({"id": id, "finished": true});
+    let failed = json!({"id": "t3", "finished": true, "failed": true});
+    // Each case: its facts, its variables, and what `hushrun why` says of t1 and of test_a.py
+    // after one run (`None`: another reason, the test file's failure or reuse, comes first).
+    type Case = (
+        &'static str,
+        String,
+        Vec<(&'static str, &'static str)>,
+        Option<&'static str>,
+        Option<&'static str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "left out by something else",
+            rules_units(
+                json!([{"id": "t1", "deselected": true}, ok("t2"), failed.clone()]),
+                json!({"failed": true}),
+            ),
+            vec![("FAKE_EXIT", "1")],
+            Some("something other than hushrun's plan left it out"),
+            None,
+        ),
+        (
+            "a test file left out by something else",
+            rules_units(
+                json!([]),
+                json!({"deselected": true, "selected": 0, "finished": 0}),
+            ),
+            vec![],
+            None,
+            Some("something other than hushrun's plan left it out"),
+        ),
+        (
+            "unfinished",
+            rules_units(
+                json!([{"id": "t1"}, ok("t2"), failed.clone()]),
+                json!({"failed": true, "finished": 2}),
+            ),
+            vec![("FAKE_EXIT", "1")],
+            Some("it didn't finish in every process that ran it"),
+            None,
+        ),
+        (
+            "unfinished, in the adapter's words",
+            rules_units(
+                json!([{"id": "t1", "notKept": "its process was killed by a signal"}, ok("t2"), failed.clone()]),
+                json!({"failed": true, "finished": 2}),
+            ),
+            vec![("FAKE_EXIT", "1")],
+            Some("its process was killed by a signal"),
+            None,
+        ),
+        (
+            "a test file that didn't run whole",
+            rules_units(json!([ok("t1"), {"id": "t2"}]), json!({"finished": 1})),
+            vec![],
+            None,
+            Some("it didn't run whole in every start of its runner"),
+        ),
+        (
+            "a start that died",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({})),
+            vec![("FAKE_STARTED", "4242")],
+            Some(
+                "a start of its runner ended before it said what it saw, so no pass of that run is kept",
+            ),
+            Some(
+                "a start of its runner ended before it said what it saw, so no pass of that run is kept",
+            ),
+        ),
+        (
+            "a second start, in its adapter's words",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({})),
+            vec![(
+                "FAKE_STARTED",
+                r#"{"why": "Jest started more than once in its command"}"#,
+            )],
+            Some("Jest started more than once in its command, so no pass of that run is kept"),
+            Some("Jest started more than once in its command, so no pass of that run is kept"),
+        ),
+        (
+            "a skip in a failed run",
+            rules_units(
+                json!([{"id": "t1", "finished": true, "skipped": true}, ok("t2")]),
+                json!({}),
+            ),
+            vec![("FAKE_EXIT", "1")],
+            Some("it was skipped in a run that failed"),
+            Some("one of its tests was skipped in a run that failed"),
+        ),
+        (
+            "a failure no test explains",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({"failed": true})),
+            vec![("FAKE_EXIT", "1")],
+            Some("its test file failed while none of its tests did"),
+            None,
+        ),
+        (
+            "a stale build in a run that passed",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({})),
+            vec![("FAKE_STALE", "build/prog is older than its sources")],
+            Some("it ran on a build older than these files"),
+            Some("it ran on a build older than these files"),
+        ),
+        (
+            "a failed run whose failures aren't by test",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({})),
+            vec![("FAKE_EXIT", "1"), ("FAKE_BY_UNIT", "0")],
+            Some("its run failed, and its adapter doesn't report each failure by test,"),
+            Some("its run failed, and its adapter doesn't report each failure by test file"),
+        ),
+        (
+            "a failed run, in its adapter's words",
+            rules_units(json!([ok("t1"), ok("t2")]), json!({})),
+            vec![
+                ("FAKE_EXIT", "1"),
+                ("FAKE_BY_UNIT", "0"),
+                ("FAKE_NOT_KEPT", "an error no test owns stopped the run"),
+            ],
+            Some("an error no test owns stopped the run"),
+            Some("an error no test owns stopped the run"),
+        ),
+        (
+            "a test its adapter never leaves out",
+            rules_units(
+                json!([{"id": "t1", "finished": true, "neverLeftOut": true}, ok("t2"), failed.clone()]),
+                json!({"failed": true}),
+            ),
+            vec![("FAKE_EXIT", "1")],
+            Some("its adapter can't leave it out of a run"),
+            None,
+        ),
+    ];
+    let python = python();
+    for (name, units, env, test, file) in cases {
+        let r = Repo::new(&[
+            ("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+            (".gitignore", "__pycache__/\n"),
+            ("fake.py", RULES_RUNNER),
+            ("test_a.py", "def t1():\n    pass\n"),
+            ("test_b.py", "def tb():\n    pass\n"),
+        ]);
+        let mut vars = vec![("FAKE_UNITS", units.as_str())];
+        vars.extend(env.iter().copied());
+        let ran = r.run(&["run", "unit", "--", &python, "fake.py"], &vars);
+        assert!(
+            ran.stderr.contains("hushrun: unit"),
+            "{name}: {}",
+            ran.stderr
+        );
+        for (asked, want) in [("test_a.py::t1", test), ("test_a.py", file)] {
+            let Some(want) = want else { continue };
+            let why = why_json(&r, asked);
+            assert_eq!(
+                why["reason"], "not-kept",
+                "{name}, {asked}: {why:#}\n{}",
+                ran.stderr
+            );
+            let says = why["says"].as_str().unwrap_or_default();
+            assert!(
+                says.starts_with(&format!("{asked} runs: ")) && says.contains(want),
+                "{name}, {asked}: {says}"
+            );
+        }
+    }
+}
+
+// covers: C-32, C-37
+#[test]
+fn a_run_left_out_twice_says_why_through_hushrun_why() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // Four test files pass; then test_b.py changes, and the plan lists the others but the one
+    // an audit runs. Every start of the runner says it left out what the plan didn't list, the
+    // start with nothing listed too: nothing of the run is kept, and `hushrun why` says so.
+    let python = python();
+    let names = ["test_a.py", "test_b.py", "test_c.py", "test_d.py"];
+    let mut files = vec![
+        (
+            "hushrun.yaml".to_string(),
+            yaml("{mode: reuse, unit: test}"),
+        ),
+        (".gitignore".to_string(), "__pycache__/\n".to_string()),
+        ("fake.py".to_string(), RULES_RUNNER.to_string()),
+    ];
+    for name in names {
+        files.push((name.to_string(), "def t1():\n    pass\n".to_string()));
+    }
+    let r = repo_of(&files);
+    let units = json!(
+        names
+            .iter()
+            .map(
+                |u| json!({"unit": u, "selected": 1, "finished": 1, "reads": [u],
+                        "tests": [{"id": "t1", "finished": true}]})
+            )
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    let first = r.run(
+        &["run", "unit", "--", &python, "fake.py"],
+        &[("FAKE_UNITS", &units)],
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    r.write("test_b.py", "def t1():\n    pass\n# changed\n");
+    let again = r.run(
+        &["run", "unit", "--", &python, "fake.py"],
+        &[
+            ("FAKE_UNITS", &units),
+            ("FAKE_LEFT_OUT", "a feature nobody listed"),
+        ],
+    );
+    assert!(again.stderr.contains("wasn't recorded"), "{}", again.stderr);
+    for asked in ["test_b.py", "test_b.py::t1"] {
+        let why = why_json(&r, asked);
+        assert_eq!(why["reason"], "not-kept", "{why:#}\n{}", again.stderr);
+        assert!(
+            why["says"]
+                .as_str()
+                .unwrap()
+                .contains("even when it ran again with nothing listed"),
+            "{why:#}"
         );
     }
 }

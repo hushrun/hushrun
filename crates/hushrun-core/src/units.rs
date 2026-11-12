@@ -579,6 +579,9 @@ pub struct Facts {
     /// \[C-39\] Of a test: its adapter never leaves it out (`neverLeftOut`), so no plan could
     /// list it by a pass of its own, and it keeps none.
     pub never_left_out: bool,
+    /// \[C-32\] Its adapter left out what the plan didn't list even in the start that ran with
+    /// nothing listed: nothing of the run can be told from a run that left things out.
+    pub left_out_again: bool,
 }
 
 /// What a run knows beyond a unit's own facts (C-32).
@@ -648,6 +651,8 @@ pub enum NotKept {
     TestsReused,
     /// A start of the runner didn't say what it saw: it ended first, or wasn't observed.
     UnfinishedStart,
+    /// The adapter left out what the plan didn't list, even with nothing listed.
+    LeftOutAgain,
     /// It was skipped, or one of its tests was, in a run whose COMMAND failed.
     SkippedInFailedRun,
     /// Of a test: its test file failed while none of its tests did.
@@ -678,6 +683,9 @@ impl NotKept {
             }
             (NotKept::UnfinishedStart, _) => {
                 "a start of its runner didn't say what it saw, so no pass of that run is kept"
+            }
+            (NotKept::LeftOutAgain, _) => {
+                "its adapter left out what hushrun's plan didn't list, even when it ran again with nothing listed, so nothing of that run is kept"
             }
             (NotKept::SkippedInFailedRun, true) => {
                 "it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"
@@ -783,6 +791,10 @@ pub fn decided(facts: &Facts, run: &RunFacts) -> Decision {
     // \[C-32\] A start that never said it ended: what it ran can't be told.
     if facts.unfinished_start {
         return not_run(NotKept::UnfinishedStart);
+    }
+    // \[C-32\] Left out what no plan listed, twice: nothing of the run can be told.
+    if facts.left_out_again {
+        return not_run(NotKept::LeftOutAgain);
     }
     // \[C-32\] A skip in a run whose COMMAND failed: nothing ran that a pass could stand on.
     if facts.skipped && !run.command_passed {

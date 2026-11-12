@@ -578,9 +578,16 @@ fn skip_or_run(
             Err(Some(err)) => format!(
                 "its adapter left out what the plan didn't list ({why}), and it couldn't run again with nothing left out ({err})"
             ),
-            Err(None) => format!(
-                "run again with nothing left out, its adapter still left out what the plan didn't list ({why})"
-            ),
+            Err(None) => {
+                // \[C-37\] What the run decided of each test file and test, `not run` with why,
+                // is kept with what each read, so that `hushrun why` says it; no result is.
+                if let Some((o, tree)) = &observed {
+                    o.keep(&code.key, tree, now(global));
+                }
+                format!(
+                    "run again with nothing left out, its adapter still left out what the plan didn't list ({why})"
+                )
+            }
         };
         // Nothing this run did can be told from a run that left out what no plan listed: nothing
         // is recorded, for the check or any unit, and the run fails.
@@ -766,6 +773,11 @@ fn skip_or_run(
         say.line(format_args!(
             "{check} passed, but it isn't recorded: {why}{flaky}"
         ));
+        // \[C-37\] What the run decided, `not run` with why, is kept with what each test file
+        // read, so that `hushrun why` says it; no result is.
+        if let Some((o, tree)) = &observed {
+            o.keep(&code.key, tree, now(global));
+        }
         return ExitCode::from(exit);
     }
     if let Some((o, _)) = &observed {

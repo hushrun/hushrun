@@ -161,6 +161,11 @@ pub struct FactsFile {
     /// words people read: a run that passed records nothing, not even the check's pass.
     #[serde(default)]
     pub stale_build: Option<String>,
+    /// \[C-37\] Why no pass of the run is kept when COMMAND failed and its failures aren't told
+    /// by unit (`failuresByUnit: false`), in words people read: such as an error no test owns. It
+    /// is what `hushrun why` says of each test file and test of the run, in place of the core's.
+    #[serde(default)]
+    pub not_kept: Option<String>,
 }
 
 impl FactsFile {
@@ -736,6 +741,16 @@ pub fn stale_build(files: &[FactsFile]) -> Option<String> {
     files
         .iter()
         .find_map(|f| f.stale_build.clone())
+        .map(|why| why.chars().take(300).collect())
+}
+
+/// \[C-37\] Why no pass of the run is kept, as the first file of `files` that says so said it.
+pub fn run_not_kept(files: &[FactsFile]) -> Option<String> {
+    files
+        .iter()
+        .filter_map(|f| f.not_kept.as_deref())
+        .map(str::trim)
+        .find(|why| !why.is_empty())
         .map(|why| why.chars().take(300).collect())
 }
 

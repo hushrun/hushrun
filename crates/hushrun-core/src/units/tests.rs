@@ -656,6 +656,14 @@ fn each_rule_that_keeps_a_result_from_a_unit_or_a_test_says_why_with_its_state()
         ),
         (
             Facts {
+                left_out_again: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::LeftOutAgain),
+        ),
+        (
+            Facts {
                 skipped: true,
                 ..complete.clone()
             },

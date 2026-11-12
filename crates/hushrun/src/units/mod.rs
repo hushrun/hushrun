@@ -398,6 +398,7 @@ fn tests_decided(
                 unfinished_start: file.unfinished_start,
                 stale_build: file.stale_build,
                 never_left_out: test.never_left_out,
+                left_out_again: file.left_out_again,
             };
             let decision = units::decided(&facts, &run(id));
             (id.clone(), (decision, facts))
@@ -405,14 +406,40 @@ fn tests_decided(
         .collect()
 }
 
+/// \[C-37\] What the run's adapters said of why no pass of the run is kept, which `hushrun why`
+/// says in place of the core's own sentence for the rule it goes with.
+#[derive(Debug, Clone, Default)]
+struct RunWords {
+    /// Why a start of the runner didn't say what it saw: its `.started` file's `why`.
+    started: Option<String>,
+    /// Why a run that failed keeps no pass, its failures not told by unit: a facts file's
+    /// `notKept`.
+    failed: Option<String>,
+}
+
 /// \[C-37\] Why a test or a test file kept nothing, in people's words, as `decision` says: for a
-/// test that didn't finish, its adapter's words when it gave some (`told`), else the rule's.
-fn not_kept(decision: Decision, test: bool, told: Option<&str>) -> Option<String> {
+/// test that didn't finish, its adapter's words when it gave some (`told`); for a rule of the
+/// whole run, what its adapter said of it (`words`); else the rule's.
+fn not_kept(
+    decision: Decision,
+    test: bool,
+    told: Option<&str>,
+    words: &RunWords,
+) -> Option<String> {
     let why = decision.not_kept?;
-    match (why, told) {
-        (units::NotKept::Unfinished, Some(told)) if !told.is_empty() => Some(told.to_string()),
-        _ => Some(why.sentence(test).to_string()),
-    }
+    let said = match why {
+        units::NotKept::Unfinished => told.map(str::to_string),
+        units::NotKept::UnfinishedStart => words
+            .started
+            .as_ref()
+            .map(|why| format!("{why}, so no pass of that run is kept")),
+        units::NotKept::CommandFailed => words.failed.clone(),
+        _ => None,
+    };
+    Some(
+        said.filter(|s| !s.is_empty())
+            .unwrap_or_else(|| why.sentence(test).to_string()),
+    )
 }
 
 /// \[C-39, C-22\] What a plan reuses when tests are the unit, counted for the run's line and for
@@ -998,12 +1025,19 @@ impl Session {
             watches: &watches,
             unwatched,
             shared: &fetched,
+            words: RunWords {
+                started: unfinished.clone(),
+                failed: facts::run_not_kept(&files),
+            },
         };
-        // \[C-32\] What holds for the whole run, in each unit's facts, for the one function.
+        // \[C-32\] What holds for the whole run, in each unit's facts, for the one function: a
+        // start that didn't say what it saw, a stale build, and what the start with nothing listed
+        // left out all the same.
         let mut read = read;
         for seen in read.seen.values_mut() {
             seen.facts.unfinished_start = unfinished.is_some();
             seen.facts.stale_build = stale.is_some();
+            seen.facts.left_out_again = left_out.is_some() && self.whole;
         }
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
         if let Some(why) = &unfinished {
@@ -1939,6 +1973,8 @@ struct Modes<'a> {
     /// \[C-41\] The hints the adapter read, with the tests they hold: what `observe` would have
     /// keyed them by.
     shared: &'a Shared,
+    /// \[C-37\] What the run's adapters said of why no pass of it is kept.
+    words: RunWords,
 }
 
 fn decide(
@@ -2368,7 +2404,20 @@ fn decide(
                 });
             }
         }
-        if ran {
+        // \[C-37\] A test file the run decided `not run` keeps its row too, with why, as a run that
+        // recorded nothing else would: `hushrun why` says what the run decided, not that it never
+        // ran here. One that didn't run whole (left out by something else, unfinished, tests
+        // reused one by one) read less than all it reads, so a row it had stays as it was.
+        let kept_row = state == State::NotRun
+            && match decision.not_kept {
+                Some(
+                    units::NotKept::LeftOut
+                    | units::NotKept::Unfinished
+                    | units::NotKept::TestsReused,
+                ) => !map.units.contains_key(unit),
+                _ => true,
+            };
+        if ran || kept_row {
             // \[C-39\] Its tests as they ran, and a test reused as the row it stands on.
             let before = map.units.get(unit);
             let tests_rows = decisions
@@ -2413,7 +2462,12 @@ fn decide(
                             duration_ms: told.duration_ms,
                             not_followed: told.not_followed.clone(),
                             // \[C-37\] Why it kept nothing, as the one function decided it.
-                            not_kept: not_kept(*decision, true, told.not_kept.as_deref()),
+                            not_kept: not_kept(
+                                *decision,
+                                true,
+                                told.not_kept.as_deref(),
+                                &mode.words,
+                            ),
                             list,
                         },
                     ))
@@ -2442,7 +2496,7 @@ fn decide(
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
-                    not_kept: not_kept(decision, false, None),
+                    not_kept: not_kept(decision, false, None, &mode.words),
                 },
             );
         }

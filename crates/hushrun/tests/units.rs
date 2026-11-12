@@ -921,6 +921,15 @@ fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
         "{}",
         ran.stderr
     );
+    // \[C-37\] `hushrun why` says what the run decided, not that it never ran here.
+    let why = r.run(&["why", "unit", "test_x.py"], &[]);
+    assert!(
+        why.stdout
+            .contains("a start of its runner ended before it said what it saw"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
 }
 
 // covers: C-32

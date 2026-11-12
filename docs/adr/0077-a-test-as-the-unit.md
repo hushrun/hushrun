@@ -314,3 +314,15 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
 - **A reader that left files.** `ready` and `why` opened the schema-1 file read-only to read its
   adapter word, which left `-shm` and `-wal` beside it. They now read it from a copy outside the
   cache, as the import does, and the directory is as it was.
+- **`why` after a run that kept nothing.** A test file or test the run decided `not run` kept a
+  row only when some test of it ran, so after a start that died, a module skipped as it loads in
+  a failed run, a second start of Jest, or a Vitest run with an error no test owns, `hushrun why`
+  said "this machine has never seen it run" of what had just run. Every unit and test the run saw
+  and decided `not run`, by any rule, now keeps a row with what it read and why, a run that
+  records nothing at all (a stale build that passed, what was left out twice) included; a unit
+  that didn't run whole keeps the row it had, since what it read this time is less than all it
+  reads. Left out twice is a rule of the one function now (`left_out_again`), so its tests say it.
+  The reasons take an adapter's words where it gives some: a test's `notKept` (pytest's plugin
+  says which wider fixture's end kept a test, where before `why` said it didn't finish), a
+  `.started` file's `why`, and a facts file's own `notKept` for a failed run whose failures
+  aren't told by unit.

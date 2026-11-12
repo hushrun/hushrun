@@ -668,6 +668,10 @@ class Observer(object):
                 entry["finished"] = max(0, entry["finished"] - 1)
                 if test_id is not None and test_id in self.tests.get(unit, {}):
                     self.tests[unit][test_id]["finished"] = False
+                    # [C-37] Why it keeps no result, for `hushrun why`: not that it didn't finish.
+                    self.tests[unit][test_id]["notKept"] = (
+                        "a fixture of a wider scope it was served (%s) failed as it ended, and "
+                        "pytest reports that on whichever test ran last, so it keeps no pass" % name)
 
     def results(self):
         self.scan_modules()
@@ -893,6 +897,7 @@ class Observer(object):
                 "deselected": bool(facts["deselected"]),
                 "skipped": bool(facts.get("skipped")),
                 "durationMs": int(round(facts["duration"] * 1000)),
+                **({"notKept": facts["notKept"]} if facts.get("notKept") else {}),
                 "notFollowed": [{"why": k, "detail": d}
                                 for k, v in sorted(self.test_not_followed.get((unit, test_id), {}).items())
                                 for d in sorted(v)],

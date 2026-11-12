@@ -2078,7 +2078,17 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
         "{}",
         stale.stderr
     );
-    assert!(store::stores(&p.cache).is_empty(), "{}", stale.stderr);
+    assert!(unit_results(&p.cache).is_empty(), "{}", stale.stderr);
+    // \[C-37\] What the run decided is kept for `hushrun why`: the stale program wasn't followed.
+    let why = p.run(&["why", "unit", "t_util"], &[]);
+    assert!(
+        why.stdout.contains(
+            "hushrun couldn't follow all it read the last time it ran here: stale program"
+        ),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
 }
 
 // covers: C-49
