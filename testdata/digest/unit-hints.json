@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Hint vectors (C-38). Each vector gives a check id, its sources set, a scope's files and a hint with paths; `expect` holds the hint's key (hex), the shape, the address, each path's token (hex), the content (hex) and its id, and what reading `bytes` (base64, as hushrun's writer wrote them) against the scope gives, with how many test files were dropped. `unread` lists bytes no reader takes. `tools/refdigest.py unit-hints` computes them independently; the Rust code must agree.",
+  "description": "Hint vectors (C-38). Each vector gives a check id, its sources set, a scope's files and a hint with paths; `expect` holds the hint's key (hex), the shape, the address, each path's token (hex), the content (hex) and its id, and what reading `bytes` (base64, as hushrun's writer wrote them) against the scope gives, with how many test files were dropped. `unread` lists bytes no reader takes; `noTests` bytes whose test files read and whose tests don't. `tools/refdigest.py unit-hints` computes them independently; the Rust code must agree.",
   "vectors": [
     {
       "name": "pytest",
@@ -826,29 +826,6 @@
       "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pA=="
     },
     {
-      "name": "schema",
-      "covers": [
-        "C-38"
-      ],
-      "description": "Another schema's content.",
-      "sources": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py"
-      ],
-      "scope": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py",
-        "tests/test_cart.py",
-        "tests/test_pricing.py",
-        "uv.lock"
-      ],
-      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ/s4pg=="
-    },
-    {
       "name": "cut-content",
       "covers": [
         "C-38"
@@ -1031,29 +1008,6 @@
         "uv.lock"
       ],
       "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPiYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAKKw4pw=="
-    },
-    {
-      "name": "seal-too-short",
-      "covers": [
-        "C-41"
-      ],
-      "description": "A hint with tests whose seal is shorter than a nonce and a tag.",
-      "sources": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py"
-      ],
-      "scope": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py",
-        "tests/test_cart.py",
-        "tests/test_pricing.py",
-        "uv.lock"
-      ],
-      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSDAxQAHAHjtP0U="
     }
   ],
   "noTests": [
@@ -1181,6 +1135,159 @@
         "uv.lock"
       ],
       "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSBgc1D7ou1Jjhv6syvc15z96Zvj+70jrkL1r41rScX8nPj+tS9nX3wmMknkVJTHtl0vt62efOvaz6pnMapvJgmVPgUArs1gxw==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "seal-too-short",
+      "covers": [
+        "C-41"
+      ],
+      "description": "A hint with tests whose seal is shorter than a nonce and a tag: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSDAxQAHAHjtP0U=",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "lists-out-of-order",
+      "covers": [
+        "C-41"
+      ],
+      "description": "The pytest-tests vector with its first two tests' lists swapped: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYmB9DBCaQYsNDOaXhDYxjbb/kHcHRUn8baJlyYJTprmltjcd+W201nNA5zHbjk5v9xaGi4y1ewfy5UV5a9r36mL9hVuPcwms2rP5D7VPXfY6k+fub+TY8u007vObn/6wmBClUseS3XPrPzW5RpGJ4M/5agUrih3ytRmWyu26MnGM5Pnnpx67v4/hxQreVYdpg1+DqvOFqyc1fBuVd0V4ZpN767NqD21wsH6iuKMzNshW5YKNPGbMvT96Q3fIf1atTD19t9H7xblmkgrX36u6AYAa0ycjw==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "v1-without-tests",
+      "covers": [
+        "C-41"
+      ],
+      "description": "A version 0 content under version 1's first line, with no tests' part: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ/s4pg==",
       "expect": {
         "read": {
           "adapter": "pytest",

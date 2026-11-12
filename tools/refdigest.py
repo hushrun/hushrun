@@ -915,17 +915,24 @@ def hint_parse(content):
         units.append((own, lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS)))
     lists, sealed = [], None
     if v1:
-        for _ in range(count(HINT_MOST_TESTS, 8)):
-            pair = (lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS))
-            if lists and lists[-1] >= pair:
-                raise Unread("lists out of order")
-            lists.append(pair)
-        aad_end = pos[0]
-        n = count(HINT_MOST_CONTENT, 1)
-        raw = take(n)
-        if n < 24 + 16:
-            raise Unread("a seal too short")
-        sealed = (aad_end, raw)
+        # [ADR 0079] What follows the units is the tests' part: damaged, it is left out whole and
+        # the units stand, a hint with no tests. Its tokens may then be named by no index.
+        try:
+            for _ in range(count(HINT_MOST_TESTS, 8)):
+                pair = (lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS))
+                if lists and lists[-1] >= pair:
+                    raise Unread("lists out of order")
+                lists.append(pair)
+            aad_end = pos[0]
+            n = count(HINT_MOST_CONTENT, 1)
+            raw = take(n)
+            if n < 24 + 16:
+                raise Unread("a seal too short")
+            if pos[0] != len(content):
+                raise Unread("bytes after its end")
+            sealed = (aad_end, raw)
+        except Unread:
+            return word.decode("ascii"), tokens, unit_files, units, [], None
     if pos[0] != len(content):
         raise Unread("bytes after its end")
     if len(used) != len(tokens):

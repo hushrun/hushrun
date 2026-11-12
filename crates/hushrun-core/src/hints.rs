@@ -953,28 +953,26 @@ fn parse(content: &[u8]) -> Result<Parsed<'_>, Unread> {
         let dirs = r.list(MOST_TOKENS, &mut used, &mut entries)?;
         units.push(ParsedUnit { own, reads, dirs });
     }
-    // \[ADR 0079\] Tests' lists, and their seal.
-    let mut lists: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
-    let mut sealed = None;
-    if v1 {
-        let count = r.count(MOST_TESTS, 8)?;
-        for _ in 0..count {
-            let reads = r.list(MOST_TOKENS, &mut used, &mut entries)?;
-            let dirs = r.list(MOST_TOKENS, &mut used, &mut entries)?;
-            let list = (reads, dirs);
-            if lists.last().is_some_and(|last| *last >= list) {
-                return Err(Unread::Damaged("lists out of order"));
+    // \[ADR 0079\] Tests' lists, and their seal: what follows the units, to the end. Damaged, it
+    // is left out whole and the units stand, a hint with no tests (C-41): a reader drops only the
+    // tests. A token only its lists named is then named by no index, which reads.
+    let (lists, sealed) = if v1 {
+        match tests_part(&mut r, content.len(), &mut used, &mut entries) {
+            Ok(found) => found,
+            Err(_) => {
+                return Ok(Parsed {
+                    adapter,
+                    tokens,
+                    unit_files,
+                    units,
+                    lists: Vec::new(),
+                    sealed: None,
+                });
             }
-            lists.push(list);
         }
-        let aad_end = content.len() - r.rest.len();
-        let length = r.count(MOST_CONTENT, 1)?;
-        let bytes = r.take(length).ok_or(Unread::Damaged("truncated"))?;
-        if length < 24 + 16 {
-            return Err(Unread::Damaged("a seal too short"));
-        }
-        sealed = Some((aad_end, bytes));
-    }
+    } else {
+        (Vec::new(), None)
+    };
     if !r.rest.is_empty() {
         return Err(Unread::Damaged("bytes after its end"));
     }
@@ -989,6 +987,39 @@ fn parse(content: &[u8]) -> Result<Parsed<'_>, Unread> {
         lists,
         sealed,
     })
+}
+
+/// The lists and the seal of a version 1 content's tests' part, which runs to its end (`len`
+/// bytes in all): the lists strictly ascending, and a seal of a nonce and a tag at least, then
+/// nothing. `Err` why it doesn't read.
+#[allow(clippy::type_complexity)]
+fn tests_part<'c>(
+    r: &mut Reader<'c>,
+    len: usize,
+    used: &mut [bool],
+    entries: &mut usize,
+) -> Result<(Vec<(Vec<u32>, Vec<u32>)>, Option<(usize, &'c [u8])>), Unread> {
+    let mut lists: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+    let count = r.count(MOST_TESTS, 8)?;
+    for _ in 0..count {
+        let reads = r.list(MOST_TOKENS, used, entries)?;
+        let dirs = r.list(MOST_TOKENS, used, entries)?;
+        let list = (reads, dirs);
+        if lists.last().is_some_and(|last| *last >= list) {
+            return Err(Unread::Damaged("lists out of order"));
+        }
+        lists.push(list);
+    }
+    let aad_end = len - r.rest.len();
+    let length = r.count(MOST_CONTENT, 1)?;
+    let bytes = r.take(length).ok_or(Unread::Damaged("truncated"))?;
+    if length < 24 + 16 {
+        return Err(Unread::Damaged("a seal too short"));
+    }
+    if !r.rest.is_empty() {
+        return Err(Unread::Damaged("bytes after its end"));
+    }
+    Ok((lists, Some((aad_end, bytes))))
 }
 
 /// A cursor over a content.
