@@ -2313,6 +2313,51 @@ fn vitests_facts_say_which_file_an_error_no_test_owns_came_from() {
     assert_eq!(unhandled["message"], "late timer", "{main:#}");
 }
 
+// covers: C-39, C-43
+#[test]
+fn vitest_tests_whose_ids_collide_are_never_left_out_after_a_change() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // `x > y` twice, from two nestings: one id, which no plan lists. The file passes whole and
+    // stores them as passed; a change to what only `z` read then asks the file's tests one by
+    // one, and both still run.
+    let r = Repo::new(&[
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, reads: test}"),
+        ),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("fx.txt", "1\n"),
+        file(
+            "test/c.test.ts",
+            "import { describe, test, expect } from 'vitest'\nimport fs from 'node:fs'\nconst log = (n: string) => fs.appendFileSync(process.env.RAN_LOG!, n + '\\n')\ndescribe('x', () => { test('y', () => { log('nested') }) })\ntest('x > y', () => { log('flat') })\ntest('z', () => { expect(fs.readFileSync('fx.txt', 'utf8')).toContain('1') })\n",
+        ),
+        file(
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('other', () => {})\n",
+        ),
+    ]);
+    let log = r.root.join("ran.log");
+    let log_text = log.display().to_string();
+    assert_eq!(r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+    r.write("fx.txt", "1 touched\n");
+    let _ = std::fs::remove_file(&log);
+    let second = r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        ran.contains("nested") && ran.contains("flat"),
+        "{ran:?}\n{}",
+        second.stderr
+    );
+}
+
 /// What a run says when a second start of the runner in COMMAND wasn't observed.
 const SECOND_START: &str = "no test file or test records a pass: Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
 

@@ -675,6 +675,48 @@ fn why_says_a_jest_test_kept_nothing_after_an_error_no_test_owns() {
     }
 }
 
+// covers: C-39, C-44
+#[test]
+fn tests_whose_ids_collide_are_never_left_out_after_a_change() {
+    // `x > y` twice, from two nestings: one id, which no plan lists. The file passes whole and
+    // stores them as passed; a change to what only `z` read then asks the file's tests one by
+    // one, and both still run.
+    for jest in jests() {
+        let r = Repo::new(
+            &jest,
+            &[
+                file(
+                    "hushrun.yaml",
+                    &yaml("{mode: reuse, unit: test, reads: test}"),
+                ),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("fx.js", "module.exports = 1;\n"),
+                file(
+                    "test/c.test.js",
+                    "const fs = require('fs');\nconst log = (n) => fs.appendFileSync(process.env.RAN_LOG, n + '\\n');\ndescribe('x', () => { test('y', () => { log('nested'); }); });\ntest('x > y', () => { log('flat'); });\ntest('z', () => { expect(fs.readFileSync('fx.js', 'utf8')).toContain('1'); });\n",
+                ),
+                file("test/other.test.js", "test('other', () => {});\n"),
+            ],
+        );
+        let log = r.root.join("ran.log");
+        let log_text = log.display().to_string();
+        assert_eq!(r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+        r.write("fx.js", "module.exports = 1; // touched\n");
+        let _ = std::fs::remove_file(&log);
+        let second = r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]);
+        assert_eq!(second.code, 0, "{}", second.out());
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            ran.contains("nested") && ran.contains("flat"),
+            "Jest {}: {ran:?}\n{}",
+            jest.major,
+            second.stderr
+        );
+    }
+}
+
 /// The newest run result this cache holds.
 fn store_result(r: &Repo) -> Value {
     let mut found = Vec::new();
