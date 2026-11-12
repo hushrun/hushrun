@@ -22,7 +22,7 @@
 //! without, would compile one key two ways, and a library compiled against a proc macro built
 //! on one would not load against the same proc macro built on the other. Instead the identity
 //! names a sysroot for `--sysroot` that holds everything of the toolchain but those folders,
-//! as links ([`Identity::hidden_sources`]): every compile sees the toolchain as one without
+//! as links ([`hidden_sources`]): every compile sees the toolchain as one without
 //! sources does, and gives the same bytes.
 //!
 //! Hashing a toolchain reads a few hundred megabytes, so it happens once per toolchain install
@@ -66,7 +66,8 @@ const DRIVER_PREFIXES: [&str; 2] = ["librustc_driver-", "libLLVM"];
 const SOURCES: [&str; 2] = ["src", "rustc-src"];
 
 /// Names the form of a sysroot without sources, so a change to how one is made gives new ones.
-const VIEW_SCHEMA: &str = "hushrun.build.sysroot/1";
+/// /2: only the target folders, a marker written last.
+const VIEW_SCHEMA: &str = "hushrun.build.sysroot/2";
 
 /// Which compiler a call is in front of (B-17).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,10 +90,6 @@ pub struct Identity {
     /// The sysroot rustc uses: the toolchain's folder under rustup, else the folder above the
     /// compiler's own `bin/`. A link's `-B` folder outside it is not keyed (B-18).
     pub sysroot: Option<PathBuf>,
-    /// The sysroot every compile is given with `--sysroot` when the toolchain has sources: the
-    /// toolchain's entries as links, without `lib/rustlib/src` and `lib/rustlib/rustc-src`.
-    /// `None` when it has neither. Paths under it are paths under the toolchain (B-8).
-    pub hidden_sources: Option<PathBuf>,
 }
 
 impl Identity {
@@ -422,10 +419,6 @@ pub fn identity(
         "std": std,
         "target": target,
     });
-    let hidden_sources = match &sysroot {
-        Some(sysroot) => without_sources(sysroot, &memo_dir.join("sysroots"))?,
-        None => None,
-    };
     Ok(Identity {
         digest: jcs::digest(&identity)?,
         parts,
@@ -434,22 +427,46 @@ pub fn identity(
         release: memo_found.release,
         targets: memo_found.targets,
         sysroot,
-        hidden_sources,
     })
 }
 
-/// The sysroot without sources of `sysroot`, made in `dir` once and found there after, or
-/// `None` when the toolchain has no sources (B-9, B-17): a folder that holds a link to each
-/// entry of the toolchain's folder but `lib/`, of `lib/` but `rustlib/`, and of `lib/rustlib/`
-/// but [`SOURCES`]. rustc given it with `--sysroot` finds the standard libraries, the proc macro
-/// crate and its own linker through the links, and no source folder to map `/rustc/<commit>/`
-/// to.
+/// The folder of the store that holds the compiler memos, under which the sysroots without
+/// sources are made ([`SYSROOTS`]).
+pub const MEMOS: &str = "compilers";
+
+/// The folder under [`MEMOS`] that holds the sysroots without sources.
+pub const SYSROOTS: &str = "sysroots";
+
+/// The file written last into a sysroot without sources, before it is renamed into place. Its
+/// modification time is when a run last used it, for the sweep (B-14).
+pub const VIEW_MARKER: &str = ".hushrun-sysroot";
+
+/// The sysroot without sources of `sysroot`, or `None` when the toolchain has no sources (B-9,
+/// B-17). It is found in `dir` whole, or made there: a folder whose `lib/rustlib/<target>` is
+/// a link to the toolchain's own for each target folder the toolchain has (each folder of its
+/// `lib/rustlib/` that holds a `lib/`, but [`SOURCES`]), and nothing else. That is all rustc
+/// reads from a sysroot it is given: the standard libraries and `proc_macro`, its own linker
+/// (`lib/rustlib/<host>/bin`), and the sources it maps `/rustc/<commit>/` to, which are left out.
 ///
-/// It is named by the toolchain's path and the names in those three folders, so a target or a
-/// component installed later gives another one, and the same toolchain always the same path.
-/// It is made under a temporary name and renamed into place whole: of two calls that make it at
-/// once, the second finds it there and drops its own.
-fn without_sources(sysroot: &Path, dir: &Path) -> Result<Option<PathBuf>, Unknown> {
+/// It is named by the toolchain's path and its target folders, so a target installed later
+/// gives another one, and nothing else in the toolchain's folder renames it (a distribution's
+/// `/usr` gains entries all the time).
+///
+/// Whole or absent: a maker fills a folder of its own (a name with its process id and a
+/// counter, made with `create_dir`, so never another's), writes [`VIEW_MARKER`] last and
+/// renames the folder into place. A view found is checked each time with a few `stat`s: the
+/// marker is there and each target's `lib/` resolves. One that isn't whole (a copy that dropped
+/// the links, a tool that emptied it) is moved aside and made again, under a lock on its name
+/// so that one maker at a time does it. Each maker removes only folders it made or moved aside
+/// itself; one a crash left is the sweep's (B-14).
+///
+/// `used`, when given, is when the caller's run began: the marker is dated then if it is older,
+/// once per run.
+pub fn hidden_sources(
+    sysroot: &Path,
+    dir: &Path,
+    used: Option<SystemTime>,
+) -> Result<Option<PathBuf>, Unknown> {
     let rustlib = sysroot.join("lib").join("rustlib");
     if !SOURCES
         .iter()
@@ -461,105 +478,131 @@ fn without_sources(sysroot: &Path, dir: &Path) -> Result<Option<PathBuf>, Unknow
         let path = path.to_path_buf();
         move |source| Unknown::Unreadable { path, source }
     };
-    let names = |folder: &Path| -> Result<Vec<String>, Unknown> {
-        let mut names = Vec::new();
-        for entry in fs::read_dir(folder).map_err(unreadable(folder))? {
-            let name = entry.map_err(unreadable(folder))?.file_name();
-            names.push(
-                name.into_string()
-                    .map_err(|name| Unknown::NotUtf8(name.to_string_lossy().into_owned()))?,
-            );
-        }
-        names.sort();
-        Ok(names)
-    };
-    let lib = sysroot.join("lib");
-    let (top, in_lib, in_rustlib) = (names(sysroot)?, names(&lib)?, names(&rustlib)?);
+    let targets = target_folders(&rustlib)?;
     let name = jcs::digest(&json!({
         "schema": VIEW_SCHEMA,
         "sysroot": sysroot.to_str().ok_or_else(|| Unknown::NotUtf8(sysroot.to_string_lossy().into_owned()))?,
-        "top": top,
-        "lib": in_lib,
-        "rustlib": in_rustlib,
+        "targets": targets,
     }))?;
     let view = dir.join(name.hex());
-    if fs::metadata(&view).is_ok_and(|meta| meta.is_dir()) {
-        return Ok(Some(view));
+    if !whole(&view, &targets) {
+        let _lock = MemoLock::take(dir, &name);
+        if !whole(&view, &targets) {
+            make_view(&rustlib, &targets, dir, &view, &name.hex()).map_err(unreadable(&view))?;
+        }
     }
-    let made = (|| -> io::Result<()> {
-        fs::create_dir_all(dir)?;
-        let temp = dir.join(format!(".{}.{}.tmp", name.hex(), std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        let link_all = |from: &Path, to: &Path, names: &[String], skip: &[&str]| {
-            fs::create_dir_all(to)?;
-            names
-                .iter()
-                .filter(|name| !skip.contains(&name.as_str()))
-                .try_for_each(|name| symlink(&from.join(name), &to.join(name)))
-        };
-        let filled = link_all(sysroot, &temp, &top, &["lib"])
-            .and_then(|()| link_all(&lib, &temp.join("lib"), &in_lib, &["rustlib"]))
-            .and_then(|()| {
-                link_all(
-                    &rustlib,
-                    &temp.join("lib").join("rustlib"),
-                    &in_rustlib,
-                    &SOURCES,
-                )
-            })
-            .and_then(|()| fs::rename(&temp, &view));
-        if filled.is_err() {
-            let _ = fs::remove_dir_all(&temp);
-        }
-        // Another call renamed its own into place first: the same links, under the same name.
-        match filled {
-            Err(_) if fs::metadata(&view).is_ok_and(|meta| meta.is_dir()) => Ok(()),
-            other => other,
-        }
-    })();
-    made.map_err(unreadable(&view))?;
-    settle_after(&view, dir);
+    if let Some(used) = used {
+        mark_used(&view.join(VIEW_MARKER), used);
+    }
     Ok(Some(view))
 }
 
-/// Waits, a few tens of milliseconds at most, until a file made in `dir` is dated later than
-/// every link of the new sysroot `view` by more than the slack a compile's start allows when it
-/// can't date a file of its own ([`crate::inputs::floor`]). Linux dates files from a clock that
-/// moves once a tick, and a compile started in the tick the links were made would take them
-/// for files changed while it ran (B-11) and store nothing. This happens once per toolchain
-/// and set of entries on a machine.
-fn settle_after(view: &Path, dir: &Path) {
-    let dated = |path: &Path| {
-        fs::symlink_metadata(path)
-            .map(|meta| {
-                let stat = Stat::of(&meta);
-                stat.mtime_ns.max(stat.ctime_ns)
-            })
-            .unwrap_or(i64::MAX)
+/// The folders of `lib/rustlib/` that hold a target's libraries (a `lib/` in them), but the
+/// sources, by name, sorted.
+fn target_folders(rustlib: &Path) -> Result<Vec<String>, Unknown> {
+    let unreadable = |source| Unknown::Unreadable {
+        path: rustlib.to_path_buf(),
+        source,
     };
-    let mut newest = dated(view);
-    for folder in [
-        view.to_path_buf(),
-        view.join("lib"),
-        view.join("lib").join("rustlib"),
-    ] {
-        if let Ok(entries) = fs::read_dir(&folder) {
-            for entry in entries.flatten() {
-                newest = newest.max(dated(&entry.path()));
+    let mut targets = Vec::new();
+    for entry in fs::read_dir(rustlib).map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| Unknown::NotUtf8(name.to_string_lossy().into_owned()))?;
+        if SOURCES.contains(&name.as_str()) {
+            continue;
+        }
+        if fs::metadata(entry.path().join("lib")).is_ok_and(|meta| meta.is_dir()) {
+            targets.push(name);
+        }
+    }
+    targets.sort();
+    Ok(targets)
+}
+
+/// Whether the view at `view` is whole: its marker is there and each target's `lib/` resolves.
+fn whole(view: &Path, targets: &[String]) -> bool {
+    fs::symlink_metadata(view.join(VIEW_MARKER)).is_ok_and(|meta| meta.is_file())
+        && targets.iter().all(|target| {
+            fs::metadata(view.join("lib").join("rustlib").join(target).join("lib"))
+                .is_ok_and(|meta| meta.is_dir())
+        })
+}
+
+/// Makes the view at `view`, moving aside one that is there and not whole. Every folder it
+/// creates or moves aside has a name of its own; only those are removed.
+fn make_view(
+    rustlib: &Path,
+    targets: &[String],
+    dir: &Path,
+    view: &Path,
+    name: &str,
+) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let pid = std::process::id();
+    if fs::symlink_metadata(view).is_ok() {
+        let aside = (0..64)
+            .map(|n| dir.join(format!(".{name}.{pid}.{n}.broken")))
+            .find(|aside| fs::symlink_metadata(aside).is_err())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free name"))?;
+        match fs::rename(view, &aside) {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(&aside);
             }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
     }
-    let probe = dir.join(format!(".clock.{}", std::process::id()));
-    let slack = i64::try_from(crate::inputs::CLOCK_SLACK.as_nanos()).unwrap_or(i64::MAX);
-    let enough = newest.saturating_add(slack);
-    for _ in 0..100 {
-        let now = fs::write(&probe, b"").map(|()| dated(&probe));
-        if now.is_err() || now.is_ok_and(|now| now > enough) {
-            break;
+    let mut temp = None;
+    for n in 0..64 {
+        let candidate = dir.join(format!(".{name}.{pid}.{n}.tmp"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                temp = Some(candidate);
+                break;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    let _ = fs::remove_file(&probe);
+    let temp =
+        temp.ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free temp name"))?;
+    let filled = (|| -> io::Result<()> {
+        let inner = temp.join("lib").join("rustlib");
+        fs::create_dir_all(&inner)?;
+        for target in targets {
+            symlink(&rustlib.join(target), &inner.join(target))?;
+        }
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp.join(VIEW_MARKER))?
+            .write_all(rustlib.to_string_lossy().as_bytes())?;
+        fs::rename(&temp, view)
+    })();
+    if filled.is_err() {
+        let _ = fs::remove_dir_all(&temp);
+        // Another maker, without the lock, renamed its own into place first.
+        if whole(view, targets) {
+            return Ok(());
+        }
+    }
+    filled
+}
+
+/// Dates the marker `used` when it is older: when a run last used the view, for the sweep.
+fn mark_used(marker: &Path, used: SystemTime) {
+    let older = fs::metadata(marker)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| modified < used);
+    if older {
+        let _ = OpenOptions::new()
+            .write(true)
+            .open(marker)
+            .and_then(|file| file.set_modified(used));
+    }
 }
 
 #[cfg(unix)]
@@ -1574,6 +1617,119 @@ mod tests {
         assert_ne!(a.parts.rustc_driver, a2.parts.rustc_driver);
     }
 
+    /// A toolchain with the standard library's sources at `<root>/rustup`, and the identity
+    /// of its compiler with the memo (and so the sysroots without sources) in `memo`.
+    fn with_sources(root: &Path) -> (PathBuf, PathBuf) {
+        let (home, toolchain) = toolchain_at(root, "stable-x", 1_000);
+        write(
+            &toolchain.join("lib/rustlib/src/rust/library/std/src/lib.rs"),
+            b"//! std",
+            1_000,
+        );
+        (home, toolchain)
+    }
+
+    fn view_of(_home: &Path, toolchain: &Path, memo: &Path) -> PathBuf {
+        super::hidden_sources(toolchain, &memo.join(super::SYSROOTS), None)
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Every symbolic link under `dir`.
+    fn links_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(folder) = stack.pop() {
+            for entry in fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                if meta.file_type().is_symlink() {
+                    out.push(path);
+                } else if meta.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    // covers: B-9, B-17
+    #[test]
+    fn a_sysroot_without_sources_that_lost_its_links_is_made_again() {
+        // A copy of the store by a tool that drops symbolic links keeps the view's folders and
+        // loses its links: given to rustc, every compile fails with E0463 for `std`.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, toolchain) = with_sources(&root);
+        settle();
+        let memo = root.join("memo");
+        let view = view_of(&home, &toolchain, &memo);
+        let std = "lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib";
+        assert!(view.join(std).is_file());
+        for link in links_under(&view) {
+            fs::remove_file(link).unwrap();
+        }
+        assert!(!view.join(std).is_file());
+        let again = view_of(&home, &toolchain, &memo);
+        assert!(again.join(std).is_file(), "{}", again.display());
+    }
+
+    // covers: B-9, B-17
+    #[test]
+    fn making_a_sysroot_without_sources_never_removes_another_makers_folder() {
+        // Two processes with one id (in two containers sharing the store) make the same view:
+        // neither may remove what the other is filling.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, toolchain) = with_sources(&root);
+        settle();
+        // Learn the view's name from another store.
+        let name = view_of(&home, &toolchain, &root.join("elsewhere"))
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let memo = root.join("memo");
+        let sysroots = memo.join("sysroots");
+        let other = sysroots.join(format!(".{name}.{}.tmp", std::process::id()));
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("being-filled"), b"by the other maker").unwrap();
+        let view = view_of(&home, &toolchain, &memo);
+        assert!(
+            view.join("lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib")
+                .is_file()
+        );
+        assert!(
+            other.join("being-filled").is_file(),
+            "another maker's folder was removed"
+        );
+    }
+
+    // covers: B-9, B-17
+    #[test]
+    fn makers_of_one_sysroot_without_sources_at_once_all_get_it_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, toolchain) = with_sources(&root);
+        settle();
+        let memo = root.join("memo");
+        let views: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| view_of(&home, &toolchain, &memo)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(views.windows(2).all(|w| w[0] == w[1]));
+        let std = "lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib";
+        assert!(views[0].join(std).is_file());
+        // Nothing left behind but the view (and the lock files' absence).
+        let left: Vec<String> = fs::read_dir(memo.join("sysroots"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+    }
+
     // covers: B-9, B-17
     #[test]
     fn a_toolchain_with_sources_is_one_compiler_with_one_without_and_compiles_see_no_sources() {
@@ -1596,26 +1752,33 @@ mod tests {
         let fake = Fake::new();
         let at = |home: &Path, name: &str, toolchain: &Path| {
             let vars = env(&[("RUSTUP_HOME", home), ("RUSTUP_TOOLCHAIN", Path::new(name))]);
-            identity(
+            let id = identity(
                 &toolchain.join("bin/rustc"),
                 &vars,
                 &home.join("memo"),
                 &fake.run(),
             )
-            .unwrap()
+            .unwrap();
+            let view = super::hidden_sources(
+                id.sysroot.as_ref().unwrap(),
+                &home.join("memo").join(super::SYSROOTS),
+                None,
+            )
+            .unwrap();
+            (id, view)
         };
-        let a = at(&home_a, "stable-x", &toolchain_a);
-        let b = at(&home_b, "1.94.0-x", &toolchain_b);
+        let (a, a_view) = at(&home_a, "stable-x", &toolchain_a);
+        let (b, b_view) = at(&home_b, "1.94.0-x", &toolchain_b);
         assert_eq!(a.digest, b.digest);
-        assert_eq!(a.hidden_sources, None, "nothing to hide");
-        let view = b.hidden_sources.clone().unwrap();
+        assert_eq!(a_view, None, "nothing to hide");
+        let view = b_view.unwrap();
         assert!(view.starts_with(home_b.join("memo")));
-        // Everything of the toolchain but its sources, through links.
+        // The toolchain's target folders, through links, and nothing else of it: rustc reads
+        // nothing else from a sysroot it is given.
+        assert!(!view.join("bin").exists());
+        assert!(!view.join("share").exists());
+        assert!(!view.join("lib/rustlib/manifest-rust-src").exists());
         for rest in [
-            "bin/rustc",
-            "share/doc/README",
-            "lib/librustc_driver-0a1b2c.dylib",
-            "lib/rustlib/manifest-rust-src",
             "lib/rustlib/aarch64-apple-darwin/lib/libstd-9f8e.rlib",
             "lib/rustlib/aarch64-apple-darwin/lib/self-contained/crt1.o",
         ] {
@@ -1628,19 +1791,20 @@ mod tests {
         assert!(!view.join("lib/rustlib/src").exists());
         assert!(fs::symlink_metadata(view.join("lib/rustlib/src")).is_err());
         // The same one at the next call, and the same one when it was made by a call before.
-        assert_eq!(
-            at(&home_b, "1.94.0-x", &toolchain_b).hidden_sources,
-            Some(view.clone())
-        );
+        assert_eq!(at(&home_b, "1.94.0-x", &toolchain_b).1, Some(view.clone()));
+        // A top-level entry the toolchain gains (a distribution's `/usr` does) renames nothing.
+        write(&toolchain_b.join("share/other/file"), b"x", 9_000);
+        write(&toolchain_b.join("lib/libother.so"), b"x", 9_000);
+        assert_eq!(at(&home_b, "1.94.0-x", &toolchain_b).1, Some(view.clone()));
         // The compiler's sources (`rustc-dev`) are hidden too.
         write(
             &toolchain_a.join("lib/rustlib/rustc-src/rust/compiler/rustc/src/main.rs"),
             b"fn main() {}",
             1_000,
         );
-        let a2 = at(&home_a, "stable-x", &toolchain_a);
+        let (a2, view_a) = at(&home_a, "stable-x", &toolchain_a);
         assert_eq!(a2.digest, a.digest);
-        let view_a = a2.hidden_sources.unwrap();
+        let view_a = view_a.unwrap();
         assert!(fs::symlink_metadata(view_a.join("lib/rustlib/rustc-src")).is_err());
         assert!(
             view_a
@@ -1653,9 +1817,7 @@ mod tests {
             b"std for x86",
             9_000,
         );
-        let b2 = at(&home_b, "1.94.0-x", &toolchain_b)
-            .hidden_sources
-            .unwrap();
+        let b2 = at(&home_b, "1.94.0-x", &toolchain_b).1.unwrap();
         assert_ne!(b2, view);
         assert!(
             b2.join("lib/rustlib/x86_64-apple-darwin/lib/libstd-77.rlib")

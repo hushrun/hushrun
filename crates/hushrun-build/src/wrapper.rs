@@ -634,7 +634,7 @@ impl Call<'_> {
                 Path::new(inv.rustc()),
                 inv.target(),
                 &|name| ports.var(name),
-                &store.root().join("compilers"),
+                &store.root().join(compiler::MEMOS),
                 &|path| ports.rustc_version(path),
                 &|path| ports.rustc_targets(path),
             )
@@ -644,7 +644,20 @@ impl Call<'_> {
         };
         self.sysroot = identity.sysroot.clone();
         // Every compile sees the toolchain as one without sources does (B-9, B-17).
-        self.hide_sources = identity.hidden_sources.as_ref().map(|view| {
+        let used =
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.current.started_ms);
+        let view = match &identity.sysroot {
+            Some(sysroot) => match compiler::hidden_sources(
+                sysroot,
+                &store.root().join(compiler::MEMOS).join(compiler::SYSROOTS),
+                Some(used),
+            ) {
+                Ok(view) => view,
+                Err(_) => return self.pass(PassedThrough::Compiler),
+            },
+            None => None,
+        };
+        self.hide_sources = view.as_ref().map(|view| {
             let mut arg = OsString::from("--sysroot=");
             arg.push(view);
             arg
@@ -664,8 +677,7 @@ impl Call<'_> {
                 .as_ref()
                 .and_then(|path| path.to_str())
                 .map(str::to_string),
-            toolchain_view: identity
-                .hidden_sources
+            toolchain_view: view
                 .as_ref()
                 .and_then(|path| path.to_str())
                 .map(str::to_string),

@@ -252,10 +252,17 @@ SHA-256 of the compiler's own binary (under rustup the toolchain's `bin/rustc`, 
 the SHA-256 of each compiler library in the toolchain's `lib/` (`librustc_driver-*`, `libLLVM*`),
 by name; and the SHA-256 of each file under `<sysroot>/lib/rustlib/<triple>/lib/`, by its path
 there, for the host and for the call's `--target`. Whether the toolchain holds sources is not
-part of it: no compile sees them (B-9). The folder without them is made once per toolchain and
-set of entries, named by the toolchain's path and the names in its own folder, in `lib/` and in
-`lib/rustlib/`, so a target or component installed later gives a new one; one that can't be made
-is a compiler of unknown identity. The compiler's built-in targets are the output of
+part of it: no compile sees them (B-9). The view without them is a folder of the store, under
+the compiler memos, whose `lib/rustlib/<target>` is a link to the toolchain's for each target
+folder it has (each folder of `lib/rustlib/` that holds a `lib/`, but the sources), and nothing
+else: that is all rustc reads from a sysroot it is given. It is named by the toolchain's path
+and those target folders, so a target installed later gives a new one and nothing else in the
+toolchain's folder renames it, and it is made once per store for each such toolchain, by the
+first wrapper that needs it. It is whole or absent: a maker fills a folder whose name only it uses, writes a marker
+last and renames it into place, removing nothing it did not make. Each call checks the view it
+finds with a few `stat`s (the marker, and each target's `lib/` through its link); one that is not
+whole is moved aside and made again under a lock on its name. One that can't be made is a
+compiler of unknown identity. The compiler's built-in targets are the output of
 `rustc --print target-list`. The content, `-vV` and the target list are kept per compiler and
 target in a memo named by the compiler's path, size and dates, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`
 and the stamps of the `lib/` folders, and computed again when a standard library folder, a `lib/`
