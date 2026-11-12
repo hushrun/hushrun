@@ -21,9 +21,11 @@
 //! | `POST v0/build/close` | [`CloseRequest`] | `{}` |
 //! | `POST v0/build/blocks/report` | [`ReportRequest`] | `{}` |
 //!
-//! An org that doesn't share answers every one of them as a route that doesn't exist (404), as a
-//! server from before them does. Whether to ask `open` at all, a results lookup's answer says in
-//! its [`SHARING_HEADER`].
+//! A server with no object store has none of these routes. An org that doesn't share answers an
+//! authenticated request to any of them as a route that doesn't exist (404), as a server from before
+//! them does. Whether to ask `open` at all, a results lookup's answer says in its
+//! [`SHARING_HEADER`]. A request that lost a race in the server's database answers 503 with
+//! `Retry-After`: send it again.
 //!
 //! Like the rest of this crate it does no IO.
 
@@ -196,7 +198,9 @@ impl<'de> Deserialize<'de> for Base64 {
     }
 }
 
-/// What a block is, as the server keeps it.
+/// What a block is, as the server keeps it. A word this version doesn't know reads as
+/// [`Class::Unknown`]: a server refuses only that block (`unsupported`), and a client reads the rest
+/// of the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Class {
@@ -205,6 +209,8 @@ pub enum Class {
     BuildScript,
     Program,
     Other,
+    #[serde(other)]
+    Unknown,
 }
 
 impl Class {
@@ -216,10 +222,11 @@ impl Class {
             Class::BuildScript => "build-script",
             Class::Program => "program",
             Class::Other => "other",
+            Class::Unknown => "unknown",
         }
     }
 
-    /// The class a word names.
+    /// The class a word names, among those a server keeps.
     pub fn from_word(word: &str) -> Option<Class> {
         [
             Class::Library,
@@ -462,12 +469,17 @@ pub enum Refusal {
     TooLarge,
     /// Its first key is suspended in the org.
     Suspended,
-    /// A more trusted build of the same key has other outputs.
+    /// A scope the caller reads holds the same key with other outputs; or, for a trusted job, another
+    /// trusted build disagreed, and the key is suspended.
     Differs,
     /// Another upload of it is under way, or it is being deleted.
     Busy,
     /// This caller writes nowhere.
     NoScope,
+    /// The caller's scope has as many uploads under way as it may: send or let them lapse first.
+    TooManyUploads,
+    /// The server doesn't take blocks of this class.
+    Unsupported,
     #[serde(other)]
     Unknown,
 }
@@ -589,9 +601,15 @@ pub enum Problem {
     Unreadable,
     /// The object store had nothing at its link.
     Missing,
+    /// A word this version doesn't know: a server records nothing for it.
+    #[serde(other)]
+    Unknown,
 }
 
-/// `POST v0/build/blocks/report`: a block that a machine found wrong.
+/// `POST v0/build/blocks/report`: a block that a machine found wrong, in a scope it reads. Every
+/// report is recorded, once per reporter, block and day. A block of the caller's own scope is
+/// deleted. A `protected` block is deleted, and for `differs` its first key suspended, only when a
+/// job that writes `protected` reports it; anyone else's report changes nothing on the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportRequest {

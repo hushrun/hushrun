@@ -96,7 +96,24 @@ fn class_words() {
         assert_eq!(serde_json::to_value(class).unwrap(), json!(class.word()));
     }
     assert_eq!(Class::from_word("dylib"), None);
-    assert!(serde_json::from_value::<Class>(json!("dylib")).is_err());
+    assert_eq!(Class::from_word("unknown"), None);
+    // A newer side's word reads as unknown, either way, and doesn't break what holds it.
+    assert_eq!(
+        serde_json::from_value::<Class>(json!("dylib")).unwrap(),
+        Class::Unknown
+    );
+    let found: LookupResponse = serde_json::from_value(json!({"found": [{
+        "address": "01".repeat(32), "scope": "protected", "bytes": 1,
+        "packSha256": "01".repeat(32), "outputs": "01".repeat(32), "costMs": 1, "class": "cdylib",
+    }]}))
+    .unwrap();
+    assert_eq!(found.found[0].class, Class::Unknown);
+    let begun: BeginRequest = serde_json::from_value(json!({"kind": "rustc/1", "blocks": [{
+        "address": "01".repeat(32), "bytes": 1, "packSha256": "01".repeat(32),
+        "outputs": "01".repeat(32), "class": "cdylib", "costMs": 1,
+    }]}))
+    .unwrap();
+    assert_eq!(begun.blocks[0].class, Class::Unknown);
 }
 
 #[test]
@@ -337,6 +354,8 @@ fn begin_and_its_answers() {
         ("differs", Refusal::Differs),
         ("busy", Refusal::Busy),
         ("no_scope", Refusal::NoScope),
+        ("too_many_uploads", Refusal::TooManyUploads),
+        ("unsupported", Refusal::Unsupported),
         ("from_the_future", Refusal::Unknown),
     ] {
         assert_eq!(
@@ -444,6 +463,9 @@ fn close_and_report() {
         json!({"kind": "rustc/1", "address": "16".repeat(32), "scope": "protected",
                "problem": "differs"}),
     );
-    // A problem is sent by the client: one the server doesn't know is refused, not guessed.
-    assert!(serde_json::from_value::<Problem>(json!("odd")).is_err());
+    // A problem a newer client sends reads as unknown: the server records nothing for it.
+    assert_eq!(
+        serde_json::from_value::<Problem>(json!("odd")).unwrap(),
+        Problem::Unknown
+    );
 }
