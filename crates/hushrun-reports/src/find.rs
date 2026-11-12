@@ -155,16 +155,31 @@ pub fn find(q: &Query<'_>) -> Option<Search> {
 }
 
 /// Surefire's TestNG provider writes each test once in its own report, `TEST-TestSuite.xml`, and
-/// TestNG's reporter writes them again, a class a file, below `junitreports/` beside it: those
-/// copies go when a `TEST-*.xml` beside their directory was found, so that no test counts twice.
+/// TestNG's reporter writes them again, a class a file, below `junitreports/` beside it. A report
+/// there is dropped only when it is such a copy: every case it holds, by class and name, is in a
+/// `TEST-TestSuite.xml` found beside its directory. A report of another tool there, or one that
+/// can't be read or holds a case of its own, stays: no test counts twice, and none is lost.
 fn drop_testng_copies(found: &mut Vec<Found>) {
-    let suites: std::collections::BTreeSet<String> = found
+    /// The most bytes of a report this reads to tell a copy: past it, the report stays.
+    const MOST_BYTES: u64 = 64 * 1024 * 1024;
+    fn cases(path: &Path) -> Option<std::collections::BTreeSet<(String, String)>> {
+        if std::fs::metadata(path).ok()?.len() > MOST_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        crate::xml::junit_cases(std::str::from_utf8(&bytes).ok()?)
+    }
+    let suites: std::collections::BTreeMap<String, PathBuf> = found
         .iter()
         .filter_map(|f| {
             let (dir, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
-            (name.starts_with("TEST-") && name.ends_with(".xml")).then(|| dir.to_string())
+            (name == "TEST-TestSuite.xml").then(|| (dir.to_string(), f.path.clone()))
         })
         .collect();
+    let mut read: std::collections::BTreeMap<
+        String,
+        Option<std::collections::BTreeSet<(String, String)>>,
+    > = std::collections::BTreeMap::new();
     found.retain(|f| {
         let Some((dir, _)) = f.rel.rsplit_once('/') else {
             return true;
@@ -174,7 +189,16 @@ fn drop_testng_copies(found: &mut Vec<Found>) {
             None if dir == "junitreports" => "",
             _ => return true,
         };
-        !suites.contains(parent)
+        let Some(suite) = suites.get(parent) else {
+            return true;
+        };
+        let held = read
+            .entry(parent.to_string())
+            .or_insert_with(|| cases(suite));
+        match (held, cases(&f.path)) {
+            (Some(held), Some(copy)) => copy.is_empty() || !copy.is_subset(held),
+            _ => true,
+        }
     });
 }
 

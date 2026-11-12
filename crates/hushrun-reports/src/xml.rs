@@ -171,6 +171,33 @@ fn seconds(element: &BytesStart<'_>, name: &str) -> Option<u64> {
     (ms.is_finite() && (0.0..=1e11).contains(&ms)).then_some(ms as u64)
 }
 
+/// \[C-27\] Every `<testcase>` of a JUnit document, by its `classname` and `name`; `None` when it
+/// isn't one, or doesn't read to its end.
+pub(crate) fn junit_cases(text: &str) -> Option<std::collections::BTreeSet<(String, String)>> {
+    let mut walk = Walk::new(text, Deadline::none());
+    let (root, empty) = walk.root().ok()?;
+    if format_of(&root) != Some(Format::Junit) {
+        return None;
+    }
+    let mut out = std::collections::BTreeSet::new();
+    if !empty {
+        walk.each(|tag| {
+            if let Tag::Open(e, _, _) = tag
+                && e.local_name().as_ref() == "testcase"
+            {
+                let class = attr(e, "classname")
+                    .map(|c| c.into_owned())
+                    .unwrap_or_default();
+                let name = attr(e, "name").map(|n| n.into_owned()).unwrap_or_default();
+                out.insert((class, name));
+            }
+            Ok(())
+        })
+        .ok()?;
+    }
+    Some(out)
+}
+
 /// JUnit: every `<testcase>`, at any depth, counts once, by its children `<failure>`,
 /// `<error>` and `<skipped>`; the summary attributes are often wrong, so they are never read.
 /// Surefire's reruns (`<flakyFailure>`, `<rerunFailure>`, …) aren't outcomes. The time is the
