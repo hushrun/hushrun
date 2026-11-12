@@ -1870,3 +1870,42 @@ fn a_test_the_build_excludes_by_tag_is_neither_run_nor_listed() {
     assert!(!cases.contains(&"slow()".to_string()), "{cases:?}");
     assert_eq!(cases.len(), 2, "{cases:?}\n{}", second.stderr);
 }
+
+// covers: C-30, C-46
+#[test]
+fn a_jar_from_a_file_repository_in_the_checkout_is_read_by_the_project_that_published_it() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // lib publishes to localrepo/, which git ignores, and app takes it from there.
+    let mut files = build(Framework::Junit5, &["lib", "app"], "reuse");
+    files[1] = file(".gitignore", "build/\n.gradle/\nlocalrepo/\n");
+    files[3] = file(
+        "build.gradle",
+        "subprojects {\n  apply plugin: 'java'\n  repositories { maven { url = rootProject.file('localrepo') }; mavenCentral() }\n  dependencies {\n    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n  }\n  tasks.withType(Test).configureEach { useJUnitPlatform() }\n}\nproject(':lib') { apply plugin: 'maven-publish'; group = 'com.example'; version = '1.0'\n  publishing { publications { maven(MavenPublication) { from components.java } }; repositories { maven { url = rootProject.file('localrepo') } } } }\nproject(':app') {\n  dependencies { implementation 'com.example:lib:1.0' }\n  tasks.named('compileJava') { mustRunAfter(':lib:publish') }\n  tasks.named('test') { mustRunAfter(':lib:publish') }\n}\n",
+    );
+    files.extend([
+        file(
+            "lib/src/main/java/lib/Lib.java",
+            "package lib;\npublic class Lib { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void v() { Assertions.assertEquals(1, lib.Lib.v()); } }\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[":lib:publish"]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    let app = &map["units"]["app/src/test/java/app/AppTest.java"];
+    assert!(app.get("notFollowed").is_none(), "{map:#}");
+    assert!(
+        app["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("lib/src/main/java/lib/Lib.java")),
+        "{map:#}"
+    );
+}

@@ -352,12 +352,7 @@ class HushrunSelection {
                     if (r == null) notFollowed << [why: "outside-repository", detail: dir] else dirs << r
                     return
                 }
-                // Gradle's own caches hold what came from remote repositories, by coordinates and
-                // checksum: no file of this checkout made them.
-                if (guh && p.startsWith(guh + File.separator)) return
-                String r = HushrunRun.rel(root, p)
-                if (r != null) { paths << r; return }
-                // A file-based Maven repository (mavenLocal()): a jar a
+                // A file-based Maven repository (mavenLocal(), or one in the checkout): a jar a
                 // remote repository supplied, not a snapshot, is as good as Gradle's own cache; one
                 // installed or published here (or a snapshot) reads the project with its
                 // coordinates, when the build has one; else what made it can't be told.
@@ -370,14 +365,23 @@ class HushrunSelection {
                     if (coords != null && HushrunRun.downloaded(f, version)) return
                     String publisher = coords == null ? null : shared.coordinates.get(coords)
                     if (publisher != null) { addProject(publisher); return }
+                    String inside = HushrunRun.rel(root, p)
+                    // A file of the checkout is read if git tracks it; hushrun says the rest.
+                    if (inside != null) { paths << inside; return }
                     notFollowed << [why: "local-maven-repository", detail: coords != null ? coords + ":" + version : p]
                     return
                 }
+                // Gradle's own caches hold what came from remote repositories, by coordinates and
+                // checksum: no file of this checkout made them.
+                if (guh && p.startsWith(guh + File.separator)) return
+                String r = HushrunRun.rel(root, p)
+                if (r != null) { paths << r; return }
             }
         } catch (Throwable t) {
             notFollowed << [why: "classpath", detail: HushrunRun.brief(t)]
         }
-        reads = [dirs: dirs as List, paths: paths as List, notFollowed: notFollowed]
+        List<String> repositories = shared.fileRepositories.collect { HushrunRun.rel(root, it) }.findAll { it != null } as List
+        reads = [dirs: dirs as List, paths: paths as List, repositories: repositories, notFollowed: notFollowed]
         return reads
     }
 }

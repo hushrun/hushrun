@@ -303,6 +303,8 @@ pub struct ReportReads {
     pub dirs: Vec<String>,
     /// Other entries of its classpath inside the repository, from its root.
     pub paths: Vec<String>,
+    /// File-based Maven repositories inside the repository the build resolves from, from its root.
+    pub repositories: Vec<String>,
 }
 
 /// A class's outer class: its binary name up to the first `$`.
@@ -404,6 +406,8 @@ struct UnitSaw {
     not_followed: BTreeSet<NotFollowed>,
     dirs: BTreeSet<String>,
     paths: BTreeSet<String>,
+    /// File-based Maven repositories inside the repository the build resolves from.
+    repositories: BTreeSet<String>,
     tests: BTreeMap<String, TestSaw>,
     /// A task reported tests for it: its tests are known.
     told: bool,
@@ -431,6 +435,7 @@ impl UnitSaw {
         self.not_followed.extend(one.not_followed);
         self.dirs.extend(one.dirs);
         self.paths.extend(one.paths);
+        self.repositories.extend(one.repositories);
         self.told |= one.told;
         for (id, saw) in one.tests {
             match self.tests.get_mut(&id) {
@@ -668,6 +673,7 @@ fn units_of(
         one.not_followed = task_not_followed.clone();
         one.dirs = report.reads.dirs.iter().cloned().collect();
         one.paths = report.reads.paths.iter().cloned().collect();
+        one.repositories = report.reads.repositories.iter().cloned().collect();
         if up_to_date || !(executed || no_source) {
             // Gradle didn't execute the task: its tests record nothing.
             one.complete = false;
@@ -772,8 +778,19 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
         // directory with files of the scope is read whole, and anything else (built output
         // outside every project's build directory) can't be told.
         for path in &saw.paths {
+            let in_repository = saw.repositories.iter().find_map(|repo| {
+                path.strip_prefix(repo.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+            });
             if tree.contains(path) {
                 reads.insert(path.clone());
+            } else if let Some(rest) = in_repository {
+                // A jar of a file repository in the checkout, which git doesn't track and no
+                // project of the build has the coordinates of.
+                not_followed.insert(NotFollowed {
+                    why: LOCAL_REPOSITORY.into(),
+                    detail: coordinates_of(rest).unwrap_or_else(|| path.clone()),
+                });
             } else if super::gotest::under(tree, &BTreeSet::from([path.clone()])).is_empty() {
                 not_followed.insert(NotFollowed {
                     why: "classpath".into(),
@@ -832,6 +849,21 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
 /// Why a class whose classpath holds a jar of a local Maven repository that no project of this
 /// build made, and no remote repository supplied, isn't followed.
 const LOCAL_REPOSITORY: &str = "local-maven-repository";
+
+/// `group:artifact:version` from a jar's path below a Maven repository
+/// (`com/acme/thing/1.0/thing-1.0.jar`), or `None`.
+fn coordinates_of(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let n = parts.len();
+    (n >= 4).then(|| {
+        format!(
+            "{}:{}:{}",
+            parts[..n - 3].join("."),
+            parts[n - 3],
+            parts[n - 2]
+        )
+    })
+}
 
 /// \[ADR 0084\] One sentence, for `hushrun why`, in place of every `local-maven-repository` entry:
 /// the jars, at most three named and how many more, and what a person can do.

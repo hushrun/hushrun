@@ -294,6 +294,14 @@ remote repositories, or filter it to the build's own group. The cost: a jar inst
 by another build of this machine, still keeps its classes from reuse until the build stops taking
 it from the local repository.
 
+## Amendment 12: a file repository in the checkout (2026-11-12)
+
+A jar of a file repository inside the checkout (`maven { url = file('localrepo') }`, git-ignored)
+was a file of the checkout that git doesn't track: `not observed` for ever, though a project of the
+build published it. Amendment 11's rules now come first there too: a jar a remote supplied is
+fine, one a project of the build published reads that project, a file of it that git tracks is
+read as a file, and any other is `not observed` for the same reason, in the same words.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's
