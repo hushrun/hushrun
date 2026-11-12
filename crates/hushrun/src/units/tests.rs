@@ -216,18 +216,13 @@ fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_o
         notes,
         ["its tests are reused by test file: Vitest's tests can't be reused one by one yet"]
     );
-    // pytest knows tests, and in this version takes each to have read what its file read.
+    // pytest knows tests, and \[ADR 0080\] watches each one: it says itself where it can't.
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &pytest::Pytest);
     assert_eq!((unit, reads), (Unit::Test, Reads::File));
     assert!(notes.is_empty());
     let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &pytest::Pytest);
-    assert_eq!((unit, reads), (Unit::Test, Reads::File));
-    assert_eq!(
-        notes,
-        [
-            "each test is taken to have read what its test file read: pytest can't be watched test by test yet"
-        ]
-    );
+    assert_eq!((unit, reads), (Unit::Test, Reads::Test));
+    assert!(notes.is_empty());
 }
 
 /// What `decide` needs of a run of one pytest test file, `tests/test_a.py`, in `dir`, on `tree`.
@@ -281,10 +276,17 @@ fn decided(
         adapter: "pytest",
         hints: adapter::Hints::Sources,
     };
+    let watches = facts::Watches::default();
+    let mode = Modes {
+        unit: Unit::Test,
+        reads: Reads::File,
+        watches: &watches,
+        unwatched: None,
+    };
     let observed = decide(
         &end,
         &Tests::default(),
-        Unit::Test,
+        &mode,
         read,
         map,
         at,
@@ -315,6 +317,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         state,
         duration_ms: 7,
         not_followed: BTreeSet::new(),
+        list: None,
     };
     let mut map = store::Map {
         reported: true,
@@ -553,6 +556,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         state: State::Passed,
         duration_ms: 1,
         not_followed: BTreeSet::new(),
+        list: None,
     };
     let mut map = store::Map::default();
     for (unit, n) in [("tests/test_a.py", 25_000), ("tests/test_b.py", 25_001)] {
@@ -576,6 +580,8 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
     let plan = |map: &store::Map| {
         plan_tests(&TestsAt {
             keyer: &keyer,
+            reads: Reads::File,
+            tree: &tree,
             known: &known,
             keyed: &keyed,
             map,

@@ -270,6 +270,39 @@ pub fn lists(
     Some(out)
 }
 
+/// \[C-40, ADR 0078\] The lists a test's key may be made from, which the plan, `observe`,
+/// `hushrun ready` and `hushrun why` all ask: with `reads: file`, its test file's (`file_lists`,
+/// from [`lists`]); with `reads: test`, the list this machine's row for it holds, every file now
+/// below a directory it listed included, or its test file's lists when the row holds none (it
+/// wasn't watched alone, and recorded on those). A test with no row has nothing to key it by.
+pub fn test_lists(
+    reads: units::Reads,
+    file_lists: &[List],
+    row: Option<&super::store::TestRow>,
+    tree: &Tree,
+) -> Vec<List> {
+    if reads == units::Reads::File {
+        return file_lists.to_vec();
+    }
+    let Some(row) = row else {
+        return Vec::new();
+    };
+    match &row.list {
+        Some(list) => {
+            let reads: BTreeSet<String> = list.reads.keys().cloned().collect();
+            let mut files = reads.clone();
+            files.extend(gotest::under(tree, &list.dirs));
+            vec![List {
+                files,
+                reads,
+                dirs: list.dirs.clone(),
+                from: From::Here(Origin::SeenHere),
+            }]
+        }
+        None => file_lists.to_vec(),
+    }
+}
+
 /// What [`choose`] decided of one test file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {

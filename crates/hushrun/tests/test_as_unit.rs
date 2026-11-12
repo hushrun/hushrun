@@ -203,6 +203,18 @@ fn has_pytest() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether the Python the tests run has `sys.monitoring` (3.12 and later), with which pytest's
+/// adapter watches each test (ADR 0080).
+fn watches() -> bool {
+    Command::new(python())
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if hasattr(sys, 'monitoring') else 1)",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 fn yaml(tests: &str) -> String {
     format!("version: 1\nrepository: {REPOSITORY}\nchecks:\n  unit:\n    tests: {tests}\n")
 }
@@ -489,27 +501,29 @@ fn observe_says_what_reusing_tests_would_have_done_and_test_files_stay_as_they_w
         r.newest_result()["units"]["tests"],
         json!({"total": 13, "ran": 13, "reused": 0})
     );
-    // `reads: test` parses, and pytest says once that it takes a test to have read its file's
-    // list in this version.
+    // \[ADR 0080\] `reads: test`: pytest watches each test on Python 3.12 and later, and says
+    // nothing; below, it says once why each test is taken to have read its test file's list.
     r.write(
         "hushrun.yaml",
         &yaml("{mode: observe, unit: test, reads: test}"),
     );
     let reads = r.run(&pytest_args(&python, &[]), &[]);
-    assert!(
-        reads.stderr.contains(
-            "hushrun: unit: each test is taken to have read what its test file read: pytest can't be watched test by test yet\n"
-        ),
-        "{}",
-        reads.stderr
-    );
-    assert_eq!(
-        reads
-            .stderr
-            .matches("can't be watched test by test")
-            .count(),
-        1
-    );
+    let said = reads
+        .stderr
+        .matches("each test is taken to have read what its test file read")
+        .count();
+    if watches() {
+        assert_eq!(said, 0, "{}", reads.stderr);
+    } else {
+        assert_eq!(said, 1, "{}", reads.stderr);
+        assert!(
+            reads
+                .stderr
+                .contains("has no sys.monitoring, which watching a test needs"),
+            "{}",
+            reads.stderr
+        );
+    }
     // Test files, as before: no test is told, and the counts are test files'.
     r.write("hushrun.yaml", &yaml("observe"));
     r.write("app/greet.py", "def hello():\n    return 'hi'  # changed\n");

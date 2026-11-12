@@ -6,6 +6,7 @@
 //! - A unit's key, by one function, [`unit_key`], with [`shape`] and [`Tree::digest`] for the
 //!   digests it holds (C-31); \[ADR 0077\] a test's, by one function beside it, [`test_key`]
 //!   (C-39), and a test's name, by [`test_name`].
+//! - \[ADR 0078\] What a test read, by one function, [`test_list`] (C-40).
 //! - A unit's state in a run, decided once, by [`state`], from the facts an adapter reported
 //!   (C-32, ADR 0060): a test file's, and \[ADR 0077\] a test's, from its own facts.
 //!
@@ -416,6 +417,111 @@ fn key_of(
         input["counts_from"] = rule.clone();
     }
     jcs::digest(&input)
+}
+
+/// \[C-40, ADR 0078\] What an adapter saw of one test file for what its tests read, as paths from
+/// the repository root (`hushrun.unit-facts/v1`, C-32).
+#[derive(Debug, Clone, Copy)]
+pub struct FileWatch<'a> {
+    /// The test file.
+    pub unit: &'a str,
+    /// Its own list (C-31): what it imported, followed to the end, or opened.
+    pub file: &'a BTreeSet<String>,
+    /// The directories it listed.
+    pub file_dirs: &'a BTreeSet<String>,
+    /// Each file's direct imports.
+    pub imports: &'a BTreeMap<String, BTreeSet<String>>,
+    /// The files each module opened from its own code, read once and perhaps kept (RFC 0003 §3.3).
+    pub opens: &'a BTreeMap<String, BTreeSet<String>>,
+    /// What loading it ran (functions called, not top-level code) and opened: `None` when the
+    /// adapter didn't say, and then no test of it can be told on its own.
+    pub loaded: Option<(&'a BTreeSet<String>, &'a BTreeSet<String>)>,
+    /// What the runner loads for every test of it, as files whose code ran: pytest's
+    /// `conftest.py` files above it.
+    pub every: &'a BTreeSet<String>,
+    /// Each shared setup: the ids of the tests it served, what it ran and what it opened.
+    pub shared: &'a [(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)],
+}
+
+/// \[C-40\] What an adapter saw while one test ran: `None` for a list it didn't say, and then the
+/// test wasn't watched alone.
+#[derive(Debug, Clone, Copy)]
+pub struct TestWatch<'a> {
+    pub id: &'a str,
+    /// Files a function of which was called while it ran: setup, body and teardown.
+    pub ran: Option<&'a BTreeSet<String>>,
+    /// Files it opened.
+    pub opened: Option<&'a BTreeSet<String>>,
+    /// Directories it listed.
+    pub dirs: Option<&'a BTreeSet<String>>,
+}
+
+/// \[C-40\] A test's list: the files its key hashes, the directories every file below which it
+/// read, and whether it is its own or, unwatched, its test file's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestList {
+    pub files: BTreeSet<String>,
+    pub dirs: BTreeSet<String>,
+    /// It is the test's own (`reads: test`, watched), not its test file's.
+    pub own: bool,
+}
+
+/// \[C-40, ADR 0078\] The one function for what a test read, which every reader calls: the plan,
+/// the record, `observe`, `ready` and `why`.
+///
+/// With `reads: file`, or for a test the adapter didn't watch alone, or a test file whose loading
+/// it didn't say, its test file's list (C-31). With `reads: test` (RFC 0004 §3.2):
+///
+/// 1. the test's own file;
+/// 2. every file a function of which was called while it ran (its setup, body and teardown), and
+///    what a shared setup that served it ran, what ran while its test file was loaded, and what
+///    the runner loads for every test of the file: files whose code ran;
+/// 3. every file that one of those, or its own file, imports directly: one step;
+/// 4. every file it opened, every file a module whose code ran opened from its own code (read once
+///    and kept), every file below a directory it listed, and what a shared setup that served it,
+///    or loading its file, opened.
+///
+/// It can miss a value that reached the test two imports away, or through no import (a registry
+/// another file filled), with no function of the way called: that is the trade `reads: test`
+/// names (RFC 0004 §3.2), which audit runs stand under.
+pub fn test_list(reads: Reads, file: &FileWatch<'_>, test: &TestWatch<'_>) -> TestList {
+    let whole = || TestList {
+        files: file.file.clone(),
+        dirs: file.file_dirs.clone(),
+        own: false,
+    };
+    if reads == Reads::File {
+        return whole();
+    }
+    let (Some(ran), Some(opened), Some(dirs), Some((loaded_ran, loaded_opened))) =
+        (test.ran, test.opened, test.dirs, file.loaded)
+    else {
+        return whole();
+    };
+    let serving = file
+        .shared
+        .iter()
+        .filter(|(ids, _, _)| ids.contains(test.id));
+    let mut code: BTreeSet<String> = BTreeSet::from([file.unit.to_string()]);
+    code.extend(ran.iter().cloned());
+    code.extend(loaded_ran.iter().cloned());
+    code.extend(file.every.iter().cloned());
+    let mut files: BTreeSet<String> = opened.clone();
+    files.extend(loaded_opened.iter().cloned());
+    for (_, shared_ran, shared_opened) in serving {
+        code.extend(shared_ran.iter().cloned());
+        files.extend(shared_opened.iter().cloned());
+    }
+    for path in &code {
+        files.extend(file.imports.get(path).into_iter().flatten().cloned());
+        files.extend(file.opens.get(path).into_iter().flatten().cloned());
+    }
+    files.extend(code);
+    TestList {
+        files,
+        dirs: dirs.clone(),
+        own: true,
+    }
 }
 
 /// Something an adapter couldn't follow while a unit ran (C-32): a subprocess, a fork, the

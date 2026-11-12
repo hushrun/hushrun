@@ -843,6 +843,36 @@ pub struct TestRow {
     pub duration_ms: u64,
     /// What wasn't followed inside its own window.
     pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
+    /// \[ADR 0078\] With `reads: test`, what it read then (C-40): its own list; `None` when it
+    /// read its test file's.
+    pub list: Option<TestListRow>,
+}
+
+/// \[ADR 0078\] A test's own list as the store keeps it, a set tests share: the files its key
+/// held, each with its kind and content hash then, and the directories it listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestListRow {
+    pub reads: BTreeMap<String, String>,
+    pub dirs: BTreeSet<String>,
+}
+
+impl TestListRow {
+    /// The store's id of the list: the SHA-256 of each read's path, entry and NUL, then each
+    /// directory's path with a `/` and a NUL, sorted. Tests with one list share one row.
+    pub fn digest(&self) -> Digest {
+        let mut bytes = Vec::new();
+        for (path, entry) in &self.reads {
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(entry.as_bytes());
+            bytes.push(0);
+        }
+        for dir in &self.dirs {
+            bytes.extend_from_slice(dir.as_bytes());
+            bytes.extend_from_slice(b"/\0");
+        }
+        Digest::of(&bytes)
+    }
 }
 
 impl TestRow {

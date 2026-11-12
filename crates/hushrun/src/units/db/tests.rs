@@ -514,6 +514,7 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
             })
             .into_iter()
             .collect(),
+        list: None,
     };
     let mut with_tests = mapped(&[("tests/test_a.py", HASH_A)]);
     with_tests.tests = BTreeMap::from([

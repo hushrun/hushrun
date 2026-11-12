@@ -49,6 +49,20 @@ lists, by their file and id, under the same rules. What it couldn't follow insid
 fixture of module, class or session scope, a teardown that may end one) it is the test file's.
 Its file is then `hushrun.unit-facts/v1`. It decides nothing of tests either.
 
+Watching a test (ADR 0080): when `reads` is `test` too, and on Python 3.12 or later, it reports
+what each test touched, and hushrun makes each test's list from it (C-40). Through
+`sys.monitoring`, every file a function of which started while the test's setup, body or teardown
+ran: a module's top-level code or a class body running is no function, since that is what an
+import is. Through the audit hook, the files it opened and the directories it listed. A module it
+imported while it ran is read too. What a fixture of a wider scope than one test ran or opened as
+it set up is a shared setup, read by every test that requests the fixture, directly or through
+another, while pytest keeps its value. What ran or was opened while a test file was collected is
+its `loaded`; its `conftest.py` and `__init__.py` files are what every test of it reads
+(`everyTest`). Each file's direct imports (`imports`) and the files each module opened from its own
+code (`opens`) come from the module graph it keeps already. A module code outside the repository
+loaded is read by the test running then and every test after it in the process. Below 3.12 it
+watches nothing, and says why (`settings.watch`).
+
 It never changes pytest's outcome on its own error: every hook is guarded, any error of its own is
 reported, which makes hushrun record nothing for the test files this process saw, and an error
 while selecting deselects nothing.
@@ -60,6 +74,7 @@ test files. Standard library only; Python 3.8 or later.
 
 import builtins
 import importlib
+import inspect
 import importlib.util
 import json
 import os
@@ -76,6 +91,7 @@ __all__ = [
     "pytest_runtest_protocol",
     "pytest_runtest_logreport",
     "pytest_fixture_setup",
+    "pytest_fixture_post_finalizer",
     "pytest_runtest_teardown",
     "pytest_sessionfinish",
 ]
@@ -155,6 +171,8 @@ class Observer(object):
         self._import_seen = set()
         self._scanned = 0
         self.unit_roots = {}          # unit -> the files it read directly, as results() found them
+        self.paths = []               # [ADR 0080] the file's table of paths
+        self.path_index = {}
         self.by_test = False          # hushrun.json's unit is test: tests are reported one by one
         self.reuse_tests = {}         # unit -> frozenset(ids) hushrun.json lets this run deselect
         self.tests = {}               # unit -> {id: facts of the test being gathered}
@@ -163,6 +181,19 @@ class Observer(object):
         self.shared_depth = 0         # >0 while a fixture of a wider scope than a test sets up
         self.shared_teardown = False  # a teardown that may end fixtures of a wider scope
         self.test_not_followed = {}   # (unit, id) -> {reason: set(details)}
+        self.watching = False         # [ADR 0080] each test's code, opens and listings are watched
+        self.watch_reason = None      # why tests aren't watched, when reads is test
+        self.clock = 0                # ticks at each test and shared setup's start and end
+        self.test_ran = {}            # (unit, id) -> set(files a function of which started)
+        self.test_opened = {}         # (unit, id) -> set(files opened)
+        self.test_dirs = {}           # (unit, id) -> set(directories listed)
+        self.test_window = {}         # (unit, id) -> [first tick, last tick, last seq, fixtures]
+        self.loaded_ran = {}          # unit -> set(files a function of which started as it loaded)
+        self.loaded_opened = {}       # unit -> set(files opened as it loaded)
+        self.setups = []              # shared setups: {argname, ran, opened, start, end}
+        self.setup_stack = []         # the shared setups setting up now, innermost last
+        self.code_files = {}          # code filename -> repository file or None
+        self.test_names = {}          # (unit, id) -> module names loaded for it by a helper
 
     # --- paths -------------------------------------------------------------------------
 
@@ -294,6 +325,9 @@ class Observer(object):
         for n in names:
             if n not in self.mod_files:
                 self.note_module(n)
+        # [ADR 0080] A module imported while a test or a shared setup runs is read by it.
+        if self.watching and self.active and (self.active_test is not None or self.setup_stack):
+            self.touched("ran", self.resolve(names))
         if importer:
             self.name_edges.setdefault(importer, set()).update(names)
             self._import_seen.add(key)
@@ -331,6 +365,10 @@ class Observer(object):
         if req_file.replace(os.sep, "/").endswith(TRANSIENT_IMPORTERS):
             if self.active:
                 self.add_root(self.active, name=fullname)
+                # [ADR 0080] Loaded for the test running now, through a helper outside the
+                # repository that keeps nothing: the test read it.
+                if self.watching and self.active_test is not None:
+                    self.test_names.setdefault((self.active, self.active_test), set()).add(fullname)
             return
         # Code outside the repository loaded it and may keep its state: every later test file may
         # use it.
@@ -378,6 +416,7 @@ class Observer(object):
                     self.edges.setdefault(fr, set()).add(r)
         if self.active:
             self.add_root(self.active, f=r)
+            self.touched("opened", {r})
         elif owner != "repo":
             self.make_ambient(f=r, why="opened outside any test file by code outside the repository")
 
@@ -441,6 +480,48 @@ class Observer(object):
             return self.test_not_followed.setdefault((self.active, self.active_test), {})
         return self.not_followed.setdefault(self.active, {})
 
+    # --- watching a test [ADR 0080] -------------------------------------------------------
+
+    def code_file(self, filename):
+        f = self.code_files.get(filename, False)
+        if f is False:
+            f = self.rel(filename) if filename and not filename.startswith("<") else None
+            self.code_files[filename] = f
+        return f
+
+    def touched(self, kind, files):
+        """Files a function of which started (`ran`) or that were opened (`opened`), for the shared
+        setup setting up now, the test running now, or the test file loading now."""
+        if not self.watching or not files:
+            return
+        if self.setup_stack:
+            self.setup_stack[-1][kind].update(files)
+        elif self.active_test is not None and self.active:
+            key = (self.active, self.active_test)
+            target = self.test_ran if kind == "ran" else self.test_opened
+            target.setdefault(key, set()).update(files)
+        elif self.active:
+            target = self.loaded_ran if kind == "ran" else self.loaded_opened
+            target.setdefault(self.active, set()).update(files)
+
+    def listed(self, path):
+        if not self.watching or self.active_test is None or not self.active or self.setup_stack:
+            return
+        r = self.rel(path) if path is not None else None
+        if r is None and path is not None:
+            try:
+                real = os.path.realpath(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
+            except Exception:
+                return
+            if real.rstrip(os.sep) == self.root:
+                r = ""
+        if r is not None:
+            self.test_dirs.setdefault((self.active, self.active_test), set()).add(r)
+
+    def tick(self):
+        self.clock += 1
+        return self.clock
+
     def test_entry(self, unit, test_id):
         tests = self.tests.setdefault(unit, {})
         if test_id not in tests:
@@ -452,6 +533,8 @@ class Observer(object):
     # --- phases ------------------------------------------------------------------------
 
     def start(self, unit):
+        if self.watching:
+            _restart_watch()
         self.seq += 1
         self.active = unit
         self.unit_last_seq[unit] = self.seq
@@ -569,8 +652,84 @@ class Observer(object):
             }
             if self.by_test:
                 entry["tests"] = self.test_results(unit)
+            if self.watching:
+                self.watch_results(unit, entry)
             out.append(entry)
         return out
+
+    def index(self, path):
+        at = self.path_index.get(path)
+        if at is None:
+            at = len(self.paths)
+            self.paths.append(path)
+            self.path_index[path] = at
+        return at
+
+    def indices(self, paths):
+        return sorted(self.index(p) for p in paths)
+
+    def watch_results(self, unit, entry):
+        """[ADR 0080] What each test of `unit` touched, and what its loading, its shared setups and
+        the runner did for all of them, by index into the file's `paths`."""
+        ambient = self.ambient
+        order = self.test_order.get(unit, [])
+        for test in entry["tests"]:
+            key = (unit, test["id"])
+            window = self.test_window.get(key)
+            if window is None:
+                continue
+            ran = set(self.test_ran.get(key, ()))
+            ran.update(self.resolve(self.test_names.get(key, ())))
+            opened = set(self.test_opened.get(key, ()))
+            last_seq = window[2]
+            # A module code outside the repository loaded is read by the test running then and
+            # every test after it in the process (RFC 0003 §3.3).
+            for seq, f, name, why in ambient:
+                if seq > last_seq:
+                    continue
+                if f:
+                    opened.add(f)
+                if name:
+                    files = self.mod_files.get(name, ())
+                    if why == PYTEST_OUTSIDE:
+                        # conftest.py and __init__.py files pytest loads while collecting are
+                        # what every test below them reads (`everyTest`), not every test's.
+                        files = [x for x in files
+                                 if x.rsplit("/", 1)[-1] not in ("conftest.py", "__init__.py")]
+                    ran.update(files)
+            test["ran"] = self.indices(ran)
+            test["opened"] = self.indices(opened)
+            test["dirs"] = self.indices(self.test_dirs.get(key, ()))
+        entry["loaded"] = {"ran": self.indices(self.loaded_ran.get(unit, ())),
+                           "opened": self.indices(self.loaded_opened.get(unit, ()))}
+        entry["everyTest"] = self.indices(self.static_roots(unit))
+        shared = []
+        for setup in self.setups:
+            served = []
+            for at, test_id in enumerate(order):
+                window = self.test_window.get((unit, test_id))
+                if window is None or setup["argname"] not in window[3]:
+                    continue
+                if setup["start"] <= window[1] and (setup["end"] is None or setup["end"] >= window[0]):
+                    served.append(at)
+            if served:
+                shared.append({"tests": served, "ran": self.indices(setup["ran"]),
+                               "opened": self.indices(setup["opened"])})
+        entry["shared"] = shared
+
+    def watch_tables(self):
+        """[ADR 0080] Each file's direct imports and the files each module opened, by index."""
+        imports = {}
+        for f, names in self.name_edges.items():
+            targets = {t for t in self.resolve(names) if t != f}
+            if targets:
+                imports[str(self.index(f))] = self.indices(targets)
+        opens = {}
+        for f, targets in self.edges.items():
+            targets = {t for t in targets if t != f}
+            if targets:
+                opens[str(self.index(f))] = self.indices(targets)
+        return imports, opens
 
     def test_results(self, unit):
         """[ADR 0077] Each test of `unit` this process ran or deselected, in that order."""
@@ -644,6 +803,12 @@ def _audit(event, args):
         _guard(obs.on_spawn, event, args, sys._getframe(1))
     elif event == "ctypes.dlopen" and args:
         _guard(obs.on_dlopen, args[0])
+    elif event in ("os.listdir", "os.scandir") and obs.watching:
+        path = args[0] if args else None
+        if isinstance(path, bytes):
+            path = os.fsdecode(path)
+        if path is None or isinstance(path, str):
+            _guard(obs.listed, path if path is not None else ".")
 
 
 def _pytest_dirs():
@@ -679,6 +844,67 @@ def _claim(directory):
     return True, os.getpid()
 
 
+WATCH_TOOL = None
+CO_OPTIMIZED = getattr(inspect, "CO_OPTIMIZED", 1)
+
+
+def _restart_watch():
+    try:
+        sys.monitoring.restart_events()
+    except Exception:
+        pass
+
+
+def _on_py_start(code, offset):
+    """[ADR 0080] A function started: its file, once a test or a shared setup, is touched. A
+    module's top-level code or a class body (not optimized code) is no function."""
+    obs = OBSERVER
+    try:
+        if obs is None or obs.done or not (code.co_flags & CO_OPTIMIZED):
+            return sys.monitoring.DISABLE
+        f = obs.code_file(code.co_filename)
+        if f is not None and not getattr(_LOCAL, "busy", False):
+            obs.touched("ran", (f,))
+    except Exception as err:
+        if obs is not None and len(obs.errors) < MOST_ERRORS:
+            obs.errors.append("watch: %r" % (err,))
+    return sys.monitoring.DISABLE
+
+
+def _start_watching(observer):
+    """[ADR 0080] Watches each test's functions with sys.monitoring, Python 3.12 or later: why not,
+    or None."""
+    global WATCH_TOOL
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is None:
+        return "Python %d.%d has no sys.monitoring, which watching a test needs (3.12 or later)" \
+            % sys.version_info[:2]
+    for tool in (4, 3):
+        if monitoring.get_tool(tool) is None:
+            monitoring.use_tool_id(tool, "hushrun")
+            WATCH_TOOL = tool
+            break
+    else:
+        return "no sys.monitoring tool id was free"
+    monitoring.register_callback(WATCH_TOOL, monitoring.events.PY_START, _on_py_start)
+    monitoring.set_events(WATCH_TOOL, monitoring.events.PY_START)
+    observer.watching = True
+    return None
+
+
+def _stop_watching():
+    global WATCH_TOOL
+    if WATCH_TOOL is None:
+        return
+    try:
+        sys.monitoring.set_events(WATCH_TOOL, 0)
+        sys.monitoring.register_callback(WATCH_TOOL, sys.monitoring.events.PY_START, None)
+        sys.monitoring.free_tool_id(WATCH_TOOL)
+    except Exception:
+        pass
+    WATCH_TOOL = None
+
+
 def _install():
     global OBSERVER, PYTEST_DIRS
     directory = os.environ.get(ENV_DIR)
@@ -699,6 +925,7 @@ def _install():
         observer.python_files = list(python_files)
     # [ADR 0077] Tests one by one, and the tests the plan lets this run deselect.
     observer.by_test = run.get("unit") == "test"
+    wants_watch = observer.by_test and run.get("reads") == "test"
     reuse_tests = run.get("reuseTests") or {}
     if observer.by_test and isinstance(reuse_tests, dict):
         observer.reuse_tests = {
@@ -712,6 +939,12 @@ def _install():
             observer.note_module(name)
             observer.make_ambient(name=name, why="loaded before the adapter")
     OBSERVER = observer
+    if wants_watch:
+        try:
+            observer.watch_reason = _start_watching(observer)
+        except Exception as err:
+            observer.watch_reason = "sys.monitoring couldn't be used (%r)" % (err,)
+            observer.watching = False
     sys.meta_path.insert(0, _FirstLoadFinder())
     builtins.__import__ = _wrapped_import
     sys.addaudithook(_audit)
@@ -824,20 +1057,28 @@ def _logreport(obs, report):
             test["failed"] = True
 
 
-def _protocol_start(obs, unit, test_id):
+def _protocol_start(obs, unit, test_id, fixtures):
     obs.unit_entry(unit)
     obs.start(unit)
     obs.active_test = test_id
     obs.shared_depth = 0
     obs.shared_teardown = False
+    obs.setup_stack = []
     if obs.by_test and test_id is not None:
         obs.test_entry(unit, test_id)
+        if obs.watching:
+            tick = obs.tick()
+            obs.test_window[(unit, test_id)] = [tick, tick, obs.seq, frozenset(fixtures)]
 
 
 def _protocol_end(obs, unit, test_id):
     obs.unit_entry(unit)["finished"] += 1
     if obs.by_test and test_id is not None:
         obs.test_entry(unit, test_id)["finished"] = True
+        window = obs.test_window.get((unit, test_id))
+        if window is not None:
+            window[1] = obs.tick()
+            window[2] = obs.seq
     obs.active_test = None
     obs.shared_depth = 0
     obs.shared_teardown = False
@@ -940,8 +1181,13 @@ def pytest_runtest_protocol(item, nextitem):
             test_id = _test_id(getattr(item, "nodeid", None))
         except Exception:
             unit = None
+    fixtures = ()
+    try:
+        fixtures = tuple(getattr(item, "fixturenames", ()) or ())
+    except Exception:
+        fixtures = ()
     if unit:
-        _call(_protocol_start, unit, test_id)
+        _call(_protocol_start, unit, test_id, fixtures)
     yield
     if unit:
         _call(_protocol_end, unit, test_id)
@@ -949,9 +1195,37 @@ def pytest_runtest_protocol(item, nextitem):
 
 def _shared_setup(obs, fixturedef, step):
     """[ADR 0077] A fixture of a wider scope than one test sets up: what happens meanwhile serves
-    every test that requests it, and is the test file's."""
-    if getattr(fixturedef, "scope", "function") != "function":
-        obs.shared_depth = max(0, obs.shared_depth + step)
+    every test that requests it, and is the test file's. [ADR 0080] What it runs and opens is a
+    shared setup's."""
+    if getattr(fixturedef, "scope", "function") == "function":
+        return
+    obs.shared_depth = max(0, obs.shared_depth + step)
+    if not obs.watching:
+        return
+    # Each start and end of a shared setup watches anew, so that one function is seen by every
+    # setup and test that calls it, not only the first.
+    _restart_watch()
+    if step > 0:
+        setup = {"argname": getattr(fixturedef, "argname", None), "ran": set(), "opened": set(),
+                 "start": obs.tick(), "end": None, "def": id(fixturedef)}
+        obs.setups.append(setup)
+        obs.setup_stack.append(setup)
+    elif obs.setup_stack:
+        obs.setup_stack.pop()
+
+
+def _shared_finalized(obs, fixturedef):
+    """[ADR 0080] pytest no longer keeps a shared fixture's value: tests after this don't read it."""
+    if not obs.watching or getattr(fixturedef, "scope", "function") == "function":
+        return
+    for setup in reversed(obs.setups):
+        if setup["def"] == id(fixturedef) and setup["end"] is None:
+            setup["end"] = obs.tick()
+            break
+
+
+def pytest_fixture_post_finalizer(fixturedef, request):
+    _call(_shared_finalized, fixturedef)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -984,6 +1258,7 @@ def pytest_sessionfinish(session, exitstatus):
     try:
         with obs.lock:
             obs.stop()
+            _stop_watching()
             config = session.config
             worker = getattr(config, "workerinput", None)
             is_controller = bool(getattr(config.option, "numprocesses", None)) and not worker
@@ -1012,6 +1287,10 @@ def pytest_sessionfinish(session, exitstatus):
                 edges = [] if is_controller else obs.edge_list()
             except Exception:
                 edges = []
+            settings = {"pythonFiles": python_files, "python": sys.version.split()[0],
+                        "pytest": pytest.__version__}
+            if obs.watch_reason:
+                settings["watch"] = obs.watch_reason
             facts = {
                 "schema": SCHEMA_V1 if obs.by_test else SCHEMA,
                 "adapter": "pytest",
@@ -1019,8 +1298,7 @@ def pytest_sessionfinish(session, exitstatus):
                 "worker": (worker or {}).get("workerid") if worker else None,
                 "controller": is_controller,
                 "failuresByUnit": True,
-                "settings": {"pythonFiles": python_files, "python": sys.version.split()[0],
-                             "pytest": pytest.__version__},
+                "settings": settings,
                 "notFollowed": [] if is_controller else
                 [{"why": k, "detail": d} for k, v in sorted(obs.session_not_followed.items())
                  for d in sorted(v)],
@@ -1030,6 +1308,18 @@ def pytest_sessionfinish(session, exitstatus):
                 "removedItems": obs.removed,
                 "parent": os.getppid(),
             }
+            if obs.watching and not is_controller:
+                try:
+                    imports, opens = obs.watch_tables()
+                    facts["imports"] = imports
+                    facts["opens"] = opens
+                    facts["paths"] = obs.paths
+                except Exception as err:
+                    # Without its tables no test of this process can be told on its own.
+                    obs.errors.append("watch tables: %r" % (err,))
+                    for unit in units:
+                        unit.pop("loaded", None)
+                    facts["errors"] = obs.errors
             name = "pytest-%d%s.json" % (os.getpid(), ("-" + facts["worker"]) if facts["worker"] else "")
             tmp = os.path.join(obs.directory, "." + name + ".tmp")
             with open(tmp, "w", encoding="utf-8") as f:

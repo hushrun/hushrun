@@ -137,6 +137,11 @@ pub struct FactsFile {
     /// of the files it imports.
     #[serde(default)]
     pub imports: BTreeMap<String, Vec<usize>>,
+    /// \[ADR 0078\] The files each module opened from its own code: the index of a module, as a
+    /// string, to the indices of the files. What a module read once and kept reaches each test
+    /// that ran its code (RFC 0003 §3.3, C-40).
+    #[serde(default)]
+    pub opens: BTreeMap<String, Vec<usize>>,
 }
 
 impl FactsFile {
@@ -216,6 +221,10 @@ pub struct UnitFacts {
     /// scope, a `beforeAll`), with the tests it served, by their index in `tests`.
     #[serde(default)]
     pub shared: Vec<SharedSetup>,
+    /// \[ADR 0078\] What the runner loads for every test of it, by index into `paths`, as files
+    /// whose code ran: pytest's `conftest.py` files above it (C-40).
+    #[serde(default)]
+    pub every_test: Vec<usize>,
 }
 
 /// \[ADR 0077\] What an adapter saw of one test in one process (C-39). An adapter that knows tests
@@ -384,22 +393,102 @@ pub struct MergedTest {
 
 /// \[ADR 0077\] Each file's direct imports in `adapter`'s files, from the root, over its processes.
 /// A file whose table names nothing for an index adds nothing.
-#[allow(
-    dead_code,
-    reason = "what a test read with `reads: test` is made from it"
-)]
+#[allow(dead_code, reason = "`watches` reads every adapter's")]
 pub fn imports(files: &[FactsFile], adapter: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let files: Vec<&FactsFile> = files.iter().filter(|f| f.adapter == adapter).collect();
+    edges_by_index(&files, |f| &f.imports)
+}
+
+/// A table of each file's files by index, over `files` but controllers', from the root.
+fn edges_by_index(
+    files: &[&FactsFile],
+    table: impl Fn(&FactsFile) -> &BTreeMap<String, Vec<usize>>,
+) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for file in files
-        .iter()
-        .filter(|f| f.adapter == adapter && !f.controller)
-    {
-        for (from, to) in &file.imports {
+    for file in files.iter().filter(|f| !f.controller) {
+        for (from, to) in table(file) {
             let Some(from) = from.parse::<usize>().ok().and_then(|i| file.paths.get(i)) else {
                 continue;
             };
             if let Some(to) = file.resolve(to) {
                 out.entry(from.clone()).or_default().extend(to);
+            }
+        }
+    }
+    out
+}
+
+/// \[ADR 0078\] What every adapter file of a run says of what its tests read beyond each test:
+/// each file's direct imports and opens, and per unit what loading it touched, what the runner
+/// loads for each of its tests, and its shared setups. Read from every file of the run's directory
+/// whatever adapter wrote it, so that no adapter has to give it (C-40).
+#[derive(Debug, Clone, Default)]
+pub struct Watches {
+    pub imports: BTreeMap<String, BTreeSet<String>>,
+    pub opens: BTreeMap<String, BTreeSet<String>>,
+    pub units: BTreeMap<String, UnitWatch>,
+}
+
+/// \[ADR 0078\] What one unit's processes said of it beyond its tests.
+#[derive(Debug, Clone, Default)]
+pub struct UnitWatch {
+    /// What loading it ran and opened; `None` when a process didn't say, or said something of it
+    /// that can't be read: then no test of it is told on its own.
+    pub loaded: Option<(BTreeSet<String>, BTreeSet<String>)>,
+    pub every: BTreeSet<String>,
+    pub shared: Vec<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>,
+}
+
+/// \[ADR 0078\] [`Watches`] of `files`.
+pub fn watches(files: &[FactsFile]) -> Watches {
+    let all: Vec<&FactsFile> = files.iter().collect();
+    let mut out = Watches {
+        imports: edges_by_index(&all, |f| &f.imports),
+        opens: edges_by_index(&all, |f| &f.opens),
+        units: BTreeMap::new(),
+    };
+    let mut broken: BTreeSet<String> = BTreeSet::new();
+    for file in files.iter().filter(|f| !f.controller) {
+        for unit in &file.units {
+            if unit.tests.is_none() {
+                continue;
+            }
+            let watch = out.units.entry(unit.unit.clone()).or_default();
+            let loaded = unit
+                .loaded
+                .as_ref()
+                .and_then(|l| file.resolve(&l.ran).zip(file.resolve(&l.opened)));
+            let every = file.resolve(&unit.every_test);
+            let shared: Option<Vec<_>> = unit
+                .shared
+                .iter()
+                .map(|setup| {
+                    let ids: Option<BTreeSet<String>> = setup
+                        .tests
+                        .iter()
+                        .map(|i| unit.tests.as_ref()?.get(*i).map(|t| t.id.clone()))
+                        .collect();
+                    Some((
+                        ids?,
+                        file.resolve(&setup.ran)?,
+                        file.resolve(&setup.opened)?,
+                    ))
+                })
+                .collect();
+            match (loaded, every, shared) {
+                (Some((ran, opened)), Some(every), Some(shared))
+                    if !broken.contains(&unit.unit) =>
+                {
+                    let into = watch.loaded.get_or_insert_with(Default::default);
+                    into.0.extend(ran);
+                    into.1.extend(opened);
+                    watch.every.extend(every);
+                    watch.shared.extend(shared);
+                }
+                _ => {
+                    broken.insert(unit.unit.clone());
+                    watch.loaded = None;
+                }
             }
         }
     }

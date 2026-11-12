@@ -42,7 +42,7 @@ use serde_json::json;
 use hushrun_core::digest::Digest;
 use hushrun_core::units::{KeyBase, NotFollowed};
 
-use super::store::{Disagreement, Map, Mapped, Origin, TestRow};
+use super::store::{Disagreement, Map, Mapped, Origin, TestListRow, TestRow};
 
 /// The schema this hushrun reads and writes, in the file's name and its `user_version`. A
 /// hushrun with another schema keeps another file.
@@ -488,10 +488,11 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     }
     // \[ADR 0077\] Each test file's tests, as they last ran here.
     let mut tests = conn.prepare(
-        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms FROM test t
+        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms, t.list_ref FROM test t
          JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
     )?;
     let mut test_names: HashMap<i64, (i64, String)> = HashMap::new();
+    let mut lists: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
     for row in tests.query_map([check], |row| {
         Ok((
             row.get(0)?,
@@ -499,9 +500,14 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             row.get(2)?,
             row.get(3)?,
             row.get(4)?,
+            row.get(5)?,
         ))
     })? {
-        let (id, unit, test, state, duration): (i64, i64, String, String, i64) = row?;
+        let (id, unit, test, state, duration, list): (i64, i64, String, String, i64, Option<i64>) =
+            row?;
+        if let Some(list) = list {
+            lists.entry(list).or_default().push((unit, test.clone()));
+        }
         let Some(state) = TestRow::state_from_word(&state) else {
             continue;
         };
@@ -512,6 +518,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                     state,
                     duration_ms: u64::try_from(duration).unwrap_or_default(),
                     not_followed: BTreeSet::new(),
+                    list: None,
                 },
             );
             test_names.insert(id, (unit, test));
@@ -533,6 +540,39 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                 .and_then(|m| m.tests.get_mut(id))
         {
             row.not_followed.insert(NotFollowed { why, detail });
+        }
+    }
+    // \[ADR 0078\] Each test's own list, a set tests share.
+    let mut found: HashMap<i64, TestListRow> = HashMap::new();
+    let mut list_reads = conn.prepare(
+        "SELECT DISTINCT r.list_ref, p.path, v.entry FROM test_list_read r
+         JOIN test t ON t.list_ref = r.list_ref JOIN unit u ON u.id = t.unit_ref
+         JOIN version v ON v.id = r.version_ref JOIN path p ON p.id = v.path_ref
+         WHERE u.check_ref = ?1",
+    )?;
+    for row in list_reads.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))? {
+        let (list, path, entry): (i64, String, String) = row?;
+        found.entry(list).or_default().reads.insert(path, entry);
+    }
+    let mut list_dirs = conn.prepare(
+        "SELECT DISTINCT d.list_ref, p.path FROM test_list_dir d
+         JOIN test t ON t.list_ref = d.list_ref JOIN unit u ON u.id = t.unit_ref
+         JOIN path p ON p.id = d.path_ref WHERE u.check_ref = ?1",
+    )?;
+    for row in list_dirs.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (list, dir): (i64, String) = row?;
+        found.entry(list).or_default().dirs.insert(dir);
+    }
+    for (list, tests) in lists {
+        let row = found.remove(&list).unwrap_or_default();
+        for (unit, test) in tests {
+            if let Some(t) = names
+                .get(&unit)
+                .and_then(|n| map.units.get_mut(n))
+                .and_then(|m| m.tests.get_mut(&test))
+            {
+                t.list = Some(row.clone());
+            }
         }
     }
     let mut rest = conn.prepare(
@@ -694,6 +734,41 @@ impl Ids<'_> {
         Ok(id)
     }
 
+    /// \[ADR 0078\] The row of a test's list, made with its reads and directories when no test
+    /// has it yet.
+    fn list(&mut self, list: &TestListRow) -> rusqlite::Result<i64> {
+        let digest = list.digest().hex();
+        if let Some(id) = self
+            .tx
+            .query_row(
+                "SELECT id FROM test_list WHERE digest = ?1",
+                [&digest],
+                |r| r.get(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        self.tx
+            .execute("INSERT INTO test_list (digest) VALUES (?1)", [&digest])?;
+        let id = self.tx.last_insert_rowid();
+        for (path, entry) in &list.reads {
+            let version = self.version(path, entry)?;
+            self.tx.execute(
+                "INSERT OR IGNORE INTO test_list_read (list_ref, version_ref) VALUES (?1, ?2)",
+                params![id, version],
+            )?;
+        }
+        for dir in &list.dirs {
+            let dir = self.path(dir)?;
+            self.tx.execute(
+                "INSERT OR IGNORE INTO test_list_dir (list_ref, path_ref) VALUES (?1, ?2)",
+                params![id, dir],
+            )?;
+        }
+        Ok(id)
+    }
+
     fn version(&mut self, path: &str, entry: &str) -> rusqlite::Result<i64> {
         let path_ref = self.path(path)?;
         if let Some(id) = self
@@ -791,15 +866,22 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 params![unit, dir],
             )?;
         }
-        // \[ADR 0077\] Its tests, with `reads: file` and no list of their own.
+        // \[ADR 0077\] Its tests; \[ADR 0078\] with `reads: test`, each with its own list, a row
+        // tests with the same list share.
         for (id, row) in &mapped.tests {
+            let list = match &row.list {
+                Some(list) => Some(ids.list(list)?),
+                None => None,
+            };
             tx.execute(
-                "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO test (unit_ref, test_id, state, duration_ms, list_ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     unit,
                     id,
                     row.state.word(),
-                    i64::try_from(row.duration_ms).unwrap_or(i64::MAX)
+                    i64::try_from(row.duration_ms).unwrap_or(i64::MAX),
+                    list
                 ],
             )?;
             let test = tx.last_insert_rowid();
