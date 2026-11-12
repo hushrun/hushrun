@@ -106,6 +106,22 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0085), which run Maven
+      # offline against a local repository: filled here once by running those tests online.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - name: Install Maven and fill its repository for the test-class tests
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
+          echo "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  $RUNNER_TEMP/maven.tar.gz" | shasum -a 512 -c -
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -190,6 +206,22 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0085), which run Maven
+      # offline against a local repository: filled here once by running those tests online.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - name: Install Maven and fill its repository for the test-class tests
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
+          echo "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  $RUNNER_TEMP/maven.tar.gz" | shasum -a 512 -c -
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
