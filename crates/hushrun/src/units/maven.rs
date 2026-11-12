@@ -822,7 +822,13 @@ impl Adapter for Recognized {
             &extension,
             &hook,
         )?;
-        Ok(vec![("MAVEN_OPTS".to_string(), OsString::from(opts))])
+        // The hook finds its list and events below `HUSHRUN_UNITS`, which a second run changes:
+        // a variable of the environment naming others would win, so it is set empty.
+        Ok(vec![
+            ("MAVEN_OPTS".to_string(), OsString::from(opts)),
+            (jvm::LEAVE_OUT_VARIABLE.to_string(), OsString::new()),
+            (jvm::EVENTS_VARIABLE.to_string(), OsString::new()),
+        ])
     }
 
     fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
