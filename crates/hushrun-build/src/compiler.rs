@@ -1674,6 +1674,34 @@ mod tests {
         assert!(again.join(std).is_file(), "{}", again.display());
     }
 
+    // covers: B-14
+    #[test]
+    fn a_run_that_uses_a_sysroot_without_sources_dates_it_so_the_sweep_keeps_it() {
+        // The sweep takes a view no run used for the kept days, by its marker's date: each run
+        // that uses one moves that date forward, never back.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (_home, toolchain) = with_sources(&root);
+        settle();
+        let sysroots = root.join("memo").join(super::SYSROOTS);
+        let day = std::time::Duration::from_secs(86_400);
+        let now = SystemTime::now();
+        let marked = |used: SystemTime| {
+            let view = super::hidden_sources(&toolchain, &sysroots, Some(used))
+                .unwrap()
+                .unwrap();
+            fs::metadata(view.join(super::VIEW_MARKER))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let made = marked(now - 30 * day);
+        let later = marked(now + day);
+        assert_eq!(later, now + day, "made {made:?}");
+        // A run that started earlier doesn't take the date back.
+        assert_eq!(marked(now - 10 * day), now + day);
+    }
+
     // covers: B-9, B-17
     #[test]
     fn making_a_sysroot_without_sources_never_removes_another_makers_folder() {
