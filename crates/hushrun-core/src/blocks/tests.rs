@@ -133,12 +133,14 @@ fn open_and_its_policy() {
         &OpenRequest {
             kind: "rustc/1".into(),
             repository: Some("github.com/acme/shop".into()),
+            commit: Some("ab".repeat(20)),
             check: Some(hex(1)),
             platform: "x86_64-unknown-linux-gnu".into(),
         },
         json!({
             "kind": "rustc/1",
             "repository": "github.com/acme/shop",
+            "commit": "ab".repeat(20),
             "check": "01".repeat(32),
             "platform": "x86_64-unknown-linux-gnu",
         }),
@@ -147,6 +149,7 @@ fn open_and_its_policy() {
         &OpenRequest {
             kind: "rustc/1".into(),
             repository: None,
+            commit: None,
             check: None,
             platform: "aarch64-apple-darwin".into(),
         },
@@ -156,34 +159,58 @@ fn open_and_its_policy() {
         sharing: true,
         reason: None,
         mode: Some(Mode::Observe),
+        writes: true,
+        untrusted: None,
         write: Some("ci/42/0123456789abcdef0123456789abcdef".into()),
         read: vec![
-            "protected".into(),
+            "protected/42".into(),
             "ci/42/0123456789abcdef0123456789abcdef".into(),
         ],
         kept_days: 30,
         limits: Limits::default(),
         allowance_bytes: 10_000_000_000,
         held_bytes: 123,
-        manifest: vec![hex(2), hex(3)],
+        manifest: vec![Pair(hex(2), hex(3))],
     };
     round_trip(
         &policy,
         json!({
             "sharing": true,
             "mode": "observe",
+            "writes": true,
             "write": "ci/42/0123456789abcdef0123456789abcdef",
-            "read": ["protected", "ci/42/0123456789abcdef0123456789abcdef"],
+            "read": ["protected/42", "ci/42/0123456789abcdef0123456789abcdef"],
             "keptDays": 30,
             "limits": {
                 "lookup": 500, "begin": 200, "hintsSent": 200, "hintsSentBytes": 1048576,
-                "hintBytes": 262144, "packBytes": 2147483648u64, "manifest": 32768,
+                "hintBytes": 262144, "packBytes": 2147483648u64, "manifest": 16384,
             },
             "allowanceBytes": 10_000_000_000u64,
             "heldBytes": 123,
-            "manifest": ["02".repeat(32), "03".repeat(32)],
+            "manifest": [["02".repeat(32), "03".repeat(32)]],
         }),
     );
+    // A job on a listed branch that isn't trusted is told why, in a word.
+    let untrusted: Policy = serde_json::from_value(json!({
+        "sharing": true, "mode": "on", "writes": false, "untrusted": "commit",
+        "read": ["protected/42"], "keptDays": 30, "allowanceBytes": 1, "heldBytes": 0,
+    }))
+    .unwrap();
+    assert_eq!(untrusted.untrusted, Some(Untrusted::Commit));
+    assert!(!untrusted.writes);
+    for (word, why) in [
+        ("repository", Untrusted::Repository),
+        ("event", Untrusted::Event),
+        ("environment", Untrusted::Environment),
+        ("runner", Untrusted::Runner),
+        ("run", Untrusted::Run),
+        ("a-new-reason", Untrusted::Unknown),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<Untrusted>(json!(word)).unwrap(),
+            why
+        );
+    }
     // Off for the plan, from a newer server that says more than this version knows.
     let off: Policy = serde_json::from_value(json!({
         "sharing": false, "reason": "plan", "keptDays": 30, "allowanceBytes": 0,
@@ -209,8 +236,10 @@ fn hints() {
         &HintsLookupRequest {
             kind: "rustc/1".into(),
             addresses: vec![hex(4)],
+            repository: Some("github.com/acme/shop".into()),
         },
-        json!({"kind": "rustc/1", "addresses": ["04".repeat(32)]}),
+        json!({"kind": "rustc/1", "addresses": ["04".repeat(32)],
+               "repository": "github.com/acme/shop"}),
     );
     round_trip(
         &HintsLookupResponse {
@@ -228,6 +257,7 @@ fn hints() {
                 address: hex(5),
                 list: Base64(vec![9]),
             }],
+            commit: None,
         },
         json!({"kind": "rustc/1", "hints": [{"address": "05".repeat(32), "list": "CQ=="}]}),
     );
@@ -241,8 +271,11 @@ fn lookup() {
             kind: "rustc/1".into(),
             addresses: vec![hex(6)],
             fetch: true,
+            repository: None,
+            machine: Some("sha256:ab".into()),
         },
-        json!({"kind": "rustc/1", "addresses": ["06".repeat(32)], "fetch": true}),
+        json!({"kind": "rustc/1", "addresses": ["06".repeat(32)], "fetch": true,
+               "machine": "sha256:ab"}),
     );
     // `fetch` is false unless said.
     let quiet: LookupRequest =
@@ -264,6 +297,7 @@ fn lookup() {
                 outputs: hex(8),
                 cost_ms: 1500,
                 class: Class::ProcMacro,
+                mine: true,
                 get: Some(link),
             }],
             suspended: vec![hex(9)],
@@ -272,7 +306,7 @@ fn lookup() {
             "found": [{
                 "address": "06".repeat(32), "scope": "protected", "bytes": 4096,
                 "packSha256": "07".repeat(32), "outputs": "08".repeat(32), "costMs": 1500,
-                "class": "proc-macro",
+                "class": "proc-macro", "mine": true,
                 "get": {
                     "method": "GET", "url": "https://store.example.com/bucket/v1/x",
                     "headers": {}, "expiresInSeconds": 600,
@@ -297,9 +331,12 @@ fn begin_and_its_answers() {
                 class: Class::Library,
                 cost_ms: 0,
             }],
+            repository: Some("github.com/acme/shop".into()),
+            commit: None,
         },
         json!({
             "kind": "rustc/1",
+            "repository": "github.com/acme/shop",
             "blocks": [{
                 "address": "0a".repeat(32), "hintAddress": "0b".repeat(32), "bytes": 1,
                 "packSha256": "0c".repeat(32), "outputs": "0d".repeat(32), "class": "library",
@@ -376,6 +413,7 @@ fn commit() {
         &CommitRequest {
             kind: "rustc/1".into(),
             addresses: vec![hex(16)],
+            commit: None,
         },
         json!({"kind": "rustc/1", "addresses": ["10".repeat(32)]}),
     );
@@ -422,7 +460,8 @@ fn close_and_report() {
             repository: None,
             check: Some(hex(20)),
             platform: "x86_64-unknown-linux-gnu".into(),
-            manifest: vec![hex(21)],
+            commit: None,
+            manifest: vec![Pair(hex(21), hex(24))],
             counts: Counts {
                 reused_local: 1,
                 reused_shared: 2,
@@ -432,15 +471,18 @@ fn close_and_report() {
                 bytes_up: 6,
                 saved_ms: 7,
                 unused_downloads: 8,
+                compared: 9,
+                compared_others: 10,
             },
         },
         json!({
             "kind": "rustc/1", "run": "17".repeat(32), "check": "14".repeat(32),
             "platform": "x86_64-unknown-linux-gnu",
-            "manifest": ["15".repeat(32)],
+            "manifest": [["15".repeat(32), "18".repeat(32)]],
             "counts": {
                 "reusedLocal": 1, "reusedShared": 2, "built": 3, "uploaded": 4, "bytesDown": 5,
-                "bytesUp": 6, "savedMs": 7, "unusedDownloads": 8,
+                "bytesUp": 6, "savedMs": 7, "unusedDownloads": 8, "compared": 9,
+                "comparedOthers": 10,
             },
         }),
     );
@@ -457,15 +499,64 @@ fn close_and_report() {
         &ReportRequest {
             kind: "rustc/1".into(),
             address: hex(22),
-            scope: "protected".into(),
-            problem: Problem::Differs,
+            scope: "protected/42".into(),
+            problem: Problem::Rejected,
+            repository: None,
+            commit: Some("cd".repeat(20)),
         },
-        json!({"kind": "rustc/1", "address": "16".repeat(32), "scope": "protected",
-               "problem": "differs"}),
+        json!({"kind": "rustc/1", "address": "16".repeat(32), "scope": "protected/42",
+               "problem": "rejected", "commit": "cd".repeat(20)}),
+    );
+    assert_eq!(
+        serde_json::from_value::<Problem>(json!("rejected")).unwrap(),
+        Problem::Rejected
     );
     // A problem a newer client sends reads as unknown: the server records nothing for it.
     assert_eq!(
         serde_json::from_value::<Problem>(json!("odd")).unwrap(),
         Problem::Unknown
     );
+}
+
+// covers: the one definition of a block's digest of outputs: JCS of the files sorted by name
+#[test]
+fn the_digest_of_outputs() {
+    let a = OutputFile {
+        name: "lib/libfoo.rlib",
+        size: 1234,
+        sha256: hex(1),
+    };
+    let b = OutputFile {
+        name: "lib/foo.d",
+        size: 7,
+        sha256: hex(2),
+    };
+    // The order the files come in doesn't matter: they are sorted by name.
+    assert_eq!(outputs_digest(&[a, b]), outputs_digest(&[b, a]));
+    // Exactly the JCS bytes of the sorted list.
+    let expected = format!(
+        "[{{\"name\":\"lib/foo.d\",\"sha256\":\"{}\",\"size\":7}},{{\"name\":\"lib/libfoo.rlib\",\"sha256\":\"{}\",\"size\":1234}}]",
+        "02".repeat(32),
+        "01".repeat(32)
+    );
+    assert_eq!(outputs_digest(&[a, b]), Hex32::sha256(expected.as_bytes()));
+    // A name, a size or a hash that differs makes another digest.
+    let other_size = OutputFile { size: 8, ..b };
+    assert_ne!(outputs_digest(&[a, other_size]), outputs_digest(&[a, b]));
+    let other_name = OutputFile {
+        name: "lib/bar.d",
+        ..b
+    };
+    assert_ne!(outputs_digest(&[a, other_name]), outputs_digest(&[a, b]));
+    // No files is a digest too: of `[]`.
+    assert_eq!(outputs_digest(&[]), Hex32::sha256(b"[]"));
+}
+
+#[test]
+fn commits() {
+    assert!(is_commit(&"a".repeat(40)));
+    assert!(is_commit(&"0".repeat(64)));
+    assert!(!is_commit(&"a".repeat(39)));
+    assert!(!is_commit(&"A".repeat(40)));
+    assert!(!is_commit(""));
 }

@@ -63,8 +63,9 @@ pub const MOST_HINT_BYTES: usize = 256 * 1024;
 pub const MOST_HINTS_PER_ADDRESS: usize = 4;
 /// The largest pack: 2 GiB. A larger block is not shared.
 pub const MOST_PACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-/// The most addresses in a run's manifest: 1 MiB of addresses.
-pub const MOST_MANIFEST: usize = 1024 * 1024 / 32;
+/// The most entries in a run's manifest: 16,384 pairs of a hint address and a block address
+/// (1 MiB of addresses). A build of a large workspace makes a few thousand compiles.
+pub const MOST_MANIFEST: usize = 16 * 1024;
 
 /// What the signature on a `begin` signs, before the org and the body's SHA-256.
 pub const BEGIN_SIGNATURE_SCHEMA: &str = "hushrun-build-begin/v1";
@@ -254,6 +255,58 @@ pub struct Link {
     pub expires_in_seconds: u32,
 }
 
+/// Whether `text` is a commit as a workspace or a token names it: 40 to 64 lowercase hex
+/// characters.
+pub fn is_commit(text: &str) -> bool {
+    (40..=64).contains(&text.len()) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// One file of a block, as the digest of its outputs reads it: its name in the block, its size
+/// and its SHA-256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputFile<'a> {
+    pub name: &'a str,
+    pub size: u64,
+    pub sha256: Hex32,
+}
+
+/// The one function for a block's digest of outputs: the SHA-256 of the JCS form (RFC 8785) of
+/// the list of its files sorted by name (bytewise), each `{"name", "sha256", "size"}`, the
+/// SHA-256 as 64 lowercase hex characters. Nothing else goes in: not the time, the machine or the
+/// repository, which differ on every machine. A machine computes it when it uploads, and again
+/// from the files it unpacked before it reuses a download; a server never computes it.
+pub fn outputs_digest(files: &[OutputFile<'_>]) -> Hex32 {
+    let mut sorted: Vec<&OutputFile<'_>> = files.iter().collect();
+    sorted.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    let list: Vec<serde_json::Value> = sorted
+        .into_iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "sha256": f.sha256.to_string(),
+                "size": f.size,
+            })
+        })
+        .collect();
+    let canonical = crate::jcs::canonicalize(&serde_json::Value::Array(list))
+        .expect("names, sizes and hex strings always have a canonical form");
+    Hex32::sha256(canonical.as_bytes())
+}
+
+/// One compile of a build, as a manifest lists it: the address of its first key (which hints go
+/// by) and the address of its block. Written as a two-element array of 64-hex strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Pair(pub Hex32, pub Hex32);
+
+impl Pair {
+    pub fn hint(&self) -> Hex32 {
+        self.0
+    }
+    pub fn block(&self) -> Hex32 {
+        self.1
+    }
+}
+
 // --- open --------------------------------------------------------------------------------------
 
 /// `POST v0/build/open`: once per run, before anything else.
@@ -261,10 +314,16 @@ pub struct Link {
 #[serde(rename_all = "camelCase")]
 pub struct OpenRequest {
     pub kind: String,
-    /// The repository, as a result names it (`github.com/acme/shop`). The client's word: it only
-    /// chooses which manifest comes back.
+    /// The repository the run is in, as a result names it (`github.com/acme/shop`). For a person
+    /// or an agent token the server reads it as the one repository connected under that name now,
+    /// or none: it chooses whose trusted blocks the run reads, and which manifest comes back. CI's
+    /// comes from its ID token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The commit the workspace has checked out (`git rev-parse HEAD`), or `None` when the client
+    /// can't read one. In CI, a job whose commit isn't its token's `sha` is not trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// The check's id, as the local store names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<Hex32>,
@@ -282,15 +341,38 @@ pub enum OffReason {
     Unknown,
 }
 
-/// What a run does with blocks, in CI and under an agent token, as the org's admin set it. A
-/// person's machine decides its own.
+/// The org's shared mode, as its admin set it: it starts at `observe`. A person's machine may
+/// lower it for itself, never raise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Download and compare, never reuse.
+    /// Upload what is built, download and compare, never reuse a download.
     Observe,
     /// Reuse.
     On,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a CI job on a branch its repository lists is not trusted, so the run can say it in a line.
+/// Such a job writes nothing and reads its repository's trusted blocks alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Untrusted {
+    /// The repository's owner id isn't the one an admin confirmed.
+    Repository,
+    /// The event isn't `push` or `schedule`, nor a `workflow_dispatch` the repository allows.
+    Event,
+    /// The job names a deployment environment.
+    Environment,
+    /// The workspace's commit isn't the token's `sha`, or the client couldn't read one.
+    Commit,
+    /// A self-hosted runner the repository hasn't opted in (or whose opt-in lapsed, or the
+    /// repository isn't private).
+    Runner,
+    /// The run started before the branch was listed, was withdrawn by an admin, or was flagged
+    /// for suspending too many keys.
+    Run,
     #[serde(other)]
     Unknown,
 }
@@ -330,13 +412,20 @@ pub struct Policy {
     pub sharing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<OffReason>,
-    /// For CI and agent tokens; `None` for a person, whose machine decides.
+    /// The org's shared mode. Every caller gets it; a person's machine may lower it for itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
+    /// Whether this caller uploads at all: the same as `write` being there.
+    #[serde(default)]
+    pub writes: bool,
+    /// For a CI job on a branch its repository lists that is not trusted: why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted: Option<Untrusted>,
     /// The scope this caller writes; `None`: it writes nothing (a job on a tag, say).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write: Option<String>,
-    /// The scopes it reads.
+    /// The scopes it reads, in the order a lookup prefers them: its repository's trusted blocks
+    /// first, then its own scope.
     #[serde(default)]
     pub read: Vec<String>,
     /// How long a block is kept after it was last used.
@@ -346,9 +435,9 @@ pub struct Policy {
     /// What the org's shared store may hold, and holds, in bytes.
     pub allowance_bytes: u64,
     pub held_bytes: u64,
-    /// The addresses the newest build like this one asked for, in order.
+    /// The compiles of the newest build like this one, in order.
     #[serde(default)]
-    pub manifest: Vec<Hex32>,
+    pub manifest: Vec<Pair>,
 }
 
 // --- hints -------------------------------------------------------------------------------------
@@ -359,6 +448,9 @@ pub struct Policy {
 pub struct HintsLookupRequest {
     pub kind: String,
     pub addresses: Vec<Hex32>,
+    /// The run's repository, as in [`OpenRequest::repository`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +481,10 @@ pub struct SentHint {
 pub struct HintsRequest {
     pub kind: String,
     pub hints: Vec<SentHint>,
+    /// The workspace's commit, as in [`OpenRequest::commit`]: where a CI job writes is decided
+    /// again for every request that writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,8 +496,9 @@ pub struct HintsResponse {
 // --- blocks ------------------------------------------------------------------------------------
 
 /// `POST v0/build/blocks/lookup`: which of these the shared store holds in a scope the caller
-/// reads. This is a block's use: it keeps the block alive. With `fetch`, each found block comes
-/// with a link to download it.
+/// reads. This is a block's use: it keeps the block alive, with or without `fetch`. With `fetch`,
+/// each found block comes with a link to download it. Without, the answer is how a machine learns
+/// that the server still vouches for a block it holds: the scope and the digest of outputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LookupRequest {
@@ -409,6 +506,13 @@ pub struct LookupRequest {
     pub addresses: Vec<Hex32>,
     #[serde(default)]
     pub fetch: bool,
+    /// The run's repository, as in [`OpenRequest::repository`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The key id of the machine asking (`sha256:<hex>`), so the answer can say which blocks it
+    /// wrote ([`Found::mine`]). Only the caller's own machines count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,6 +526,9 @@ pub struct Found {
     pub outputs: Hex32,
     pub cost_ms: u32,
     pub class: Class,
+    /// Whether the caller's own machine (for CI, its own run) wrote it.
+    #[serde(default)]
+    pub mine: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub get: Option<Link>,
 }
@@ -430,7 +537,7 @@ pub struct Found {
 #[serde(rename_all = "camelCase")]
 pub struct LookupResponse {
     pub found: Vec<Found>,
-    /// Asked addresses whose first key the org suspended: not served.
+    /// Asked addresses whose first key is suspended in the repository: not served.
     #[serde(default)]
     pub suspended: Vec<Hex32>,
 }
@@ -457,24 +564,32 @@ pub struct BeginBlock {
 pub struct BeginRequest {
     pub kind: String,
     pub blocks: Vec<BeginBlock>,
+    /// The run's repository, as in [`OpenRequest::repository`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The workspace's commit, as in [`OpenRequest::commit`]: trust is decided again for every
+    /// `begin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// Why a block won't be taken. It stays on the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Refusal {
-    /// The org's shared store is full until the next sweep makes room.
+    /// The org's shared store is full, and `begin` couldn't make room, until the next sweep does.
     OverAllowance,
     /// Past [`MOST_PACK_BYTES`].
     TooLarge,
-    /// Its first key is suspended in the org.
+    /// Its first key is suspended in the repository.
     Suspended,
-    /// A scope the caller reads holds the same key with other outputs; or, for a trusted job, another
-    /// trusted build disagreed, and the key is suspended.
+    /// A scope the caller reads holds the same key with other outputs (the trusted copy first):
+    /// discard the local block. For a trusted job, another trusted build disagreed.
     Differs,
     /// Another upload of it is under way, or it is being deleted.
     Busy,
-    /// This caller writes nowhere.
+    /// This caller writes nowhere: no scope of its own, or (for CI) a run that was withdrawn or
+    /// flagged.
     NoScope,
     /// The caller's scope has as many uploads under way as it may: send or let them lapse first.
     TooManyUploads,
@@ -523,6 +638,9 @@ pub struct BeginResponse {
 pub struct CommitRequest {
     pub kind: String,
     pub addresses: Vec<Hex32>,
+    /// The workspace's commit, as in [`OpenRequest::commit`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// Where a block stands after `commit`.
@@ -569,6 +687,10 @@ pub struct Counts {
     pub saved_ms: u64,
     /// Packs downloaded that no compile asked for.
     pub unused_downloads: u64,
+    /// Downloads compared with a local build of the same key (shared `observe`, or an audit).
+    pub compared: u64,
+    /// Of those, the comparisons of blocks another machine built.
+    pub compared_others: u64,
 }
 
 /// `POST v0/build/close`: once per run, at its end. Sent again with the same `run`, it counts
@@ -584,9 +706,14 @@ pub struct CloseRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<Hex32>,
     pub platform: String,
-    /// The addresses the run asked for, in order, each once.
+    /// The workspace's commit, as in [`OpenRequest::commit`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The run's compiles, in order, each once: whether reused locally, downloaded or built. The
+    /// server keeps the one it has instead when this one has under half its entries and that one
+    /// is under 7 days old.
     #[serde(default)]
-    pub manifest: Vec<Hex32>,
+    pub manifest: Vec<Pair>,
     #[serde(default)]
     pub counts: Counts,
 }
@@ -601,15 +728,19 @@ pub enum Problem {
     Unreadable,
     /// The object store had nothing at its link.
     Missing,
+    /// It opened, but a compile that depends on it couldn't load it.
+    Rejected,
     /// A word this version doesn't know: a server records nothing for it.
     #[serde(other)]
     Unknown,
 }
 
-/// `POST v0/build/blocks/report`: a block that a machine found wrong, in a scope it reads. Every
-/// report is recorded, once per reporter, block and day. A block of the caller's own scope is
-/// deleted. A `protected` block is deleted, and for `differs` its first key suspended, only when a
-/// job that writes `protected` reports it; anyone else's report changes nothing on the server.
+/// `POST v0/build/blocks/report`: a block that a machine found wrong, in a scope it reads. A
+/// report is recorded, once per reporter, block and day, only for a block the scope holds, and a
+/// reporter's reports are counted only so many a day. A block of the caller's own scope is
+/// deleted. A repository's trusted block is deleted, and for `differs` its first key suspended in
+/// the repository, only when a trusted job of that repository reports it; anyone else's report
+/// changes nothing on the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportRequest {
@@ -617,6 +748,12 @@ pub struct ReportRequest {
     pub address: Hex32,
     pub scope: String,
     pub problem: Problem,
+    /// The run's repository, as in [`OpenRequest::repository`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The workspace's commit, as in [`OpenRequest::commit`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 #[cfg(test)]
