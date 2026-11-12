@@ -952,7 +952,12 @@ impl Told {
         let mut out: Vec<String> = indices
             .as_array()?
             .iter()
-            .map(|i| paths[i.as_u64().unwrap() as usize].as_str().unwrap().to_string())
+            .map(|i| {
+                paths[i.as_u64().unwrap() as usize]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         out.sort();
         Some(out)
@@ -1045,7 +1050,11 @@ fn tests_vitest(
         .output()
         .unwrap();
     let mut workers = std::collections::BTreeMap::new();
-    for path in std::fs::read_dir(&units).unwrap().flatten().map(|e| e.path()) {
+    for path in std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+    {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if !name.starts_with("vitest-worker-") || !name.ends_with(".json") {
             continue;
@@ -1154,7 +1163,8 @@ fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_th
     // Vitest counts the tests of a suite it skipped whole in its total only: it reports no
     // result for them.
     assert!(
-        told.stdout.contains("Tests  7 passed | 3 skipped | 1 todo (12)"),
+        told.stdout
+            .contains("Tests  7 passed | 3 skipped | 1 todo (12)"),
         "{}",
         told.stdout
     );
@@ -1166,7 +1176,11 @@ fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_th
         .collect();
     assert_eq!(
         left,
-        ["cart > adds 1", "cart > in euros > rounds", "cart > total [2]"]
+        [
+            "cart > adds 1",
+            "cart > in euros > rounds",
+            "cart > total [2]"
+        ]
     );
     for id in &left {
         assert_eq!(tests[*id]["finished"], false, "{id}");
@@ -1264,10 +1278,14 @@ fn each_vitest_test_ends_as_vitest_says_and_a_filter_tells_nothing() {
 
     // Vitest's own name filter: what it left out isn't told either.
     let told = tests_vitest(&r, "file", json!({}), &["-t", "plain|three"], &[]);
-    assert_eq!(told.ids("test/outcomes.test.ts"), ["closes > three", "plain"]);
+    assert_eq!(
+        told.ids("test/outcomes.test.ts"),
+        ["closes > three", "plain"]
+    );
 }
 
-const WATCHED: &str = "import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+const WATCHED: &str =
+    "import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { used, K } from '../src/lib'
 import { connect, close } from '../src/db'
@@ -1345,7 +1363,10 @@ fn vitest_watches_what_each_test_ran_opened_and_listed() {
         ["data/fixture.json"]
     );
     assert_eq!(told.list(unit, "reads a file", "dirs").unwrap(), ["data"]);
-    assert_eq!(told.list(unit, "nothing else", "opened").unwrap(), Vec::<String>::new());
+    assert_eq!(
+        told.list(unit, "nothing else", "opened").unwrap(),
+        Vec::<String>::new()
+    );
     // A module's top-level code isn't a function called: far.ts made NEAR when it was imported.
     assert_eq!(ran("a constant next door"), ["src/near.ts", unit]);
     assert_eq!(ran("nothing else"), [unit]);
@@ -1355,7 +1376,13 @@ fn vitest_watches_what_each_test_ran_opened_and_listed() {
     assert_eq!(imports["src/lib.ts"], ["src/rate.ts"]);
     assert_eq!(
         imports[unit],
-        ["src/db.ts", "src/each.ts", "src/lib.ts", "src/load.ts", "src/near.ts"]
+        [
+            "src/db.ts",
+            "src/each.ts",
+            "src/lib.ts",
+            "src/load.ts",
+            "src/near.ts"
+        ]
     );
     // A suite's `beforeAll` and `afterAll`, for the tests of the suite.
     let facts = &told.unit(unit)["units"][0];
@@ -1365,7 +1392,11 @@ fn vitest_watches_what_each_test_ran_opened_and_listed() {
         .iter()
         .filter(|s| !s["ran"].as_array().unwrap().is_empty())
         .map(|s| {
-            let tests = s["tests"].as_array().unwrap().iter().map(|t| t.as_u64().unwrap());
+            let tests = s["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_u64().unwrap());
             (tests.collect(), told.names(unit, &s["ran"]).unwrap())
         })
         .collect();
