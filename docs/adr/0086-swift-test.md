@@ -240,3 +240,16 @@ test binary's output to end (up to its `WaitDelay`), so there the runner forward
 the same process, as the command without hushrun would. hushrun's `ctest` never copies output: the
 real `ctest` gets hushrun's standard output itself, so a program a test left running prints there
 directly (ADR 0087).
+
+## Amendment 4: a cap on what is kept, and signals after the end (2026-11-12)
+
+A second review left `yes` running from a test: hushrun's `swift` was still alive 10 s after swift
+ended, with no forwarder, then spent over 90 s and 401 MB reading what it had kept. The copying
+loop went on reading while output kept arriving without asking whether swift had ended, and kept
+every byte. Now every pass of the loop asks, the second after swift's end is counted whatever
+arrives, and the rest goes to the forwarder; at most 16 MiB is kept to read, what comes after is
+still passed on whole, and such a run records no pass, saying why.
+
+A signal sent once swift had ended (while hushrun's `swift` listed or read) was stored and never
+acted on: signal-hook can't put a default handler back. Each signal now also gets a default
+action that runs once forwarding stops, so it ends hushrun's `swift` as it would any program.

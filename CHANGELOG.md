@@ -252,6 +252,16 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   own wait now fails with `Test I/O incomplete`, as without hushrun. The runner hands output still
   open after the binary exits to a forwarder and exits, rather than passing it on to its end
   itself, which made `go test` print `ok`.
+- CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
+  program a test program waits for or has compiled in, and a program a test names by a relative
+  path are now read; on Makefiles a source newer than its object makes the program stale; an
+  in-source build says so in the run; and for `ctest` as the command the project's discovery runs
+  once less, the plan's listing being taken.
+- `swift test`: an executable target is read by every test target, which may start it; hushrun's
+  `swift` stops waiting a second after swift ends whatever output keeps arriving, and keeps at most
+  16 MiB of it.
+- hushrun's `ctest` and `swift` end on a signal sent after the real program ended, rather than
+  ignoring it.
 - The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
   the current directory, a relative one is from it, and a link to one of hushrun's own programs
   is passed over.
