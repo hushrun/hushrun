@@ -40,14 +40,19 @@ pub type Recognize = fn(&[String], &Path) -> Option<Result<Box<dyn Adapter>, Str
 
 /// The adapters a COMMAND may get, tried in order. Any COMMAND none of them takes gets pytest's,
 /// which does nothing where pytest never starts ([`choose`]).
+///
+/// Those that know COMMAND by its program's name come first. CTest's and Swift's come last, since
+/// they also take COMMANDs beyond `ctest` and `swift test`: CTest's a shell line, script or
+/// Makefile that starts `ctest`, Swift's any COMMAND in a directory with a `Package.swift`. CTest's
+/// goes before Swift's, so that `ctest` in a Swift package is CTest's.
 pub const RECOGNIZED: &[Recognize] = &[
     cargo::recognized,
     gotest::recognized,
     vitest::recognized,
-    ctest::recognized,
-    swift::recognized,
     maven::recognized,
     gradle::recognized,
+    ctest::recognized,
+    swift::recognized,
 ];
 
 /// \[C-32\] The one adapter a run of `command` in `cwd` gets: the first of [`RECOGNIZED`] that
@@ -307,3 +312,6 @@ pub trait Adapter: std::fmt::Debug {
         None
     }
 }
+
+#[cfg(test)]
+mod tests;
