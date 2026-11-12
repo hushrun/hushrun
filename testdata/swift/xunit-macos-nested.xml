@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<testsuites>
+<testsuite name="TestResults" errors="0" tests="1" failures="0" time="0.082272291">
+<testcase classname="CartTests.Outer.InnerTests" name="testInner" time="0.082272291">
+</testcase>
+</testsuite>
+</testsuites>

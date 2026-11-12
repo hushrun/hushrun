@@ -1,0 +1,261 @@
+{
+ "cLanguageStandard": null,
+ "cxxLanguageStandard": null,
+ "defaultLocalization": null,
+ "dependencies": [
+  {
+   "fileSystem": [
+    {
+     "identity": "localmoney",
+     "path": "/work/LocalMoney",
+     "productFilter": null,
+     "traits": [
+      {
+       "name": "default"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "sourceControl": [
+    {
+     "identity": "remotefmt",
+     "location": {
+      "local": [
+       "/work/RemoteFmt"
+      ]
+     },
+     "productFilter": null,
+     "requirement": {
+      "range": [
+       {
+        "lowerBound": "1.0.0",
+        "upperBound": "2.0.0"
+       }
+      ]
+     },
+     "traits": [
+      {
+       "name": "default"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "name": "Shop",
+ "packageKind": {
+  "root": [
+   "/work/Shop"
+  ]
+ },
+ "pkgConfig": null,
+ "platforms": [
+  {
+   "options": [],
+   "platformName": "macos",
+   "version": "13.0"
+  }
+ ],
+ "products": [
+  {
+   "name": "shop-cli",
+   "settings": [],
+   "targets": [
+    "shop-cli"
+   ],
+   "type": {
+    "executable": null
+   }
+  }
+ ],
+ "providers": null,
+ "swiftLanguageVersions": null,
+ "targets": [
+  {
+   "dependencies": [],
+   "exclude": [],
+   "name": "CHelpers",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "regular"
+  },
+  {
+   "dependencies": [],
+   "exclude": [],
+   "name": "CZ",
+   "packageAccess": false,
+   "path": "Sources/CZ",
+   "resources": [],
+   "settings": [],
+   "type": "system"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "CHelpers",
+      null
+     ]
+    },
+    {
+     "byName": [
+      "CZ",
+      null
+     ]
+    },
+    {
+     "product": [
+      "Money",
+      "LocalMoney",
+      null,
+      null
+     ]
+    },
+    {
+     "product": [
+      "Fmt",
+      "RemoteFmt",
+      null,
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "Core",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "regular"
+  },
+  {
+   "dependencies": [],
+   "exclude": [],
+   "name": "gen-tool",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "executable"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "gen-tool",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "GenPlugin",
+   "packageAccess": true,
+   "pluginCapability": {
+    "buildTool": null
+   },
+   "resources": [],
+   "settings": [],
+   "type": "plugin"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Core",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "Cart",
+   "packageAccess": true,
+   "pluginUsages": [
+    {
+     "plugin": [
+      "GenPlugin",
+      null
+     ]
+    }
+   ],
+   "resources": [],
+   "settings": [],
+   "type": "regular"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Cart",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "shop-cli",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "executable"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Cart",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "CartTests",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "test"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Core",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "CoreTests",
+   "packageAccess": true,
+   "resources": [],
+   "settings": [],
+   "type": "test"
+  },
+  {
+   "dependencies": [
+    {
+     "byName": [
+      "Cart",
+      null
+     ]
+    }
+   ],
+   "exclude": [],
+   "name": "MixedTests",
+   "packageAccess": true,
+   "resources": [
+    {
+     "path": "Fixtures",
+     "rule": {
+      "copy": {}
+     }
+    }
+   ],
+   "settings": [],
+   "type": "test"
+  }
+ ],
+ "toolsVersion": {
+  "_version": "6.0.0"
+ },
+ "traits": []
+}

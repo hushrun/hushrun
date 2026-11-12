@@ -35,6 +35,7 @@ pub mod pytest;
 pub mod runner;
 pub mod shared;
 pub mod store;
+pub mod swift;
 pub mod vitest;
 pub mod why;
 

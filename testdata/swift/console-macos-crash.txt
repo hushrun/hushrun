@@ -1,0 +1,142 @@
+Test Suite 'All tests' started at 2026-11-11 23:05:43.493.
+Test Suite 'MixedTests.xctest' started at 2026-11-11 23:05:43.493.
+Test Suite 'MixedXCTests' started at 2026-11-11 23:05:43.493.
+Test Case '-[MixedTests.MixedXCTests testAsync]' started.
+Test Case '-[MixedTests.MixedXCTests testAsync]' passed (0.000 seconds).
+Test Case '-[MixedTests.MixedXCTests testCrashWhenAsked]' started.
+MixedTests/MixedXCTests.swift:15: Fatal error: deliberate crash
+Test Suite 'All tests' started at 2026-11-11 23:05:43.567.
+Test Suite 'All tests' passed at 2026-11-11 23:05:43.567.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+Test Suite 'All tests' started at 2026-11-11 23:05:43.642.
+Test Suite 'CartTests.xctest' started at 2026-11-11 23:05:43.643.
+Test Suite 'CartTests' started at 2026-11-11 23:05:43.643.
+Test Case '-[CartTests.CartTests testAsync]' started.
+Test Case '-[CartTests.CartTests testAsync]' passed (0.029 seconds).
+Test Case '-[CartTests.CartTests testFails]' started.
+/work/Shop/Tests/CartTests/CartTests.swift:10: error: -[CartTests.CartTests testFails] : XCTAssertEqual failed: ("1000") is not equal to ("1") - deliberate failure
+Test Case '-[CartTests.CartTests testFails]' failed (0.059 seconds).
+Test Case '-[CartTests.CartTests testGenerated]' started.
+Test Case '-[CartTests.CartTests testGenerated]' passed (0.000 seconds).
+Test Case '-[CartTests.CartTests testSkipped]' started.
+/work/Shop/Tests/CartTests/CartTests.swift:11: -[CartTests.CartTests testSkipped] : Test skipped - not today
+Test Case '-[CartTests.CartTests testSkipped]' skipped (0.000 seconds).
+Test Case '-[CartTests.CartTests testTotal]' started.
+Test Case '-[CartTests.CartTests testTotal]' passed (0.000 seconds).
+Test Case '-[CartTests.CartTests testTotalWithTax]' started.
+Test Case '-[CartTests.CartTests testTotalWithTax]' passed (0.000 seconds).
+Test Suite 'CartTests' failed at 2026-11-11 23:05:43.732.
+	 Executed 6 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.089 (0.089) seconds
+Test Suite 'CartTestsMore' started at 2026-11-11 23:05:43.732.
+Test Case '-[CartTests.CartTestsMore testTotal]' started.
+Test Case '-[CartTests.CartTestsMore testTotal]' passed (0.000 seconds).
+Test Suite 'CartTestsMore' passed at 2026-11-11 23:05:43.733.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite '_TtCO9CartTests5Outer10InnerTests' started at 2026-11-11 23:05:43.733.
+Test Case '-[_TtCO9CartTests5Outer10InnerTests testInner]' started.
+Test Case '-[_TtCO9CartTests5Outer10InnerTests testInner]' passed (0.000 seconds).
+Test Suite '_TtCO9CartTests5Outer10InnerTests' passed at 2026-11-11 23:05:43.733.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'CartTests.xctest' failed at 2026-11-11 23:05:43.733.
+	 Executed 8 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.089 (0.090) seconds
+Test Suite 'All tests' failed at 2026-11-11 23:05:43.733.
+	 Executed 8 tests, with 1 test skipped and 1 failure (0 unexpected) in 0.089 (0.090) seconds
+◇ Test run started.
+↳ Testing Library Version: 2403
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite MixedSuite started.
+◇ Suite Nested started.
+◇ Test testTotal() started.
+◇ Test testTotalWithTax() started.
+◇ Test fails() started.
+◇ Test param(flag:) started.
+◇ Test crashWhenAsked() started.
+➜ Test skipped() skipped.
+◇ Test asyncTest() started.
+◇ Test resource() started.
+◇ Test inner() started.
+◇ Test case passing 1 argument flag → true to param(flag:) started.
+✘ Test fails() recorded an issue at MixedSwiftTests.swift:12:24: Expectation failed: Bool(false)
+↳ deliberate failure
+↳ Bool(false) → false
+↳   false → ()
+◇ Test case passing 1 argument flag → false to param(flag:) started.
+✔ Test testTotalWithTax() passed after 0.001 seconds.
+✔ Test crashWhenAsked() passed after 0.001 seconds.
+✔ Test inner() passed after 0.001 seconds.
+✔ Test param(flag:) with 2 test cases passed after 0.001 seconds.
+✘ Test fails() failed after 0.001 seconds with 1 issue.
+✔ Test testTotal() passed after 0.001 seconds.
+✔ Test asyncTest() passed after 0.001 seconds.
+✔ Suite Nested passed after 0.001 seconds.
+✔ Test resource() passed after 0.008 seconds.
+✘ Suite MixedSuite failed after 0.009 seconds with 1 issue.
+✘ Test run with 9 tests in 2 suites failed after 0.010 seconds with 1 issue.
+◇ Test run started.
+↳ Testing Library Version: 2403
+↳ Target Platform: arm64e-apple-macos14.0
+➜ Suite DisabledSuite skipped: "whole suite off"
+◇ Suite PriceTests started.
+◇ Test freeFunction() started.
+➜ Test neverRuns() skipped: "whole suite off"
+◇ Suite Nested started.
+◇ Test "raw identifier test" started.
+◇ Test freeParam(n:) started.
+◇ Test zlibLinked() started.
+◇ Test "A display name, with (parens) and / slash" started.
+◇ Test twoArgs(s:n:) started.
+◇ Test fromExtension() started.
+◇ Test testTotalWithTax() started.
+◇ Test fails() started.
+◇ Test zipped(label:value:) started.
+◇ Test testTotal() started.
+➜ Test skipped() skipped: "not today"
+◇ Test asyncTest() started.
+◇ Suite "Deep display name" started.
+◇ Test case passing 2 arguments label → "y", value → 20 to zipped(label:value:) started.
+◇ Test case passing 2 arguments label → "x", value → 10 to zipped(label:value:) started.
+◇ Test inner() started.
+✔ Test freeFunction() passed after 0.001 seconds.
+✔ Test zlibLinked() passed after 0.001 seconds.
+✔ Test testTotalWithTax() passed after 0.001 seconds.
+◇ Test case passing 2 arguments s → "b", n → 1 to twoArgs(s:n:) started.
+◇ Test case passing 2 arguments s → "b", n → 2 to twoArgs(s:n:) started.
+✔ Test testTotal() passed after 0.001 seconds.
+✔ Test "raw identifier test" passed after 0.001 seconds.
+◇ Test case passing 2 arguments s → "a", n → 1 to twoArgs(s:n:) started.
+✘ Test fails() recorded an issue at CoreTests.swift:13:24: Expectation failed: 1 == 2
+↳ deliberate failure
+↳ 1 == 2 → false
+◇ Test deepest() started.
+◇ Test "Deepest with display" started.
+✔ Test "A display name, with (parens) and / slash" passed after 0.001 seconds.
+◇ Test case passing 2 arguments s → "a", n → 2 to twoArgs(s:n:) started.
+✔ Test inner() passed after 0.001 seconds.
+✔ Test fromExtension() passed after 0.001 seconds.
+✔ Test deepest() passed after 0.001 seconds.
+✔ Test "Deepest with display" passed after 0.001 seconds.
+✔ Test zipped(label:value:) with 2 test cases passed after 0.001 seconds.
+◇ Test case passing 1 argument n → 1 to freeParam(n:) started.
+✘ Test fails() failed after 0.001 seconds with 1 issue.
+◇ Test case passing 1 argument n → 3 to freeParam(n:) started.
+◇ Test case passing 1 argument n → 2 to freeParam(n:) started.
+✔ Suite "Deep display name" passed after 0.001 seconds.
+✔ Suite Nested passed after 0.001 seconds.
+✘ Test freeParam(n:) recorded an issue with 1 argument n → 2 at CoreTests.swift:8:54: Expectation failed: n != 2
+↳ two fails
+↳ n != 2 → false
+↳   n → 2
+✔ Test twoArgs(s:n:) with 4 test cases passed after 0.001 seconds.
+✘ Test freeParam(n:) with 3 test cases failed after 0.001 seconds with 1 issue.
+✔ Test asyncTest() passed after 0.020 seconds.
+✘ Suite PriceTests failed after 0.021 seconds with 1 issue.
+✘ Test run with 17 tests in 4 suites failed after 0.021 seconds with 2 issues.
+◇ Test run started.
+↳ Testing Library Version: 2403
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Note: Some test targets reported failures:
+  - MixedTests (XCTest)
+  - CartTests (XCTest)
+  - MixedTests (Swift Testing)
+  - CoreTests (Swift Testing)

@@ -109,6 +109,9 @@ jobs:
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0086).
+      - name: Name Swift for the test-target tests
+        run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -196,6 +199,9 @@ jobs:
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0086).
+      - name: Name Swift for the test-target tests
+        run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass

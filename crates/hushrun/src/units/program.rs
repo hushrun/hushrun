@@ -45,10 +45,164 @@ pub trait Program: Sync {
     fn ended(&self, call: &Call<'_>, args: &[OsString], exit: Option<i32>) {
         let _ = (call, args, exit);
     }
+
+    /// \[ADR 0086\] Runs the real program itself, for an adapter that needs more than changed
+    /// arguments: its output as it goes by ([`run_copying_stdout`]), or the real program started
+    /// again after it ([`real_command`]). The exit code this program on `PATH` ends with; `None`,
+    /// the default, leaves the start to [`Program::args`] and [`Program::ended`]. Asked only in a
+    /// run with a directory of its own.
+    fn run(&self, call: &Call<'_>) -> Option<ExitCode> {
+        let _ = call;
+        None
+    }
 }
 
 /// \[ADR 0077\] The programs adapters put on `PATH`, by name. A new one is one entry here.
-pub const PROGRAMS: &[&dyn Program] = &[&super::ctest::Ctest];
+pub const PROGRAMS: &[&dyn Program] = &[
+    &super::ctest::Ctest,
+    &super::swift::SWIFT,
+    &super::swift::SWIFT_TEST,
+];
+
+/// \[ADR 0086\] A command that starts the real program `real` as a program on `PATH` starts it:
+/// with `PATH` as COMMAND's environment had it and neither of this module's variables, so that
+/// nothing it starts reaches a program of hushrun's.
+pub fn real_command(real: &Path) -> Command {
+    let mut command = Command::new(real);
+    match path_was(std::env::var_os(PATH_WAS)) {
+        Some(Some(path)) => {
+            command.env("PATH", path);
+        }
+        Some(None) => {
+            command.env_remove("PATH");
+        }
+        None => {}
+    }
+    command.env_remove(DIR_VAR).env_remove(PATH_WAS);
+    command
+}
+
+/// \[ADR 0086\] How a real program run by [`run_copying_stdout`] ended, and what it wrote on its
+/// standard output.
+#[derive(Debug, Default)]
+pub struct Copied {
+    /// Its exit code, when it exited.
+    pub exit: Option<i32>,
+    /// The signal that stopped it, when one did.
+    pub signal: Option<i32>,
+    /// Every byte it wrote on its standard output, as written.
+    pub stdout: Vec<u8>,
+}
+
+impl Copied {
+    /// The exit code a program on `PATH` ends with for it: its own, 1 past 255, or the same
+    /// signal.
+    pub fn exit_code(&self) -> ExitCode {
+        match (self.exit, self.signal) {
+            (Some(code), _) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            (None, Some(signal)) => super::runner::end_as(signal),
+            (None, None) => ExitCode::from(1),
+        }
+    }
+}
+
+/// \[ADR 0086\] Runs `command` with its standard output copied, byte for byte, to this process's
+/// as it goes by, and kept: through a pseudo-terminal in raw mode, with the window's size, when
+/// this process's standard output is a terminal (a program that colors only on one, Swift Testing,
+/// still does), else through a pipe. Standard input and error are inherited untouched, and the
+/// signals that stop a process are passed on, as [`Program::args`]'s start does. `Err` when it
+/// can't be started.
+pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
+    use std::io::{Read as _, Write as _};
+    let (mut from, to) = output_channel()?;
+    command.stdout(to);
+    let mut child = command.spawn()?;
+    // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
+    drop(command);
+    let forwarding = super::runner::forward_signals(child.id());
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let out = std::io::stdout();
+        loop {
+            match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    kept.extend_from_slice(&buf[..n]);
+                    let mut out = out.lock();
+                    let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
+                Err(_) => break,
+            }
+        }
+        kept
+    });
+    let status = loop {
+        match child.wait() {
+            Ok(status) => break Some(status),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break None,
+        }
+    };
+    drop(forwarding);
+    let stdout = reader.join().unwrap_or_default();
+    Ok(match status {
+        Some(status) => Copied {
+            exit: status.code(),
+            signal: super::runner::signal_of(&status),
+            stdout,
+        },
+        None => Copied {
+            stdout,
+            ..Copied::default()
+        },
+    })
+}
+
+/// The end this process reads and the end the child writes its standard output to: a
+/// pseudo-terminal when this process's standard output is a terminal, else a pipe.
+#[cfg(unix)]
+fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::process::Stdio)> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    use rustix::termios::{
+        OptionalActions, isatty, tcgetattr, tcgetwinsize, tcsetattr, tcsetwinsize,
+    };
+    if !isatty(std::io::stdout()) {
+        let (from, to) = std::io::pipe()?;
+        return Ok((Box::new(from), to.into()));
+    }
+    let controller = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    // Never the child's: only this process reads it.
+    rustix::io::fcntl_setfd(&controller, rustix::io::FdFlags::CLOEXEC)?;
+    grantpt(&controller)?;
+    unlockpt(&controller)?;
+    let name = ptsname(&controller, Vec::new())?;
+    let terminal = rustix::fs::open(
+        name.as_c_str(),
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    // Raw: the bytes arrive as the child wrote them, no `\n` made `\r\n`.
+    let mut modes = tcgetattr(&terminal)?;
+    modes.make_raw();
+    tcsetattr(&terminal, OptionalActions::Now, &modes)?;
+    if let Ok(size) = tcgetwinsize(std::io::stdout()) {
+        let _ = tcsetwinsize(&terminal, size);
+    }
+    Ok((
+        Box::new(std::fs::File::from(controller)),
+        std::fs::File::from(terminal).into(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn output_channel() -> std::io::Result<(Box<dyn std::io::Read + Send>, std::process::Stdio)> {
+    let (from, to) = std::io::pipe()?;
+    Ok((Box::new(from), to.into()))
+}
 
 /// One start of a program on `PATH`.
 pub struct Call<'a> {
@@ -247,6 +401,12 @@ fn run_with(
         real: &real,
         units,
     };
+    // \[ADR 0086\] A program that runs the real one itself.
+    if let (Some(program), Some(_)) = (program, units)
+        && let Some(code) = program.run(&call)
+    {
+        return code;
+    }
     // A run with no directory of its own changes nothing: hushrun knows of no plan.
     let start: Vec<OsString> = match program {
         Some(program) if units.is_some() => program.args(&call),
