@@ -1175,6 +1175,9 @@ pub struct Output {
     pub any_failure: bool,
     /// Each top-level test's time, from Go's `--- PASS`, `--- FAIL` and `--- SKIP` lines.
     pub durations: BTreeMap<String, u64>,
+    /// \[C-32\] The top-level name of everything a `--- SKIP: ` line named, a subtest's included:
+    /// Go prints them with `-v` and `-json` only.
+    pub skipped: BTreeSet<String>,
     /// The summary, while nothing but coverage lines came after it.
     pub summary: Option<Summary>,
     /// The output ended with a whole line.
@@ -1251,6 +1254,12 @@ impl Output {
             from = start;
         }
         let own = text.strip_prefix('\u{16}').unwrap_or(text);
+        // A skip, a subtest's indented under its test: part of the test's body didn't run.
+        let indented = text.trim_start();
+        let indented = indented.strip_prefix('\u{16}').unwrap_or(indented);
+        if let Some(rest) = indented.strip_prefix("--- SKIP: ") {
+            self.skipped.insert(top_level(rest));
+        }
         for word in ["--- PASS: ", "--- FAIL: ", "--- SKIP: "] {
             if let Some(rest) = own.strip_prefix(word)
                 && let Some((name, time)) = rest.split_once(" (")
@@ -1351,6 +1360,7 @@ pub fn outcome(at: &TestsAt, out: &Output, ended: Ended) -> Vec<super::facts::Te
                 failed: out.failed.contains(id),
                 deselected,
                 duration_ms: out.durations.get(id).copied().unwrap_or(0),
+                skipped: !deselected && out.skipped.contains(id),
                 ..super::facts::TestFacts::default()
             }
         })
@@ -1904,6 +1914,13 @@ mod tests {
         assert_eq!(out.durations.get("TestB"), None);
         assert_eq!(out.durations.get("TestC"), Some(&250));
         assert_eq!(out.durations.get("TestD"), Some(&0));
+        // \[C-32\] A skip, a subtest's by its test, with or without -json's mark.
+        assert_eq!(out.skipped.iter().collect::<Vec<_>>(), ["TestD"]);
+        let out = read(
+            true,
+            &[b"=== RUN   TestE\n    \x16--- SKIP: TestE/one (0.00s)\n\x16--- PASS: TestE (0.00s)\n"],
+        );
+        assert_eq!(out.skipped.iter().collect::<Vec<_>>(), ["TestE"]);
         // The summary is the last line but coverage, after output with no newline too.
         assert_eq!(
             read(false, &[b"PASS\ncoverage: 50.0% of statements\n"]).summary,

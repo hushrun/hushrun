@@ -1385,6 +1385,40 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
     );
 }
 
+// covers: C-32, C-45
+#[test]
+fn a_skip_in_a_go_run_that_failed_records_nothing() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // A skip says the body didn't run: in a run that failed that may be the failure's doing (here
+    // TestNeeds skips when TestSetup failed), so the skipped test records no pass; in a run that
+    // passed, a skip is a pass. Go prints `--- SKIP` with -v and -json.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nvar ready bool\n\nfunc TestSetup(t *testing.T) {\n\tif os.Getenv(\"FIXED\") == \"\" {\n\t\tt.Fatal(\"setup\")\n\t}\n\tready = true\n}\n\nfunc TestNeeds(t *testing.T) {\n\tif !ready {\n\t\tt.Skip(\"no setup\")\n\t}\n}\n\nfunc TestOk(t *testing.T) {}\n",
+        ),
+    ]);
+    for flag in ["-v", "-json"] {
+        let cache = r.root.join(format!("cache{flag}"));
+        let cache_text = cache.display().to_string();
+        let args = ["run", "unit", "--", "go", "test", flag, "./..."];
+        let first = r.run(&args, &[("HUSHRUN_CACHE_DIR", &cache_text)]);
+        assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+        assert_eq!(
+            store::map(&cache)["units"]["p"]["tests"],
+            serde_json::json!({"TestNeeds": "not-run", "TestOk": "passed", "TestSetup": "failed"}),
+            "{flag}"
+        );
+        let second = r.run(&args, &[("HUSHRUN_CACHE_DIR", &cache_text), ("FIXED", "1")]);
+        assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    }
+}
+
 // covers: C-45
 #[test]
 fn what_a_program_a_go_test_left_running_prints_reaches_go_test_and_no_test_of_it_passes() {

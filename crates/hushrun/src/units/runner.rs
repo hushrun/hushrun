@@ -627,6 +627,8 @@ fn record(
         schema: schema.into(),
         adapter: adapter.into(),
         failures_by_unit: true,
+        // \[C-32\] `go test` starts every test binary of one start of it: one start per `go test`.
+        start: (adapter == super::gotest::ADAPTER).then(go_start).flatten(),
         invocation: Some(invocation),
         units,
         ..FactsFile::default()
@@ -638,6 +640,17 @@ fn record(
     if let Ok(bytes) = serde_json::to_vec(&file) {
         let _ = facts::write_whole(&path, &bytes);
     }
+}
+
+/// \[C-32\] The start of `go test` this runner belongs to: the `go` process that started it.
+#[cfg(unix)]
+fn go_start() -> Option<String> {
+    Some(format!("go-test-{}", std::os::unix::process::parent_id()))
+}
+
+#[cfg(not(unix))]
+fn go_start() -> Option<String> {
+    None
 }
 
 #[cfg(unix)]

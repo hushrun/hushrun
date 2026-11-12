@@ -1551,6 +1551,36 @@ fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
     assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
 }
 
+// covers: C-32, C-43
+#[test]
+fn a_skip_in_a_vitest_run_that_failed_records_nothing() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A skip says the body didn't run: in a run that failed that may be the failure's doing, so a
+    // skipped test and its file record no pass; in a run that passed, a skip is a pass.
+    let mut files = told_shop("{mode: reuse, unit: test}");
+    files.push(file(
+        "test/skips.test.ts",
+        "import { describe, test, expect } from 'vitest'\ntest.skip('skipped', () => {})\ndescribe.skip('box', () => { test('inner', () => {}) })\ntest.todo('later')\ntest.skipIf(true)('when', () => {})\ntest('itself', (ctx) => { ctx.skip() })\ntest('ok', () => {})\ntest('bad', () => { expect(process.env.FIXED).toBeTruthy() })\n",
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.map()["units"]["test/skips.test.ts"]["tests"],
+        json!({"skipped": "not-run", "box > inner": "not-run", "later": "not-run",
+               "when": "not-run", "itself": "not-run", "ok": "passed", "bad": "failed"})
+    );
+    let second = r.run_env(VITEST_RUN, &[("FIXED", "1")]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        r.map()["units"]["test/skips.test.ts"]["tests"],
+        json!({"skipped": "passed", "box > inner": "passed", "later": "passed",
+               "when": "passed", "itself": "passed", "ok": "passed", "bad": "passed"})
+    );
+}
+
 // covers: C-43, C-39, C-34
 #[test]
 fn an_audited_vitest_test_that_fails_again_alone_suspends_reuse() {

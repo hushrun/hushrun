@@ -89,8 +89,14 @@ function relativeTo(root, file) {
 export default function hushrun() {
   const dir = process.env.HUSHRUN_UNITS;
   if (!dir || !fs.existsSync(dir) || !claim(dir)) return noop();
+  // [C-32] One id for this start of Vitest and every worker of it, whatever its projects or
+  // --shard: only the start that claimed the run writes.
+  process.env.HUSHRUN_VITEST_START ??= `vitest-${process.pid}-${Date.now()}`;
   const state = (globalThis[STATE] ??= {
     dir,
+    start: process.env.HUSHRUN_VITEST_START,
+    units: new Map(),
+    failuresByUnit: true,
     errors: [],
     whole: [],
     projects: new Map(),
@@ -320,8 +326,11 @@ async function deselect(state, vitest, sorted) {
   return kept;
 }
 
+// The run's end, written whole each time Vitest says it ended: a run that ends more than once
+// (another set of files run in the same start) adds to what the earlier ends said, never replaces
+// it, and a file run twice ran whole only when it did each time.
 function report(state, vitest, modules, errors, reason) {
-  const units = new Map();
+  const units = state.units;
   for (const module of modules) {
     const unit = path.resolve(module.moduleId);
     const tests = [...module.children.allTests()];
@@ -335,6 +344,9 @@ function report(state, vitest, modules, errors, reason) {
       unit,
       selected: 0,
       finished: 0,
+      // [C-32] Its tests Vitest skipped (by their code, a filter, or hushrun): in a run that
+      // failed, the file records no pass.
+      skipped: 0,
       failed: false,
       deselected: false,
       durationMs: 0,
@@ -344,6 +356,7 @@ function report(state, vitest, modules, errors, reason) {
     };
     before.selected += selected;
     before.finished += finished;
+    before.skipped += states.filter((s) => s === 'skipped').length;
     before.failed ||= moduleState === 'failed' || !module.ok();
     before.durationMs += Math.round(module.diagnostic().duration || 0);
     const issues = state.issues.get(module.project.name || '') || [];
@@ -366,11 +379,13 @@ function report(state, vitest, modules, errors, reason) {
     }
   }
   const bail = Number(vitest.config.bail || 0) > 0;
+  state.failuresByUnit &&= errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed');
   writeWhole(path.join(state.dir, `vitest-${process.pid}.json`), {
     edges: importEdges(vitest),
     schema: SCHEMA,
     adapter: 'vitest',
-    failuresByUnit: errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed'),
+    start: state.start,
+    failuresByUnit: state.failuresByUnit,
     settings: {
       testFiles: [...(state.testFiles || [])],
       configFiles: [...state.configFiles],

@@ -321,6 +321,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
         };
         had.finished &= told.finished;
         had.failed |= told.failed;
+        had.skipped |= told.skipped && !told.deselected;
         had.deselected &= told.deselected;
         had.never_left_out |= told.never_left_out;
         had.duration_ms = had.duration_ms.saturating_add(told.duration_ms);
@@ -346,6 +347,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
 struct Ended {
     selected: u64,
     finished: u64,
+    skipped: u64,
     failed: bool,
     deselected: bool,
     duration_ms: u64,
@@ -506,6 +508,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         });
         entry.selected = entry.selected.saturating_add(unit.selected);
         entry.finished = entry.finished.saturating_add(unit.finished);
+        entry.skipped = entry.skipped.saturating_add(unit.skipped);
         entry.failed |= unit.failed;
         entry.deselected &= unit.deselected;
         entry.duration_ms = entry.duration_ms.saturating_add(unit.duration_ms);
@@ -517,6 +520,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let Ended {
             selected,
             finished,
+            skipped,
             failed,
             deselected,
             duration_ms,
@@ -553,6 +557,8 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                     failed,
                     not_followed,
                     deselected,
+                    // \[C-32\] A test of it Vitest skipped: in a run that failed, no pass.
+                    skipped: skipped > 0,
                     ..Facts::default()
                 },
                 reads,

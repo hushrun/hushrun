@@ -186,6 +186,12 @@ function wholeFile() {
   };
 }
 
+// [C-32] The start of Vitest this worker belongs to, as its plugin named it when it claimed the run.
+function startOf() {
+  const start = process.env.HUSHRUN_VITEST_START;
+  return start ? { start } : {};
+}
+
 function writeFacts(value) {
   state.written += 1;
   const name = `vitest-worker-${process.pid}-${workerThreads.threadId}-${state.written}.json`;
@@ -200,7 +206,7 @@ afterAll(() => {
   // [ADR 0081] Tests one by one are written when the run's files end, after every hook.
   if (state.file && state.file.live) return;
   try {
-    writeFacts({ schema: SCHEMA, adapter: 'vitest-worker', units: [wholeFile()], errors: state.errors });
+    writeFacts({ schema: SCHEMA, adapter: 'vitest-worker', ...startOf(), units: [wholeFile()], errors: state.errors });
   } catch {
     // Nothing written: hushrun then knows nothing of this file's reads, and it is not observed.
   }
@@ -720,12 +726,16 @@ function testsFacts(F) {
       entry.deselected = true;
     } else {
       if (kind === 'skipped') {
+        // [C-32] Skipped by its own code: finished, its body not run.
         entry.finished = true;
+        entry.skipped = true;
       } else {
         const state = test.result && test.result.state;
         entry.finished = F.finished.has(test)
           && (state === 'pass' || state === 'fail' || state === 'skip');
         entry.failed = state === 'fail' || (entry.finished && suiteFailed(test));
+        // It skipped itself as it ran (`ctx.skip()`): its body didn't run to its end.
+        if (entry.finished && state === 'skip') entry.skipped = true;
         entry.durationMs = Math.round((test.result && test.result.duration) || 0);
       }
       const unfollowed = [...own.notFollowed];
@@ -752,6 +762,7 @@ function testsFacts(F) {
         const had = told[at];
         had.finished = had.finished && entry.finished;
         had.failed = had.failed || entry.failed;
+        if (entry.skipped) had.skipped = true;
         had.durationMs += entry.durationMs;
         had.notFollowed.push(...entry.notFollowed);
         order.set(test, at);
@@ -786,6 +797,7 @@ function testsFacts(F) {
   const facts = {
     schema: SCHEMA_V1,
     adapter: 'vitest-worker',
+    ...startOf(),
     units: [unit],
     errors: state.errors,
     paths,

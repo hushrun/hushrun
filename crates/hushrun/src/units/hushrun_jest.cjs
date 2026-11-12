@@ -167,6 +167,9 @@ function install(S) {
   // Workers write only for the run whose main process claimed the directory (C-32): a Jest a
   // test starts inherits the variables, and its own main process clears this one.
   const runOf = () => process.env.HUSHRUN_JEST_RUN || '';
+  // [C-32] This start of Jest, which its main process names when it claims the run: one id for it
+  // and every worker of it, whatever its projects or --shard; only one start of a run writes.
+  const startOf = () => (process.env.HUSHRUN_JEST_START ? { start: process.env.HUSHRUN_JEST_START } : {});
   S.rel = rel;
   S.note = note;
 
@@ -767,6 +770,9 @@ function install(S) {
         unit: this.file,
         selected,
         finished,
+        // [C-32] Its tests that finished without their body running (test.skip, describe.skip,
+        // test.todo): in a run that failed, its file records no pass.
+        skipped: records.filter((r) => r.status === 'skipped').length,
         failed,
         deselected: false,
         durationMs: records.reduce((n, r) => n + (r.durationMs || 0), 0),
@@ -806,6 +812,7 @@ function install(S) {
               id: r.id,
               finished: rs.every(done),
               failed: rs.some((x) => x.status === 'failed'),
+              ...(rs.some((x) => x.status === 'skipped') ? { skipped: true } : {}),
               deselected: false,
               durationMs: rs.reduce((n, x) => n + (x.durationMs || 0), 0),
               notFollowed: this.concurrent ? [] : dedupe(rs.flatMap((x) => x.b.nf)),
@@ -821,6 +828,7 @@ function install(S) {
             notFollowed: this.concurrent ? [] : dedupe(r.b.nf),
           };
           if (r.attempts > 1) out.attempts = r.attempts;
+          if (r.status === 'skipped') out.skipped = true;
           if (lists && !r.concurrent && (r.status === 'passed' || r.status === 'failed')) {
             const dirs = new Set([...r.b.dirs, ...fileDirs]);
             for (const b of this.hooks) if (under(this.order[position.get(r)], b.describe)) for (const d of b.dirs) dirs.add(d);
@@ -869,6 +877,7 @@ function install(S) {
       writeWhole(`jest-${process.pid}-${wt.threadId}-${S.written}.json`, {
         schema: SCHEMA,
         adapter: 'jest',
+        ...startOf(),
         failuresByUnit: true,
         settings: {
           typeAware,
@@ -1154,6 +1163,7 @@ function install(S) {
     // What the globalSetup window reads and starts is every test file's (C-32).
     S.global = { opened: new Set(), dirs: new Set(), notFollowed: [] };
     process.env.HUSHRUN_JEST_RUN = String(process.pid);
+    process.env.HUSHRUN_JEST_START = `jest-${process.pid}-${S.started}`;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     process.env.HUSHRUN_JEST_WATCH = '0';
     process.env.HUSHRUN_JEST_EVERY = '[]';
@@ -1164,6 +1174,7 @@ function install(S) {
   function notClaimed() {
     // A Jest started inside a test file of the run: neither it nor its workers write.
     delete process.env.HUSHRUN_JEST_RUN;
+    delete process.env.HUSHRUN_JEST_START;
     delete process.env.HUSHRUN_JEST_EVERY;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     S.buffering = false;
@@ -1357,6 +1368,7 @@ function install(S) {
     writeWhole(`jest-main-${process.pid}.json`, {
       schema: SCHEMA,
       adapter: 'jest-main',
+      ...startOf(),
       failuresByUnit: !!results && !results.wasInterrupted && !results.runExecError,
       settings: {
         version: String(S.version || ''),
