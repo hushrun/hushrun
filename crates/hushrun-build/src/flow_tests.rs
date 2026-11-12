@@ -3404,6 +3404,8 @@ fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_bet
     }
     // Equal first keys, equal second keys, the same bytes.
     let (keys_a, keys_b) = (a.keys(), b.keys());
+    // Each line says how many compiles the run audited (B-16).
+    assert_eq!(keys_a["reg"]["audit"], "one-in");
     for name in ["reg", "a"] {
         assert_eq!(
             keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"],

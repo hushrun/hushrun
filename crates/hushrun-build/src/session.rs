@@ -333,6 +333,10 @@ fn is_probe(outcome: Outcome) -> bool {
     )
 }
 
+/// The line a run whose audit is off ends with (B-16).
+const AUDIT_OFF: &str = "build: the audit is off for this run (HUSHRUN_BUILD_AUDIT=none): no \
+                         reused block was compared with a fresh compile";
+
 /// What a run's compiles came to (B-20).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
@@ -578,12 +582,16 @@ impl Session {
     /// same at once.
     pub fn finish(self, now: SystemTime) -> Summary {
         let current = &self.current;
-        let summary = Summary::of_run(
+        let mut summary = Summary::of_run(
             current.mode,
             current.min_free_gb,
             &current.entries(),
             &self.rebuilt,
         );
+        // B-16: whoever turned the audit off turned a guard off; the run says so every time.
+        if current.audit == Audit::Never {
+            summary.lines.push(AUDIT_OFF.to_string());
+        }
         let _ = remove_dir(&current.folder);
         let _ = crate::sweep::sweep(&Store::new(&current.store), now, current.keep_days);
         remove_stale_sessions(&current.store, now);
@@ -792,7 +800,25 @@ mod tests {
         let folder = session.env()[1].1.clone();
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(found.audit, Audit::Every);
-        session.finish(UNIX_EPOCH);
+        assert!(
+            session
+                .finish(UNIX_EPOCH)
+                .lines()
+                .iter()
+                .all(|l| !l.contains("audit"))
+        );
+        // Turned off, the guard it is gone for the run, and the run says so (B-16).
+        let none = |name: &str| (name == crate::audit::VAR).then(|| OsString::from("none"));
+        let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        let lines = session.finish(UNIX_EPOCH).lines().to_vec();
+        assert_eq!(
+            lines,
+            vec![
+                "build: the audit is off for this run (HUSHRUN_BUILD_AUDIT=none): no reused block \
+                 was compared with a fresh compile"
+                    .to_string()
+            ]
+        );
 
         // Never in CI, and never over a wrapper the person set.
         let mut ci = start(dir.path(), &settings, &exe, &none);

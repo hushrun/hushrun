@@ -251,8 +251,11 @@ reused. `hushrun build clean` clears it.
 chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the
 block's. A difference serves the fresh outputs, suspends the key and is reported. Programs and
 proc macros are not compared. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
-every such compile when it is `every` and none when it is `none`: a replay that compares two
-machines asks for the first, a test that expects a reuse for the second.
+every such compile when it is `every` and none when it is `none`; any other value keeps one in
+fifty. `every` is what a replay that compares two machines asks for. `none` removes the one check
+that catches two compiles with one key and different bytes, for whoever sets it, CI or not: it is
+for tests that expect a reuse, and a run that has it ends with a line saying the audit is off.
+The key log records each run's setting.
 
 **B-17 The compiler.** The compiler's identity is its content, so that one toolchain installed
 on two machines, under any folder or name, is one compiler: the output of `rustc -vV`; the

@@ -428,6 +428,7 @@ impl Call<'_> {
             "outcome": entry.outcome,
             "found": entry.found,
             "differed": entry.differed,
+            "audit": self.current.audit,
             "portable": entry.portable,
             "keys": &*keys,
         });
