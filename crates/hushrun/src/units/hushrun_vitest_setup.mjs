@@ -398,6 +398,7 @@ function hooks() {
     guard('suite start', () => {
       const F = mine(suite);
       if (!F) return;
+      settle(F);
       flush(F);
       if (suite === suite.file) {
         F.live = true;
@@ -431,6 +432,7 @@ function hooks() {
     guard('suite end', () => {
       const F = mine(suite);
       if (!F) return;
+      settle(F);
       flush(F);
       if (F.stack[F.stack.length - 1] !== suite || F.open.size) F.concurrent = true;
       const at = F.stack.lastIndexOf(suite);
@@ -446,7 +448,9 @@ function hooks() {
     const out = await onBeforeRunTask?.call(this, test, ...rest);
     guard('test start', () => {
       const F = mine(test);
-      if (!F || (test.mode !== 'run' && test.mode !== 'queued')) return;
+      if (!F) return;
+      settle(F);
+      if (test.mode !== 'run' && test.mode !== 'queued') return;
       // Between one test's end and the next one's start only Vitest's code runs: one take less.
       if (!F.lastWasTestEnd) flush(F);
       if (F.open.size || F.stack[F.stack.length - 1] !== (test.suite || test.file)
@@ -489,6 +493,7 @@ function own(runner) {
       const F = state.file;
       if (F && F.live && !F.written) {
         F.written = true;
+        settle(F);
         flush(F);
         writeFacts(testsFacts(F));
       }
@@ -497,6 +502,19 @@ function own(runner) {
     }
     return onAfterRunFiles?.call(this, ...args);
   };
+}
+
+// A test that skipped itself (`ctx.skip()`) ends with no `onAfterRunTask`: its window closes at
+// the next boundary, with what ran since.
+function settle(F) {
+  for (const test of F.open) {
+    if (!test.result || test.result.state === 'run') continue;
+    flush(F);
+    F.finished.add(test);
+    F.open.delete(test);
+    const top = F.stack[F.stack.length - 1];
+    F.current = top ? sharedOf(F, top) : F.after;
+  }
 }
 
 function sharedOf(F, suite) {
@@ -603,14 +621,14 @@ function choose(F) {
     }
   }
   if (!changed) return;
-  const settle = (suite) => {
-    for (const child of suite.tasks || []) if (child.type === 'suite') settle(child);
+  const skipEmpty = (suite) => {
+    for (const child of suite.tasks || []) if (child.type === 'suite') skipEmpty(child);
     const running = (t) => t.mode === 'run' || t.mode === 'queued';
     if (running(suite) && (suite.tasks || []).length && !suite.tasks.some(running)) {
       suite.mode = 'skip';
     }
   };
-  settle(F.testFile);
+  skipEmpty(F.testFile);
 }
 
 // Whether a suite above `test` failed in a hook of its own: its `afterAll`, a cleanup, a snapshot
