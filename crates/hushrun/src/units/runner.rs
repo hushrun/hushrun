@@ -336,7 +336,7 @@ fn package_at(run: &facts::RunFile, here: &Path) -> Option<String> {
 /// \[ADR 0083\] The longest hushrun waits for a test binary to list its tests.
 const LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// \[ADR 0083\] How long the runner reads a test binary's output after it exited, for what a
-/// program it started still holds open: Go's own `-test.waitdelay` default.
+/// program it started still holds open: as long as `go test` itself waits by default.
 const OUTPUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// \[ADR 0083\] With `unit: test` (C-39), what the Go package in `here` runs test by test: its
@@ -349,7 +349,7 @@ fn tests_here(dir: &Path, here: &Path, told: &Told) -> Option<super::gotest::Tes
     }
     let unit = package_at(&run, here)?;
     let reuse = run.reuse_tests.get(&unit).cloned().unwrap_or_default();
-    let mut list = |extra: &[&str]| list_binary(told, extra);
+    let mut list = |extra: &[&str]| list_binary(told, extra, dir);
     // Said once a run, by the first start that finds it.
     let mut old = || {
         let first = std::fs::OpenOptions::new()
@@ -373,10 +373,12 @@ fn tests_here(dir: &Path, here: &Path, told: &Told) -> Option<super::gotest::Tes
 }
 
 /// \[ADR 0083\] What `told`'s binary prints with `extra` for its arguments, as the run would start
-/// it, when it exits 0 within [`LIST_BUDGET`]; `None` otherwise.
-fn list_binary(told: &Told, extra: &[&str]) -> Option<Vec<u8>> {
+/// it, when it exits 0 within [`LIST_BUDGET`]; `None` otherwise. A binary built with `-cover`
+/// writes what listing covered into the run's directory `dir`, not COMMAND's.
+fn list_binary(told: &Told, extra: &[&str], dir: &Path) -> Option<Vec<u8>> {
     let args: Vec<OsString> = extra.iter().map(OsString::from).collect();
     let (_, mut command) = command_for(told, true, &args);
+    command.env("GOCOVERDIR", dir);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

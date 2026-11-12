@@ -1318,6 +1318,9 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
         ("glued-fail", &["-json"], &mid),
         ("glued-pass", &[], &all),
         ("glued-pass", &["-json"], &all),
+        // Coverage prints its line after Go's summary.
+        ("", &["-cover"], &all),
+        ("fail", &["-cover", "-json"], &mid),
     ];
     for (n, (mode, flags, want)) in cases.iter().enumerate() {
         let (ran, got) = r.shape(n, mode, flags);
