@@ -783,7 +783,7 @@ impl Adapter for Recognized {
     }
 
     fn runner(&self) -> &'static str {
-        "maven"
+        "Maven"
     }
 
     fn test_file(&self) -> &'static str {

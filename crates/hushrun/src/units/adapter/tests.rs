@@ -199,3 +199,18 @@ fn env_with_variables_before_a_command_is_read_through_for_every_adapter() {
     // pytest's own checks still see the Python's options.
     assert!(chosen(&words("env A=1 python -I -m pytest"), dir.path()).is_err());
 }
+
+#[test]
+fn each_runner_is_named_as_people_write_it() {
+    let dir = loads_all();
+    for (command, runner) in [
+        ("mvn test", "Maven"),
+        ("gradle test", "Gradle"),
+        ("ctest", "CTest"),
+        ("npx vitest run", "Vitest"),
+        ("npx jest", "Jest"),
+    ] {
+        let adapter = choose(&words(command), dir.path()).unwrap();
+        assert_eq!(adapter.runner(), runner, "{command}");
+    }
+}
