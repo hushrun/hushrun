@@ -244,15 +244,6 @@ fn major_minor(version: &str) -> Option<(u64, u64)> {
     Some((major, minor))
 }
 
-/// \[ADR 0082\] Whether hushrun can watch each test of this Jest: 29, and 30 from 30.5, whose
-/// runtimes say which file a module name resolves to. Jest 30.0 to 30.4 weren't tried.
-pub fn watchable(version: Option<&str>) -> bool {
-    matches!(
-        version.and_then(major_minor),
-        Some((29, _)) | Some((30, 5..))
-    )
-}
-
 /// The config file Jest loads for `recognized` in `cwd`, when there is one in a file of its own.
 pub fn config_file(recognized: &Recognized, cwd: &Path) -> Option<PathBuf> {
     if let Some(config) = &recognized.config {
@@ -684,7 +675,8 @@ impl Adapter for Recognized {
     fn tests(&self) -> KnowsTests {
         KnowsTests {
             unit: true,
-            reads: watchable(self.version.as_deref()),
+            // \[C-40\] Where a test can't be watched, the adapter's facts say why.
+            reads: true,
         }
     }
 
@@ -917,13 +909,17 @@ mod tests {
 
     // covers: C-44
     #[test]
-    fn jest_29_and_30_are_known_and_30_5_on_is_watched() {
-        assert!(watchable(Some("29.7.0")));
-        assert!(watchable(Some("30.5.2")));
-        assert!(watchable(Some("30.10.0")));
-        assert!(!watchable(Some("30.4.1")));
-        assert!(!watchable(Some("30.0.0-beta.3")));
-        assert!(!watchable(None));
+    fn jest_29_and_30_are_known_and_others_are_said() {
+        assert_eq!(major_minor("30.0.0-beta.3"), Some((30, 0)));
+        assert!(
+            Recognized {
+                config: None,
+                coverage: false,
+                version: None
+            }
+            .tests()
+            .reads
+        );
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("pkg");
         std::fs::create_dir_all(dir.path().join("node_modules/jest")).unwrap();

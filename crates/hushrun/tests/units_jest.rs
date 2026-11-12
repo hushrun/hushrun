@@ -855,6 +855,14 @@ fn unit_of(facts: &[Value], unit: &str) -> Value {
         imports.insert(paths[from.parse::<usize>().unwrap()].clone(), names(to));
     }
     u["imports"] = Value::Object(imports);
+    let mut opens = serde_json::Map::new();
+    for (from, to) in file["opens"].as_object().into_iter().flatten() {
+        opens.insert(paths[from.parse::<usize>().unwrap()].clone(), names(to));
+    }
+    u["opens"] = Value::Object(opens);
+    if u.get("everyTest").is_some() {
+        u["everyTest"] = names(&u["everyTest"]);
+    }
     u["settings"] = file["settings"].clone();
     u
 }
@@ -1005,7 +1013,6 @@ test('retried', () => {
                 "a > b > deep [2]",
                 "x [2]",
                 "x",
-                "x [2]",
                 "skipped",
                 "later",
                 "retried"
@@ -1013,6 +1020,13 @@ test('retried', () => {
             "Jest {}",
             jest.major
         );
+        // Tests whose ids collide are told as one, never left out, with no list of their own:
+        // `x [2]` and the second `x`; `a > b > deep` and `a > b > deep [2]`, two nestings alike.
+        for id in ["x [2]", "a > b > deep", "a > b > deep [2]"] {
+            assert_eq!(test_of(&unit, id)["neverLeftOut"], true, "{id}");
+        }
+        assert!(test_of(&unit, "x").get("neverLeftOut").is_none());
+        assert_eq!(test_of(&unit, "x [2]")["finished"], true);
         // Skipped by its own code, it passed; a retry is counted.
         assert_eq!(test_of(&unit, "skipped")["finished"], true);
         assert_eq!(test_of(&unit, "later")["finished"], true);
@@ -1172,19 +1186,21 @@ fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
                     .contains(&json!("src/names.js")),
                 "{unit:#}"
             );
+            // What the runner loads for every test: setup files, and Jest's config.
+            for every in ["jest.config.js", "src/level.js", "test/setup.js"] {
+                assert!(
+                    unit["everyTest"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(every)),
+                    "{every}: {unit:#}"
+                );
+            }
             assert!(
-                unit["loaded"]["ran"]
+                !unit["loaded"]["ran"]
                     .as_array()
                     .unwrap()
-                    .contains(&json!("test/setup.js")),
-                "{unit:#}"
-            );
-            assert!(
-                unit["loaded"]["ran"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("src/level.js")),
-                "{unit:#}"
+                    .contains(&json!("test/setup.js"))
             );
             // Each file's direct imports.
             assert_eq!(
@@ -1199,6 +1215,10 @@ fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
         assert_eq!(code, 0, "{out}");
         let unit = unit_of(&facts, "test/db.test.js");
         assert_eq!(unit["settings"]["watched"], false);
+        assert_eq!(
+            unit["settings"]["watch"],
+            "Jest's own V8 coverage is on, and it takes the counters watching a test needs"
+        );
         assert!(test_of(&unit, "db > queries").get("ran").is_none());
         assert!(out.contains("db.js"), "coverage still reports: {out}");
         // With `reads: file`, nothing is watched.
@@ -1810,5 +1830,431 @@ fn a_test_file_that_fails_to_load_or_kills_its_worker_is_told() {
         assert_eq!(unit["settings"]["fileFailures"][0]["in"], "collection");
         let main = main_of(&facts);
         assert_eq!(main["units"][0]["failed"], true, "{main:#}");
+    }
+}
+
+// ------------------------------------------------------------------ `reads: test`, end to end
+
+/// A repository whose `test/a.test.js` has `target` among `files`, and a test file every change
+/// runs, so that the check's own key misses.
+fn reads_repo(jest: &Jest, files: &[(&str, &str)], tests: &str) -> Repo {
+    let mut all = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "node_modules\ncoverage\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/other.test.js",
+            "test('other', () => { expect(1).toBe(1); });\n",
+        ),
+    ];
+    for (path, text) in files {
+        all.retain(|(p, _)| p != path);
+        all.push(file(path, text));
+    }
+    Repo::new(jest, &all)
+}
+
+/// Whether `observe`, with `reads`, would have reused `target` of `test/a.test.js` after
+/// `change` made it fail: what its disagreement line says.
+fn would_reuse_test(
+    jest: &Jest,
+    files: &[(&str, &str)],
+    change: (&str, &str),
+    reads: &str,
+) -> bool {
+    let r = reads_repo(
+        jest,
+        files,
+        &format!("{{mode: observe, unit: test, reads: {reads}}}"),
+    );
+    let first = r.run(JEST_RUN);
+    assert_eq!(first.code, 0, "Jest {}: {}", jest.major, first.out());
+    assert!(
+        !first.stderr.contains("each test is taken to have read"),
+        "{}",
+        first.stderr
+    );
+    r.write(change.0, change.1);
+    let second = r.run(JEST_RUN);
+    assert_eq!(
+        second.code,
+        1,
+        "the change makes target fail:\n{}",
+        second.out()
+    );
+    second.stderr.contains(
+        "hushrun: unit: test/a.test.js::target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
+    )
+}
+
+/// `reads: test` follows the change: neither setting would reuse the test.
+fn caught(files: &[(&str, &str)], change: (&str, &str)) {
+    for jest in jests() {
+        assert!(
+            !would_reuse_test(&jest, files, change, "file"),
+            "Jest {} reads: file",
+            jest.major
+        );
+        assert!(
+            !would_reuse_test(&jest, files, change, "test"),
+            "Jest {} reads: test",
+            jest.major
+        );
+    }
+}
+
+/// A known miss of `reads: test` (RFC 0004 §3.2): `reads: file` runs the test, `reads: test`
+/// would reuse it. Whoever closes the miss changes the second assertion.
+fn known_miss(files: &[(&str, &str)], change: (&str, &str)) {
+    for jest in jests() {
+        assert!(
+            !would_reuse_test(&jest, files, change, "file"),
+            "Jest {} reads: file",
+            jest.major
+        );
+        assert!(
+            would_reuse_test(&jest, files, change, "test"),
+            "Jest {} reads: test: a known miss",
+            jest.major
+        );
+    }
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_function_called() {
+    caught(
+        &[
+            ("src/calc.js", "exports.f = () => 1;\n"),
+            (
+                "src/facade.js",
+                "const calc = require('./calc');\nexports.g = () => calc.f();\n",
+            ),
+            (
+                "test/a.test.js",
+                "const facade = require('../src/facade');\ntest('target', () => { expect(facade.g()).toBe(1); });\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/calc.js", "exports.f = () => 2;\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_constant_the_code_that_ran_imports_directly() {
+    caught(
+        &[
+            ("src/consts.js", "exports.K = 1;\n"),
+            (
+                "src/facade.js",
+                "const { K } = require('./consts');\nexports.g = () => K;\n",
+            ),
+            (
+                "test/a.test.js",
+                "const facade = require('../src/facade');\ntest('target', () => { expect(facade.g()).toBe(1); });\n",
+            ),
+        ],
+        ("src/consts.js", "exports.K = 2;\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_constant_the_test_file_imports_directly() {
+    caught(
+        &[
+            ("src/consts.js", "exports.K = 1;\n"),
+            (
+                "test/a.test.js",
+                "const { K } = require('../src/consts');\ntest('target', () => { expect(K).toBe(1); });\n",
+            ),
+        ],
+        ("src/consts.js", "exports.K = 2;\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_file_opened() {
+    caught(
+        &[
+            ("src/data.js", "1\n"),
+            (
+                "test/a.test.js",
+                "const fs = require('fs');\ntest('target', () => { expect(fs.readFileSync('src/data.js', 'utf8').trim()).toBe('1'); });\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/data.js", "2\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_file_a_module_read_once_and_kept() {
+    caught(
+        &[
+            ("src/price.js", "5\n"),
+            (
+                "src/prices.js",
+                "const fs = require('fs');\nconst path = require('path');\nlet kept;\nexports.price = () => (kept = kept || fs.readFileSync(path.join(__dirname, 'price.js'), 'utf8').trim());\n",
+            ),
+            (
+                "test/a.test.js",
+                "const prices = require('../src/prices');\ntest('first', () => { expect(prices.price()).toBeTruthy(); });\ntest('target', () => { expect(prices.price()).toBe('5'); });\n",
+            ),
+        ],
+        ("src/price.js", "6\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_what_a_before_all_read() {
+    caught(
+        &[
+            ("src/made.js", "exports.make = () => 1;\n"),
+            (
+                "test/a.test.js",
+                "let made;\ndescribe('d', () => {\n  beforeAll(() => { made = require('../src/made').make(); });\n  test('target', () => { expect(made).toBe(1); });\n});\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/made.js", "exports.make = () => 2;\n"),
+    );
+}
+
+// covers: C-40, C-44
+#[test]
+fn jest_reads_test_follows_a_module_required_lazily_inside_a_test() {
+    caught(
+        &[
+            ("src/lazy.js", "exports.K = 1;\n"),
+            (
+                "test/a.test.js",
+                "test('target', () => { expect(require('../src/lazy').K).toBe(1); });\ntest('plain', () => {});\n",
+            ),
+        ],
+        ("src/lazy.js", "exports.K = 2;\n"),
+    );
+}
+
+/// Two imports away: cart.js ran and imports settings.js, which built TAX from defaults.js at
+/// import, with no function of either called.
+fn two_imports_away() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("src/defaults.js", "exports.RATE = 3;\n"),
+        (
+            "src/settings.js",
+            "const { RATE } = require('./defaults');\nexports.TAX = RATE * 2;\n",
+        ),
+        (
+            "src/cart.js",
+            "const { TAX } = require('./settings');\nexports.total = (xs) => xs.reduce((n, x) => n + x, 0) + TAX;\n",
+        ),
+        (
+            "test/a.test.js",
+            "const { total } = require('../src/cart');\ntest('target', () => { expect(total([1])).toBe(7); });\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-44
+#[test]
+fn a_known_miss_of_jest_reads_test_a_value_two_imports_away() {
+    known_miss(
+        &two_imports_away(),
+        ("src/defaults.js", "exports.RATE = 4;\n"),
+    );
+}
+
+/// A registry plugins.js fills as boot.js requires it: the test file requires boot and the
+/// registry, and nothing of plugins.js, whose code runs at import only.
+fn a_registry() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("src/registry.js", "exports.HANDLERS = {};\n"),
+        (
+            "src/plugins.js",
+            "const { HANDLERS } = require('./registry');\nHANDLERS.x = 41;\n",
+        ),
+        ("src/boot.js", "require('./plugins');\n"),
+        (
+            "test/a.test.js",
+            "require('../src/boot');\nconst { HANDLERS } = require('../src/registry');\ntest('target', () => { expect(HANDLERS.x).toBe(41); });\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-44
+#[test]
+fn a_known_miss_of_jest_reads_test_a_registry_another_file_filled_at_import() {
+    known_miss(
+        &a_registry(),
+        (
+            "src/plugins.js",
+            "const { HANDLERS } = require('./registry');\nHANDLERS.x = 42;\n",
+        ),
+    );
+}
+
+/// The line `observe` says of what reusing tests would have done.
+fn observe_tests_line(ran: &Ran) -> String {
+    ran.line("hushrun: unit: with `tests: reuse`,").to_string()
+}
+
+// covers: C-40, C-44
+#[test]
+fn a_concurrent_test_gets_its_files_list() {
+    for jest in jests() {
+        // `plain` runs other.js's code through facade.js; `target` touches nothing. A change to other.js runs
+        // `plain`, and `target` too when it is concurrent: its test file read other.js.
+        for (concurrent, expected) in [
+            (false, "1 of 3 tests would have run"),
+            (true, "2 of 3 tests would have run"),
+        ] {
+            let target = if concurrent {
+                "test.concurrent('target', async () => { expect(1).toBe(1); });"
+            } else {
+                "test('target', () => { expect(1).toBe(1); });"
+            };
+            let files = [
+                ("src/other.js", "exports.f = () => 1;\n"),
+                (
+                    "src/facade.js",
+                    "const other = require('./other');\nexports.g = () => other.f();\n",
+                ),
+                (
+                    "test/a.test.js",
+                    &*format!(
+                        "const o = require('../src/facade');\n{target}\ntest('plain', () => {{ expect(o.g()).toBe(1); }});\n"
+                    ),
+                ),
+            ];
+            let r = reads_repo(&jest, &files, "{mode: observe, unit: test, reads: test}");
+            let first = r.run(JEST_RUN);
+            assert_eq!(first.code, 0, "{}", first.out());
+            assert_eq!(
+                first.stderr.contains("each test is taken to have read what its test file read: test.concurrent tests run at once"),
+                concurrent,
+                "{}",
+                first.stderr
+            );
+            r.write("src/other.js", "exports.f = () => 1; // changed\n");
+            let second = r.run(JEST_RUN);
+            assert_eq!(second.code, 0, "{}", second.out());
+            assert!(
+                observe_tests_line(&second).contains(expected),
+                "Jest {} concurrent {concurrent}: {}",
+                jest.major,
+                second.stderr
+            );
+        }
+    }
+}
+
+// covers: C-40, C-44
+#[test]
+fn ts_jest_checking_types_and_jests_v8_coverage_watch_no_test_and_say_why() {
+    for jest in jests() {
+        let files = [
+            (
+                "jest.config.js",
+                "module.exports = { preset: 'ts-jest', testEnvironment: 'node' };\n",
+            ),
+            (
+                "tsconfig.json",
+                "{\"compilerOptions\": {\"strict\": true, \"esModuleInterop\": true}}\n",
+            ),
+            ("src/k.ts", "export const k = 1;\n"),
+            (
+                "test/a.test.ts",
+                "import { test, expect } from '@jest/globals';\nimport { k } from '../src/k';\ntest('target', () => { expect(k).toBe(1); });\n",
+            ),
+        ];
+        let r = reads_repo(&jest, &files, "{mode: observe, unit: test, reads: test}");
+        let typed = r.run(JEST_RUN);
+        assert_eq!(typed.code, 0, "{}", typed.out());
+        assert!(
+            typed.stderr.contains("hushrun: unit: each test is taken to have read what its test file read: ts-jest checks types with a language service, which reads every file of code for every test file"),
+            "Jest {}: {}",
+            jest.major,
+            typed.stderr
+        );
+        let r = reads_repo(
+            &jest,
+            &[("test/a.test.js", "test('target', () => {});\n")],
+            "{mode: observe, unit: test, reads: test}",
+        );
+        let covered = r.run(&[
+            "run",
+            "unit",
+            "--",
+            "node",
+            "node_modules/jest/bin/jest.js",
+            "--ci",
+            "--coverage",
+            "--coverageProvider=v8",
+        ]);
+        assert_eq!(covered.code, 0, "{}", covered.out());
+        assert!(
+            covered.stderr.contains("hushrun: unit: each test is taken to have read what its test file read: Jest's own V8 coverage is on, and it takes the counters watching a test needs"),
+            "Jest {}: {}",
+            jest.major,
+            covered.stderr
+        );
+    }
+}
+
+// covers: C-40, C-44, C-36
+#[test]
+fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_test() {
+    for jest in jests() {
+        // One test of a file runs a.js's code through wa.js, sixty others b.js's through wb.js;
+        // the test file requires both wrappers: a change to a.js runs only the first test, and
+        // two of the sixty, chosen by their keys, as a check.
+        let files = [
+            ("src/a.js", "exports.f = () => 1;\n"),
+            ("src/b.js", "exports.f = () => 1;\n"),
+            (
+                "src/wa.js",
+                "const a = require('./a');\nexports.f = () => a.f();\n",
+            ),
+            (
+                "src/wb.js",
+                "const b = require('./b');\nexports.f = () => b.f();\n",
+            ),
+            (
+                "test/a.test.js",
+                "const wa = require('../src/wa');\nconst wb = require('../src/wb');\ntest('one', () => { expect(wa.f()).toBe(1); });\ntest.each([...Array(60).keys()])('two %i', () => { expect(wb.f()).toBe(1); });\n",
+            ),
+        ];
+        let r = reads_repo(&jest, &files, "{mode: reuse, unit: test, reads: test}");
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 0, "{}", first.out());
+        let map = r.map();
+        assert_eq!(
+            map["units"]["test/a.test.js"]["tests"]
+                .as_object()
+                .unwrap()
+                .len(),
+            61
+        );
+        let mut results = Vec::new();
+        collect(&r.cache.join("results/units/v0"), &mut results);
+        assert_eq!(results.len(), 2 + 61 + 1, "Jest {}", jest.major);
+        r.write("src/a.js", "exports.f = () => 1; // changed\n");
+        let second = r.run(JEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.out());
+        assert!(
+            second.stderr.contains(
+                "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that did run as a check"
+            ),
+            "Jest {}: {}",
+            jest.major,
+            second.stderr
+        );
+        assert_eq!(
+            store_result(&r)["units"]["tests"],
+            json!({"total": 62, "ran": 4, "reused": 58})
+        );
     }
 }

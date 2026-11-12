@@ -365,6 +365,45 @@ function install(S) {
     return [...files];
   }
 
+  // ---------------------------------------------------------------- why a test isn't watched
+  const V8_COVERAGE = "Jest's own V8 coverage is on, and it takes the counters watching a test needs";
+  const TYPE_AWARE = 'ts-jest checks types with a language service, which reads every file of code for every test file';
+  // The repository file whose code is running: the nearest frame of the stack that is one.
+  function opener() {
+    const limit = Error.stackTraceLimit;
+    const prepare = Error.prepareStackTrace;
+    let frames = [];
+    try {
+      Error.stackTraceLimit = 40;
+      Error.prepareStackTrace = (_, callSites) => callSites;
+      const holder = {};
+      Error.captureStackTrace(holder, opener);
+      frames = holder.stack || [];
+    } catch {
+      frames = [];
+    } finally {
+      Error.prepareStackTrace = prepare;
+      Error.stackTraceLimit = limit;
+    }
+    for (const frame of Array.isArray(frames) ? frames : []) {
+      const name = frame && typeof frame.getFileName === 'function' ? frame.getFileName() : null;
+      if (!name || name === __filename) continue;
+      const r = rel(name);
+      if (r) return r;
+    }
+    return null;
+  }
+  // Jest's config files, as the main process that claimed the run found them.
+  function everyFromMain() {
+    if (S.main) return S.main.every || [];
+    try {
+      const list = JSON.parse(process.env.HUSHRUN_JEST_EVERY || '[]');
+      return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
   // ---------------------------------------------------------------- one test file in a worker
   const bucket = (kind, describe) => ({ kind, describe, called: new Set(), opened: new Set(), loaded: new Set(), dirs: new Set(), nf: [] });
   // [RFC 0004 §4.2, §4.3] A test's names: its suites' and its own, from the outermost.
@@ -414,12 +453,19 @@ function install(S) {
       this.mayDeselect = process.env.HUSHRUN_JEST_DESELECT === '1';
       const listed = run.reuseTests && this.file ? run.reuseTests[this.file] : null;
       this.reuse = new Set(this.mayDeselect && Array.isArray(listed) ? listed : []);
-      this.watch = S.watchAsked && process.env.HUSHRUN_JEST_WATCH === '1';
+      // Whether to watch each test, as the main process said; else why not, in its words.
+      const watch = process.env.HUSHRUN_JEST_WATCH || '';
+      this.watch = S.watchAsked && watch === '1';
+      this.unwatched = S.watchAsked && !this.watch && watch !== '0' && watch ? watch : null;
       const co = runtime && runtime._coverageOptions;
       if (this.watch && co && co.collectCoverage && co.coverageProvider === 'v8') {
         // Jest's own V8 coverage takes the same counters: watching would empty it.
         this.watch = false;
+        this.unwatched = V8_COVERAGE;
       }
+      // [C-40] What each module of the repository opened, kept with the module: a file read once
+      // and cached reaches every test that runs the module's code.
+      this.opens = new Map();
       this.coverage = false;
       if (this.watch) {
         try {
@@ -434,18 +480,31 @@ function install(S) {
       // What this process read since the last test file ended is this one's: Jest reading it and
       // setting up its environment.
       const p = S.pending;
-      for (const r of p.opened) this.open(r);
+      for (const r of p.opened) {
+        this.reads.add(r);
+        this.keep(r, null);
+      }
       for (const r of p.dirs) this.list(r);
       this.fileBucket.nf.push(...p.notFollowed);
       S.pending = { opened: new Set(), dirs: new Set(), notFollowed: [] };
     }
     open(r) {
       this.reads.add(r);
+      const who = this.watch ? opener() : null;
       // Inside a require, held until it ends: Jest reading a module to compile it isn't the
       // test opening it.
       const frame = S.frames[S.frames.length - 1];
-      if (frame) frame.opened.push(r);
-      else this.current.opened.add(r);
+      if (frame) frame.opened.push([r, who]);
+      else this.keep(r, who);
+    }
+    // An open that stands: the window's, and the module's whose code opened it. The test file's
+    // own opens are its tests' or its collection's, never every test's.
+    keep(r, who) {
+      this.current.opened.add(r);
+      if (who && who !== this.file && who !== r) {
+        if (!this.opens.has(who)) this.opens.set(who, new Set());
+        this.opens.get(who).add(r);
+      }
     }
     list(r) {
       this.dirs.add(r);
@@ -605,6 +664,15 @@ function install(S) {
       // [RFC 0004 §3.2] What each test read is told only when every part is: its window's
       // counters, the file's direct imports, and no type checker reading everything.
       const lists = this.watch && this.coverage && this.resolves && !typeAware;
+      // [C-40] Why no test of it was watched, in a sentence people read.
+      let watchWhy = null;
+      if (S.watchAsked && S.byTest) {
+        if (typeAware) watchWhy = TYPE_AWARE;
+        else if (this.unwatched) watchWhy = this.unwatched;
+        else if (!this.resolves) watchWhy = "this Jest's runtime doesn't say which file a module name resolves to, which watching a test needs (Jest 29, or 30.5 and later)";
+        else if (!this.coverage) watchWhy = "V8's precise coverage, which watching a test needs, wasn't available in a Jest process";
+        else if (this.concurrent) watchWhy = 'test.concurrent tests run at once, so each of them takes its test file\'s list';
+      }
       const records = this.order.map((t) => this.tests.get(t));
       // In a file with concurrent tests, windows overlap: what wasn't followed is the file's. And
       // where tests aren't told, what wasn't followed in one is the file's too.
@@ -647,10 +715,31 @@ function install(S) {
         const position = new Map(records.map((r, i) => [r, i]));
         // What wasn't watched outside every test's window: listed directories go to each test.
         const fileDirs = new Set(this.fileBucket.dirs);
-        unit.tests = records.map((r) => {
+        // [RFC 0004 §4.3] One entry per id: tests whose ids collide are told as one, never left
+        // out, failed if any failed and finished only if all did, with no list of their own.
+        const groups = new Map();
+        for (const r of records) {
+          if (!groups.has(r.id)) groups.set(r.id, []);
+          groups.get(r.id).push(r);
+        }
+        const place = new Map([...groups.keys()].map((id, i) => [id, i]));
+        const done = (r) => r.status === 'passed' || r.status === 'failed' || r.status === 'skipped';
+        unit.tests = [...groups.values()].map((rs) => {
+          const r = rs[0];
+          if (rs.length > 1 || r.ambiguous) {
+            return {
+              id: r.id,
+              finished: rs.every(done),
+              failed: rs.some((x) => x.status === 'failed'),
+              deselected: false,
+              durationMs: rs.reduce((n, x) => n + (x.durationMs || 0), 0),
+              notFollowed: this.concurrent ? [] : dedupe(rs.flatMap((x) => x.b.nf)),
+              neverLeftOut: true,
+            };
+          }
           const out = {
             id: r.id,
-            finished: r.status === 'passed' || r.status === 'failed' || r.status === 'skipped',
+            finished: done(r),
             failed: r.status === 'failed',
             deselected: r.status === 'left-out',
             durationMs: r.durationMs || 0,
@@ -668,15 +757,17 @@ function install(S) {
           return out;
         });
         if (lists) {
-          unit.loaded = {
-            ran: ixs(new Set([...this.fileBucket.called, ...this.setup, ...S.processFiles])),
-            opened: ixs(this.fileBucket.opened),
-          };
+          // What collection called and opened; what the runner loads for every test of the
+          // file: its setup files, its process's own code and Jest's config files.
+          unit.loaded = { ran: ixs(this.fileBucket.called), opened: ixs(this.fileBucket.opened) };
+          unit.everyTest = ixs(new Set([...this.setup, ...S.processFiles, ...everyFromMain()]));
           unit.shared = this.hooks.map((b) => ({
-            tests: records.map((r, i) => ((r.status === 'passed' || r.status === 'failed') && under(this.order[i], b.describe) ? i : -1)).filter((i) => i >= 0),
+            tests: [...new Set(records
+              .filter((r, i) => (r.status === 'passed' || r.status === 'failed') && !r.ambiguous && groups.get(r.id).length === 1 && under(this.order[i], b.describe))
+              .map((r) => place.get(r.id)))].sort((a, c) => a - c),
             ran: ixs(new Set([...b.called, ...b.loaded])),
             opened: ixs(b.opened),
-          })).filter((s) => s.tests.length);
+          })).filter((x) => x.tests.length);
         }
       }
       const imports = {};
@@ -687,6 +778,8 @@ function install(S) {
         }
         for (const k of Object.keys(imports)) imports[k] = [...new Set(imports[k])].sort((a, b) => a - b);
       }
+      const opens = {};
+      if (lists) for (const [who, set] of this.opens) opens[String(ix(who))] = ixs(set);
       S.written += 1;
       writeWhole(`jest-${process.pid}-${wt.threadId}-${S.written}.json`, {
         schema: SCHEMA,
@@ -695,12 +788,14 @@ function install(S) {
         settings: {
           typeAware,
           watched: lists,
+          ...(watchWhy ? { watch: watchWhy } : {}),
           leftOut: this.leftOut,
           fileFailures: this.fileFailures,
         },
         units: [unit],
         paths: table,
         imports,
+        opens,
         edges: [...this.edges.values()].map(([from, to]) => [from, to, 'import']),
         removedItems: this.leftOut,
         errors: S.errors.splice(0),
@@ -801,14 +896,13 @@ function install(S) {
     const at = S.frames.lastIndexOf(frame);
     if (at < 0) return;
     S.frames.splice(at);
-    const kept = frame.opened.filter((r) => !frame.compiled.has(r));
+    const kept = frame.opened.filter(([r]) => !frame.compiled.has(r));
     const parent = S.frames[S.frames.length - 1];
     if (parent) {
       // Jest 29 reads a module in the require around the one that compiles it.
       for (const r of frame.compiled) parent.compiled.add(r);
       parent.opened.push(...kept);
-    }
-    else if (S.session) for (const r of kept) S.session.current.opened.add(r);
+    } else if (S.session) for (const [r, who] of kept) S.session.keep(r, who);
   }
   function patchRuntime(Runtime) {
     const proto = Runtime.prototype;
@@ -917,6 +1011,7 @@ function install(S) {
     process.env.HUSHRUN_JEST_RUN = String(process.pid);
     process.env.HUSHRUN_JEST_DESELECT = '0';
     process.env.HUSHRUN_JEST_WATCH = '0';
+    process.env.HUSHRUN_JEST_EVERY = '[]';
     S.buffering = false;
     process.on('exit', () => guard('exit', () => S.writeMain(null)));
     return true;
@@ -924,6 +1019,7 @@ function install(S) {
   function notClaimed() {
     // A Jest started inside a test file of the run: neither it nor its workers write.
     delete process.env.HUSHRUN_JEST_RUN;
+    delete process.env.HUSHRUN_JEST_EVERY;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     S.buffering = false;
   }
@@ -931,6 +1027,7 @@ function install(S) {
     if (cfg.readConfigs.__hushrun) return;
     const readConfigs = cfg.readConfigs;
     const wrapped = async function readConfigsHushrun(argv) {
+      if (argv && typeof argv.config === 'string') S.argvConfig = argv.config;
       const out = await readConfigs.apply(this, arguments);
       if (!claimMain()) {
         notClaimed();
@@ -994,7 +1091,8 @@ function install(S) {
     if (issues.length) M.refused = issues.join('; ');
     const v8 = g.collectCoverage && g.coverageProvider === 'v8';
     const runnerOk = configs.every((c) => /jest-circus/.test(String(c.testRunner)));
-    process.env.HUSHRUN_JEST_WATCH = S.watchAsked && !v8 && runnerOk ? '1' : '0';
+    process.env.HUSHRUN_JEST_WATCH = !S.watchAsked || !runnerOk ? '0' : v8 ? V8_COVERAGE : '1';
+    S.rootDirs = configs.map((c) => c.rootDir).filter((d) => typeof d === 'string');
   }
   const SEQ_DONE = Symbol.for('hushrun.jest.sequencer');
   function patchSequencer(Seq) {
@@ -1063,8 +1161,23 @@ function install(S) {
     if (kept.length === 0 && sorted.length > 0) M.allLeftOut = true;
     return kept;
   }
+  // Jest's config files: what the main process compiled and its globalSetup read, Jest's config
+  // by its names in each project's root, and --config's file.
+  function configFiles() {
+    const out = new Set(S.processFiles);
+    for (const f of S.global.opened) out.add(f);
+    const names = ['jest.config.js', 'jest.config.ts', 'jest.config.mjs', 'jest.config.cjs', 'jest.config.mts', 'jest.config.cts'];
+    for (const d of S.rootDirs || []) for (const n of names) if (own.existsSync(path.join(d, n))) out.add(rel(path.join(d, n)));
+    if (S.argvConfig && own.existsSync(path.resolve(S.argvConfig))) out.add(rel(path.resolve(S.argvConfig)));
+    out.delete(null);
+    return [...out].sort();
+  }
   S.runStarted = function runStarted() {
     S.window = false;
+    guard('config files', () => {
+      S.main.every = configFiles();
+      process.env.HUSHRUN_JEST_EVERY = JSON.stringify(S.main.every);
+    });
     // In band, this process runs the test files from here.
     S.buffering = true;
   };
@@ -1095,8 +1208,7 @@ function install(S) {
     M.written = true;
     const units = [...M.results.values()];
     for (const file of M.removed) units.push({ unit: file, selected: 0, finished: 0, failed: false, deselected: true, durationMs: 0 });
-    const configFiles = new Set(S.processFiles);
-    for (const f of S.global.opened) configFiles.add(f);
+    const files = guard('config files', configFiles) || [];
     writeWhole(`jest-main-${process.pid}.json`, {
       schema: SCHEMA,
       adapter: 'jest-main',
@@ -1106,7 +1218,7 @@ function install(S) {
         testFiles: M.testFiles,
         selected: M.selected,
         refused: M.refused,
-        configFiles: [...configFiles].sort(),
+        configFiles: files,
         dirs: [...S.global.dirs].sort(),
         complete: !!results,
         ...M.settings,
