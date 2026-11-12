@@ -96,20 +96,82 @@ pub struct Copied {
     pub exit: Option<i32>,
     /// The signal that stopped it, when one did.
     pub signal: Option<i32>,
-    /// Every byte it wrote on its standard output, as written, until it ended, or until its
-    /// output was handed to a forwarder ([`Copied::held`]).
+    /// The lines of its standard output the caller wanted, each whole with its ending, as
+    /// written, until it ended, or until its output was handed to a forwarder ([`Copied::held`]).
     pub stdout: Vec<u8>,
+    /// How many bytes those lines came to, kept or not.
+    pub wanted: u64,
     /// \[ADR 0086\] Something it started still held its standard output after it ended: what it
     /// printed can't be read whole, so no pass of it is recorded. What comes later is passed on
     /// all the same, by a forwarder of its own ([`FORWARD`]).
     pub held: bool,
-    /// It printed more than [`KEEP_MOST`]: what came after wasn't kept (it was passed on), so
-    /// what it printed can't be read whole and no pass of it is recorded.
+    /// The lines wanted came to more than [`KEEP_MOST`]: those after weren't kept (they were
+    /// passed on), so what it printed can't be read whole and no pass of it is recorded.
     pub cut: bool,
 }
 
 /// \[ADR 0086\] The most of a program's output [`run_copying_stdout`] keeps to read.
 pub const KEEP_MOST: usize = 16 << 20;
+
+/// \[ADR 0086\] The longest line [`run_copying_stdout`] keeps whole: what follows on that line
+/// isn't kept.
+const LINE_MOST: usize = 64 << 10;
+
+/// \[ADR 0086\] What [`run_copying_stdout`] keeps of a program's output, as it goes by: each line
+/// `wanted` takes, whole with its ending (`\n` or `\r`), up to [`KEEP_MOST`] in all.
+struct Lines {
+    wanted: fn(&[u8]) -> bool,
+    line: Vec<u8>,
+    kept: Vec<u8>,
+    bytes: u64,
+    cut: bool,
+}
+
+impl Lines {
+    fn new(wanted: fn(&[u8]) -> bool) -> Lines {
+        Lines {
+            wanted,
+            line: Vec::new(),
+            kept: Vec::new(),
+            bytes: 0,
+            cut: false,
+        }
+    }
+
+    fn take(&mut self, mut bytes: &[u8]) {
+        while let Some(at) = bytes.iter().position(|b| *b == b'\n' || *b == b'\r') {
+            self.push(&bytes[..at]);
+            self.end(bytes[at]);
+            bytes = &bytes[at + 1..];
+        }
+        self.push(bytes);
+    }
+
+    fn push(&mut self, part: &[u8]) {
+        let room = LINE_MOST.saturating_sub(self.line.len());
+        self.line.extend_from_slice(&part[..part.len().min(room)]);
+    }
+
+    fn end(&mut self, ending: u8) {
+        if !self.line.is_empty() && (self.wanted)(&self.line) {
+            let size = self.line.len() + 1;
+            self.bytes += size as u64;
+            if self.kept.len() + size <= KEEP_MOST {
+                self.kept.extend_from_slice(&self.line);
+                self.kept.push(ending);
+            } else {
+                self.cut = true;
+            }
+        }
+        self.line.clear();
+    }
+
+    /// What was kept, what the wanted lines came to, and whether some weren't kept.
+    fn finish(mut self) -> (Vec<u8>, u64, bool) {
+        self.end(b'\n');
+        (self.kept, self.bytes, self.cut)
+    }
+}
 
 /// \[ADR 0086\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
 /// to tell "still held open by a program it left running" from "closing now": what its last
@@ -131,7 +193,8 @@ impl Copied {
 }
 
 /// \[ADR 0086\] Runs `command` with its standard output copied, byte for byte, to this process's
-/// as it goes by, and kept: through a pseudo-terminal in raw mode, with the window's size, when
+/// as it goes by, and its lines `wanted` takes kept, as they go by ([`Copied::stdout`]), so that
+/// a program that prints much besides is still read: through a pseudo-terminal in raw mode, with the window's size, when
 /// this process's standard output is a terminal (a program that colors only on one, Swift Testing,
 /// still does), else through a pipe. Standard input and error are inherited untouched, and the
 /// signals that stop a process are passed on, as [`Program::args`]'s start does. `Err` when it
@@ -143,35 +206,36 @@ impl Copied {
 /// again, [`FORWARD`], with the read end as its standard input and this process's standard output
 /// as its own), as a shell lets that program go on printing: nothing waits, nothing is lost, and
 /// the run is [`Copied::held`].
-pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
+pub fn run_copying_stdout(
+    mut command: Command,
+    wanted: fn(&[u8]) -> bool,
+) -> std::io::Result<Copied> {
     let (mut from, to) = output_channel()?;
     command.stdout(to);
     let mut child = command.spawn()?;
     // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
     drop(command);
     let forwarding = super::runner::forward_signals(child.id());
-    let mut kept = Vec::new();
-    let mut cut = false;
-    let (status, held) = copy_until_held(&mut from, &mut child, &mut |bytes| {
-        // Kept up to KEEP_MOST to be read; passed on whole.
-        let room = KEEP_MOST.saturating_sub(kept.len());
-        kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
-        cut |= bytes.len() > room;
-    });
+    // The lines wanted kept up to KEEP_MOST to be read; every byte passed on.
+    let mut lines = Lines::new(wanted);
+    let (status, held) = copy_until_held(&mut from, &mut child, &mut |bytes| lines.take(bytes));
     drop(forwarding);
     if held {
         hand_over(from);
     }
+    let (kept, wanted, cut) = lines.finish();
     Ok(match status {
         Some(status) => Copied {
             exit: status.code(),
             signal: super::runner::signal_of(&status),
             stdout: kept,
+            wanted,
             held,
             cut,
         },
         None => Copied {
             stdout: kept,
+            wanted,
             held,
             cut,
             ..Copied::default()
@@ -844,7 +908,7 @@ mod tests {
             pid.display()
         ));
         let started = std::time::Instant::now();
-        let copied = run_copying_stdout(command).unwrap();
+        let copied = run_copying_stdout(command, |_| true).unwrap();
         let took = started.elapsed();
         if let Ok(text) = std::fs::read_to_string(&pid) {
             let _ = Command::new("kill").arg(text.trim()).status();
@@ -859,7 +923,7 @@ mod tests {
         // A program whose output ends with it isn't held.
         let mut quick = Command::new("sh");
         quick.arg("-c").arg("echo done");
-        assert!(!run_copying_stdout(quick).unwrap().held);
+        assert!(!run_copying_stdout(quick, |_| true).unwrap().held);
     }
 
     // covers: C-39
@@ -868,7 +932,7 @@ mod tests {
     fn a_program_on_path_ends_with_a_windows_exit_code_whole() {
         let mut command = Command::new("cmd");
         command.args(["/C", "exit 300"]);
-        let copied = run_copying_stdout(command).unwrap();
+        let copied = run_copying_stdout(command, |_| true).unwrap();
         assert_eq!(copied.exit, Some(300));
         assert_eq!(
             super::super::runner::ending(copied.exit, copied.signal, cfg!(windows)),
@@ -884,9 +948,11 @@ mod tests {
         let pid = tmp.path().join("pid");
         // The program exits, and leaves one printing as fast as it can.
         let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(format!("yes & echo $! > '{}'; exit 4", pid.display()));
+        command.arg("-c").arg(format!(
+            "yes '{}' & echo $! > '{}'; exit 4",
+            "a long line printed over and over ".repeat(30),
+            pid.display()
+        ));
         // Whatever happens, `yes` stops after 10 s.
         let watched = pid.clone();
         std::thread::spawn(move || {
@@ -896,7 +962,7 @@ mod tests {
             }
         });
         let started = std::time::Instant::now();
-        let copied = run_copying_stdout(command).unwrap();
+        let copied = run_copying_stdout(command, |_| true).unwrap();
         let took = started.elapsed();
         if let Ok(text) = std::fs::read_to_string(&pid) {
             let _ = Command::new("kill").arg(text.trim()).status();

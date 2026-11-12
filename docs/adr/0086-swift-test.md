@@ -257,3 +257,16 @@ still passed on whole, and such a run records no pass, saying why.
 A signal sent once swift had ended (while hushrun's `swift` listed or read) was stored and never
 acted on: signal-hook can't put a default handler back. Each signal now also gets a default
 action that runs once forwarding stops, so it ends hushrun's `swift` as it would any program.
+
+## Amendment 5: a loud suite, and saying why output wasn't read (2026-11-12)
+
+A third review printed more than 16 MiB from a test: Amendment 4's cap kept the first 16 MiB of
+bytes, so the `Test Case` lines that came after were never read, nothing of the tests was
+recorded, and nothing said so. hushrun now keeps, as output goes by, only the lines it reads
+(XCTest's `Test Case '…'`), whole, at most 16 MiB of them; everything is still passed on byte for
+byte. A suite that prints much besides is recorded. Past 16 MiB of those lines, or with output a
+program swift started still held after swift ended, each test of the run with no failure seen is
+`not observed`, with why (`output`), so `hushrun why` says the reason of each test, and the run
+says it once, through its facts' `settings.note`, with the size: `hushrun: unit: swift test
+printed 17.0 MiB of `Test Case` lines, more than the 16 MiB hushrun reads: none of its tests is
+recorded`. A line longer than 64 KiB is kept up to there.

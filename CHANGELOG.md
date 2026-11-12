@@ -313,6 +313,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: the plan's listing is taken once, by the `ctest` COMMAND starts, and never by a later
   start or one under a wrapper, which list for themselves; and a failed test the listing didn't
   name (one discovery added after it) keeps every pass of its `ctest` out.
+- `swift test`: hushrun keeps only XCTest's `Test Case` lines of what swift prints, as they go by,
+  so a suite that prints more than 16 MiB besides is still recorded; past 16 MiB of those lines,
+  or with output still held after swift ended, the run says once why no test is recorded, and
+  `hushrun why` says it of each test.
 - CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
   or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
   `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build

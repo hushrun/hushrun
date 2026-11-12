@@ -1009,6 +1009,8 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
 /// A `swift` for a whole run: a package whose `CoreTests` depends on `Extra` only when the
 /// environment has `WITH_EXTRA`, as a manifest that reads `Context.environment` may say, and
 /// whose XCTest tests print as macOS prints them, but those a `--skip` leaves out.
+/// With `LOUD`, it prints 17 MiB before its tests: of other lines (`junk`), or of `Test Case`
+/// lines of no test (`cases`).
 #[cfg(unix)]
 fn fake_env_swift(dir: &Path, root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1040,6 +1042,10 @@ fn fake_env_swift(dir: &Path, root: &Path) {
          *describe*) if [ -n \"$WITH_EXTRA\" ]; then echo '{with}'; else echo '{without}'; fi; exit 0 ;;\n\
          *dump-package*) echo '{dump}'; exit 0 ;;\n\
          'test list'*) printf 'CoreTests.CoreTests/testA\\nGreetTests.GreetTests/testB\\n'; exit 0 ;;\n\
+         esac\n\
+         case \"$LOUD\" in\n\
+         junk) yes 'a loud test prints this' | head -c 17825792; echo ;;\n\
+         cases) yes \"Test Case '-[Noise.Noise testN]' started.\" | head -c 17825792; echo ;;\n\
          esac\n{a}{b}",
         with = describe(r#""Core", "Extra""#),
         without = describe(r#""Core""#),
@@ -1089,6 +1095,77 @@ fn the_tools_hushrun_starts_for_swift_get_commands_own_env_assignments() {
     assert_eq!(
         second.line("hushrun: unit: "),
         "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+    );
+}
+
+// covers: C-48, C-37
+#[cfg(unix)]
+#[test]
+fn a_loud_swift_test_is_recorded_and_past_what_hushrun_reads_says_why() {
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("Package.swift", "// swift-tools-version: 6.0\n"),
+        file("Sources/Core/Core.swift", "public let core = 1\n"),
+        file("Sources/Extra/Extra.swift", "public let extra = 1\n"),
+        file("Sources/Greet/Greet.swift", "public let greet = 1\n"),
+        file("Tests/CoreTests/CoreTests.swift", "// a\n"),
+        file("Tests/GreetTests/GreetTests.swift", "// b\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fake = std::fs::canonicalize(dir.path()).unwrap().join("swift");
+    let r = Repo::new(&fake, &files);
+    fake_env_swift(&fake.parent().unwrap().join("bin"), &r.repo);
+    let fake = fake.parent().unwrap().join("bin/swift");
+    let r = Repo {
+        path: std::env::join_paths([
+            fake.parent().unwrap(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap(),
+        ..r
+    };
+    // 17 MiB of `Test Case` lines: past what hushrun reads, nothing of the tests is recorded,
+    // and the run says why once, as `hushrun why` does of each test.
+    let cut = r.run(
+        &["run", "unit", "--", "swift", "test"],
+        &[("LOUD", "cases")],
+    );
+    assert_eq!(cut.code, 0, "{}", cut.stderr);
+    let why = "swift test printed 17.0 MiB of `Test Case` lines, more than the 16 MiB hushrun reads: none of its tests is recorded";
+    let said: Vec<&str> = cut.stderr.lines().filter(|l| l.contains(why)).collect();
+    assert_eq!(said, [format!("hushrun: unit: {why}")], "{}", cut.stderr);
+    let asked = r.run(
+        &[
+            "why",
+            "unit",
+            "Tests/CoreTests::CoreTests/testA",
+            "--format",
+            "json",
+        ],
+        &[],
+    );
+    assert_eq!(asked.code, 0, "{}\n{}", asked.stdout, asked.stderr);
+    let asked: Value = serde_json::from_str(&asked.stdout).unwrap();
+    assert_eq!(
+        asked["says"],
+        format!(
+            "Tests/CoreTests::CoreTests/testA runs: hushrun couldn't follow all it read the last time it ran here: output ({why})"
+        ),
+        "{asked:#}"
+    );
+    // 17 MiB of what a test printed, then its `Test Case` lines: hushrun keeps those as they go
+    // by, and the tests are recorded.
+    let loud = r.run(
+        &["run", "--force", "unit", "--", "swift", "test"],
+        &[("LOUD", "junk")],
+    );
+    assert_eq!(loud.code, 0, "{}", loud.stderr);
+    assert_eq!(
+        r.map()["units"]["Tests/CoreTests"]["tests"],
+        json!({"CoreTests/testA": "passed"}),
+        "{}",
+        loud.stderr
     );
 }
 
@@ -1200,7 +1277,7 @@ fn a_program_a_test_left_running_keeps_printing_after_hushruns_swift_returns() {
         .collect();
     assert_eq!(facts.len(), 1, "{facts:?}");
     assert_eq!(
-        facts[0]["units"][0]["tests"][0]["finished"], false,
+        facts[0]["units"][0]["tests"][0]["notFollowed"][0]["why"], "output",
         "{:#}",
         facts[0]
     );
