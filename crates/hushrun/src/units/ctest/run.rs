@@ -50,6 +50,7 @@ impl program::Program for Ctest {
     }
 
     fn args(&self, call: &Call<'_>) -> Vec<OsString> {
+        debug_assert_eq!(call.name, "ctest");
         let Some(units) = call.units else {
             return call.args.to_vec();
         };
