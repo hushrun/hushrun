@@ -364,6 +364,8 @@ struct TestSaw {
     finished: bool,
     failed: bool,
     deselected: bool,
+    /// \[C-32\] An invocation of it was skipped: its body didn't run.
+    skipped: bool,
     duration_ms: u64,
 }
 
@@ -374,6 +376,8 @@ struct UnitSaw {
     complete: bool,
     failed: bool,
     deselected: bool,
+    /// \[C-32\] A test of it was skipped.
+    skipped: bool,
     duration_ms: u64,
     not_followed: BTreeSet<NotFollowed>,
     dirs: BTreeSet<String>,
@@ -400,6 +404,7 @@ impl UnitSaw {
         self.complete &= one.complete || one.deselected;
         self.failed |= one.failed;
         self.deselected &= one.deselected;
+        self.skipped |= one.skipped;
         self.duration_ms = self.duration_ms.saturating_add(one.duration_ms);
         self.not_followed.extend(one.not_followed);
         self.dirs.extend(one.dirs);
@@ -421,6 +426,7 @@ impl UnitSaw {
                         };
                     }
                     had.failed |= saw.failed;
+                    had.skipped |= saw.skipped;
                     had.deselected &= saw.deselected;
                     had.duration_ms = had.duration_ms.saturating_add(saw.duration_ms);
                 }
@@ -460,8 +466,18 @@ fn report_of(file: &FactsFile) -> Result<Report, String> {
     Ok(report)
 }
 
-/// Each unit one task's report speaks of, as that task saw it, with its tests.
-fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
+/// Whether something a task's report speaks of failed: the task, a test, or a suite.
+fn report_failed(report: &Report) -> bool {
+    report.task_failed
+        || !report.suite_failures.is_empty()
+        || report.invocations.iter().any(|inv| inv.r == "FAILURE")
+}
+
+/// Each unit one task's report speaks of, as that task saw it, with its tests. \[C-32\] A skipped
+/// test is told `skipped`; it counts as finished only when nothing of the run failed
+/// (`run_failed`): TestNG skips every test of a suite whose configuration failed, in any class,
+/// and a JVM that died leaves the test in flight skipped. Then its class didn't run whole either.
+fn units_of(report: &Report, errors: &[String], run_failed: bool) -> Vec<(String, UnitSaw)> {
     let mut out = Vec::new();
     if report.outcome == "not-followed" {
         return out;
@@ -533,22 +549,27 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
         one.failed = class_failed.contains(outer.as_str());
         // A class left out whole ran nothing, and Gradle never named its tests.
         one.told = !one.deselected;
-        let testng = report.framework.as_deref() == Some("testng");
         let any_failed =
             events.is_some_and(|tests| tests.values().flatten().any(|inv| inv.r == "FAILURE"));
         for (id, invs) in events.into_iter().flatten() {
             let failed = invs.iter().any(|inv| inv.r == "FAILURE");
-            let skipped = invs.iter().all(|inv| inv.r == "SKIPPED");
-            // A test skipped in a class whose setup failed didn't earn a pass: TestNG reports a
-            // failing configuration method as a failed test and skips the rest of its class.
-            let cascade = skipped && (one.failed || (testng && any_failed));
+            let skipped = !failed && invs.iter().any(|inv| inv.r == "SKIPPED");
+            // A test skipped in a class or a run where something failed didn't earn a pass:
+            // TestNG reports a failing configuration method as a failed test and skips what it
+            // guards, in its class or in every class of its suite.
+            let cascade = skipped && (one.failed || any_failed || run_failed);
             let saw = TestSaw {
                 finished: whole && !cascade,
                 failed,
                 deselected: false,
+                skipped,
                 duration_ms: invs.iter().map(|inv| inv.ms).fold(0, u64::saturating_add),
             };
             one.failed |= failed;
+            one.skipped |= skipped;
+            if cascade {
+                one.complete = false;
+            }
             one.duration_ms = one.duration_ms.saturating_add(saw.duration_ms);
             one.tests.insert(id.clone(), saw);
         }
@@ -563,6 +584,7 @@ fn units_of(report: &Report, errors: &[String]) -> Vec<(String, UnitSaw)> {
                 finished: false,
                 failed: false,
                 deselected: whole,
+                skipped: false,
                 duration_ms: 0,
             });
         }
@@ -578,10 +600,15 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
     if mine.is_empty() {
         return Ok(None);
     }
+    let reports = mine
+        .iter()
+        .map(|file| Ok((report_of(file)?, &file.errors)))
+        .collect::<Result<Vec<_>, String>>()?;
+    // \[C-32\] Something of this run's tasks failed.
+    let run_failed = reports.iter().any(|(report, _)| report_failed(report));
     let mut merged: BTreeMap<String, UnitSaw> = BTreeMap::new();
-    for file in mine {
-        let report = report_of(file)?;
-        for (name, one) in units_of(&report, &file.errors) {
+    for (report, errors) in &reports {
+        for (name, one) in units_of(report, errors, run_failed) {
             merged.entry(name).or_insert_with(UnitSaw::unseen).add(one);
         }
     }
@@ -622,6 +649,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                     failed: saw.failed,
                     not_followed,
                     deselected: saw.deselected,
+                    skipped: saw.skipped,
                     ..Facts::default()
                 },
                 reads,
@@ -634,6 +662,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                                 finished: t.finished,
                                 failed: t.failed,
                                 deselected: t.deselected,
+                                skipped: t.skipped,
                                 duration_ms: t.duration_ms,
                                 ..MergedTest::default()
                             };

@@ -427,6 +427,20 @@ struct ClassSeen {
     from_reports: bool,
 }
 
+impl ClassSeen {
+    /// Its events or its reports say something of it failed.
+    fn any_failed(&self) -> bool {
+        self.events
+            .as_ref()
+            .is_some_and(|e| e.failed || e.tests.values().any(|t| t.failed))
+            || self.case_class_failed
+            || self
+                .cases
+                .values()
+                .any(|(o, _)| o.contains(&reports::Outcome::Failed))
+    }
+}
+
 /// A report's test name up to its parameters or invocation: `param(int)[1]` is `param`.
 fn method_of_case(name: &str) -> &str {
     name.split(['[', '(', '{']).next().unwrap_or(name).trim()
@@ -575,11 +589,13 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         failures_by_unit: unattributed == 0,
         ..Observed::default()
     };
+    // \[C-32\] Something of this run failed: a failure no class owns, or any class's.
+    let run_failed = unattributed > 0 || seen.values().any(ClassSeen::any_failed);
     for ((module_dir, class), class_seen) in seen {
         let Some(module) = modules.get(&module_dir) else {
             continue;
         };
-        let Some(mut seen_unit) = decide_class(&class_seen) else {
+        let Some(mut seen_unit) = decide_class(&class_seen, run_failed) else {
             continue;
         };
         if !module.not_built.is_empty() {
@@ -651,13 +667,17 @@ fn merge_events(mut a: ClassEvents, b: &ClassEvents) -> ClassEvents {
 
 /// \[C-47\] What one test class's events, or else its reports, come to as facts: hushrun's facts,
 /// never a state. A test is finished only when every invocation of it finished; a failure is a
-/// failure; a skipped test counts as finished only in a class with no failure (TestNG skips the
-/// tests of a class whose setup failed); a class that failed outside its tests, or something of
-/// which never finished, finishes none of its tests but those that failed. `None` when neither
-/// says anything of it.
-fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
+/// failure; a class that failed outside its tests, or something of which never finished,
+/// finishes none of its tests but those that failed.
+///
+/// \[C-32\] A skipped test is told `skipped`, and so is its class. It counts as finished only
+/// when nothing of the run failed (`run_failed`): TestNG skips every test of a suite whose
+/// configuration failed, in any class, and the tests that depend on a method that failed; then
+/// its class didn't run whole either. `None` when neither says anything of it.
+fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
     let mut tests: BTreeMap<String, MergedTest> = BTreeMap::new();
-    let (class_failed, open, complete, deselected, unnamed);
+    let (class_failed, open, mut complete, deselected, unnamed);
+    let mut class_skipped = false;
     if let Some(e) = c.events.as_ref().filter(|e| {
         e.started
             || e.finished
@@ -669,7 +689,7 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         let any_open = e.open || e.tests.values().any(|t| t.open);
         for (id, t) in &e.tests {
             let mut finished = t.finished && !t.open;
-            if (t.skipped && any_failed) || ((e.failed || any_open) && !t.failed) {
+            if (t.skipped && (any_failed || run_failed)) || ((e.failed || any_open) && !t.failed) {
                 finished = false;
             }
             tests.insert(
@@ -678,11 +698,13 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
                     finished: finished || t.failed,
                     failed: t.failed,
                     deselected: t.left_out && !t.started,
+                    skipped: t.skipped && !t.failed,
                     duration_ms: t.duration_ms,
                     ..MergedTest::default()
                 },
             );
         }
+        class_skipped = e.skipped;
         class_failed = any_failed;
         open = any_open;
         let all_done = !e.tests.is_empty()
@@ -716,12 +738,14 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         for (id, (outcomes, ms)) in &c.cases {
             let failed = outcomes.contains(&reports::Outcome::Failed);
             let skipped = outcomes.contains(&reports::Outcome::Skipped);
-            let finished = failed || !((skipped && any_failed) || c.case_class_failed);
+            let finished =
+                failed || !((skipped && (any_failed || run_failed)) || c.case_class_failed);
             tests.insert(
                 id.clone(),
                 MergedTest {
                     finished,
                     failed,
+                    skipped: skipped && !failed,
                     duration_ms: *ms,
                     ..MergedTest::default()
                 },
@@ -752,11 +776,17 @@ fn decide_class(c: &ClassSeen) -> Option<super::Seen> {
         .values()
         .map(|t| t.duration_ms)
         .fold(0, u64::saturating_add);
+    // \[C-32\] A skip that didn't count as finished: the class didn't run whole.
+    if tests.values().any(|t| t.skipped && !t.finished) {
+        complete = false;
+    }
+    let skipped = class_skipped || tests.values().any(|t| t.skipped && !t.deselected);
     Some(super::Seen {
         facts: Facts {
             complete: complete && !open,
             failed: class_failed,
             deselected,
+            skipped,
             ..Facts::default()
         },
         reads: BTreeSet::new(),

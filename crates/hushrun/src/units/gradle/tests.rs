@@ -396,15 +396,24 @@ fn a_junit5_task_reports_classes_and_tests_left_out_and_class_failures() {
     for id in [
         "ex.app.CalcTest$Inner$Deeper.deep",
         "ex.app.CalcTest$Inner.innerPasses",
-        "ex.app.CalcTest.abortedByAssumption",
-        "ex.app.CalcTest.disabled",
         "ex.app.CalcTest.overloaded",
         "ex.app.CalcTest.paramNamed",
         "ex.app.CalcTest.repeated",
     ] {
         assert_eq!(states[id], units::State::Passed, "{id}");
     }
-    assert!(!calc.facts.failed && calc.facts.complete);
+    // \[C-32\] Skipped in a run where other classes failed: told skipped, and not finished, so
+    // the class didn't run whole.
+    let tests = calc.tests.as_ref().unwrap();
+    for id in [
+        "ex.app.CalcTest.abortedByAssumption",
+        "ex.app.CalcTest.disabled",
+    ] {
+        assert_eq!(states[id], units::State::NotRun, "{id}");
+        assert!(tests[id].skipped, "{id}");
+    }
+    assert!(!tests["ex.app.CalcTest.repeated"].skipped);
+    assert!(!calc.facts.failed && !calc.facts.complete && calc.facts.skipped);
     // What a class read: every file below its project's directory and below each project its
     // classpath is built from, build logic and other projects left out.
     assert!(calc.reads.contains("lib/src/main/java/ex/lib/Lib.java"));
@@ -693,7 +702,13 @@ fn a_task_gradle_didnt_run_whole_records_nothing() {
 #[test]
 fn what_the_script_couldnt_follow_makes_its_task_not_observed() {
     let t = junit5_tree();
-    let app = captured(JUNIT5_APP);
+    // Without the skipped tests, which other classes' failures keep from finishing (C-32).
+    let app = changed(&captured(JUNIT5_APP), |r| {
+        r["invocations"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|inv| inv["r"] != "SKIPPED");
+    });
     // A test framework the script doesn't know; the script's own error.
     let unknown = changed(&app, |r| {
         r["notFollowed"] = serde_json::json!([{"why": "test-framework", "detail": "x"}]);

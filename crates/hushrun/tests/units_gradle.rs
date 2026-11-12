@@ -166,6 +166,19 @@ impl Repo {
         serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
     }
 
+    /// Every unit result this machine recorded, `pass` or `fail`, by count.
+    fn unit_results(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut files = Vec::new();
+        collect(&self.cache.join("results/units/v0"), &mut files);
+        let mut out = std::collections::BTreeMap::new();
+        for f in files {
+            let v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            let result = v["result"].as_str().unwrap_or("?").to_string();
+            *out.entry(result).or_default() += 1;
+        }
+        out
+    }
+
     /// The test cases of a class Gradle's XML report says ran, by name.
     fn xml_cases(&self, project: &str, class: &str) -> Vec<String> {
         let path = self
@@ -804,5 +817,66 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     assert_eq!(
         line(&second, "hushrun: unit: "),
         "hushrun: unit: 2 of 3 tests run, in 1 of 1 test file; 1 already passed on the files it read, and 1 more that did runs as a check"
+    );
+}
+
+/// A TestNG build: `SetupTest`'s `@BeforeSuite` fails without a database (`NO_DB`), which skips
+/// every test of the suite; `OrderTest.total` fails whenever it runs; nine green classes.
+fn testng_build(tests: &str) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'ng'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'org.testng:testng:7.10.2' }\ntest { useTestNG() }\n",
+        ),
+        file(
+            "src/test/java/ng/SetupTest.java",
+            "package ng;\nimport org.testng.annotations.*;\npublic class SetupTest {\n  @BeforeSuite public void db() { if (System.getenv(\"NO_DB\") != null) throw new IllegalStateException(\"no database\"); }\n  @Test public void setupWorks() {}\n}\n",
+        ),
+        file(
+            "src/test/java/ng/OrderTest.java",
+            "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class OrderTest {\n  @Test public void total() { assertEquals(1, 2); }\n}\n",
+        ),
+    ];
+    for n in 1..=9 {
+        files.push(file(
+            &format!("src/test/java/ng/Green{n}Test.java"),
+            &format!("package ng;\nimport org.testng.annotations.*;\npublic class Green{n}Test {{\n  @Test public void green() {{}}\n}}\n"),
+        ));
+    }
+    files
+}
+
+// covers: C-32, C-46
+#[test]
+fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&testng_build("reuse"));
+    // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
+    let first = r.run(&command(&gradle, &[]), &[("NO_DB", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Only the setup's failure is recorded: no skipped class passed.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("fail".into(), 1)]),
+        "{}\n{}",
+        first.stdout,
+        first.stderr
+    );
+    // The database is back: OrderTest runs, and fails, as plain Gradle says.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("OrderTest > total FAILED"),
+        "{}",
+        second.stdout
     );
 }

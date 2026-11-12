@@ -771,3 +771,69 @@ fn a_module_built_without_the_modules_it_depends_on_isnt_followed() {
         "{map:#}"
     );
 }
+
+/// One module with TestNG 7.10.2 on Surefire 3.5.4, which runs it with its TestNG provider: the
+/// hook's interceptor loads there, its listener doesn't. `SetupTest`'s `@BeforeSuite` fails
+/// without a database (`SHOP_NO_DB`), which skips every test of the suite; `OrderTest.total`
+/// fails whenever it runs; nine green classes.
+fn testng(tests: &str, extra: &[(String, String)]) -> Vec<(String, String)> {
+    let mut files = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(
+            "pom.xml",
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>shop</groupId><artifactId>ng</artifactId><version>1.0</version>
+  <properties>
+    <maven.compiler.release>11</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies><dependency><groupId>org.testng</groupId><artifactId>testng</artifactId><version>7.10.2</version><scope>test</scope></dependency></dependencies>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version></plugin></plugins></build>
+</project>
+"#,
+        ),
+        file(
+            "src/test/java/ng/SetupTest.java",
+            "package ng;\nimport org.testng.annotations.*;\npublic class SetupTest {\n  @BeforeSuite public void db() { if (System.getenv(\"SHOP_NO_DB\") != null) throw new IllegalStateException(\"no database\"); }\n  @Test public void setupWorks() {}\n}\n",
+        ),
+        file(
+            "src/test/java/ng/OrderTest.java",
+            "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class OrderTest {\n  @Test public void total() { assertEquals(1, 2); }\n}\n",
+        ),
+    ];
+    for n in 1..=9 {
+        files.push(file(
+            &format!("src/test/java/ng/Green{n}Test.java"),
+            &format!("package ng;\nimport org.testng.annotations.*;\npublic class Green{n}Test {{\n  @Test public void green() {{}}\n}}\n"),
+        ));
+    }
+    files.extend(extra.iter().cloned());
+    files
+}
+
+// covers: C-32, C-47
+#[test]
+fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
+    let Some(maven) = maven() else { return };
+    let r = Repo::new(&testng("reuse", &[]), maven);
+    // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
+    let first = r.run(&[], &["test"], &[("SHOP_NO_DB", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    // Only the setup's failure is recorded: no skipped class passed.
+    assert_eq!(
+        r.unit_results(),
+        BTreeMap::from([("fail".into(), 1)]),
+        "{}\n{}",
+        first.stderr,
+        first.stdout
+    );
+    // The database is back: OrderTest runs, and fails, as plain Maven says.
+    let second = r.run(&[], &["test"], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.stdout.contains("ng.OrderTest.total"),
+        "{}",
+        second.stdout
+    );
+}
