@@ -773,10 +773,8 @@ fn a_module_built_without_the_modules_it_depends_on_isnt_followed() {
 }
 
 /// One module with TestNG 7.10.2 on Surefire 3.5.4, which runs it with its TestNG provider: the
-/// hook's interceptor loads there, its listener doesn't. `SetupTest`'s `@BeforeSuite` fails
-/// without a database (`SHOP_NO_DB`), which skips every test of the suite; `OrderTest.total`
-/// fails whenever it runs; nine green classes.
-fn testng(tests: &str, extra: &[(String, String)]) -> Vec<(String, String)> {
+/// hook's interceptor loads there, its listener doesn't. Nine green classes, and `extra`.
+fn testng(tests: &str, extra: &[(&str, &str)]) -> Vec<(String, String)> {
     let mut files = vec![
         file("hushrun.yaml", &yaml(tests)),
         file(
@@ -793,14 +791,6 @@ fn testng(tests: &str, extra: &[(String, String)]) -> Vec<(String, String)> {
 </project>
 "#,
         ),
-        file(
-            "src/test/java/ng/SetupTest.java",
-            "package ng;\nimport org.testng.annotations.*;\npublic class SetupTest {\n  @BeforeSuite public void db() { if (System.getenv(\"SHOP_NO_DB\") != null) throw new IllegalStateException(\"no database\"); }\n  @Test public void setupWorks() {}\n}\n",
-        ),
-        file(
-            "src/test/java/ng/OrderTest.java",
-            "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class OrderTest {\n  @Test public void total() { assertEquals(1, 2); }\n}\n",
-        ),
     ];
     for n in 1..=9 {
         files.push(file(
@@ -808,7 +798,7 @@ fn testng(tests: &str, extra: &[(String, String)]) -> Vec<(String, String)> {
             &format!("package ng;\nimport org.testng.annotations.*;\npublic class Green{n}Test {{\n  @Test public void green() {{}}\n}}\n"),
         ));
     }
-    files.extend(extra.iter().cloned());
+    files.extend(extra.iter().map(|(path, text)| file(path, text)));
     files
 }
 
@@ -816,7 +806,22 @@ fn testng(tests: &str, extra: &[(String, String)]) -> Vec<(String, String)> {
 #[test]
 fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
     let Some(maven) = maven() else { return };
-    let r = Repo::new(&testng("reuse", &[]), maven);
+    // `SetupTest`'s `@BeforeSuite` fails without a database (`SHOP_NO_DB`), which skips every
+    // test of the suite; `OrderTest.total` fails whenever it runs.
+    let files = testng(
+        "reuse",
+        &[
+            (
+                "src/test/java/ng/SetupTest.java",
+                "package ng;\nimport org.testng.annotations.*;\npublic class SetupTest {\n  @BeforeSuite public void db() { if (System.getenv(\"SHOP_NO_DB\") != null) throw new IllegalStateException(\"no database\"); }\n  @Test public void setupWorks() {}\n}\n",
+            ),
+            (
+                "src/test/java/ng/OrderTest.java",
+                "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class OrderTest {\n  @Test public void total() { assertEquals(1, 2); }\n}\n",
+            ),
+        ],
+    );
+    let r = Repo::new(&files, maven);
     // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
     let first = r.run(&[], &["test"], &[("SHOP_NO_DB", "1")]);
     assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
@@ -833,6 +838,42 @@ fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
     assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
     assert!(
         second.stdout.contains("ng.OrderTest.total"),
+        "{}",
+        second.stdout
+    );
+}
+
+// covers: C-39, C-47
+#[test]
+fn a_reused_testng_base_class_leaves_out_none_of_the_tests_its_subclasses_inherit() {
+    let Some(maven) = maven() else { return };
+    // ATest inherits Base's test, which fails in ATest: a test of each class, as TestNG runs it.
+    let files = testng(
+        "reuse",
+        &[
+            (
+                "src/test/java/ng/Base.java",
+                "package ng;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class Base {\n  protected int value() { return 1; }\n  @Test public void inherited() { assertEquals(value(), 1); }\n}\n",
+            ),
+            (
+                "src/test/java/ng/ATest.java",
+                "package ng;\nimport org.testng.annotations.*;\npublic class ATest extends Base {\n  @Override protected int value() { return 2; }\n  @Test public void own() {}\n}\n",
+            ),
+        ],
+    );
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["test", "-Dtest=Base,ATest,Green*Test"], &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    assert!(
+        first.stdout.contains("ng.ATest.inherited"),
+        "{}",
+        first.stdout
+    );
+    // Nothing changed: Base is reused, and ATest runs whole, its inherited test failing again.
+    let second = r.run(&[], &["test", "-Dtest=Base,ATest,Green*Test"], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.stdout.contains("ng.ATest.inherited"),
         "{}",
         second.stdout
     );
