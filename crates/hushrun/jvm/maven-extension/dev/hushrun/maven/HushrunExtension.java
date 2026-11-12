@@ -364,8 +364,11 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
 
     /**
      * Every reactor project p depends on, transitively: through dependencies of every scope, its
-     * parent, its plugins' own dependencies and the annotation processors its compiler names
-     * ({@code annotationProcessorPaths}, on the plugin or in any execution).
+     * parent, its plugins' own dependencies, and every reactor project a plugin's configuration
+     * names (on the plugin or in any execution, as Maven merged it): the annotation processors
+     * of {@code annotationProcessorPaths}, the {@code artifactItems} the dependency plugin copies
+     * or unpacks, and any other element with a {@code groupId} and an {@code artifactId}, or a
+     * value {@code groupId:artifactId[:…]}.
      */
     private static Set<MavenProject> closure(Map<String, MavenProject> byId, MavenProject p) {
         Set<MavenProject> seen = new LinkedHashSet<>();
@@ -379,7 +382,7 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
             try {
                 for (Plugin pl : c.getBuildPlugins()) {
                     for (Dependency d : pl.getDependencies()) ids.add(d.getGroupId() + ":" + d.getArtifactId());
-                    ids.addAll(processorPaths(pl));
+                    ids.addAll(named(pl, byId));
                 }
             } catch (Throwable e) {
                 // A model without build plugins: its dependencies and parent are all it says.
@@ -392,34 +395,51 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
         return seen;
     }
 
-    /** The {@code groupId:artifactId} of each {@code annotationProcessorPaths} entry of a plugin's configuration. */
-    static List<String> processorPaths(Plugin pl) {
+    /** The reactor projects, {@code groupId:artifactId}, a plugin's configuration names anywhere. */
+    static List<String> named(Plugin pl, Map<String, MavenProject> byId) {
         List<String> out = new ArrayList<>();
         List<Object> confs = new ArrayList<>();
         confs.add(pl.getConfiguration());
         for (PluginExecution e : pl.getExecutions()) confs.add(e.getConfiguration());
-        for (Object c : confs) {
-            if (!(c instanceof Xpp3Dom)) continue;
-            Xpp3Dom paths = ((Xpp3Dom) c).getChild("annotationProcessorPaths");
-            if (paths == null) continue;
-            for (Xpp3Dom path : paths.getChildren()) {
-                Xpp3Dom g = path.getChild("groupId");
-                Xpp3Dom a = path.getChild("artifactId");
-                if (g != null && a != null && g.getValue() != null && a.getValue() != null) {
-                    out.add(g.getValue().trim() + ":" + a.getValue().trim());
+        Deque<Xpp3Dom> todo = new ArrayDeque<>();
+        for (Object c : confs) if (c instanceof Xpp3Dom) todo.add((Xpp3Dom) c);
+        while (!todo.isEmpty()) {
+            Xpp3Dom node = todo.poll();
+            Xpp3Dom g = node.getChild("groupId");
+            Xpp3Dom a = node.getChild("artifactId");
+            if (g != null && a != null && g.getValue() != null && a.getValue() != null) {
+                String id = g.getValue().trim() + ":" + a.getValue().trim();
+                if (byId.containsKey(id) && !out.contains(id)) out.add(id);
+            }
+            String v = node.getValue();
+            if (v != null) {
+                for (String id : byId.keySet()) {
+                    String t = v.trim();
+                    if ((t.equals(id) || t.startsWith(id + ":")) && !out.contains(id)) out.add(id);
                 }
             }
+            for (Xpp3Dom child : node.getChildren()) todo.add(child);
         }
         return out;
     }
 
-    /** The reactor projects whose test classes p's tests read: a test-jar dependency on them. */
+    /**
+     * The reactor projects whose test classes p's tests read: a test-jar dependency on them (type
+     * {@code test-jar} or classifier {@code tests}, of any scope) of p or of any project p depends
+     * on, to the end: a module that takes another's test-jar at compile scope hands its test
+     * classes on.
+     */
     private static List<String> testJars(Map<String, MavenProject> byId, MavenProject p) {
         List<String> out = new ArrayList<>();
-        for (Dependency d : p.getDependencies()) {
-            String id = d.getGroupId() + ":" + d.getArtifactId();
-            boolean tests = "test-jar".equals(d.getType()) || "tests".equals(d.getClassifier());
-            if (tests && byId.containsKey(id) && !out.contains(id)) out.add(id);
+        List<MavenProject> those = new ArrayList<>();
+        those.add(p);
+        those.addAll(closure(byId, p));
+        for (MavenProject c : those) {
+            for (Dependency d : c.getDependencies()) {
+                String id = d.getGroupId() + ":" + d.getArtifactId();
+                boolean tests = "test-jar".equals(d.getType()) || "tests".equals(d.getClassifier());
+                if (tests && byId.containsKey(id) && !out.contains(id)) out.add(id);
+            }
         }
         return out;
     }

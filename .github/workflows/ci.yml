@@ -130,24 +130,32 @@ jobs:
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
       # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
-      # published checksum, and a Gradle user home holding what their builds need (JUnit 5.11.4
-      # and 4.13.2), filled by one build here: the tests run offline against it.
-      - name: Install Gradle for the test-class tests
+      # published checksum, and a Gradle user home filled here once by running those tests online,
+      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
+      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
+      # platform the test compiles for, android-36; otherwise this job opts out of it by name
+      # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
+      - name: Install Gradle and fill its user home for the test-class tests
         run: |
+          set -euo pipefail
           cd "$RUNNER_TEMP"
           curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
           echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
           unzip -q gradle-9.3.1-bin.zip
-          mkdir -p deps/j5/src/test/java deps/j4/src/test/java
-          printf "include 'j5', 'j4'\n" > deps/settings.gradle
-          printf "subprojects { apply plugin: 'java'; repositories { mavenCentral() } }\n" > deps/build.gradle
-          printf "dependencies {\n  testImplementation platform('org.junit:junit-bom:5.11.4')\n  testImplementation 'org.junit.jupiter:junit-jupiter'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n" > deps/j5/build.gradle
-          printf "dependencies { testImplementation 'junit:junit:4.13.2' }\ntest { useJUnit() }\n" > deps/j4/build.gradle
-          printf "class T5Test { @org.junit.jupiter.api.Test void t() {} }\n" > deps/j5/src/test/java/T5Test.java
-          printf "public class T4Test { @org.junit.Test public void t() {} }\n" > deps/j4/src/test/java/T4Test.java
-          GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" -p deps --no-daemon -q test
           echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+          else
+            echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
+            echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID=skip
+          fi
+          cd "$GITHUB_WORKSPACE"
+          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
       # Jest 29 and 30 for the tests of the Jest adapter (ADR 0082), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |
@@ -262,24 +270,32 @@ jobs:
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
       # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
-      # published checksum, and a Gradle user home holding what their builds need (JUnit 5.11.4
-      # and 4.13.2), filled by one build here: the tests run offline against it.
-      - name: Install Gradle for the test-class tests
+      # published checksum, and a Gradle user home filled here once by running those tests online,
+      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
+      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
+      # platform the test compiles for, android-36; otherwise this job opts out of it by name
+      # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
+      - name: Install Gradle and fill its user home for the test-class tests
         run: |
+          set -euo pipefail
           cd "$RUNNER_TEMP"
           curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
           echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
           unzip -q gradle-9.3.1-bin.zip
-          mkdir -p deps/j5/src/test/java deps/j4/src/test/java
-          printf "include 'j5', 'j4'\n" > deps/settings.gradle
-          printf "subprojects { apply plugin: 'java'; repositories { mavenCentral() } }\n" > deps/build.gradle
-          printf "dependencies {\n  testImplementation platform('org.junit:junit-bom:5.11.4')\n  testImplementation 'org.junit.jupiter:junit-jupiter'\n  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\ntest { useJUnitPlatform() }\n" > deps/j5/build.gradle
-          printf "dependencies { testImplementation 'junit:junit:4.13.2' }\ntest { useJUnit() }\n" > deps/j4/build.gradle
-          printf "class T5Test { @org.junit.jupiter.api.Test void t() {} }\n" > deps/j5/src/test/java/T5Test.java
-          printf "public class T4Test { @org.junit.Test public void t() {} }\n" > deps/j4/src/test/java/T4Test.java
-          GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" -p deps --no-daemon -q test
           echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+          else
+            echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
+            echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID=skip
+          fi
+          cd "$GITHUB_WORKSPACE"
+          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
       # Jest 29 and 30 for the tests of the Jest adapter (ADR 0082), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |

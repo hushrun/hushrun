@@ -171,6 +171,10 @@ class HushrunShared implements Serializable {
     Map<String, String> sourceDirsHow = [:]             // canonical project dir -> where they came from
     // canonical project dir -> [canonical project dir, configuration] of each project dependency it declares
     Map<String, List<List<String>>> projectDeps = [:]
+    // "group:name" -> canonical project dir, for each project of the build
+    Map<String, String> coordinates = [:]
+    // canonical directories of the file-based Maven repositories the build resolves from (mavenLocal())
+    Set<String> fileRepositories = new TreeSet<>()
     List<String> includedBuildDirs = []
 
     /** A configuration only a project's own tests use: another project's tests never read through it. */
@@ -328,9 +332,23 @@ class HushrunSelection {
                     if (r == null) notFollowed << [why: "outside-repository", detail: dir] else dirs << r
                     return
                 }
+                // Gradle's own caches hold what came from remote repositories, by coordinates and
+                // checksum: no file of this checkout made them.
                 if (guh && p.startsWith(guh + File.separator)) return
                 String r = HushrunRun.rel(root, p)
-                if (r != null) paths << r
+                if (r != null) { paths << r; return }
+                // A file-based Maven repository (mavenLocal()): a project of this build may have
+                // published it, and then the class reads that project; else what made it can't
+                // be told.
+                String repo = shared.fileRepositories.find { p.startsWith(it + File.separator) }
+                if (repo != null) {
+                    List<String> parts = Arrays.asList(p.substring(repo.length() + 1).replace(File.separatorChar, '/' as char).split("/"))
+                    int n = parts.size()
+                    String coords = n >= 4 ? parts.subList(0, n - 3).join(".") + ":" + parts.get(n - 3) : null
+                    String publisher = coords == null ? null : shared.coordinates.get(coords)
+                    if (publisher != null) addProject(publisher)
+                    else notFollowed << [why: "local-maven-repository", detail: (coords != null ? coords + ":" + parts.get(n - 2) : p) + " from " + repo + ", which hushrun doesn't know what built"]
+                }
             }
         } catch (Throwable t) {
             notFollowed << [why: "classpath", detail: HushrunRun.brief(t)]
@@ -454,14 +472,19 @@ class HushrunInput implements Serializable {
 
 // The hook's list and events directory, given to the test JVM when it starts: computed then from
 // HUSHRUN_UNITS, and no input of the task (what the list holds is one, through "hushrunLeftOut").
+// The hook also goes on as a Java agent, which writes that the JVM began and how it ended: a test
+// JVM halted, killed, or ended by a test's System.exit is told where no listener of the hook loads.
 class HushrunJvmArgs implements org.gradle.process.CommandLineArgumentProvider, Serializable {
     @org.gradle.api.tasks.Internal String buildRoot
     @org.gradle.api.tasks.Internal String taskPath
+    @org.gradle.api.tasks.Internal String hookJar
     Iterable<String> asArguments() {
         File work = HushrunRun.work(buildRoot, taskPath)
         if (work == null) return []
-        return ["-Dhushrun.tests.leaveOut=" + new File(work, "leave-out.txt").path,
-                "-Dhushrun.tests.events=" + new File(work, "events").path]
+        List<String> args = ["-Dhushrun.tests.leaveOut=" + new File(work, "leave-out.txt").path,
+                             "-Dhushrun.tests.events=" + new File(work, "events").path]
+        if (hookJar != null && new File(hookJar).isFile()) args << ("-javaagent:" + hookJar)
+        return args
     }
 }
 
@@ -765,6 +788,11 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
             try {
                 g.rootProject.allprojects { p -> describe(p, shared) }
                 shared.includedBuildDirs = g.includedBuilds.collect { it.projectDir.canonicalPath }
+                try {
+                    settings.dependencyResolutionManagement.repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).each { r ->
+                        if (r.url?.scheme == "file") shared.fileRepositories << new File(r.url).canonicalPath
+                    }
+                } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
             // Registered now, not earlier: the listener also hears buildSrc's tasks, and the first
             // event creates the service and freezes its parameters.
@@ -818,7 +846,8 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
         if (t.hasProperty("failOnNoDiscoveredTests")) {
             t.failOnNoDiscoveredTests.convention(unitsVar.map { String ignored -> HushrunInput.failsOnNone(info) }.orElse(true))
         }
-        t.jvmArgumentProviders.add(new HushrunJvmArgs(buildRoot: shared.buildRoot, taskPath: t.path))
+        t.jvmArgumentProviders.add(new HushrunJvmArgs(buildRoot: shared.buildRoot, taskPath: t.path,
+                hookJar: hookJar != null && hookJar.isFile() ? hookJar.absolutePath : null))
         HushrunTaskListener l = new HushrunTaskListener(info: info)
         t.doFirst(l)
         t.addTestListener(l)
@@ -868,6 +897,12 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
                 how << "kotlin"
             } catch (Throwable ignored) {}
         }
+        try {
+            shared.coordinates[(p.group?.toString() ?: "") + ":" + p.name] = projectDir
+            p.repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).each { r ->
+                if (r.url?.scheme == "file") shared.fileRepositories << new File(r.url).canonicalPath
+            }
+        } catch (Throwable ignored) {}
         try {
             List<List<String>> deps = []
             p.configurations.each { c ->

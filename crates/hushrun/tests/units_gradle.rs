@@ -2,17 +2,18 @@
 //! by its source file, a test is one of its methods, and what a class read is every source file
 //! below its project and each project its classpath is built from.
 //!
-//! The fixtures are generated multi-project builds with JUnit 5 or JUnit 4, run by the Gradle that
-//! `HUSHRUN_TEST_GRADLE` names (a `gradle` program) with `--offline`, against the Gradle user home
-//! `HUSHRUN_TEST_GRADLE_USER_HOME` names, which holds JUnit 5.11.4 and JUnit 4.13.2: CI fills it
-//! once before the tests. They say so and pass where either is missing, unless
-//! `HUSHRUN_TEST_TOOLS=required`, which CI sets. Daemons stay warm between tests, as they do on a
-//! person's machine.
+//! The fixtures are generated builds (JUnit 5, JUnit 4, TestNG, Spock, Kotest), run by the Gradle
+//! that `HUSHRUN_TEST_GRADLE` names (a `gradle` program) with `--offline`, against the Gradle user
+//! home `HUSHRUN_TEST_GRADLE_USER_HOME` names, which must hold every library and plugin they use.
+//! With `HUSHRUN_TEST_GRADLE_ONLINE=1` they run online and fill that home instead, which is how CI
+//! fills it once before its test run: what the tests need is the tests' own builds, never a list
+//! beside them. They say so and pass where Gradle is missing, unless `HUSHRUN_TEST_TOOLS=required`,
+//! which CI sets. Daemons stay warm between tests, as they do on a person's machine.
 //!
-//! The Android test needs Android's SDK as well, named by `HUSHRUN_TEST_ANDROID_SDK`, and a Gradle
-//! user home that holds Android's Gradle plugin, 9.1.1 or the version `HUSHRUN_TEST_ANDROID_PLUGIN`
-//! names (8.13.2 for Gradle 8); without the SDK it says so and passes, even when tools are
-//! required.
+//! The Android test needs Android's SDK as well, named by `HUSHRUN_TEST_ANDROID_SDK`, and Android's
+//! Gradle plugin, 9.1.1 or the version `HUSHRUN_TEST_ANDROID_PLUGIN` names (8.13.2 for Gradle 8).
+//! Without the SDK it fails under `HUSHRUN_TEST_TOOLS=required`, as every tool does, unless the run
+//! opts out of it by name with `HUSHRUN_TEST_ANDROID=skip`.
 
 #[path = "common/store.rs"]
 mod store;
@@ -258,6 +259,17 @@ fn tools(what: &str, here: bool) -> bool {
     false
 }
 
+/// `--offline`, the tests' Gradle option, but with `HUSHRUN_TEST_GRADLE_ONLINE=1`: then Gradle runs
+/// online and fills the Gradle user home with what the tests' builds need, which is how CI fills
+/// it once before its test run (a system property nothing reads stands in).
+fn offline() -> &'static str {
+    if std::env::var("HUSHRUN_TEST_GRADLE_ONLINE").as_deref() == Ok("1") {
+        "-Dhushrun.tests.online=true"
+    } else {
+        "--offline"
+    }
+}
+
 /// The Gradle the tests run.
 fn gradle() -> String {
     std::env::var("HUSHRUN_TEST_GRADLE").unwrap_or_else(|_| "gradle".into())
@@ -370,7 +382,7 @@ fn command<'a>(gradle: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
         "unit",
         "--",
         gradle,
-        "--offline",
+        offline(),
         "--console=plain",
         "test",
         "--continue",
@@ -769,8 +781,15 @@ fn android_sdk() -> Option<String> {
 #[test]
 fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     let Some(sdk) = android_sdk() else {
-        eprintln!(
-            "note: skipping: HUSHRUN_TEST_ANDROID_SDK names no Android SDK (a manual check, ADR 0084)"
+        // Missing, it fails under HUSHRUN_TEST_TOOLS=required, as every tool does, unless the
+        // run opts out of it by name: HUSHRUN_TEST_ANDROID=skip.
+        if std::env::var("HUSHRUN_TEST_ANDROID").as_deref() == Ok("skip") {
+            eprintln!("note: skipping: HUSHRUN_TEST_ANDROID=skip (ADR 0084)");
+            return;
+        }
+        tools(
+            "the Android SDK (HUSHRUN_TEST_ANDROID_SDK), or HUSHRUN_TEST_ANDROID=skip",
+            false,
         );
         return;
     };
@@ -815,7 +834,7 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
         "unit",
         "--",
         gradle.as_str(),
-        "--offline",
+        offline(),
         "--console=plain",
         ":core:testDebugUnitTest",
     ];
@@ -1072,7 +1091,12 @@ fn spock_features_whose_names_differ_after_a_bracket_are_left_out_one_by_one() {
     let second = r.run(&command(&gradle, &[]), &[]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
     let cases = r.xml_cases(".", "ex.ParseSpec");
-    assert!(cases.contains(&"parses [b]".to_string()), "{cases:?}");
+    assert!(
+        cases.contains(&"parses [b]".to_string()),
+        "{cases:?}\n{}\n{}",
+        second.stdout,
+        second.stderr
+    );
     assert_eq!(cases.len(), 2, "{cases:?}");
 }
 
@@ -1148,7 +1172,7 @@ fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed()
             "unit",
             "--",
             "./gradlew",
-            "--offline",
+            offline(),
             "--console=plain",
             "test",
             "--continue",
@@ -1468,10 +1492,7 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
     };
     let g: &'static str = Box::leak(gradle.into_boxed_str());
     // Only app's tests: lib's sources, which app's classes read, are on their list.
-    let first = r.run(
-        &only(&[g, "--offline", "--console=plain", ":app:test"]),
-        &[],
-    );
+    let first = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
     let map = r.map();
     let reads = map["units"][CART]["reads"].as_array().unwrap().clone();
@@ -1484,10 +1505,7 @@ fn a_task_of_one_project_keeps_the_sources_it_read_through_another_on_its_list()
         "lib/src/main/java/shop/lib/Price.java",
         "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
     );
-    let second = r.run(
-        &only(&[g, "--offline", "--console=plain", ":app:test"]),
-        &[],
-    );
+    let second = r.run(&only(&[g, offline(), "--console=plain", ":app:test"]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert!(
         second.stdout.contains("CartTest") || r.xml_cases("app", "shop.app.CartTest").len() >= 2,
@@ -1541,4 +1559,292 @@ fn a_junit4_test_jvm_that_died_beside_a_genuine_failure_records_no_pass_for_its_
         ran.stdout,
         ran.stderr
     );
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_that_ends_its_jvm_records_no_pass_under_gradles_own_runners() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // JUnit 4 and TestNG on Gradle's own runners, which load no listener of the hook: `b` ends
+    // the test JVM with `System.exit(0)` when `EXIT` is set, and `c`, which always fails, never
+    // runs. Gradle calls the task successful. A JVM a class, so that the green ones run.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "build/\n.gradle/\n"),
+        file(
+            "settings.gradle",
+            &format!("rootProject.name = 'exit'\ninclude 'j4', 'ng'\n{LINE}\n"),
+        ),
+        file(
+            "build.gradle",
+            "subprojects { apply plugin: 'java'; repositories { mavenCentral() }; tasks.withType(Test).configureEach { forkEvery = 1 } }\nproject(':j4') { dependencies { testImplementation 'junit:junit:4.13.2' }; test { useJUnit() } }\nproject(':ng') { dependencies { testImplementation 'org.testng:testng:7.10.2' }; test { useTestNG() } }\n",
+        ),
+        file(
+            "j4/src/test/java/p/ExitTest.java",
+            "package p;\nimport org.junit.*;\nimport org.junit.runners.MethodSorters;\n@FixMethodOrder(MethodSorters.NAME_ASCENDING)\npublic class ExitTest {\n  @Test public void a() {}\n  @Test public void b() { if (System.getenv(\"EXIT\") != null) System.exit(0); }\n  @Test public void c() { Assert.fail(\"c\"); }\n}\n",
+        ),
+        file(
+            "j4/src/test/java/p/GreenTest.java",
+            "package p;\nimport org.junit.*;\npublic class GreenTest { @Test public void g() {} }\n",
+        ),
+        file(
+            "ng/src/test/java/q/ExitTest.java",
+            "package q;\nimport org.testng.annotations.*;\nimport static org.testng.Assert.*;\npublic class ExitTest {\n  @Test public void a() {}\n  @Test(dependsOnMethods = \"a\") public void b() { if (System.getenv(\"EXIT\") != null) System.exit(0); }\n  @Test(dependsOnMethods = \"b\") public void c() { fail(\"c\"); }\n}\n",
+        ),
+        file(
+            "ng/src/test/java/q/GreenTest.java",
+            "package q;\nimport org.testng.annotations.*;\npublic class GreenTest { @Test public void g() {} }\n",
+        ),
+    ]);
+    let ran = r.run(&command(&gradle, &[]), &[("EXIT", "1")]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // The green classes passed; neither ExitTest did.
+    assert_eq!(
+        r.unit_results(),
+        std::collections::BTreeMap::from([("pass".into(), 2)]),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+}
+
+// covers: C-30, C-46
+#[test]
+fn a_jar_from_the_local_maven_repository_is_read_by_what_built_it_or_not_followed() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let local = tempfile::tempdir().unwrap();
+    let m2 = std::fs::canonicalize(local.path()).unwrap();
+    // A jar of the local repository nothing here builds: an empty zip and its POM.
+    let thing = m2.join("com/other/thing/1.0");
+    std::fs::create_dir_all(&thing).unwrap();
+    let mut empty = b"PK\x05\x06".to_vec();
+    empty.extend([0u8; 18]);
+    std::fs::write(thing.join("thing-1.0.jar"), &empty).unwrap();
+    std::fs::write(
+        thing.join("thing-1.0.pom"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.other</groupId><artifactId>thing</artifactId><version>1.0</version></project>\n",
+    )
+    .unwrap();
+    // lib publishes to the local repository, and app takes it from there, not as a project.
+    let mut files = build(Framework::Junit5, &["lib", "app"], "reuse");
+    files[3] = file(
+        "build.gradle",
+        "subprojects {\n  apply plugin: 'java'\n  repositories { mavenLocal(); mavenCentral() }\n  dependencies {\n    testImplementation platform('org.junit:junit-bom:5.11.4')\n    testImplementation 'org.junit.jupiter:junit-jupiter'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n  }\n  tasks.withType(Test).configureEach { useJUnitPlatform() }\n}\nproject(':lib') { apply plugin: 'maven-publish'; group = 'com.example'; version = '1.0'\n  publishing { publications { maven(MavenPublication) { from components.java } } } }\nproject(':app') {\n  dependencies { implementation 'com.example:lib:1.0'; testImplementation(System.getenv('THING') ? 'com.other:thing:1.0' : 'com.example:lib:1.0') }\n  tasks.named('compileJava') { mustRunAfter(':lib:publishToMavenLocal') }\n  tasks.named('test') { mustRunAfter(':lib:publishToMavenLocal') }\n}\n",
+    );
+    files.extend([
+        file(
+            "lib/src/main/java/lib/Lib.java",
+            "package lib;\npublic class Lib { public static int v() { return 1; } }\n",
+        ),
+        file(
+            "lib/src/test/java/lib/LibTest.java",
+            "package lib;\nimport org.junit.jupiter.api.*;\nclass LibTest { @Test void v() { Assertions.assertTrue(Lib.v() > 0); } }\n",
+        ),
+        file(
+            "app/src/test/java/app/AppTest.java",
+            "package app;\nimport org.junit.jupiter.api.*;\nclass AppTest { @Test void v() { Assertions.assertEquals(1, lib.Lib.v()); } }\n",
+        ),
+    ]);
+    for n in 1..=9 {
+        files.push(file(
+            &format!("app/src/test/java/app/Green{n}Test.java"),
+            &format!("package app;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    let r = Repo::new(&files);
+    let repo_local = format!("-Dmaven.repo.local={}", m2.display());
+    let args = |extra: &[&'static str]| -> Vec<String> {
+        let mut out: Vec<String> = [
+            "run",
+            "unit",
+            "--",
+            gradle.as_str(),
+            offline(),
+            "--console=plain",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        out.push(repo_local.clone());
+        out.extend(extra.iter().map(|s| s.to_string()));
+        out
+    };
+    let run = |extra: &[&'static str], env: &[(&str, &str)]| {
+        let a = args(extra);
+        r.run(&a.iter().map(String::as_str).collect::<Vec<_>>(), env)
+    };
+    let tasks = [":lib:publishToMavenLocal", "test", "--continue"];
+    let first = run(&tasks, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // app's classes read lib's sources: lib built the jar they took from the local repository.
+    let map = r.map();
+    assert!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("lib/src/main/java/lib/Lib.java")),
+        "{map:#}"
+    );
+    r.write(
+        "lib/src/main/java/lib/Lib.java",
+        "package lib;\npublic class Lib { public static int v() { return 2; } }\n",
+    );
+    let second = run(&tasks, &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stdout.contains("AppTest > v() FAILED"),
+        "{}",
+        second.stdout
+    );
+    // A jar of the local repository no project of the build makes: the class that ran (AppTest,
+    // which failed and runs again) isn't followed, and says why.
+    let third = run(&tasks, &[("THING", "1")]);
+    assert_eq!(third.code, 1, "{}\n{}", third.stdout, third.stderr);
+    let map = r.map();
+    assert_eq!(
+        map["units"]["app/src/test/java/app/AppTest.java"]["notFollowed"],
+        json!(["local-maven-repository"]),
+        "{map:#}"
+    );
+}
+
+// covers: C-39, C-46
+#[test]
+fn kotest_tests_which_cant_be_left_out_are_never_counted_as_reused() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "build/\n.gradle/\n.kotlin/\n"),
+        file(
+            "settings.gradle",
+            &format!(
+                "pluginManagement {{ repositories {{ gradlePluginPortal(); mavenCentral() }} }}\n{LINE}\nrootProject.name = 'kt'\n"
+            ),
+        ),
+        file(
+            "build.gradle",
+            "plugins { id 'org.jetbrains.kotlin.jvm' version '2.3.21' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'io.kotest:kotest-runner-junit5:5.9.1'; testRuntimeOnly 'org.junit.platform:junit-platform-launcher' }\ntest { useJUnitPlatform() }\n",
+        ),
+        file(
+            "src/test/kotlin/p/NamesSpec.kt",
+            "package p\nimport io.kotest.core.spec.style.FunSpec\nclass NamesSpec : FunSpec({\n  test(\"one\") { }\n  test(\"two\") { check(System.getenv(\"FAIL\") == null) }\n  test(\"three\") { }\n})\n",
+        ),
+    ]);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    // Kotest's tests can't be left out one by one: none is listed, and the line says they run.
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let line = line(&second, "hushrun: unit: ");
+    assert!(!line.contains("already passed"), "{line}");
+    assert_eq!(r.xml_cases(".", "p.NamesSpec").len(), 3);
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_killed_timed_out_or_out_of_memory_records_no_pass_for_its_class() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    // app's one class does what `WHAT` says; other's nine green classes are another task's.
+    let what = "package shop.app;\nimport org.junit.jupiter.api.*;\nclass WhatTest {\n  @Test void a() {}\n  @Test void b() throws Exception {\n    String what = System.getenv(\"WHAT\");\n    if (\"kill\".equals(what)) new ProcessBuilder(\"kill\", \"-9\", String.valueOf(ProcessHandle.current().pid())).start().waitFor();\n    if (\"slow\".equals(what)) Thread.sleep(120_000);\n    if (\"oom\".equals(what)) { java.util.List<long[]> all = new java.util.ArrayList<>(); while (true) all.add(new long[1 << 20]); }\n  }\n  @Test void c() {}\n}\n";
+    for (case, expected) in [
+        ("kill", vec![("pass", 9)]),
+        ("slow", vec![("pass", 9)]),
+        // A 16 MB test JVM out of memory takes Gradle's worker down with it: nothing of the task
+        // is recorded, its failure neither.
+        ("oom", vec![("pass", 9)]),
+    ] {
+        let mut files = build(Framework::Junit5, &["app", "other"], "reuse");
+        files.push(file(
+            "app/build.gradle",
+            "tasks.named('test') { maxHeapSize = '16m'; timeout = java.time.Duration.ofSeconds(15) }\n",
+        ));
+        files.push(file("app/src/test/java/shop/app/WhatTest.java", what));
+        for n in 1..=9 {
+            files.push(file(
+                &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+                &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+            ));
+        }
+        let r = Repo::new(&files);
+        let ran = r.run(&command(&gradle, &[]), &[("WHAT", case)]);
+        assert_eq!(ran.code, 1, "{case}: {}\n{}", ran.stdout, ran.stderr);
+        let expected: std::collections::BTreeMap<String, usize> = expected
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        assert_eq!(
+            r.unit_results(),
+            expected,
+            "{case}: {}\n{}",
+            ran.stdout,
+            ran.stderr
+        );
+    }
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_task_gradle_restores_from_its_build_cache_records_and_leaves_out_nothing() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&shop("reuse"));
+    let cache = ["clean", "--build-cache"];
+    let first = r.run(&command(&gradle, &cache), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let before = r.map();
+    // A file of the rest changes: every class runs as far as hushrun goes, the tasks' inputs are
+    // those of the first run, and Gradle takes their outputs from its build cache.
+    r.write("README.md", "A shop, again.\n");
+    let again = r.run(&command(&gradle, &cache), &[]);
+    assert_eq!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
+    assert!(again.stdout.contains("FROM-CACHE"), "{}", again.stdout);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 5, "ran": 0, "reused": 0}),
+        "{}",
+        again.stderr
+    );
+    assert_eq!(r.map()["units"], before["units"]);
+}
+
+// covers: C-39, C-46
+#[test]
+fn a_test_the_build_excludes_by_tag_is_neither_run_nor_listed() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
+    files.push(file(
+        "app/build.gradle",
+        "tasks.named('test') { useJUnitPlatform { excludeTags 'slow' } }\n",
+    ));
+    files.push(file(
+        "app/src/test/java/shop/app/TagTest.java",
+        "package shop.app;\nimport org.junit.jupiter.api.*;\nclass TagTest {\n  @Test void fast() {}\n  @Test void flip() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Test @Tag(\"slow\") void slow() { Assertions.fail(\"never runs\"); }\n  @Test void more() {}\n}\n",
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(&command(&gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    // `fast` or `more` was left out, the other audited, `flip` ran; `slow` never.
+    let cases = r.xml_cases("app", "shop.app.TagTest");
+    assert!(cases.contains(&"flip()".to_string()), "{cases:?}");
+    assert!(!cases.contains(&"slow()".to_string()), "{cases:?}");
+    assert_eq!(cases.len(), 2, "{cases:?}\n{}", second.stderr);
 }

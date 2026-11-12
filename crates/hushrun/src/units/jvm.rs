@@ -13,7 +13,9 @@
 //! - a TestNG method interceptor that does the same inside TestNG, and leaves nothing of a test
 //!   context out when a method of it depends on another method or a group;
 //! - a JUnit Platform listener that writes each test's and container's events, flushed one line at
-//!   a time, to a file of its own in a directory.
+//!   a time, to a file of its own in a directory;
+//! - a Java agent (`-javaagent`, which Gradle's script gives each test JVM) that writes that the
+//!   JVM began and, from a shutdown hook, how it ended: whether a test called `System.exit`.
 //!
 //! The list is the file the system property [`LEAVE_OUT_PROPERTY`] names, else the variable
 //! [`LEAVE_OUT_VARIABLE`], else `$HUSHRUN_UNITS/test-jvm/leave-out.txt` ([`LEAVE_OUT_FILE`]); the
@@ -114,6 +116,45 @@ pub struct JvmEvents {
     pub left_out: Vec<LeftOutEvent>,
     /// Each test that started or was skipped, `class#method` as its source names them.
     pub seen: BTreeSet<String>,
+    /// The hook as a Java agent said the JVM began.
+    pub began: bool,
+    /// How it said the JVM ended, through its shutdown hooks; `None` when it didn't (halted,
+    /// killed, or no agent).
+    pub ended: Option<JvmEnd>,
+}
+
+/// How a JVM ended, as the hook's agent saw it from a shutdown hook.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JvmEnd {
+    /// A thread called `System.exit`.
+    pub exit: bool,
+    /// Frames of a test or its framework were below that call.
+    pub by_test: bool,
+    /// The frames below it.
+    pub stack: String,
+}
+
+impl JvmEvents {
+    /// \[C-32\] The JVM stopped before its test runner was done: the agent saw it begin and no end
+    /// (a halt, a kill, a crash), or a test ended it, or something other than Gradle's worker
+    /// called `System.exit` (a thread a test started). `false` where no agent loaded.
+    pub fn stopped_early(&self) -> bool {
+        if !self.began {
+            return false;
+        }
+        match &self.ended {
+            None => true,
+            Some(end) => {
+                end.by_test
+                    || (end.exit
+                        && !end
+                            .stack
+                            .split(' ')
+                            .next()
+                            .is_some_and(|f| f.contains("org.gradle.process.internal.worker.")))
+            }
+        }
+    }
 }
 
 /// One test, or class, the hook left out.
@@ -247,6 +288,16 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
                 out.basedir = field("basedir").map(str::to_string);
             }
             "plan-started" | "plan-finished" => out.listened = true,
+            "jvm-began" => out.began = true,
+            "jvm-ended" => {
+                let flag =
+                    |name: &str| event.get(name).and_then(serde_json::Value::as_bool) == Some(true);
+                out.ended = Some(JvmEnd {
+                    exit: flag("exit"),
+                    by_test: flag("byTest"),
+                    stack: field("stack").unwrap_or("").to_string(),
+                });
+            }
             "leave-out-unread" => out.list_unread = Some(field("error").unwrap_or("").to_string()),
             kind @ ("left-out" | "not-left-out") => {
                 let Some(class) = class else { continue };
@@ -518,6 +569,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("{line}"));
             assert!(why.contains(says), "{why}");
         }
+    }
+
+    // covers: C-32
+    #[test]
+    fn a_jvm_stopped_early_when_it_began_and_a_test_or_nothing_ended_it() {
+        let of = |lines: &str| {
+            read_events(
+                format!("{{\"e\":\"jvm\",\"pid\":\"1\",\"dir\":\"/w\",\"basedir\":null}}\n{lines}")
+                    .as_bytes(),
+            )
+        };
+        let gradle = r#"{"e":"jvm-ended","exit":true,"byTest":false,"stack":"worker.org.gradle.process.internal.worker.GradleWorkerMain.main"}"#;
+        let by_test = r#"{"e":"jvm-ended","exit":true,"byTest":true,"stack":"p.ExitTest.b org.junit.runners.ParentRunner$3.evaluate"}"#;
+        let elsewhere = r#"{"e":"jvm-ended","exit":true,"byTest":false,"stack":"p.Helper.run java.lang.Thread.run"}"#;
+        let natural = r#"{"e":"jvm-ended","exit":false,"byTest":false,"stack":null}"#;
+        let began = r#"{"e":"jvm-began"}"#;
+        assert!(!of(&format!("{began}\n{gradle}\n")).stopped_early());
+        assert!(!of(&format!("{began}\n{natural}\n")).stopped_early());
+        assert!(of(&format!("{began}\n{by_test}\n")).stopped_early());
+        assert!(of(&format!("{began}\n{elsewhere}\n")).stopped_early());
+        // Began and never ended: halted or killed.
+        assert!(of(&format!("{began}\n")).stopped_early());
+        // No agent: nothing to say.
+        assert!(!of("").stopped_early());
     }
 
     #[test]

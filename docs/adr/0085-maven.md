@@ -32,8 +32,9 @@ have.
 
 ## Decision
 
-1. **Two jars, built here and checked in.** hushrun embeds two small jars, written to
-   `<cache dir>/adapters/jvm-<hash>/` when a run needs them:
+1. **Two jars, built here and checked in.** hushrun embeds two small jars, each written to a
+   directory of its own, `<cache dir>/adapters/jvm-<first 16 hex of its SHA-256>/`, when a run
+   needs them:
    - **the test-JVM hook** (`crates/hushrun/jvm/test-jvm-hook/`, about 20 KB): a JUnit Platform
      filter after discovery and a TestNG method interceptor that leave out exactly the classes and
      methods a list names, and a JUnit Platform listener that writes each test's events, flushed a
@@ -151,6 +152,25 @@ sources) is below no directory a unit read, and is the rest; a change to one run
 the build knows which files it compiles, and a file it doesn't may reach a test by a road hushrun
 doesn't see, such as a jar in the local repository. With `-pl app -am`, the modules app depends on
 keep their sources on app's classes' lists.
+
+## Amendment 5: test-jars handed on, and modules a plugin names (2026-11-12)
+
+Item 4 added an upstream module's test roots only when the module itself declared that module's
+test-jar. A module that takes another's test-jar at compile scope hands those test classes on to
+every module that depends on it, and a test there was reused after a test class it reads changed.
+The decision: the test-jar dependencies (type `test-jar` or classifier `tests`, of any scope) of
+the module and of every module it depends on, to the end, add those modules' test roots.
+
+Amendment 2 followed a plugin's dependencies and the compiler's `annotationProcessorPaths` only. A
+module that another uses only through a plugin's configuration (the dependency plugin's `copy` or
+`unpack` of `artifactItems`; the same shape in assembly, shade, exec or antrun) was read by none of
+that module's tests, and a test that runs the copied jar was reused after the module changed. The
+decision: every reactor module a plugin's configuration names, anywhere in its tree, on the plugin
+or in any execution, as Maven merged it with the parents' `pluginManagement` (an element with a
+`groupId` and an `artifactId`, or a value `groupId:artifactId[:…]`), joins the module's closure.
+Still not modelled, and so a test that reaches another module that way is reused when that module
+changes: a path to another module's `target/` written by hand in a configuration or a test, and a
+script or a test that builds or reads another module by itself.
 
 ## Consequences
 
