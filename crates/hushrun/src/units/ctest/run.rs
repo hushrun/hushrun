@@ -103,21 +103,8 @@ impl From<String> for Skip {
 
 /// The real `ctest`, or another tool, with the environment COMMAND had: `PATH` as it was.
 fn tool(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    match program::path_was(std::env::var_os(program::PATH_WAS)) {
-        Some(Some(path)) => {
-            command.env("PATH", path);
-        }
-        Some(None) => {
-            command.env_remove("PATH");
-        }
-        None => {}
-    }
-    command
-        .env_remove(program::DIR_VAR)
-        .env_remove(program::PATH_WAS)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
+    let mut command = program::real_command(program);
+    command.stdin(Stdio::null()).stderr(Stdio::null());
     command
 }
 
