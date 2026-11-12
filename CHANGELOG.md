@@ -161,6 +161,11 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   crashes, keeps every test file and test of the run from a pass. Contract: an adapter's process
   may make `<anything>.started` in `HUSHRUN_UNITS` as it begins and remove it once its facts are
   written; pytest's does.
+- `hushrun why` says why a test or a test file kept no result the last time it ran here, as the
+  run decided it: a skip in a run that failed (such as a Go test that skips because another
+  failed), a failure no test explains, a start that died, a stale build, a test its adapter never
+  leaves out. Before, it said nothing had changed and no pass counted. A stale build in a run that
+  failed no longer records the passes of test files and tests either.
 - With `reads: test`, pytest's adapter follows what Python modules re-export: a package's
   `__init__.py` that binds names from another module, `from X import *`, and a module's `__all__`.
 - pytest's adapter takes a SQLite database a test connects to as read, as it does a file it opens.

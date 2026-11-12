@@ -422,6 +422,22 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
                "test_skipped": "not-run"}),
         "{map:#}"
     );
+    // \[C-37\] `hushrun why` says why each kept nothing, as the run decided it: the test, and its
+    // test file, which one of its tests' skips kept from a pass.
+    let skipped = why_json(&r, "tests/test_skips.py::test_skipped");
+    assert_eq!(skipped["reason"], "not-kept", "{skipped:#}");
+    assert_eq!(
+        skipped["says"],
+        format!("tests/test_skips.py::test_skipped runs: {SKIPPED_IN_A_FAILED_RUN}"),
+        "{skipped:#}"
+    );
+    let file = why_json(&r, "tests/test_skips.py");
+    assert_eq!(file["reason"], "not-kept", "{file:#}");
+    assert_eq!(
+        file["says"],
+        "tests/test_skips.py runs: one of its tests was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides",
+        "{file:#}"
+    );
     // In a run that passed, a skip is a pass, as before.
     let passed = r.run(&pytest_args(&python, &[]), &[("SKIP", "1")]);
     assert_eq!(passed.code, 0, "{}\n{}", passed.stdout, passed.stderr);
@@ -431,6 +447,9 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
         "{map:#}"
     );
 }
+
+/// What `hushrun why` says of a test skipped in a run that failed (C-37).
+const SKIPPED_IN_A_FAILED_RUN: &str = "it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides";
 
 /// A runner that writes an adapter's facts itself, as pytest's plugin would: each test file
 /// of `FAKE_FILES` ran whole, and in the starts `FAKE_LEFT_OUT` names (by their number across
@@ -642,7 +661,12 @@ fn in_observe_a_start_that_left_out_what_nothing_listed_records_no_unit_and_keep
         ],
     );
     assert_eq!(ran.code, 0, "{}", ran.stderr);
-    assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1, "{}", ran.stderr);
+    assert_eq!(
+        std::fs::read_dir(&state).unwrap().count(),
+        1,
+        "{}",
+        ran.stderr
+    );
     assert!(
         ran.stderr.contains(
             "hushrun: unit: test files weren't observed: its adapter left out what nothing listed (2 features of test_a.py nobody listed)"
@@ -675,7 +699,10 @@ fn a_run_on_a_stale_build_records_no_pass_of_its_check() {
     let env = [
         ("FAKE_STATE", state_dir.as_str()),
         ("FAKE_FILES", "test_a.py"),
-        ("FAKE_STALE", "build/prog is older than what it is built from"),
+        (
+            "FAKE_STALE",
+            "build/prog is older than what it is built from",
+        ),
     ];
     let ran = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
@@ -698,6 +725,76 @@ fn a_run_on_a_stale_build_records_no_pass_of_its_check() {
     );
     assert_eq!(failed.code, 1, "{}", failed.stderr);
     assert_eq!(r.newest_result()["result"], "fail");
+    // \[C-32\] Its test file passed on that stale build in a run that failed: no pass of it is
+    // kept.
+    assert_eq!(r.unit_results(), 0);
+}
+
+/// A runner that writes pytest's facts itself with tests as the unit, and fails: `test_a.py`
+/// failed while each of its tests passed, as a failure no test explains would say (a failing
+/// `teardown_module`, a crash between tests); with `FAKE_TWO_FAILS`, its `test_two` failed; with
+/// `FAKE_STALE`, it ran on a stale build.
+const UNEXPLAINED_RUNNER: &str = r#"import json, os, sys
+d = os.environ["HUSHRUN_UNITS"]
+two = bool(os.environ.get("FAKE_TWO_FAILS"))
+tests = [{"id": "test_one", "finished": True}, {"id": "test_two", "finished": True, "failed": two}]
+units = [{"unit": "test_a.py", "selected": 2, "finished": 2, "failed": True,
+          "reads": ["test_a.py"], "tests": tests}]
+facts = {"schema": "hushrun.unit-facts/v1", "adapter": "pytest", "failuresByUnit": True,
+         "settings": {"pythonFiles": ["test_*.py", "*_test.py"]}, "units": units}
+if os.environ.get("FAKE_STALE"):
+    facts["staleBuild"] = os.environ["FAKE_STALE"]
+with open(os.path.join(d, "fake.json"), "w") as f:
+    json.dump(facts, f)
+sys.exit(1)
+"#;
+
+// covers: C-37, C-39
+#[test]
+fn why_says_a_test_kept_nothing_as_its_test_file_failed_while_none_of_its_tests_did() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        ("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        (".gitignore", "__pycache__/\n"),
+        ("fake.py", UNEXPLAINED_RUNNER),
+        (
+            "test_a.py",
+            "def test_one():\n    pass\n\ndef test_two():\n    pass\n",
+        ),
+    ]);
+    let python = python();
+    let ran = r.run(&["run", "unit", "--", &python, "fake.py"], &[]);
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let map = store::map(&r.cache);
+    assert_eq!(
+        map["units"]["test_a.py"]["tests"],
+        json!({"test_one": "not-run", "test_two": "not-run"}),
+        "{map:#}"
+    );
+    let one = why_json(&r, "test_a.py::test_one");
+    assert_eq!(one["reason"], "not-kept", "{one:#}");
+    assert_eq!(
+        one["says"],
+        "test_a.py::test_one runs: its test file failed while none of its tests did, and what failed may need this test to run, so it keeps no pass",
+        "{one:#}"
+    );
+    // \[C-32\] On a stale build, test_one's pass in a run test_two failed proves nothing either.
+    let ran = r.run(
+        &["run", "unit", "--", &python, "fake.py"],
+        &[
+            ("FAKE_TWO_FAILS", "1"),
+            ("FAKE_STALE", "build/prog is older"),
+        ],
+    );
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    let one = why_json(&r, "test_a.py::test_one");
+    assert_eq!(
+        one["says"],
+        "test_a.py::test_one runs: it ran on a build older than these files, so its pass proves nothing of them",
+        "{one:#}"
+    );
 }
 
 // covers: C-39

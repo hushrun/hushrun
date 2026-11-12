@@ -453,7 +453,17 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
                 "this machine has never seen it run, and no pass that counts here matches what another machine saw it read".into(),
             ),
             Choice::Nothing => {
-                explain_change(&mut out, &changes, &says, &map, input, &unit, adapter.as_ref());
+                let not_kept = own.and_then(|mapped| mapped.not_kept.as_deref());
+                explain_change(
+                    &mut out,
+                    &changes,
+                    &says,
+                    &map,
+                    input,
+                    &unit,
+                    adapter.as_ref(),
+                    not_kept,
+                );
             }
         },
         Err(why) => {
@@ -461,7 +471,17 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             out.detail.push(format!(
                 "as far as this machine knows: can't read which passed ({why})"
             ));
-            explain_change(&mut out, &changes, &says, &map, input, &unit, adapter.as_ref());
+            let not_kept = own.and_then(|mapped| mapped.not_kept.as_deref());
+            explain_change(
+                &mut out,
+                &changes,
+                &says,
+                &map,
+                input,
+                &unit,
+                adapter.as_ref(),
+                not_kept,
+            );
         }
     }
     out
@@ -521,9 +541,10 @@ fn explain_test(
             .insert(0, "so it runs every time, and records nothing".into());
         return;
     }
-    // \[C-37\] It ran here and kept nothing, for the reason its run recorded with it.
+    // \[C-37\] It ran here and kept nothing, for the reason its run recorded with it: `not run`,
+    // or a pass it keeps none of.
     if let Some(why) = row
-        .filter(|row| row.state == State::NotRun)
+        .filter(|row| matches!(row.state, State::NotRun | State::Passed))
         .and_then(|row| row.not_kept.as_deref())
     {
         says(out, Decision::Runs, "not-kept", why.into());
@@ -646,7 +667,7 @@ fn explain_test(
             changes(at.map, at.sets, input.tree, at.unit, &reads)
         }
     };
-    explain_change(out, &changes, says, at.map, input, at.unit, adapter);
+    explain_change(out, &changes, says, at.map, input, at.unit, adapter, None);
 }
 
 /// What changed since the test file last ran here, among what its key holds.
@@ -760,7 +781,10 @@ fn changes_of(
 
 type Says<'a> = dyn Fn(&mut Explanation, Decision, &'static str, String) + 'a;
 
-/// Why a test file with no result under its key runs: what changed, most particular first.
+/// Why a test file with no result under its key runs: what changed, most particular first; with
+/// nothing changed, \[C-37\] why it kept no result when it last ran here (`not_kept`, as that
+/// run decided it), else that its result didn't count or is gone.
+#[allow(clippy::too_many_arguments)]
 fn explain_change(
     out: &mut Explanation,
     changes: &Changes,
@@ -769,6 +793,7 @@ fn explain_change(
     input: &WhyInput<'_>,
     unit: &str,
     adapter: &dyn Adapter,
+    not_kept: Option<&str>,
 ) {
     if let Some((file, how)) = &changes.read {
         let (reason, why) = match *how {
@@ -811,6 +836,10 @@ fn explain_change(
         out.file = Some(file.clone());
         out.detail
             .insert(0, "so every test file of the check runs".into());
+        return;
+    }
+    if let Some(why) = not_kept {
+        says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
     says(

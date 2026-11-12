@@ -540,6 +540,8 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
     // A run that saw the test file again replaces its tests with what it saw; \[C-37\] a test it
     // decided `not-run` keeps why, as its adapter said it.
     let mut fewer = mapped(&[("tests/test_a.py", HASH_A)]);
+    // \[C-37\] And the test file keeps why it kept no result of its own.
+    fewer.not_kept = Some("one of its tests was skipped in a run that failed".into());
     fewer.tests = BTreeMap::from([(
         "test_one".to_string(),
         TestRow {
@@ -555,12 +557,14 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
     write_run(&path, &r).unwrap();
     let map = load(&path, &id("unit")).map;
     assert_eq!(map.units["tests/test_a.py"].tests, fewer.tests);
-    // \[C-37\] Why it kept nothing belongs to a `not-run` test only: the store refuses it on another.
+    assert_eq!(map.units["tests/test_a.py"].not_kept, fewer.not_kept);
+    // \[C-37\] Why it kept nothing belongs to a `not-run` test, or a `passed` one that keeps no
+    // pass: the store refuses it on another.
     {
         let conn = Connection::open(&path).unwrap();
         assert!(
             conn.execute(
-                "UPDATE test SET state = 'passed' WHERE not_kept IS NOT NULL",
+                "UPDATE test SET state = 'failed' WHERE not_kept IS NOT NULL",
                 []
             )
             .is_err()
@@ -823,7 +827,7 @@ fn a_store_that_cant_be_read_is_set_aside_and_made_anew_by_the_next_write() {
     let dir = tempfile::tempdir().unwrap();
     let path = super::path(dir.path(), Some("example.com/acme/shop"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let column = "    -- [C-37] Why a test the run decided `not-run` kept no result, as its adapter said it.\n    not_kept    TEXT CHECK (not_kept IS NULL OR (state = 'not-run' AND not_kept <> '')),\n";
+    let column = "    -- [C-37] Why a test the run decided `not-run`, or `passed` with no pass kept, kept no result.\n    not_kept    TEXT CHECK (not_kept IS NULL OR (state IN ('not-run', 'passed') AND not_kept <> '')),\n";
     assert!(TABLES.contains(column));
     let old = TABLES.replace(column, "");
     {

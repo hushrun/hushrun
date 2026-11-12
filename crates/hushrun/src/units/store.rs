@@ -833,6 +833,9 @@ pub struct Mapped {
     /// \[ADR 0077\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:
     /// the ids a plan keys before COMMAND (C-39).
     pub tests: BTreeMap<String, TestRow>,
+    /// \[C-37\] Why it kept no result of its own when it last ran here, as the run decided it
+    /// `not run` ([`hushrun_core::units::NotKept`]): what `hushrun why` says. `None` otherwise.
+    pub not_kept: Option<String>,
 }
 
 /// \[ADR 0077\] One test as it last ran here (C-39).
@@ -843,8 +846,9 @@ pub struct TestRow {
     pub duration_ms: u64,
     /// What wasn't followed inside its own window.
     pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
-    /// \[C-37\] Why it kept no result, as its adapter said when the run decided it `not-run`:
-    /// what `hushrun why` says. `None` in any other state.
+    /// \[C-37\] Why it kept no result, as the run decided it `not-run`, or `passed` and kept no
+    /// pass ([`hushrun_core::units::Decision`]): its adapter's words for one that didn't finish,
+    /// else the rule's. What `hushrun why` says. `None` in any other state.
     pub not_kept: Option<String>,
     /// \[ADR 0078\] With `reads: test`, what it read then (C-40): its own list; `None` when it
     /// read its test file's.

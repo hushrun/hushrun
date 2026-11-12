@@ -606,3 +606,127 @@ fn a_tests_list_follows_reexports_to_the_end() {
         ])
     );
 }
+
+// covers: C-32, C-37
+#[test]
+fn each_rule_that_keeps_a_result_from_a_unit_or_a_test_says_why_with_its_state() {
+    let complete = facts(true, false, false);
+    let failed_run = RunFacts {
+        command_passed: false,
+        failures_by_unit: false,
+        planned: false,
+    };
+    let attributed = RunFacts {
+        failures_by_unit: true,
+        ..failed_run
+    };
+    let not_run = |why| Decision {
+        state: State::NotRun,
+        not_kept: Some(why),
+    };
+    let cases = [
+        (
+            Facts {
+                deselected: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::LeftOut),
+        ),
+        (
+            facts(false, false, false),
+            PASSED,
+            not_run(NotKept::Unfinished),
+        ),
+        (
+            Facts {
+                tests_reused: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::TestsReused),
+        ),
+        (
+            Facts {
+                unfinished_start: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::UnfinishedStart),
+        ),
+        (
+            Facts {
+                skipped: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::SkippedInFailedRun),
+        ),
+        (
+            Facts {
+                unexplained: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::Unexplained),
+        ),
+        (
+            Facts {
+                stale_build: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::StaleBuild),
+        ),
+        (
+            complete.clone(),
+            failed_run,
+            not_run(NotKept::CommandFailed),
+        ),
+        (
+            Facts {
+                never_left_out: true,
+                ..complete.clone()
+            },
+            PASSED,
+            Decision {
+                state: State::Passed,
+                not_kept: Some(NotKept::NeverLeftOut),
+            },
+        ),
+    ];
+    for (facts, run, want) in &cases {
+        let got = decided(facts, run);
+        assert_eq!(got, *want, "{facts:?}");
+        assert_eq!(state(facts, run), want.state);
+        // What it records: nothing, the pass of a test never left out included.
+        assert_eq!(got.recorded(), None, "{facts:?}");
+        let why = got.not_kept.unwrap();
+        assert!(!why.sentence(true).is_empty() && !why.sentence(false).is_empty());
+    }
+    // A failure, a reuse, what wasn't followed and a pass kept say nothing: their state says it.
+    for (facts, run) in [
+        (facts(true, true, false), &PASSED),
+        (facts(true, false, true), &PASSED),
+        (complete.clone(), &PASSED),
+        (
+            Facts {
+                deselected: true,
+                ..complete.clone()
+            },
+            &RunFacts {
+                planned: true,
+                ..PASSED
+            },
+        ),
+    ] {
+        assert_eq!(decided(&facts, run).not_kept, None, "{facts:?}");
+    }
+    // A failure records, whatever else holds for the run.
+    let failed = Facts {
+        unfinished_start: true,
+        stale_build: true,
+        ..facts(true, true, false)
+    };
+    assert_eq!(decided(&failed, &failed_run).recorded(), Some(false));
+}

@@ -117,6 +117,8 @@ CREATE TABLE unit (
     origin    TEXT NOT NULL CHECK (origin IN ('seen here', 'shared')),
     -- The system whose machine saw a shared list: one for `shared`, none for `seen here`.
     shared_os TEXT CHECK (shared_os IN ('linux', 'macos', 'windows')),
+    -- [C-37] Why it kept no result of its own when it last ran here, as the run decided it.
+    not_kept  TEXT CHECK (not_kept IS NULL OR (origin = 'seen here' AND not_kept <> '')),
     UNIQUE (check_ref, path_ref),
     CHECK ((origin = 'seen here') = (shared_os IS NULL))
 ) STRICT;
@@ -191,8 +193,8 @@ CREATE TABLE test (
     state       TEXT NOT NULL CHECK (state IN ('passed', 'failed', 'not-observed', 'not-run')),
     duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
     list_ref    INTEGER REFERENCES test_list (id),
-    -- [C-37] Why a test the run decided `not-run` kept no result, as its adapter said it.
-    not_kept    TEXT CHECK (not_kept IS NULL OR (state = 'not-run' AND not_kept <> '')),
+    -- [C-37] Why a test the run decided `not-run`, or `passed` with no pass kept, kept no result.
+    not_kept    TEXT CHECK (not_kept IS NULL OR (state IN ('not-run', 'passed') AND not_kept <> '')),
     UNIQUE (unit_ref, test_id)
 ) STRICT;
 CREATE INDEX test_by_list ON test (list_ref);
@@ -637,15 +639,29 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     };
     let mut names: HashMap<i64, String> = HashMap::new();
     let mut units = conn.prepare(
-        "SELECT u.id, p.path, u.origin, u.shared_os FROM unit u JOIN path p ON p.id = u.path_ref
+        "SELECT u.id, p.path, u.origin, u.shared_os, u.not_kept FROM unit u
+         JOIN path p ON p.id = u.path_ref
          WHERE u.check_ref = ?1",
     )?;
     for row in units.query_map([check], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
     })? {
-        let (id, name, origin, os): (i64, String, String, Option<String>) = row?;
+        let (id, name, origin, os, not_kept): (
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = row?;
         let mapped = Mapped {
             origin: Origin::from_row(&origin, os.as_deref()).unwrap_or_default(),
+            not_kept,
             ..Mapped::default()
         };
         map.units.insert(name.clone(), mapped);
@@ -725,7 +741,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                     state,
                     duration_ms: u64::try_from(duration).unwrap_or_default(),
                     not_followed: BTreeSet::new(),
-                    not_kept: not_kept.filter(|_| state == State::NotRun),
+                    not_kept: not_kept.filter(|_| matches!(state, State::NotRun | State::Passed)),
                     list: None,
                 },
             );
@@ -1044,14 +1060,18 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     for (name, mapped) in w.seen {
         let path_ref = ids.path(name)?;
         tx.execute(
-            "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os, not_kept)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 check,
                 path_ref,
                 w.now_ms,
                 mapped.origin.word(),
-                mapped.origin.system().map(|os| os.word())
+                mapped.origin.system().map(|os| os.word()),
+                mapped
+                    .not_kept
+                    .as_deref()
+                    .filter(|why| mapped.origin.system().is_none() && !why.is_empty())
             ],
         )?;
         let unit = tx.last_insert_rowid();
@@ -1094,7 +1114,8 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                     list,
                     row.not_kept
                         .as_deref()
-                        .filter(|why| row.state == State::NotRun && !why.is_empty())
+                        .filter(|why| matches!(row.state, State::NotRun | State::Passed)
+                            && !why.is_empty())
                 ],
             )?;
             let test = tx.last_insert_rowid();

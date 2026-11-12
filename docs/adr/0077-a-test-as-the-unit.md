@@ -239,7 +239,7 @@ first; the plugin's are in ADR 0080's Amendment 2.
   run that exited 139. Now a process may make `<anything>.started` in the run's directory as it
   begins and remove it once its facts are written; one left after COMMAND means no unit and no
   test of the run records a pass (the one state function gets COMMAND as failed and no failure
-  told by unit), fails still record, and the run says so once. No rule says a failed COMMAND with
+  told by unit, later a fact of its own, below), fails still record, and the run says so once. No rule says a failed COMMAND with
   no failed unit keeps nothing: a package that fails to build beside fifty that passed keeps the
   fifty.
 - **Left out in `observe`.** Amendment 4's second start ran in `observe` too, where nothing was
@@ -265,3 +265,17 @@ first; the plugin's are in ADR 0080's Amendment 2.
 - **`ready` and `why` before an import.** They write nothing, so they never import a schema-1
   store, and read no adapter word: they could choose CTest where the run, which imports first,
   chooses pytest. They now read the word from the schema-1 file, read only.
+- **Why a test kept nothing.** `hushrun why` gave the wrong reason for a test the core left
+  without a result: a Go `TestNeeds` that skipped because `TestBase` failed (with `GOFLAGS=-v`)
+  was told nothing changed and no pass counts. Only an adapter's `notKept` was kept. Now the one
+  state function returns, with each `not run`, the rule that decided it (`NotKept`: left out by
+  something else, unfinished, tests reused one by one, a start that died, a skip in a failed run,
+  a failure no test explains, a stale build, a failed run without failures by unit), and with a
+  pass a test never left out keeps none of. The start that died, the stale build and
+  `neverLeftOut` are facts that function reads, not a COMMAND narrowed to failed or a check after
+  it. The sentence goes into the test's row, the adapter's words winning for a test that didn't
+  finish, and into the test file's own row, a new column; `why` says it as reason `not-kept`, for
+  a test first and for a test file where nothing changed and no pass counts. A test file told
+  without its tests and decided `not run` still keeps no row, as before: `why` says it never ran
+  here. A stale build in a run that failed now keeps every pass out too: before, a test file or
+  test whose failures the adapter reports by unit recorded its pass.

@@ -570,6 +570,15 @@ pub struct Facts {
     /// explains (a failing `afterAll`, a crash between tests). Its pass would let the next run
     /// leave it out, and what failed would never run again.
     pub unexplained: bool,
+    /// \[C-32\] A start of the runner began and never said it ended (a `.started` file left in
+    /// `HUSHRUN_UNITS`): what it ran can't be told, so nothing of the run passes.
+    pub unfinished_start: bool,
+    /// \[C-32\] The runner ran a build older than the files (`staleBuild`): a pass proves nothing
+    /// of them.
+    pub stale_build: bool,
+    /// \[C-39\] Of a test: its adapter never leaves it out (`neverLeftOut`), so no plan could
+    /// list it by a pass of its own, and it keeps none.
+    pub never_left_out: bool,
 }
 
 /// What a run knows beyond a unit's own facts (C-32).
@@ -627,6 +636,100 @@ impl State {
     }
 }
 
+/// \[C-37\] Why a test or a test file that ran keeps no result of its own, as [`decided`] said:
+/// the rule that decided it, which `hushrun why` says in [`NotKept::sentence`]'s words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NotKept {
+    /// Something other than the plan deselected it: nothing ran.
+    LeftOut,
+    /// It didn't finish in every process that ran it.
+    Unfinished,
+    /// Of a test file: some of its tests were reused one by one, so it didn't run whole.
+    TestsReused,
+    /// A start of the runner ended before it said what it saw.
+    UnfinishedStart,
+    /// It was skipped, or one of its tests was, in a run whose COMMAND failed.
+    SkippedInFailedRun,
+    /// Of a test: its test file failed while none of its tests did.
+    Unexplained,
+    /// The runner ran a build older than the files.
+    StaleBuild,
+    /// COMMAND failed, and the adapter doesn't report each failure by unit.
+    CommandFailed,
+    /// Of a test: its adapter never leaves it out, so it keeps no pass of its own.
+    NeverLeftOut,
+}
+
+impl NotKept {
+    /// What `hushrun why` says of it, of a test (`test`) or of a test file.
+    pub fn sentence(self, test: bool) -> &'static str {
+        match (self, test) {
+            (NotKept::LeftOut, _) => {
+                "something other than hushrun's plan left it out the last time it was collected here, so it didn't run"
+            }
+            (NotKept::Unfinished, true) => {
+                "it didn't finish in every process that ran it the last time, so it keeps no result"
+            }
+            (NotKept::Unfinished, false) => {
+                "it didn't run whole in every start of its runner the last time, so it keeps no result of its own"
+            }
+            (NotKept::TestsReused, _) => {
+                "some of its tests were reused one by one the last time it ran, so it didn't run whole and keeps no pass of its own"
+            }
+            (NotKept::UnfinishedStart, _) => {
+                "a start of its runner ended before it said what it saw, so no pass of that run is kept"
+            }
+            (NotKept::SkippedInFailedRun, true) => {
+                "it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"
+            }
+            (NotKept::SkippedInFailedRun, false) => {
+                "one of its tests was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"
+            }
+            (NotKept::Unexplained, _) => {
+                "its test file failed while none of its tests did, and what failed may need this test to run, so it keeps no pass"
+            }
+            (NotKept::StaleBuild, _) => {
+                "it ran on a build older than these files, so its pass proves nothing of them"
+            }
+            (NotKept::CommandFailed, true) => {
+                "its run failed, and its adapter doesn't report each failure by test, so no pass of that run is kept"
+            }
+            (NotKept::CommandFailed, false) => {
+                "its run failed, and its adapter doesn't report each failure by test file, so no pass of that run is kept"
+            }
+            (NotKept::NeverLeftOut, _) => {
+                "its adapter can't leave it out of a run, so it runs every time and keeps no pass of its own"
+            }
+        }
+    }
+}
+
+/// \[C-32, C-37\] A unit's or a test's state in a run, and why it keeps no result of its own
+/// when it ran and keeps none: what [`decided`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decision {
+    pub state: State,
+    /// Why it keeps nothing: for `not run`, and for a `passed` test that keeps no pass
+    /// ([`NotKept::NeverLeftOut`]). `None` otherwise: a reuse, a failure, what wasn't followed
+    /// (its own words), a pass kept.
+    pub not_kept: Option<NotKept>,
+}
+
+impl Decision {
+    /// What it records under its key: `Some(true)` a pass, `Some(false)` a fail, `None` nothing.
+    pub fn recorded(self) -> Option<bool> {
+        match (self.state.recorded(), self.not_kept) {
+            (Some(true), Some(_)) => None,
+            (recorded, _) => recorded,
+        }
+    }
+}
+
+/// A unit's state in a run: [`decided`]'s.
+pub fn state(facts: &Facts, run: &RunFacts) -> State {
+    decided(facts, run).state
+}
+
 /// \[C-32, ADR 0060\] The one place a unit's state is decided, from what its adapter reported and
 /// what the run knows. A failure is a failure, whatever else is true, a deselection included; a
 /// unit the plan listed and the adapter deselected is `reused`; a unit that didn't run whole is
@@ -641,39 +744,70 @@ impl State {
 /// \[C-32\] In a run whose COMMAND failed, a test that was skipped, and a test file one of whose
 /// tests was, are `not run`: a skip there proves nothing. In a run that passed, a skip is a pass.
 /// \[C-39\] A test of a test file that failed while none of its tests failed is `not run`.
-pub fn state(facts: &Facts, run: &RunFacts) -> State {
+///
+/// \[C-32\] A run with a start that never said it ended, or on a stale build, is `not run` for
+/// all but its failures. \[C-39\] A test its adapter never leaves out passes and keeps no pass.
+///
+/// \[C-37\] With each `not run`, the rule that said so: why `hushrun why` says it kept nothing.
+pub fn decided(facts: &Facts, run: &RunFacts) -> Decision {
+    let not_run = |why| Decision {
+        state: State::NotRun,
+        not_kept: Some(why),
+    };
     // \[ADR 0069\] First, before a deselection: a process that may not deselect (a nested pytest, an
     // xdist worker the plan doesn't speak for) can run a unit another deselected, and its failure
     // must never read as a reuse.
     if facts.failed {
-        return State::Failed;
+        return Decision {
+            state: State::Failed,
+            not_kept: None,
+        };
     }
     if facts.deselected {
         // Deselected by something other than the plan, such as another plugin: nothing ran.
         return if run.planned {
-            State::Reused
+            Decision {
+                state: State::Reused,
+                not_kept: None,
+            }
         } else {
-            State::NotRun
+            not_run(NotKept::LeftOut)
         };
     }
-    if !facts.complete || facts.tests_reused {
-        return State::NotRun;
+    if !facts.complete {
+        return not_run(NotKept::Unfinished);
+    }
+    if facts.tests_reused {
+        return not_run(NotKept::TestsReused);
+    }
+    // \[C-32\] A start that never said it ended: what it ran can't be told.
+    if facts.unfinished_start {
+        return not_run(NotKept::UnfinishedStart);
     }
     // \[C-32\] A skip in a run whose COMMAND failed: nothing ran that a pass could stand on.
     if facts.skipped && !run.command_passed {
-        return State::NotRun;
+        return not_run(NotKept::SkippedInFailedRun);
     }
     // \[C-39\] Its test file failed and no test of it did: what failed may need this test to run.
     if facts.unexplained {
-        return State::NotRun;
+        return not_run(NotKept::Unexplained);
     }
     if !facts.not_followed.is_empty() {
-        return State::NotObserved;
+        return Decision {
+            state: State::NotObserved,
+            not_kept: None,
+        };
     }
-    if run.command_passed || run.failures_by_unit {
-        State::Passed
-    } else {
-        State::NotRun
+    // \[C-32\] What ran was built before these files.
+    if facts.stale_build {
+        return not_run(NotKept::StaleBuild);
+    }
+    if !(run.command_passed || run.failures_by_unit) {
+        return not_run(NotKept::CommandFailed);
+    }
+    Decision {
+        state: State::Passed,
+        not_kept: facts.never_left_out.then_some(NotKept::NeverLeftOut),
     }
 }
 

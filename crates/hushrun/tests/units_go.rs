@@ -1531,6 +1531,11 @@ fn a_v_that_only_goflags_gives_keeps_the_passes_and_why_asks_for_no_v() {
     let why = r.run(&["why", "unit", "p::TestNeeds"], &[("GOFLAGS", "-v")]);
     let told = format!("{}\n{}", why.stdout, why.stderr);
     assert!(!told.contains("-v"), "{told}");
+    // \[C-37\] The reason is the one the run decided: a skip in a run that failed.
+    assert!(
+        told.contains("p::TestNeeds runs: it was skipped in a run that failed, and a skip there proves nothing"),
+        "{told}"
+    );
 }
 
 /// What `hushrun why` says of a test its binary's early end left without a result.

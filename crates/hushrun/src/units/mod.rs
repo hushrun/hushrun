@@ -52,7 +52,7 @@ use std::process::Command;
 use hushrun_core::digest::Digest;
 use hushrun_core::time::Time;
 use hushrun_core::units::{
-    self, Facts, KeyBase, Mode, Reads, RunFacts, Set, State, Tests, Tree, Unit,
+    self, Decision, Facts, KeyBase, Mode, Reads, RunFacts, Set, State, Tests, Tree, Unit,
 };
 
 use crate::cmd::usage;
@@ -371,22 +371,22 @@ fn tests_that_passed(
     Some(out)
 }
 
-/// \[C-39\] Each of a test file's tests `told`, with its facts and its state by the one function:
-/// it finished, failed and was deselected as told, and what wasn't followed is what was inside its
-/// own window and `outside`, what was outside every test's window of its file. `run(id)` is what
-/// the run knows for it, the plan's listing of it included. When its test file failed
-/// (`file_failed`) and none of `told` did, no test of it passes: the failure is unexplained.
+/// \[C-39\] Each of a test file's tests `told`, with its facts and its decision by the one
+/// function: it finished, failed and was deselected as told, and what wasn't followed is what was
+/// inside its own window and what `file` says was outside every test's window of its file.
+/// `run(id)` is what the run knows for it, the plan's listing of it included. When its test file
+/// failed and none of `told` did, no test of it passes: the failure is unexplained. \[C-32\] What
+/// holds for the whole run (a start that never ended, a stale build) holds for each test.
 fn tests_decided(
     told: &BTreeMap<String, facts::MergedTest>,
-    outside: &BTreeSet<units::NotFollowed>,
-    file_failed: bool,
+    file: &Facts,
     run: impl Fn(&str) -> RunFacts,
-) -> BTreeMap<String, (State, Facts)> {
-    let unexplained = file_failed && told.values().all(|test| !test.failed);
+) -> BTreeMap<String, (Decision, Facts)> {
+    let unexplained = file.failed && told.values().all(|test| !test.failed);
     told.iter()
         .map(|(id, test)| {
             let mut not_followed = test.not_followed.clone();
-            not_followed.extend(outside.iter().cloned());
+            not_followed.extend(file.not_followed.iter().cloned());
             let facts = Facts {
                 complete: test.finished,
                 failed: test.failed,
@@ -395,11 +395,24 @@ fn tests_decided(
                 tests_reused: false,
                 skipped: test.skipped,
                 unexplained,
+                unfinished_start: file.unfinished_start,
+                stale_build: file.stale_build,
+                never_left_out: test.never_left_out,
             };
-            let state = units::state(&facts, &run(id));
-            (id.clone(), (state, facts))
+            let decision = units::decided(&facts, &run(id));
+            (id.clone(), (decision, facts))
         })
         .collect()
+}
+
+/// \[C-37\] Why a test or a test file kept nothing, in people's words, as `decision` says: for a
+/// test that didn't finish, its adapter's words when it gave some (`told`), else the rule's.
+fn not_kept(decision: Decision, test: bool, told: Option<&str>) -> Option<String> {
+    let why = decision.not_kept?;
+    match (why, told) {
+        (units::NotKept::Unfinished, Some(told)) if !told.is_empty() => Some(told.to_string()),
+        _ => Some(why.sentence(test).to_string()),
+    }
 }
 
 /// \[C-39, C-22\] What a plan reuses when tests are the unit, counted for the run's line and for
@@ -889,17 +902,6 @@ impl Session {
         // \[C-32\] A start of the runner that began and never said it ended: what it ran can't
         // be told, so no unit and no test of the run records a pass; a fail still records.
         let unfinished = facts::unfinished_starts(&self.run_dir);
-        let narrowed;
-        let end = if unfinished {
-            narrowed = Finish {
-                base: end.base.clone(),
-                command_passed: false,
-                ..*end
-            };
-            &narrowed
-        } else {
-            end
-        };
         let at = StoreAt {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
@@ -995,9 +997,11 @@ impl Session {
             unwatched,
             shared: &fetched,
         };
+        // \[C-32\] What holds for the whole run, in each unit's facts, for the one function.
         let mut read = read;
-        if unfinished {
-            read.failures_by_unit = false;
+        for seen in read.seen.values_mut() {
+            seen.facts.unfinished_start = unfinished;
+            seen.facts.stale_build = stale.is_some();
         }
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
         if unfinished {
@@ -1187,13 +1191,8 @@ impl Session {
                         };
                         if let Some((unit, id)) = observed.again_tests.get(name) {
                             let seen = read.seen.get(unit)?;
-                            let decided = tests_decided(
-                                seen.tests.as_ref()?,
-                                &seen.facts.not_followed,
-                                seen.facts.failed,
-                                |_| run,
-                            );
-                            return decided.get(id).map(|(state, _)| *state);
+                            let decided = tests_decided(seen.tests.as_ref()?, &seen.facts, |_| run);
+                            return decided.get(id).map(|(decision, _)| decision.state);
                         }
                         let seen = read.seen.get(name)?;
                         Some(units::state(&seen.facts, &run))
@@ -2145,15 +2144,20 @@ fn decide(
             How::Plan(plan) => plan.tests.lists(unit, id),
             _ => false,
         };
-        let test_states: Option<BTreeMap<String, (State, Facts)>> = by_test
+        let decisions: Option<BTreeMap<String, (Decision, Facts)>> = by_test
             .then_some(seen.tests.as_ref())
             .flatten()
             .map(|told| {
-                tests_decided(told, &facts.not_followed, facts.failed, |id| RunFacts {
+                tests_decided(told, &facts, |id| RunFacts {
                     planned: planned || listed_tests(id),
                     ..run
                 })
             });
+        let test_states: Option<BTreeMap<String, (State, Facts)>> = decisions.as_ref().map(|d| {
+            d.iter()
+                .map(|(id, (decision, facts))| (id.clone(), (decision.state, facts.clone())))
+                .collect()
+        });
         // The test file's own state: decided as before from its facts, with what wasn't followed
         // inside any of its tests, and not whole when some of its tests were reused one by one.
         // What wasn't followed inside a test is its test file's too, whether or not its tests
@@ -2171,7 +2175,8 @@ fn decide(
                 .iter()
                 .any(|(id, (state, _))| *state == State::Reused && listed_tests(id));
         }
-        let state = units::state(&whole, &run);
+        let decision = units::decided(&whole, &run);
+        let state = decision.state;
         let tests_ran = test_states
             .as_ref()
             .is_some_and(|states| states.values().any(|(s, _)| s.ran()));
@@ -2285,11 +2290,11 @@ fn decide(
         {
             reads.extend(before.reads.keys().cloned());
         }
-        let key = state.recorded().and_then(|_| keyer.key(unit, &reads));
+        let key = decision.recorded().and_then(|_| keyer.key(unit, &reads));
         if let Some(key) = key {
             file_keys.insert(key);
         }
-        if let (Some(passed), Some(key)) = (state.recorded(), key) {
+        if let (Some(passed), Some(key)) = (decision.recorded(), key) {
             out.records.push(UnitRecord {
                 key,
                 result: if passed { "pass" } else { "fail" }.into(),
@@ -2340,20 +2345,12 @@ fn decide(
         // with `reads: file`, \[C-40\] and each test's with `reads: test`; one that didn't run
         // whole, or didn't pass whole, records each test that ran under the test's own key.
         if state != State::Passed || mode.reads == Reads::Test {
-            for (id, (test, _)) in test_states.iter().flatten() {
+            for (id, (test, _)) in decisions.iter().flatten() {
+                // \[C-39\] One its adapter never leaves out records no pass of its own: no plan
+                // finds one to list it by, and it runs, as it would. A fail still counts.
                 let Some(passed) = test.recorded() else {
                     continue;
                 };
-                // \[C-39\] One its adapter never leaves out records no pass of its own: no plan
-                // finds one to list it by, and it runs, as it would. A fail still counts.
-                let never_left_out = seen
-                    .tests
-                    .as_ref()
-                    .and_then(|told| told.get(id))
-                    .is_some_and(|t| t.never_left_out);
-                if passed && never_left_out {
-                    continue;
-                }
                 let Some(key) = keyer.test_key(unit, id, &test_files(&test_list(id))) else {
                     continue;
                 };
@@ -2372,10 +2369,11 @@ fn decide(
         if ran {
             // \[C-39\] Its tests as they ran, and a test reused as the row it stands on.
             let before = map.units.get(unit);
-            let tests_rows = test_states
+            let tests_rows = decisions
                 .iter()
                 .flatten()
-                .filter_map(|(id, (test, _))| {
+                .filter_map(|(id, (decision, _))| {
+                    let test = &decision.state;
                     if *test == State::Reused {
                         if let Some(row) = before.and_then(|b| b.tests.get(id)) {
                             return Some((id.clone(), row.clone()));
@@ -2412,8 +2410,8 @@ fn decide(
                             state: *test,
                             duration_ms: told.duration_ms,
                             not_followed: told.not_followed.clone(),
-                            // \[C-37\] Why it kept nothing, as its adapter said, with the state.
-                            not_kept: told.not_kept.clone().filter(|_| *test == State::NotRun),
+                            // \[C-37\] Why it kept nothing, as the one function decided it.
+                            not_kept: not_kept(*decision, true, told.not_kept.as_deref()),
                             list,
                         },
                     ))
@@ -2441,6 +2439,8 @@ fn decide(
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
                     origin: Origin::SeenHere,
                     tests: tests_rows,
+                    // \[C-37\] Why it kept no result of its own, as the one function decided it.
+                    not_kept: not_kept(decision, false, None),
                 },
             );
         }
@@ -2611,6 +2611,7 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
         dirs: list.dirs.clone(),
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),
+        not_kept: None,
     }
 }
 
