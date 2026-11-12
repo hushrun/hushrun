@@ -1,0 +1,13 @@
+{"e":"jvm","pid":"100","dir":"/work/reactor-junit5/lib","basedir":"/work/reactor-junit5/lib"}
+{"e":"plan-started"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]","class":null,"method":null,"params":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]","class":"com.example.lib.GreenTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]/[method:green1()]","class":"com.example.lib.GreenTest","method":"green1","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]/[method:green1()]","class":"com.example.lib.GreenTest","method":"green1","params":"","status":"SUCCESSFUL","ms":27,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]/[method:green2()]","class":"com.example.lib.GreenTest","method":"green2","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]/[method:green2()]","class":"com.example.lib.GreenTest","method":"green2","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"finished","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.GreenTest]","class":"com.example.lib.GreenTest","method":null,"params":null,"status":"SUCCESSFUL","ms":43,"message":null}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]","class":"com.example.lib.CrashTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:a_before()]","class":"com.example.lib.CrashTest","method":"a_before","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:a_before()]","class":"com.example.lib.CrashTest","method":"a_before","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:com.example.lib.CrashTest]/[method:b_crash()]","class":"com.example.lib.CrashTest","method":"b_crash","params":""}
