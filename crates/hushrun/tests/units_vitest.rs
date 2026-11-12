@@ -1559,3 +1559,51 @@ fn an_audited_vitest_test_that_fails_again_alone_suspends_reuse() {
     );
     assert_eq!(store::disagreements(&r.cache), ["test/two.test.ts::ok"]);
 }
+
+/// A coverage provider that measures nothing, so that Vitest's coverage is on with no package.
+const NO_COVERAGE: &str = "const self = new URL(import.meta.url).pathname
+export default {
+  getProvider() {
+    let options
+    return {
+      name: 'none',
+      initialize(ctx) { options = { ...ctx.config.coverage, customProviderModule: self } },
+      resolveOptions() { return options },
+      clean() {}, onAfterSuiteRun() {}, generateCoverage() { return {} }, reportCoverage() {},
+    }
+  },
+  startCoverage() {}, takeCoverage() { return {} }, stopCoverage() {},
+}
+";
+
+// covers: C-43
+#[test]
+fn with_vitests_coverage_on_no_test_is_left_out_or_watched() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("cov.mjs", NO_COVERAGE),
+        (
+            "test/two.test.ts",
+            "import { test } from 'vitest'\ntest('one', () => {})\ntest('two', () => {})\n",
+        ),
+    ]);
+    r.write(
+        "vitest.config.ts",
+        &config("  test: { coverage: { enabled: true, provider: 'custom', customProviderModule: './cov.mjs' } },\n"),
+    );
+    // Coverage shares V8's counters with watching, and a partial run's coverage would read as a
+    // drop: every test runs, and none says what it ran.
+    let told = tests_vitest(&r, "test", json!({"test/two.test.ts": ["one"]}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let tests = told.tests("test/two.test.ts");
+    for (id, test) in &tests {
+        assert_eq!(
+            (&test["finished"], &test["deselected"]),
+            (&json!(true), &json!(false)),
+            "{id}"
+        );
+        assert!(test.get("ran").is_none(), "{id}: {test}");
+    }
+}

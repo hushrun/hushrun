@@ -809,4 +809,61 @@ mod tests {
         assert!(module_path("virtual:routes").is_err());
         assert!(module_path("src/relative.ts").is_err());
     }
+
+    fn told(id: &str, finished: bool, failed: bool, ran: Option<Vec<usize>>) -> TestFacts {
+        TestFacts {
+            id: id.into(),
+            finished,
+            failed,
+            ran,
+            opened: Some(vec![]),
+            dirs: Some(vec![]),
+            ..TestFacts::default()
+        }
+    }
+
+    // covers: C-43
+    #[test]
+    fn a_test_two_projects_ran_finished_only_where_both_finished_it() {
+        let worker = |paths: &[&str]| FactsFile {
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            ..FactsFile::default()
+        };
+        let a = worker(&["test/a.test.ts", "src/x.ts"]);
+        let b = worker(&["src/y.ts", "test/a.test.ts"]);
+        let mut tests = BTreeMap::new();
+        merge_tests(
+            &mut tests,
+            &a,
+            &[
+                told("t", true, false, Some(vec![0, 1])),
+                told("u", true, false, Some(vec![0])),
+                told("v", true, false, Some(vec![0])),
+            ],
+        );
+        merge_tests(
+            &mut tests,
+            &b,
+            &[
+                told("t", true, false, Some(vec![0, 1])),
+                told("u", false, false, Some(vec![1])),
+                told("v", true, true, None),
+            ],
+        );
+        // Each worker's indices are its own table's.
+        assert_eq!(
+            tests["t"].ran,
+            Some(BTreeSet::from([
+                "test/a.test.ts".to_string(),
+                "src/x.ts".to_string(),
+                "src/y.ts".to_string()
+            ]))
+        );
+        assert!(tests["t"].finished && !tests["t"].failed);
+        // Unfinished in one project: unfinished.
+        assert!(!tests["u"].finished);
+        // Failed in one: failed; and not watched alone in one: not watched.
+        assert!(tests["v"].failed);
+        assert_eq!(tests["v"].ran, None);
+    }
 }
