@@ -156,3 +156,19 @@ The decision: a test file that failed while none of its tests failed records no 
 its tests in that run: the one state function makes them `not run`. Its own `fail` is recorded as
 before, so its next run asks its tests again and runs them. A failure one of its tests explains
 leaves the others' passes as they were.
+
+## Amendment 4: a run that left out what no plan listed runs again (2026-11-12)
+
+RFC 0003's principle 5 says every failure of the machinery ends in "ran everything". A reviewer
+showed the shared JVM hook leaving out Spock features nobody listed while the check passed: the
+plan was right, the machinery wasn't, and what it left out never ran. Some adapters can tell only
+after COMMAND, from what the runner reported, that this happened.
+
+The decision: an adapter says so from its `read` (`Read::left_out`, with why in words people read),
+or a facts file does (`leftOutUnlisted`). hushrun then says one line, starts COMMAND once more in a
+directory of its own whose `hushrun.json` lists nothing, with no plan, and decides everything (the
+exit code, every unit's state, the check's result) from that start alone; the first start's
+results are dropped. When the second start can't be set up, or says the same again, nothing is
+recorded for the check or any unit, and hushrun fails, saying why: what ran can't be told from what
+a broken run left out. `swift test`'s own run again, inside its program, stays as it is; this is
+for adapters that learn it only after COMMAND.

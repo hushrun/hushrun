@@ -196,6 +196,11 @@ pub struct Read {
     pub edges: BTreeSet<Edge>,
     /// \[C-38\] The hints read for `planned`.
     pub received: Vec<HintKnown>,
+    /// \[C-32\] The adapter learned, after COMMAND, that its runner left out something the plan
+    /// didn't list, and why, in words people read: the run starts COMMAND once more with nothing
+    /// left out and goes by that start alone; when that can't be done, or it says so again,
+    /// nothing is recorded and the run fails. (A facts file can say it too: `leftOutUnlisted`.)
+    pub left_out: Option<String>,
 }
 
 /// What `hushrun why` has to go by: this machine's store and the files now, and no tool.

@@ -503,50 +503,101 @@ fn skip_or_run(
         }
     }
 
-    let clock = Instant::now();
-    let started = SystemTime::now();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut child = Command::new(program(&command[0], dir, &path));
-    child
-        .args(&command[1..])
-        .current_dir(dir)
-        .env(variants::INSIDE_A_RUN, "1");
-    build.apply(&mut child);
-    if let Some(session) = &session {
-        session.apply(&mut child);
-    }
-    let status = child.status();
-    let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let status = match status {
-        Ok(status) => status,
-        Err(err) => {
-            eprintln!("hushrun: can't start {}: {err}", command[0]);
-            // As shells report it: 127, not found; 126, found but not runnable.
-            let code = if err.kind() == std::io::ErrorKind::NotFound {
-                127
-            } else {
-                126
-            };
-            return ExitCode::from(code);
+    let runner = Runner::from_process(global);
+    // \[C-32\] COMMAND starts once, or twice when its adapter left out what the plan didn't list:
+    // the second start leaves nothing out, and alone decides the run (RFC 0003 principle 5).
+    let mut starts = 0;
+    let (status, duration_ms, started, mut observed) = loop {
+        starts += 1;
+        let clock = Instant::now();
+        let started = SystemTime::now();
+        let mut child = Command::new(program(&command[0], dir, &path));
+        child
+            .args(&command[1..])
+            .current_dir(dir)
+            .env(variants::INSIDE_A_RUN, "1");
+        build.apply(&mut child);
+        if let Some(session) = &session {
+            session.apply(&mut child);
         }
+        let status = child.status();
+        let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = match status {
+            Ok(status) => status,
+            Err(err) => {
+                eprintln!("hushrun: can't start {}: {err}", command[0]);
+                // As shells report it: 127, not found; 126, found but not runnable.
+                let code = if err.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                };
+                return ExitCode::from(code);
+            }
+        };
+        if signaled(&status) {
+            if code.is_some() && backend.is_some() {
+                say.line(format_args!(
+                    "{check} stopped by a signal; nothing recorded"
+                ));
+            }
+            return ExitCode::from(exit_code(&status));
+        }
+        let (Some(code), Some(backend)) = (code, backend) else {
+            break (status, duration_ms, started, None);
+        };
+        // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done;
+        // none when the files aren't the ones the run's key is for.
+        let observed = session.as_ref().and_then(|session| {
+            observed(
+                global,
+                session,
+                code,
+                backend,
+                command,
+                dir,
+                status.success(),
+                job.as_deref(),
+            )
+        });
+        let Some(why) = observed.as_ref().and_then(|(o, _)| o.left_out.clone()) else {
+            break (status, duration_ms, started, observed);
+        };
+        let set_up = match session.as_deref_mut() {
+            Some(session) if starts == 1 => session.whole_again().map_err(Some),
+            _ => Err(None),
+        };
+        let not_recorded = match set_up {
+            Ok(()) => {
+                say.line(format_args!(
+                    "{check}: running it once more with nothing left out: its adapter left out what the plan didn't list ({why})"
+                ));
+                continue;
+            }
+            Err(Some(err)) => format!(
+                "its adapter left out what the plan didn't list ({why}), and it couldn't run again with nothing left out ({err})"
+            ),
+            Err(None) => format!(
+                "run again with nothing left out, its adapter still left out what the plan didn't list ({why})"
+            ),
+        };
+        // Nothing this run did can be told from a run that left out what no plan listed: nothing
+        // is recorded, for the check or any unit, and the run fails.
+        say.line(format_args!("{check} wasn't recorded: {not_recorded}"));
+        let _ = results::ran_here(&code.key, Ended::Failed);
+        write_outputs(&runner, Verdict::Fail, None);
+        let exit = exit_code(&status);
+        return ExitCode::from(if exit == 0 { 1 } else { exit });
     };
     let exit = exit_code(&status);
     // G13: a verdict the result that decided here didn't have.
     let flaky = flaky(decided.as_ref(), status.success());
-    if signaled(&status) {
-        if code.is_some() && backend.is_some() {
-            say.line(format_args!(
-                "{check} stopped by a signal; nothing recorded"
-            ));
-        }
-        return ExitCode::from(exit);
-    }
     let verdict = if status.success() {
         Verdict::Pass
     } else {
         Verdict::Fail
     };
-    let runner = Runner::from_process(global);
     let (Some(code), Some(backend)) = (code, backend) else {
         write_outputs(&runner, verdict, None);
         return ExitCode::from(exit);
@@ -556,20 +607,6 @@ fn skip_or_run(
     if verdict == Verdict::Fail {
         let _ = results::ran_here(&code.key, Ended::Failed);
     }
-    // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done; none
-    // when the files aren't the ones the run's key is for.
-    let mut observed = session.as_ref().and_then(|session| {
-        observed(
-            global,
-            session,
-            code,
-            backend,
-            command,
-            dir,
-            status.success(),
-            job.as_deref(),
-        )
-    });
     let reused = observed
         .as_ref()
         .and_then(|(o, _)| o.counts.as_ref())

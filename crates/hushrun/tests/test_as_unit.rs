@@ -431,6 +431,105 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
     );
 }
 
+/// A runner that writes an adapter's facts itself, as pytest's plugin would: each test file
+/// of `FAKE_FILES` ran whole, and in the starts `FAKE_LEFT_OUT` names (by their number across
+/// every run, from 1) it says it left out what the plan didn't list. Each start keeps the
+/// `hushrun.json` it saw in `FAKE_STATE`, and exits with `FAKE_EXIT_<n>`, else 0.
+const FAKE_RUNNER: &str = r#"import json, os, sys
+d = os.environ["HUSHRUN_UNITS"]
+with open(os.path.join(d, "hushrun.json")) as f:
+    run = json.load(f)
+state = os.environ["FAKE_STATE"]
+n = len(os.listdir(state)) + 1
+with open(os.path.join(state, str(n)), "w") as f:
+    json.dump(run, f)
+units = [{"unit": u, "selected": 1, "finished": 1, "reads": [u]}
+         for u in os.environ["FAKE_FILES"].split()]
+facts = {"schema": "hushrun.unit-facts/v0", "adapter": "pytest", "failuresByUnit": True,
+         "settings": {"pythonFiles": ["test_*.py", "*_test.py"]}, "units": units}
+if str(n) in os.environ.get("FAKE_LEFT_OUT", "").split():
+    facts["leftOutUnlisted"] = "2 features of test_a.py nobody listed"
+with open(os.path.join(d, "fake-%d.json" % n), "w") as f:
+    json.dump(facts, f)
+sys.exit(int(os.environ.get("FAKE_EXIT_%d" % n, "0")))
+"#;
+
+// covers: C-32, C-34
+#[test]
+fn an_adapter_that_left_out_what_the_plan_didnt_list_runs_again_with_nothing_left_out() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        ("hushrun.yaml", &yaml("reuse")),
+        (".gitignore", "__pycache__/\n"),
+        ("fake.py", FAKE_RUNNER),
+        ("other.py", "X = 1\n"),
+        ("test_a.py", "def test_a():\n    pass\n"),
+        ("test_b.py", "def test_b():\n    pass\n"),
+    ]);
+    let state = r.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = python();
+    let state_dir = state.to_string_lossy().into_owned();
+    let run = |extra: &[(&str, &str)]| {
+        let mut env = vec![
+            ("FAKE_STATE", state_dir.as_str()),
+            ("FAKE_FILES", "test_a.py test_b.py"),
+        ];
+        env.extend_from_slice(extra);
+        r.run(&["run", "unit", "--", &python, "fake.py"], &env)
+    };
+    let seen = |n: usize| -> Value {
+        serde_json::from_slice(&std::fs::read(state.join(n.to_string())).unwrap()).unwrap()
+    };
+    // Start 1: both test files pass, and are recorded.
+    let first = run(&[]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(r.unit_results(), 2, "{}", first.stderr);
+    // Start 2 is planned with one of them listed, fails, and says it left out what the plan
+    // didn't list: start 3 runs with nothing left out, passes, and alone decides the run.
+    r.write("other.py", "X = 2\n");
+    let second = run(&[("FAKE_LEFT_OUT", "2"), ("FAKE_EXIT_2", "1")]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert!(
+        second.stderr.contains(
+            "hushrun: unit: running it once more with nothing left out: its adapter left out what the plan didn't list (2 features of test_a.py nobody listed)"
+        ),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(seen(2)["reuse"].as_array().unwrap().len(), 1, "{}", seen(2));
+    assert_eq!(seen(3)["reuse"], json!([]), "{}", seen(3));
+    assert!(seen(3).get("reuseTests").is_none(), "{}", seen(3));
+    let result = r.newest_result();
+    assert_eq!(result["result"], "pass", "{result:#}");
+    assert_eq!(
+        (result["units"]["total"].clone(), result["units"]["reused"].clone()),
+        (json!(2), json!(0))
+    );
+    // Start 5 says it again: nothing is recorded, and hushrun fails, saying why.
+    r.write("other.py", "X = 3\n");
+    let before = r.unit_results();
+    let results = || {
+        let mut files = Vec::new();
+        collect(&r.cache.join("results/results/v0"), &mut files);
+        files.len()
+    };
+    let recorded = results();
+    let third = run(&[("FAKE_LEFT_OUT", "4 5")]);
+    assert_eq!(third.code, 1, "{}", third.stderr);
+    assert!(
+        third.stderr.contains(
+            "hushrun: unit wasn't recorded: run again with nothing left out, its adapter still left out what the plan didn't list (2 features of test_a.py nobody listed)"
+        ),
+        "{}",
+        third.stderr
+    );
+    assert_eq!(results(), recorded);
+    assert_eq!(r.unit_results(), before);
+}
+
 // covers: C-39
 #[test]
 fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {

@@ -87,6 +87,11 @@ pub enum Start {
 /// happened, what COMMAND's environment gains, and \[ADR 0069\] the plan, when reuse made one.
 pub struct Session {
     dir: PathBuf,
+    /// \[C-32\] The directory COMMAND's start writes in: `dir`, or for a start that leaves
+    /// nothing out after one that left out what the plan didn't list, one of its own inside it.
+    run_dir: PathBuf,
+    /// Where COMMAND runs.
+    cwd: PathBuf,
     cache: PathBuf,
     adapter: Box<dyn Adapter>,
     variables: Vec<(String, OsString)>,
@@ -574,6 +579,8 @@ impl Session {
             reads,
             notes,
             plan_notes: Vec::new(),
+            run_dir: dir.clone(),
+            cwd: cwd.to_path_buf(),
             dir,
             cache,
             adapter,
@@ -745,7 +752,7 @@ impl Session {
             Unit::File => PlannedTests::default(),
         };
         if let Err(err) = write_run_file(
-            &self.dir,
+            &self.run_dir,
             &self.root,
             &Listed {
                 reuse: reuse.iter().cloned().collect(),
@@ -837,7 +844,9 @@ impl Session {
     /// lines that say so. `None` when the adapter wrote nothing, so that everything ran and no
     /// unit is recorded.
     pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
-        let files = facts::read_all(&self.dir)?;
+        let files = facts::read_all(&self.run_dir)?;
+        // \[C-32\] What a facts file says the runner left out that the plan didn't list.
+        let unlisted = facts::left_out(&files);
         let at = StoreAt {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
@@ -866,9 +875,22 @@ impl Session {
             asker.as_ref(),
         ) {
             Ok(Some(read)) => read,
-            Ok(None) => return None,
-            Err(why) => return Observed::unread(&end.base.check, &why),
+            // \[C-32\] Left out what the plan didn't list: whatever else could be read, this start
+            // decides nothing.
+            Ok(None) => {
+                return unlisted.map(|why| Observed {
+                    left_out: Some(why),
+                    ..Observed::default()
+                });
+            }
+            Err(why) => {
+                return Observed::unread(&end.base.check, &why).map(|o| Observed {
+                    left_out: unlisted,
+                    ..o
+                });
+            }
         };
+        let left_out = read.left_out.clone().or(unlisted);
         let watches = facts::watches(&files);
         // \[C-40\] Why the adapter watched no test, when it says.
         let unwatched = files.iter().find_map(|f| {
@@ -889,6 +911,7 @@ impl Session {
             shared: &fetched,
         };
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
+        observed.left_out = left_out;
         // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
         // was none. A plan said it already.
         if let (Some(unread), Mode::Observe) = (&loaded.unread, end.mode) {
@@ -928,12 +951,39 @@ impl Session {
         })
     }
 
+    /// \[C-32\] Sets up COMMAND's start once more, with nothing left out, after a start whose
+    /// adapter left out what the plan didn't list (RFC 0003 principle 5: every failure of the
+    /// machinery ends in "ran everything"): a directory of its own whose `hushrun.json` lists
+    /// nothing, the variables pointing at it, and no plan, so that the run goes by that start
+    /// alone. `Err` why it can't be set up.
+    pub fn whole_again(&mut self) -> Result<(), String> {
+        let dir = self.dir.join("whole");
+        std::fs::create_dir_all(&dir).map_err(|err| format!("can't make {}: {err}", dir.display()))?;
+        let unit_files = BTreeSet::new();
+        let listed = Listed {
+            extras: self.adapter.again(&self.root, &self.cwd, &unit_files),
+            unit: self.unit,
+            reads: self.reads,
+            ..Listed::default()
+        };
+        write_run_file(&dir, &self.root, &listed)
+            .map_err(|err| format!("can't write its plan: {err}"))?;
+        for (name, value) in &mut self.variables {
+            if name == runner::UNITS_VAR {
+                *value = dir.clone().into_os_string();
+            }
+        }
+        self.run_dir = dir;
+        self.plan = None;
+        Ok(())
+    }
+
     /// \[C-34, ADR 0069\] The second run of the audit (RFC 0003 §3.7): COMMAND as written, again,
     /// with a directory of its own whose `hushrun.json` lists every test file the first run saw
     /// but `again`, so that only those run. `None` when it can't be set up, and then each of them
     /// counts as having failed again.
     pub fn again(&self, observed: &Observed, again: &BTreeSet<String>) -> Option<Again> {
-        let dir = self.dir.join("again");
+        let dir = self.run_dir.join("again");
         std::fs::create_dir_all(&dir).ok()?;
         // \[C-39\] An audited test runs alone: every other test of its file is listed one by one,
         // and its file isn't listed whole.
@@ -1395,6 +1445,9 @@ pub struct Observed {
     /// \[C-38\] What this run's hint says of each test file reused on what its build is made of
     /// alone, which no row of the store holds.
     built: BTreeMap<String, hushrun_core::hints::Unit>,
+    /// \[C-32\] The adapter left out what the plan didn't list, and why: this start decides
+    /// nothing, and COMMAND starts once more with nothing left out.
+    pub left_out: Option<String>,
     /// \[C-39\] Whether tests were decided one by one in this run, and \[C-40\] what each was
     /// taken to have read: what its hint holds of them (C-41).
     by_test: bool,
@@ -1789,6 +1842,7 @@ fn decide(
         refused,
         edges,
         received,
+        left_out: _,
     } = read;
     let mut seen = seen;
     // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the

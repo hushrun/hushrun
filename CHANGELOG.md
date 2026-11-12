@@ -132,6 +132,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   passed, a skip is a pass, as before. An adapter's facts may say `skipped`; pytest does.
 - A test file that failed while none of its tests failed, such as a failing `afterAll`, records
   no pass for any of its tests: the next run runs them, and what failed runs again.
+- When an adapter finds after the command that its runner left out something the plan didn't
+  list, `hushrun run` says so in one line and runs the command once more with nothing left out,
+  going by that run alone; if that can't be done, or it happens again, nothing is recorded and the
+  run fails, saying why. An adapter's facts may say `leftOutUnlisted`.
 
 ### Fixed
 

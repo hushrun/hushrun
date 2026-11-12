@@ -153,6 +153,10 @@ pub struct FactsFile {
     /// from`). A test that reads a file reads what it re-exports, to the end.
     #[serde(default)]
     pub reexports: BTreeMap<String, Vec<usize>>,
+    /// \[C-32\] The runner left out something the plan didn't list, and why, in words people
+    /// read: the run starts COMMAND once more with nothing left out, and goes by that start alone.
+    #[serde(default)]
+    pub left_out_unlisted: Option<String>,
 }
 
 impl FactsFile {
@@ -675,6 +679,14 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
             .all(|(selected, finished)| finished >= selected);
     }
     out
+}
+
+/// \[C-32\] Why the first file of `files` that says so left out what the plan didn't list.
+pub fn left_out(files: &[FactsFile]) -> Option<String> {
+    files
+        .iter()
+        .find_map(|f| f.left_out_unlisted.clone())
+        .map(|why| why.chars().take(300).collect())
 }
 
 /// What a file says of a runner setting, as a list of strings, when every file that says it
