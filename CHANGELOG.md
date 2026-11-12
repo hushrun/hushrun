@@ -285,6 +285,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: a test whose program isn't built here is marked so whichever test of its unit comes
   first; skipped and disabled tests are told as skipped, so in a run that failed they record no
   pass; and the plan's listing and walk get a command's own `env NAME=value` assignments.
+- CTest: a run in which a test of a program older than what it is built from ran (a source
+  changed, nothing built) no longer records the check's pass: it says once that the pass isn't
+  recorded, naming the program, what changed, and to build before ctest, and the next run on the
+  same code runs again.
 - CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
   program a test program waits for or has compiled in, and a program a test names by a relative
   path are now read; on Makefiles a source newer than its object makes the program stale; an

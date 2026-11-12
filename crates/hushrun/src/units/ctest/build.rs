@@ -49,8 +49,9 @@ pub struct Built {
     pub own: BTreeSet<String>,
     /// Its build couldn't be read: it reads every C and C++ file of the scope.
     pub every_source: bool,
-    /// Why it isn't up to date, when it isn't: it ran old code.
-    pub stale: Option<String>,
+    /// Why it isn't known to be up to date, when it isn't: it is older than what it is built
+    /// from, and ran old code; or whether it is can't be told.
+    pub stale: Option<Stale>,
     /// Why what it is built from can't be told at all, when it can't: it isn't observed.
     pub refused: Option<String>,
     /// How it was read: `ninja`, `makefile` or `every source`.
@@ -58,6 +59,33 @@ pub struct Built {
     /// Programs and modules of its build it may start, from the top of the build directory:
     /// those it waits for (`add_dependencies`) and those its objects' compile commands name.
     pub starts: BTreeSet<String>,
+}
+
+/// \[ADR 0087\] Why a test program isn't known to be up to date.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stale {
+    /// It is older than something it is built from: the build would make it again, and its tests
+    /// ran old code (C-32's stale build).
+    Old(String),
+    /// Whether it is up to date can't be told.
+    Unknown(String),
+}
+
+impl Stale {
+    /// Why, in people's words.
+    pub fn why(&self) -> &str {
+        match self {
+            Stale::Old(why) | Stale::Unknown(why) => why,
+        }
+    }
+
+    /// Of two, the one that says more: a program known to be old is old.
+    pub fn either(a: Option<Stale>, b: Option<Stale>) -> Option<Stale> {
+        match (a, b) {
+            (Some(Stale::Old(why)), _) | (_, Some(Stale::Old(why))) => Some(Stale::Old(why)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// What reading one build directory keeps between its programs.
@@ -176,7 +204,7 @@ impl<'a> Walker<'a> {
             let other = self.program(&path, build);
             built.reads.extend(other.reads);
             built.every_source |= other.every_source;
-            built.stale = built.stale.take().or(other.stale);
+            built.stale = Stale::either(built.stale.take(), other.stale);
             built.refused = built.refused.take().or(other.refused);
         }
         self.walking.remove(program);
@@ -202,10 +230,10 @@ impl<'a> Walker<'a> {
             }
             Named::BuildDir(dir) => Built {
                 every_source: true,
-                stale: Some(format!(
+                stale: Some(Stale::Unknown(format!(
                     "its test names {}, a directory of a build, whose programs it may start can't be told up to date",
                     dir.display()
-                )),
+                ))),
                 method: "every source",
                 ..Built::default()
             },
@@ -313,7 +341,7 @@ impl<'a> Walker<'a> {
     }
 
     fn every_source(&self, program: &Path) -> Built {
-        let stale = newest_source(self.root, program);
+        let stale = newest_source(self.root, program).map(Stale::Old);
         Built {
             every_source: true,
             stale,
@@ -417,7 +445,9 @@ impl<'a> Walker<'a> {
                     return None;
                 };
                 if state != "VALID" {
-                    out.stale = Some(format!("{object}'s record of its headers is {state}"));
+                    out.stale = Some(Stale::Unknown(format!(
+                        "{object}'s record of its headers is {state}"
+                    )));
                 }
                 for file in files {
                     match self.place(file, build) {
@@ -487,11 +517,24 @@ impl<'a> Walker<'a> {
                 }
             }
         }
-        if out.stale.is_none() {
+        // Ninja's own word decides, whatever a record said: work to do means it ran old code.
+        if !matches!(out.stale, Some(Stale::Old(_))) {
             match run(ninja, build, &["-n", target], &self.assigned) {
                 Some(text) if text.contains("no work to do") => {}
-                Some(_) => out.stale = Some("ninja would build it again".into()),
-                None => out.stale = Some("ninja can't say whether it is up to date".into()),
+                Some(_) => {
+                    let program = build.join(target);
+                    let newer = newer_than(&program, out.reads.iter().map(|r| self.root.join(r)));
+                    out.stale = Some(Stale::Old(match newer {
+                        Some(why) => format!("ninja would build it again: {why}"),
+                        None => "ninja would build it again".into(),
+                    }));
+                }
+                None if out.stale.is_none() => {
+                    out.stale = Some(Stale::Unknown(
+                        "ninja can't say whether it is up to date".into(),
+                    ));
+                }
+                None => {}
             }
         }
         // \[ADR 0087\] What it waits for, through phony edges, that is a program or a module,
@@ -651,7 +694,8 @@ impl<'a> Walker<'a> {
         }
         out.stale = stale
             .or_else(|| newer_than(program, made_files.into_iter()))
-            .or_else(|| newer_than(program, out.reads.iter().map(|r| self.root.join(r))));
+            .or_else(|| newer_than(program, out.reads.iter().map(|r| self.root.join(r))))
+            .map(Stale::Old);
         // \[ADR 0087\] The targets its own waits for (`CMakeFiles/Makefile2`) that link a
         // program or a module, and those its compile flags name.
         let extras = self.extras.get(build).cloned().unwrap_or_default();

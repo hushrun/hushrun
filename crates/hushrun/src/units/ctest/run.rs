@@ -64,7 +64,7 @@ impl program::Program for Ctest {
             }
             Err(Skip::Passthrough) => call.args.to_vec(),
             Err(Skip::Unobserved(why)) => {
-                write_facts(units, Vec::new(), settings_why(&why), false);
+                write_facts(units, Vec::new(), settings_why(&why), false, None);
                 call.args.to_vec()
             }
         }
@@ -80,6 +80,7 @@ impl program::Program for Ctest {
                 Vec::new(),
                 settings_why("ctest was stopped by a signal, so nothing it ran is known"),
                 false,
+                None,
             );
             return;
         }
@@ -372,7 +373,7 @@ pub fn walk(
                 had.reads.extend(built.reads);
                 had.own.extend(built.own);
                 had.every_source |= built.every_source;
-                had.stale = had.stale.take().or(built.stale);
+                had.stale = super::build::Stale::either(had.stale.take(), built.stale);
                 had.refused = had.refused.take().or(built.refused);
             }
         };
@@ -796,6 +797,9 @@ fn record(p: &Pending) {
     let mut units: BTreeMap<String, UnitFacts> = BTreeMap::new();
     let mut own: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut every_source: Vec<String> = Vec::new();
+    // \[C-32\] A program older than what it is built from whose test ran in this start: its pass
+    // proves nothing of the files now, and the check records none.
+    let mut stale_build: Option<String> = None;
     for (i, test) in p.tests.iter().enumerate() {
         let unit = units.entry(test.unit.clone()).or_insert_with(|| {
             let mut facts = UnitFacts {
@@ -811,10 +815,10 @@ fn record(p: &Pending) {
                         detail: why.clone(),
                     });
                 }
-                if let Some(why) = &built.stale {
+                if let Some(stale) = &built.stale {
                     facts.not_followed.push(Unfollowed {
                         why: "stale program".into(),
-                        detail: why.clone(),
+                        detail: stale.why().to_string(),
                     });
                 }
                 own.insert(test.unit.clone(), built.own.iter().cloned().collect());
@@ -862,6 +866,15 @@ fn record(p: &Pending) {
         if !left && !disabled {
             unit.selected += 1;
             unit.finished += u64::from(finished);
+            if stale_build.is_none()
+                && let Some(super::build::Stale::Old(why)) =
+                    p.built.get(&test.unit).and_then(|b| b.stale.as_ref())
+            {
+                stale_build = Some(format!(
+                    "{} is older than what it is built from ({why}): build before ctest",
+                    test.unit
+                ));
+            }
         }
         if unit.tests.is_none() {
             unit.skipped += u64::from(skipped);
@@ -903,6 +916,7 @@ fn record(p: &Pending) {
         units.into_values().collect(),
         settings,
         p.report_tests,
+        stale_build,
     );
 }
 
@@ -918,6 +932,7 @@ fn write_facts(
     units: Vec<UnitFacts>,
     settings: BTreeMap<String, serde_json::Value>,
     tests: bool,
+    stale_build: Option<String>,
 ) {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -936,6 +951,7 @@ fn write_facts(
         // \[C-32\] Each `ctest` is a start of its own, and writes one file: a program counts as
         // run whole only when each start that ran any of it ran it whole.
         start: Some(format!("{ADAPTER}-{}-{nanos}", std::process::id())),
+        stale_build,
         ..FactsFile::default()
     };
     let path = dir.join(format!("{ADAPTER}-{}-{nanos}.json", std::process::id()));

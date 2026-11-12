@@ -1165,6 +1165,89 @@ fn on_makefiles_a_source_newer_than_its_object_is_a_stale_program() {
     );
 }
 
+// covers: C-49, C-32
+#[test]
+fn a_pass_on_a_program_older_than_its_sources_is_not_recorded_until_it_is_built() {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?} {generator}", cmake.version);
+            let p = Project::new(&cmake, generator, &shop("reuse"));
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // util.h changes, and nothing builds: t_util's test runs on the program as it was.
+            p.write("src/util.h", "static int twice(int x) { return x + x; }\n");
+            let stale = p.run(CTEST, &[]);
+            assert_eq!(stale.code, 0, "{at}: {}", stale.stderr);
+            let said: Vec<&str> = stale
+                .stderr
+                .lines()
+                .filter(|l| l.starts_with("hushrun: unit passed, but it isn't recorded: "))
+                .collect();
+            assert_eq!(said.len(), 1, "{at}: {}", stale.stderr);
+            assert!(
+                said[0].contains("t_util") && said[0].contains("build before ctest"),
+                "{at}: {}",
+                said[0]
+            );
+            assert!(
+                !stale.stderr.contains("won't run again"),
+                "{at}: {}",
+                stale.stderr
+            );
+            // The same code again: nothing was recorded, so it runs again, and says so again.
+            let again = p.run(CTEST, &[]);
+            assert!(
+                !again.stderr.contains("unit skipped"),
+                "{at}: {}",
+                again.stderr
+            );
+            assert!(
+                again
+                    .stderr
+                    .contains("hushrun: unit passed, but it isn't recorded: "),
+                "{at}: {}",
+                again.stderr
+            );
+            // Built: the next run records as usual, and the one after skips.
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert!(
+                built.stderr.contains("it won't run again on this code")
+                    && !built.stderr.contains("isn't recorded"),
+                "{at}: {}",
+                built.stderr
+            );
+            assert!(p.run(CTEST, &[]).stderr.contains("unit skipped"), "{at}");
+            // A stale program none of whose tests ran in this start says nothing of it: greet.h
+            // changes, and only util's test runs.
+            p.write(
+                "src/greet.h",
+                "static const char *greet(void) { return \"hey\"; }\n",
+            );
+            let other = p.run(
+                &[
+                    "run",
+                    "unit",
+                    "--",
+                    "ctest",
+                    "--test-dir",
+                    "build",
+                    "-R",
+                    "util",
+                ],
+                &[],
+            );
+            assert_eq!(other.code, 0, "{at}: {}", other.stderr);
+            assert!(
+                other.stderr.contains("it won't run again on this code")
+                    && !other.stderr.contains("isn't recorded"),
+                "{at}: {}",
+                other.stderr
+            );
+        }
+    }
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_test_reads_the_programs_of_the_fixtures_and_tests_it_depends_on() {
@@ -1986,13 +2069,16 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
         &[],
     );
     assert_eq!(stale.code, 0, "{}", stale.stderr);
-    let map = store::map(&p.cache);
-    assert_eq!(
-        map["units"]["t_util"]["notFollowed"],
-        json!(["stale program"]),
-        "{map:#}"
+    // \[ADR 0087, amended\] Its pass proves nothing of the files now: nothing is recorded, the
+    // check's pass included, and the run says why.
+    assert!(
+        stale.stderr.contains(
+            "hushrun: unit passed, but it isn't recorded: t_util is older than what it is built from ("
+        ),
+        "{}",
+        stale.stderr
     );
-    assert!(map["units"]["t_greet"]["notFollowed"].is_null(), "{map:#}");
+    assert!(store::stores(&p.cache).is_empty(), "{}", stale.stderr);
 }
 
 // covers: C-49

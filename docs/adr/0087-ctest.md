@@ -261,3 +261,17 @@ A second review ran these, each a test left out while real `ctest` failed after 
 
 hushrun's `ctest` also ends on a signal sent after the real `ctest` ended, as any program does: the
 forwarding of signals no longer keeps them once the real one is gone.
+
+## Amendment 7: a run on a stale program records no pass (2026-11-12)
+
+Item 4 kept a stale program's own unit from a pass, but the check's pass was still recorded, so
+the next run on the same code skipped whole and never ran the program as built. A program known to
+be older than what it is built from (`ninja -n` has work, or on Makefiles a file it read is newer)
+whose test ran in a start of `ctest` now makes that start's facts say `staleBuild` (C-32):
+`<program> is older than what it is built from (<what changed>): build before ctest`. A pass of
+the run then records nothing, the check's included, and says so once; a failure records as usual.
+A program whose being up to date can't be told (a header record that isn't `VALID` while `ninja -n`
+has no work, `ninja` not answering, a directory of a build a test names) stays `not observed` only:
+it proves no old code ran, and treating it as stale would keep such a check from ever recording.
+Ninja's `-n` is now asked even when a record wasn't `VALID`, so its answer decides. A stale
+program none of whose tests ran in the start says nothing.
