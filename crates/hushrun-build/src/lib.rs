@@ -65,6 +65,7 @@ pub mod model;
 pub mod portable;
 pub mod regular;
 pub mod restore;
+pub mod rlib;
 pub mod roots;
 pub mod scan;
 pub mod script;

@@ -1183,6 +1183,19 @@ impl Call<'_> {
         let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
+        // B-6: a library whose `.rlib` holds only rustc's own members bundled no static
+        // library, so the static libraries in its native folders are not in its bytes.
+        if inv.class() == Class::Library
+            && observed
+                .native_dirs
+                .iter()
+                .any(|dir| !dir.archives.is_empty())
+        {
+            observed.bundles_nothing = outputs
+                .iter()
+                .find(|o| o.file.kind == OutputKind::Link && o.file.name.ends_with(".rlib"))
+                .is_some_and(|o| crate::rlib::bundles_nothing(&o.file.path) == Some(true));
+        }
         if inv.class() != Class::Library {
             let linked = self.link(cx, stdout, floor)?;
             observed.link = Some(linked.link);

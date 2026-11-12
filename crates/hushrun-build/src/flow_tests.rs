@@ -50,6 +50,10 @@ struct Plan {
     link_salt: Option<String>,
     /// For a proc macro: something more in its metadata, as a crate hash that moved does.
     metadata_salt: Option<String>,
+    /// For a library: its `.rlib` as an `ar` archive with these members (`lib.rmeta` holds
+    /// what the compile read), as rustc writes one; a bundled static library's objects are
+    /// members of their own.
+    rlib_members: Option<Vec<String>>,
 }
 
 type During = Box<dyn FnMut()>;
@@ -247,6 +251,21 @@ impl Fake {
                     bytes.extend_from_slice(b"\nsymbols");
                     let name = format!("lib{stem}.{}", std::env::consts::DLL_EXTENSION);
                     (out.join(name), Some(bytes))
+                }
+                _ if plan.rlib_members.is_some() => {
+                    let path = out.join(format!("lib{stem}.rlib"));
+                    let rlib = format!("rlib\n{content}");
+                    let members: Vec<(&str, &[u8])> = plan
+                        .rlib_members
+                        .iter()
+                        .flatten()
+                        .map(|name| (name.as_str(), rlib.as_bytes()))
+                        .collect();
+                    let temp = out.join(format!(".{stem}.ar"));
+                    crate::rlib::write_gnu(&temp, &members).unwrap();
+                    let bytes = fs::read(&temp).unwrap();
+                    fs::remove_file(&temp).unwrap();
+                    (path, Some(bytes))
                 }
                 _ => (
                     out.join(format!("lib{stem}.rlib")),
@@ -2678,6 +2697,54 @@ fn a_native_folder_is_an_input_and_a_root_of_its_own() {
         REUSED
     );
     assert_eq!(run(&w, &setup(&w, "three", &outside, b"x two")), STORED);
+}
+
+// covers: B-6
+#[test]
+fn a_library_that_bundled_nothing_is_not_keyed_by_the_static_libraries_beside_it() {
+    // `ring` builds `libring_core.a` with the cargo home's path in its objects, and cargo hands
+    // its folder (`-L native=`) to every crate above it. Those that bundle nothing from it
+    // (their `.rlib` holds only rustc's own members) don't hold its bytes: another machine's
+    // `libring_core.a` must not give them another key. One that bundles it still does.
+    for (members, other_bytes_reuse) in [
+        (vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o"], true),
+        (
+            vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o", "1f2e-curve25519.o"],
+            false,
+        ),
+    ] {
+        let w = world(Mode::On);
+        w.plan(
+            "a",
+            Plan {
+                rlib_members: Some(members.iter().map(|m| m.to_string()).collect()),
+                ..Plan::default()
+            },
+        );
+        let setup = |name: &str, bytes: &[u8]| {
+            let ws = w.checkout(name);
+            let dir = ws.join("target/debug/build/ring-1/out");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("libring_core.a"), bytes).unwrap();
+            let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
+            (ws, format!("native={dir}"))
+        };
+        let run = |(ws, native): &(PathBuf, String)| {
+            settle();
+            w.call(ws, "a", &["-L", native]).outcome()
+        };
+        assert_eq!(
+            run(&setup("one", b"objects naming /home/runner/.cargo")),
+            STORED
+        );
+        let other = run(&setup("two", b"objects naming /opt/tools/cargo"));
+        let expected = if other_bytes_reuse { REUSED } else { STORED };
+        assert_eq!(other, expected, "members {members:?}");
+        // A static library that appears, or a folder's names that change, still count.
+        let ws = setup("three", b"objects naming /home/runner/.cargo");
+        fs::write(ws.0.join("target/debug/build/ring-1/out/new.txt"), b"").unwrap();
+        assert_eq!(run(&ws), STORED, "the folder's names changed");
+    }
 }
 
 // covers: B-11

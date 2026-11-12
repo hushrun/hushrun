@@ -271,6 +271,7 @@ mod tests {
             externs: vec![],
             native: vec![],
             native_dirs: vec![],
+            bundles_nothing: false,
             shape: vec![],
             generated: None,
             declared: None,

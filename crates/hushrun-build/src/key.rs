@@ -19,8 +19,9 @@ use crate::model::{Located, RootName};
 pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 
 /// The schema of the second key. v5: reads under the cargo home and the toolchain named as
-/// bases, a proc macro named by what it was built from. v6: and by its metadata.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v6";
+/// bases, a proc macro named by what it was built from. v6: and by its metadata. v7: a library
+/// that bundled nothing names its native folders without their static libraries.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v7";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -277,6 +278,11 @@ pub struct Observed {
     pub native: Vec<Read>,
     /// Every `-L native=`, `all=` and bare folder: its names and its static libraries (B-6).
     pub native_dirs: Vec<NativeDir>,
+    /// A library whose `.rlib` holds nothing but rustc's own members bundled no static library
+    /// (B-6): its native folders are named without their static libraries' bytes, which are
+    /// not in its own.
+    #[serde(default)]
+    pub bundles_nothing: bool,
     /// Every folder that directly holds a read file.
     pub shape: Vec<Shape>,
     /// Every file under `OUT_DIR`; `None` when the package has no build script.
@@ -326,7 +332,22 @@ impl Observed {
                 (e.name.clone(), e.options.clone())
             })?,
             native: normalize(&self.native, "native", |r| r.at.clone())?,
-            native_dirs: normalize(&self.native_dirs, "native folders", |d| d.dir.clone())?,
+            native_dirs: normalize(
+                &self
+                    .native_dirs
+                    .iter()
+                    .map(|dir| match self.bundles_nothing {
+                        true => NativeDir {
+                            archives: Vec::new(),
+                            ..dir.clone()
+                        },
+                        false => dir.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                "native folders",
+                |d| d.dir.clone(),
+            )?,
+            bundles_nothing: self.bundles_nothing,
             shape: normalize_shape(&self.shape)?,
             generated: self
                 .generated
@@ -455,6 +476,8 @@ struct BlockBody {
     externs: Vec<ExternInput>,
     native: Vec<Read>,
     native_dirs: Vec<NativeDir>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bundles_nothing: bool,
     shape: Vec<Shape>,
     generated: Option<Vec<Generated>>,
     declared: Option<DeclaredBody>,
@@ -577,6 +600,11 @@ pub struct ReadList {
     /// lookup whose roots differ skips the hint before it opens anything: its paths outside
     /// every root are another checkout's (B-8).
     pub roots: Option<Digest>,
+    /// The compile bundled no static library ([`Observed::bundles_nothing`]): the lookup names
+    /// the native folders as it did. Whether a crate bundles one follows from what is keyed
+    /// besides (its sources and flags), so a compile that bundles one never finds this key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bundles_nothing: bool,
 }
 
 /// The digest of a call's roots as [`crate::roots::Roots::tied`] gives them, in any order.
@@ -624,6 +652,7 @@ impl ReadList {
                 Place::Anywhere => None,
                 Place::Tied(roots) => Some(roots_digest(roots)),
             },
+            bundles_nothing: observed.bundles_nothing,
         }
     }
 }
@@ -713,6 +742,7 @@ mod tests {
                 names: Some(vec!["libx.a".into(), "x.h".into()]),
                 archives: vec![("libx.a".into(), d(11))],
             }],
+            bundles_nothing: false,
             shape: vec![Shape {
                 dir: at(RootName::Package, "src"),
                 names: vec!["lib.rs".into(), "util.rs".into()],
@@ -763,7 +793,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "2a9356781dcbd2df4de6a8cb56b801dfeb0aa4fcdb71943056bdaeb1e8915820"
+            "3b456c32b1e7460bac2e553670d951415e4b0af6181a64b7fe0e704496f1f262"
         );
     }
 

@@ -100,7 +100,12 @@ metadata can't be found, and a tied proc macro,
 - `native folders`: for a library, every `-L native=`, `all=` and bare folder, whether or not a
   `-l` names anything in it (a `#[link(kind = "static")]` in the source bundles a static library
   found there into the `.rlib`, and nothing reports it): the names of its entries, and each `*.a`
-  and `*.lib` directly in it by SHA-256. These folders are usually other packages' `OUT_DIR`s: no
+  and `*.lib` directly in it by SHA-256. A library whose `.rlib` holds nothing but rustc's own
+  members (`lib.rmeta` and its `*.rcgu.o` objects) bundled no static library, so the bytes of
+  those static libraries are not in it: its key names the folders by their entries alone, and
+  its hint says so, so that the lookup names them the same way. Whether a crate bundles one
+  follows from its sources and flags, which are keyed besides, so a compile that bundles one
+  never finds such a key. A compile that writes no `.rlib` keys the static libraries' bytes. These folders are usually other packages' `OUT_DIR`s: no
   record is written there, and digests are remembered for the run under its session's folder, by
   path and stat. A linked output (a program, a proc macro, a build-script binary) has none:
   cargo hands it every dependency's folders whether it links anything from them or not, and its
