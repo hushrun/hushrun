@@ -837,6 +837,73 @@ fn a_test_presets_repeat_index_and_show_only_are_read() {
     );
 }
 
+// covers: C-49
+#[test]
+fn hushruns_listings_write_no_file_a_preset_or_the_command_line_names() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for cmake in with_cmake() {
+        let generator = generators(&cmake)[0];
+        let at = format!("CMake {:?}", cmake.version);
+        let mut files = shop("reuse");
+        // A preset's JUnit file came in version 6 (CMake 3.25).
+        let (version, junit) = if cmake.version >= (3, 25) {
+            (6, r#", "outputJUnitFile": "pj.xml""#)
+        } else {
+            (3, "")
+        };
+        files.push(file(
+            "CMakePresets.json",
+            &format!(
+                r#"{{"version": {version},
+                "configurePresets": [{{"name": "dev", "binaryDir": "${{sourceDir}}/build"}}],
+                "testPresets": [{{"name": "log", "configurePreset": "dev",
+                  "output": {{"outputLogFile": "mylog.txt"{junit}}}}}]}}"#
+            ),
+        ));
+        let p = Project::new(&cmake, generator, &files);
+        // The user's own log and JUnit file from before.
+        p.write("mylog.txt", "mine\n");
+        p.write("build/pj.xml", "<mine/>\n");
+        // A ctest in front of the real one that says when, as the run starts, a file the user
+        // reads isn't as it was before hushrun's first listing.
+        let wrap = p.root.join("wrap");
+        std::fs::create_dir_all(&wrap).unwrap();
+        let marker = p.root.join("changed.txt");
+        let first = p.root.join("first.txt");
+        let watched = "mylog.txt build/mylog.txt pj.xml build/pj.xml";
+        let script = format!(
+            "#!/bin/sh\nsum() {{ for f in {watched}; do cksum \"$f\" 2>/dev/null; done; }}\n\
+             [ -f '{first}' ] || sum > '{first}'\n\
+             case \"$*\" in *--show-only*|*--version*) ;; *) sum | cmp -s - '{first}' || echo \"$*\" >> '{marker}' ;; esac\n\
+             exec '{real}' \"$@\"\n",
+            real = cmake.bin.join("ctest").display(),
+            marker = marker.display(),
+            first = first.display()
+        );
+        std::fs::write(wrap.join("ctest"), script).unwrap();
+        std::fs::set_permissions(wrap.join("ctest"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let mut was = std::ffi::OsString::from("=");
+        was.push(wrap.as_os_str());
+        was.push(":");
+        was.push(&p.path);
+        let was = was.into_string().unwrap();
+        let shim = p.shim(
+            &["--preset", "log", "-O", "cli.log"],
+            json!({"unit": "test", "reuse": ["t_greet"]}),
+            Some(shop_plan(&["t_greet"])),
+            &[("HUSHRUN_PROGRAMS_PATH", was.as_str())],
+        );
+        assert_eq!(shim.code, 0, "{at}\n{}", shim.stdout);
+        assert_eq!(shim.left_out(), ["t_greet::greet"], "{at}");
+        assert!(
+            !marker.exists(),
+            "{at}: a listing changed a file before: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

@@ -385,6 +385,9 @@ pub struct Preset {
     pub by_position: bool,
     /// It sets `execution.showOnly`: `ctest --preset` runs no test.
     pub show_only: bool,
+    /// Its `output.outputLogFile`, which even a listing writes, and a command line's `-O` doesn't
+    /// replace (ran, CMake 3.22 and 4.4).
+    pub log: Option<String>,
 }
 
 /// The test preset `name` of the presets in `dir`, merged as CMake merges them (`include`,
@@ -426,6 +429,13 @@ pub fn preset(name: &str, dir: &Path) -> Result<Preset, String> {
         .and_then(|r| r.get("mode"))
         .and_then(|m| m.as_str())
         .is_some_and(|mode| matches!(mode, "until-pass" | "after-timeout"));
+    if let Some(log) = tp
+        .get("output")
+        .and_then(|o| o.get("outputLogFile"))
+        .and_then(|v| v.as_str())
+    {
+        out.log = Some(expand(log, name)?);
+    }
     out.show_only = execution
         .and_then(|e| e.get("showOnly"))
         .is_some_and(|v| !v.is_null());

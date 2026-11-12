@@ -116,18 +116,74 @@ fn path_was() -> Option<OsString> {
     }
 }
 
-/// The real `ctest`'s listing with `args`: its tests, and the lines it printed before them.
-pub fn list(real: &Path, args: &[String], cwd: &Path) -> Result<Vec<select::Listed>, String> {
+/// The real `ctest`'s listing with `args`: its tests. A listing writes a test preset's
+/// `outputJUnitFile` and `outputLogFile` (ran, CMake 4.4): it is given a JUnit file of its own,
+/// in a directory of its own, which replaces the preset's; and the preset's log, `log`, which a
+/// command line's `-O` doesn't replace (and on CMake 3.22 makes a listing write), is put back as
+/// it was, so that no file the user reads is left changed by hushrun.
+pub fn list(
+    real: &Path,
+    args: &[String],
+    cwd: &Path,
+    log: Option<&Path>,
+) -> Result<Vec<select::Listed>, String> {
+    let own = tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
+    let kept = log.map(Kept::new);
     let output = tool(real)
         .args(args)
         .arg("--show-only=json-v1")
+        .arg("--output-junit")
+        .arg(own.path().join("listing.xml"))
         .current_dir(cwd)
-        .output()
-        .map_err(|err| format!("can't start {}: {err}", real.display()))?;
+        .output();
+    if let Some(kept) = kept {
+        kept.put_back();
+    }
+    let output = output.map_err(|err| format!("can't start {}: {err}", real.display()))?;
     if !output.status.success() {
         return Err("ctest couldn't list its tests".into());
     }
     select::parse_listing(&output.stdout).map(|(listing, _)| listing.tests)
+}
+
+/// A file as it was before a listing, to put back after it.
+struct Kept {
+    path: PathBuf,
+    was: Option<(Vec<u8>, SystemTime)>,
+}
+
+impl Kept {
+    fn new(path: &Path) -> Kept {
+        let was = std::fs::read(path).ok().and_then(|bytes| {
+            let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+            Some((bytes, modified))
+        });
+        Kept {
+            path: path.to_path_buf(),
+            was,
+        }
+    }
+
+    /// The file as it was: gone if it wasn't there, else its bytes and its time, whole.
+    fn put_back(self) {
+        match self.was {
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            Some((bytes, modified)) => {
+                let same = std::fs::read(&self.path).is_ok_and(|now| now == bytes)
+                    && std::fs::metadata(&self.path)
+                        .and_then(|m| m.modified())
+                        .is_ok_and(|m| m == modified);
+                if !same
+                    && facts::write_whole(&self.path, &bytes).is_ok()
+                    && let Ok(file) = std::fs::File::options().write(true).open(&self.path)
+                {
+                    let _ = file.set_modified(modified);
+                }
+            }
+        }
+    }
 }
 
 /// The real `ctest`'s version.
@@ -168,7 +224,11 @@ pub fn listed(
             .and_then(|p| p.binary_dir.clone())
             .unwrap_or_else(|| cwd.to_path_buf()),
     };
-    let tests = list(real, &args::listing(items, &[]), cwd)?;
+    let log = preset
+        .as_ref()
+        .and_then(|p| p.log.as_ref())
+        .map(|l| cwd.join(l));
+    let tests = list(real, &args::listing(items, &[]), cwd, log.as_deref())?;
     if tests.is_empty() {
         let multi = select::build_dir(&test_dir).multi_config;
         return Err(if multi && !args::has(items, &["-C", "--build-config"]) {
@@ -488,7 +548,13 @@ fn choose(
             // Everything left out: a pass stays a pass (ran: the last --no-tests wins).
             words.push("--no-tests=ignore".into());
         }
-        let Ok(again) = list(real, &args::listing(&args::parse(&words), &[]), cwd) else {
+        let log = preset.and_then(|p| p.log.as_ref()).map(|l| cwd.join(l));
+        let Ok(again) = list(
+            real,
+            &args::listing(&args::parse(&words), &[]),
+            cwd,
+            log.as_deref(),
+        ) else {
             continue;
         };
         let mut got: Vec<(String, String)> = again.iter().map(select::Listed::identity).collect();
