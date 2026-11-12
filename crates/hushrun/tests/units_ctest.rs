@@ -1283,6 +1283,79 @@ fn a_program_a_test_names_by_a_relative_path_is_read() {
     }
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_program_a_test_program_starts_by_a_compiled_in_path_or_waits_for_is_read() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let uses = |name: &str| {
+            format!("int main(void) {{ const char *p = {name}; return p[0] == '/' ? 0 : 1; }}\n")
+        };
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(cdef C)\nenable_testing()\n\
+                     add_executable(cli tools/cli.c)\nadd_executable(cli4 tools/cli4.c)\n\
+                     add_executable(waited tools/waited.c)\nadd_library(plg MODULE lib/plg.c)\n\
+                     add_executable(t_cdef tests/t_cdef.c)\n\
+                     target_compile_definitions(t_cdef PRIVATE CLI_PATH=\"$<TARGET_FILE:cli>\")\nadd_dependencies(t_cdef cli)\n\
+                     add_executable(t_nodep tests/t_nodep.c)\n\
+                     target_compile_definitions(t_nodep PRIVATE CLI_PATH=\"$<TARGET_FILE:cli4>\")\n\
+                     add_executable(t_plg tests/t_plg.c)\n\
+                     target_compile_definitions(t_plg PRIVATE PLG_PATH=\"$<TARGET_FILE:plg>\")\nadd_dependencies(t_plg plg)\n\
+                     add_executable(t_wait tests/t_wait.c)\nadd_dependencies(t_wait waited)\n\
+                     add_executable(t_p tests/t_p.c)\n\
+                     foreach(t cdef nodep plg wait p)\n  add_test(NAME ${t} COMMAND t_${t})\nendforeach()\n",
+                ),
+                file("tools/cli.c", "int main(void) { return 0; }\n"),
+                file("tools/cli4.c", "int main(void) { return 0; }\n"),
+                file("tools/waited.c", "int main(void) { return 0; }\n"),
+                file("lib/plg.c", "int plg(void) { return 1; }\n"),
+                file("tests/t_cdef.c", &uses("CLI_PATH")),
+                file("tests/t_nodep.c", &uses("CLI_PATH")),
+                file("tests/t_plg.c", &uses("PLG_PATH")),
+                file("tests/t_wait.c", "int main(void) { return 0; }\n"),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        let reads = |unit: &str| map["units"][unit]["reads"].clone();
+        // A path of the build's compiled in, with the program it names waited for or not; a
+        // program or module a test program waits for (add_dependencies): each is read.
+        assert_eq!(
+            reads("t_cdef"),
+            json!(["tests/t_cdef.c", "tools/cli.c"]),
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_nodep"),
+            json!(["tests/t_nodep.c", "tools/cli4.c"]),
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_plg"),
+            json!(["lib/plg.c", "tests/t_plg.c"]),
+            "{at}"
+        );
+        assert_eq!(
+            reads("t_wait"),
+            json!(["tests/t_wait.c", "tools/waited.c"]),
+            "{at}"
+        );
+        assert_eq!(reads("t_p"), json!(["tests/t_p.c"]), "{at}");
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
