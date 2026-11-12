@@ -1088,3 +1088,61 @@ fn junit4_tests_of_a_class_in_the_default_package_leave_out_nothing_of_a_class_n
     let cases = r.xml_cases("app", "p.CalcTest");
     assert_eq!(cases.len(), 9, "{cases:?}\n{}", second.stderr);
 }
+
+// covers: C-32, C-46
+#[cfg(unix)]
+#[test]
+fn a_gradle_wrapper_that_starts_gradle_again_keeps_what_the_first_start_failed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let counts = tempfile::tempdir().unwrap();
+    let count_dir = counts.path().to_string_lossy().into_owned();
+    // A wrapper that starts Gradle again when it fails, and a test that fails the first time.
+    let mut files = build(Framework::Junit5, &["app"], "{mode: reuse, unit: test}");
+    files.extend([
+        file(
+            "gradlew",
+            "#!/bin/sh\n\"$REAL_GRADLE\" \"$@\" || \"$REAL_GRADLE\" \"$@\"\n",
+        ),
+        file(
+            "app/src/test/java/shop/app/FlakyTest.java",
+            "package shop.app;\nimport org.junit.jupiter.api.*;\nimport java.nio.file.*;\nclass FlakyTest {\n  @Test void flaky() throws Exception { Path p = Paths.get(System.getenv(\"COUNTS\"), \"ran\"); boolean again = Files.exists(p); Files.write(p, new byte[0]); Assertions.assertTrue(again); }\n  @Test void steady() {}\n}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    std::fs::set_permissions(
+        r.repo.join("gradlew"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            "./gradlew",
+            "--offline",
+            "--console=plain",
+            "test",
+            "--continue",
+        ],
+        &[("REAL_GRADLE", &gradle), ("COUNTS", &count_dir)],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(
+        ran.stdout.matches("FlakyTest > flaky() FAILED").count(),
+        1,
+        "{}",
+        ran.stdout
+    );
+    // The second start passed it; the first failed it: a flaky test is a failed one.
+    assert_eq!(
+        r.map()["units"]["app/src/test/java/shop/app/FlakyTest.java"]["tests"],
+        json!({"shop.app.FlakyTest.flaky": "failed", "shop.app.FlakyTest.steady": "passed"}),
+        "{}",
+        ran.stderr
+    );
+}

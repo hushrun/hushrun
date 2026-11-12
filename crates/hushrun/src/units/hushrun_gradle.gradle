@@ -71,12 +71,17 @@ class HushrunRun {
 
     static String key(String buildRoot, String taskPath) { sha1(buildRoot + "\n" + taskPath).substring(0, 12) }
 
-    /** The task's facts file in this run's directory. */
-    static File facts(String buildRoot, String taskPath) {
+    /**
+     * The task's facts file in this run's directory: as its own actions write it, and, `start`
+     * given, as the build service keeps it for one start of Gradle, which a second start under
+     * the same COMMAND never overwrites.
+     */
+    static File facts(String buildRoot, String taskPath, String start = null) {
         String u = units()
         if (u == null) return null
         String safe = taskPath.replaceAll(/[^A-Za-z0-9]+/, "_").replaceAll(/^_+/, "")
-        return new File(u, "gradle-" + safe + "-" + key(buildRoot, taskPath) + ".json")
+        String name = "gradle-" + safe + "-" + key(buildRoot, taskPath) + (start == null ? "" : "-" + start)
+        return new File(u, name + ".json")
     }
 
     /** The task's own directory in this run's directory: its list for the hook, the hook's events. */
@@ -115,10 +120,12 @@ class HushrunRun {
         return m.length() > 300 ? m.substring(0, 300) : m
     }
 
-    /** The facts file around a report. */
-    static String factsText(Map report, List<String> errors) {
-        JsonOutput.toJson([schema: FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
-                           settings: [gradle: report], errors: errors ?: []])
+    /** The facts file around a report, of one start of Gradle when `start` says which. */
+    static String factsText(Map report, List<String> errors, String start = null) {
+        Map facts = [schema: FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
+                     settings: [gradle: report], errors: errors ?: []]
+        if (start != null) facts.start = start
+        JsonOutput.toJson(facts)
     }
 }
 
@@ -635,7 +642,10 @@ class HushrunAfter implements Action<Task>, Serializable {
 
 // Hears how every task ended: a Test task that was up to date, came from the build cache, had no
 // source or failed before its tests, and test tasks this script can't follow.
+// One instance a build, so one start of Gradle: its id names the facts files it keeps.
 abstract class HushrunService implements BuildService<Params>, OperationCompletionListener {
+    final String start = UUID.randomUUID().toString()
+
     interface Params extends BuildServiceParameters {
         MapProperty<String, String> getStored()          // task path -> its stored report
         MapProperty<String, String> getUnfollowed()      // task path -> why
@@ -680,7 +690,8 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             report.outcome = outcome
             report.taskFailed = failed
             report.taskFailures = failed ? HushrunService.messages(res.failures, 0) : []
-            HushrunRun.writeWhole(target, HushrunRun.factsText(report, errors))
+            HushrunRun.writeWhole(HushrunRun.facts(root, path, start), HushrunRun.factsText(report, errors, start))
+            target.delete()
         } catch (Throwable ignored) {
         }
     }
@@ -709,7 +720,7 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
         if (why == null) return
         String root = parameters.root.get()["root"]
         Map report = [schema: HushrunRun.REPORT_SCHEMA, task: path, outcome: "not-followed", notFollowed: [[why: "task", detail: why]]]
-        HushrunRun.writeWhole(HushrunRun.facts(root, path), HushrunRun.factsText(report, []))
+        HushrunRun.writeWhole(HushrunRun.facts(root, path, start), HushrunRun.factsText(report, [], start))
     }
 }
 

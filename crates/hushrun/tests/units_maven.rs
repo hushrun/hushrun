@@ -1049,3 +1049,48 @@ fn a_fork_that_died_after_its_class_tests_passed_records_no_pass_for_it() {
         );
     }
 }
+
+// covers: C-32, C-47
+#[cfg(unix)]
+#[test]
+fn a_maven_wrapper_that_starts_maven_again_records_neither_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(maven) = maven() else { return };
+    let counts = tempfile::tempdir().unwrap();
+    // A wrapper that starts Maven again when it fails, and a test that fails the first time.
+    let mut files = junit4("{mode: reuse, unit: test}");
+    files.push(file(
+        "mvnw",
+        "#!/bin/sh\n\"$REAL_MVN\" \"$@\" || \"$REAL_MVN\" \"$@\"\n",
+    ));
+    files.push(file(
+        "core/src/test/java/shop/core/FlakyTest.java",
+        "package shop.core;\n\nimport org.junit.Test;\nimport java.nio.file.*;\nimport static org.junit.Assert.*;\n\npublic class FlakyTest {\n  @Test public void flaky() throws Exception { Path p = Paths.get(System.getenv(\"COUNTS\"), \"ran\"); boolean again = Files.exists(p); Files.write(p, new byte[0]); assertTrue(again); }\n}\n",
+    ));
+    let r = Repo::new(&files, maven);
+    std::fs::set_permissions(r.repo.join("mvnw"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut words = r.mvn(&["test"]);
+    let real = std::mem::replace(&mut words[0], "./mvnw".into());
+    let output = r
+        .hushrun()
+        .env("REAL_MVN", &real)
+        .env("COUNTS", counts.path())
+        .args(["run", "unit", "--"])
+        .args(&words)
+        .output()
+        .expect("hushrun");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stderr}\n{stdout}");
+    assert!(
+        stdout.contains("<<< FAILURE!") && stdout.contains("BUILD SUCCESS"),
+        "{stdout}"
+    );
+    // Two starts of Maven under one COMMAND: which ran in which can't be told, so neither the
+    // first start's failure nor the second's pass is recorded.
+    assert!(
+        stderr.contains("Maven started 2 times under COMMAND"),
+        "{stderr}"
+    );
+    assert!(r.unit_results().is_empty(), "{stderr}");
+}

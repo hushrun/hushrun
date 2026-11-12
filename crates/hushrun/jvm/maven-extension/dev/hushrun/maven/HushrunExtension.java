@@ -104,7 +104,10 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
     private static String graph(MavenSession session, List<MavenProject> all, long started, String unitsDir,
                                 String leaveOut, List<String> errors) {
         StringBuilder b = new StringBuilder();
-        b.append("{\"schema\":\"hushrun.unit-facts/v1\",\"adapter\":\"maven\",\"settings\":{\"maven\":{");
+        // One start of Maven: every fork and module of it is this one build.
+        String start = pid() + "-" + System.nanoTime();
+        b.append("{\"schema\":\"hushrun.unit-facts/v1\",\"adapter\":\"maven\",\"start\":").append(Json.q(start));
+        b.append(",\"settings\":{\"maven\":{");
         b.append("\"version\":1,\"mavenVersion\":").append(Json.q(mavenVersion()));
         b.append(",\"startedMs\":").append(started);
         b.append(",\"pid\":").append(Json.q(pid()));
