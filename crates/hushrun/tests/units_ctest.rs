@@ -1300,7 +1300,17 @@ fn a_header_a_target_writes_on_every_build_leaves_the_program_that_includes_it_u
             ],
         );
         // As people run it: build, then test. The target runs on every build, and writes the
-        // header again; the program is built again after it, and is up to date.
+        // header again; the program is built again after it, and is up to date. (A build in the
+        // same second as the last leaves make 3.81 linking nothing after the object it made
+        // again: the program is old then, and is said so.)
+        let second = |t: std::time::SystemTime| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        };
+        let last = p.built.get().map_or(0, second);
+        while second(std::time::SystemTime::now()) <= last {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         p.build();
         let ran = p.run(CTEST, &[]);
         assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
