@@ -60,8 +60,6 @@ pub struct Recognized {
     /// \[ADR 0083\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
     /// matching, and its tests are reused by package.
     pub chooses: Option<&'static str>,
-    /// \[ADR 0083, amended\] COMMAND's `-v` or `-json`: Go names each test's outcome.
-    pub names_each: bool,
 }
 
 /// Build flags `go test` takes with no value, and whether `go list` takes them too because they
@@ -141,7 +139,6 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         build: Vec::new(),
         packages: Vec::new(),
         chooses: None,
-        names_each: false,
     };
     let mut words = command[2..].iter();
     let mut first = true;
@@ -155,10 +152,6 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
                 match name {
                     "test.run" => out.chooses = out.chooses.or(Some("-run")),
                     "test.skip" => out.chooses = out.chooses.or(Some("-skip")),
-                    "test.v" => {
-                        let value = word.split_once('=').map(|(_, v)| v);
-                        out.names_each = value == Some("test2json") || go_bool(value) == Some(true);
-                    }
                     _ => {}
                 }
             }
@@ -209,9 +202,6 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             _ => {}
         }
         if let Some((_, listed)) = BOOL_FLAGS.iter().find(|(n, _)| *n == name) {
-            if name == "v" || name == "json" {
-                out.names_each = go_bool(inline.as_deref()) == Some(true);
-            }
             if *listed {
                 out.build.push(word.clone());
             }
@@ -1338,30 +1328,44 @@ pub struct Ended {
     pub returned: bool,
 }
 
-/// \[ADR 0083\] Whether a test binary's run ended as Go's test main ends one, so that every test it
-/// ran and didn't name failed passed: `M.Run` [returned](Ended::returned), its output was read to
-/// the end and readable, the last line Go's own summary (marked, with `-json`) with nothing after it
-/// but coverage, and
+/// \[ADR 0083\] Whether a test binary's run ended normally, as Go's test main ends one, so that
+/// every test it ran and didn't name failed passed: `None` when it did; else \[C-37\] why not, in
+/// people's words, which each test it left without a result keeps in this machine's store for
+/// `hushrun why`. Normally: `M.Run` [returned](Ended::returned), its output was read to the end and
+/// readable, the last line Go's own summary (marked, with `-json`) with nothing after it but
+/// coverage, and
 ///
 /// - `PASS` with exit 0, `os.Exit(0)` in a test being a panic (`-test.paniconexit0`);
 /// - or `FAIL` with exit 1, a `--- FAIL: ` seen, every name a `--- FAIL: ` gave one the binary
 ///   listed, and no `-failfast`, which leaves tests unstarted that nothing names.
-pub fn ended_normally(at: &TestsAt, out: &Output, ended: Ended) -> bool {
-    if !ended.returned || !ended.read_whole || !out.readable() || ended.signal.is_some() {
-        return false;
+fn not_normal(at: &TestsAt, out: &Output, ended: Ended) -> Option<&'static str> {
+    if !ended.returned || ended.signal.is_some() {
+        return Some(ENDED_EARLY);
     }
-    if !out.failed.iter().all(|name| at.listed.contains(name)) {
-        return false;
+    if !ended.read_whole
+        || !out.readable()
+        || !out.failed.iter().all(|name| at.listed.contains(name))
+    {
+        return Some(UNREAD);
     }
-    match out.summary {
+    let normal = match out.summary {
         Some(Summary::Pass) => ended.exit == Some(0) && at.flags.panic_on_exit0,
-        Some(Summary::Fail) => ended.exit == Some(1) && out.any_failure && !at.flags.failfast,
+        Some(Summary::Fail) if at.flags.failfast => return Some(FAILFAST),
+        Some(Summary::Fail) => ended.exit == Some(1) && out.any_failure,
         None => false,
-    }
+    };
+    (!normal).then_some(UNREAD)
 }
 
+/// \[C-37\] Why no test of a binary that didn't get back to Go's summary kept a result.
+pub const ENDED_EARLY: &str = "its package's test binary ended before Go's test main returned (a panic, a timeout, os.Exit or a signal), so no test of it that didn't fail kept a result";
+/// \[C-37\] Why no test of a binary run with `-failfast` that failed kept a result.
+pub const FAILFAST: &str = "its package failed under -failfast, which leaves tests unstarted that go test doesn't name, so no test of it that didn't fail kept a result";
+/// \[C-37\] Why no test of a binary whose output hushrun couldn't read as Go's kept a result.
+pub const UNREAD: &str = "hushrun couldn't read its package's test output to Go's own summary, so no test of it that didn't fail kept a result";
+
 /// \[ADR 0083\] Each test of a start, as its facts say it (C-39): failed when the output named it
-/// failed; finished when the run [ended normally](ended_normally) and hushrun didn't leave it out;
+/// failed; finished when the run [ended normally](not_normal) and hushrun didn't leave it out;
 /// deselected when hushrun left it out. Its time is the one Go gave it, or 0: without `-v` Go times
 /// only the tests that failed.
 ///
@@ -1373,17 +1377,25 @@ pub fn outcome(
     out: &Output,
     ended: Ended,
 ) -> (Vec<super::facts::TestFacts>, Option<&'static str>) {
-    let normal = ended_normally(at, out, ended);
+    let not_normal = not_normal(at, out, ended);
+    let normal = not_normal.is_none();
     let unnamed = normal && out.summary == Some(Summary::Fail) && !at.flags.names_each;
+    // \[C-37\] Why a test left unfinished kept no result: decided here, with its state, and kept.
+    let why = not_normal.or(unnamed.then_some(UNNAMED));
     let tests = at
         .tests
         .iter()
         .map(|id| {
             let deselected = at.skipped.contains(id);
+            let failed = out.failed.contains(id);
+            let finished = normal && !deselected && (!unnamed || failed);
             super::facts::TestFacts {
                 id: id.clone(),
-                finished: normal && !deselected && (!unnamed || out.failed.contains(id)),
-                failed: out.failed.contains(id),
+                finished,
+                not_kept: why
+                    .filter(|_| !finished && !failed && !deselected)
+                    .map(str::to_string),
+                failed,
                 deselected,
                 duration_ms: out.durations.get(id).copied().unwrap_or(0),
                 skipped: !deselected && out.skipped.contains(id),
@@ -1395,7 +1407,7 @@ pub fn outcome(
 }
 
 /// \[ADR 0083, amended\] Why a package that failed kept no pass of its other tests, which the run
-/// and `hushrun why` say.
+/// says once and `hushrun why` says for each such test, from its row.
 pub const UNNAMED: &str = "a package that failed keeps its other tests' results only when go test names each one: add -v to keep them";
 
 /// \[ADR 0070\] The Go adapter for `go test …` (C-35); `None` for any other COMMAND.
@@ -1567,10 +1579,6 @@ impl Adapter for Recognized {
         !map.sources.is_empty()
     }
 
-    fn why_test_not_kept(&self) -> Option<&'static str> {
-        (!self.names_each).then_some(UNNAMED)
-    }
-
     fn why_units_are_directories(&self) -> bool {
         true
     }
@@ -1608,14 +1616,13 @@ mod tests {
         assert_eq!(r.dir.as_deref(), Some("sub"));
         assert_eq!(r.build, ["-mod=vendor"]);
         assert_eq!(r.packages, ["."]);
-        // \[ADR 0083, amended\] Whether Go names each test's outcome: -v or -json.
-        assert!(r.names_each);
-        let plain = recognize(&words("go test")).unwrap().unwrap();
-        assert!(plain.packages.is_empty());
-        assert!(!plain.names_each);
-        assert_eq!(plain.why_test_not_kept(), Some(UNNAMED));
-        let verbose = recognize(&words("go test -v ./...")).unwrap().unwrap();
-        assert_eq!(verbose.why_test_not_kept(), None);
+        assert!(
+            recognize(&words("go test"))
+                .unwrap()
+                .unwrap()
+                .packages
+                .is_empty()
+        );
         for refused in [
             "go test -c ./x",
             "go test -exec qemu ./...",
@@ -2052,8 +2059,23 @@ mod tests {
             ]
         );
         assert_eq!(note, Some(UNNAMED));
+        // \[C-37\] Each test left unfinished, unfailed and not left out keeps why, decided here.
+        let why = |told: &[super::super::facts::TestFacts]| -> Vec<Option<String>> {
+            told.iter().map(|t| t.not_kept.clone()).collect()
+        };
+        assert_eq!(why(&told), [Some(UNNAMED.to_string()), None, None]);
+        // A panic or a timeout: the binary never returned, whatever -v says.
+        let early = Ended {
+            returned: false,
+            ..ended(2)
+        };
+        assert_eq!(
+            why(&outcome(&at, &fail, early).0),
+            [Some(ENDED_EARLY.to_string()), None, None]
+        );
         let (told, note) = outcome(&unnamed, &read(false, &[b"PASS\n"]), ended(0));
         assert!(told[0].finished && told[1].finished);
+        assert!(told.iter().all(|t| t.not_kept.is_none()));
         assert_eq!(note, None);
         // Any other end: the failures named, and nothing finished.
         let nothing = [
@@ -2088,29 +2110,35 @@ mod tests {
             },
             ..at.clone()
         };
-        assert!(!ended_normally(&failfast, &fail, ended(1)));
+        assert_eq!(not_normal(&failfast, &fail, ended(1)), Some(FAILFAST));
         // FAIL with nothing named, or a name the binary doesn't have.
-        assert!(!ended_normally(&at, &read(false, &[b"FAIL\n"]), ended(1)));
-        assert!(!ended_normally(
-            &at,
-            &read(false, &[b"--- FAIL: TestGone (0.00s)\nFAIL\n"]),
-            ended(1)
-        ));
+        assert!(not_normal(&at, &read(false, &[b"FAIL\n"]), ended(1)).is_some());
+        assert!(
+            not_normal(
+                &at,
+                &read(false, &[b"--- FAIL: TestGone (0.00s)\nFAIL\n"]),
+                ended(1)
+            )
+            .is_some()
+        );
         // A benchmark's failure is one the binary listed.
-        assert!(ended_normally(
-            &at,
-            &read(false, &[b"--- FAIL: BenchmarkX\nFAIL\n"]),
-            ended(1)
-        ));
+        assert!(
+            not_normal(
+                &at,
+                &read(false, &[b"--- FAIL: BenchmarkX\nFAIL\n"]),
+                ended(1)
+            )
+            .is_none()
+        );
         // PASS needs exit 0, and os.Exit(0) a panic.
         let pass = read(false, &[b"PASS\n"]);
-        assert!(ended_normally(&at, &pass, ended(0)));
-        assert!(!ended_normally(&at, &pass, ended(1)));
+        assert!(not_normal(&at, &pass, ended(0)).is_none());
+        assert!(not_normal(&at, &pass, ended(1)).is_some());
         let lax = TestsAt {
             flags: BinaryFlags::default(),
             ..at.clone()
         };
-        assert!(!ended_normally(&lax, &pass, ended(0)));
+        assert!(not_normal(&lax, &pass, ended(0)).is_some());
     }
 
     /// Go, for the tests that prove a pattern against it: `None`, said, where it is missing,

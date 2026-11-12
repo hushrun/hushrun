@@ -521,17 +521,10 @@ fn explain_test(
             .insert(0, "so it runs every time, and records nothing".into());
         return;
     }
-    // \[C-37\] It ran here, another test of its file failed, and it kept nothing: its COMMAND may
-    // be why.
-    let file_failed = at.map.units.get(at.unit).is_some_and(|mapped| {
-        mapped
-            .tests
-            .values()
-            .any(|test| test.state == State::Failed)
-    });
-    if row.is_some_and(|row| row.state == State::NotRun)
-        && file_failed
-        && let Some(why) = adapter.why_test_not_kept()
+    // \[C-37\] It ran here and kept nothing, for the reason its run recorded with it.
+    if let Some(why) = row
+        .filter(|row| row.state == State::NotRun)
+        .and_then(|row| row.not_kept.as_deref())
     {
         says(out, Decision::Runs, "not-kept", why.into());
         return;

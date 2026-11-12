@@ -843,6 +843,9 @@ pub struct TestRow {
     pub duration_ms: u64,
     /// What wasn't followed inside its own window.
     pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
+    /// \[C-37\] Why it kept no result, as its adapter said when the run decided it `not-run`:
+    /// what `hushrun why` says. `None` in any other state.
+    pub not_kept: Option<String>,
     /// \[ADR 0078\] With `reads: test`, what it read then (C-40): its own list; `None` when it
     /// read its test file's.
     pub list: Option<TestListRow>,

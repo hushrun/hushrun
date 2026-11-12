@@ -168,9 +168,14 @@ them `skipped` would claim what wasn't seen. The tests it named failed are recor
 failed, and the package's own fail is recorded as before. A binary that passed is unchanged: every
 listed test hushrun didn't leave out passed, a skip included. The runner's facts say why
 (`settings.note`), and the run says it once, `hushrun: <NAME>: a package that failed keeps its
-other tests' results only when go test names each one: add -v to keep them`; `hushrun why NAME
-'pkg::TestX'` gives the same reason for a test that kept nothing while another of its package
-failed, when its COMMAND has neither `-v` nor `-json`.
+other tests' results only when go test names each one: add -v to keep them`; each such test's
+facts carry the same sentence (`notKept`), which this machine's store keeps with its `not-run`
+row, and `hushrun why NAME 'pkg::TestX'` says it from there. A start that didn't end normally
+gives each test it left without a result its own reason the same way: the binary ended before
+Go's test main returned (a panic, a timeout, `os.Exit` or a signal), it failed under `-failfast`,
+or its output couldn't be read to Go's summary. The reason is decided once, where the test's
+state is, and never derived again from COMMAND's flags: a `-v` that only `GOFLAGS` gives makes Go
+name each test, and a panic leaves tests unrun that `-v` wouldn't keep.
 
 The trade, plainly: without `-v`, Go's tests one by one save only two things. In a package that
 passed, a test that did something hushrun couldn't follow costs only itself; in a package that

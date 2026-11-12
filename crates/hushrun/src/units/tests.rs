@@ -167,6 +167,7 @@ fn sent_tests(
             state,
             duration_ms: 1,
             not_followed: BTreeSet::new(),
+            not_kept: None,
             list: list.clone(),
         };
         mapped.tests.insert("test_ok".into(), row(State::Passed));
@@ -528,6 +529,7 @@ fn a_test_not_followed_keeps_its_file_from_being_reused_whole_for_either_unit() 
                 why: "subprocess".into(),
                 detail: "python".into(),
             }]),
+            not_kept: None,
             list: None,
         },
     );
@@ -779,6 +781,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         state,
         duration_ms: 7,
         not_followed: BTreeSet::new(),
+        not_kept: None,
         list: None,
     };
     let mut map = store::Map {
@@ -1022,6 +1025,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         state: State::Passed,
         duration_ms: 1,
         not_followed: BTreeSet::new(),
+        not_kept: None,
         list: None,
     };
     let mut map = store::Map::default();
@@ -1090,6 +1094,7 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
         state: State::Passed,
         duration_ms: 7,
         not_followed: BTreeSet::new(),
+        not_kept: None,
         list: None,
     };
     let mut map = store::Map {

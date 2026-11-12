@@ -284,6 +284,10 @@ pub struct TestFacts {
     /// another test of its file shares: it records no key of its own, so no plan lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub never_left_out: bool,
+    /// \[C-37\] Why it kept no result, when it didn't finish and didn't fail, in people's words:
+    /// this machine's store keeps it with the test's row, and `hushrun why` says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_kept: Option<String>,
 }
 
 /// \[ADR 0077\] Files that ran and files opened, by index into the file's `paths`.
@@ -423,6 +427,8 @@ pub struct MergedTest {
     pub never_left_out: bool,
     /// \[C-32\] A process that ran it said it was skipped.
     pub skipped: bool,
+    /// \[C-37\] Why it kept no result, as the first process that said so said it.
+    pub not_kept: Option<String>,
     /// What ran, was opened and listed while it ran, from the root; `None` when a process didn't
     /// say, or said it in a way that can't be read: then what it read can't be told test by test.
     pub ran: Option<BTreeSet<String>>,
@@ -566,6 +572,9 @@ fn merge_tests(
         merged.skipped |= test.skipped && !test.deselected;
         merged.deselected &= test.deselected;
         merged.never_left_out |= test.never_left_out;
+        if merged.not_kept.is_none() {
+            merged.not_kept.clone_from(&test.not_kept);
+        }
         merged.duration_ms = merged.duration_ms.saturating_add(test.duration_ms);
         merged
             .not_followed

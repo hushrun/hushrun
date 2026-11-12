@@ -2310,6 +2310,7 @@ fn decide(
                                 state: State::Passed,
                                 duration_ms: passed.found.duration_ms,
                                 not_followed: BTreeSet::new(),
+                                not_kept: None,
                                 list,
                             },
                         ));
@@ -2327,6 +2328,8 @@ fn decide(
                             state: *test,
                             duration_ms: told.duration_ms,
                             not_followed: told.not_followed.clone(),
+                            // \[C-37\] Why it kept nothing, as its adapter said, with the state.
+                            not_kept: told.not_kept.clone().filter(|_| *test == State::NotRun),
                             list,
                         },
                     ))

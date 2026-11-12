@@ -40,7 +40,7 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _, Transac
 use serde_json::json;
 
 use hushrun_core::digest::Digest;
-use hushrun_core::units::{KeyBase, NotFollowed};
+use hushrun_core::units::{KeyBase, NotFollowed, State};
 
 use super::store::{Disagreement, Map, Mapped, Origin, TestListRow, TestRow};
 
@@ -191,6 +191,8 @@ CREATE TABLE test (
     state       TEXT NOT NULL CHECK (state IN ('passed', 'failed', 'not-observed', 'not-run')),
     duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
     list_ref    INTEGER REFERENCES test_list (id),
+    -- [C-37] Why a test the run decided `not-run` kept no result, as its adapter said it.
+    not_kept    TEXT CHECK (not_kept IS NULL OR (state = 'not-run' AND not_kept <> '')),
     UNIQUE (unit_ref, test_id)
 ) STRICT;
 CREATE INDEX test_by_list ON test (list_ref);
@@ -616,8 +618,8 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     }
     // \[ADR 0077\] Each test file's tests, as they last ran here.
     let mut tests = conn.prepare(
-        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms, t.list_ref FROM test t
-         JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
+        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms, t.list_ref, t.not_kept
+         FROM test t JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
     )?;
     let mut test_names: HashMap<i64, (i64, String)> = HashMap::new();
     let mut lists: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
@@ -629,10 +631,19 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
+            row.get(6)?,
         ))
     })? {
-        let (id, unit, test, state, duration, list): (i64, i64, String, String, i64, Option<i64>) =
-            row?;
+        #[allow(clippy::type_complexity, reason = "one row's columns")]
+        let (id, unit, test, state, duration, list, not_kept): (
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            Option<i64>,
+            Option<String>,
+        ) = row?;
         if let Some(list) = list {
             lists.entry(list).or_default().push((unit, test.clone()));
         }
@@ -646,6 +657,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                     state,
                     duration_ms: u64::try_from(duration).unwrap_or_default(),
                     not_followed: BTreeSet::new(),
+                    not_kept: not_kept.filter(|_| state == State::NotRun),
                     list: None,
                 },
             );
@@ -1002,14 +1014,17 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 None => None,
             };
             tx.execute(
-                "INSERT INTO test (unit_ref, test_id, state, duration_ms, list_ref)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO test (unit_ref, test_id, state, duration_ms, list_ref, not_kept)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     unit,
                     id,
                     row.state.word(),
                     i64::try_from(row.duration_ms).unwrap_or(i64::MAX),
-                    list
+                    list,
+                    row.not_kept
+                        .as_deref()
+                        .filter(|why| row.state == State::NotRun && !why.is_empty())
                 ],
             )?;
             let test = tx.last_insert_rowid();

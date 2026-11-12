@@ -186,6 +186,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
   tests: Go names only what failed, so a test that skipped because another failed looked passed.
   The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.
+- `hushrun why` gives a test that kept no result the reason its run recorded with it in this
+  machine's store, rather than one guessed from COMMAND: a Go test that a panic or a timeout left
+  unrun is told so, not to add `-v`, and a `-v` that comes only from `GOFLAGS` is no longer asked
+  for. An adapter's facts may say a test's `notKept`; the Go runner sends it.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
   passes hushrun recorded for the files as they were.
 - `swift test`: a target built with a build-tool plugin of another package reads its package

@@ -1481,6 +1481,59 @@ fn a_go_package_that_failed_with_v_keeps_the_passes_it_names() {
     assert!(!first.stderr.contains(UNNAMED), "{}", first.stderr);
 }
 
+// covers: C-37, C-45
+#[test]
+fn why_a_go_test_left_unrun_by_a_panic_kept_no_result_is_how_its_binary_ended() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // TestBase fails, then TestPanics panics: the binary never gets back to Go's summary, so
+    // TestLater never runs. Its reason is how the binary ended, not -v, which would change nothing.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport \"testing\"\n\nfunc TestBase(t *testing.T) { t.Error(\"base\") }\n\nfunc TestPanics(t *testing.T) { panic(\"boom\") }\n\nfunc TestLater(t *testing.T) {}\n",
+        ),
+    ]);
+    let (first, _) = r.go_tests(&[], &[]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.tests_of("p"),
+        serde_json::json!({"TestBase": "failed", "TestLater": "not-run", "TestPanics": "failed"})
+    );
+    let why = r.run(&["why", "unit", "p::TestLater"], &[]);
+    let told = format!("{}\n{}", why.stdout, why.stderr);
+    assert!(told.contains(ENDED_EARLY), "{told}");
+    assert!(!told.contains(UNNAMED), "{told}");
+}
+
+// covers: C-37, C-45
+#[test]
+fn a_v_that_only_goflags_gives_keeps_the_passes_and_why_asks_for_no_v() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // A -v that only GOFLAGS gives: Go names each test, the pass is kept, and the skip in a run
+    // that failed records nothing for a reason -v has nothing to do with.
+    let r = Repo::new(&needs());
+    let (first, _) = r.go_tests(&[], &[("GOFLAGS", "-v")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.tests_of("p"),
+        serde_json::json!({"TestBase": "failed", "TestNeeds": "not-run", "TestOk": "passed"})
+    );
+    assert!(!first.stderr.contains(UNNAMED), "{}", first.stderr);
+    let why = r.run(&["why", "unit", "p::TestNeeds"], &[("GOFLAGS", "-v")]);
+    let told = format!("{}\n{}", why.stdout, why.stderr);
+    assert!(!told.contains("-v"), "{told}");
+}
+
+/// What `hushrun why` says of a test its binary's early end left without a result.
+const ENDED_EARLY: &str = "its package's test binary ended before Go's test main returned";
+
 // covers: C-32, C-45
 #[test]
 fn a_skip_in_a_go_run_that_failed_records_nothing() {

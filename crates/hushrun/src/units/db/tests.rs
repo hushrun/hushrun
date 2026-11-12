@@ -514,6 +514,7 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
             })
             .into_iter()
             .collect(),
+        not_kept: None,
         list: None,
     };
     let mut with_tests = mapped(&[("tests/test_a.py", HASH_A)]);
@@ -536,9 +537,16 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
     write_run(&path, &r).unwrap();
     let map = load(&path, &id("unit")).map;
     assert_eq!(map.units["tests/test_a.py"].tests, with_tests.tests);
-    // A run that saw the test file again replaces its tests with what it saw.
+    // A run that saw the test file again replaces its tests with what it saw; \[C-37\] a test it
+    // decided `not-run` keeps why, as its adapter said it.
     let mut fewer = mapped(&[("tests/test_a.py", HASH_A)]);
-    fewer.tests = BTreeMap::from([("test_one".to_string(), row(State::NotRun, 0, None))]);
+    fewer.tests = BTreeMap::from([(
+        "test_one".to_string(),
+        TestRow {
+            not_kept: Some("its binary ended early".into()),
+            ..row(State::NotRun, 0, None)
+        },
+    )]);
     let r = run(
         "unit",
         &[("tests/test_a.py", fewer.clone())],
@@ -547,6 +555,21 @@ fn a_test_files_tests_are_kept_with_it_and_replaced_with_it() {
     write_run(&path, &r).unwrap();
     let map = load(&path, &id("unit")).map;
     assert_eq!(map.units["tests/test_a.py"].tests, fewer.tests);
+    // \[C-37\] Why it kept nothing belongs to a `not-run` test only: the store refuses it on another.
+    {
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE test SET state = 'passed' WHERE not_kept IS NOT NULL",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE test SET not_kept = '' WHERE state = 'not-run'", [])
+                .is_err()
+        );
+    }
     // A test file that left the scope takes its tests with it.
     let r = run("unit", &[], &["tests/other.py"]);
     write_run(&path, &r).unwrap();
