@@ -455,6 +455,15 @@ function report(state, vitest, modules, errors, reason) {
       });
     }
   }
+  // [C-37] The errors no test owns (an unhandled rejection, a timer that threw after its test),
+  // each with the test file Vitest says it came from: why no pass of the run is kept.
+  state.unhandled ??= [];
+  for (const error of errors || []) {
+    state.unhandled.push({
+      file: typeof error?.VITEST_TEST_PATH === 'string' ? error.VITEST_TEST_PATH : null,
+      message: String(error?.message ?? error).split('\n')[0].slice(0, 300),
+    });
+  }
   const bail = Number(vitest.config.bail || 0) > 0;
   state.failuresByUnit &&= errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed');
   writeWhole(path.join(state.dir, `vitest-${process.pid}.json`), {
@@ -468,6 +477,7 @@ function report(state, vitest, modules, errors, reason) {
       configFiles: [...state.configFiles],
       version: String(vitest.version || ''),
       refused: state.refused,
+      unhandled: state.unhandled,
       // [ADR 0081] Why no test was watched, when `reads: test` asked and none could be.
       ...(state.watch ? { watch: state.watch } : {}),
     },

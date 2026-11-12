@@ -383,6 +383,35 @@ fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(path.to_path_buf()))
 }
 
+/// \[C-37\] Why no pass of a run is kept when Vitest reported an error no test owns: the first
+/// such error's test file, from the root, and its first line when it is short; `None` when there
+/// was none.
+fn unowned_error(main: &FactsFile, root: &Path) -> Option<String> {
+    let first = main
+        .settings
+        .get("unhandled")
+        .and_then(|v| v.as_array())?
+        .first()?
+        .clone();
+    let file = first
+        .get("file")
+        .and_then(|v| v.as_str())
+        .and_then(|f| relative(root, Path::new(f)));
+    let message = first
+        .get("message")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty() && m.chars().count() <= 120);
+    let from = match (file, message) {
+        (Some(file), Some(message)) => format!(" (in {file}: {message})"),
+        (Some(file), None) => format!(" (in {file})"),
+        (None, Some(message)) => format!(" ({message})"),
+        (None, None) => String::new(),
+    };
+    Some(format!(
+        "Vitest reported an error no test owns{from}, so no pass of that run is kept"
+    ))
+}
+
 /// Reads what the Vitest adapter wrote in a run's directory, for the repository at `root` whose
 /// files are `tree`. `Ok(None)` when it wrote nothing; `Err` says why nothing can be told.
 pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<Observed>, String> {
@@ -479,6 +508,9 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             }
         }
     }
+    // \[C-37\] An error no test owns: no pass of the run is kept (its facts say so by
+    // `failuresByUnit`), and each test that didn't fail says why, with the file it came from.
+    let unowned = unowned_error(main, &root);
     let mut out = Observed {
         failures_by_unit: main.failures_by_unit,
         unit_files,
@@ -542,6 +574,12 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 not_followed.extend(saw.not_followed);
                 dirs = saw.dirs;
                 tests = saw.tests;
+                if let (Some(why), Some(tests)) = (&unowned, &mut tests) {
+                    for test in tests.values_mut().filter(|t| !t.failed && !t.deselected) {
+                        test.finished = false;
+                        test.not_kept = Some(why.clone());
+                    }
+                }
             }
             None if !deselected => {
                 not_followed.insert(NotFollowed {
@@ -834,6 +872,57 @@ mod tests {
             dirs: Some(vec![]),
             ..TestFacts::default()
         }
+    }
+
+    // covers: C-37, C-43
+    #[test]
+    fn an_error_no_test_owns_tells_each_test_that_didnt_fail_why_it_kept_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        for f in ["test/a.test.ts", "test/bad.test.ts"] {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let tree = Tree::default();
+        let abs = |f: &str| root.join(f).display().to_string();
+        let main: FactsFile = serde_json::from_value(serde_json::json!({
+            "schema": "hushrun.unit-facts/v0", "adapter": ADAPTER, "failuresByUnit": false,
+            "settings": {"testFiles": [abs("test/a.test.ts"), abs("test/bad.test.ts")],
+                         "unhandled": [{"file": abs("test/bad.test.ts"), "message": "late timer"}]},
+            "units": [
+                {"unit": abs("test/a.test.ts"), "selected": 1, "finished": 1},
+                {"unit": abs("test/bad.test.ts"), "selected": 2, "finished": 2, "failed": true},
+            ],
+        }))
+        .unwrap();
+        let worker = |unit: &str, tests: serde_json::Value| -> FactsFile {
+            serde_json::from_value(serde_json::json!({
+                "schema": "hushrun.unit-facts/v1", "adapter": WORKER,
+                "units": [{"unit": unit, "tests": tests}],
+            }))
+            .unwrap()
+        };
+        let files = [
+            main,
+            worker(
+                "test/a.test.ts",
+                serde_json::json!([{"id": "a1", "finished": true}]),
+            ),
+            worker(
+                "test/bad.test.ts",
+                serde_json::json!([{"id": "leaks", "finished": true},
+                                   {"id": "waits", "finished": true, "failed": true}]),
+            ),
+        ];
+        let seen = observe(&files, &root, &tree).unwrap().unwrap();
+        let why = "Vitest reported an error no test owns (in test/bad.test.ts: late timer), so no pass of that run is kept";
+        let a1 = &seen.units["test/a.test.ts"].tests.as_ref().unwrap()["a1"];
+        assert!(!a1.finished);
+        assert_eq!(a1.not_kept.as_deref(), Some(why));
+        let bad = seen.units["test/bad.test.ts"].tests.as_ref().unwrap();
+        assert_eq!(bad["leaks"].not_kept.as_deref(), Some(why));
+        // A test that failed is a failure, and says nothing more.
+        assert!(bad["waits"].failed && bad["waits"].not_kept.is_none());
     }
 
     // covers: C-43

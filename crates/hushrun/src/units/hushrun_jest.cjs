@@ -473,7 +473,7 @@ function install(S) {
       this.afterAllFailed = [];
       this.hookErrors = new Set();
       this.uncaught = 0;
-      this.rejections = new Set();
+      this.rejections = new Map();
       this.circus = null;
       const run = S.run;
       // Leave out tests only when the main process that claimed the run allowed it.
@@ -701,8 +701,11 @@ function install(S) {
         case 'error':
           // An uncaught exception or unhandled rejection: whose it is can't be told. A
           // rejection handled later (Jest 30's `error_handled`) is no error.
-          if (event.promise) this.rejections.add(event.promise);
-          else this.uncaught += 1;
+          if (event.promise) this.rejections.set(event.promise, errMessage(event.error));
+          else {
+            this.uncaught += 1;
+            this.uncaughtMessage = this.uncaughtMessage || errMessage(event.error);
+          }
           break;
         case 'error_handled':
           this.rejections.delete(event.promise);
@@ -720,8 +723,16 @@ function install(S) {
     // after which no test of the file is told as finished.
     settle() {
       const unhandled = (this.circus && this.circus.unhandledErrors) || [];
-      const unattributed = this.uncaught > 0 || this.rejections.size > 0
-        || unhandled.some((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      const unowned = unhandled.find((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      const unattributed = this.uncaught > 0 || this.rejections.size > 0 || unowned !== undefined;
+      if (unattributed) {
+        // [C-37] Why its tests keep no result, which `hushrun why` says: the error's first line
+        // when it is short.
+        const message = this.uncaughtMessage || [...this.rejections.values()][0]
+          || (unowned !== undefined ? errMessage(unowned) : '');
+        const shown = message && message.length <= 120 ? ` (${message})` : '';
+        this.unsureWhy = `Jest reported an error it couldn't charge to a test${shown}, so no test of its file keeps a result of that run`;
+      }
       for (const [test, r] of this.tests) {
         if (r.status === 'passed') {
           if ((test.errors && test.errors.length) || this.afterAllFailed.some((b) => b && under(test, b))) r.status = 'failed';
@@ -817,6 +828,7 @@ function install(S) {
               finished: rs.every(done),
               failed: rs.some((x) => x.status === 'failed'),
               ...(rs.some((x) => x.status === 'skipped') ? { skipped: true } : {}),
+              ...(rs.some((x) => x.unsure) && this.unsureWhy ? { notKept: this.unsureWhy } : {}),
               deselected: false,
               durationMs: rs.reduce((n, x) => n + (x.durationMs || 0), 0),
               notFollowed: this.concurrent ? [] : dedupe(rs.flatMap((x) => x.b.nf)),
@@ -833,6 +845,7 @@ function install(S) {
           };
           if (r.attempts > 1) out.attempts = r.attempts;
           if (r.status === 'skipped') out.skipped = true;
+          if (r.unsure && this.unsureWhy) out.notKept = this.unsureWhy;
           if (lists && !r.concurrent && (r.status === 'passed' || r.status === 'failed')) {
             const dirs = new Set([...r.b.dirs, ...fileDirs]);
             for (const b of this.hooks) if (under(this.order[position.get(r)], b.describe)) for (const d of b.dirs) dirs.add(d);

@@ -644,6 +644,37 @@ fn a_skip_in_a_jest_run_that_failed_records_nothing() {
     }
 }
 
+// covers: C-37, C-39, C-44
+#[test]
+fn why_says_a_jest_test_kept_nothing_after_an_error_no_test_owns() {
+    // A timer `leaks` left throws while `waits` runs: Jest 29 charges it to `waits`, Jest 30 to
+    // `leaks`; either way no test of the file keeps a result, and `hushrun why` says what happened.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/leak.test.js",
+            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\n",
+        ),
+    ];
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        let why = r.run(&["why", "unit", "test/leak.test.js::after"]);
+        assert!(
+            why.out().contains(
+                "Jest reported an error it couldn't charge to a test (late timer), so no test of its file keeps a result of that run"
+            ),
+            "Jest {}: {}",
+            jest.major,
+            why.out()
+        );
+    }
+}
+
 /// The newest run result this cache holds.
 fn store_result(r: &Repo) -> Value {
     let mut found = Vec::new();

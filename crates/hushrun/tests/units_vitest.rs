@@ -2272,6 +2272,47 @@ fn a_start_of_vitest_that_runs_no_test_file_is_no_second_start() {
     assert!(!after.stderr.contains("records a pass"), "{}", after.stderr);
 }
 
+// covers: C-37, C-43
+#[test]
+fn vitests_facts_say_which_file_an_error_no_test_owns_came_from() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A timer one test of bad.test.ts left throws after it: Vitest reports an error no test owns
+    // and fails the run, so no pass of it is kept, a.test.ts's included. The main process's facts
+    // say where it came from, and every test that didn't fail is told why it kept nothing.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/bad.test.ts",
+            "import { test } from 'vitest'\ntest('leaks', () => { setTimeout(() => { throw new Error('late timer') }, 10) })\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 100)) })\n",
+        ),
+    ]);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let (code, main) = plugin_vitest(&r, &[], &[]);
+    assert_eq!(code, 1);
+    assert_eq!(main["failuresByUnit"], false, "{main:#}");
+    let unhandled = &main["settings"]["unhandled"][0];
+    assert!(
+        unhandled["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("test/bad.test.ts")),
+        "{main:#}"
+    );
+    assert_eq!(unhandled["message"], "late timer", "{main:#}");
+}
+
 /// What a run says when a second start of the runner in COMMAND wasn't observed.
 const SECOND_START: &str = "no test file or test records a pass: Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
 
