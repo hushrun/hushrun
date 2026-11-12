@@ -610,6 +610,76 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
     }
 }
 
+/// A program of the project that writes a header (`gen.h`) a test program includes: the
+/// generator's source and the header it includes are what that test program reads.
+fn generated() -> Vec<(String, String)> {
+    vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "build/\n"),
+        file(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.19)\nproject(gen C)\nenable_testing()\n\
+             add_executable(gen tools/gen.c)\ntarget_include_directories(gen PRIVATE common)\n\
+             add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gen.h COMMAND gen ${CMAKE_BINARY_DIR}/gen.h DEPENDS gen)\n\
+             add_executable(t_u tests/t_u.c ${CMAKE_BINARY_DIR}/gen.h)\ntarget_include_directories(t_u PRIVATE ${CMAKE_BINARY_DIR})\n\
+             add_executable(t_s tests/t_s.c)\ntarget_include_directories(t_s PRIVATE common)\n\
+             add_executable(t_p tests/t_p.c)\n\
+             add_test(NAME u COMMAND t_u)\nadd_test(NAME s COMMAND t_s)\nadd_test(NAME p COMMAND t_p)\n",
+        ),
+        file("common/val.h", "#define VAL 1\n"),
+        file(
+            "tools/gen.c",
+            "#include <stdio.h>\n#include \"val.h\"\nint main(int argc, char **argv) {\n\
+             \x20 FILE *f = fopen(argv[1], \"w\"); if (!f) return 1;\n\
+             \x20 fprintf(f, \"#define GEN_VAL %d\\n\", VAL); fclose(f); return 0;\n}\n",
+        ),
+        file(
+            "tests/t_u.c",
+            "#include \"gen.h\"\nint main(void) { return GEN_VAL == 1 ? 0 : 1; }\n",
+        ),
+        file(
+            "tests/t_s.c",
+            "#include \"val.h\"\nint main(void) { return VAL > 0 ? 0 : 1; }\n",
+        ),
+        file("tests/t_p.c", "int main(void) { return 0; }\n"),
+    ]
+}
+
+// covers: C-49, C-30
+#[test]
+fn a_header_a_program_of_the_project_writes_reads_what_that_program_is_built_from() {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let p = Project::new(&cmake, generator, &generated());
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+            // t_u includes gen.h, which gen writes: it reads gen's source and the header gen.c
+            // includes, as much as its own source.
+            let map = store::map(&p.cache);
+            let reads = map["units"]["t_u"]["reads"].clone();
+            for file in ["common/val.h", "tests/t_u.c", "tools/gen.c"] {
+                assert!(
+                    reads.as_array().unwrap().contains(&json!(file)),
+                    "{at}: t_u read {reads}"
+                );
+            }
+            // val.h changes, and the build writes another gen.h: t_u runs, and fails.
+            p.write("common/val.h", "#define VAL 2\n");
+            git::commit_all(&p.repo, "val");
+            p.build();
+            let second = p.run(CTEST, &[]);
+            assert!(
+                second.ran().contains(&"u".to_string()),
+                "{at}\n{}\n{}",
+                second.stdout,
+                second.stderr
+            );
+            assert_ne!(second.code, 0, "{at}\n{}", second.stdout);
+        }
+    }
+}
+
 // covers: C-49, C-39
 #[test]
 fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {

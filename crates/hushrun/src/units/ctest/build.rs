@@ -8,6 +8,9 @@
 //!   and each object's compiler depfile, `<object>.d`, a precompiled header's included (GCC
 //!   writes what the header read only there). Up to date when no file it read is newer than it.
 //!   Both gave the same files in the spike.
+//! - A header or source a build rule writes (a generator the project builds and runs) reads what
+//!   that rule reads, to the end, in both: its script, its template, the program it runs, and that
+//!   program's own objects' headers from their records.
 //! - A file in the build directory with no rule that makes it was written when CMake configured
 //!   the build (`configure_file`): the program reads every file configuring read.
 //! - Sources fetched into the build directory (`FetchContent`, under `_deps/`) aren't the
@@ -239,56 +242,78 @@ impl<'a> Walker<'a> {
         if objects.is_empty() {
             return None;
         }
-        let deps = deps(ninja, build, &objects)?;
-        let mut generated: Vec<String> = Vec::new();
-        for object in &objects {
-            let Some((state, files)) = deps.get(object).filter(|(_, f)| !f.is_empty()) else {
-                // No record of what it included: its headers can't be told.
-                return None;
-            };
-            if state != "VALID" {
-                out.stale = Some(format!("{object}'s record of its headers is {state}"));
+        // Each object's headers, from its record; a header a build rule writes reads what that
+        // rule reads, to the end: its script, its template, and the program it runs, whose own
+        // objects' headers are read again from their records, and so on (a generated header the
+        // generator's own sources include among them).
+        let mut asked: BTreeSet<String> = BTreeSet::new();
+        let mut pending = objects;
+        while !pending.is_empty() {
+            pending.retain(|o| asked.insert(o.clone()));
+            if pending.is_empty() {
+                break;
             }
-            for file in files {
-                match self.place(file, build) {
-                    Place::Repo(rel) => {
-                        out.reads.insert(rel);
-                    }
-                    Place::Outside => {}
-                    Place::Build(rel) if outputs.contains(&rel) => generated.push(rel),
-                    Place::Build(rel) => configured |= !fetched(&rel) && !cmake_own(&rel),
+            let deps = deps(ninja, build, &pending)?;
+            let mut generated: Vec<String> = Vec::new();
+            for object in std::mem::take(&mut pending) {
+                let Some((state, files)) = deps.get(&object).filter(|(_, f)| !f.is_empty()) else {
+                    // No record of what it included: its headers can't be told.
+                    return None;
+                };
+                if state != "VALID" {
+                    out.stale = Some(format!("{object}'s record of its headers is {state}"));
                 }
-            }
-        }
-        // A header a build rule writes: what that rule reads, to the end.
-        let mut frontier: Vec<String> = generated
-            .into_iter()
-            .filter(|g| !seen.contains(g))
-            .collect();
-        while !frontier.is_empty() {
-            let edges = query(ninja, build, &frontier)?;
-            let mut next = Vec::new();
-            for node in std::mem::take(&mut frontier) {
-                seen.insert(node.clone());
-                for (input, _) in edges
-                    .get(&node)
-                    .map(|e| e.inputs.as_slice())
-                    .unwrap_or_default()
-                {
-                    match self.place(input, build) {
+                for file in files {
+                    match self.place(file, build) {
                         Place::Repo(rel) => {
                             out.reads.insert(rel);
                         }
-                        Place::Build(rel) if outputs.contains(&rel) && !seen.contains(&rel) => {
-                            next.push(rel);
-                        }
-                        _ => {}
+                        Place::Outside => {}
+                        Place::Build(rel) if outputs.contains(&rel) => generated.push(rel),
+                        Place::Build(rel) => configured |= !fetched(&rel) && !cmake_own(&rel),
                     }
                 }
             }
-            next.sort();
-            next.dedup();
-            frontier = next;
+            let mut frontier: Vec<String> = generated
+                .into_iter()
+                .filter(|g| !seen.contains(g))
+                .collect();
+            frontier.sort();
+            frontier.dedup();
+            while !frontier.is_empty() {
+                let edges = query(ninja, build, &frontier)?;
+                let mut next = Vec::new();
+                for node in std::mem::take(&mut frontier) {
+                    seen.insert(node.clone());
+                    if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch") {
+                        pending.push(node.clone());
+                    }
+                    for (input, _) in edges
+                        .get(&node)
+                        .map(|e| e.inputs.as_slice())
+                        .unwrap_or_default()
+                    {
+                        match self.place(input, build) {
+                            Place::Repo(rel) => {
+                                out.reads.insert(rel);
+                            }
+                            Place::Outside => {}
+                            Place::Build(rel) if outputs.contains(&rel) => {
+                                if !seen.contains(&rel) {
+                                    next.push(rel);
+                                }
+                            }
+                            Place::Build(rel) => {
+                                configured |= !fetched(&rel) && !cmake_own(&rel);
+                            }
+                        }
+                    }
+                }
+                next.sort();
+                next.dedup();
+                next.retain(|n| !seen.contains(n));
+                frontier = next;
+            }
         }
         if configured {
             let inputs = query(ninja, build, &["build.ninja".to_string()])?;
@@ -364,7 +389,15 @@ impl<'a> Walker<'a> {
         if objects.is_empty() {
             return None;
         }
-        for object in &objects {
+        // Each object's headers, from its depfile; a header a build rule writes reads what that
+        // rule reads, to the end: its script, its template, and the program it runs, whose own
+        // objects' depfiles are read in turn.
+        let mut asked: BTreeSet<String> = BTreeSet::new();
+        let mut pending = objects;
+        while let Some(object) = pending.pop() {
+            if !asked.insert(object.clone()) {
+                continue;
+            }
             let depfile = build.join(format!("{object}.d"));
             let files = depfile_deps(&depfile)?;
             for file in files {
@@ -373,16 +406,35 @@ impl<'a> Walker<'a> {
                         out.reads.insert(rel);
                     }
                     Place::Outside => {}
-                    Place::Build(rel) => {
-                        if let Some(inputs) = graph.get(&rel) {
-                            for input in inputs.iter().filter(|i| !bookkeeping(i)) {
-                                if let Place::Repo(r) = self.place(input, build) {
-                                    out.reads.insert(r);
+                    Place::Build(rel) if graph.contains_key(&rel) => {
+                        let mut stack = vec![rel];
+                        while let Some(node) = stack.pop() {
+                            if !seen.insert(node.clone()) {
+                                continue;
+                            }
+                            if is_object(&node) || node.ends_with(".pch") || node.ends_with(".gch")
+                            {
+                                pending.push(node.clone());
+                            }
+                            for dep in graph.get(&node).into_iter().flatten() {
+                                if bookkeeping(dep) {
+                                    continue;
+                                }
+                                match self.place(dep, build) {
+                                    Place::Repo(r) => {
+                                        out.reads.insert(r);
+                                    }
+                                    Place::Outside => {}
+                                    Place::Build(r) if graph.contains_key(&r) => stack.push(r),
+                                    Place::Build(r) => {
+                                        configured |= !fetched(&r) && !cmake_own(&r);
+                                    }
                                 }
                             }
-                        } else {
-                            configured |= !fetched(&rel) && !cmake_own(&rel);
                         }
+                    }
+                    Place::Build(rel) => {
+                        configured |= !fetched(&rel) && !cmake_own(&rel);
                     }
                 }
             }
