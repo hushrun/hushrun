@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use hushrun_core::units::{Facts, NotFollowed};
+use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
+use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
 use super::facts::{FactsFile, Invocation};
 use super::runner;
 
@@ -942,6 +943,127 @@ fn split_escaped(text: &str) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// \[ADR 0068\] The Cargo adapter for `cargo test` and `cargo nextest run` (C-32); `None` for any
+/// other COMMAND.
+pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(Ok(Box::new(recognize(command)?)))
+}
+
+impl Adapter for Recognized {
+    fn word(&self) -> &'static str {
+        ADAPTER
+    }
+
+    fn runner(&self) -> &'static str {
+        "cargo"
+    }
+
+    fn test_file(&self) -> &'static str {
+        "test binary"
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::None
+    }
+
+    fn binds(&self) -> bool {
+        true
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        let exe = at.exe()?;
+        let env = |name: &str| (at.env)(name).and_then(|v| v.into_string().ok());
+        runner_variables(self, &exe, at.cwd, &env).map(|vars| {
+            vars.into_iter()
+                .map(|(name, value)| (name, OsString::from(value)))
+                .collect()
+        })
+    }
+
+    fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        let b = plan_build(self, at.root, at.cwd, at.compile_env)?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| b.unit_files.contains(path),
+            Sources::Named(&b.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let known = b
+            .units
+            .iter()
+            .map(|(unit, b)| {
+                let lists = (b.not_followed.is_empty() && at.tree.contains(unit))
+                    .then(|| vec![super::built_list(&b.reads)]);
+                (unit.clone(), lists)
+            })
+            .collect();
+        let bound = b
+            .units
+            .iter()
+            .map(|(unit, b)| (unit.clone(), b.executable.clone()))
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            bound,
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        if !at.files.iter().any(|f| f.adapter == ADAPTER) {
+            return Ok(None);
+        }
+        let observed = observe(self, at.files, at.root, at.cwd, at.command_passed)?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| observed.unit_files.contains(path),
+            Sources::Named(&observed.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let planned = observed
+            .units
+            .iter()
+            .map(|(unit, seen)| (unit.clone(), vec![super::built_list(&seen.reads)]))
+            .collect();
+        Ok(Some(Read {
+            seen: observed.units,
+            failures_by_unit: true,
+            sets,
+            planned,
+            executables: observed.executables,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, _: &Path, _: &Path, _: &BTreeSet<String>) -> RunExtras {
+        RunExtras::default()
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        units::classify(
+            at.tree.paths(),
+            &|p| at.map.units.contains_key(p),
+            Sources::Named(&at.map.sources, SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_not_a_unit(&self, _: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        format!(
+            "{unit} isn't a test file of {check} as far as this machine knows: no test binary of its last build here has it as its root file"
+        )
+    }
+
+    fn why_known_from(&self) -> Option<&'static str> {
+        Some("its test binaries and what each is built from are those of its last build here")
+    }
+
+    fn why_no_path(&self) -> Option<&'static str> {
+        Some("its test binary is built from it: rustc's dep-info for the build names it")
+    }
 }
 
 #[cfg(test)]

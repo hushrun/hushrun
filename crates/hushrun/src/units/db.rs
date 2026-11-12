@@ -463,26 +463,6 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     Ok(map)
 }
 
-/// The adapter a check's test files are observed with, as the store names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterWord {
-    Pytest,
-    Cargo,
-    Go,
-    Vitest,
-}
-
-impl AdapterWord {
-    pub fn word(self) -> &'static str {
-        match self {
-            AdapterWord::Pytest => "pytest",
-            AdapterWord::Cargo => "cargo",
-            AdapterWord::Go => "go",
-            AdapterWord::Vitest => "vitest",
-        }
-    }
-}
-
 /// What an edge between two files is: one imports, opens or reads the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EdgeKind {
@@ -518,7 +498,8 @@ pub type Edge = (String, String, EdgeKind);
 pub struct Write<'a> {
     pub check_id: Digest,
     pub base: &'a KeyBase,
-    pub adapter: AdapterWord,
+    /// \[ADR 0077\] The adapter's word ([`super::adapter::Adapter::word`]).
+    pub adapter: &'static str,
     /// Each test file that ran, with what the map keeps of it.
     pub seen: &'a BTreeMap<String, Mapped>,
     /// The scope's files now: a test file the map has whose file is gone is forgotten.
@@ -657,7 +638,7 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             command,
             w.base.cwd,
             w.base.scope.as_str(),
-            w.adapter.word(),
+            w.adapter,
             w.now_ms,
         ],
         |row| row.get(0),

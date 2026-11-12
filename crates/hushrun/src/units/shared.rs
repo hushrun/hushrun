@@ -26,9 +26,10 @@ use hushrun_core::glob::Pattern;
 use hushrun_core::hints::{self, Key, Os};
 use hushrun_core::units::{self, KeyBase, Set, Sets, Sources, Tree};
 
+use super::adapter::Hints;
 use super::db::{HintHow, HintKnown};
 use super::store::{Found, HintPlace, Lookup, Mapped, Origin, UnitResults};
-use super::{MOST_UNITS, gotest, vitest};
+use super::{MOST_UNITS, gotest};
 use crate::results::RunResult;
 
 /// The most lists a test file's key is computed from.
@@ -64,19 +65,15 @@ pub fn systems(base: &KeyBase) -> Vec<Os> {
 /// source kind, with no test file named: a new test file then gives another address, and
 /// everything runs once, as Vitest's adapter does here (ADR 0071). The plan and the run that
 /// writes a hint both ask it.
-pub fn sources(vitest: bool, sets: &Sets, tree: &Tree, ignore: &[Pattern]) -> Vec<String> {
-    if vitest {
-        units::classify(
-            tree.paths(),
-            &|_| false,
-            Sources::Kinds(vitest::SOURCE_KINDS),
-            ignore,
-        )
-        .files(Set::Sources)
-        .map(str::to_string)
-        .collect()
-    } else {
-        sets.files(Set::Sources).map(str::to_string).collect()
+pub fn sources(hints: Hints, sets: &Sets, tree: &Tree, ignore: &[Pattern]) -> Vec<String> {
+    match hints {
+        Hints::Kinds(kinds) => {
+            units::classify(tree.paths(), &|_| false, Sources::Kinds(kinds), ignore)
+                .files(Set::Sources)
+                .map(str::to_string)
+                .collect()
+        }
+        Hints::None | Hints::Sources => sets.files(Set::Sources).map(str::to_string).collect(),
     }
 }
 

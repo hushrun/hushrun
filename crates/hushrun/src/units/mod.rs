@@ -18,6 +18,7 @@
 //! once more ([`Session::again`]); the run records the check with its units. The directory goes
 //! on every outcome.
 
+pub mod adapter;
 pub mod cargo;
 pub mod db;
 pub mod facts;
@@ -36,9 +37,12 @@ use std::process::Command;
 
 use hushrun_core::digest::Digest;
 use hushrun_core::time::Time;
-use hushrun_core::units::{self, Facts, KeyBase, Mode, RunFacts, Set, Sources, State, Tests, Tree};
+use hushrun_core::units::{
+    self, Facts, KeyBase, Mode, Reads, RunFacts, Set, State, Tests, Tree, Unit,
+};
 
 use crate::results::RunResult;
+use adapter::{Adapter, Hints, Known, PlanAt, Read, ReadAt, RunExtras, StartAt};
 use shared::{Asker, Choice, List, Shared};
 use store::{Disagreement, Found, Mapped, Origin, UnitRecord, UnitResults};
 
@@ -50,17 +54,6 @@ pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
     pub duration_ms: u64,
-}
-
-/// Which adapter a run loads.
-#[derive(Debug, Clone)]
-enum Adapter {
-    Pytest,
-    Cargo(cargo::Recognized),
-    /// \[ADR 0070\]
-    Go(gotest::Recognized),
-    /// \[ADR 0071\]
-    Vitest(vitest::Recognized),
 }
 
 /// What starting to observe a run came to.
@@ -77,7 +70,7 @@ pub enum Start {
 pub struct Session {
     dir: PathBuf,
     cache: PathBuf,
-    adapter: Adapter,
+    adapter: Box<dyn Adapter>,
     variables: Vec<(String, OsString)>,
     tests: Tests,
     root: PathBuf,
@@ -85,6 +78,48 @@ pub struct Session {
     /// What COMMAND's compiles get besides: the build blocks' wrapper and session (B-2), which
     /// the plan's build, COMMAND's own made first, gets too.
     compile_env: Vec<(OsString, OsString)>,
+    /// \[C-39\] What this run reuses one by one, as its adapter can: `tests.unit`, or test files
+    /// where the adapter knows no test.
+    unit: Unit,
+    /// \[C-39\] What a test is taken to have read in this run: `tests.reads`, or the test file's
+    /// list where the adapter can't watch a test.
+    reads: Reads,
+    /// \[C-39\] What the run says once, after `<NAME>: `, of what its adapter can't do.
+    notes: Vec<String>,
+}
+
+/// \[C-39, ADR 0077\] What a check whose `tests` are `tests` reuses one by one with `adapter`, and
+/// what a test is taken to have read; with the lines that say, once, where the adapter can't do
+/// what the check asks (RFC 0004 §1.2): it then reuses by test file, or takes each test to have
+/// read what its test file read.
+fn what_it_reuses(tests: &Tests, adapter: &dyn Adapter) -> (Unit, Reads, Vec<String>) {
+    let knows = adapter.tests();
+    let mut notes = Vec::new();
+    let unit = match tests.unit {
+        Unit::Test if knows.unit => Unit::Test,
+        Unit::Test => {
+            notes.push(format!(
+                "its tests are reused by {}: {}'s tests can't be reused one by one yet",
+                adapter.test_file(),
+                adapter.runner()
+            ));
+            Unit::File
+        }
+        Unit::File => Unit::File,
+    };
+    let reads = match tests.reads {
+        Reads::Test if unit == Unit::Test && knows.reads => Reads::Test,
+        Reads::Test if unit == Unit::Test => {
+            notes.push(format!(
+                "each test is taken to have read what its {} read: {} can't be watched test by test yet",
+                adapter.test_file(),
+                adapter.runner()
+            ));
+            Reads::File
+        }
+        Reads::Test | Reads::File => Reads::File,
+    };
+    (unit, reads, notes)
 }
 
 impl Drop for Session {
@@ -128,51 +163,43 @@ impl Session {
         let Some(cache) = crate::context::cache_dir() else {
             return Start::Not("there is no cache directory".into());
         };
-        let env = |name: &str| std::env::var(name).ok();
-        let adapter = match choose(command, cwd) {
+        let adapter = match adapter::choose(command, cwd) {
             Ok(adapter) => adapter,
             Err(why) => return Start::Not(why),
         };
-        let exe =
-            || std::env::current_exe().map_err(|err| format!("can't tell where hushrun is: {err}"));
-        let variables = match &adapter {
-            Adapter::Go(recognized) => exe().and_then(|exe| {
-                gotest::variables(recognized, &exe, cwd, std::env::var_os("GOFLAGS"))
-            }),
-            Adapter::Cargo(recognized) => exe().and_then(|exe| {
-                cargo::runner_variables(recognized, &exe, cwd, &env).map(|vars| {
-                    vars.into_iter()
-                        .map(|(name, value)| (name, OsString::from(value)))
-                        .collect::<Vec<_>>()
-                })
-            }),
-            Adapter::Vitest(_) => vitest::install(&cache)
-                .map(|dir| vitest::variables(&dir))
-                .map_err(|err| format!("can't write its Vitest plugin: {err}")),
-            Adapter::Pytest => pytest::install(&cache)
-                .map(|dir| {
-                    pytest::variables(
-                        &dir,
-                        std::env::var_os("PYTHONPATH"),
-                        std::env::var_os("PYTEST_ADDOPTS"),
-                    )
-                })
-                .map_err(|err| format!("can't write its pytest plugin: {err}")),
-        };
-        let mut variables = match variables {
-            Ok(variables) => variables,
-            Err(why) => return Start::Not(why),
-        };
+        let (unit, reads, notes) = what_it_reuses(tests, adapter.as_ref());
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
-        let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| write_run_file(&dir, root, &[], None, &[], None));
+        let written = std::fs::create_dir_all(&dir).and_then(|()| {
+            let listed = Listed {
+                unit,
+                reads,
+                ..Listed::default()
+            };
+            write_run_file(&dir, root, &listed)
+        });
         if let Err(err) = written {
             let _ = std::fs::remove_dir_all(&dir);
             return Start::Not(format!("can't make {}: {err}", dir.display()));
         }
+        let env = |name: &str| std::env::var_os(name);
+        let at = StartAt {
+            cache: &cache,
+            cwd,
+            env: &env,
+        };
+        let mut variables = match adapter.variables(&at) {
+            Ok(variables) => variables,
+            Err(why) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Start::Not(why);
+            }
+        };
         variables.push((runner::UNITS_VAR.to_string(), dir.clone().into_os_string()));
         Start::On(Box::new(Session {
+            unit,
+            reads,
+            notes,
             dir,
             cache,
             adapter,
@@ -188,6 +215,11 @@ impl Session {
     /// wrapper, which the plan's build gets too: it is COMMAND's build, made first.
     pub fn compile_with(&mut self, env: Vec<(OsString, OsString)>) {
         self.compile_env = env;
+    }
+
+    /// \[C-39\] What the run says once, each after `<NAME>: `, of what its adapter can't do.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// Gives COMMAND the variables that load the adapter.
@@ -213,92 +245,28 @@ impl Session {
         }
         let map = loaded.map;
         let asker = self.asker(input.store, check_id, &input.base);
-        let mut patterns = None;
-        let mut built = None;
-        let mut listed_files: Option<Vec<String>> = None;
-        let mut received = Vec::new();
-        let (sets, known): (units::Sets, Known) = match &self.adapter {
-            Adapter::Pytest | Adapter::Vitest(_) => {
-                match observed_plan(
-                    &self.adapter,
-                    input.tree,
-                    input.root,
-                    input.cwd,
-                    &map,
-                    asker.as_ref(),
-                    &self.tests.ignore,
-                ) {
-                    Ok(Some(found)) => {
-                        patterns = found.python_files;
-                        listed_files = found.listed;
-                        received = found.shared.received;
-                        (found.sets, found.known)
-                    }
-                    // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
-                    Ok(None) => return Planned::Plan(String::new()),
-                    Err(why) => return Planned::Everything(why),
-                }
-            }
-            Adapter::Cargo(recognized) => {
-                let b =
-                    match cargo::plan_build(recognized, input.root, input.cwd, &self.compile_env) {
-                        Ok(b) => b,
-                        Err(why) => return Planned::Everything(why),
-                    };
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| b.unit_files.contains(path),
-                    Sources::Named(&b.named, cargo::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let known = b
-                    .units
-                    .iter()
-                    .map(|(unit, b)| {
-                        let lists = (b.not_followed.is_empty() && input.tree.contains(unit))
-                            .then(|| vec![built_list(&b.reads)]);
-                        (unit.clone(), lists)
-                    })
-                    .collect();
-                built = Some(b);
-                (sets, known)
-            }
-            Adapter::Go(recognized) => {
-                let listed = match gotest::list(recognized, input.root, input.cwd) {
-                    Ok(listed) => listed,
-                    Err(why) => return Planned::Everything(why),
-                };
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| listed.unit_files.contains(path),
-                    Sources::Named(&listed.named, gotest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker.as_ref(), false, &sets, input.tree, &self.tests.ignore);
-                let known = listed
-                    .units
-                    .iter()
-                    .map(|(unit, u)| {
-                        let whole = u.not_followed.is_empty()
-                            && u.own.iter().all(|f| input.tree.contains(f));
-                        let lists = whole
-                            .then(|| {
-                                shared::lists(
-                                    unit,
-                                    map.units.get(unit),
-                                    &shared,
-                                    input.tree,
-                                    Some(&u.reads),
-                                )
-                            })
-                            .flatten();
-                        (unit.clone(), lists)
-                    })
-                    .collect();
-                received = shared.received;
-                (sets, known)
-            }
+        let at = PlanAt {
+            tree: input.tree,
+            root: input.root,
+            cwd: input.cwd,
+            map: &map,
+            asker: asker.as_ref(),
+            ignore: &self.tests.ignore,
+            compile_env: &self.compile_env,
         };
+        let planning = match self.adapter.plan(&at) {
+            Ok(Some(planning)) => planning,
+            // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
+            Ok(None) => return Planned::Plan(String::new()),
+            Err(why) => return Planned::Everything(why),
+        };
+        let adapter::Planning {
+            sets,
+            known,
+            received,
+            extras,
+            bound,
+        } = planning;
         let keyer = Keyer::new(input.tree, &sets, &input.base);
         let total = known.len();
         if total == 0 {
@@ -342,18 +310,19 @@ impl Session {
             .filter(|unit| !audited.contains(*unit))
             .cloned()
             .collect();
-        // A test binary is reused only as the bytes whose dep-info its key holds.
+        // \[ADR 0069\] A unit bound to a file's bytes (a test binary) is reused only as the bytes
+        // whose dep-info its key holds.
         let mut binaries = Vec::new();
-        if let Some(built) = &built {
+        if self.adapter.binds() {
             reuse.retain(|unit| {
-                let Some(b) = built.units.get(unit) else {
+                let Some(path) = bound.get(unit) else {
                     return false;
                 };
-                match std::fs::read(&b.executable) {
+                match std::fs::read(path) {
                     Ok(bytes) => {
                         binaries.push(facts::Binary {
                             unit: unit.clone(),
-                            path: b.executable.clone(),
+                            path: path.clone(),
                             sha256: Digest::of(&bytes).hex(),
                         });
                         true
@@ -365,10 +334,14 @@ impl Session {
         if let Err(err) = write_run_file(
             &self.dir,
             &self.root,
-            &reuse.iter().cloned().collect::<Vec<_>>(),
-            patterns.as_deref(),
-            &binaries,
-            listed_files.as_deref(),
+            &Listed {
+                reuse: reuse.iter().cloned().collect(),
+                extras,
+                binaries,
+                unit: self.unit,
+                reads: self.reads,
+                reuse_tests: BTreeMap::new(),
+            },
         ) {
             return Planned::Everything(format!("can't write the plan ({err})"));
         }
@@ -430,20 +403,15 @@ impl Session {
         base: &KeyBase,
     ) -> Option<Asker<'s>> {
         let systems = shared::systems(base);
-        if matches!(self.adapter, Adapter::Cargo(_)) || systems.is_empty() || !self.tests.is_on() {
+        if self.adapter.hints() == Hints::None || systems.is_empty() || !self.tests.is_on() {
             return None;
         }
         Some(Asker {
             store,
             check_id,
             systems,
-            adapter: self.adapter_word().word(),
+            adapter: self.adapter.word(),
         })
-    }
-
-    /// The adapter, as the store names it.
-    fn adapter_word(&self) -> db::AdapterWord {
-        adapter_word(&self.adapter)
     }
 
     /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
@@ -455,7 +423,8 @@ impl Session {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
             base: end.base.clone(),
-            adapter: self.adapter_word(),
+            adapter: self.adapter.word(),
+            hints: self.adapter.hints(),
         };
         let loaded = db::load(&at.path, &at.check_id);
         let map = loaded.map;
@@ -509,162 +478,16 @@ impl Session {
         map: &store::Map,
         asker: Option<&Asker<'_>>,
     ) -> Result<Option<Read>, String> {
-        let ignore = &self.tests.ignore;
-        match &self.adapter {
-            Adapter::Pytest => {
-                let merged = facts::merged(files, "pytest");
-                if merged.is_empty() {
-                    return Ok(None);
-                }
-                let patterns = pytest::python_files(root, cwd);
-                let told = facts::setting(files, "pytest", "pythonFiles");
-                let readable = pytest::is_test_file(&patterns, "x.py").is_some();
-                let agrees = matches!(&told, Ok(Some(list)) if *list == patterns);
-                let guard = (!readable || !agrees).then(|| units::NotFollowed {
-                    why: "python-files".into(),
-                    detail: "pytest's python_files isn't what hushrun read of its configuration"
-                        .into(),
-                });
-                let failures_by_unit = merged.values().all(|m| m.failures_by_unit);
-                let seen: BTreeMap<String, Seen> = merged
-                    .into_iter()
-                    .map(|(unit, m)| {
-                        let mut not_followed = m.not_followed;
-                        not_followed.extend(guard.clone());
-                        let facts = Facts {
-                            complete: m.finished >= m.selected,
-                            failed: m.failed,
-                            not_followed,
-                            deselected: m.deselected,
-                            ..Facts::default()
-                        };
-                        let seen = Seen {
-                            facts,
-                            reads: m.reads,
-                            duration_ms: m.duration_ms,
-                        };
-                        (unit, seen)
-                    })
-                    .collect();
-                let is_unit =
-                    |path: &str| readable && pytest::is_test_file(&patterns, path) == Some(true);
-                let sets = units::classify(
-                    tree.paths(),
-                    &is_unit,
-                    Sources::Kinds(pytest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker, false, &sets, tree, ignore);
-                let planned = seen
-                    .keys()
-                    .filter_map(|unit| {
-                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen,
-                    failures_by_unit,
-                    sets,
-                    planned,
-                    edges: facts::edges_of(files, "pytest"),
-                    received: shared.received,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Cargo(recognized) => {
-                if !files.iter().any(|f| f.adapter == cargo::ADAPTER) {
-                    return Ok(None);
-                }
-                let observed = cargo::observe(recognized, files, root, cwd, command_passed)?;
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Named(&observed.named, cargo::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let planned = observed
-                    .units
-                    .iter()
-                    .map(|(unit, seen)| (unit.clone(), vec![built_list(&seen.reads)]))
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: true,
-                    sets,
-                    planned,
-                    executables: observed.executables,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Go(recognized) => {
-                if !files.iter().any(|f| f.adapter == gotest::ADAPTER) {
-                    return Ok(None);
-                }
-                let observed = gotest::observe(recognized, files, root, cwd, tree)?;
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Named(&observed.named, gotest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let unit_files = Some(observed.unit_files.clone());
-                let shared = fetch(asker, false, &sets, tree, ignore);
-                let planned = observed
-                    .compiled
-                    .iter()
-                    .filter_map(|(unit, compiled)| {
-                        let own = map.units.get(unit);
-                        let lists = shared::lists(unit, own, &shared, tree, Some(compiled))?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: true,
-                    sets,
-                    planned,
-                    own: observed.own,
-                    dirs: observed.dirs,
-                    edges: observed.edges,
-                    unit_files,
-                    received: shared.received,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Vitest(_) => {
-                let Some(observed) = vitest::observe(files, root, tree)? else {
-                    return Ok(None);
-                };
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Kinds(vitest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker, true, &sets, tree, ignore);
-                let planned = observed
-                    .units
-                    .keys()
-                    .filter_map(|unit| {
-                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: observed.failures_by_unit,
-                    sets,
-                    planned,
-                    dirs: observed.dirs,
-                    unit_files: Some(observed.unit_files),
-                    refused: observed.refused,
-                    edges: observed.edges,
-                    received: shared.received,
-                    ..Read::default()
-                }))
-            }
-        }
+        self.adapter.read(&ReadAt {
+            files,
+            root,
+            cwd,
+            tree,
+            command_passed,
+            map,
+            asker,
+            ignore: &self.tests.ignore,
+        })
     }
 
     /// \[C-34, ADR 0069\] The second run of the audit (RFC 0003 §3.7): COMMAND as written, again,
@@ -680,37 +503,30 @@ impl Session {
             .filter(|unit| !again.contains(*unit))
             .cloned()
             .collect();
-        let (patterns, binaries) = match &self.adapter {
-            Adapter::Pytest => (
-                Some(pytest::python_files(&self.root, &observed.cwd)),
-                Vec::new(),
-            ),
-            Adapter::Cargo(_) => {
-                let mut binaries = Vec::new();
-                for unit in &others {
-                    let path = observed.executables.get(unit)?;
-                    let bytes = std::fs::read(path).ok()?;
-                    binaries.push(facts::Binary {
-                        unit: unit.clone(),
-                        path: path.clone(),
-                        sha256: Digest::of(&bytes).hex(),
-                    });
-                }
-                (None, binaries)
+        let extras = self
+            .adapter
+            .again(&self.root, &observed.cwd, &observed.unit_files);
+        let mut binaries = Vec::new();
+        if self.adapter.binds() {
+            for unit in &others {
+                let path = observed.executables.get(unit)?;
+                let bytes = std::fs::read(path).ok()?;
+                binaries.push(facts::Binary {
+                    unit: unit.clone(),
+                    path: path.clone(),
+                    sha256: Digest::of(&bytes).hex(),
+                });
             }
-            Adapter::Go(_) | Adapter::Vitest(_) => (None, Vec::new()),
+        }
+        let listed = Listed {
+            reuse: others,
+            extras,
+            binaries,
+            unit: self.unit,
+            reads: self.reads,
+            reuse_tests: BTreeMap::new(),
         };
-        let listed: Option<Vec<String>> = matches!(self.adapter, Adapter::Vitest(_))
-            .then(|| observed.unit_files.iter().cloned().collect());
-        write_run_file(
-            &dir,
-            &self.root,
-            &others,
-            patterns.as_deref(),
-            &binaries,
-            listed.as_deref(),
-        )
-        .ok()?;
+        write_run_file(&dir, &self.root, &listed).ok()?;
         let mut variables = self.variables.clone();
         for (name, value) in &mut variables {
             if name == runner::UNITS_VAR {
@@ -770,176 +586,18 @@ impl Session {
     }
 }
 
-/// An adapter, as the store and a hint name it.
-fn adapter_word(adapter: &Adapter) -> db::AdapterWord {
-    match adapter {
-        Adapter::Pytest => db::AdapterWord::Pytest,
-        Adapter::Cargo(_) => db::AdapterWord::Cargo,
-        Adapter::Go(_) => db::AdapterWord::Go,
-        Adapter::Vitest(_) => db::AdapterWord::Vitest,
-    }
-}
-
-/// The one adapter a run of `command` in `cwd` gets (C-32, C-35): Cargo's for `cargo test` and
-/// `cargo nextest run`, Go's for `go test`, Vitest's for one run of Vitest, and pytest's for any
-/// other COMMAND; `Err` says why the one it would get can't load safely. The run, `hushrun ready`
-/// and `hushrun why` all ask it.
-fn choose(command: &[String], cwd: &Path) -> Result<Adapter, String> {
-    if let Some(recognized) = cargo::recognize(command) {
-        return Ok(Adapter::Cargo(recognized));
-    }
-    if let Some(recognized) = gotest::recognize(command) {
-        return recognized.map(Adapter::Go);
-    }
-    if let Some(recognized) = vitest::recognize(command) {
-        let recognized = recognized?;
-        if let Some(why) = vitest::unloadable(&recognized, cwd) {
-            return Err(why);
-        }
-        return Ok(Adapter::Vitest(recognized));
-    }
-    match pytest::unsafe_for(command) {
-        Some(why) => Err(why.into()),
-        None => Ok(Adapter::Pytest),
-    }
-}
-
-/// What an observed adapter's plan reads from files alone, before any key.
-struct ObservedPlan {
-    sets: units::Sets,
-    known: Known,
-    /// pytest's unit rule as hushrun read it.
-    python_files: Option<Vec<String>>,
-    /// \[ADR 0071\] Vitest's test files as the map, or a hint, lists them.
-    listed: Option<Vec<String>>,
-    /// \[C-38\] The hints read.
-    shared: Shared,
-}
-
-/// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the lists of files each
-/// might be keyed by, from the scope's files, the check's map and \[C-38\] the hints `asker`
-/// fetches: no tool starts. The plan and `hushrun ready` both read it. `Err` says why nothing can
-/// be reused; \[ADR 0074\] `None` that there is nothing to say: pytest, the adapter of any COMMAND
-/// hushrun doesn't recognize, never reported for this check, here or on a machine whose hint
-/// this one read ([`speaks_of_test_files`]).
-fn observed_plan(
-    adapter: &Adapter,
-    tree: &Tree,
-    root: &Path,
-    cwd: &Path,
-    map: &store::Map,
-    asker: Option<&Asker<'_>>,
-    ignore: &[hushrun_core::glob::Pattern],
-) -> Result<Option<ObservedPlan>, String> {
-    match adapter {
-        Adapter::Pytest => {
-            let found = pytest::python_files(root, cwd);
-            if pytest::is_test_file(&found, "x.py").is_none() {
-                if !speaks_of_test_files(adapter, map, &Shared::default()) {
-                    return Ok(None);
-                }
-                return Err(
-                    "pytest's python_files names a directory, which this version doesn't read"
-                        .into(),
-                );
-            }
-            let sets = units::classify(
-                tree.paths(),
-                &|path| pytest::is_test_file(&found, path) == Some(true),
-                Sources::Kinds(pytest::SOURCE_KINDS),
-                ignore,
-            );
-            let shared = fetch(asker, false, &sets, tree, ignore);
-            if !speaks_of_test_files(adapter, map, &shared) {
-                return Ok(None);
-            }
-            let known = sets
-                .files(Set::Units)
-                .map(|unit| {
-                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
-                    (unit.to_string(), lists)
-                })
-                .collect();
-            Ok(Some(ObservedPlan {
-                sets,
-                known,
-                python_files: Some(found),
-                listed: None,
-                shared,
-            }))
-        }
-        Adapter::Vitest(recognized) => {
-            if recognized.coverage {
-                return Err(
-                    "Vitest's coverage is on, and a partial run's coverage would read as a drop"
-                        .into(),
-                );
-            }
-            let shared = fetch(asker, true, &units::Sets::default(), tree, ignore);
-            let mut listed: BTreeSet<String> = map
-                .unit_files
-                .iter()
-                .filter(|f| tree.contains(f))
-                .cloned()
-                .collect();
-            if listed.is_empty() {
-                listed = shared.unit_files();
-            }
-            if listed.is_empty() {
-                return Err("no run here has listed Vitest's test files yet".into());
-            }
-            let sets = units::classify(
-                tree.paths(),
-                &|path| listed.contains(path),
-                Sources::Kinds(vitest::SOURCE_KINDS),
-                ignore,
-            );
-            let known = sets
-                .files(Set::Units)
-                .map(|unit| {
-                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
-                    (unit.to_string(), lists)
-                })
-                .collect();
-            Ok(Some(ObservedPlan {
-                sets,
-                known,
-                python_files: None,
-                listed: Some(listed.into_iter().collect()),
-                shared,
-            }))
-        }
-        Adapter::Cargo(_) | Adapter::Go(_) => {
-            Err("its test files are known from a build, which this doesn't make".into())
-        }
-    }
-}
-
-/// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (for Vitest, every file of
-/// a source kind), read against `tree`; none without one.
+/// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (or every file of the
+/// adapter's kinds, Vitest's), read against `tree`; none without one.
 fn fetch(
     asker: Option<&Asker<'_>>,
-    vitest: bool,
+    hints: Hints,
     sets: &units::Sets,
     tree: &Tree,
     ignore: &[hushrun_core::glob::Pattern],
 ) -> Shared {
     asker.map_or_else(Shared::default, |asker| {
-        asker.fetch(&shared::sources(vitest, sets, tree, ignore), tree)
+        asker.fetch(&shared::sources(hints, sets, tree, ignore), tree)
     })
-}
-
-/// \[ADR 0074\] Whether a plan, and `hushrun ready`, say anything of a check's test files before
-/// it runs: always for an adapter its COMMAND was recognized for, and for pytest, which any other
-/// COMMAND gets, only once pytest reported this check's test files here, as its map says, or
-/// \[C-38\] on another machine, as a hint read says. A check that runs `npm test` or `make test`
-/// never started pytest, and its Python-looking files are no test files of it. The one rule both
-/// read.
-fn speaks_of_test_files(adapter: &Adapter, map: &store::Map, shared: &Shared) -> bool {
-    match adapter {
-        Adapter::Pytest => map.reported() || shared.names_any(),
-        Adapter::Cargo(_) | Adapter::Go(_) | Adapter::Vitest(_) => true,
-    }
 }
 
 /// \[C-22\] What `hushrun ready` needs to say how many test files a run would run.
@@ -976,7 +634,7 @@ pub enum Previewed {
 /// build (Cargo, Go), when no adapter would load, or when the lookup fails. It writes nothing,
 /// and sends nothing but the lookup.
 pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
-    let adapter = choose(p.command, p.cwd).ok()?;
+    let adapter = adapter::choose(p.command, p.cwd).ok()?;
     let cache = crate::context::cache_dir()?;
     let check_id = store::check_id(&p.base, p.repository);
     let loaded = db::load(&db::path(&cache, p.repository), &check_id);
@@ -989,18 +647,19 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         store: p.store,
         check_id,
         systems,
-        adapter: adapter_word(&adapter).word(),
+        adapter: adapter.word(),
     });
-    let found = observed_plan(
-        &adapter,
-        p.tree,
-        p.root,
-        p.cwd,
-        &map,
-        asker.as_ref(),
-        &p.tests.ignore,
-    )
-    .ok()??;
+    let found = adapter
+        .plan_from_files(&PlanAt {
+            tree: p.tree,
+            root: p.root,
+            cwd: p.cwd,
+            map: &map,
+            asker: asker.as_ref(),
+            ignore: &p.tests.ignore,
+            compile_env: &[],
+        })
+        .ok()??;
     let total = found.known.len();
     if total == 0 || total > MOST_UNITS {
         return None;
@@ -1030,10 +689,6 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         audited,
     })
 }
-
-/// The test files a plan knows of, each with the lists of files it might be keyed by (C-38), as
-/// far as it can tell: `None` when it can't, and it runs.
-type Known = Vec<(String, Option<Vec<List>>)>;
 
 /// Each test file's lists with the key of each for the files on disk now (C-31): those
 /// `tests.always` names and those no list is known for left out.
@@ -1070,53 +725,35 @@ fn built_list(reads: &BTreeSet<String>) -> List {
     }
 }
 
-/// What an adapter's files came to, before any state is decided.
+/// What `hushrun.json` lists for adapters (C-32).
 #[derive(Debug, Default)]
-struct Read {
-    /// Each unit, as seen, merged over its processes.
-    seen: BTreeMap<String, Seen>,
-    /// The adapter reports each failure by unit.
-    failures_by_unit: bool,
-    /// The four sets (C-30), by the adapter's rule for this run.
-    sets: units::Sets,
-    /// For each unit a plan of this run would have keyed, the lists it would have keyed it by
-    /// (C-38): what `observe` says reuse would have done. A unit not here would have run.
-    planned: BTreeMap<String, Vec<List>>,
-    /// \[ADR 0069\] Each test binary's executable, by its unit.
-    executables: BTreeMap<String, PathBuf>,
-    /// \[ADR 0070\] The files each unit is made of, when they aren't its own path: a Go package's
-    /// test files. All must be in the scope.
-    own: BTreeMap<String, Vec<String>>,
-    /// \[ADR 0070\] The directories each unit listed, which the map keeps for the plan.
-    dirs: BTreeMap<String, BTreeSet<String>>,
-    /// \[ADR 0071\] The test files the runner listed, which the map keeps as the unit rule; \[C-38\]
-    /// for Go, `go list`'s, which `hushrun why` reads on a machine whose map lacks a package.
-    unit_files: Option<BTreeSet<String>>,
-    /// \[ADR 0071\] Why the adapter deselected nothing the plan listed.
-    refused: Option<String>,
-    /// \[ADR 0072\] The direct edges the adapter saw, for `hushrun why`.
-    edges: BTreeSet<db::Edge>,
-    /// \[C-38\] The hints read for `planned`.
-    received: Vec<db::HintKnown>,
+struct Listed {
+    /// Units an adapter may deselect whole.
+    reuse: Vec<String>,
+    /// What the adapter checks before it deselects any.
+    extras: RunExtras,
+    /// \[ADR 0069\] The reused test binaries.
+    binaries: Vec<facts::Binary>,
+    /// \[ADR 0077\] What the run reuses one by one, and what a test is taken to have read.
+    unit: Unit,
+    reads: Reads,
+    /// \[ADR 0077\] Tests an adapter may deselect one by one, by unit, each by its id.
+    reuse_tests: BTreeMap<String, Vec<String>>,
 }
 
-/// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root, what adapters may
-/// deselect, pytest's unit rule as hushrun read it, and the reused binaries.
-fn write_run_file(
-    dir: &Path,
-    root: &Path,
-    reuse: &[String],
-    python_files: Option<&[String]>,
-    binaries: &[facts::Binary],
-    test_files: Option<&[String]>,
-) -> std::io::Result<()> {
+/// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root and what `listed`
+/// says.
+fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<()> {
     let run = facts::RunFile {
         schema: facts::RUN_SCHEMA.into(),
         root: root.to_path_buf(),
-        reuse: reuse.to_vec(),
-        python_files: python_files.map(<[String]>::to_vec),
-        binaries: binaries.to_vec(),
-        test_files: test_files.map(<[String]>::to_vec),
+        reuse: listed.reuse.clone(),
+        python_files: listed.extras.python_files.clone(),
+        binaries: listed.binaries.clone(),
+        test_files: listed.extras.test_files.clone(),
+        unit: Some(listed.unit.word().to_string()),
+        reads: Some(listed.reads.word().to_string()),
+        reuse_tests: listed.reuse_tests.clone(),
     };
     let bytes = serde_json::to_vec(&run).map_err(std::io::Error::other)?;
     facts::write_whole(&dir.join(facts::RUN_FILE), &bytes)
@@ -1335,13 +972,14 @@ impl Observed {
         if units.is_empty() {
             return None;
         }
-        // \[ADR 0071\] Only Vitest's list of test files is its runner's own.
-        let unit_files = match at.adapter {
-            db::AdapterWord::Vitest => map.unit_files,
-            _ => BTreeSet::new(),
+        // \[ADR 0071\] Only an adapter whose hints go by its kinds (Vitest) has a list of test
+        // files that is its runner's own.
+        let unit_files = match at.hints {
+            Hints::Kinds(_) => map.unit_files,
+            Hints::None | Hints::Sources => BTreeSet::new(),
         };
         let hint = hushrun_core::hints::Hint {
-            adapter: at.adapter.word().to_string(),
+            adapter: at.adapter.to_string(),
             units,
             unit_files,
         };
@@ -1473,7 +1111,8 @@ struct StoreAt {
     path: PathBuf,
     check_id: Digest,
     base: KeyBase,
-    adapter: db::AdapterWord,
+    adapter: &'static str,
+    hints: Hints,
 }
 
 fn decide(
@@ -1503,14 +1142,12 @@ fn decide(
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
     // that shares none.
-    let share = (at.adapter != db::AdapterWord::Cargo && hushrun_core::hints::Os::this().is_some())
-        .then(|| {
-            let vitest = at.adapter == db::AdapterWord::Vitest;
-            shared::Place::new(
-                &at.check_id,
-                &shared::sources(vitest, sets, tree, &tests.ignore),
-            )
-        });
+    let share = (at.hints != Hints::None && hushrun_core::hints::Os::this().is_some()).then(|| {
+        shared::Place::new(
+            &at.check_id,
+            &shared::sources(at.hints, sets, tree, &tests.ignore),
+        )
+    });
     let received = match &how {
         How::Plan(plan) => plan.received.clone(),
         How::Observe | How::Quiet => received,

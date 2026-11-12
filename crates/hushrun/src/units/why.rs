@@ -15,12 +15,13 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
-use hushrun_core::units::{self, KeyBase, Mode, Set, Sources, Tests, Tree};
+use hushrun_core::units::{self, KeyBase, Mode, Set, Tests, Tree};
 
+use super::adapter::{self, Adapter, Hints, WhyAt};
 use super::db::{self, EdgeKind};
 use super::shared::{self, Asker, Choice, Shared};
 use super::store::{self, Map, UnitResults};
-use super::{Adapter, Keyer, adapter_word, cargo, choose, fetch, gotest, pytest, rest_of, vitest};
+use super::{Keyer, fetch, rest_of};
 use crate::results::RunResult;
 
 /// What `hushrun why` needs.
@@ -117,7 +118,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     };
-    let adapter = match choose(&input.base.command, input.cwd) {
+    let adapter = match adapter::choose(&input.base.command, input.cwd) {
         Ok(adapter) => adapter,
         Err(why) => {
             out.decision = Decision::Off;
@@ -134,14 +135,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     }
     let map = loaded.map;
     // For Go a unit is a package's directory, which one of its test files names too.
-    let unit = match adapter {
-        Adapter::Go(_) if asked.ends_with("_test.go") => match asked.rsplit_once('/') {
-            Some((dir, _)) => dir.to_string(),
-            None => ".".to_string(),
-        },
-        Adapter::Go(_) if asked.is_empty() => ".".to_string(),
-        _ => asked.to_string(),
-    };
+    let unit = adapter.why_unit(asked);
     out.unit = unit.clone();
     let would = tests.mode != Mode::Reuse;
     let verb = |decision: Decision| match (decision, would) {
@@ -161,123 +155,82 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
 
     // \[C-38\] The hints a run would read: with results on a server, for any adapter but Cargo's.
     let systems = shared::systems(&input.base);
-    let asker = match (&input.results, &adapter) {
-        (_, Adapter::Cargo(_)) => None,
-        (Ok(results), _) if !systems.is_empty() => Some(Asker {
+    let asker = match &input.results {
+        _ if adapter.hints() == Hints::None => None,
+        Ok(results) if !systems.is_empty() => Some(Asker {
             store: *results,
             check_id,
             systems: systems.clone(),
-            adapter: adapter_word(&adapter).word(),
+            adapter: adapter.word(),
         }),
         _ => None,
     };
-    let vitest_shared = match &adapter {
-        Adapter::Vitest(_) => fetch(
+    let kinds_shared = match adapter.hints() {
+        Hints::Kinds(_) => fetch(
             asker.as_ref(),
-            true,
+            adapter.hints(),
             &units::Sets::default(),
             input.tree,
             &tests.ignore,
         ),
-        _ => Shared::default(),
+        Hints::None | Hints::Sources => Shared::default(),
     };
     let listed = if map.unit_files.is_empty() {
-        vitest_shared.unit_files()
+        kinds_shared.unit_files()
     } else {
         map.unit_files.clone()
     };
-    // The four sets, by the adapter's rule (C-30): pytest's from files now; the others' from the
-    // last run here, as far as this machine knows, or Vitest's from a hint.
-    let python_files = pytest::python_files(input.root, input.cwd);
-    let sets = match &adapter {
-        Adapter::Pytest => units::classify(
-            input.tree.paths(),
-            &|p| pytest::is_test_file(&python_files, p) == Some(true),
-            Sources::Kinds(pytest::SOURCE_KINDS),
+    // The four sets, by the adapter's rule (C-30): from files now, or from the last run here, as
+    // far as this machine knows, or from a hint.
+    let no_hints = Shared::default();
+    let sets = adapter.why_sets(&WhyAt {
+        tree: input.tree,
+        root: input.root,
+        cwd: input.cwd,
+        map: &map,
+        ignore: &tests.ignore,
+        shared: &no_hints,
+        listed: &listed,
+    });
+    let mut shared = match adapter.hints() {
+        Hints::Kinds(_) => kinds_shared,
+        Hints::None => Shared::default(),
+        Hints::Sources if !adapter.why_asks_hints(&map) => Shared::default(),
+        Hints::Sources => fetch(
+            asker.as_ref(),
+            adapter.hints(),
+            &sets,
+            input.tree,
             &tests.ignore,
         ),
-        Adapter::Vitest(_) => units::classify(
-            input.tree.paths(),
-            &|p| listed.contains(p),
-            Sources::Kinds(vitest::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-        Adapter::Cargo(_) => units::classify(
-            input.tree.paths(),
-            &|p| map.units.contains_key(p),
-            Sources::Named(&map.sources, cargo::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-        Adapter::Go(_) => units::classify(
-            input.tree.paths(),
-            &|p| {
-                p.ends_with("_test.go")
-                    && (map.unit_files.contains(p) || map.units.contains_key(&package_of(p)))
-            },
-            Sources::Named(&map.sources, gotest::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-    };
-    let mut shared = match &adapter {
-        Adapter::Vitest(_) => vitest_shared,
-        Adapter::Cargo(_) => Shared::default(),
-        // Go's sources are those of its last run here: with none, there is no address to ask.
-        Adapter::Go(_) if map.sources.is_empty() => Shared::default(),
-        Adapter::Pytest | Adapter::Go(_) => {
-            fetch(asker.as_ref(), false, &sets, input.tree, &tests.ignore)
-        }
     };
     // A `shared` entry here counts only when its system is one a run reads (C-38).
     shared.systems = systems;
-    let known_from_last_run = match &adapter {
-        Adapter::Pytest => None,
-        Adapter::Vitest(_) => Some("Vitest's list of test files is the one of its last run here"),
-        Adapter::Cargo(_) => {
-            Some("its test binaries and what each is built from are those of its last build here")
-        }
-        Adapter::Go(_) => Some(
-            "its packages and what each is built from are those go list named in its last run here",
-        ),
-    };
-    if let Some(why) = known_from_last_run {
+    if let Some(why) = adapter.why_known_from() {
         out.here_only = true;
         out.detail
             .push(format!("as far as this machine knows: {why}"));
     }
+    let at = WhyAt {
+        tree: input.tree,
+        root: input.root,
+        cwd: input.cwd,
+        map: &map,
+        ignore: &tests.ignore,
+        shared: &shared,
+        listed: &listed,
+    };
 
     // Is it a test file of the check at all?
-    let is_unit = match &adapter {
-        Adapter::Go(_) => {
-            map.units.contains_key(&unit)
-                || shared.knows(&unit)
-                || map.unit_files.iter().any(|f| package_of(f) == unit)
-        }
-        _ => sets.of(&unit) == Some(Set::Units),
-    };
-    if !is_unit {
-        let why = match &adapter {
-            _ if sets.of(&unit).is_none() && !matches!(adapter, Adapter::Go(_)) => {
+    if !adapter.why_is_unit(&at, &sets, &unit) {
+        let why = match sets.of(&unit) {
+            None if !adapter.why_units_are_directories() => {
                 format!("{unit} isn't a file of {check}'s scope as it is now")
             }
-            _ if sets.of(&unit) == Some(Set::Ignored) => {
+            Some(Set::Ignored) => {
                 format!("{unit} is in {check}'s `tests.ignore`: no test reads it")
             }
-            Adapter::Pytest if !map.reported() && shared.hints.is_empty() => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: no run of {check} here has had pytest report its test files"
-            ),
-            Adapter::Pytest => format!(
-                "{unit} isn't a test file of {check}: pytest's python_files ({}) doesn't name it",
-                python_files.join(", ")
-            ),
-            Adapter::Vitest(_) => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: Vitest didn't list it in its last run here"
-            ),
-            Adapter::Cargo(_) => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: no test binary of its last build here has it as its root file"
-            ),
-            Adapter::Go(_) => format!(
-                "{unit} isn't a package {check} tests as far as this machine knows: go list didn't name it in its last run here"
-            ),
+            _ => adapter.why_not_a_unit(&at, check.as_str(), &unit),
         };
         says(&mut out, Decision::NotATestFile, "not-a-test-file", why);
         return out;
@@ -402,7 +355,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
                 "this machine has never seen it run, and no pass that counts here matches what another machine saw it read".into(),
             ),
             Choice::Nothing => {
-                explain_change(&mut out, &changes, &says, &map, input, &unit, &adapter);
+                explain_change(&mut out, &changes, &says, &map, input, &unit, adapter.as_ref());
             }
         },
         Err(why) => {
@@ -410,18 +363,10 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             out.detail.push(format!(
                 "as far as this machine knows: can't read which passed ({why})"
             ));
-            explain_change(&mut out, &changes, &says, &map, input, &unit, &adapter);
+            explain_change(&mut out, &changes, &says, &map, input, &unit, adapter.as_ref());
         }
     }
     out
-}
-
-/// A Go test file's package: its directory, `.` for the root.
-fn package_of(file: &str) -> String {
-    match file.rsplit_once('/') {
-        Some((dir, _)) => dir.to_string(),
-        None => ".".to_string(),
-    }
 }
 
 /// What changed since the test file last ran here, among what its key holds.
@@ -525,7 +470,7 @@ fn explain_change(
     map: &Map,
     input: &WhyInput<'_>,
     unit: &str,
-    adapter: &Adapter,
+    adapter: &dyn Adapter,
 ) {
     if let Some((file, how)) = &changes.read {
         let (reason, why) = match *how {
@@ -554,11 +499,8 @@ fn explain_change(
                 }
             }
             out.detail.insert(0, line);
-        } else if matches!(adapter, Adapter::Cargo(_)) {
-            out.detail.insert(
-                0,
-                "its test binary is built from it: rustc's dep-info for the build names it".into(),
-            );
+        } else if let Some(why) = adapter.why_no_path() {
+            out.detail.insert(0, why.into());
         }
         if let Some((_, every, _)) = &changes.every {
             out.detail
@@ -587,14 +529,20 @@ fn explain_change(
 
 /// The shortest path of direct edges the store holds from `unit` to `file` (for Go, to its
 /// package's directory), through files `unit` read; empty when there is none.
-fn path_to(input: &WhyInput<'_>, map: &Map, unit: &str, file: &str, adapter: &Adapter) -> Vec<Hop> {
+fn path_to(
+    input: &WhyInput<'_>,
+    map: &Map,
+    unit: &str,
+    file: &str,
+    adapter: &dyn Adapter,
+) -> Vec<Hop> {
     let check_id = store::check_id(&input.base, input.repository);
     let Ok(edges) = db::edges(input.store, &check_id) else {
         return Vec::new();
     };
-    let go = matches!(adapter, Adapter::Go(_));
+    let go = adapter.why_units_are_directories();
     let target = if go {
-        package_of(file)
+        super::gotest::package_of(file)
     } else {
         file.to_string()
     };

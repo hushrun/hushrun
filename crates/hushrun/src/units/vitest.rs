@@ -16,8 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use hushrun_core::units::{Facts, NotFollowed, Tree};
+use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
+use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
 use super::facts::{FactsFile, Unfollowed};
 
 /// The adapter's name in its main process's facts file.
@@ -496,6 +497,145 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         );
     }
     Ok(Some(out))
+}
+
+/// \[ADR 0071\] The Vitest adapter for a COMMAND that starts one run of Vitest, whose config
+/// loads it (C-35); `None` for any other COMMAND.
+pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    let recognized = match recognize(command)? {
+        Ok(recognized) => recognized,
+        Err(why) => return Some(Err(why)),
+    };
+    if let Some(why) = unloadable(&recognized, cwd) {
+        return Some(Err(why));
+    }
+    Some(Ok(Box::new(recognized)))
+}
+
+impl Adapter for Recognized {
+    fn word(&self) -> &'static str {
+        ADAPTER
+    }
+
+    fn runner(&self) -> &'static str {
+        "Vitest"
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::Kinds(SOURCE_KINDS)
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        install(at.cache)
+            .map(|dir| variables(&dir))
+            .map_err(|err| format!("can't write its Vitest plugin: {err}"))
+    }
+
+    fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        if self.coverage {
+            return Err(
+                "Vitest's coverage is on, and a partial run's coverage would read as a drop".into(),
+            );
+        }
+        let shared = super::fetch(at.asker, self.hints(), &Sets::default(), at.tree, at.ignore);
+        let mut listed: BTreeSet<String> = at
+            .map
+            .unit_files
+            .iter()
+            .filter(|f| at.tree.contains(f))
+            .cloned()
+            .collect();
+        if listed.is_empty() {
+            listed = shared.unit_files();
+        }
+        if listed.is_empty() {
+            return Err("no run here has listed Vitest's test files yet".into());
+        }
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| listed.contains(path),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let known = sets
+            .files(Set::Units)
+            .map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                (unit.to_string(), lists)
+            })
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            received: shared.received,
+            extras: RunExtras {
+                python_files: None,
+                test_files: Some(listed.into_iter().collect()),
+            },
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        let Some(observed) = observe(at.files, at.root, at.tree)? else {
+            return Ok(None);
+        };
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| observed.unit_files.contains(path),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        let planned = observed
+            .units
+            .keys()
+            .filter_map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                Some((unit.clone(), lists))
+            })
+            .collect();
+        Ok(Some(Read {
+            seen: observed.units,
+            failures_by_unit: observed.failures_by_unit,
+            sets,
+            planned,
+            dirs: observed.dirs,
+            unit_files: Some(observed.unit_files),
+            refused: observed.refused,
+            edges: observed.edges,
+            received: shared.received,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, _: &Path, _: &Path, unit_files: &BTreeSet<String>) -> RunExtras {
+        RunExtras {
+            python_files: None,
+            test_files: Some(unit_files.iter().cloned().collect()),
+        }
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        units::classify(
+            at.tree.paths(),
+            &|p| at.listed.contains(p),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_not_a_unit(&self, _: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        format!(
+            "{unit} isn't a test file of {check} as far as this machine knows: Vitest didn't list it in its last run here"
+        )
+    }
+
+    fn why_known_from(&self) -> Option<&'static str> {
+        Some("Vitest's list of test files is the one of its last run here")
+    }
 }
 
 #[cfg(test)]

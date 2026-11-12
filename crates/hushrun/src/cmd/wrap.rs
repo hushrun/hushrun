@@ -1456,6 +1456,10 @@ fn observe_tests(
         }
         units::Start::On(session) => session,
     };
+    // \[C-39\] Where its adapter can't do what the check asks: once a run.
+    for note in session.notes() {
+        say.line(format_args!("{check}: {note}"));
+    }
     Some(session)
 }
 

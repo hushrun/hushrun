@@ -63,7 +63,8 @@ fn observed(dir: &Path, units: usize) -> (Observed, Tree) {
             path: dir.join("store.v1.sqlite"),
             check_id,
             base,
-            adapter: db::AdapterWord::Pytest,
+            adapter: "pytest",
+            hints: adapter::Hints::Sources,
         }),
         ..Observed::default()
     };
@@ -174,4 +175,57 @@ fn a_test_file_reused_on_another_systems_list_isnt_in_this_machines_hint() {
     let read = hushrun_core::hints::read(&sent[0], &place.key, tree.paths()).unwrap();
     let units: Vec<&str> = read.hint.units.keys().map(String::as_str).collect();
     assert_eq!(units, ["tests/test_1.py", "tests/test_2.py"]);
+}
+
+// covers: C-39
+#[test]
+fn an_adapter_that_cant_do_what_the_check_asks_reuses_by_test_file_and_says_so_once() {
+    let words = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let tests = |unit: Unit, reads: Reads| Tests {
+        mode: Mode::Reuse,
+        unit,
+        reads,
+        ..Tests::default()
+    };
+    let cargo = cargo::recognize(&words("cargo nextest run")).unwrap();
+    let go = gotest::recognize(&words("go test ./...")).unwrap().unwrap();
+    let vitest = vitest::recognize(&words("npx vitest run"))
+        .unwrap()
+        .unwrap();
+    // Test files, as asked: nothing to say, whatever the adapter.
+    for adapter in [&cargo as &dyn Adapter, &go, &vitest, &pytest::Pytest] {
+        let (unit, reads, notes) = what_it_reuses(&tests(Unit::File, Reads::File), adapter);
+        assert_eq!((unit, reads), (Unit::File, Reads::File));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+    // Tests, of an adapter that knows none: by test file, said once, in the runner's words.
+    let (unit, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &cargo);
+    assert_eq!(unit, Unit::File);
+    assert_eq!(
+        notes,
+        ["its tests are reused by test binary: cargo's tests can't be reused one by one yet"]
+    );
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &go);
+    assert_eq!((unit, reads), (Unit::File, Reads::File));
+    assert_eq!(
+        notes,
+        ["its tests are reused by package: go test's tests can't be reused one by one yet"]
+    );
+    let (_, _, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &vitest);
+    assert_eq!(
+        notes,
+        ["its tests are reused by test file: Vitest's tests can't be reused one by one yet"]
+    );
+    // pytest knows tests, and in this version takes each to have read what its file read.
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::File), &pytest::Pytest);
+    assert_eq!((unit, reads), (Unit::Test, Reads::File));
+    assert!(notes.is_empty());
+    let (unit, reads, notes) = what_it_reuses(&tests(Unit::Test, Reads::Test), &pytest::Pytest);
+    assert_eq!((unit, reads), (Unit::Test, Reads::File));
+    assert_eq!(
+        notes,
+        [
+            "each test is taken to have read what its test file read: pytest can't be watched test by test yet"
+        ]
+    );
 }

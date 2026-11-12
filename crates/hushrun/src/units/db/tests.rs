@@ -77,7 +77,7 @@ fn write_run(path: &Path, r: &Run<'_>) -> Result<(), Unread> {
         &Write {
             check_id: id(r.check),
             base: &b,
-            adapter: AdapterWord::Pytest,
+            adapter: "pytest",
             seen: &r.seen,
             tree: &r.tree,
             rest: &rest,
@@ -347,7 +347,7 @@ fn a_store_another_hushrun_holds_is_busy_and_nothing_is_written() {
     let w = Write {
         check_id: id("lint"),
         base: &b,
-        adapter: AdapterWord::Pytest,
+        adapter: "pytest",
         seen: &r.seen,
         tree: &r.tree,
         rest: &BTreeMap::new(),

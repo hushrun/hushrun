@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use hushrun_core::units::{Facts, NotFollowed, Tree};
+use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
+use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
 use super::facts::{FactsFile, Invocation};
 use super::runner;
 
@@ -920,6 +921,163 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// \[ADR 0070\] The Go adapter for `go test …` (C-35); `None` for any other COMMAND.
+pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(recognize(command)?.map(|r| Box::new(r) as Box<dyn Adapter>))
+}
+
+impl Adapter for Recognized {
+    fn word(&self) -> &'static str {
+        ADAPTER
+    }
+
+    fn runner(&self) -> &'static str {
+        "go test"
+    }
+
+    fn test_file(&self) -> &'static str {
+        "package"
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        let exe = at.exe()?;
+        variables(self, &exe, at.cwd, (at.env)("GOFLAGS"))
+    }
+
+    fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        let listed = list(self, at.root, at.cwd)?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| listed.unit_files.contains(path),
+            Sources::Named(&listed.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        let known = listed
+            .units
+            .iter()
+            .map(|(unit, u)| {
+                let whole = u.not_followed.is_empty() && u.own.iter().all(|f| at.tree.contains(f));
+                let lists = whole
+                    .then(|| {
+                        super::shared::lists(
+                            unit,
+                            at.map.units.get(unit),
+                            &shared,
+                            at.tree,
+                            Some(&u.reads),
+                        )
+                    })
+                    .flatten();
+                (unit.clone(), lists)
+            })
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            received: shared.received,
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        if !at.files.iter().any(|f| f.adapter == ADAPTER) {
+            return Ok(None);
+        }
+        let observed = observe(self, at.files, at.root, at.cwd, at.tree)?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| observed.unit_files.contains(path),
+            Sources::Named(&observed.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let unit_files = Some(observed.unit_files.clone());
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        let planned = observed
+            .compiled
+            .iter()
+            .filter_map(|(unit, compiled)| {
+                let own = at.map.units.get(unit);
+                let lists = super::shared::lists(unit, own, &shared, at.tree, Some(compiled))?;
+                Some((unit.clone(), lists))
+            })
+            .collect();
+        Ok(Some(Read {
+            seen: observed.units,
+            failures_by_unit: true,
+            sets,
+            planned,
+            own: observed.own,
+            dirs: observed.dirs,
+            edges: observed.edges,
+            unit_files,
+            received: shared.received,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, _: &Path, _: &Path, _: &BTreeSet<String>) -> RunExtras {
+        RunExtras::default()
+    }
+
+    fn why_unit(&self, asked: &str) -> String {
+        if asked.ends_with("_test.go") {
+            return package_of(asked);
+        }
+        if asked.is_empty() {
+            return ".".to_string();
+        }
+        asked.to_string()
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        units::classify(
+            at.tree.paths(),
+            &|p| {
+                p.ends_with("_test.go")
+                    && (at.map.unit_files.contains(p) || at.map.units.contains_key(&package_of(p)))
+            },
+            Sources::Named(&at.map.sources, SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_is_unit(&self, at: &WhyAt<'_>, _: &Sets, unit: &str) -> bool {
+        at.map.units.contains_key(unit)
+            || at.shared.knows(unit)
+            || at.map.unit_files.iter().any(|f| package_of(f) == unit)
+    }
+
+    fn why_not_a_unit(&self, _: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        format!(
+            "{unit} isn't a package {check} tests as far as this machine knows: go list didn't name it in its last run here"
+        )
+    }
+
+    fn why_known_from(&self) -> Option<&'static str> {
+        Some(
+            "its packages and what each is built from are those go list named in its last run here",
+        )
+    }
+
+    fn why_asks_hints(&self, map: &super::store::Map) -> bool {
+        // Go's sources are those of its last run here: with none, there is no address to ask.
+        !map.sources.is_empty()
+    }
+
+    fn why_units_are_directories(&self) -> bool {
+        true
+    }
+}
+
+/// A Go test file's package: its directory, `.` for the root.
+pub fn package_of(file: &str) -> String {
+    match file.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => ".".to_string(),
+    }
 }
 
 #[cfg(test)]

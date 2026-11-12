@@ -4,7 +4,9 @@
 //! - `hushrun.json`, hushrun's, written before COMMAND starts: `{"schema": "hushrun.units/v0",
 //!   "root": <the repository's root>, "reuse": [<units the plan lets adapters deselect>]}`, and
 //!   \[ADR 0069\] what an adapter checks before it deselects any: `pythonFiles`, pytest's unit rule
-//!   as hushrun read it, and `binaries`, each reused test binary's path and SHA-256.
+//!   as hushrun read it, and `binaries`, each reused test binary's path and SHA-256; \[ADR 0077\]
+//!   with `unit`, `reads` and `reuseTests`, the tests it may deselect one by one (C-39). An adapter
+//!   that reads none of these three deselects only whole units, which runs more and never less.
 //! - `<anything>.json`, an adapter's, one per process: `{"schema": "hushrun.unit-facts/v0", …}`,
 //!   [`FactsFile`]. A name that starts with `.` is a file being written, and is never read.
 
@@ -45,6 +47,18 @@ pub struct RunFile {
     /// deselects nothing when its own list isn't this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_files: Option<Vec<String>>,
+    /// \[ADR 0077\] What the run reuses one by one, `file` or `test` (C-39): an adapter that knows
+    /// tests reports each of them with `test`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// \[ADR 0077\] What a test is taken to have read, `file` or `test`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<String>,
+    /// \[ADR 0077\] Tests the plan lets an adapter deselect one by one, by their unit, each by its
+    /// id: those whose newest result that counts here passed on the files they read, but the
+    /// audited ones (C-39). A unit `reuse` lists isn't here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reuse_tests: BTreeMap<String, Vec<String>>,
 }
 
 /// \[ADR 0069\] A test binary the plan reuses.
