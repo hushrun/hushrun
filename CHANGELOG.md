@@ -162,6 +162,23 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - `reads: test`'s known misses name a third: a value an earlier test computed and a cache kept,
   such as a `functools.cache` wrapper, which a later test reads without its code running. The
   audit's second run catches it, as it does the other two.
+- Maven and Gradle no longer record as passed a test TestNG skipped because another class's suite
+  setup failed: a skipped test, and a class skipped whole, is told skipped, and passes only in a
+  run where nothing failed.
+- A change to an annotation processor of the build, or to any project a module or project names
+  only to its build (`annotationProcessorPaths`, plugin dependencies, `annotationProcessor`,
+  `kapt`, `ksp`, `compileOnly`), now runs the tests of the code it generates, under Maven and
+  Gradle.
+- Gradle: a class whose test JVM died (a crash, `System.exit`, a kill) records no pass. The
+  adapter now reads the test-JVM hook's events and the task's failure.
+- The test-JVM hook matches a listed test by its whole name: Spock features, parametrized display
+  names and Kotest names that differ after a `[` are no longer all left out for one entry; and
+  TestNG's interceptor leaves out an inherited test by the subclass it runs in. A test the hook
+  left out that its list didn't name makes the run start COMMAND once more with nothing left out.
+- Gradle leaves out no JUnit 4 test of a class in the default package by a filter pattern, which
+  also left out the test of that name in every class of the same simple name.
+- A `gradlew` script that starts Gradle again after a failure no longer has its second start's
+  pass replace the first start's failure: each start keeps its own facts.
 - A `ctest`, `swift test` or wrapper COMMAND that CTest's or `swift test`'s adapter now takes,
   which pytest's adapter took before, stays pytest's where this machine's store says pytest
   reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the

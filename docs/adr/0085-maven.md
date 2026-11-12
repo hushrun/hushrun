@@ -97,6 +97,51 @@ have.
    every file of the four kinds, as Vitest's are (ADR 0075), so `hushrun ready` can make it. A first
    run here, with no hint, reuses nothing.
 
+## Amendment 1: a skip earns no pass where something failed (2026-11-12)
+
+Item 5 let a skipped test pass in a class where nothing failed. A reviewer showed TestNG, after
+another class's `@BeforeSuite` failed, skipping every test of the suite: the reports held the
+failure under that class only, the skipped classes were recorded as passed, and the next run left
+out a test that fails. The decision: each skipped test, and its class, is told `skipped` (ADR 0077,
+Amendment 2), a class Surefire's report says was skipped whole too, so a run whose COMMAND failed
+records nothing of them; and a skipped test finishes only when nothing of the run failed, else its
+class didn't run whole either.
+
+## Amendment 2: what a class read, and the hook's list, matched exactly (2026-11-12)
+
+Item 4 followed Maven's reactor graph, which holds no edge for the annotation processors a
+compiler names in `annotationProcessorPaths`: a change to a processor module with tests of its own
+changed no key, and the tests of the code it generates were reused. The decision: a module's
+upstream also holds the reactor projects its plugins depend on and those its compiler names as
+processors (on the plugin or in any execution), and theirs, with dependencies of every scope and
+its parent; one this build doesn't build is `upstream-not-built`, as before.
+
+Item 3 said a test's id is its method's name up to its first `[`, and the hook compared names so:
+Spock features and parametrized display names can hold one. The decision: a test's id is its
+method's whole name, but a JUnit Vintage test's, whose Parameterized invocation is `name[…]`, and
+a report's (which gives the parameters in no one form). The hook matches whole names too, `name[…]`
+only under the Vintage engine, and tells each test it leaves out with the entry that listed it.
+TestNG's interceptor matches the class a method runs as a test of, its instance's: a method
+inherited from a concrete base class is a test of each subclass, which the base class's entry no
+longer leaves out, and a subclass's entry does. The adapter holds the events to the list of each
+module: a test left out that no entry names exactly, or an entry neither left out nor seen run in
+a class that ran, makes the run start COMMAND once more with nothing left out (ADR 0077,
+Amendment 4).
+
+## Amendment 3: starts, and forks that die (2026-11-12)
+
+The extension's file names its start, `start` (ADR 0077, Amendment 1): every fork and module of one
+Maven build is one start. Two files, a script that starts Maven twice, still record nothing, said
+once. Within the start a test finished only when every JVM that reported it finished it, and a
+class or test one of them left open is open. A rerun that passed after a failure
+(`rerunFailingTestsCount`) is a failure, from events and reports alike: a flaky test is a failed
+one. A fork that dies in a class's teardown writes no report of that class, and its events leave
+it open: the class records nothing, which a test checks.
+
+Known, and left as it is: Maven names a test `<method>` under a unit that is its class, and Gradle
+`<class>.<method>` under its source file, so the same test has another id under each adapter (ADR
+0084, Amendment 5).
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0

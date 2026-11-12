@@ -12,8 +12,9 @@
 //! - The script reports facts and decides nothing: one file per Test task in `HUSHRUN_UNITS`, a
 //!   `hushrun.unit-facts/v1` file of no unit whose `settings.gradle` is the task's report
 //!   ([`Report`]): Gradle's own test events as they came, how the task ended, the names of its test
-//!   classes, what it left out and its classpath mapped to the build's projects. Everything else
-//!   is decided here, in [`observe`].
+//!   classes, what it left out and its classpath mapped to the build's projects, and where its test
+//!   JVMs wrote the hook's events, which are read here too. Each start of Gradle keeps its own
+//!   files. Everything else is decided here, in [`observe`].
 //! - Selection: a class reused whole by an exclusion Gradle evaluates while it looks at the task's
 //!   class files; a test reused one by one by the hook for the JUnit Platform and TestNG, and by
 //!   Gradle's own filter patterns for JUnit 4, up to 250 tests a task.

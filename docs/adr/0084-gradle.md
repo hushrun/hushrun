@@ -121,6 +121,74 @@ and C-46 hold over §4.5.
     (`make test`, a script) gets the default adapter, which does nothing for it, and the line in
     the settings file adds nothing without `HUSHRUN_GRADLE`.
 
+## Amendment 1: a skip earns no pass where something failed (2026-11-12)
+
+Item 8 let a skipped test finish unless its own class failed, or under TestNG held a failed
+test. A reviewer showed TestNG skipping every test of the suite after another class's
+`@BeforeSuite` failed: the skipped classes were recorded as passed and left out next time.
+
+The decision: each skipped test, and its class, is told `skipped` (ADR 0077, Amendment 2), so a
+run whose COMMAND failed records nothing of them. And a skipped test finishes only when nothing of
+the run failed (a task, a test, a suite): else it didn't, and its class didn't run whole.
+
+## Amendment 2: a test class reads every project its build names (2026-11-12)
+
+Item 10 followed the test classpath only. A project the build only runs, an annotation processor
+(`annotationProcessor`, `kapt`, `ksp`) or one on `compileOnly`, is on no test classpath; when it had
+tests of its own its files were sources, so a change to it changed no key, and the tests of the code
+it generates were reused. The decision: a test class also reads every project its project declares
+in any configuration, and what those declare outside their own tests (a configuration whose name
+starts `test`, `androidTest`, `kaptTest` or `kspTest`, or holds `UnitTest` or `AndroidTest`, but
+`testFixtures*`), transitively, from the declared dependencies, never by resolving them.
+
+## Amendment 3: a test JVM that died, and the hook's events (2026-11-12)
+
+Item 8 took a task whose root suite ended to have run its tests whole. When a test JVM dies Gradle
+calls the test in flight skipped, ends the root suite, says nothing of a class whose class teardown
+never ended, and fails the task with `Process 'Gradle Test Executor N' finished with non-zero exit
+value`. The class was recorded as passed. And the adapter kept the hook's events and never read
+them.
+
+The decision: the report says where the task's test JVMs wrote the hook's events in this run, and
+the messages of the task's failure. A task ran nothing whole when it failed and no test or suite of
+it did, when its failure says its test process ended badly, or when its events can't be read; a
+class the events started and never ended didn't run whole, and none of its tests finished but
+those that failed. JUnit 4 under Gradle's own runner and TestNG write no test events: there only
+the task's failure tells.
+
+## Amendment 4: the hook's list, matched exactly and held to (2026-11-12)
+
+Item 6's hook entry compared a method up to its first `[`. Spock features, parametrized display
+names and Kotest names can hold one: three features that differ after it were all left out by one
+entry, the failing one too, and the check passed with no test run. And JUnit 4's patterns for a
+class of the default package, `CalcTest.add`, start with an upper-case letter, which Gradle reads as
+a simple class name: `p.CalcTest.add` was left out too.
+
+The decision: the hook matches a method's whole name, and a Vintage test's `name[…]` only under the
+JUnit Vintage engine (ADR 0085, Amendment 2); each test it leaves out is told with the entry that
+listed it. The report holds the hook's list, and the adapter holds the events to it: a test left
+out that no entry names exactly, or an entry that was neither left out nor seen run in a class that
+ran, makes the run start COMMAND once more with nothing left out (`Read.left_out`, ADR 0077,
+Amendment 4). A JUnit 4 class of the default package, or whose name starts upper-case, gets no
+pattern: its listed tests run.
+
+## Amendment 5: each start of Gradle keeps its own facts (2026-11-12)
+
+A task's facts file was named by the task, so a `gradlew` script that starts Gradle again after a
+failure overwrote the first start's report: a test that failed and then passed was recorded as
+passed. The decision: the build service, one instance a build, keeps each task's report as its
+start's own file, with `start` (ADR 0077, Amendment 1), and the adapter holds every start's word as
+it holds two tasks': a test failed when any start failed it, and finished, and its class ran whole,
+only when every start and task that ran it did. A retry that passed after a failure in the same
+start (the test-retry plugin) stays a failure (item 9). `--continue` and `--rerun-tasks` change
+nothing: each task executes once a start. The hook's events directory is the task's in the run, so
+a second start's JVMs write beside the first's, and a class either left open didn't run whole.
+
+Known, and left as they are: Gradle names a test `<class>.<method>` under a unit that is its source
+file, and Maven `<method>` under a unit that is its class, so the same test has another id under
+each adapter, and no result is shared between them. An audited class whose task is up to date
+doesn't run in that run (item 8): the audit waits for a run in which Gradle executes the task.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's
@@ -137,8 +205,8 @@ without it (configuration: `--dry-run`; the task: `--rerun`, which runs every te
 So about 5 to 7% of the test task, nothing measurable in configuration. The Gradle 8.14.5 rows
 were taken on a quiet machine; the Gradle 9.3.1 rows while other builds loaded it, so a difference
 under half a second there is noise. Of the JUnit Platform's cost on Gradle 9.3.1, about 0.4 s came
-from the hook's events, which this adapter doesn't read (with them sent nowhere: 2,103); on Gradle
-8.14.5 they cost nothing measurable.
+from the hook's events, which this adapter didn't read then (with them sent nowhere: 2,103; it
+reads them since Amendment 3); on Gradle 8.14.5 they cost nothing measurable.
 
 ## Not built
 
