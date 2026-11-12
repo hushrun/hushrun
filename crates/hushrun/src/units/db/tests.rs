@@ -854,6 +854,129 @@ fn a_store_that_cant_be_read_is_set_aside_and_made_anew_by_the_next_write() {
     assert!(std::path::Path::new(&aside).is_file());
 }
 
+/// `path` with `.unread` after it.
+fn aside_of(path: &Path) -> PathBuf {
+    let mut aside = path.as_os_str().to_os_string();
+    aside.push(".unread");
+    PathBuf::from(aside)
+}
+
+// covers: C-36
+#[cfg(unix)]
+#[test]
+fn a_store_that_cant_be_written_for_now_is_left_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    // A healthy store, read-only for one run (a full disk, an I/O error, a permission are the
+    // same): the run reads it as nothing and writes nothing, and the store is there after.
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    let first = run(
+        "unit",
+        &[("tests/test_a.py", mapped(&[("app.py", HASH_A)]))],
+        &["app.py", "tests/test_a.py"],
+    );
+    write_run(&path, &first).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // As root, permissions hold nothing back: nothing to see.
+    let held = std::fs::OpenOptions::new().write(true).open(&path).is_err();
+    let other = run(
+        "other",
+        &[("tests/test_b.py", mapped(&[("app.py", HASH_A)]))],
+        &["app.py", "tests/test_b.py"],
+    );
+    let wrote = write_run(&path, &other);
+    if path.exists() {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    if !held {
+        return;
+    }
+    assert!(wrote.is_err());
+    assert!(!aside_of(&path).exists());
+    let loaded = load(&path, &id("unit"));
+    assert!(loaded.unread.is_none(), "{:?}", loaded.unread);
+    assert!(loaded.map.reported());
+}
+
+// covers: C-36
+#[test]
+fn only_damage_a_retry_cant_cure_sets_a_store_aside() {
+    use rusqlite::ffi;
+    let error = |code| rusqlite::Error::SqliteFailure(ffi::Error::new(code), None);
+    for code in [ffi::SQLITE_NOTADB, ffi::SQLITE_CORRUPT] {
+        assert!(matches!(unread(&error(code)), Unread::Broken(_)), "{code}");
+    }
+    for code in [
+        ffi::SQLITE_READONLY,
+        ffi::SQLITE_FULL,
+        ffi::SQLITE_IOERR,
+        ffi::SQLITE_PERM,
+        ffi::SQLITE_CANTOPEN,
+        ffi::SQLITE_CONSTRAINT,
+    ] {
+        assert!(matches!(unread(&error(code)), Unread::Trouble(_)), "{code}");
+    }
+    for code in [ffi::SQLITE_BUSY, ffi::SQLITE_LOCKED] {
+        assert_eq!(unread(&error(code)), Unread::Busy, "{code}");
+    }
+}
+
+// covers: C-36
+#[test]
+fn two_runs_that_find_a_store_damaged_set_aside_only_the_damaged_one() {
+    // Both fail on the damaged store; the first sets it aside and makes a new one, which it writes
+    // to; only then does the second decide. It must set aside nothing of the first's work.
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let damaged = b"this is not SQLite, it is a partial download".to_vec();
+    std::fs::write(&path, &damaged).unwrap();
+    let both_failed = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let (first_done, wait_first) = std::sync::mpsc::channel::<()>();
+    let wait_first = std::sync::Mutex::new(Some(wait_first));
+    let write_as = |check: &'static str, file: &'static str| {
+        let r = run(
+            check,
+            &[(file, mapped(&[("app.py", HASH_A)]))],
+            &["app.py", file],
+        );
+        write_run(&path, &r)
+    };
+    std::thread::scope(|scope| {
+        let barrier = both_failed.clone();
+        let first = scope.spawn(move || {
+            BEFORE_SET_ASIDE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    barrier.wait();
+                }))
+            });
+            let wrote = write_as("unit", "tests/test_a.py");
+            first_done.send(()).unwrap();
+            wrote
+        });
+        let barrier = both_failed.clone();
+        let waiting = wait_first.lock().unwrap().take().unwrap();
+        let second = scope.spawn(move || {
+            BEFORE_SET_ASIDE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    barrier.wait();
+                    waiting.recv().unwrap();
+                }))
+            });
+            write_as("other", "tests/test_b.py")
+        });
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+    });
+    // The damaged bytes are what was set aside, and the new store holds both runs' work.
+    assert!(
+        std::fs::read(aside_of(&path)).unwrap() == damaged,
+        "the new store was set aside"
+    );
+    assert!(load(&path, &id("unit")).map.reported());
+    assert!(load(&path, &id("other")).map.reported());
+}
+
 // covers: C-22, C-32
 #[test]
 fn readers_that_write_nothing_read_the_adapter_of_a_schema_1_store_without_importing() {

@@ -248,6 +248,9 @@ pub enum Unread {
     Busy,
     /// It isn't a store of this schema, or SQLite says it is damaged: what it said.
     Broken(String),
+    /// \[C-36\] Something a later run may not meet: the file or its directory read-only, a full
+    /// disk, an I/O error, a permission. What it said.
+    Trouble(String),
 }
 
 impl Unread {
@@ -261,15 +264,57 @@ impl Unread {
             Unread::Broken(why) => format!(
                 "this machine's record of what its test files read can't be read ({why}), so the next run here starts it again"
             ),
+            Unread::Trouble(why) => format!(
+                "this machine's record of what its test files read can't be read now ({why})"
+            ),
         }
     }
 }
 
+/// \[C-36\] What an error of SQLite's says of a store: busy; damaged, as SQLite itself reports (not
+/// a database, corrupt or malformed), which a retry can't cure; or trouble a later run may not
+/// meet (read-only, full, I/O, permission, anything else), which changes nothing on disk.
 fn unread(err: &rusqlite::Error) -> Unread {
     match err.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => Unread::Busy,
-        _ => Unread::Broken(first_line(&err.to_string())),
+        Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => {
+            Unread::Broken(first_line(&err.to_string()))
+        }
+        _ => Unread::Trouble(first_line(&err.to_string())),
     }
+}
+
+/// What names one file on disk, whatever its name: its device and inode.
+#[cfg(unix)]
+type Identity = (u64, u64);
+/// What names one file on disk, as far as this system says: its size and modification time.
+#[cfg(not(unix))]
+type Identity = (u64, std::time::SystemTime);
+
+#[cfg(unix)]
+fn identity(path: &Path) -> Option<Identity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(path: &Path) -> Option<Identity> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// The lock beside a store, `<file>.lock`, held while a store is made or set aside.
+fn locked(path: &Path) -> Result<std::fs::File, Unread> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(name))
+        .map_err(|e| Unread::Trouble(e.to_string()))?;
+    lock.lock().map_err(|e| Unread::Trouble(e.to_string()))?;
+    Ok(lock)
 }
 
 fn first_line(text: &str) -> String {
@@ -352,27 +397,48 @@ fn this_builds_tables() -> &'static BTreeSet<String> {
 }
 
 /// \[C-36\] The one place a store is written: `write` with the store opened to write, made when
-/// there is none. A store that can't be opened or written for anything but "busy" (another schema,
-/// damaged, a table of an older build of this schema) is set aside ([`set_aside`]) and made anew,
-/// once, so the line that says the next run starts it again is true. `Err` when even that fails,
-/// or another hushrun held it too long.
+/// there is none. A store a retry can't cure (another schema, a table of an older build of this
+/// schema, damage SQLite reports) is set aside ([`set_aside`]) and made anew, once, so the line
+/// that says the next run starts it again is true; trouble that may pass (read-only, a full disk,
+/// I/O, a permission) changes nothing on disk. `Err` when even that fails, or another hushrun held
+/// it too long.
 fn writing<T>(
     path: &Path,
     write: impl Fn(&mut Connection) -> Result<T, Unread>,
 ) -> Result<T, Unread> {
     let attempt = || open_writable(path).and_then(|mut conn| write(&mut conn));
+    let tried = identity(path);
     match attempt() {
         Err(Unread::Broken(why)) => {
-            set_aside(path, &why);
+            #[cfg(test)]
+            BEFORE_SET_ASIDE.with(|hook| {
+                if let Some(hook) = hook.borrow().as_ref() {
+                    hook();
+                }
+            });
+            set_aside(path, tried, &why)?;
             attempt()
         }
         other => other,
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test runs between a write that failed and setting the store aside, in this thread.
+    static BEFORE_SET_ASIDE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// \[C-36\] Sets a store that can't be read aside, `<file>.unread` beside it (one kept, the
-/// newest), with its WAL's files gone, so that the next write makes it anew.
-fn set_aside(path: &Path, why: &str) {
+/// newest), with its WAL's files gone, so that the next write makes it anew: under the lock beside
+/// it, and only while `path` still names `tried`, the file that failed, so that a run never sets
+/// aside a store another just made.
+fn set_aside(path: &Path, tried: Option<Identity>, why: &str) -> Result<(), Unread> {
+    let _lock = locked(path)?;
+    if tried.is_none() || identity(path) != tried {
+        return Ok(());
+    }
     tracing::debug!("{} is set aside and made anew: {why}", path.display());
     let mut aside = path.as_os_str().to_os_string();
     aside.push(".unread");
@@ -380,11 +446,12 @@ fn set_aside(path: &Path, why: &str) {
         let _ = std::fs::remove_file(path);
     }
     remove(path);
+    Ok(())
 }
 
 fn open_writable(path: &Path) -> Result<Connection, Unread> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| Unread::Broken(e.to_string()))?;
+        std::fs::create_dir_all(dir).map_err(|e| Unread::Trouble(e.to_string()))?;
     }
     let conn = Connection::open(path).map_err(|e| unread(&e))?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(|e| unread(&e))?;
@@ -403,15 +470,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     // A new file: WAL, then the tables and the version in one transaction, so that a store with a
     // version always has its tables. One hushrun makes it, holding a lock file beside it; another
     // that waited finds it made.
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(PathBuf::from(name))
-        .map_err(|e| Unread::Broken(e.to_string()))?;
-    lock.lock().map_err(|e| Unread::Broken(e.to_string()))?;
+    let _lock = locked(path)?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
         return Ok(conn);

@@ -303,3 +303,11 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   pytest's by the store's word, lost the word to one run with the build directory missing: ctest
   failed before pytest started, and CTest took the check from then on, with one unit instead of
   pytest's test files. Only a run whose COMMAND passed while pytest wrote nothing forgets the word.
+- **A store set aside for trouble that passes.** Amendment 10 set aside a store any write failed
+  on for anything but busy: a store read-only for one run was renamed and made anew, losing every
+  check's lists and words of the repository, and a full disk would do the same. In a race of two
+  runs on a damaged store, the second could set aside the store the first had just made. Now only
+  what a retry can't cure sets a store aside (another schema or tables, or damage SQLite reports:
+  not a database, corrupt); read-only, full, I/O and permission errors read as no map for that run
+  and change nothing on disk. The rename happens under the lock beside the store, and only while
+  its path names the file that failed.
