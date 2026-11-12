@@ -176,9 +176,9 @@ pub struct Gathered {
 /// system's own clock couldn't be read ([`floor`]). Linux stamps files from a clock that moves
 /// once a tick (1 to 10 ms) and lags the real one; macOS stamps them exactly.
 #[cfg(target_os = "linux")]
-const CLOCK_SLACK: Duration = Duration::from_millis(20);
+pub(crate) const CLOCK_SLACK: Duration = Duration::from_millis(20);
 #[cfg(not(target_os = "linux"))]
-const CLOCK_SLACK: Duration = Duration::ZERO;
+pub(crate) const CLOCK_SLACK: Duration = Duration::ZERO;
 
 /// The compile's start as file dates count it (B-11): the date the file system gave a file
 /// created just before (`probe`), never after `now`; without one, `now` less the slack. A file

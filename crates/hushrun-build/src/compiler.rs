@@ -518,7 +518,48 @@ fn without_sources(sysroot: &Path, dir: &Path) -> Result<Option<PathBuf>, Unknow
         }
     })();
     made.map_err(unreadable(&view))?;
+    settle_after(&view, dir);
     Ok(Some(view))
+}
+
+/// Waits, a few tens of milliseconds at most, until a file made in `dir` is dated later than
+/// every link of the new sysroot `view` by more than the slack a compile's start allows when it
+/// can't date a file of its own ([`crate::inputs::floor`]). Linux dates files from a clock that
+/// moves once a tick, and a compile started in the tick the links were made would take them
+/// for files changed while it ran (B-11) and store nothing. This happens once per toolchain
+/// and set of entries on a machine.
+fn settle_after(view: &Path, dir: &Path) {
+    let dated = |path: &Path| {
+        fs::symlink_metadata(path)
+            .map(|meta| {
+                let stat = Stat::of(&meta);
+                stat.mtime_ns.max(stat.ctime_ns)
+            })
+            .unwrap_or(i64::MAX)
+    };
+    let mut newest = dated(view);
+    for folder in [
+        view.to_path_buf(),
+        view.join("lib"),
+        view.join("lib").join("rustlib"),
+    ] {
+        if let Ok(entries) = fs::read_dir(&folder) {
+            for entry in entries.flatten() {
+                newest = newest.max(dated(&entry.path()));
+            }
+        }
+    }
+    let probe = dir.join(format!(".clock.{}", std::process::id()));
+    let slack = i64::try_from(crate::inputs::CLOCK_SLACK.as_nanos()).unwrap_or(i64::MAX);
+    let enough = newest.saturating_add(slack);
+    for _ in 0..100 {
+        let now = fs::write(&probe, b"").map(|()| dated(&probe));
+        if now.is_err() || now.is_ok_and(|now| now > enough) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let _ = fs::remove_file(&probe);
 }
 
 #[cfg(unix)]
