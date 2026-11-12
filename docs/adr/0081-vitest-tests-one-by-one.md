@@ -91,16 +91,19 @@ against Vitest 4.1.12 on Node 20, after reading Vitest's runner and running each
    where any failed it, was left out where every one left it out, and what it read is known only
    where every one said it.
 9. **The cost**, measured on Node 20.20.2 and Vitest 4.1.12, forks pool, 30 test files of 10
-   trivial tests each importing two of ten modules, seven interleaved rounds on a loaded machine,
-   CPU time of Vitest and its workers (median): no adapter 4.20 s; ADR 0071's test files 4.60 s;
-   tests one by one, not watched, 4.60 s; watched, 5.20 s. Watching costs about 0.6 s of CPU for
-   300 tests, 2 ms a test, most of it each worker's coverage session and its takes.
+   trivial tests each importing two of ten modules, interleaved rounds on a heavily loaded machine
+   (load average 65 and 129), CPU time of Vitest and its workers, medians of 7 and 9 rounds: no
+   adapter 4.20 s and 4.41 s; ADR 0071's test files 4.60 s and 4.74 s; tests one by one, not
+   watched, 4.60 s and 4.81 s; watched, 5.20 s and 5.54 s. Watching costs 0.6 to 0.7 s of CPU for
+   300 tests, 2 to 2.5 ms a test, most of it each worker's coverage session and its takes; telling
+   tests without watching costs nothing measurable.
 
 ## Consequences
 
 - A Vitest check with `unit: test` runs again only the tests that failed or read a changed file,
   after the one config line ADR 0071 needs.
-- A suite left out whole shows in Vitest's summary as tests neither passed nor skipped.
+- A suite left out whole shows in Vitest's summary as tests neither passed nor skipped: Vitest
+  sends no result for the tests of a suite it skips.
 - Reading through a getter counts: a constant read from another module makes that module run for
   the test, which narrows `reads: test`'s first miss (RFC 0004 §3.2) to values copied before the
   test file's modules were evaluated, and to registries filled through no import.
