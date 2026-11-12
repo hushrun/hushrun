@@ -2015,6 +2015,7 @@ fn facts_of(
         parsed,
         run.copied.exit,
         package,
+        run.copied.held,
     )
 }
 
@@ -2029,6 +2030,7 @@ fn tested(
     parsed: &Parsed,
     exit: Option<i32>,
     package: &Path,
+    held: bool,
 ) -> FactsFile {
     // On macOS, with any `--skip` or `--filter`, a nested XCTest class doesn't run, and the
     // parallel xunit says it passed: nothing of it counts.
@@ -2067,6 +2069,9 @@ fn tested(
             }
             None => (false, false, 0, false),
         };
+        // \[C-48\] Output a program swift test started held past its end: what it printed can't
+        // be read whole, and no pass of it is recorded. A failure seen is a failure.
+        let finished = finished && (failed || !held);
         any_failed |= failed;
         by_target
             .entry(target.to_string())
@@ -2109,6 +2114,15 @@ fn tested(
     );
     if let Some(why) = &left.refused {
         settings.insert("refused".to_string(), Value::String(why.clone()));
+    }
+    if held {
+        settings.insert(
+            "held".to_string(),
+            Value::String(format!(
+                "a program swift test started held its output {} seconds after it ended: no pass of it is recorded",
+                program::OUTPUT_GRACE.as_secs()
+            )),
+        );
     }
     FactsFile {
         schema: facts::FACTS_SCHEMA_V1.into(),
@@ -2480,6 +2494,7 @@ mod tests {
             &parsed,
             Some(0),
             Path::new("/work/Shop"),
+            false,
         );
         let cart = file.units.iter().find(|u| u.unit == "CartTests").unwrap();
         let inner = cart
@@ -2490,6 +2505,34 @@ mod tests {
             .find(|t| t.id == "Outer.InnerTests/testInner")
             .unwrap();
         assert_eq!(inner.finished, !cfg!(target_os = "macos"));
+    }
+
+    // covers: C-48
+    #[test]
+    fn output_held_past_the_end_records_no_pass() {
+        let listing = Listing::parse("A.C/testOk\nA.C/testBad\n");
+        let console: BTreeMap<String, Outcome> = [
+            ("A.C/testOk".to_string(), Outcome::Passed(1)),
+            ("A.C/testBad".to_string(), Outcome::Failed(1)),
+        ]
+        .into();
+        let parsed = parse::<&str>(&[]);
+        let file = tested(
+            &listing,
+            &console,
+            None,
+            None,
+            &LeftOut::default(),
+            &parsed,
+            Some(1),
+            Path::new("/p"),
+            true,
+        );
+        let tests = file.units[0].tests.as_ref().unwrap();
+        let of = |id: &str| tests.iter().find(|t| t.id == id).unwrap().clone();
+        assert!(!of("C/testOk").finished);
+        assert!(of("C/testBad").finished && of("C/testBad").failed);
+        assert!(file.settings.contains_key("held"));
     }
 
     // covers: C-48, C-32
@@ -2516,6 +2559,7 @@ mod tests {
             &parsed,
             Some(1),
             Path::new("/p"),
+            false,
         );
         let skipped: BTreeMap<String, bool> = file
             .units
@@ -2546,6 +2590,7 @@ mod tests {
                 &parallel,
                 exit,
                 Path::new("/p"),
+                false,
             );
             let ok = file.units[0].tests.as_ref().unwrap();
             let ok = ok.iter().find(|t| t.id == "C/testOk").unwrap();
@@ -2577,6 +2622,7 @@ mod tests {
             &parsed,
             Some(1),
             Path::new("/p"),
+            false,
         );
         let unit = |name: &str| file.units.iter().find(|u| u.unit == name).unwrap();
         let test = |u: &str, id: &str| {
@@ -2608,6 +2654,7 @@ mod tests {
             &parsed,
             Some(0),
             Path::new("/p"),
+            false,
         );
         let crashed = quiet
             .units
@@ -2632,6 +2679,7 @@ mod tests {
             &parsed,
             Some(1),
             Path::new("/p"),
+            false,
         );
         assert!(!none.failures_by_unit);
         assert!(none.units.iter().all(|u| u.finished == 0));

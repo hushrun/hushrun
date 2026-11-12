@@ -96,9 +96,19 @@ pub struct Copied {
     pub exit: Option<i32>,
     /// The signal that stopped it, when one did.
     pub signal: Option<i32>,
-    /// Every byte it wrote on its standard output, as written.
+    /// Every byte it wrote on its standard output, as written, until it ended or [`OUTPUT_GRACE`]
+    /// after.
     pub stdout: Vec<u8>,
+    /// Something it started still held its standard output [`OUTPUT_GRACE`] after it ended:
+    /// what came after isn't passed on, and what it printed can't be read whole, so no pass of
+    /// it is recorded.
+    pub held: bool,
 }
+
+/// How long [`run_copying_stdout`] passes output on after the program ended, for what a program
+/// it started still holds open: as long as hushrun's target runner waits for a test binary's
+/// (ADR 0083), and `go test` itself by default.
+pub const OUTPUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Copied {
     /// The exit code a program on `PATH` ends with for it: its own, 1 past 255, or the same
@@ -116,8 +126,9 @@ impl Copied {
 /// as it goes by, and kept: through a pseudo-terminal in raw mode, with the window's size, when
 /// this process's standard output is a terminal (a program that colors only on one, Swift Testing,
 /// still does), else through a pipe. Standard input and error are inherited untouched, and the
-/// signals that stop a process are passed on, as [`Program::args`]'s start does. `Err` when it
-/// can't be started.
+/// signals that stop a process are passed on, as [`Program::args`]'s start does. Output that a
+/// program it started still holds open is passed on for [`OUTPUT_GRACE`] after it ended, and then
+/// no more ([`Copied::held`]). `Err` when it can't be started.
 pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
     use std::io::{Read as _, Write as _};
     let (mut from, to) = output_channel()?;
@@ -126,15 +137,19 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
     // Only the child holds its end now: reading ends when it, and whatever it started, closes it.
     drop(command);
     let forwarding = super::runner::forward_signals(child.id());
-    let reader = std::thread::spawn(move || {
-        let mut kept = Vec::new();
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tell, done) = std::sync::mpsc::channel();
+    let shared = std::sync::Arc::clone(&kept);
+    std::thread::spawn(move || {
         let mut buf = vec![0u8; 64 * 1024];
         let out = std::io::stdout();
         loop {
             match from.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    kept.extend_from_slice(&buf[..n]);
+                    if let Ok(mut kept) = shared.lock() {
+                        kept.extend_from_slice(&buf[..n]);
+                    }
                     let mut out = out.lock();
                     let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
                 }
@@ -143,7 +158,7 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
                 Err(_) => break,
             }
         }
-        kept
+        let _ = tell.send(());
     });
     let status = loop {
         match child.wait() {
@@ -153,15 +168,20 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
         }
     };
     drop(forwarding);
-    let stdout = reader.join().unwrap_or_default();
+    // Its output ends when every program holding it let it go: waited for a while only, so that a
+    // program it left running never holds hushrun, and COMMAND, for ever.
+    let held = done.recv_timeout(OUTPUT_GRACE).is_err();
+    let stdout = kept.lock().map(|k| k.clone()).unwrap_or_default();
     Ok(match status {
         Some(status) => Copied {
             exit: status.code(),
             signal: super::runner::signal_of(&status),
             stdout,
+            held,
         },
         None => Copied {
             stdout,
+            held,
             ..Copied::default()
         },
     })
@@ -637,6 +657,36 @@ mod tests {
             real_in("faketool", &path, &root),
             Some(root.join("here/rel/faketool"))
         );
+    }
+
+    // covers: C-48
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_keeps_output_open_past_its_end_is_waited_for_a_while_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        // The program exits, and leaves one it started holding its standard output.
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo before; (sleep 2; echo late; exec sleep 40) & echo $! > '{}'; exit 3",
+            pid.display()
+        ));
+        let started = std::time::Instant::now();
+        let copied = run_copying_stdout(command).unwrap();
+        let took = started.elapsed();
+        if let Ok(text) = std::fs::read_to_string(&pid) {
+            let _ = Command::new("kill").arg(text.trim()).status();
+        }
+        assert_eq!(copied.exit, Some(3));
+        // What came within the grace is passed on and kept; then hushrun stops waiting.
+        let text = String::from_utf8_lossy(&copied.stdout).into_owned();
+        assert!(text.contains("before") && text.contains("late"), "{text}");
+        assert!(took < std::time::Duration::from_secs(20), "{took:?}");
+        assert!(copied.held);
+        // A program whose output ends with it isn't held.
+        let mut quick = Command::new("sh");
+        quick.arg("-c").arg("echo done");
+        assert!(!run_copying_stdout(quick).unwrap().held);
     }
 
     // covers: C-39
