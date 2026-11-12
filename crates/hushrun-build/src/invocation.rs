@@ -284,6 +284,16 @@ const OTHER_KEYED: [&str; 16] = [
     "SOURCE_DATE_EPOCH",
 ];
 
+/// The variables of [`OTHER_KEYED`] that only the C driver (`cc`) and the linker read. A
+/// library's compile runs neither (rustc writes the `.rlib` and `.rmeta` itself), so they are
+/// keyed for linked outputs only.
+const LINKER_ONLY: [&str; 4] = [
+    "LIBRARY_PATH",
+    "LD_RUN_PATH",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+];
+
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
 /// keyed. Every other `-Z` passes through (B-4).
 const UNSTABLE_KEYED: [&str; 5] = [
@@ -347,7 +357,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         seen.emits.push(Emit::Link);
     }
 
-    let (keyed_env, package) = read_env(env)?;
+    let (keyed_env, package) = read_env(env, class)?;
     let form = crate::messages::Form::new(
         seen.error_format.as_deref(),
         (!seen.json.is_empty())
@@ -1128,13 +1138,16 @@ fn classify(name: &str, crate_type: Option<&String>, test: bool) -> Result<Class
     }
 }
 
-fn read_env(env: &Env) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
+fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
     if env.unreadable_cargo_name {
         return Err(PassedThrough::NotUtf8);
     }
     let mut keyed = BTreeMap::new();
     for (name, value) in &env.vars {
-        if cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) {
+        // A library is written by rustc itself: no C driver or linker runs for it, so what only
+        // they read is not its input, and would tie its key to how this machine is set up.
+        let linker_only = class == Class::Library && LINKER_ONLY.contains(&name.as_str());
+        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str())) && !linker_only {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
@@ -1916,12 +1929,24 @@ pub(crate) mod tests {
             "GCC_EXEC_PREFIX",
             "SOURCE_DATE_EPOCH",
         ];
+        let program = minimal("").replace("--crate-type lib", "--crate-type bin");
         for name in read {
             let env = Env::from_vars([(name, "x")]);
-            let inv = handled(&argv(&minimal("")), &env);
+            let inv = handled(&argv(&program), &env);
             assert_eq!(
                 inv.key_env().get(name).map(String::as_str),
                 Some("x"),
+                "{name}"
+            );
+            // A library runs no C driver or linker: what only they read is not its input.
+            let library = handled(&argv(&minimal("")), &env);
+            let linker_only = matches!(
+                name,
+                "LIBRARY_PATH" | "LD_RUN_PATH" | "COMPILER_PATH" | "GCC_EXEC_PREFIX"
+            );
+            assert_eq!(
+                library.key_env().get(name).map(String::as_str),
+                (!linker_only).then_some("x"),
                 "{name}"
             );
         }
