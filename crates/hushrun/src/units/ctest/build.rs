@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The suffixes of C, C++, Objective-C and CUDA sources and headers: a test program's sources
 /// (C-30). Every other file a build names (a CMake file, a template, data) is in the rest set.
