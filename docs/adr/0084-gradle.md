@@ -255,7 +255,9 @@ reads them since Amendment 3); on Gradle 8.14.5 they cost nothing measurable.
 
 - A Gradle repository observes and reuses test classes, and with `unit: test` their methods, after
   one reviewed line in its settings file.
-- A test class reused whole names no tests: `units.tests` counts the tests of the classes that ran.
+- A test class reused whole names no tests in that run: `units.tests` counts, for it, the tests
+  this machine's store or a hint knows of it, as C-39 has it, beside the tests of the classes that
+  ran.
 - hushrun's extra input and output make a Test task's cache key differ from a build without
   hushrun: Gradle's build cache shares nothing between the two.
 

@@ -32,8 +32,9 @@ have.
 
 ## Decision
 
-1. **Two jars, built here and checked in.** hushrun embeds two small jars, written to
-   `<cache dir>/adapters/jvm-<hash>/` when a run needs them:
+1. **Two jars, built here and checked in.** hushrun embeds two small jars, each written to a
+   directory of its own, `<cache dir>/adapters/jvm-<first 16 hex of its SHA-256>/`, when a run
+   needs them:
    - **the test-JVM hook** (`crates/hushrun/jvm/test-jvm-hook/`, about 20 KB): a JUnit Platform
      filter after discovery and a TestNG method interceptor that leave out exactly the classes and
      methods a list names, and a JUnit Platform listener that writes each test's events, flushed a
