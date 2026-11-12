@@ -1211,6 +1211,7 @@ fn a_program_a_test_left_running_keeps_printing_after_hushruns_swift_returns() {
 #[cfg(unix)]
 #[test]
 fn a_signal_after_swift_ended_ends_hushruns_swift() {
+    use hushrun_testkit::env::Hermetic as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::process::ExitStatusExt as _;
     let dir = tempfile::tempdir().unwrap();
@@ -1229,6 +1230,8 @@ fn a_signal_after_swift_ended_ends_hushruns_swift() {
     let units = root.join("units");
     std::fs::create_dir_all(&units).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        // What the developer's shell exports never reaches a runner a test starts.
+        .hermetic()
         .args(["__hushrun-program", "swift", "test"])
         .current_dir(&root)
         .env("PATH", &was)

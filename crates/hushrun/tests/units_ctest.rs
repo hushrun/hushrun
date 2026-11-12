@@ -2127,6 +2127,7 @@ fn a_program_a_test_left_running_keeps_printing_after_hushruns_ctest_returns() {
 // covers: C-49
 #[test]
 fn a_signal_during_a_listing_leaves_the_presets_log_as_it_was() {
+    use hushrun_testkit::env::Hermetic as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::process::ExitStatusExt as _;
     let dir = tempfile::tempdir().unwrap();
@@ -2169,6 +2170,8 @@ fn a_signal_during_a_listing_leaves_the_presets_log_as_it_was() {
     let mut was = std::ffi::OsString::from("=");
     was.push(&path);
     let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        // What the developer's shell exports never reaches a runner a test starts.
+        .hermetic()
         .current_dir(&repo)
         .env("PATH", &path)
         .env("HUSHRUN_UNITS", &units)

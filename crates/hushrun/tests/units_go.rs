@@ -1628,6 +1628,7 @@ fn holding(hold: u32) -> Repo {
 // covers: C-45
 #[test]
 fn output_held_past_go_tests_own_wait_fails_the_package_as_it_does_without_hushrun() {
+    use hushrun_testkit::env::Hermetic as _;
     if !tools("Go", has_go()) {
         return;
     }
@@ -1636,6 +1637,8 @@ fn output_held_past_go_tests_own_wait_fails_the_package_as_it_does_without_hushr
     let r = holding(8);
     let words = ["go", "test", "-count=1", "-timeout=20s", "-v", "./..."];
     let plain = Command::new("go")
+        // What the developer's shell exports never reaches a runner a test starts.
+        .hermetic()
         .args(&words[1..])
         .current_dir(&r.repo)
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
