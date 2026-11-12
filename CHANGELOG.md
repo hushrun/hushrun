@@ -16,6 +16,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Added
 
+- Jest 29 and 30 are observed, test files and tests, through `NODE_OPTIONS` ([ADR 0082](docs/adr/0082-jest.md)).
 - Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and
   **`tests.reads`** (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`,
   a test file whose own key didn't pass has its tests reused one by one, each under a key of its

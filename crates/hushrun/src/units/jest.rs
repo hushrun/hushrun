@@ -487,9 +487,15 @@ fn strings(file: &FactsFile, key: &str) -> Vec<String> {
 /// Whether `path` is a config every test file reads, by its name: Jest's, Babel's, a preset.
 fn read_by_all(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    ["jest.config.", "babel.config.", ".babelrc.", "jest-preset.", "jest.preset."]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    [
+        "jest.config.",
+        "babel.config.",
+        ".babelrc.",
+        "jest-preset.",
+        "jest.preset.",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
         && CODE_KINDS.iter().any(|kind| name.ends_with(kind))
 }
 
@@ -577,8 +583,8 @@ pub fn observe(
     for unit in names {
         let end = ended.remove(&unit);
         let seen = merged.remove(&unit);
-        let deselected =
-            end.as_ref().is_some_and(|e| e.deselected) && seen.as_ref().is_none_or(|s| s.deselected);
+        let deselected = end.as_ref().is_some_and(|e| e.deselected)
+            && seen.as_ref().is_none_or(|s| s.deselected);
         let mut not_followed = whole.clone();
         let mut reads: BTreeSet<String> = every.clone();
         reads.insert(unit.clone());
@@ -687,7 +693,8 @@ impl Adapter for Recognized {
     }
 
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
-        let dir = install(at.cache).map_err(|err| format!("can't write its Jest adapter: {err}"))?;
+        let dir =
+            install(at.cache).map_err(|err| format!("can't write its Jest adapter: {err}"))?;
         variables(&dir, (at.env)("NODE_OPTIONS"))
     }
 
@@ -879,12 +886,18 @@ mod tests {
     // covers: C-44
     #[test]
     fn the_adapter_loads_beside_what_node_options_had() {
-        let vars = variables(Path::new("/c/adapters/jest-1"), Some("--max-old-space-size=4096".into())).unwrap();
+        let vars = variables(
+            Path::new("/c/adapters/jest-1"),
+            Some("--max-old-space-size=4096".into()),
+        )
+        .unwrap();
         assert_eq!(
             vars[0],
             (
                 "NODE_OPTIONS".to_string(),
-                OsString::from("--max-old-space-size=4096 --require /c/adapters/jest-1/hushrun-jest.cjs")
+                OsString::from(
+                    "--max-old-space-size=4096 --require /c/adapters/jest-1/hushrun-jest.cjs"
+                )
             )
         );
         assert_eq!(
@@ -971,15 +984,15 @@ mod tests {
     #[test]
     fn what_the_main_process_and_the_workers_wrote_comes_to_one_unit_each() {
         let tree = tree_of(&[
-                "jest.config.js",
-                "babel.config.js",
-                "src/a.ts",
-                "src/b.js",
-                "src/data.json",
-                "test/a.test.ts",
-                "test/b.test.ts",
-                "test/c.test.ts",
-                "test/__snapshots__/a.test.ts.snap",
+            "jest.config.js",
+            "babel.config.js",
+            "src/a.ts",
+            "src/b.js",
+            "src/data.json",
+            "test/a.test.ts",
+            "test/b.test.ts",
+            "test/c.test.ts",
+            "test/__snapshots__/a.test.ts.snap",
         ]);
         let nothing = || "nothing".to_string();
         assert_eq!(observe(&[], &tree, None, &nothing).unwrap_err(), "nothing");
@@ -1001,11 +1014,17 @@ mod tests {
                        "tests": [{"id": "a", "finished": true}]}],
         }));
         // Workers without the main process: Jest stopped before its reporter wrote.
-        assert!(observe(&[worker.clone()], &tree, None, &nothing).is_err());
+        assert!(observe(std::slice::from_ref(&worker), &tree, None, &nothing).is_err());
         assert!(observe(&[main.clone(), main.clone()], &tree, None, &nothing).is_err());
         let mut broken = main.clone();
-        broken.errors.push("version: this Jest, 28.1.3, isn't one hushrun's adapter knows (29, 30)".into());
-        assert!(observe(&[broken], &tree, None, &nothing).unwrap_err().contains("28.1.3"));
+        broken
+            .errors
+            .push("version: this Jest, 28.1.3, isn't one hushrun's adapter knows (29, 30)".into());
+        assert!(
+            observe(&[broken], &tree, None, &nothing)
+                .unwrap_err()
+                .contains("28.1.3")
+        );
         let seen = observe(&[main, worker], &tree, Some("jest.config.js"), &nothing).unwrap();
         let a = &seen.units["test/a.test.ts"];
         assert!(a.facts.complete && !a.facts.failed && a.facts.not_followed.is_empty());
@@ -1033,5 +1052,4 @@ mod tests {
         assert!(seen.units["test/c.test.ts"].facts.deselected);
         assert_eq!(seen.unit_files.len(), 3);
     }
-
 }

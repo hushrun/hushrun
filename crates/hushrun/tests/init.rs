@@ -6481,7 +6481,9 @@ fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {
     r.write("jest.config.cjs", "module.exports = {};\n");
     r.write(
         "package.json",
-        &package.replace("NODE_OPTIONS=--", "NODE_OPTIONS=\\\"$NODE_OPTIONS --").replace("modules jest", "modules\\\" jest"),
+        &package
+            .replace("NODE_OPTIONS=--", "NODE_OPTIONS=\\\"$NODE_OPTIONS --")
+            .replace("modules jest", "modules\\\" jest"),
     );
     let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
     assert!(!out.stdout.contains("HUSHRUN_JEST"), "{}", out.stdout);

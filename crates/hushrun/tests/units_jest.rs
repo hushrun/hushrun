@@ -80,12 +80,10 @@ fn jest_in(variable: &str, major: u32) -> Option<Jest> {
     let package = std::fs::read(dir.join("jest/package.json")).ok()?;
     let package: Value = serde_json::from_slice(&package).ok()?;
     let version = package["version"].as_str()?;
-    version
-        .starts_with(&format!("{major}."))
-        .then_some(Jest {
-            major,
-            modules: dir,
-        })
+    version.starts_with(&format!("{major}.")).then_some(Jest {
+        major,
+        modules: dir,
+    })
 }
 
 fn has_node() -> bool {
@@ -252,7 +250,12 @@ impl Repo {
             .unwrap()
             .flatten()
             .map(|e| e.path())
-            .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("jest-"))
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("jest-")
+            })
             .expect("the Jest adapter was written")
     }
 }
@@ -294,10 +297,7 @@ fn shop(tests: &str) -> Vec<(String, String)> {
         file(".gitignore", "node_modules\ncoverage\n"),
         file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
         file("jest.config.js", CONFIG),
-        file(
-            "src/pricing.js",
-            "exports.price = (x) => x * 2;\n",
-        ),
+        file("src/pricing.js", "exports.price = (x) => x * 2;\n"),
         file(
             "src/cart.js",
             "const { price } = require('./pricing');\nexports.total = (xs) => xs.reduce((n, x) => n + price(x), 0);\n",
@@ -321,7 +321,14 @@ fn shop(tests: &str) -> Vec<(String, String)> {
     files
 }
 
-const JEST_RUN: &[&str] = &["run", "unit", "--", "node", "node_modules/jest/bin/jest.js", "--ci"];
+const JEST_RUN: &[&str] = &[
+    "run",
+    "unit",
+    "--",
+    "node",
+    "node_modules/jest/bin/jest.js",
+    "--ci",
+];
 
 // covers: C-30, C-31, C-32, C-44
 #[test]
@@ -347,13 +354,23 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
         // opened, and Jest's config, which every test file reads.
         assert_eq!(
             r.reads("test/cart.test.js"),
-            ["jest.config.js", "src/cart.js", "src/pricing.js", "test/cart.test.js"],
+            [
+                "jest.config.js",
+                "src/cart.js",
+                "src/pricing.js",
+                "test/cart.test.js"
+            ],
             "Jest {}",
             jest.major
         );
         assert_eq!(
             r.reads("test/dyn.test.js"),
-            ["jest.config.js", "src/data.js", "src/dyn.js", "test/dyn.test.js"],
+            [
+                "jest.config.js",
+                "src/data.js",
+                "src/dyn.js",
+                "test/dyn.test.js"
+            ],
             "Jest {}",
             jest.major
         );
@@ -400,7 +417,11 @@ fn jest_reuses_test_files_that_already_passed() {
             jest.major,
             second.stderr
         );
-        assert!(second.stderr.contains("reusing 4 test files"), "{}", second.stderr);
+        assert!(
+            second.stderr.contains("reusing 4 test files"),
+            "{}",
+            second.stderr
+        );
         // Why, with the imports the adapter saw.
         r.write("src/pricing.js", "exports.price = (x) => 2 * x;\n");
         let why = r.run(&["why", "unit", "test/cart.test.js"]);
@@ -536,7 +557,9 @@ fn an_audited_test_that_fails_again_alone_suspends_the_checks_reuse() {
         );
         // The second run ran `ok` alone: Jest left `also` out.
         assert!(
-            caught.stderr.contains("Tests:       1 failed, 1 skipped, 2 total"),
+            caught
+                .stderr
+                .contains("Tests:       1 failed, 1 skipped, 2 total"),
             "Jest {}: {}",
             jest.major,
             caught.stderr
@@ -655,7 +678,11 @@ fn jest_commands_hushrun_doesnt_observe_run_as_written_and_say_why() {
             jest.major,
             config.stderr
         );
-        assert!(config.stderr.contains("Test Suites: 7 passed, 7 total"), "{}", config.stderr);
+        assert!(
+            config.stderr.contains("Test Suites: 7 passed, 7 total"),
+            "{}",
+            config.stderr
+        );
     }
 }
 
@@ -697,7 +724,12 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
         );
         assert_eq!(
             r.reads("test/cart.test.js"),
-            ["jest.config.js", "src/cart.js", "src/pricing.js", "test/cart.test.js"]
+            [
+                "jest.config.js",
+                "src/cart.js",
+                "src/pricing.js",
+                "test/cart.test.js"
+            ]
         );
         // An ES module config takes the other form, in band and with workers alike.
         r.write("package.json", "{\"name\": \"shop\", \"private\": true}\n");
@@ -793,7 +825,11 @@ fn unit_of(facts: &[Value], unit: &str) -> Value {
     let names = |v: &Value| -> Value {
         let mut out: Vec<String> = v
             .as_array()
-            .map(|a| a.iter().map(|i| paths[i.as_u64().unwrap() as usize].clone()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|i| paths[i.as_u64().unwrap() as usize].clone())
+                    .collect()
+            })
             .unwrap_or_default();
         out.sort();
         json!(out)
@@ -816,10 +852,7 @@ fn unit_of(facts: &[Value], unit: &str) -> Value {
     }
     let mut imports = serde_json::Map::new();
     for (from, to) in file["imports"].as_object().into_iter().flatten() {
-        imports.insert(
-            paths[from.parse::<usize>().unwrap()].clone(),
-            names(to),
-        );
+        imports.insert(paths[from.parse::<usize>().unwrap()].clone(), names(to));
     }
     u["imports"] = Value::Object(imports);
     u["settings"] = file["settings"].clone();
@@ -857,14 +890,23 @@ fn the_adapter_leaves_out_what_it_is_told_and_no_tests_found_stays_jests_own() {
         assert_eq!(code, 0, "{out}");
         let main = main_of(&facts);
         assert_eq!(main["removedItems"], 7, "{main:#}");
-        assert!(main["units"].as_array().unwrap().iter().all(|u| u["deselected"] == true));
+        assert!(
+            main["units"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|u| u["deselected"] == true)
+        );
         // A filter, then one left: still a pass.
         let (code, out, _) =
             adapter_jest(&r, json!({"reuse": every, "testFiles": every}), &["cart"]);
         assert_eq!(code, 0, "{out}");
         // A filter that matches nothing stays Jest's own failure.
-        let (code, _, _) =
-            adapter_jest(&r, json!({"reuse": every, "testFiles": every}), &["no-such-test"]);
+        let (code, _, _) = adapter_jest(
+            &r,
+            json!({"reuse": every, "testFiles": every}),
+            &["no-such-test"],
+        );
         assert_eq!(code, 1);
         // What isn't on the list runs, and its failure is the run's.
         r.write("src/greet.js", "exports.hello = () => 'ho';\n");
@@ -993,7 +1035,12 @@ test('retried', () => {
             .filter(|t| t["deselected"] == true)
             .map(|t| t["id"].as_str().unwrap())
             .collect();
-        assert_eq!(deselected, ["a > one", "a > double 1", "skipped"], "Jest {}", jest.major);
+        assert_eq!(
+            deselected,
+            ["a > one", "a > double 1", "skipped"],
+            "Jest {}",
+            jest.major
+        );
         assert_eq!(test_of(&unit, "a > b > deep")["failed"], false);
         // --testNamePattern and a focus leave tests that didn't run: not finished.
         let (_, _, facts) = adapter_jest(
@@ -1015,7 +1062,12 @@ test('retried', () => {
         assert_eq!(code, 1);
         let unit = unit_of(&facts, "test/ids.test.js");
         assert_eq!(unit["failed"], true, "{unit:#}");
-        assert_eq!(test_of(&unit, "a > b > deep")["failed"], true, "Jest {}", jest.major);
+        assert_eq!(
+            test_of(&unit, "a > b > deep")["failed"],
+            true,
+            "Jest {}",
+            jest.major
+        );
         assert_eq!(test_of(&unit, "a > one")["failed"], false);
     }
 }
@@ -1025,14 +1077,20 @@ test('retried', () => {
 fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
     for jest in jests() {
         let files = vec![
-            file("hushrun.yaml", &yaml("{mode: observe, unit: test, reads: test}")),
+            file(
+                "hushrun.yaml",
+                &yaml("{mode: observe, unit: test, reads: test}"),
+            ),
             file(".gitignore", "node_modules\ncoverage\n"),
             file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
             file(
                 "jest.config.js",
                 "module.exports = { testEnvironment: 'node', transform: {}, setupFiles: ['./test/setup.js'] };\n",
             ),
-            file("test/setup.js", "globalThis.LEVEL = require('../src/level').level;\n"),
+            file(
+                "test/setup.js",
+                "globalThis.LEVEL = require('../src/level').level;\n",
+            ),
             file("src/level.js", "exports.level = 1;\n"),
             file("src/helper.js", "exports.stamp = () => 'stamp';\n"),
             file(
@@ -1059,32 +1117,75 @@ fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
             let (code, out, facts) = adapter_jest(&r, run.clone(), band);
             assert_eq!(code, 0, "{out}");
             let unit = unit_of(&facts, "test/db.test.js");
-            assert_eq!(unit["settings"]["watched"], true, "Jest {}: {unit:#}", jest.major);
+            assert_eq!(
+                unit["settings"]["watched"], true,
+                "Jest {}: {unit:#}",
+                jest.major
+            );
             // A function called in the window: its file. A module's top level running because it
             // was required isn't, but a module first required in the window is.
-            assert_eq!(test_of(&unit, "db > queries")["ran"], json!(["src/db.js", "test/db.test.js"]));
-            assert_eq!(test_of(&unit, "db > connected")["ran"], json!(["test/db.test.js"]));
-            assert_eq!(test_of(&unit, "db > reads")["opened"], json!(["data/fixture.json"]));
+            assert_eq!(
+                test_of(&unit, "db > queries")["ran"],
+                json!(["src/db.js", "test/db.test.js"])
+            );
+            assert_eq!(
+                test_of(&unit, "db > connected")["ran"],
+                json!(["test/db.test.js"])
+            );
+            assert_eq!(
+                test_of(&unit, "db > reads")["opened"],
+                json!(["data/fixture.json"])
+            );
             assert_eq!(
                 test_of(&unit, "db > lazily")["ran"],
                 json!(["src/lazy.js", "test/db.test.js"])
             );
             // What it couldn't follow inside its window is its own.
-            assert_eq!(test_of(&unit, "db > starts")["notFollowed"][0]["why"], "subprocess");
+            assert_eq!(
+                test_of(&unit, "db > starts")["notFollowed"][0]["why"],
+                "subprocess"
+            );
             assert_eq!(test_of(&unit, "db > queries")["notFollowed"], json!([]));
             assert_eq!(unit["notFollowed"], json!([]));
             // A concurrent test can't be watched alone: it gets its file's list.
             let together = unit_of(&facts, "test/together.test.js");
-            assert!(test_of(&together, "together").get("ran").is_none(), "{together:#}");
-            assert!(test_of(&together, "alone").get("ran").is_some(), "{together:#}");
+            assert!(
+                test_of(&together, "together").get("ran").is_none(),
+                "{together:#}"
+            );
+            assert!(
+                test_of(&together, "alone").get("ran").is_some(),
+                "{together:#}"
+            );
             // The beforeAll serves every test under it; loading the file ran the setup file and
             // what collection called.
             let shared = &unit["shared"][0];
-            assert_eq!(shared["ran"], json!(["src/db.js", "src/helper.js", "test/db.test.js"]));
+            assert_eq!(
+                shared["ran"],
+                json!(["src/db.js", "src/helper.js", "test/db.test.js"])
+            );
             assert_eq!(shared["tests"].as_array().unwrap().len(), 6, "{shared:#}");
-            assert!(unit["loaded"]["ran"].as_array().unwrap().contains(&json!("src/names.js")), "{unit:#}");
-            assert!(unit["loaded"]["ran"].as_array().unwrap().contains(&json!("test/setup.js")), "{unit:#}");
-            assert!(unit["loaded"]["ran"].as_array().unwrap().contains(&json!("src/level.js")), "{unit:#}");
+            assert!(
+                unit["loaded"]["ran"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("src/names.js")),
+                "{unit:#}"
+            );
+            assert!(
+                unit["loaded"]["ran"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("test/setup.js")),
+                "{unit:#}"
+            );
+            assert!(
+                unit["loaded"]["ran"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("src/level.js")),
+                "{unit:#}"
+            );
             // Each file's direct imports.
             assert_eq!(
                 unit["imports"]["test/db.test.js"],
@@ -1101,9 +1202,15 @@ fn with_reads_test_each_test_says_what_it_ran_opened_and_imported() {
         assert!(test_of(&unit, "db > queries").get("ran").is_none());
         assert!(out.contains("db.js"), "coverage still reports: {out}");
         // With `reads: file`, nothing is watched.
-        let (_, _, facts) =
-            adapter_jest(&r, json!({"unit": "test", "reads": "file", "testFiles": every}), &[]);
-        assert_eq!(unit_of(&facts, "test/db.test.js")["settings"]["watched"], false);
+        let (_, _, facts) = adapter_jest(
+            &r,
+            json!({"unit": "test", "reads": "file", "testFiles": every}),
+            &[],
+        );
+        assert_eq!(
+            unit_of(&facts, "test/db.test.js")["settings"]["watched"],
+            false
+        );
     }
 }
 
@@ -1188,13 +1295,21 @@ fn hazards() -> Vec<Hazard> {
                 "test/pkg.test.js",
                 "const fs = require('fs');\ntest('pkg', () => { expect(fs.readFileSync('package.json', 'utf8')).not.toContain('changed'); });\n",
             )],
-            |r| r.write("package.json", "{\"name\": \"shop\", \"private\": true, \"description\": \"changed\"}\n"),
+            |r| {
+                r.write(
+                    "package.json",
+                    "{\"name\": \"shop\", \"private\": true, \"description\": \"changed\"}\n",
+                )
+            },
         ),
         hazard(
             "Jest's config, which every test file reads",
             vec![
                 file("jest.config.js", &config("globals: { LEVEL: 1 }")),
-                file("test/level.test.js", "test('level', () => { expect(LEVEL).toBe(1); });\n"),
+                file(
+                    "test/level.test.js",
+                    "test('level', () => { expect(LEVEL).toBe(1); });\n",
+                ),
             ],
             |r| {
                 r.write(
@@ -1227,7 +1342,10 @@ fn hazards() -> Vec<Hazard> {
             vec![
                 file("jest.config.js", &config("setupFiles: ['./test/setup.js']")),
                 file("test/setup.js", "globalThis.LEVEL = 1;\n"),
-                file("test/level.test.js", "test('level', () => { expect(globalThis.LEVEL).toBe(1); });\n"),
+                file(
+                    "test/level.test.js",
+                    "test('level', () => { expect(globalThis.LEVEL).toBe(1); });\n",
+                ),
             ],
             |r| r.write("test/setup.js", "globalThis.LEVEL = 2;\n"),
         ),
@@ -1257,13 +1375,21 @@ fn hazards() -> Vec<Hazard> {
             "a manual mock",
             vec![
                 file("src/mocked.js", "exports.mocked = () => 'real';\n"),
-                file("src/__mocks__/mocked.js", "exports.mocked = () => 'mock';\n"),
+                file(
+                    "src/__mocks__/mocked.js",
+                    "exports.mocked = () => 'mock';\n",
+                ),
                 file(
                     "test/mock.test.js",
                     "jest.mock('../src/mocked');\nconst { mocked } = require('../src/mocked');\ntest('mock', () => { expect(mocked()).toBe('mock'); });\n",
                 ),
             ],
-            |r| r.write("src/__mocks__/mocked.js", "exports.mocked = () => 'other';\n"),
+            |r| {
+                r.write(
+                    "src/__mocks__/mocked.js",
+                    "exports.mocked = () => 'other';\n",
+                )
+            },
         ),
         hazard(
             "a new manual mock",
@@ -1274,7 +1400,12 @@ fn hazards() -> Vec<Hazard> {
                     "jest.mock('../src/mocked');\nconst { mocked } = require('../src/mocked');\ntest('mock', () => { expect(mocked()).toBeUndefined(); });\n",
                 ),
             ],
-            |r| r.write("src/__mocks__/mocked.js", "exports.mocked = () => 'mock';\n"),
+            |r| {
+                r.write(
+                    "src/__mocks__/mocked.js",
+                    "exports.mocked = () => 'mock';\n",
+                )
+            },
         ),
         hazard(
             "a snapshot",
@@ -1291,9 +1422,15 @@ fn hazards() -> Vec<Hazard> {
         hazard(
             "a module moduleNameMapper names",
             vec![
-                file("jest.config.js", &config("moduleNameMapper: { '^@level$': '<rootDir>/src/level.js' }")),
+                file(
+                    "jest.config.js",
+                    &config("moduleNameMapper: { '^@level$': '<rootDir>/src/level.js' }"),
+                ),
                 file("src/level.js", "exports.level = 1;\n"),
-                file("test/mapped.test.js", "test('mapped', () => { expect(require('@level').level).toBe(1); });\n"),
+                file(
+                    "test/mapped.test.js",
+                    "test('mapped', () => { expect(require('@level').level).toBe(1); });\n",
+                ),
             ],
             |r| r.write("src/level.js", "exports.level = 2;\n"),
         ),
@@ -1322,7 +1459,14 @@ fn check_hazards(jest: &Jest, hazards: Vec<Hazard>, some_reused: bool) {
             assert_eq!(r.run(&write).code, 0, "{}", hazard.name);
         }
         let first = r.run(&command);
-        assert_eq!(first.code, 0, "Jest {} {}: {}", jest.major, hazard.name, first.out());
+        assert_eq!(
+            first.code,
+            0,
+            "Jest {} {}: {}",
+            jest.major,
+            hazard.name,
+            first.out()
+        );
         (hazard.change)(&r);
         let failing = r.truth();
         assert!(
@@ -1384,8 +1528,13 @@ fn what_every_test_file_reads_with_jest() {
         ];
         let mut hazards = Vec::new();
         for (name, change) in [
-            ("an environment's own import", (|r: &Repo| r.write("env/level.js", "exports.level = 2;\n")) as fn(&Repo)),
-            ("what globalSetup required", |r: &Repo| r.write("setup/seed.js", "exports.seed = 2;\n")),
+            (
+                "an environment's own import",
+                (|r: &Repo| r.write("env/level.js", "exports.level = 2;\n")) as fn(&Repo),
+            ),
+            ("what globalSetup required", |r: &Repo| {
+                r.write("setup/seed.js", "exports.seed = 2;\n")
+            }),
         ] {
             hazards.push(hazard(name, files.clone(), change));
         }
@@ -1408,7 +1557,11 @@ fn what_every_test_file_reads_with_jest() {
             "setup/resolver.js",
             "setup/seed.js",
         ] {
-            assert!(reads.contains(&every.to_string()), "Jest {} {every}: {reads:?}", jest.major);
+            assert!(
+                reads.contains(&every.to_string()),
+                "Jest {} {every}: {reads:?}",
+                jest.major
+            );
         }
         // A globalSetup that starts a program: no test file is observed.
         r.write(
@@ -1419,8 +1572,7 @@ fn what_every_test_file_reads_with_jest() {
         assert_eq!(started.code, 0, "{}", started.out());
         let map = r.map();
         assert_eq!(
-            map["units"]["test/cart.test.js"]["notFollowed"][0],
-            "subprocess",
+            map["units"]["test/cart.test.js"]["notFollowed"][0], "subprocess",
             "Jest {}: {map:#}",
             jest.major
         );
@@ -1440,7 +1592,10 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
             file("hushrun.yaml", &yaml("observe")),
             file(".gitignore", "node_modules\n"),
             file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-            file("jest.config.js", "module.exports = { preset: 'ts-jest', testEnvironment: 'node' };\n"),
+            file(
+                "jest.config.js",
+                "module.exports = { preset: 'ts-jest', testEnvironment: 'node' };\n",
+            ),
             file("tsconfig.json", &tsconfig(false)),
             file("src/types.ts", "export interface P { x: number }\n"),
             file(
@@ -1462,7 +1617,11 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
         assert_eq!(first.code, 0, "{}", first.out());
         // A type-only import is erased: no run shows it. Every file of code is read instead.
         let reads = r.reads("test/other.test.ts");
-        assert!(reads.contains(&"src/types.ts".to_string()), "Jest {}: {reads:?}", jest.major);
+        assert!(
+            reads.contains(&"src/types.ts".to_string()),
+            "Jest {}: {reads:?}",
+            jest.major
+        );
         assert!(reads.contains(&"src/price.ts".to_string()), "{reads:?}");
         // The type changes, and the test file that used it fails to compile: it would run.
         r.write("src/types.ts", "export interface P { y: number }\n");
@@ -1478,7 +1637,10 @@ fn ts_jest_checking_types_makes_every_file_of_code_read_by_every_test_file() {
         let run = json!({"testFiles": every});
         let (code, out, facts) = adapter_jest(&r, run.clone(), &[]);
         assert_eq!(code, 0, "{out}");
-        assert_eq!(unit_of(&facts, "test/other.test.ts")["settings"]["typeAware"], true);
+        assert_eq!(
+            unit_of(&facts, "test/other.test.ts")["settings"]["typeAware"],
+            true
+        );
         r.write("tsconfig.json", &tsconfig(true));
         let (code, out, facts) = adapter_jest(&r, run, &[]);
         assert_eq!(code, 0, "{out}");
@@ -1512,12 +1674,17 @@ fn jest_projects_snapshots_and_worker_threads() {
         assert_eq!(first.code, 0, "{}", first.out());
         let map = r.map();
         assert_eq!(map["unitFiles"].as_array().unwrap().len(), 8, "{map:#}");
-        assert!(r.reads("test/cart.test.js").contains(&"test/b.js".to_string()));
-        assert!(!r.reads("test/pricing.test.js").contains(&"test/b.js".to_string()));
+        assert!(
+            r.reads("test/cart.test.js")
+                .contains(&"test/b.js".to_string())
+        );
+        assert!(
+            !r.reads("test/pricing.test.js")
+                .contains(&"test/b.js".to_string())
+        );
         // A worker thread isn't followed.
         assert_eq!(
-            map["units"]["test/thread.test.js"]["notFollowed"][0],
-            "worker",
+            map["units"]["test/thread.test.js"]["notFollowed"][0], "worker",
             "Jest {}: {map:#}",
             jest.major
         );
@@ -1531,10 +1698,19 @@ fn jest_in_its_es_module_mode_is_observed() {
         let files = vec![
             file("hushrun.yaml", &yaml("observe")),
             file(".gitignore", "node_modules\n"),
-            file("package.json", "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n"),
-            file("jest.config.js", "export default { testEnvironment: 'node', transform: {} };\n"),
+            file(
+                "package.json",
+                "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+            ),
+            file(
+                "jest.config.js",
+                "export default { testEnvironment: 'node', transform: {} };\n",
+            ),
             file("src/pricing.js", "export const price = (x) => x * 2;\n"),
-            file("src/cart.js", "import { price } from './pricing.js';\nexport const total = (xs) => xs.reduce((n, x) => n + price(x), 0);\n"),
+            file(
+                "src/cart.js",
+                "import { price } from './pricing.js';\nexport const total = (xs) => xs.reduce((n, x) => n + price(x), 0);\n",
+            ),
             file(
                 "test/cart.test.js",
                 "import { test, expect } from '@jest/globals';\nimport { total } from '../src/cart.js';\ntest('total', () => { expect(total([1, 2])).toBe(6); });\n",
@@ -1557,11 +1733,19 @@ fn jest_in_its_es_module_mode_is_observed() {
         assert_eq!(ran.code, 0, "{}", ran.out());
         assert_eq!(
             r.reads("test/cart.test.js"),
-            ["jest.config.js", "src/cart.js", "src/pricing.js", "test/cart.test.js"],
+            [
+                "jest.config.js",
+                "src/cart.js",
+                "src/pricing.js",
+                "test/cart.test.js"
+            ],
             "Jest {}",
             jest.major
         );
-        assert_eq!(r.reads("test/other.test.js"), ["jest.config.js", "test/other.test.js"]);
+        assert_eq!(
+            r.reads("test/other.test.js"),
+            ["jest.config.js", "test/other.test.js"]
+        );
     }
 }
 
@@ -1599,7 +1783,8 @@ fn a_test_file_that_fails_to_load_or_kills_its_worker_is_told() {
         );
         // A file that fails to load fails, before any of its tests ran.
         let every = listed(&r);
-        let (code, _, facts) = adapter_jest(&r, json!({"unit": "test", "testFiles": every}), &["broken"]);
+        let (code, _, facts) =
+            adapter_jest(&r, json!({"unit": "test", "testFiles": every}), &["broken"]);
         assert_eq!(code, 1);
         let unit = unit_of(&facts, "test/broken.test.js");
         assert_eq!(unit["failed"], true, "{unit:#}");
