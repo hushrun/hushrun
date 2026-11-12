@@ -164,12 +164,17 @@ its absolute path and which no debugger reads. A program set to `tied`, a progra
 flags say `-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug
 info and a program for any other target are left as they are. When the toolchain holds the
 sources of the standard library or of the compiler (`lib/rustlib/src`, rustup's `rust-src`;
-`lib/rustlib/rustc-src`, `rustc-dev`), every compile also gets `--sysroot` naming a folder of
-links to everything else in the toolchain (B-17): rustc maps the standard library's
-`/rustc/<commit>/` paths to those folders when they are there and reads macro text from them,
-which changes crate hashes, metadata and debug info, so a machine with them and one without
-would compile one key two ways. Paths under that folder are paths under the toolchain (B-8). It
-changes nothing else.
+`lib/rustlib/rustc-src`, `rustc-dev`), every compile also gets `--sysroot` naming the toolchain's
+view without them (B-17): rustc maps the standard library's `/rustc/<commit>/` paths to those
+folders when they are there and reads macro text from them, which changes crate hashes,
+metadata and debug info, so a machine with them and one without would compile one key two ways.
+Paths under the view are paths under the toolchain (B-8, B-11). On such a machine this is
+visible to the person, and only for the compiles the wrapper handles (a compile it passes
+through, such as an incremental rebuild of a workspace crate, is as without the wrapper): an
+error or warning that points into the standard library names `/rustc/<commit>/…` and shows no
+source line (and its column may differ by one), as on a machine without the sources; and debug
+info names the standard library's files as `/rustc/<commit>/…`, so a debugger needs a source map
+to show them. Panic locations and what programs do are the same. Nothing else changes.
 
 No block comes from an incremental compile, and an edit never loses incremental compilation: a
 compile that asks for `-C incremental`, finds no block, and already has its dep-info file in the
