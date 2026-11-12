@@ -268,10 +268,47 @@ fn run(args: &[OsString]) -> ExitCode {
     if let Some(reading) = draining {
         reading.drain();
     }
+    end_with(exit, signal)
+}
+
+/// How hushrun ends when it stands in for a program, a test binary here or a `ctest` or `swift`
+/// on `PATH`: as the program ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ending {
+    /// An exit code `ExitCode` holds: 0 to 255.
+    Code(u8),
+    /// One it doesn't, which ends the process with `std::process::exit`.
+    Whole(i32),
+    /// By the program's signal.
+    Signal(i32),
+}
+
+/// How to end for a program that exited with `exit`, or was stopped by `signal`. Where the
+/// system's exit codes are wider than a byte (`wide`, as on Windows), one past 255 passes through
+/// whole rather than as 1; elsewhere none is wider. Neither known: 1.
+pub(super) fn ending(exit: Option<i32>, signal: Option<i32>, wide: bool) -> Ending {
     match (exit, signal) {
-        (Some(code), _) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-        (None, Some(signal)) => end_as(signal),
-        (None, None) => ExitCode::from(1),
+        (Some(code), _) => match u8::try_from(code) {
+            Ok(byte) => Ending::Code(byte),
+            Err(_) if wide => Ending::Whole(code),
+            Err(_) => Ending::Code(1),
+        },
+        (None, Some(signal)) => Ending::Signal(signal),
+        (None, None) => Ending::Code(1),
+    }
+}
+
+/// Ends this process as the program it stands in for ended ([`ending`]): with its exit code,
+/// whole on Windows, or by the same signal.
+pub(super) fn end_with(exit: Option<i32>, signal: Option<i32>) -> ExitCode {
+    match ending(exit, signal, cfg!(windows)) {
+        Ending::Code(byte) => ExitCode::from(byte),
+        Ending::Whole(code) => {
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            std::process::exit(code)
+        }
+        Ending::Signal(signal) => end_as(signal),
     }
 }
 
@@ -746,6 +783,26 @@ pub(super) fn forward_signals(_: u32) -> Option<Forwarding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: C-32, C-39
+    #[test]
+    fn a_test_binary_or_program_ends_with_a_windows_exit_code_whole() {
+        assert_eq!(ending(Some(0), None, true), Ending::Code(0));
+        assert_eq!(ending(Some(8), None, false), Ending::Code(8));
+        assert_eq!(ending(Some(255), None, true), Ending::Code(255));
+        // Windows: a test binary's or a runner's 300, or an NTSTATUS such as 0xC0000005, comes
+        // back whole.
+        assert_eq!(ending(Some(300), None, true), Ending::Whole(300));
+        assert_eq!(
+            ending(Some(0xC000_0005_u32 as i32), None, true),
+            Ending::Whole(0xC000_0005_u32 as i32)
+        );
+        // Where codes are a byte, none is wider; one that were would end as 1.
+        assert_eq!(ending(Some(300), None, false), Ending::Code(1));
+        // A signal, by the same signal; neither known, 1.
+        assert_eq!(ending(None, Some(9), false), Ending::Signal(9));
+        assert_eq!(ending(None, None, true), Ending::Code(1));
+    }
 
     // covers: C-32
     #[test]

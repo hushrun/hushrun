@@ -225,6 +225,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   couldn't be read no longer makes every C and C++ file a source.
 - On Windows, hushrun's `ctest` and `swift` end with the real program's exit code whole, where
   one past 255 used to end as 1.
+- On Windows, hushrun's test runner ends with a Cargo or Go test binary's exit code whole, as
+  its `ctest` and `swift` do, where one past 255 used to end as 1.
 - The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
   the current directory, a relative one is from it, and a link to one of hushrun's own programs
   is passed over.

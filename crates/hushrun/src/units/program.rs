@@ -116,47 +116,11 @@ pub const MOST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 /// to: hushrun copying its standard input to its standard output until the end. Never typed.
 pub const FORWARD: &str = "__hushrun-forward";
 
-/// How a program on `PATH` ends with the real program's exit code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Exit {
-    /// An exit code `ExitCode` holds: 0 to 255.
-    Code(u8),
-    /// One it doesn't, which ends the process with `std::process::exit`.
-    Whole(i32),
-}
-
-/// The way to end with `code`, where the system's exit codes are wider than a byte (`wide`, as on
-/// Windows): one past 255 passes through whole there, rather than as 1; elsewhere none is wider.
-fn exit_of(code: i32, wide: bool) -> Exit {
-    match u8::try_from(code) {
-        Ok(byte) => Exit::Code(byte),
-        Err(_) if wide => Exit::Whole(code),
-        Err(_) => Exit::Code(1),
-    }
-}
-
-/// Ends as the real program did, with its exit code `code`.
-fn end_with(code: i32) -> ExitCode {
-    match exit_of(code, cfg!(windows)) {
-        Exit::Code(byte) => ExitCode::from(byte),
-        Exit::Whole(code) => {
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stderr().flush();
-            std::process::exit(code)
-        }
-    }
-}
-
 impl Copied {
     /// The exit code a program on `PATH` ends with for it: its own, whole (on Windows past 255
     /// too), or the same signal.
     pub fn exit_code(&self) -> ExitCode {
-        match (self.exit, self.signal) {
-            (Some(code), _) => end_with(code),
-            (None, Some(signal)) => super::runner::end_as(signal),
-            (None, None) => ExitCode::from(1),
-        }
+        super::runner::end_with(self.exit, self.signal)
     }
 }
 
@@ -660,11 +624,7 @@ fn run_with(
     if let (Some(program), Some(_)) = (program, units) {
         program.ended(&call, &start, exit);
     }
-    match (exit, signal) {
-        (Some(code), _) => end_with(code),
-        (None, Some(signal)) => super::runner::end_as(signal),
-        (None, None) => ExitCode::from(1),
-    }
+    super::runner::end_with(exit, signal)
 }
 
 #[cfg(test)]
@@ -852,22 +812,6 @@ mod tests {
     }
 
     // covers: C-39
-    #[test]
-    fn an_exit_code_wider_than_a_byte_passes_through_whole() {
-        assert_eq!(exit_of(0, true), Exit::Code(0));
-        assert_eq!(exit_of(8, false), Exit::Code(8));
-        assert_eq!(exit_of(255, true), Exit::Code(255));
-        // Windows: a test runner's 300, or an NTSTATUS such as 0xC0000005, comes back whole.
-        assert_eq!(exit_of(300, true), Exit::Whole(300));
-        assert_eq!(
-            exit_of(0xC000_0005_u32 as i32, true),
-            Exit::Whole(0xC000_0005_u32 as i32)
-        );
-        // Where codes are a byte, none is wider; one that were would end as 1.
-        assert_eq!(exit_of(300, false), Exit::Code(1));
-    }
-
-    // covers: C-39
     #[cfg(windows)]
     #[test]
     fn a_program_on_path_ends_with_a_windows_exit_code_whole() {
@@ -875,7 +819,10 @@ mod tests {
         command.args(["/C", "exit 300"]);
         let copied = run_copying_stdout(command).unwrap();
         assert_eq!(copied.exit, Some(300));
-        assert_eq!(exit_of(300, cfg!(windows)), Exit::Whole(300));
+        assert_eq!(
+            super::super::runner::ending(copied.exit, copied.signal, cfg!(windows)),
+            super::super::runner::Ending::Whole(300)
+        );
     }
 
     // covers: C-39
