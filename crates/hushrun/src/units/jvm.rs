@@ -31,8 +31,6 @@
 //! read leaves nothing out, and the events say so. The events' lines are described in the hook's
 //! `Events.java`.
 
-#![allow(dead_code, reason = "the adapters of JVM build tools load it")]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,12 +40,33 @@ pub const TEST_JVM_HOOK: &[u8] = include_bytes!("../../jvm/hushrun-test-jvm-hook
 /// Its file name in the cache.
 pub const TEST_JVM_HOOK_NAME: &str = "hushrun-test-jvm-hook.jar";
 /// The system property that names the list of tests to leave out.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the hook reads it; Gradle's script passes it as written, which a test checks"
+    )
+)]
 pub const LEAVE_OUT_PROPERTY: &str = "hushrun.tests.leaveOut";
 /// The variable that names it when the property isn't set.
 pub const LEAVE_OUT_VARIABLE: &str = "HUSHRUN_TESTS_LEAVE_OUT";
 /// The list's path below `HUSHRUN_UNITS` when neither names one.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the hook reads it; Maven's extension writes the list there itself"
+    )
+)]
 pub const LEAVE_OUT_FILE: &str = "test-jvm/leave-out.txt";
 /// The system property that names the directory for the events.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the hook reads it; Gradle's script passes it as written, which a test checks"
+    )
+)]
 pub const EVENTS_PROPERTY: &str = "hushrun.tests.events";
 /// The variable that names it when the property isn't set.
 pub const EVENTS_VARIABLE: &str = "HUSHRUN_TESTS_EVENTS";
@@ -330,6 +349,41 @@ pub fn read_events_dir(dir: &Path) -> Result<BTreeMap<String, JvmEvents>, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names above are the hook's, as its sources spell them, and Gradle's script passes the
+    /// two properties as written.
+    #[test]
+    fn the_names_are_those_the_hook_and_gradles_script_use() {
+        let leave_out = include_str!("../../jvm/test-jvm-hook/dev/hushrun/testjvm/LeaveOut.java");
+        let events = include_str!("../../jvm/test-jvm-hook/dev/hushrun/testjvm/Events.java");
+        let names = include_str!("../../jvm/test-jvm-hook/dev/hushrun/testjvm/Names.java");
+        let gradle = include_str!("hushrun_gradle.gradle");
+        for (source, property, variable, child) in [
+            (
+                leave_out,
+                LEAVE_OUT_PROPERTY,
+                LEAVE_OUT_VARIABLE,
+                LEAVE_OUT_FILE,
+            ),
+            (events, EVENTS_PROPERTY, EVENTS_VARIABLE, EVENTS_DIR),
+        ] {
+            assert!(
+                source.contains(&format!("PROPERTY = \"{property}\"")),
+                "{property}"
+            );
+            assert!(
+                source.contains(&format!("VARIABLE = \"{variable}\"")),
+                "{variable}"
+            );
+            let child = child.strip_prefix("test-jvm/").unwrap();
+            assert!(
+                source.contains(&format!("Names.of(PROPERTY, VARIABLE, \"{child}\")")),
+                "{child}"
+            );
+            assert!(gradle.contains(&format!("\"-D{property}=\"")), "{property}");
+        }
+        assert!(names.contains("new File(v.trim(), \"test-jvm\")"));
+    }
 
     #[test]
     fn the_hook_is_a_jar_with_its_services_and_written_whole_once() {
