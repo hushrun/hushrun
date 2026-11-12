@@ -635,6 +635,90 @@ fn a_failing_teardown_of_a_wider_fixture_keeps_every_test_it_served_from_a_pass(
 
 // covers: C-32
 #[test]
+fn a_session_fixture_asked_for_at_run_time_whose_end_fails_keeps_the_test_from_a_pass() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_leaky takes the session fixture `db` with `request.getfixturevalue`, which no test's
+    // `fixturenames` holds, and leaks; `db` says so at the session's end, which pytest reports on
+    // the last test. Left out next time, test_leaky would let the check pass on the same code.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\npythonpath = .\n".into()),
+        (
+            "tests/conftest.py".into(),
+            "import pytest\nOPEN = []\n\n\
+             @pytest.fixture(scope='session')\ndef db():\n    yield OPEN\n    assert not OPEN, 'a connection was left open'\n"
+                .into(),
+        ),
+        (
+            "tests/test_l.py".into(),
+            "import os\n\ndef test_leaky(request):\n    db = request.getfixturevalue('db')\n    if os.environ.get('BUG'):\n        db.append('c')\n"
+                .into(),
+        ),
+        (
+            "tests/test_m.py".into(),
+            "import pytest\n\n@pytest.mark.parametrize('i', range(5))\ndef test_many(i, db):\n    assert True\n"
+                .into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = store::map(&r.cache);
+    assert_ne!(
+        map["units"]["tests/test_l.py"]["tests"]["test_leaky"], "passed",
+        "{map:#}"
+    );
+    let second = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+}
+
+// covers: C-32
+#[test]
+fn a_wider_fixture_whose_end_fails_keeps_no_pass_from_a_test_served_another_of_its_name() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // Two fixtures named `res`: a/'s, of module scope, fails as it ends; b/'s, a function's,
+    // has nothing to do with it. test_b keeps its pass.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\npythonpath = .\n".into()),
+        ("tests/a/__init__.py".into(), String::new()),
+        (
+            "tests/a/conftest.py".into(),
+            "import os, pytest\n\n@pytest.fixture(scope='module')\ndef res():\n    yield 1\n    if os.environ.get('FAIL_A'):\n        raise RuntimeError('a res end failed')\n"
+                .into(),
+        ),
+        ("tests/a/test_a.py".into(), "def test_a(res):\n    assert res\n".into()),
+        ("tests/b/__init__.py".into(), String::new()),
+        (
+            "tests/b/conftest.py".into(),
+            "import pytest\n\n@pytest.fixture\ndef res():\n    return 2\n".into(),
+        ),
+        ("tests/b/test_b.py".into(), "def test_b(res):\n    assert res\n".into()),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[("FAIL_A", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = store::map(&r.cache);
+    assert_ne!(
+        map["units"]["tests/a/test_a.py"]["tests"]["test_a"], "passed",
+        "{map:#}"
+    );
+    assert_eq!(
+        map["units"]["tests/b/test_b.py"]["tests"]["test_b"], "passed",
+        "{map:#}"
+    );
+}
+
+// covers: C-32
+#[test]
 fn in_observe_a_start_that_left_out_what_nothing_listed_records_no_unit_and_keeps_its_exit() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
         return;

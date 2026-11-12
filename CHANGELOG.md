@@ -172,6 +172,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - With `reads: test`, pytest's adapter follows what Python modules re-export: a package's
   `__init__.py` that binds names from another module, `from X import *`, and a module's `__all__`.
 - pytest's adapter takes a SQLite database a test connects to as read, as it does a file it opens.
+- A pytest fixture of a wider scope whose end fails keeps the pass of a test that asked for it at
+  run time (`request.getfixturevalue`), and no longer of a test served another fixture of its name.
 - pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
   name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
   list, and runs when it changes.

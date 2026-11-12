@@ -110,3 +110,15 @@ test that failed first.
   found `mmap`, `shutil.copyfile`, `zipimport`, `importlib.resources` and `glob.glob` followed
   already, through `open` or `os.scandir`; `os.stat` and `os.path.exists` raise no event, so a test
   that only asks whether a file is there isn't taken to have read it.
+
+## Amendment 3: what the third review ran (2026-11-12)
+
+- **Served, by definition.** Amendment 2 matched the tests a failing wider fixture served by its
+  definition, read once the test's protocol had ended; but pytest has dropped the test's request
+  by then, so the match fell back to names from `fixturenames`, which never hold a fixture asked
+  for with `request.getfixturevalue`. A session fixture `db` asked for that way, whose end failed
+  because the test leaked, left the test its pass: the next run left it out and passed on the same
+  code. The other way, a function fixture of the same name in another directory lost its test's
+  pass. The plugin now notes what a test was served as its teardown begins, while the request is
+  alive and before any fixture ends; names are the match only for a test whose teardown never
+  began.

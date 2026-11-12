@@ -1500,8 +1500,9 @@ def pytest_runtest_protocol(item, nextitem):
         except Exception:
             cut = True
         _call(_served, unit, test_id, _request_fixtures(item))
-        _call(_note_served, getattr(item, "nodeid", None), fixtures + _request_fixtures(item),
-              _request_fixture_defs(item))
+        # What it was served by name, for a test whose teardown never ran (its request is gone by
+        # now, so its definitions are the teardown's to note).
+        _call(_note_served, getattr(item, "nodeid", None), fixtures, ())
         _call(_protocol_end, unit, test_id, getattr(item, "nodeid", None), cut)
 
 
@@ -1560,8 +1561,10 @@ def _teardown_shares(obs, item, nextitem):
 
 def _note_served(obs, nodeid, names, def_ids):
     """[C-32] The fixtures a test was served, by name and by definition: what a wider fixture whose
-    end fails takes the pass of."""
-    obs.served[nodeid] = (frozenset(names), frozenset(def_ids))
+    end fails takes the pass of. Noted while its request is alive (its teardown, before any fixture
+    ends: pytest drops the request once the protocol ends), and added to."""
+    had_names, had_defs = obs.served.get(nodeid, (frozenset(), frozenset()))
+    obs.served[nodeid] = (had_names | frozenset(names), had_defs | frozenset(def_ids))
 
 
 def _request_fixture_defs(item):
@@ -1592,6 +1595,10 @@ def pytest_runtest_teardown(item, nextitem):
     if OBSERVER is not None and not OBSERVER.done:
         _call(lambda obs: obs.active and _served(obs, obs.active, obs.active_test,
                                                  _request_fixtures(item)))
+        # [C-32] What it was served, by definition, while its request still says: before any of
+        # its fixtures ends, a wider one whose end may fail included.
+        _call(_note_served, getattr(item, "nodeid", None), _request_fixtures(item),
+              _request_fixture_defs(item))
     yield
 
 
