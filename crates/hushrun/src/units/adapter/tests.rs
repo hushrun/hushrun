@@ -94,3 +94,24 @@ fn the_wider_matches_come_after_every_match_by_name() {
     assert_eq!(chosen(&shell, dir.path()), Ok("swift"));
     assert_eq!(chosen(&words("pytest -q"), dir.path()), Ok("pytest"));
 }
+
+#[test]
+fn a_program_is_known_by_its_name_whatever_its_directory_and_windows_extension() {
+    let dir = loads_all();
+    for (command, adapter) in [
+        ("cargo.EXE test", "cargo"),
+        ("C:\\go\\bin\\go.exe test ./...", "go"),
+        ("node_modules/.bin/vitest.CMD run", "vitest"),
+        ("vitest.bat run", "vitest"),
+        ("jest.bat", "jest"),
+        ("mvn.cmd test", "maven"),
+        ("gradlew.BAT test", "gradle"),
+        ("ctest.bat --test-dir build", "ctest"),
+    ] {
+        assert_eq!(
+            chosen(&words(command), dir.path()),
+            Ok(adapter),
+            "{command}"
+        );
+    }
+}

@@ -22,6 +22,7 @@ use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 use super::adapter::{
     Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
+use super::command::program_name;
 use super::facts::FactsFile;
 
 /// The adapter's word: its workers' facts files, this machine's store and a hint name it so.
@@ -93,17 +94,9 @@ const NODE_VALUES: &[&str] = &[
     "--env-file",
 ];
 
-fn program(word: &str) -> String {
-    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    file.strip_suffix(".cmd")
-        .or_else(|| file.strip_suffix(".exe"))
-        .unwrap_or(file)
-        .to_string()
-}
-
 /// Whether `word` names Jest's own program: `jest`, a path to it, or `jest/bin/jest.js`.
 fn is_jest(word: &str) -> bool {
-    let name = program(word);
+    let name = program_name(word);
     if name == "jest" {
         return true;
     }
@@ -120,7 +113,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
         if is_jest(first) {
             break;
         }
-        match program(first).as_str() {
+        match program_name(first) {
             "node" | "nodejs" => {
                 // `node [options] node_modules/jest/bin/jest.js`, the way to Jest's ESM mode.
                 let mut next = &rest[1..];
@@ -138,7 +131,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             }
             "pnpm" | "yarn" | "bun" | "npm" => {
                 // `pnpm jest`, `pnpm exec jest`, `yarn jest`, `bun x jest`, `npm exec -- jest`.
-                let manager = program(first);
+                let manager = program_name(first);
                 let mut next = &rest[1..];
                 if manager == "bun" && next.first().map(String::as_str) == Some("--bun") {
                     return Some(Err("Jest under Bun's own runtime doesn't load Node's options, which hushrun's adapter needs".into()));

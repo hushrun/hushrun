@@ -128,8 +128,7 @@ const VALUE_FLAGS: &[(&str, bool)] = &[
 /// is, in a form hushrun doesn't read, which the run says.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     let program = command.first()?;
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let file = file.strip_suffix(".exe").unwrap_or(file);
+    let file = super::command::program_name(program);
     if file != "go" || command.get(1).map(String::as_str) != Some("test") {
         return None;
     }

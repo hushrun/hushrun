@@ -34,6 +34,7 @@ use hushrun_core::units::{self, Facts, Set, Sets, Sources};
 
 use super::Seen;
 use super::adapter::{Adapter, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
+use super::command::program_name;
 use super::facts;
 use super::program;
 
@@ -82,18 +83,12 @@ pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapt
     }))
 }
 
-/// The file name of a command word, without `.exe`.
-fn name_of(word: &str) -> &str {
-    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    file.strip_suffix(".exe").unwrap_or(file)
-}
-
 /// What COMMAND is to the CTest adapter: `Some(Ok(Some(args)))` for `ctest …` itself,
 /// `Some(Ok(None))` for a COMMAND that starts it by name through something else.
 fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
     let first = command.first()?;
     let rest = &command[1..];
-    match name_of(first) {
+    match program_name(first) {
         "ctest" if first.contains(['/', '\\']) => Some(Err(format!(
             "COMMAND starts ctest by its path ({first}), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
         ))),
@@ -115,7 +110,7 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
             if targets_test && dir.join("CMakeCache.txt").is_file() {
                 return Some(Err(BYPASSED.to_string()));
             }
-            if name_of(first) == "ninja" || dir.join("CMakeCache.txt").is_file() {
+            if program_name(first) == "ninja" || dir.join("CMakeCache.txt").is_file() {
                 return None;
             }
             let makefile = ["GNUmakefile", "makefile", "Makefile"]
@@ -158,7 +153,7 @@ fn starts_ctest(text: &str) -> bool {
         .collect();
     let pytest = words
         .iter()
-        .any(|w| matches!(name_of(w), "pytest" | "py.test" | "tox" | "nox"));
+        .any(|w| matches!(program_name(w), "pytest" | "py.test" | "tox" | "nox"));
     words.contains(&"ctest") && !pytest
 }
 

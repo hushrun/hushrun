@@ -78,13 +78,7 @@ const LAUNCHERS: &[(&str, &[&str])] = &[
 /// What `command` is for the Vitest adapter: `None` when it doesn't start Vitest; `Some(Err(why))`
 /// when it does, in a way hushrun doesn't observe, which the run says.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
-    let name = |word: &str| {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        file.strip_suffix(".cmd")
-            .or_else(|| file.strip_suffix(".exe"))
-            .unwrap_or(file)
-            .to_string()
-    };
+    let name = |word: &str| super::command::program_name(word).to_string();
     let mut rest = command;
     loop {
         let first = name(rest.first()?);

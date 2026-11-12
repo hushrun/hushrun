@@ -33,6 +33,7 @@ use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
 use super::adapter::{Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras};
 use super::adapter::{StartAt, WhyAt};
+use super::command::program_name;
 use super::facts::{FactsFile, MergedTest};
 use super::jvm::{self, ClassEvents};
 
@@ -59,18 +60,6 @@ pub struct Recognized {
     pub launcher: String,
 }
 
-/// The program `word` names, without its directory or a Windows script's extension.
-fn program(word: &str) -> String {
-    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    let lower = file.to_ascii_lowercase();
-    for ext in [".cmd", ".bat", ".exe"] {
-        if let Some(stem) = lower.strip_suffix(ext) {
-            return stem.to_string();
-        }
-    }
-    file.to_string()
-}
-
 /// The `-D` properties `args` set, by name, the last of each: `-Dname=value`, `-Dname` (`true`),
 /// and `-D name=value`.
 fn properties(args: &[String]) -> BTreeMap<String, String> {
@@ -95,8 +84,8 @@ fn properties(args: &[String]) -> BTreeMap<String, String> {
 /// What `command` is for the Maven adapter: `None` when it doesn't start Maven; `Some(Err(why))`
 /// when it does in a way hushrun can't observe, which the run says.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
-    let launcher = program(command.first()?);
-    match launcher.as_str() {
+    let launcher = program_name(command.first()?);
+    match launcher {
         "mvn" | "mvnw" => {}
         "mvnd" | "mvnd.sh" => {
             return Some(Err(
@@ -117,7 +106,9 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
             "COMMAND sets -D{EXT_CLASS_PATH}, which would leave out hushrun's Maven extension"
         )));
     }
-    Some(Ok(Recognized { launcher }))
+    Some(Ok(Recognized {
+        launcher: launcher.to_string(),
+    }))
 }
 
 /// \[ADR 0085\] The Maven adapter for `mvn …` and `./mvnw …` (C-47); `None` for any other COMMAND.

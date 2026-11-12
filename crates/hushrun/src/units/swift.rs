@@ -38,6 +38,7 @@ use super::Seen;
 use super::adapter::{
     Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
+use super::command::program_name;
 use super::facts::{self, FactsFile, RunFile, TestFacts, UnitFacts};
 use super::program::{self, Call, Copied, Program};
 use super::store::Map;
@@ -124,16 +125,11 @@ const PYTHON: &[&str] = &[
     "rye", "coverage",
 ];
 
-fn file_name(word: &str) -> &str {
-    let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    file.strip_suffix(".exe").unwrap_or(file)
-}
-
 /// What `command` in `cwd` is for the adapter: `None` when it isn't its; `Some(Err(why))` when it
 /// is, in a form hushrun can't observe.
 pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>> {
     let mut words: Vec<&str> = command.iter().map(String::as_str).collect();
-    if words.first().map(|w| file_name(w)) == Some("env") {
+    if words.first().map(|w| program_name(w)) == Some("env") {
         words.remove(0);
         while words
             .first()
@@ -143,7 +139,7 @@ pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>
         }
     }
     let first = *words.first()?;
-    let name = file_name(first);
+    let name = program_name(first);
     let args: Option<Vec<&str>> = match name {
         "swift" if words.get(1) == Some(&"test") => Some(words[2..].to_vec()),
         "swift-test" => Some(words[1..].to_vec()),

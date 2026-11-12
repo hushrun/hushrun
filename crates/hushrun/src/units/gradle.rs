@@ -71,13 +71,7 @@ pub struct Recognized {
 /// wrapper `gradlew`, or either's `.bat`, by name or path); `Some(Err(why))` when it does, in a way
 /// hushrun doesn't observe.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
-    let program = command.first()?;
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let file = file
-        .strip_suffix(".bat")
-        .or_else(|| file.strip_suffix(".cmd"))
-        .or_else(|| file.strip_suffix(".exe"))
-        .unwrap_or(file);
+    let file = super::command::program_name(command.first()?);
     if file != "gradle" && file != "gradlew" {
         return None;
     }

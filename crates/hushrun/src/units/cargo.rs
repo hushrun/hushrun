@@ -124,8 +124,7 @@ const NEXTEST_VALUED: &[&str] = &[
 /// …` or `cargo [+toolchain] test …`.
 pub fn recognize(command: &[String]) -> Option<Recognized> {
     let program = command.first()?;
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let file = file.strip_suffix(".exe").unwrap_or(file);
+    let file = super::command::program_name(program);
     let mut rest = &command[1..];
     let mut toolchain = None;
     let nextest = match file {

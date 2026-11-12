@@ -75,13 +75,10 @@ pub fn variables(
 /// to its environments and not others, so in either the plugin pytest is told to load could be
 /// missing, and pytest would stop.
 pub fn unsafe_for(command: &[String]) -> Option<&'static str> {
-    let python = |word: &str| {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        file.starts_with("python")
-    };
+    let python = |word: &str| super::command::program_name(word).starts_with("python");
     let mut after_python = false;
     for word in command {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        let file = super::command::program_name(word);
         if file == "tox" || file.starts_with("tox.") || file == "nox" {
             return Some("tox and nox choose what reaches their environments");
         }
