@@ -5,13 +5,14 @@
 //! and calls [`Session::finish`] after it exits. The wrapper finds the session through
 //! [`SESSION`] and reads no setting of its own, so every compile of one run sees one mode.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::audit::Audit;
 use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs};
 use crate::settings::{self, Overrides, Settings};
 use crate::store::{DAY, Store};
@@ -113,6 +114,10 @@ pub struct Current {
     /// machines. Nothing is written otherwise.
     #[serde(default)]
     pub key_log: Option<PathBuf>,
+    /// How many of the compiles that could be reused this run audits (B-16), from
+    /// `HUSHRUN_BUILD_AUDIT` as `hushrun run` began.
+    #[serde(default)]
+    pub audit: Audit,
     /// The session's folder.
     pub folder: PathBuf,
 }
@@ -502,6 +507,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         key_log: (start.env)(KEY_LOG)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute()),
+        audit: Audit::from_var((start.env)(crate::audit::VAR).as_deref().and_then(OsStr::to_str)),
         folder,
     };
     let file = current.folder.join(SESSION_FILE);
@@ -739,6 +745,15 @@ mod tests {
         let folder = session.env()[1].1.clone();
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(found.programs, Programs::Tied);
+        assert_eq!(found.audit, Audit::OneIn);
+        session.finish(UNIX_EPOCH);
+
+        // How many compiles the run audits is read once, as it begins (B-16).
+        let every = |name: &str| (name == crate::audit::VAR).then(|| OsString::from("every"));
+        let session = begin(&start(dir.path(), &settings, &exe, &every)).unwrap();
+        let folder = session.env()[1].1.clone();
+        let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
+        assert_eq!(found.audit, Audit::Every);
         session.finish(UNIX_EPOCH);
 
         // Never in CI, and never over a wrapper the person set.

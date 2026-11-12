@@ -226,7 +226,9 @@ reused. `hushrun build clean` clears it.
 **B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
 chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the
 block's. A difference serves the fresh outputs, suspends the key and is reported. Programs and
-proc macros are not compared.
+proc macros are not compared. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
+every such compile when it is `every` and none when it is `none`: a replay that compares two
+machines asks for the first, a test that expects a reuse for the second.
 
 **B-17 The compiler.** The compiler's identity is: the path given, resolved; its size and
 modification time; `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; under rustup, the size and modification

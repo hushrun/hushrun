@@ -419,6 +419,8 @@ impl Call<'_> {
             "package": entry.package,
             "class": entry.class,
             "outcome": entry.outcome,
+            "found": entry.found,
+            "differed": entry.differed,
             "portable": entry.portable,
             "keys": &*keys,
         });
@@ -830,7 +832,10 @@ impl Call<'_> {
                     };
                     let serves_form = description.messages.form() == self.invocation.form()
                         || description.messages.only_notices();
-                    let audit = self.ports.audited(&key, self.current.started_ms);
+                    let audit = self
+                        .current
+                        .audit
+                        .picks(|| self.ports.audited(&key, self.current.started_ms));
                     if self.current.key_log.is_some() {
                         let mut keys = self.keys.borrow_mut();
                         keys.block = Some(key);
