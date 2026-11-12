@@ -103,7 +103,13 @@ pub struct Copied {
     /// printed can't be read whole, so no pass of it is recorded. What comes later is passed on
     /// all the same, by a forwarder of its own ([`FORWARD`]).
     pub held: bool,
+    /// It printed more than [`KEEP_MOST`]: what came after wasn't kept (it was passed on), so
+    /// what it printed can't be read whole and no pass of it is recorded.
+    pub cut: bool,
 }
+
+/// \[ADR 0086\] The most of a program's output [`run_copying_stdout`] keeps to read.
+pub const KEEP_MOST: usize = 16 << 20;
 
 /// \[ADR 0086\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
 /// to tell "still held open by a program it left running" from "closing now": what its last
@@ -157,21 +163,26 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
     let mut ended_at: Option<Instant> = None;
     let mut last = Instant::now();
     let mut held = false;
+    let mut cut = false;
     loop {
-        match from.read(&mut buf) {
+        // Every pass, whatever arrives, asks whether the program ended, and counts from its end.
+        let read = match from.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                kept.extend_from_slice(&buf[..n]);
+                // Kept up to KEEP_MOST to be read; passed on whole.
+                let room = KEEP_MOST.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+                cut |= n > room;
                 let mut out = out.lock();
                 let _ = out.write_all(&buf[..n]).and_then(|()| out.flush());
                 last = Instant::now();
-                continue;
+                true
             }
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => true,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => false,
             // Once nothing holds a terminal, Linux answers EIO, and macOS the end.
             Err(_) => break,
-        }
+        };
         if status.is_none() {
             match child.try_wait() {
                 Ok(Some(done)) => {
@@ -191,7 +202,9 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
             held = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        if !read {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
     let status = match status {
         Some(status) => status,
@@ -215,10 +228,12 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
             signal: super::runner::signal_of(&status),
             stdout: kept,
             held,
+            cut,
         },
         None => Copied {
             stdout: kept,
             held,
+            cut,
             ..Copied::default()
         },
     })
@@ -302,6 +317,7 @@ pub fn run_copying_stdout(mut command: Command) -> std::io::Result<Copied> {
         signal: None,
         stdout,
         held: false,
+        cut: false,
     })
 }
 
@@ -823,6 +839,38 @@ mod tests {
             super::super::runner::ending(copied.exit, copied.signal, cfg!(windows)),
             super::super::runner::Ending::Whole(300)
         );
+    }
+
+    // covers: C-48
+    #[cfg(unix)]
+    #[test]
+    fn output_that_never_stops_is_handed_over_and_kept_only_so_far() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid = tmp.path().join("pid");
+        // The program exits, and leaves one printing as fast as it can.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("yes & echo $! > '{}'; exit 4", pid.display()));
+        // Whatever happens, `yes` stops after 10 s.
+        let watched = pid.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            if let Ok(text) = std::fs::read_to_string(&watched) {
+                let _ = Command::new("kill").arg(text.trim()).status();
+            }
+        });
+        let started = std::time::Instant::now();
+        let copied = run_copying_stdout(command).unwrap();
+        let took = started.elapsed();
+        if let Ok(text) = std::fs::read_to_string(&pid) {
+            let _ = Command::new("kill").arg(text.trim()).status();
+        }
+        assert_eq!(copied.exit, Some(4));
+        assert!(took < MOST_AFTER * 4, "{took:?}");
+        assert!(copied.held);
+        assert!(copied.stdout.len() <= KEEP_MOST, "{}", copied.stdout.len());
+        assert!(copied.cut);
     }
 
     // covers: C-39

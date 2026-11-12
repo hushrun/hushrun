@@ -2015,7 +2015,7 @@ fn facts_of(
         .as_ref()
         .and_then(|f| f.read(run.at))
         .map(|bytes| read_xunit(&bytes, listing));
-    tested(
+    let mut file = tested(
         listing,
         &console,
         events.as_ref(),
@@ -2024,8 +2024,19 @@ fn facts_of(
         parsed,
         run.copied.exit,
         package,
-        run.copied.held,
-    )
+        run.copied.held || run.copied.cut,
+    );
+    // \[C-48\] Past what hushrun keeps of its output, what it printed can't be read whole.
+    if run.copied.cut {
+        file.settings.insert(
+            "cut".to_string(),
+            Value::String(format!(
+                "swift test printed more than the {} MiB hushrun reads: no pass of it is recorded",
+                program::KEEP_MOST >> 20
+            )),
+        );
+    }
+    file
 }
 
 /// \[C-48\] The facts file of a run from what each source said (pure, for tests).
