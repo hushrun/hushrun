@@ -255,11 +255,26 @@ impl Fake {
                 _ if plan.rlib_members.is_some() => {
                     let path = out.join(format!("lib{stem}.rlib"));
                     let rlib = format!("rlib\n{content}");
-                    let members: Vec<(&str, &[u8])> = plan
+                    // `lib.rmeta` holds the crate's metadata after rustc's header; a member
+                    // written `name<path` holds that file's bytes, as a bundled object does.
+                    let mut meta = b"rust\0\0\0\x0a".to_vec();
+                    let mut inner = b"rust\0\0\0\x0a".to_vec();
+                    inner.extend_from_slice(rlib.as_bytes());
+                    meta.extend_from_slice(&(inner.len() as u64).to_le_bytes());
+                    meta.extend_from_slice(&inner);
+                    let members: Vec<(String, Vec<u8>)> = plan
                         .rlib_members
                         .iter()
                         .flatten()
-                        .map(|name| (name.as_str(), rlib.as_bytes()))
+                        .map(|spec| match spec.split_once('<') {
+                            Some((name, from)) => (name.to_string(), fs::read(from).unwrap()),
+                            None if spec == "lib.rmeta" => (spec.clone(), meta.clone()),
+                            None => (spec.clone(), rlib.as_bytes().to_vec()),
+                        })
+                        .collect();
+                    let members: Vec<(&str, &[u8])> = members
+                        .iter()
+                        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
                         .collect();
                     let temp = out.join(format!(".{stem}.ar"));
                     crate::rlib::write_gnu(&temp, &members).unwrap();
@@ -2740,7 +2755,8 @@ fn a_library_that_bundled_nothing_is_not_keyed_by_the_static_libraries_beside_it
             let ws = w.checkout(name);
             let dir = ws.join("target/debug/build/ring-1/out");
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("libring_core.a"), bytes).unwrap();
+            crate::rlib::write_gnu(&dir.join("libring_core.a"), &[("curve25519.o", bytes)])
+                .unwrap();
             let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
             (ws, format!("native={dir}"))
         };
@@ -2759,6 +2775,53 @@ fn a_library_that_bundled_nothing_is_not_keyed_by_the_static_libraries_beside_it
         let ws = setup("three", b"objects naming /home/runner/.cargo");
         fs::write(ws.0.join("target/debug/build/ring-1/out/new.txt"), b"").unwrap();
         assert_eq!(run(&ws), STORED, "the folder's names changed");
+    }
+}
+
+// covers: B-6
+#[test]
+fn a_bundled_object_under_rustcs_own_names_is_found_by_its_bytes() {
+    // A build script's C object bundled as a second `lib.rmeta`, or named with the dependent's
+    // own prefix (which a build script can read from `target/debug/.fingerprint/`): the names
+    // look like rustc's, the bytes are the static library's. A changed C file must not reuse
+    // the library built from the old one.
+    for forged in ["lib.rmeta", "a-xa.inner.rcgu.o"] {
+        let w = world(Mode::On);
+        let setup = |name: &str, object: &[u8]| {
+            let ws = w.checkout(name);
+            let dir = ws.join("target/debug/build/u-1/out");
+            fs::create_dir_all(&dir).unwrap();
+            crate::rlib::write_gnu(&dir.join("libinner.a"), &[("inner.o", object)]).unwrap();
+            fs::write(ws.join("inner.o"), object).unwrap();
+            let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
+            (ws, format!("native={dir}"))
+        };
+        let run = |(ws, native): &(PathBuf, String)| {
+            w.plan(
+                "a",
+                Plan {
+                    rlib_members: Some(vec![
+                        "lib.rmeta".into(),
+                        "a-xa.a.1-cgu.0.rcgu.o".into(),
+                        format!("{forged}<{}", ws.join("inner.o").display()),
+                    ]),
+                    ..Plan::default()
+                },
+            );
+            settle();
+            w.call(ws, "a", &["-L", native]).outcome()
+        };
+        assert_eq!(run(&setup("one", b"inner_value returns 1")), STORED);
+        assert_eq!(
+            run(&setup("two", b"inner_value returns 2")),
+            STORED,
+            "{forged}: the C changed"
+        );
+        assert_eq!(
+            run(&setup("three", b"inner_value returns 1")),
+            REUSED,
+            "{forged}: the same C"
+        );
     }
 }
 

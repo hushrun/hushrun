@@ -1184,8 +1184,8 @@ impl Call<'_> {
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
         // B-6: a library whose `.rlib` holds only rustc's own members (its metadata, and the
-        // objects named with its crate name and extra filename) bundled no static library, so
-        // the static libraries in its native folders are not in its bytes.
+        // objects named with its crate name and extra filename), none of them a member of a
+        // static library in its native folders, bundled none, so their bytes are not in its own.
         if inv.class() == Class::Library
             && observed
                 .native_dirs
@@ -1197,7 +1197,8 @@ impl Call<'_> {
                 .find(|o| o.file.kind == OutputKind::Link && o.file.name.ends_with(".rlib"))
                 .is_some_and(|o| {
                     let prefix = crate::rlib::own_prefix(inv.crate_name(), inv.extra_filename());
-                    crate::rlib::bundles_nothing(&o.file.path, &prefix) == Some(true)
+                    crate::rlib::bundles_nothing(&o.file.path, &prefix, &self.native_archives())
+                        == Some(true)
                 });
         }
         if inv.class() != Class::Library {
@@ -1313,6 +1314,39 @@ impl Call<'_> {
             dep_info: info,
             portability,
         })
+    }
+
+    /// Every static library (`*.a`, `*.lib`) directly in a folder rustc searches for native
+    /// libraries: each `-L native=`, `-L all=` and bare `-L` (B-6). A folder that can't be
+    /// listed adds nothing; one rustc couldn't list either bundles nothing from it.
+    fn native_archives(&self) -> Vec<PathBuf> {
+        let inv = self.invocation;
+        let mut out = Vec::new();
+        for search in inv.search_paths() {
+            if !matches!(
+                search.kind,
+                crate::invocation::SearchKind::Native | crate::invocation::SearchKind::All
+            ) {
+                continue;
+            }
+            let dir = Path::new(inv.cwd()).join(&search.path);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if (name.ends_with(".a") || name.ends_with(".lib"))
+                    && std::fs::metadata(&path).is_ok_and(|m| m.is_file())
+                {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Step 11: the files rustc announced, each hashed and searched for the roots and for the

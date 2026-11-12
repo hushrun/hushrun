@@ -58,9 +58,11 @@ differed under equal keys with no path in them.
   swept like unused blocks (B-14). A link through it is judged by the toolchain's file (B-11).
 - **What reaches only some compiles stays out of the others' keys** (B-5, B-6): a library's key
   holds neither the linker's variables nor the SDK (`SDKROOT`, `DEVELOPER_DIR`), since rustc
-  writes a library itself; and a library whose `.rlib` holds only `lib.rmeta` and objects named
-  with its own crate name and extra filename bundled nothing, so the static libraries in its
-  native folders are named by their entries, not their bytes. `SOURCE_DATE_EPOCH` stays in every
+  writes a library itself; and a library whose `.rlib` holds only its one `lib.rmeta` and objects
+  named with its own crate name and extra filename, none of them byte for byte a member of a
+  static library in its native folders, bundled nothing, so those static libraries are named by
+  their entries, not their bytes. Names alone were not enough: a build script can name its
+  object `lib.rmeta` or read the dependent's extra filename from disk. `SOURCE_DATE_EPOCH` stays in every
   key: a proc macro runs inside rustc and can read it, and a library's command line doesn't show
   a macro re-exported by another library.
 - **The audit can be set for a run** (B-16): `HUSHRUN_BUILD_AUDIT=every` for replays that compare

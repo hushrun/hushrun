@@ -22,8 +22,9 @@ pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 /// bases, a proc macro named by what it was built from. v6: and by its metadata. v7: a library
 /// that bundled nothing names its native folders without their static libraries. v8: only the
 /// crate's own objects count as rustc's (a v7 hint judged by a member's suffix). v9: a block
-/// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]).
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v9";
+/// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]). v10: a
+/// library bundled nothing only when no member of its `.rlib` is a native library's member too.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v10";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -281,9 +282,9 @@ pub struct Observed {
     /// Every `-L native=`, `all=` and bare folder: its names and its static libraries (B-6).
     pub native_dirs: Vec<NativeDir>,
     /// A library whose `.rlib` holds nothing but rustc's own members (its metadata and the
-    /// objects named with its crate name and extra filename) bundled no static library (B-6):
-    /// its native folders are named without their static libraries' bytes, which are not in its
-    /// own.
+    /// objects named with its crate name and extra filename), none of them a member of a static
+    /// library in its native folders, bundled none (B-6): its native folders are named without
+    /// their static libraries' bytes, which are not in its own.
     #[serde(default)]
     pub bundles_nothing: bool,
     /// Every folder that directly holds a read file.
@@ -869,7 +870,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "c477f0d37dd0f51d39f14aead9069613c63277607f5356609f483ef21b7c77bd"
+            "ea3f41fa2c8cd1c450fffe749187e45322cba559f7541d48eeadb4815fbfd9d8"
         );
     }
 
