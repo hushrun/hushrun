@@ -28,6 +28,7 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Contract: this machine's store of what test files read is now
   `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests; a `v1` file is left
   alone. A CI cache step names `*.v2.sqlite`.
+- The **`swift test` adapter** ([ADR 0086](docs/adr/0086-swift-test.md)): test targets, and with `unit: test` XCTest and Swift Testing tests, through hushrun's `swift` on COMMAND's `PATH`.
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been
   reused, and `on` reuses. `status`, also `hushrun build` alone, shows the mode, the store's

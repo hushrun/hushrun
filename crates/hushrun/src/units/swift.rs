@@ -1561,7 +1561,7 @@ impl Program for SwiftProgram {
             .iter()
             .map(|a| a.to_str().map(str::to_string))
             .collect::<Option<_>>()?;
-        let (prefix, test): (&[&str], &[String]) = if self.0 == "swift" {
+        let (prefix, test): (&[&str], &[String]) = if call.name == "swift" {
             if args.first().map(String::as_str) != Some("test") {
                 return None;
             }
