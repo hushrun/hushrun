@@ -22,7 +22,11 @@ and on Linux, found what can be relied on and what can't; this decision is what 
    Testing's `Suite/Nested/func(labels:)` or `func(labels:)` outside a suite, a raw identifier with
    its backticks. A parametrized test is one test: `--skip` can't leave out one of its cases. Two
    `private` tests of one name in two files get `/File.swift:line:column` after their ids, which
-   moves when a line does: such a test is never left out, nor reported one by one.
+   moves when a line does: such a test is never left out, nor reported one by one. The adapter
+   leaves it out of its `--skip` patterns and out of the tests it reports (it sends no
+   `neverLeftOut`): it runs whenever its target runs, counts in no total of tests, and keeps no
+   result of its own; a failure of it fails its target, whose other tests then keep no pass, as
+   for any failure no reported test explains (C-39).
 3. **Reads, before the run.** `swift package --package-path P --scratch-path <hushrun's own>
    describe --type json`, followed into every dependency of type `fileSystem`, gives each target's
    directory, its targets and its products; `dump-package` gives the settings `describe` leaves
