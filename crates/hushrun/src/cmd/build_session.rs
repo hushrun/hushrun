@@ -47,13 +47,40 @@ pub(crate) fn begin(now: SystemTime, repository: Option<&str>) -> Result<Session
     begin_with(&here, std::env::current_exe())
 }
 
+/// Whether a toolchain under rustup's home could have sources (`lib/rustlib/src` or
+/// `lib/rustlib/rustc-src`), or there is no rustup home to look in (then cargo's `rustc` is
+/// something else, and is asked). A few `stat`s.
+fn rustup_has_sources(env: &dyn Fn(&str) -> Option<OsString>) -> bool {
+    let home = env("RUSTUP_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".rustup"))
+        });
+    let Some(Ok(toolchains)) = home.map(|home| std::fs::read_dir(home.join("toolchains"))) else {
+        return true;
+    };
+    toolchains.flatten().any(|toolchain| {
+        let rustlib = toolchain.path().join("lib").join("rustlib");
+        ["src", "rustc-src"]
+            .iter()
+            .any(|name| std::fs::symlink_metadata(rustlib.join(name)).is_ok())
+    })
+}
+
 /// The sysroot of the rustc cargo will call in `folder`: `RUSTC`, else `rustc` on `PATH` (the
 /// rustup proxy picks the folder's toolchain), as `rustc --print sysroot` says. `None` when it
 /// can't be run.
 fn rustc_sysroot(folder: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let rustc = env("RUSTC")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| OsString::from("rustc"));
+    let rustc = env("RUSTC").filter(|value| !value.is_empty());
+    // Asking the rustup proxy costs a process and rustup's start (about 100 ms). When rustup's
+    // own toolchains are what cargo will call and none has sources, there is nothing to make.
+    if rustc.is_none() && !rustup_has_sources(env) {
+        return None;
+    }
+    let rustc = rustc.unwrap_or_else(|| OsString::from("rustc"));
     let out = std::process::Command::new(rustc)
         .args(["--print", "sysroot"])
         .current_dir(folder)
@@ -174,6 +201,22 @@ mod tests {
             folder: None,
             sysroot: &|_| None,
         }
+    }
+
+    // covers: B-17
+    #[test]
+    fn the_compiler_is_asked_for_its_sysroot_only_where_a_toolchain_may_have_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("rustup");
+        let named = home.clone().into_os_string();
+        let env = move |name: &str| (name == "RUSTUP_HOME").then(|| named.clone());
+        std::fs::create_dir_all(home.join("toolchains/stable-x/lib/rustlib/x/lib")).unwrap();
+        assert!(!rustup_has_sources(&env));
+        // No rustup home at all: cargo's rustc is something else, and is asked.
+        let none = |_: &str| None::<OsString>;
+        assert!(rustup_has_sources(&none));
+        std::fs::create_dir_all(home.join("toolchains/nightly-x/lib/rustlib/src/rust")).unwrap();
+        assert!(rustup_has_sources(&env));
     }
 
     fn lost() -> std::io::Result<PathBuf> {
