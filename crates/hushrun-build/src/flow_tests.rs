@@ -3197,14 +3197,28 @@ const INDEX: &str = "registry/src/index.crates.io-1949cf8c6b5b557f";
 struct Box2 {
     w: World,
     home: PathBuf,
+    /// `CARGO_HOME`, or `<home>/.cargo`.
+    cargo_home: PathBuf,
+    /// `RUSTUP_HOME`, or `<home>/.rustup`.
+    rustup_home: PathBuf,
     toolchain: String,
     key_log: PathBuf,
 }
 
 fn a_machine(user: &str, toolchain: &str) -> Box2 {
+    a_machine_with(user, toolchain, None)
+}
+
+/// [`a_machine`], with `CARGO_HOME` and `RUSTUP_HOME` set to these folders under the machine's
+/// root, as an image that installs Rust under a system folder does.
+fn a_machine_with(user: &str, toolchain: &str, homes: Option<(&str, &str)>) -> Box2 {
     let dir = tempfile::tempdir().unwrap();
     let root = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
     let home = root.join("home").join(user);
+    let (cargo_home, rustup_home) = match homes {
+        Some((cargo, rustup)) => (root.join(cargo), root.join(rustup)),
+        None => (home.join(".cargo"), home.join(".rustup")),
+    };
     let key_log = root.join("keys.jsonl");
     let settings = root.join("build.json");
     settings::update(&settings, |s| {
@@ -3217,9 +3231,12 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
     let env = {
         let home = home.clone();
         let key_log = key_log.clone();
+        let set = homes.map(|_| (cargo_home.clone(), rustup_home.clone()));
         move |name: &str| match name {
             "HOME" => Some(home.clone().into_os_string()),
             session::KEY_LOG => Some(key_log.clone().into_os_string()),
+            "CARGO_HOME" => set.as_ref().map(|s| s.0.clone().into_os_string()),
+            "RUSTUP_HOME" => set.as_ref().map(|s| s.1.clone().into_os_string()),
             _ => None,
         }
     };
@@ -3234,7 +3251,7 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
     })
     .unwrap();
     // The same toolchain, installed under this machine's own name.
-    let sysroot = home.join(".rustup/toolchains").join(toolchain);
+    let sysroot = rustup_home.join("toolchains").join(toolchain);
     let rustc = sysroot.join("bin/rustc");
     for (rest, bytes) in [
         ("bin/rustc", &b"fake rustc"[..]),
@@ -3245,7 +3262,7 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
         fs::write(sysroot.join(rest), bytes).unwrap();
     }
     // A registry package unpacked in this machine's cargo home.
-    let package = home.join(".cargo").join(INDEX).join("reg-1.0.0");
+    let package = cargo_home.join(INDEX).join("reg-1.0.0");
     fs::create_dir_all(package.join("src")).unwrap();
     fs::write(package.join("src/lib.rs"), "mod util;\n").unwrap();
     fs::write(package.join("src/util.rs"), "pub fn util() {}\n").unwrap();
@@ -3258,6 +3275,8 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
             plans: Rc::default(),
         },
         home,
+        cargo_home,
+        rustup_home,
         toolchain: toolchain.to_string(),
         key_log,
     }
@@ -3265,14 +3284,14 @@ fn a_machine(user: &str, toolchain: &str) -> Box2 {
 
 impl Box2 {
     fn package(&self) -> PathBuf {
-        self.home.join(".cargo").join(INDEX).join("reg-1.0.0")
+        self.cargo_home.join(INDEX).join("reg-1.0.0")
     }
 
     /// The variables cargo and rustup hand every compile on this machine.
     fn toolchain_vars(&self, fake: &mut Fake) {
         fake.vars.insert(
             "RUSTUP_HOME".into(),
-            self.home.join(".rustup").to_str().unwrap().into(),
+            self.rustup_home.to_str().unwrap().into(),
         );
         fake.vars
             .insert("RUSTUP_TOOLCHAIN".into(), self.toolchain.clone());
@@ -3368,7 +3387,7 @@ fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_bet
         assert_eq!(reg.outcome(), STORED, "{}", reg.stderr);
         // The cargo home was remapped like the workspace.
         let args = &reg.seen.compiles[0];
-        let cargo_home = m.home.join(".cargo");
+        let cargo_home = m.cargo_home.clone();
         assert!(
             args.contains(&format!(
                 "--remap-path-prefix={}=/hushrun/cargo",
@@ -3435,7 +3454,7 @@ fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_bet
 
 /// Gives machine `m`'s toolchain the standard library's sources, as rustup's `rust-src` does.
 fn with_rust_src(m: &Box2) {
-    let sysroot = m.home.join(".rustup/toolchains").join(&m.toolchain);
+    let sysroot = m.rustup_home.join("toolchains").join(&m.toolchain);
     for rest in [
         "lib/rustlib/src/rust/library/std/src/lib.rs",
         "lib/rustlib/src/rust/library/core/src/macros/mod.rs",
@@ -3483,7 +3502,7 @@ fn a_machine_with_the_standard_librarys_sources_compiles_as_one_without_them() {
         "nothing to hide"
     );
     let view = sysroot_arg(&reg_b.seen.compiles[0]).expect("a sysroot without the sources");
-    let toolchain_b = b.home.join(".rustup/toolchains").join(&b.toolchain);
+    let toolchain_b = b.rustup_home.join("toolchains").join(&b.toolchain);
     assert!(toolchain_b.join("lib/rustlib/src").is_dir());
     assert!(!view.join("lib/rustlib/src").exists(), "{}", view.display());
     assert_eq!(
@@ -3617,6 +3636,73 @@ fn a_dependent_of_a_proc_macro_whose_metadata_differs_elsewhere_is_built_not_reu
         assert_eq!(named(&a) == named(&b), !metadata_differs);
         assert!(named(&b)["produced-by"].is_string(), "{}", named(&b));
     }
+}
+
+// covers: B-6, B-8
+#[test]
+fn a_dotenv_search_above_a_cargo_home_in_a_shared_folder_is_keyed_as_above_a_home() {
+    // One machine keeps the cargo home in its home folder, the other under a shared folder (the
+    // rustup home here; `/opt/tools/cargo` or the official image's `/usr/local/cargo` for
+    // real). A macro that reads the first `.env` walking up from a registry package must give
+    // the same key on both: the shared folders above the cargo home are that machine's layout,
+    // not places the block was read from.
+    let a = a_machine("runner", "stable-aarch64-apple-darwin");
+    let b = a_machine_with(
+        "agent",
+        "1.94.0-aarch64-apple-darwin",
+        Some(("opt/tools/cargo", "opt/tools")),
+    );
+    assert!(b.cargo_home.starts_with(&b.rustup_home));
+    let call = |m: &Box2, ws: &Path| {
+        let sqlx = ws.join("target/debug/deps/libsqlx-s.rlib");
+        fs::write(&sqlx, "the same sqlx").unwrap();
+        let source = m.package().join("src/lib.rs");
+        let ext = format!("sqlx={}", sqlx.display());
+        let args: Vec<OsString> =
+            m.w.args(ws, "reg", &["--extern", &ext])
+                .into_iter()
+                .map(|arg| {
+                    if arg == "reg/src/lib.rs" {
+                        source.clone().into_os_string()
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+        m.w.call_args(ws, "reg", args, |fake| {
+            m.toolchain_vars(fake);
+            fake.vars.insert(
+                "CARGO_MANIFEST_DIR".into(),
+                m.package().to_str().unwrap().into(),
+            );
+            fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+        })
+    };
+    for m in [&a, &b] {
+        m.w.plan("reg", Plan::default());
+    }
+    let (ws_a, ws_b) = (a.w.checkout("ws"), b.w.checkout("workspace/project"));
+    settle();
+    for (m, ws) in [(&a, &ws_a), (&b, &ws_b)] {
+        let r = call(m, ws);
+        assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+        let portable = r.entry.unwrap().portable.unwrap();
+        assert!(portable.portable, "{portable:?}");
+    }
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    assert_eq!(keys_a["reg"]["keys"]["step"], keys_b["reg"]["keys"]["step"]);
+    assert_eq!(
+        keys_a["reg"]["keys"]["block"], keys_b["reg"]["keys"]["block"],
+        "{}\n{}",
+        keys_a["reg"]["keys"]["second_parts"], keys_b["reg"]["keys"]["second_parts"]
+    );
+    // A `.env` in the shared folder above B's cargo home is what the search finds there: another
+    // key, by its bytes.
+    fs::write(b.rustup_home.join(".env"), "DATABASE_URL=postgres://x\n").unwrap();
+    settle();
+    let r = call(&b, &ws_b);
+    assert_eq!(r.outcome(), STORED);
+    assert!(!r.entry.unwrap().found);
 }
 
 /// Copies every file under `from` to the same place under `to`.

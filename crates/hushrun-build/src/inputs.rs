@@ -485,13 +485,16 @@ impl Context<'_> {
     }
 
     /// An upward search for the file `name` from the folder `from` (B-6 `declared`), as a macro
-    /// that reads the first one it finds walking up does it. Each place under a root or a shared
-    /// folder goes into `files`, read where it lies as any other. From the first folder above
-    /// them all, one entry goes into `above`: the first file of that name found walking on up
-    /// from there, by its bytes, or none. That holds no folder outside the roots, so it doesn't
-    /// tie the block (B-8), and it is computed from this call's own folders, so it never opens
-    /// another checkout's path. Every place it looked at is watched, so a file that appears,
-    /// goes or changes there while compiling is caught (B-11).
+    /// that reads the first one it finds walking up does it. Each place under a root or a base
+    /// goes into `files`, read where it lies as any other; so does each place under a shared
+    /// folder when the search starts there. From the first folder above them all, one entry goes
+    /// into `above`: the first file of that name found walking on up from there, by its bytes,
+    /// or none. A shared folder above a root or a base (`/opt` above a cargo home in
+    /// `/opt/tools/cargo`) is the machine's own layout, like the home folder above `~/.cargo`,
+    /// and is in that entry too, never read where it lies. The entry holds no folder outside the
+    /// roots, so it doesn't tie the block (B-8), and it is computed from this call's own folders,
+    /// so it never opens another checkout's path. Every place it looked at is watched, so a file
+    /// that appears, goes or changes there while compiling is caught (B-11).
     ///
     /// Cost: one `stat` per folder above the roots, up to the first file found.
     fn upward(
@@ -503,9 +506,17 @@ impl Context<'_> {
         watched: &mut Vec<Watched>,
     ) -> Result<(), NotStored> {
         let mut below = None;
+        let mut rooted = false;
         for dir in from.ancestors() {
             let candidate = dir.join(name);
-            if !matches!(self.located(&candidate)?, Located::Outside(_)) {
+            let at = self.located(&candidate)?;
+            let read_here = match at {
+                Located::Rooted(_) => true,
+                Located::Shared(_) => !rooted,
+                Located::Outside(_) => false,
+            };
+            if read_here {
+                rooted |= matches!(at, Located::Rooted(_));
                 files.push(candidate);
                 below = Some(self.located(dir)?);
                 continue;
