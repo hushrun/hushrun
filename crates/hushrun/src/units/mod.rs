@@ -1682,6 +1682,7 @@ fn decide(
         }
     }
     let mut counts = Counts::default();
+    let mut file_keys: BTreeSet<Digest> = BTreeSet::new();
     let mut test_counts = TestCounts::default();
     let mut told_tests = false;
     let mut saved_ms = 0u64;
@@ -1847,6 +1848,9 @@ fn decide(
             reads.extend(before.reads.keys().cloned());
         }
         let key = state.recorded().and_then(|_| keyer.key(unit, &reads));
+        if let Some(key) = key {
+            file_keys.insert(key);
+        }
         if let (Some(passed), Some(key)) = (state.recorded(), key) {
             out.records.push(UnitRecord {
                 key,
@@ -1980,10 +1984,9 @@ fn decide(
     if matches!(how, How::Plan(_)) && (counts.reused > 0 || test_counts.reused > 0) {
         counts.saved_ms = Some(saved_ms);
     }
-    if out.records.len() > MOST_UNITS {
-        // More than a server takes for one run: none goes, so none counts.
-        out.records.clear();
-    }
+    // \[RFC 0004 §3.8\] In the order whatever a server cuts is a pass of: failures, then test
+    // files' results, then tests' passes. The backend sends what its server takes.
+    out.records = order_records(std::mem::take(&mut out.records), &file_keys);
 
     // What `observe` says (RFC 0003 §1.2, RFC 0004 §1.2), in the words people read: test files,
     // tests, the files they read.
@@ -2083,6 +2086,17 @@ fn decide(
     }
     out.counts = Some(counts);
     out
+}
+
+/// \[RFC 0004 §3.8\] `records` in the order a server that takes fewer keeps the first of: every
+/// failure, then the passes of test files (`file_keys`), then the passes of tests. Cutting the end
+/// only ever loses a pass, which costs its next run; a lost failure could let an older pass reuse.
+fn order_records(records: Vec<UnitRecord>, file_keys: &BTreeSet<Digest>) -> Vec<UnitRecord> {
+    let (fails, passes): (Vec<UnitRecord>, Vec<UnitRecord>) =
+        records.into_iter().partition(|r| r.result != "pass");
+    let (files, tests): (Vec<UnitRecord>, Vec<UnitRecord>) =
+        passes.into_iter().partition(|r| file_keys.contains(&r.key));
+    fails.into_iter().chain(files).chain(tests).collect()
 }
 
 /// Of `files`, those a key holds (units and sources), each with its kind and content hash now, as

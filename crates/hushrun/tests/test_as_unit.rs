@@ -11,6 +11,7 @@ mod store;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hushrun_testkit::fake_results::FakeResults;
 use hushrun_testkit::git;
 use serde_json::{Value, json};
 
@@ -709,4 +710,106 @@ fn the_plugin_reports_each_test_and_deselects_the_tests_it_is_told() {
     );
     let child = unit_of(&facts[0], "tests/test_child.py");
     assert_eq!(child["notFollowed"][0]["why"], "subprocess");
+}
+
+fn with_server(results: &FakeResults) -> Vec<(&'static str, String)> {
+    vec![
+        ("HUSHRUN_BACKEND", results.url()),
+        ("HUSHRUN_TOKEN", FakeResults::TOKEN.to_string()),
+    ]
+}
+
+fn envs<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pairs.iter().map(|(n, v)| (*n, v.as_str())).collect()
+}
+
+/// A test file of 6,000 tests, one of which fails while `FAIL` is set, and one more test file.
+fn many(tests: &str) -> Vec<(String, String)> {
+    vec![
+        ("hushrun.yaml".into(), yaml(tests)),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\n".into()),
+        (
+            "tests/test_many.py".into(),
+            "import os\nimport pytest\n\n@pytest.mark.parametrize('n', range(5999))\ndef test_n(n):\n    pass\n\ndef test_flips():\n    assert not os.environ.get('FAIL')\n".into(),
+        ),
+        ("tests/test_other.py".into(), "def test_other():\n    pass\n".into()),
+    ]
+}
+
+// covers: C-39, C-12
+#[test]
+fn an_older_server_keeps_the_first_5000_results_failures_first_and_a_saving_without_a_reused_file()
+{
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    results.take_older_limits();
+    let server = with_server(&results);
+    let r = repo_of(&many("{mode: reuse, unit: test}"));
+    let python = python();
+    let mut env = envs(&server);
+    env.push(("FAIL", "1"));
+    // test_many.py failed: its own fail and each of its 6,000 tests, and test_other.py's pass:
+    // 6,002 results, past the 5,000 the server takes. They go again, the first 5,000, the two
+    // failures first, and the run says once what wasn't kept.
+    let first = r.run(&pytest_args(&python, &[]), &env);
+    assert_eq!(first.code, 1, "{}", first.stderr);
+    assert!(
+        first.stderr.contains(
+            "hushrun: unit: 1,002 of its 6,002 results of test files and tests weren't kept: acme keeps 5,000 a run"
+        ),
+        "{}",
+        first.stderr
+    );
+    assert_eq!(results.unit_results(), 5_000);
+    assert_eq!(results.unit_results_that("fail"), 2);
+    assert_eq!(results.recorded().len(), 1);
+    // The flip fixed: test_many.py's other tests, whose passes the server kept, are reused one by
+    // one and no test file whole. The server refuses `savedMs` then, and the result goes again
+    // without it: it is recorded, with its tests' counts.
+    let second = r.run(&pytest_args(&python, &[]), &envs(&server));
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let recorded = results.recorded();
+    let newest = recorded
+        .iter()
+        .find(|r| r["result"] == "pass")
+        .expect("the pass is recorded");
+    assert!(newest["units"].get("savedMs").is_none(), "{newest:#}");
+    assert!(
+        newest["units"]["tests"]["reused"].as_u64() > Some(0),
+        "{newest:#}"
+    );
+    assert!(!second.stderr.contains("not recorded"), "{}", second.stderr);
+}
+
+// covers: C-12
+#[test]
+fn a_body_too_large_for_an_older_server_goes_again_as_the_first_5000() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let results = FakeResults::start();
+    // A server from before tests, whose limit on a body (1 MiB) came first.
+    results.answer(
+        "POST",
+        "v0/runs/",
+        413,
+        json!("Failed to buffer the request body: length limit exceeded"),
+        1,
+    );
+    let server = with_server(&results);
+    let r = repo_of(&many("{mode: reuse, unit: test}"));
+    let mut env = envs(&server);
+    env.push(("FAIL", "1"));
+    let first = r.run(&pytest_args(&python(), &[]), &env);
+    assert_eq!(first.code, 1, "{}", first.stderr);
+    assert_eq!(results.unit_results(), 5_000);
+    assert_eq!(results.unit_results_that("fail"), 2);
+    assert!(
+        first.stderr.contains("1,002 of its 6,002 results"),
+        "{}",
+        first.stderr
+    );
 }
