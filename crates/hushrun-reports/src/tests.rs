@@ -282,6 +282,26 @@ fn the_default_places_are_found_from_the_command_and_the_root() {
 
 // covers: C-27
 #[test]
+fn testngs_copies_of_surefires_report_are_found_once() {
+    let dir = tree(&[
+        ("target/surefire-reports/TEST-TestSuite.xml", JUNIT),
+        ("target/surefire-reports/junitreports/TEST-ng.A.xml", JUNIT),
+        ("target/surefire-reports/junitreports/TEST-ng.B.xml", JUNIT),
+        // A directory of that name with no suite report beside it is read.
+        ("other/junitreports/TEST-x.xml", JUNIT),
+    ]);
+    let q = query(dir.path(), dir.path(), &[]);
+    assert_eq!(
+        rels(find(&q)),
+        [
+            "other/junitreports/TEST-x.xml",
+            "target/surefire-reports/TEST-TestSuite.xml",
+        ]
+    );
+}
+
+// covers: C-27
+#[test]
 fn a_report_older_than_the_run_is_not_its() {
     let dir = tree(&[("junit.xml", JUNIT)]);
     let mut q = query(dir.path(), dir.path(), &[]);

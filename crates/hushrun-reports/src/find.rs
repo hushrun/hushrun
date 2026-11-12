@@ -147,10 +147,35 @@ pub fn find(q: &Query<'_>) -> Option<Search> {
     });
     found.sort_by(|a, b| a.rel.cmp(&b.rel));
     found.dedup_by(|a, b| a.rel == b.rel);
+    drop_testng_copies(&mut found);
     Some(Search {
         files: found,
         cut_short,
     })
+}
+
+/// Surefire's TestNG provider writes each test once in its own report, `TEST-TestSuite.xml`, and
+/// TestNG's reporter writes them again, a class a file, below `junitreports/` beside it: those
+/// copies go when a `TEST-*.xml` beside their directory was found, so that no test counts twice.
+fn drop_testng_copies(found: &mut Vec<Found>) {
+    let suites: std::collections::BTreeSet<String> = found
+        .iter()
+        .filter_map(|f| {
+            let (dir, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
+            (name.starts_with("TEST-") && name.ends_with(".xml")).then(|| dir.to_string())
+        })
+        .collect();
+    found.retain(|f| {
+        let Some((dir, _)) = f.rel.rsplit_once('/') else {
+            return true;
+        };
+        let parent = match dir.rsplit_once('/') {
+            Some((parent, "junitreports")) => parent,
+            None if dir == "junitreports" => "",
+            _ => return true,
+        };
+        !suites.contains(parent)
+    });
 }
 
 /// A path as CI writes it, with what CI fills in made a wildcard: `test_results_${{ matrix.crate

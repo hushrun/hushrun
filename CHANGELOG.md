@@ -219,6 +219,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Gradle: a test-classpath jar from `mavenLocal()` is no longer dropped silently: where a project
   of the build published it, the class reads that project; otherwise the class is not observed,
   and says why.
+- A Maven run of TestNG no longer counts each test twice in its summary: TestNG's own copies of
+  Surefire's report, below `surefire-reports/junitreports/`, aren't read beside it.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

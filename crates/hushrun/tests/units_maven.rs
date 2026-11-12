@@ -825,6 +825,13 @@ fn tests_testng_skipped_after_a_failed_suite_setup_never_pass() {
     // The suite's setup fails: TestNG skips every test, OrderTest's failing one among them.
     let first = r.run(&[], &["test"], &[("SHOP_NO_DB", "1")]);
     assert_eq!(first.code, 1, "{}\n{}", first.stderr, first.stdout);
+    // The run's counts are Maven's, `Tests run: 12, Failures: 1, Skipped: 11`: TestNG's own
+    // copies of the reports below `junitreports/` aren't counted again.
+    assert!(
+        first.stderr.contains("): 12 tests, 1 failed, 11 skipped"),
+        "{}",
+        first.stderr
+    );
     // Only the setup's failure is recorded: no skipped class passed.
     assert_eq!(
         r.unit_results(),
