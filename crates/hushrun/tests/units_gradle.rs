@@ -463,7 +463,10 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
         return;
     }
     let gradle = gradle();
+    // lib keeps no test here: a task whose list didn't change is up to date, and Gradle wouldn't
+    // run an audited class of it (ADR 0084).
     let mut files = shop("{mode: reuse, unit: test}");
+    files.retain(|(path, _)| path != PRICE);
     files.push(file(
         "app/src/test/java/shop/app/SetupTest.java",
         "package shop.app;\nimport org.junit.jupiter.api.*;\nclass SetupTest {\n  @BeforeAll static void up() { Assertions.assertNull(System.getenv(\"FAIL\")); }\n  @Test void works() {}\n}\n",
@@ -498,7 +501,7 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
     );
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 3 of 6 test files run; 3 already passed on the files they read, and so did 2 tests of the others, and 2 more that did run as a check"
+        "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and so did 2 tests of the others, and 2 more that did run as a check"
     );
     // Tests are counted where Gradle named them: a class reused whole named none.
     let result = r.newest_result();

@@ -91,7 +91,9 @@ and C-46 hold over §4.5.
    (TestNG reports a failing `@BeforeClass` as a failed test named after the method and skips the
    rest), didn't finish: no test records a pass it didn't earn. A task Gradle didn't execute (up to
    date, from its build cache, skipped) records nothing: its report, kept in the task's outputs,
-   names its classes and what they read and no event. One that ended before its root suite records
+   names its classes and what they read and no event. That holds for an audited class too: a task
+   whose list is the one of its last execution is up to date, Gradle's check stands, and the audit
+   of its classes waits for a run in which Gradle executes it. Nothing is recorded meanwhile. One that ended before its root suite records
    no pass; a failure outside every class, none for the task. Kotlin Multiplatform's
    `ignoreFailures` changes nothing: facts come from the events. A class two tasks ran (Android's
    debug and release) finished where both ran it whole.
