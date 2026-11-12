@@ -360,12 +360,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         seen.emits.push(Emit::Link);
     }
 
-    let expands = seen.externs.iter().any(|e| {
-        e.path
-            .as_deref()
-            .is_some_and(|path| crate::inputs::is_linked_library(Path::new(path)))
-    });
-    let (keyed_env, package) = read_env(env, class, expands)?;
+    let (keyed_env, package) = read_env(env, class)?;
     let form = crate::messages::Form::new(
         seen.error_format.as_deref(),
         (!seen.json.is_empty())
@@ -1146,13 +1141,7 @@ fn classify(name: &str, crate_type: Option<&String>, test: bool) -> Result<Class
     }
 }
 
-/// The variables B-5 keys, and the package's folders. `expands` says whether the compile takes a
-/// proc macro (an `--extern` that names a linked library).
-fn read_env(
-    env: &Env,
-    class: Class,
-    expands: bool,
-) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
+fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
     if env.unreadable_cargo_name {
         return Err(PassedThrough::NotUtf8);
     }
@@ -1161,11 +1150,7 @@ fn read_env(
         // A library is written by rustc itself: no C driver or linker runs for it, so what only
         // they read is not its input, and would tie its key to how this machine is set up.
         let linker_only = class == Class::Library && LINKER_ONLY.contains(&name.as_str());
-        // rustc never reads `SOURCE_DATE_EPOCH`; a proc macro runs inside it and may. A library
-        // that expands none is the same compile under any value.
-        let dateless = class == Class::Library && !expands && name == "SOURCE_DATE_EPOCH";
-        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str())) && !linker_only && !dateless
-        {
+        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str())) && !linker_only {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
@@ -1970,11 +1955,9 @@ pub(crate) mod tests {
                     | "SDKROOT"
                     | "DEVELOPER_DIR"
             );
-            // A library that expands no proc macro takes no date from it (the next test).
-            let dateless = name == "SOURCE_DATE_EPOCH";
             assert_eq!(
                 library.key_env().get(name).map(String::as_str),
-                (!linker_only && !dateless).then_some("x"),
+                (!linker_only).then_some("x"),
                 "{name}"
             );
         }
@@ -1982,17 +1965,15 @@ pub(crate) mod tests {
 
     // covers: B-5
     #[test]
-    fn source_date_epoch_is_part_of_the_first_key_where_a_date_can_reach_the_output() {
+    fn source_date_epoch_is_part_of_the_first_key() {
         // Compilers and build tools take "now" from it, so it reaches anything that embeds a
-        // date: a program (the linker, a C driver) and a library that expands a proc macro (it
-        // runs inside rustc and reads rustc's variables). Unset, one value and another are three
-        // different compiles for those.
-        let key = |line: &str, value: Option<&str>| {
+        // date. Unset, one value and another are three different compiles.
+        let key = |value: Option<&str>| {
             let env = match value {
                 Some(value) => Env::from_vars([("SOURCE_DATE_EPOCH", value)]),
                 None => Env::default(),
             };
-            let inv = handled(&argv(line), &env);
+            let inv = handled(&argv(&minimal("")), &env);
             crate::key::Asked {
                 compiler: hushrun_core::Digest::of(b"rustc"),
                 args: inv.key_args(),
@@ -2002,23 +1983,39 @@ pub(crate) mod tests {
             .key()
             .unwrap()
         };
-        let program = minimal("").replace("--crate-type lib", "--crate-type bin");
-        let expands = minimal(&format!(
-            "--extern serde_derive=/o/libserde_derive-1.{}",
-            std::env::consts::DLL_EXTENSION
-        ));
-        for line in [program.as_str(), expands.as_str()] {
-            let unset = key(line, None);
-            let one = key(line, Some("1700000000"));
-            assert_ne!(unset, one, "{line}");
-            assert_ne!(one, key(line, Some("1800000000")), "{line}");
-            assert_eq!(one, key(line, Some("1700000000")), "{line}");
-        }
-        // rustc itself never reads it: a library that expands no proc macro is the same compile
-        // under any value (every library of this workspace compared, on macOS and Linux).
-        let plain = minimal("--extern itoa=/o/libitoa-1.rmeta --extern proc_macro");
-        assert_eq!(key(&plain, None), key(&plain, Some("1700000000")));
-        assert_eq!(key(&plain, Some("1")), key(&plain, Some("2")));
+        let unset = key(None);
+        let one = key(Some("1700000000"));
+        let two = key(Some("1800000000"));
+        assert_ne!(unset, one);
+        assert_ne!(one, two);
+        assert_eq!(one, key(Some("1700000000")));
+    }
+
+    // covers: B-5
+    #[test]
+    fn source_date_epoch_is_in_the_first_key_of_a_library_whose_macros_come_through_another() {
+        // A derive re-exported by a library (`serde` with `derive`, `pub use pmd::stamp;`)
+        // reaches rustc through `-L dependency=`, not as an `--extern`: the command line of a
+        // library that expands one looks like that of one that expands none. A macro that reads
+        // the variable puts it in the bytes, so every library keys it.
+        let key = |value: Option<&str>| {
+            let env = match value {
+                Some(value) => Env::from_vars([("SOURCE_DATE_EPOCH", value)]),
+                None => Env::default(),
+            };
+            let line = minimal("--extern reexp=/o/libreexp-1.rmeta -L dependency=/o");
+            let inv = handled(&argv(&line), &env);
+            crate::key::Asked {
+                compiler: hushrun_core::Digest::of(b"rustc"),
+                args: inv.key_args(),
+                env: inv.key_env().clone(),
+                added: Vec::new(),
+            }
+            .key()
+            .unwrap()
+        };
+        assert_ne!(key(Some("1")), key(Some("2")));
+        assert_ne!(key(None), key(Some("1")));
     }
 
     // covers: B-5

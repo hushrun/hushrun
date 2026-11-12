@@ -46,13 +46,6 @@ differed under equal keys with no path in them.
   `--sysroot` naming a view of the toolchain that holds only its target folders, as links. It is
   made whole or not at all, checked each time it is found, made as `hushrun run` begins, and
   swept like unused blocks (B-14). A link through it is judged by the toolchain's file (B-11).
-- **What reaches only some compiles stays out of the others' keys** (B-5, B-6): a library's key
-  holds neither the linker's variables nor the SDK, nor `SOURCE_DATE_EPOCH` unless it expands a
-  proc macro (rustc never reads it; a macro runs inside rustc and may), nor the static libraries
-  in its native folders when its `.rlib` bundled none of them.
-- **A machine's folder is found where it ends a name** (B-10): a home `/root` is not found in
-  `/rootfs` or `/roots.rs`. The byte before is not looked at, since a flag (`-I/root/include`) or
-  the length crate metadata writes before a string can stand there.
 - **The audit can be set for a run** (B-16): `HUSHRUN_BUILD_AUDIT=every` for replays that compare
   machines, `none` for tests; a run with `none` says so.
 
@@ -66,6 +59,6 @@ differed under equal keys with no path in them.
   the owner.
 - Nothing leaves a machine yet. This is what a later server and relay need: the blocks that may
   leave, and keys that agree between machines.
-- Lost on purpose, for now: the C-bundling crates whose objects hold absolute paths (hushrun
-  would have to change the C compiler's flags, and only machines with the same C compiler would
-  gain), and every linked output between machines with other linkers.
+- Lost on purpose, for now: libraries that inherit a C library's folder through `-L native=`, the
+  C-bundling crates whose objects hold absolute paths, and every linked output between machines
+  with other linkers.
