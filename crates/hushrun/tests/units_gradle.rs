@@ -10,8 +10,9 @@
 //! person's machine.
 //!
 //! The Android test needs Android's SDK as well, named by `HUSHRUN_TEST_ANDROID_SDK`, and a Gradle
-//! user home that holds Android's Gradle plugin 9.1.1; without both it says so and passes, even
-//! when tools are required.
+//! user home that holds Android's Gradle plugin, 9.1.1 or the version `HUSHRUN_TEST_ANDROID_PLUGIN`
+//! names (8.13.2 for Gradle 8); without the SDK it says so and passes, even when tools are
+//! required.
 
 #[path = "common/store.rs"]
 mod store;
@@ -694,23 +695,25 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
         return;
     }
     let gradle = gradle();
+    let plugin = std::env::var("HUSHRUN_TEST_ANDROID_PLUGIN").unwrap_or_else(|_| "9.1.1".into());
     let r = Repo::new(&[
         file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
         file(".gitignore", "build/\n.gradle/\n.kotlin/\nlocal.properties\n"),
+        // As the spike's Android sample is, whose Gradle user home the tests run offline against.
         file(
-            "settings.gradle",
-            &format!(
-                "pluginManagement {{ repositories {{ google(); mavenCentral(); gradlePluginPortal() }} }}\ndependencyResolutionManagement {{ repositories {{ google(); mavenCentral() }} }}\n{LINE}\nrootProject.name = 'droid'\ninclude 'core'\n"
-            ),
+            "settings.gradle.kts",
+            "pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\ndependencyResolutionManagement { repositories { google(); mavenCentral() } }\nSystem.getenv(\"HUSHRUN_GRADLE\")?.let { apply(from = it) }\nrootProject.name = \"droid\"\ninclude(\":core\")\n",
         ),
         file("gradle.properties", "android.useAndroidX=true\n"),
         file(
-            "build.gradle",
-            "plugins { id 'com.android.library' version '9.1.1' apply false }\n",
+            "build.gradle.kts",
+            &format!(
+                "plugins {{\n  id(\"com.android.application\") version \"{plugin}\" apply false\n  id(\"com.android.library\") version \"{plugin}\" apply false\n}}\n"
+            ),
         ),
         file(
-            "core/build.gradle",
-            "plugins { id 'com.android.library' }\nandroid { namespace 'shop.core'; compileSdk 36; defaultConfig { minSdk 24 } }\ndependencies { testImplementation 'junit:junit:4.13.2' }\n",
+            "core/build.gradle.kts",
+            "plugins { id(\"com.android.library\") }\nandroid {\n  namespace = \"shop.core\"\n  compileSdk = 36\n  defaultConfig { minSdk = 24 }\n}\ndependencies { testImplementation(\"junit:junit:4.13.2\") }\n",
         ),
         file(
             "core/src/main/java/shop/core/Core.java",
