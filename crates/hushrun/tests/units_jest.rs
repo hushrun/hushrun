@@ -417,8 +417,10 @@ fn jest_reuses_test_files_that_already_passed() {
             jest.major,
             second.stderr
         );
+        // Its saving, or under a second, the count.
         assert!(
-            second.stderr.contains("reusing 4 test files"),
+            second.stderr.contains("reusing 4 test files saved about")
+                || second.stderr.contains("; 4 test files reused"),
             "{}",
             second.stderr
         );
