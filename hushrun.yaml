@@ -37,6 +37,12 @@ checks:
   test-macos:
     counts_from:
       os: macos
+    # Every test file runs as before; hushrun says which ones `tests: reuse` would have left out.
+    tests: observe
   doctest-macos:
     counts_from:
       os: macos
+  # Linux's tests, which count only from CI's system, as above. Every test file runs as before,
+  # and hushrun says which ones `tests: reuse` would have left out.
+  test:
+    tests: observe
