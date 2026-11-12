@@ -1952,3 +1952,73 @@ fn a_program_a_test_left_running_keeps_printing_after_hushruns_ctest_returns() {
     let out = reader.join().unwrap();
     assert!(out.contains("ran") && out.contains("late line"), "{out}");
 }
+
+// covers: C-49
+#[test]
+fn a_signal_during_a_listing_leaves_the_presets_log_as_it_was() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join("build")).unwrap();
+    std::fs::write(
+        repo.join("build/CMakeCache.txt"),
+        "CMAKE_GENERATOR:INTERNAL=Other\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("CMakePresets.json"),
+        r#"{"version": 3, "configurePresets": [{"name": "dev", "binaryDir": "${sourceDir}/build"}],
+            "testPresets": [{"name": "log", "configurePreset": "dev", "output": {"outputLogFile": "mylog.txt"}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("mylog.txt"), "mine\n").unwrap();
+    // A ctest whose listing writes the preset's log, as CTest does, then takes a while.
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = root.join("listing");
+    std::fs::write(
+        bin.join("ctest"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'ctest version 4.4.5' ;;\n  *--show-only=json-v1*) echo listing > mylog.txt; touch '{}'; sleep 3; echo '{{\"tests\": []}}' ;;\nesac\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("ctest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let units = root.join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("hushrun.json"),
+        json!({"schema": "hushrun.units/v0", "root": repo, "reuse": []}).to_string(),
+    )
+    .unwrap();
+    let path = std::env::join_paths([bin.clone(), "/usr/bin".into(), "/bin".into()]).unwrap();
+    let mut was = std::ffi::OsString::from("=");
+    was.push(&path);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hushrun"))
+        .current_dir(&repo)
+        .env("PATH", &path)
+        .env("HUSHRUN_UNITS", &units)
+        .env("HUSHRUN_PROGRAMS_PATH", was)
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_HOST", NO_HOST)
+        .args(["__hushrun-program", "ctest", "--preset", "log"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let waited = std::time::Instant::now();
+    while !marker.exists() && waited.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+    let status = child.wait().unwrap();
+    // Ended by the signal, after the log was put back.
+    assert_eq!(status.signal(), Some(2), "{status:?}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("mylog.txt")).unwrap(),
+        "mine\n"
+    );
+}

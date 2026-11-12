@@ -133,6 +133,8 @@ pub fn list(
 ) -> Result<Vec<select::Listed>, String> {
     let own = tempfile::tempdir().map_err(|err| format!("no temporary directory: {err}"))?;
     let kept = log.map(Kept::new);
+    // A signal while the preset's log is changed waits until it is put back, then acts.
+    let held = kept.as_ref().map(|_| HeldSignals::new());
     let output = tool(real, cwd, assigned)
         .args(args)
         .arg("--show-only=json-v1")
@@ -143,11 +145,60 @@ pub fn list(
     if let Some(kept) = kept {
         kept.put_back();
     }
+    drop(held);
     let output = output.map_err(|err| format!("can't start {}: {err}", real.display()))?;
     if !output.status.success() {
         return Err("ctest couldn't list its tests".into());
     }
     select::parse_listing(&output.stdout).map(|(listing, _)| listing.tests)
+}
+
+/// The signals that stop a process, held while it lives: one that arrives then acts once it is
+/// dropped, as it would have.
+struct HeldSignals {
+    #[cfg(unix)]
+    arrived: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(unix)]
+    ids: Vec<signal_hook::SigId>,
+}
+
+impl HeldSignals {
+    fn new() -> HeldSignals {
+        #[cfg(unix)]
+        {
+            use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+            let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ids = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
+                .into_iter()
+                .filter_map(|signal| {
+                    let value = usize::try_from(signal).ok()?;
+                    signal_hook::flag::register_usize(signal, arrived.clone(), value).ok()
+                })
+                .collect();
+            HeldSignals { arrived, ids }
+        }
+        #[cfg(not(unix))]
+        {
+            HeldSignals {}
+        }
+    }
+}
+
+impl Drop for HeldSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            for id in &self.ids {
+                signal_hook::low_level::unregister(*id);
+            }
+            let signal = self.arrived.load(std::sync::atomic::Ordering::SeqCst);
+            if let Ok(signal) = i32::try_from(signal)
+                && signal != 0
+            {
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+            }
+        }
+    }
 }
 
 /// A file as it was before a listing, to put back after it.
