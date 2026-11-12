@@ -935,15 +935,20 @@ fn an_in_source_build_says_why_nothing_is_reused() {
         let first = p.run(&["run", "unit", "--", "ctest"], &[]);
         assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
         // Its build directory is the repository: what each program is built from can't be told
-        // apart from the repository's files, and the run says so of each program.
-        let map = store::map(&p.cache);
-        for unit in ["t_price", "t_greet"] {
-            assert_eq!(
-                map["units"][unit]["notFollowed"],
-                json!(["in-source build"]),
-                "{at}: {map:#}"
-            );
-        }
+        // apart from the repository's files, and the run says so, once.
+        let said = first
+            .stderr
+            .lines()
+            .filter(|l| l.contains("is the repository's: what it is built from can't be told"))
+            .count();
+        assert_eq!(said, 1, "{at}\n{}", first.stderr);
+        assert!(
+            first
+                .stderr
+                .contains("hushrun: unit: test files weren't observed: its build directory"),
+            "{at}\n{}",
+            first.stderr
+        );
     }
 }
 
