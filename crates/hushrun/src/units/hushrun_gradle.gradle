@@ -596,6 +596,9 @@ class HushrunReport {
                       names: [:], invocations: [], suiteFailures: [], narrowedBy: [],
                       reads: [dirs: reads.dirs, paths: reads.paths],
                       notFollowed: new ArrayList(reads.notFollowed as List), sourceDirsHow: info.sourceDirsHow]
+        // Where this run's test JVMs of the task write the hook's events, from HUSHRUN_UNITS now.
+        File work = HushrunRun.work(info.shared.buildRoot, info.taskPath)
+        report.eventsDir = work == null ? null : new File(work, "events").path
         addNames(report, s, s?.leftOutClasses ?: [])
         (s?.leftOutTests ?: []).each { addNames(report, s, [HushrunRun.outerOf(it[1])]) }
         return report
@@ -658,6 +661,7 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
                 report.invocations = []         // Gradle kept these; they didn't run now
                 report.suiteFailures = []
                 report.rootDone = false
+                report.eventsDir = null
             } else {
                 // No event and no report: what the class exclusion decided, when it ran.
                 HushrunSelection s = HushrunSelection.decided(path)
@@ -667,9 +671,24 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             }
             report.outcome = outcome
             report.taskFailed = failed
+            report.taskFailures = failed ? HushrunService.messages(res.failures, 0) : []
             HushrunRun.writeWhole(target, HushrunRun.factsText(report, errors))
         } catch (Throwable ignored) {
         }
+    }
+
+    /** The messages of a task's failures and their causes, at most 20. */
+    static List<String> messages(def failures, int depth) {
+        List<String> out = []
+        try {
+            (failures ?: []).each { f ->
+                if (out.size() >= 20 || depth > 8) return
+                String m = f.message ?: ""
+                out << (m.length() > 300 ? m.substring(0, 300) : m)
+                out.addAll(messages(f.causes, depth + 1))
+            }
+        } catch (Throwable ignored) {}
+        return out.size() > 20 ? out.subList(0, 20) : out
     }
 
     private void notFollowed(String path) {

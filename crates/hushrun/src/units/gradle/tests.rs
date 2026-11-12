@@ -843,3 +843,111 @@ fn a_plan_knows_the_last_runs_test_classes_and_the_directories_they_read() {
     assert_eq!(unnamed, set(&["app::ex.app.Gen"]));
     assert_eq!(dirs, set(&["app", "lib"]));
 }
+
+/// A task's facts file: `invocations` as `[class, name, result]`, and the rest of its report.
+fn task(invocations: &[(&str, &str, &str)], rest: serde_json::Value) -> FactsFile {
+    let mut report = serde_json::json!({
+        "schema": REPORT_SCHEMA, "task": ":test", "projectDir": ".", "outcome": "executed",
+        "rootDone": true, "framework": "junit-platform",
+        "names": {"p.CrashTest": "src/test/java/p/CrashTest.java",
+                  "p.FailTest": "src/test/java/p/FailTest.java"},
+        "invocations": invocations.iter().map(|(c, n, r)| serde_json::json!({
+            "c": c, "n": n, "r": r, "p": [[c, c]], "ms": 1})).collect::<Vec<_>>(),
+        "reads": {"dirs": ["."]}
+    });
+    for (k, v) in rest.as_object().unwrap() {
+        report[k] = v.clone();
+    }
+    serde_json::from_value(serde_json::json!({
+        "schema": "hushrun.unit-facts/v1", "adapter": "gradle", "units": [],
+        "settings": {"gradle": report}
+    }))
+    .unwrap()
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_that_died_leaves_the_class_it_was_in_not_run() {
+    let t = tree(&[
+        "src/test/java/p/CrashTest.java",
+        "src/test/java/p/FailTest.java",
+    ]);
+    let ran = [
+        ("p.CrashTest", "a()", "SUCCESS"),
+        ("p.CrashTest", "b()", "SUCCESS"),
+        ("p.FailTest", "fails()", "FAILURE"),
+    ];
+    let crash = "src/test/java/p/CrashTest.java";
+    // The task failed with a failed test, and the hook's events say CrashTest started and never
+    // ended: its JVM died in its @AfterAll.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("1-1.jsonl"),
+        r#"{"e":"jvm","pid":"1","dir":"/w","basedir":null}
+{"e":"plan-started"}
+{"e":"started","test":false,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]","class":"p.CrashTest","method":null,"params":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:a()]","class":"p.CrashTest","method":"a","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:a()]","class":"p.CrashTest","method":"a","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+{"e":"started","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:b()]","class":"p.CrashTest","method":"b","params":""}
+{"e":"finished","test":true,"uid":"[engine:junit-jupiter]/[class:p.CrashTest]/[method:b()]","class":"p.CrashTest","method":"b","params":"","status":"SUCCESSFUL","ms":1,"message":null}
+"#,
+    )
+    .unwrap();
+    let events = serde_json::json!(dir.path().to_string_lossy());
+    let observed = observe(
+        &[task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "eventsDir": events}),
+        )],
+        &t,
+    )
+    .unwrap()
+    .unwrap();
+    let crashed = &observed.units[crash];
+    assert_eq!(state(crashed, false), units::State::NotRun);
+    assert!(
+        crashed
+            .tests
+            .as_ref()
+            .unwrap()
+            .values()
+            .all(|t| !t.finished)
+    );
+    // Without the events, the same task: CrashTest ran whole as far as Gradle says.
+    let observed = observe(&[task(&ran, serde_json::json!({"taskFailed": true}))], &t)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state(&observed.units[crash], false), units::State::Passed);
+    // A failed task no failed test explains, or Gradle's word that its test process ended
+    // badly: no class of it ran whole.
+    let green = [
+        ("p.CrashTest", "a()", "SUCCESS"),
+        ("p.CrashTest", "b()", "SUCCESS"),
+    ];
+    for file in [
+        task(&green, serde_json::json!({"taskFailed": true})),
+        task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "taskFailures": [
+                "Execution failed for task ':test'.",
+                "Process 'Gradle Test Executor 3' finished with non-zero exit value 3"]}),
+        ),
+    ] {
+        let observed = observe(&[file], &t).unwrap().unwrap();
+        assert_eq!(state(&observed.units[crash], false), units::State::NotRun);
+    }
+    // A events directory that can't be read: nothing of the task ran whole.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("events");
+    std::fs::write(&file, "not a directory").unwrap();
+    let observed = observe(
+        &[task(
+            &ran,
+            serde_json::json!({"taskFailed": true, "eventsDir": file.to_string_lossy()}),
+        )],
+        &t,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(state(&observed.units[crash], false), units::State::NotRun);
+}

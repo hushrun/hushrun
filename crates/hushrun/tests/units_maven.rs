@@ -1007,3 +1007,45 @@ fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_i
         second.stdout
     );
 }
+
+// covers: C-32, C-47
+#[test]
+fn a_fork_that_died_after_its_class_tests_passed_records_no_pass_for_it() {
+    let Some(maven) = maven() else { return };
+    // JUnit 4, which Surefire runs without the hook, and JUnit 5, which it runs with it: a class
+    // whose tests passed and whose JVM dies in its class teardown, run last of its module.
+    let crash4 = "package shop.core;\n\nimport org.junit.*;\n\npublic class CrashTest {\n  @Test public void a() {}\n  @Test public void b() {}\n  @AfterClass public static void after() { if (System.getenv(\"SHOP_CRASH\") != null) Runtime.getRuntime().halt(3); }\n}\n";
+    let crash5 = "package shop.lib;\n\nimport org.junit.jupiter.api.*;\n\nclass CrashTest {\n  @Test void a() {}\n  @Test void b() {}\n  @AfterAll static void after() { if (System.getenv(\"SHOP_CRASH\") != null) Runtime.getRuntime().halt(3); }\n}\n";
+    let mut four = junit4("observe");
+    four.retain(|(path, _)| !path.ends_with("CrashTest.java"));
+    four.push(file("core/src/test/java/shop/core/CrashTest.java", crash4));
+    let mut five = shop("observe");
+    five.push(file("lib/src/test/java/shop/lib/CrashTest.java", crash5));
+    // JUnit 4: AskTest and CalcTest pass, then CrashTest. JUnit 5: lib's RoundTest and PriceTest
+    // pass, then CrashTest; app, which depends on lib, doesn't run; other's three pass.
+    for (files, order, passed) in [(four, "alphabetical", 2), (five, "reversealphabetical", 5)] {
+        let r = Repo::new(&files, maven.clone());
+        let ran = r.run(
+            &[],
+            &[
+                "--fail-at-end",
+                "test",
+                &format!("-Dsurefire.runOrder={order}"),
+            ],
+            &[("SHOP_CRASH", "1")],
+        );
+        assert_ne!(ran.code, 0, "{}\n{}", ran.stderr, ran.stdout);
+        assert!(
+            ran.stdout.contains("The forked VM terminated"),
+            "{}",
+            ran.stdout
+        );
+        assert_eq!(
+            r.unit_results(),
+            BTreeMap::from([("pass".into(), passed)]),
+            "{order}: {}\n{}",
+            ran.stderr,
+            ran.stdout
+        );
+    }
+}

@@ -30,6 +30,7 @@ use super::adapter::{
     Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
 use super::facts::{FactsFile, MergedTest, Unfollowed};
+use super::jvm::{self, JvmEvents};
 use super::shared::Shared;
 use super::store::Map;
 
@@ -237,6 +238,10 @@ pub struct Report {
     pub reads: ReportReads,
     /// What the script couldn't follow of the task: every test class of it.
     pub not_followed: Vec<Unfollowed>,
+    /// The directory this run's test JVMs of the task wrote the hook's events to.
+    pub events_dir: Option<String>,
+    /// The messages of the task's failure and its causes, when it failed.
+    pub task_failures: Vec<String>,
 }
 
 /// What a task left out.
@@ -477,7 +482,17 @@ fn report_failed(report: &Report) -> bool {
 /// test is told `skipped`; it counts as finished only when nothing of the run failed
 /// (`run_failed`): TestNG skips every test of a suite whose configuration failed, in any class,
 /// and a JVM that died leaves the test in flight skipped. Then its class didn't run whole either.
-fn units_of(report: &Report, errors: &[String], run_failed: bool) -> Vec<(String, UnitSaw)> {
+///
+/// A test JVM that died ran nothing of its task whole: the task failed and no test or suite of it
+/// did, or Gradle said its test process ended badly (it calls the test in flight skipped, and
+/// says nothing of a class whose `@AfterAll` never ended). A class the hook's events (`events`,
+/// this task's JVMs') started and never ended didn't run whole either.
+fn units_of(
+    report: &Report,
+    errors: &[String],
+    run_failed: bool,
+    events: &Result<BTreeMap<String, JvmEvents>, String>,
+) -> Vec<(String, UnitSaw)> {
     let mut out = Vec::new();
     if report.outcome == "not-followed" {
         return out;
@@ -490,7 +505,23 @@ fn units_of(report: &Report, errors: &[String], run_failed: bool) -> Vec<(String
             && (report.root_done || (!report.task_failed && report.invocations.is_empty())));
     // A failure outside any class: no test of the task is known to have run whole.
     let outside = report.suite_failures.iter().any(|s| s.c.is_none());
-    let whole = whole && !outside;
+    // A test JVM that died: a failure no test explains, or Gradle's word for it.
+    let died = report
+        .task_failures
+        .iter()
+        .any(|m| m.contains("non-zero exit value") || m.contains("unexpected problem"))
+        || (report.task_failed
+            && report.suite_failures.is_empty()
+            && !report.invocations.iter().any(|inv| inv.r == "FAILURE"));
+    let whole = whole && !outside && !died && events.is_ok();
+    // The classes a test JVM started and never ended, by their outer class.
+    let open: BTreeSet<&str> = events
+        .iter()
+        .flat_map(BTreeMap::values)
+        .flat_map(|jvm| jvm.classes.iter())
+        .filter(|(_, class)| class.open)
+        .map(|(outer, _)| outer.as_str())
+        .collect();
     let mut task_not_followed: BTreeSet<NotFollowed> =
         report.not_followed.iter().map(NotFollowed::from).collect();
     if let Some(error) = errors.first() {
@@ -545,7 +576,8 @@ fn units_of(report: &Report, errors: &[String], run_failed: bool) -> Vec<(String
             continue;
         }
         one.deselected = left_out_classes.contains(outer.as_str()) && events.is_none();
-        one.complete = whole;
+        let class_whole = whole && !open.contains(outer.as_str());
+        one.complete = class_whole;
         one.failed = class_failed.contains(outer.as_str());
         // A class left out whole ran nothing, and Gradle never named its tests.
         one.told = !one.deselected;
@@ -559,7 +591,7 @@ fn units_of(report: &Report, errors: &[String], run_failed: bool) -> Vec<(String
             // guards, in its class or in every class of its suite.
             let cascade = skipped && (one.failed || any_failed || run_failed);
             let saw = TestSaw {
-                finished: whole && !cascade,
+                finished: class_whole && !cascade,
                 failed,
                 deselected: false,
                 skipped,
@@ -604,11 +636,19 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
         .iter()
         .map(|file| Ok((report_of(file)?, &file.errors)))
         .collect::<Result<Vec<_>, String>>()?;
+    // \[C-32\] Each task's hook events; none for a task whose JVMs wrote none (JUnit 4, TestNG).
+    let events: Vec<Result<BTreeMap<String, JvmEvents>, String>> = reports
+        .iter()
+        .map(|(report, _)| match &report.events_dir {
+            Some(dir) => jvm::read_events_dir(Path::new(dir)),
+            None => Ok(BTreeMap::new()),
+        })
+        .collect();
     // \[C-32\] Something of this run's tasks failed.
     let run_failed = reports.iter().any(|(report, _)| report_failed(report));
     let mut merged: BTreeMap<String, UnitSaw> = BTreeMap::new();
-    for (report, errors) in &reports {
-        for (name, one) in units_of(report, errors, run_failed) {
+    for ((report, errors), events) in reports.iter().zip(&events) {
+        for (name, one) in units_of(report, errors, run_failed, events) {
             merged.entry(name).or_insert_with(UnitSaw::unseen).add(one);
         }
     }

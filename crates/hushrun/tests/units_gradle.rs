@@ -972,3 +972,48 @@ fn a_change_to_an_annotation_processor_of_the_build_runs_the_tests_of_the_code_i
         second.stdout
     );
 }
+
+/// `app`'s `CrashTest`, whose test JVM dies when `CRASH` names where: `after` in its `@AfterAll`,
+/// once both its tests passed, `test` inside its second test. Nine green classes in `other`.
+fn crash_build() -> Vec<(String, String)> {
+    let mut files = build(Framework::Junit5, &["app", "other"], "reuse");
+    files.push(file(
+        "app/src/test/java/shop/app/CrashTest.java",
+        "package shop.app;\nimport org.junit.jupiter.api.*;\n@TestMethodOrder(MethodOrderer.MethodName.class)\nclass CrashTest {\n  static void crashIf(String where) { if (where.equals(System.getenv(\"CRASH\"))) Runtime.getRuntime().halt(3); }\n  @Test void a() {}\n  @Test void b() { crashIf(\"test\"); }\n  @AfterAll static void after() { crashIf(\"after\"); }\n}\n",
+    ));
+    for n in 1..=9 {
+        files.push(file(
+            &format!("other/src/test/java/shop/other/Green{n}Test.java"),
+            &format!("package shop.other;\nimport org.junit.jupiter.api.*;\nclass Green{n}Test {{ @Test void green() {{}} }}\n"),
+        ));
+    }
+    files
+}
+
+// covers: C-32, C-46
+#[test]
+fn a_test_jvm_that_died_records_no_pass_for_the_class_it_was_in() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    for (round, place) in ["after", "test"].into_iter().enumerate() {
+        let r = Repo::new(&crash_build());
+        // The test JVM dies: Gradle fails the task, and no test of it failed.
+        let ran = r.run(&command(&gradle, &[]), &[("CRASH", place)]);
+        assert_eq!(ran.code, 1, "{place}: {}\n{}", ran.stdout, ran.stderr);
+        assert!(
+            ran.stderr.contains("finished with non-zero exit value 3"),
+            "{place}: {}",
+            ran.stderr
+        );
+        // other's classes passed; CrashTest recorded nothing.
+        assert_eq!(
+            r.unit_results(),
+            std::collections::BTreeMap::from([("pass".into(), 9)]),
+            "{place} ({round}): {}\n{}",
+            ran.stdout,
+            ran.stderr
+        );
+    }
+}
