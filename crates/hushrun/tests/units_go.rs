@@ -1387,6 +1387,39 @@ fn a_go_test_passes_or_fails_by_what_its_binary_printed_and_how_it_ended() {
 
 // covers: C-45
 #[test]
+fn what_a_program_a_go_test_left_running_prints_reaches_go_test_and_no_test_of_it_passes() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    // The program holds the test binary's output for 6 s: just past the 5 s after the binary's
+    // exit within which its output must end for its tests to pass, and short of Go's own 10 s
+    // timeout, so the test stays as short as it can while still crossing that line.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\nfunc TestStarts(t *testing.T) {\n\tcmd := exec.Command(\"sh\", \"-c\", \"sleep 6; echo late\")\n\tcmd.Stdout = os.Stdout\n\tif err := cmd.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n}\n\nfunc TestOther(t *testing.T) {}\n",
+        ),
+    ]);
+    let ran = r.run(&["run", "unit", "--", "go", "test", "-v", "./..."], &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    // go test printed what the program printed, as it does without hushrun.
+    assert!(
+        ran.stdout.contains("late"),
+        "{}\n{}",
+        ran.stdout,
+        ran.stderr
+    );
+    assert_eq!(
+        r.map()["units"]["p"]["tests"],
+        serde_json::json!({"TestOther": "not-run", "TestStarts": "not-run"})
+    );
+}
+
+// covers: C-45
+#[test]
 fn a_go_binary_that_ended_any_other_way_records_its_named_failures_and_no_pass() {
     if !tools("Go", has_go()) {
         return;
