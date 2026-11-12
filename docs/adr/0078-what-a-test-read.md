@@ -115,14 +115,14 @@ constant with `from X import` and is imported for it by a third re-exports nothi
 is two imports away, the first known miss, pinned by
 `a_known_miss_of_reads_test_a_constant_a_plain_module_passes_on`.
 
-## Amendment 4: a run's body fits 8 MiB, and which 413 is an older server's (2026-11-12)
+## Amendment 4: a run's body fits 8 MiB, and any 413 sends the first 5,000 again (2026-11-12)
 
-Item 9 says at most 50,000 results and 8 MiB, but the CLI capped only the count, and read any 413
-as an older server: it then sent the first 5,000 again, cutting results a server that refused for
-another reason would have refused anyway. Now the CLI cuts results from the last, as it does past
-50,000, until the body fits 8 MiB (tests' passes go first, failures last); 50,000 results of about
-110 bytes and the largest result fit, so the cut is a guard. Both servers answer a body over their
-limit with axum's own 413, `Failed to buffer the request body: length limit exceeded`, so the body
-can't tell an older server from this one; the size can: a body this CLI fit to 8 MiB that gets that
-413 met a smaller limit, an older server's, and goes again as the first 5,000. A 413 in other words
-is the server's refusal, said as one, and the run isn't sent again.
+Item 9 says at most 50,000 results and 8 MiB, but the CLI capped only the count. Now the CLI cuts
+results from the last, as it does past 50,000, until the body fits 8 MiB (tests' passes go first,
+failures last); 50,000 results of about 110 bytes and the largest result fit, so the cut is a
+guard. Since the body always fits 8 MiB, a 413 means whoever answered takes less than this server
+does, whoever it is: an older server (1 MiB), or a proxy in front of one (nginx's default is
+1 MiB), which answers in its own words. So any 413 gets the first 5,000 once more, said as before
+with how many weren't kept, and only a second 413 is a refusal. (A first version of this
+amendment took only a 413 in axum's words, `Failed to buffer the request body: length limit
+exceeded`, as an older server's: a large run behind such a proxy then kept no result at all.)

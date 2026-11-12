@@ -1252,21 +1252,18 @@ fn without_saved(result: &RunResult) -> Option<RunResult> {
     Some(result)
 }
 
-/// \[RFC 0004 §3.8\] Whether a server refused a run's results by the limits of one from before
-/// tests as the unit: 413 for a body over 1 MiB, or 400 `invalid` for more than 5,000. Both servers
-/// answer a body past their limit with axum's own 413 and [`BODY_LIMIT`]; since the body sent fits
-/// [`MOST_RUN_BYTES`] ([`fitting`]), that answer can only be an older server's smaller limit. A 413
-/// in other words is a server's own refusal.
+/// \[RFC 0004 §3.8\] Whether a run's results met a smaller limit than this hushrun's: any 413, since
+/// the body sent fits [`MOST_RUN_BYTES`] ([`fitting`]), so whoever answered (an older server, whose
+/// limit is 1 MiB, or a proxy in front of a server, nginx's 1 MiB by default) takes less; or an
+/// older server's 400 `invalid` for more than 5,000. The caller sends the first 5,000 once more, and
+/// a second refusal is one.
 fn older_limit(status: u16, answer: &[u8]) -> bool {
-    (status == 413 && String::from_utf8_lossy(answer).contains(BODY_LIMIT))
+    status == 413
         || (status == 400
             && error_code(answer).as_deref() == Some("invalid")
             && error_message(answer)
                 .is_some_and(|m| m.starts_with("a run records at most 5000 test files' results")))
 }
-
-/// What a server whose body limit a request passed answers with its 413 (axum's own words).
-const BODY_LIMIT: &str = "Failed to buffer the request body: length limit exceeded";
 
 /// \[RFC 0004 §3.8\] The most results of test files and tests a run sends.
 pub const MOST_RESULTS: usize = 50_000;

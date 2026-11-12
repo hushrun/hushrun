@@ -1483,37 +1483,31 @@ fn a_body_too_large_for_an_older_server_goes_again_as_the_first_5000() {
 
 // covers: C-12
 #[test]
-fn a_413_that_isnt_an_older_servers_limit_doesnt_go_again_as_the_first_5000() {
+fn a_413_in_any_words_goes_again_as_the_first_5000_and_a_second_is_a_refusal() {
     if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
         return;
     }
-    let results = FakeResults::start();
-    // A 413 in a server's own words, not the older server's body limit: the body this hushrun
-    // sends fits a server's 8 MiB, so the first 5,000 would be cut for nothing.
-    results.answer(
-        "POST",
-        "v0/runs/",
-        413,
-        json!({"error": {"code": "too_large", "message": "a run's body is at most 8 MiB"}}),
-        1,
-    );
-    let server = with_server(&results);
-    let r = repo_of(&many("{mode: reuse, unit: test}"));
-    let mut env = envs(&server);
-    env.push(("FAIL", "1"));
-    let first = r.run(&pytest_args(&python(), &[]), &env);
-    assert_eq!(first.code, 1, "{}", first.stderr);
-    assert_eq!(results.unit_results(), 0);
-    assert!(
-        !first.stderr.contains("keeps 5,000 a run"),
-        "{}",
-        first.stderr
-    );
-    assert!(
-        first.stderr.contains("a run's body is at most 8 MiB"),
-        "{}",
-        first.stderr
-    );
+    // A proxy in front of the server with a smaller body limit (nginx's is 1 MiB) answers 413 in
+    // its own words. hushrun's body fits 8 MiB, so whoever answered takes less: the first 5,000
+    // go again, once.
+    let proxy = json!("<html><head><title>413 Request Entity Too Large</title></head></html>");
+    for (times, kept) in [(1, 5_000), (2, 0)] {
+        let results = FakeResults::start();
+        results.answer("POST", "v0/runs/", 413, proxy.clone(), times);
+        let server = with_server(&results);
+        let r = repo_of(&many("{mode: reuse, unit: test}"));
+        let mut env = envs(&server);
+        env.push(("FAIL", "1"));
+        let first = r.run(&pytest_args(&python(), &[]), &env);
+        assert_eq!(first.code, 1, "{}", first.stderr);
+        assert_eq!(results.unit_results(), kept, "{}", first.stderr);
+        assert_eq!(
+            first.stderr.contains("1,002 of its 6,002 results"),
+            kept > 0,
+            "{}",
+            first.stderr
+        );
+    }
 }
 
 /// `hushrun why unit <asked> --format json`, read.
