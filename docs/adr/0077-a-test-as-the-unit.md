@@ -250,3 +250,10 @@ first; the plugin's are in ADR 0080's Amendment 2.
   programs and passed, and that was recorded as the check's pass on this code: the next run was
   skipped. An adapter that knows says so (`Read::stale_build`, or `staleBuild` in its facts): a run
   that passed then records nothing at all and says why once; a failed one records its fail.
+- **A store that can't be read.** The line said the next run starts such a store again, but only a
+  schema mismatch was replaced: a schema-2 file made before the test table's `not_kept` column
+  failed every read and write for ever, said at debug only. Now a store whose tables aren't the
+  ones this build makes can't be read either, and the one place that writes sets aside (as
+  `<file>.unread`, one kept) a store it can't open or write for anything but busy, and makes it
+  anew, once. The missing column isn't added in place: one rule covers every shape a store can be
+  in, and costs one run's map.

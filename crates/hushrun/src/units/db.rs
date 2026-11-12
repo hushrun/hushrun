@@ -312,7 +312,9 @@ fn ids(conn: &Connection) -> Result<(i64, i64), Unread> {
     .map_err(|e| unread(&e))
 }
 
-/// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`].
+/// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`], and \[C-36\]
+/// its tables as this build makes them, so that a store an older build of the same schema made (a
+/// test table without a column read now) reads as one that can't be read, and is set aside.
 fn check_schema(conn: &Connection) -> Result<(), Unread> {
     let (app, version) = ids(conn)?;
     if app != APPLICATION_ID || version != SCHEMA {
@@ -320,20 +322,62 @@ fn check_schema(conn: &Connection) -> Result<(), Unread> {
             "it isn't hushrun's store of schema {SCHEMA}"
         )));
     }
+    if tables_of(conn).map_err(|e| unread(&e))? != *this_builds_tables() {
+        return Err(Unread::Broken(
+            "its tables aren't the ones this hushrun makes".into(),
+        ));
+    }
     Ok(())
 }
 
-/// A store opened to write, made when there is none, and made again when the one there can't be
-/// read: `Err` when even that fails, or another hushrun held it too long.
-fn open_to_write(path: &Path) -> Result<Connection, Unread> {
-    match open_writable(path) {
+/// The `CREATE TABLE` statements of a database's tables, as SQLite keeps them.
+fn tables_of(conn: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare("SELECT sql FROM sqlite_master WHERE type = 'table'")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?.collect()
+}
+
+/// The tables [`TABLES`] makes, made once in memory.
+fn this_builds_tables() -> &'static BTreeSet<String> {
+    static MADE: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        Connection::open_in_memory()
+            .and_then(|conn| {
+                conn.execute_batch(TABLES)?;
+                tables_of(&conn)
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// \[C-36\] The one place a store is written: `write` with the store opened to write, made when
+/// there is none. A store that can't be opened or written for anything but "busy" (another schema,
+/// damaged, a table of an older build of this schema) is set aside ([`set_aside`]) and made anew,
+/// once, so the line that says the next run starts it again is true. `Err` when even that fails,
+/// or another hushrun held it too long.
+fn writing<T>(
+    path: &Path,
+    write: impl Fn(&mut Connection) -> Result<T, Unread>,
+) -> Result<T, Unread> {
+    let attempt = || open_writable(path).and_then(|mut conn| write(&mut conn));
+    match attempt() {
         Err(Unread::Broken(why)) => {
-            tracing::debug!("{} is replaced: {why}", path.display());
-            remove(path);
-            open_writable(path)
+            set_aside(path, &why);
+            attempt()
         }
         other => other,
     }
+}
+
+/// \[C-36\] Sets a store that can't be read aside, `<file>.unread` beside it (one kept, the
+/// newest), with its WAL's files gone, so that the next write makes it anew.
+fn set_aside(path: &Path, why: &str) {
+    tracing::debug!("{} is set aside and made anew: {why}", path.display());
+    let mut aside = path.as_os_str().to_os_string();
+    aside.push(".unread");
+    if std::fs::rename(path, PathBuf::from(aside)).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    remove(path);
 }
 
 fn open_writable(path: &Path) -> Result<Connection, Unread> {
@@ -346,6 +390,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
         .map_err(|e| unread(&e))?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
+        check_schema(&conn)?;
         return Ok(conn);
     }
     if app != 0 || version != 0 {
@@ -826,14 +871,16 @@ pub fn write(path: &Path, w: &Write<'_>) -> Result<(), Unread> {
 }
 
 fn write_waiting(path: &Path, w: &Write<'_>, busy: Duration) -> Result<(), Unread> {
-    let mut conn = open_to_write(path)?;
-    conn.busy_timeout(busy).map_err(|e| unread(&e))?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| unread(&e))?;
-    write_in(&tx, w).map_err(|e| unread(&e))?;
-    tx.commit().map_err(|e| unread(&e))?;
-    checkpoint(&conn);
+    writing(path, |conn| {
+        conn.busy_timeout(busy).map_err(|e| unread(&e))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| unread(&e))?;
+        write_in(&tx, w).map_err(|e| unread(&e))?;
+        tx.commit().map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1160,24 +1207,25 @@ pub fn note_hints(
     hints: &[HintKnown],
     now_ms: i64,
 ) -> Result<(), Unread> {
-    let mut conn = open_to_write(path)?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| unread(&e))?;
-    let check: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM checks WHERE check_id = ?1",
-            [check_id.hex()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| unread(&e))?;
-    if let Some(check) = check {
-        note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
-    }
-    tx.commit().map_err(|e| unread(&e))?;
-    checkpoint(&conn);
-    Ok(())
+    writing(path, |conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| unread(&e))?;
+        let check: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM checks WHERE check_id = ?1",
+                [check_id.hex()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| unread(&e))?;
+        if let Some(check) = check {
+            note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
+        }
+        tx.commit().map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(())
+    })
 }
 
 /// \[C-38\] Whether this machine sent or received the hint `content_id` at `address` for `os`, for

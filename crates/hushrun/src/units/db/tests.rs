@@ -814,3 +814,38 @@ fn a_file_that_isnt_a_store_of_schema_1_is_never_imported() {
         .collect();
     assert!(left.iter().all(|n| !n.starts_with(".import-")), "{left:?}");
 }
+
+// covers: C-36
+#[test]
+fn a_store_that_cant_be_read_is_set_aside_and_made_anew_by_the_next_write() {
+    // Schema 2 as a build before its test table's `not_kept` column made it: every read and every
+    // write of it fails, for ever, unless the next write sets it aside and starts again.
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::path(dir.path(), Some("example.com/acme/shop"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let column = "    -- [C-37] Why a test the run decided `not-run` kept no result, as its adapter said it.\n    not_kept    TEXT CHECK (not_kept IS NULL OR (state = 'not-run' AND not_kept <> '')),\n";
+    assert!(TABLES.contains(column));
+    let old = TABLES.replace(column, "");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch(&old).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA};"
+        ))
+        .unwrap();
+    }
+    let r = run(
+        "unit",
+        &[("tests/test_a.py", mapped(&[("app.py", HASH_B)]))],
+        &["app.py", "tests/test_a.py"],
+    );
+    write_run(&path, &r).unwrap();
+    let loaded = load(&path, &id("unit"));
+    assert!(loaded.unread.is_none(), "{:?}", loaded.unread);
+    assert!(loaded.map.reported());
+    // Set aside, not deleted: one kept, beside it.
+    let mut aside = path.as_os_str().to_os_string();
+    aside.push(".unread");
+    assert!(std::path::Path::new(&aside).is_file());
+}
