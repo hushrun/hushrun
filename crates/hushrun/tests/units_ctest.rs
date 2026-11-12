@@ -1237,6 +1237,52 @@ fn a_test_reads_the_programs_of_the_fixtures_and_tests_it_depends_on() {
     }
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_program_a_test_names_by_a_relative_path_is_read() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let driver = "#include <unistd.h>\nint main(int argc, char **argv) {\n\
+            \x20 if (argc < 2) return 0;\n  execv(argv[1], argv + 1); return 2;\n}\n";
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(rel C)\nenable_testing()\n\
+                     add_executable(cli2 tools/cli2.c)\nadd_executable(cli3 tools/cli3.c)\n\
+                     add_executable(t_rel tests/driver.c)\nadd_executable(t_rel3 tests/driver.c)\n\
+                     add_test(NAME rel COMMAND t_rel ./cli2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})\n\
+                     add_test(NAME rel3 COMMAND t_rel3 ./cli3)\n",
+                ),
+                file("tools/cli2.c", "int main(void) { return 0; }\n"),
+                file("tools/cli3.c", "int main(void) { return 0; }\n"),
+                file("tests/driver.c", driver),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        let map = store::map(&p.cache);
+        // A relative path is taken from the test's WORKING_DIRECTORY, else its directory.
+        assert_eq!(
+            map["units"]["t_rel"]["reads"],
+            json!(["tests/driver.c", "tools/cli2.c"]),
+            "{at}"
+        );
+        assert_eq!(
+            map["units"]["t_rel3"]["reads"],
+            json!(["tests/driver.c", "tools/cli3.c"]),
+            "{at}"
+        );
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {
