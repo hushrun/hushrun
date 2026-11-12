@@ -652,6 +652,54 @@ fn two_starts_of_pytest_in_one_command_never_add_up_to_a_test_file_that_ran_whol
     assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
 }
 
+// covers: C-32
+#[test]
+fn a_relative_path_opened_after_a_chdir_is_the_file_it_names_there() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The test file opens `data.py` from the root as it loads, then its test opens `data.py`
+    // from `sub/`: the same string, another file, which its list must hold.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("data.py", "0\n"),
+        ("sub/data.py", "1\n"),
+        (
+            "test_a.py",
+            "import os\n\nwith open('data.py') as f:\n    ROOT = f.read()\n\ndef test_target():\n    os.chdir('sub')\n    try:\n        with open('data.py') as f:\n            assert f.read().strip() == '1'\n    finally:\n        os.chdir('..')\n",
+        ),
+        ("test_other.py", "def test_other():\n    assert True\n"),
+    ]);
+    let python = python();
+    let args = [
+        "run",
+        "unit",
+        "--",
+        &python,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ];
+    let first = r.run(&args, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        r.reads("test_a.py").contains(&"sub/data.py".to_string()),
+        "{:?}",
+        r.reads("test_a.py")
+    );
+    r.write("sub/data.py", "2\n");
+    let second = r.run(&args, &[]);
+    assert_eq!(second.code, 1, "{}", second.stdout);
+    assert!(
+        !second.stderr.contains("it would have been reused"),
+        "{}",
+        second.stderr
+    );
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {

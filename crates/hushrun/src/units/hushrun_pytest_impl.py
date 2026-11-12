@@ -203,12 +203,19 @@ class Observer(object):
 
     def rel(self, path):
         """Repository-relative path of a file, or None when it is not the repository's own."""
+        # A relative path names a file from the directory the process is in now: keyed by the
+        # absolute path, a later chdir finds the file it names there, never the one cached.
+        if not os.path.isabs(path):
+            try:
+                path = os.path.join(os.getcwd(), path)
+            except Exception:
+                return None
         cached = self._rel_cache.get(path)
         if cached is not None or path in self._rel_cache:
             return cached
         result = None
         try:
-            real = os.path.realpath(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
+            real = os.path.realpath(path)
             if real.startswith(self.root_prefix) and not real.startswith(self.third_party_prefixes):
                 relative = real[len(self.root_prefix):]
                 parts = relative.split(os.sep)

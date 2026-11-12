@@ -143,6 +143,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   no longer add up to a test file that ran whole: a test file's tests are counted within each
   start, and one of whose tests never ran records no pass. An adapter's facts may say `start`;
   pytest sends it. A test told by id finished only when every process that ran it finished it.
+- pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
+  name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
+  list, and runs when it changes.
 
 ## [0.13.0] - 2026-11-12
 
