@@ -63,13 +63,13 @@ and C-46 hold over §4.5.
    report alike. A unit of no file is made of no file of the scope; the store keeps its row only
    while it runs, so it is reused every other run at best.
 6. **A test's id** is `<class as Gradle names it>.<method>`: the method is Gradle's name, or for an
-   invocation under a method's own suite of the same class (parametrized, repeated, factory, a
-   Spock unrolled feature), that suite's; then `(args)`, `[n]` and `[n](x)` go. Every invocation of
-   a method is one test, as RFC 0004 §3.1 has it for JUnit. A nested class's method is
-   `pkg.Outer$Inner.method`. The script splits an id at the first `.` after which the class's
-   outer class is one of the unit's: the hook's entry is `pkg.Outer$Inner#method`, JUnit 4's
-   patterns `pkg.Outer$Inner.method` and `pkg.Outer$Inner.method[*]` (Parameterized names its
-   tests `method[0: x=1]`).
+   invocation under a method's own suite of the same class (parametrized, repeated, factory, a Spock
+   unrolled feature), that suite's; then `(args)`, `[n]`, and `[n]` followed by `(x)`, go. Every
+   invocation of a method is one test, as RFC 0004 §3.1 has it for JUnit. A nested class's method is
+   `pkg.Outer$Inner.method`. The script splits an id at the first `.` after which the class's outer
+   class is one of the unit's: the hook's entry is `pkg.Outer$Inner#method`, JUnit 4's patterns
+   `pkg.Outer$Inner.method` and `pkg.Outer$Inner.method[*]` (Parameterized names its tests
+   `method[0: x=1]`).
 7. **Selection** (C-32). A unit `reuse` lists is left out whole by an exclusion added to the task,
    which Gradle evaluates while it fingerprints the task's class files, at execution: a set lookup
    of each class file's outer class. A test `reuseTests` lists goes through the hook for the JUnit
