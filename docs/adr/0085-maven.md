@@ -172,6 +172,19 @@ Still not modelled, and so a test that reaches another module that way is reused
 changes: a path to another module's `target/` written by hand in a configuration or a test, and a
 script or a test that builds or reads another module by itself.
 
+## Amendment 6: a module an assembly descriptor names (2026-11-12)
+
+A run showed Amendment 5 missed a reactor module named only in an assembly descriptor file (a
+`moduleSet` with `useAllReactorProjects`, which another module's test then runs from its own
+`target/`): no dependency and no configuration of the POM names it, so the test was reused after
+the module changed. The decision: the descriptor files a plugin's configuration names
+(`descriptors`, `descriptor`, `descriptorSourceDirectory`) are read, and each reactor module's
+`groupId:artifactId` in them joins the closure; a module or dependency set with no includes or a
+wildcard in one, a descriptor that can't be read, or a path holding a property, makes every
+reactor module join it. Runs also show that `dependency:unpack-dependencies` (a dependency names
+the module) and a plugin that only a profile turned on by a property adds (Maven's model holds it
+then) are followed already.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0
