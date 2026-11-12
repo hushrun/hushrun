@@ -99,6 +99,7 @@ function install() {
     if (p) {
       state.reads.add(p);
       bucket()?.opened.add(p);
+      if (state.file && state.file.watch) keptBy(state.file, p);
     }
   });
   const listed = (value) => note('list', () => {
@@ -277,6 +278,10 @@ function startFile(told) {
     kinds: new Map(),
     ids: new Map(),
     finished: new Set(),
+    // Each module whose code was on the stack when a file was opened, with the files: a file a
+    // module read once and kept reaches every test that runs the module's code.
+    kept: new Map(),
+    shared_ids: new Set(),
   };
   state.file.current = state.file.loaded;
   // Without V8's coverage no test says what it ran, and each gets its file's list.
@@ -522,6 +527,30 @@ function settle(F) {
   }
 }
 
+// The repository's modules on the stack of an open, each of which may keep what it read.
+function keptBy(F, opened) {
+  const prepare = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  let sites = [];
+  try {
+    Error.stackTraceLimit = 64;
+    Error.prepareStackTrace = (_, callSites) => callSites;
+    const holder = {};
+    Error.captureStackTrace(holder, keptBy);
+    sites = holder.stack || [];
+  } finally {
+    Error.prepareStackTrace = prepare;
+    Error.stackTraceLimit = limit;
+  }
+  for (const site of sites) {
+    const name = site && typeof site.getFileName === 'function' ? site.getFileName() : null;
+    const module = name ? idPath(name) : null;
+    if (!module || module === SELF || /[\\/]node_modules[\\/]/.test(module)) continue;
+    if (!F.kept.has(module)) F.kept.set(module, new Set());
+    F.kept.get(module).add(opened);
+  }
+}
+
 function sharedOf(F, suite) {
   let b = F.shared.get(suite);
   if (!b) {
@@ -568,27 +597,19 @@ function name(F) {
     groups.get(base).push(entry);
   }
   const ids = new Map();
-  const ambiguous = new Set();
   for (const [base, entries] of groups) {
     const shape = JSON.stringify(entries[0].names);
     const mixed = entries.some((e) => JSON.stringify(e.names) !== shape);
     entries.forEach((entry, k) => {
-      const id = k === 0 ? base : `${base} [${k + 1}]`;
-      if (mixed) ambiguous.add(entry.test);
-      ids.set(entry.test, id);
+      // Different suites that join to one name share it: they can't be told apart.
+      ids.set(entry.test, mixed || k === 0 ? base : `${base} [${k + 1}]`);
     });
   }
-  const seen = new Map();
-  for (const [test, id] of ids) {
-    if (seen.has(id)) {
-      ambiguous.add(test);
-      ambiguous.add(seen.get(id));
-    } else {
-      seen.set(id, test);
-    }
-  }
-  for (const test of ambiguous) ids.delete(test);
+  const count = new Map();
+  for (const id of ids.values()) count.set(id, (count.get(id) || 0) + 1);
   F.ids = ids;
+  // An id more than one test has: told once, never left out (C-43).
+  F.shared_ids = new Set([...count].filter(([, n]) => n > 1).map(([id]) => id));
 }
 
 function declaredSkip(F, test) {
@@ -607,10 +628,8 @@ function choose(F) {
   for (const test of tests) {
     if (test.concurrent) F.concurrent = true;
     const id = F.ids.get(test);
-    if (id === undefined) {
-      F.kinds.set(test, 'ambiguous');
-    } else if (test.mode === 'run' || test.mode === 'queued') {
-      if (F.reuse.has(id)) {
+    if (test.mode === 'run' || test.mode === 'queued') {
+      if (F.reuse.has(id) && !F.shared_ids.has(id)) {
         // Skipped, as Vitest's own report then says: its mode doesn't reach the main process.
         test.mode = 'skip';
         test.result = { state: 'skip' };
@@ -681,10 +700,11 @@ function testsFacts(F) {
   };
   const told = [];
   const order = new Map();
+  const byId = new Map();
   for (const test of testsOf(F.testFile || {})) {
     let kind = F.kinds.get(test);
     if (kind === 'deselected' && (F.finished.has(test) || F.tests.has(test))) kind = 'planned';
-    if (kind === undefined || kind === 'ambiguous' || kind === 'filtered') continue;
+    if (kind === undefined || kind === 'filtered') continue;
     const id = F.ids.get(test);
     const own = F.tests.get(test) || newBucket();
     const shared = served(test);
@@ -720,6 +740,25 @@ function testsFacts(F) {
         entry.dirs = many(dirs);
       }
     }
+    // Tests that share an id are told once: failed if any failed, finished only if all did, with
+    // no list of their own, and never left out (C-43).
+    if (F.shared_ids.has(id)) {
+      delete entry.ran;
+      delete entry.opened;
+      delete entry.dirs;
+      entry.neverLeftOut = true;
+      const at = byId.get(id);
+      if (at !== undefined) {
+        const had = told[at];
+        had.finished = had.finished && entry.finished;
+        had.failed = had.failed || entry.failed;
+        had.durationMs += entry.durationMs;
+        had.notFollowed.push(...entry.notFollowed);
+        order.set(test, at);
+        continue;
+      }
+      byId.set(id, told.length);
+    }
     order.set(test, told.length);
     told.push(entry);
   }
@@ -728,7 +767,7 @@ function testsFacts(F) {
   if (watched) {
     for (const [suite, b] of F.shared) {
       if (!b.ran.size && !b.opened.size) continue;
-      const tests = testsOf(suite).filter((t) => order.has(t)).map((t) => order.get(t));
+      const tests = [...new Set(testsOf(suite).filter((t) => order.has(t)).map((t) => order.get(t)))];
       if (tests.length) shared.push({ tests, ran: many(b.ran), opened: many(b.opened) });
     }
   } else if (F.concurrent) {
@@ -753,10 +792,20 @@ function testsFacts(F) {
     imports: {},
   };
   if (watched) {
-    const loadedRan = [...F.loaded.ran, ...F.after.ran, ...F.every];
-    unit.loaded = { ran: many(loadedRan), opened: many([...F.loaded.opened, ...F.after.opened]) };
+    unit.loaded = {
+      ran: many([...F.loaded.ran, ...F.after.ran]),
+      opened: many([...F.loaded.opened, ...F.after.opened]),
+    };
+    unit.everyTest = many(F.every);
     unit.shared = shared;
     facts.imports = imports(at, many);
+    facts.opens = {};
+    for (const [module, files] of F.kept) {
+      const from = at(module);
+      if (from === null) continue;
+      const to = many(files).filter((i) => i !== from);
+      if (to.length) facts.opens[String(from)] = to;
+    }
   }
   return facts;
 }

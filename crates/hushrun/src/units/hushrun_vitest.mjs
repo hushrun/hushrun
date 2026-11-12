@@ -244,6 +244,9 @@ async function deselect(state, vitest, sorted) {
     if (refused !== null && run.reuseTests && Object.keys(run.reuseTests).length) {
       state.refused = refused;
     }
+    if (run.reads === 'test' && coverage) {
+      state.watch = "Vitest's coverage is on, and it shares V8's counters with watching a test";
+    }
     writeWhole(path.join(state.dir, 'vitest-tests'), {
       unit: 'test',
       watch: run.reads === 'test' && !coverage,
@@ -328,6 +331,8 @@ function report(state, vitest, modules, errors, reason) {
       configFiles: [...state.configFiles],
       version: String(vitest.version || ''),
       refused: state.refused,
+      // [ADR 0081] Why no test was watched, when `reads: test` asked and none could be.
+      ...(state.watch ? { watch: state.watch } : {}),
     },
     notFollowed: state.whole,
     units: [...units.values()],

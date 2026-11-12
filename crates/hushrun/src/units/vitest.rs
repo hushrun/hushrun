@@ -318,6 +318,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
             ran: list(&test.ran),
             opened: list(&test.opened),
             dirs: list(&test.dirs),
+            never_left_out: test.never_left_out,
         };
         let Some(had) = into.get_mut(&test.id) else {
             into.insert(test.id.clone(), told);
@@ -326,6 +327,7 @@ fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, test
         had.finished &= told.finished;
         had.failed |= told.failed;
         had.deselected &= told.deselected;
+        had.never_left_out |= told.never_left_out;
         had.duration_ms = had.duration_ms.saturating_add(told.duration_ms);
         had.not_followed.extend(told.not_followed);
         for (had, told) in [
