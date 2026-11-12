@@ -53,7 +53,7 @@ struct PlanFile {
     schema: String,
     /// Each unit's lists, each the files its key holds.
     units: BTreeMap<String, Vec<Vec<String>>>,
-    /// The scope's C and C++ files that aren't ignored: what a key can hold.
+    /// The scope's C and C++ files of the sources and units sets: what a key can hold.
     scope: Vec<String>,
 }
 
@@ -158,13 +158,14 @@ impl Recognized {
                 out.units.insert(unit.to_string(), None);
                 continue;
             };
+            // \[C-30\] Only what the graph gives a program is a source (see `read`).
+            out.named
+                .extend(b.reads.iter().filter(|f| build::is_source(f)).cloned());
             let reads: BTreeSet<String> = if b.every_source {
                 every.clone()
             } else {
                 b.reads.clone()
             };
-            out.named
-                .extend(reads.iter().filter(|f| build::is_source(f)).cloned());
             out.unit_files.extend(b.own.iter().cloned());
             out.units
                 .insert(unit.to_string(), Some((reads, b.own.clone())));
@@ -294,7 +295,10 @@ impl Adapter for Recognized {
             let scope = at
                 .tree
                 .paths()
-                .filter(|p| build::is_source(p) && planning.sets.of(p) != Some(Set::Ignored))
+                .filter(|p| {
+                    build::is_source(p)
+                        && matches!(planning.sets.of(p), Some(Set::Sources | Set::Units))
+                })
                 .map(str::to_string)
                 .collect();
             let units = planning
@@ -364,10 +368,14 @@ impl Adapter for Recognized {
         let mut named: BTreeSet<String> = BTreeSet::new();
         for (unit, m) in merged {
             let mut reads = m.reads;
+            // \[C-30\] Sources are what a build's graph gives some program: a file of a source
+            // kind no program is built from is in the rest set, and a change to it runs
+            // everything. A program whose build couldn't be read reads every source, which
+            // doesn't make every file of a source kind a source.
+            named.extend(reads.iter().filter(|f| build::is_source(f)).cloned());
             if every.contains(&unit) {
                 reads.extend(all_sources.iter().cloned());
             }
-            named.extend(reads.iter().filter(|f| build::is_source(f)).cloned());
             let facts = Facts {
                 complete: m.complete,
                 failed: m.failed,

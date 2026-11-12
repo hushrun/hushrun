@@ -986,8 +986,8 @@ pub struct Graph {
     pub tests: BTreeMap<String, TestTarget>,
     /// Their directories, by module name.
     pub by_c99: BTreeMap<String, String>,
-    /// Every file of a kind SwiftPM compiles below a target's directory (a binary or system
-    /// library target aside): the sources (C-30).
+    /// The sources (C-30): every file of a kind SwiftPM compiles below a target's directory (a
+    /// binary or system library target aside) that a test target reads.
     pub named: BTreeSet<String>,
     /// Which target's directory depends on which, for `hushrun why`.
     pub edges: BTreeSet<super::db::Edge>,
@@ -1080,6 +1080,9 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
                 .any(|t| t["pluginUsages"].as_array().is_some_and(|u| !u.is_empty()))
         })
     };
+    // Every file of a kind SwiftPM compiles below a target's directory: what the graph can give a
+    // test target.
+    let mut compiled: BTreeSet<String> = BTreeSet::new();
     let mut products: BTreeMap<String, Vec<(usize, Vec<String>)>> = BTreeMap::new();
     let mut plugin_products: BTreeSet<String> = BTreeSet::new();
     for (i, d) in described.iter().enumerate() {
@@ -1107,7 +1110,7 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
                 continue;
             };
             if kind != "binary" && kind != "system-target" {
-                out.named.extend(
+                compiled.extend(
                     below(tree, &from)
                         .filter(|p| of_kind(p))
                         .map(str::to_string),
@@ -1244,6 +1247,12 @@ pub fn graph_of(described: &[Described], root: &Path, tree: &Tree) -> Graph {
             .filter(|p| of_kind(p))
             .map(str::to_string)
             .collect();
+        // \[C-30\] Sources are the files the graph gives a test target: of a compiled kind, below a
+        // target's directory, and read by one. Any other file of a compiled kind (a target no test
+        // target depends on, an `Examples/` or `Fixtures/` tree, a package this one doesn't
+        // depend on) is in the rest set, so a change to it runs every test target.
+        out.named
+            .extend(reads.iter().filter(|p| compiled.contains(*p)).cloned());
         out.by_c99.insert(c99.clone(), unit.clone());
         out.tests.insert(
             unit,

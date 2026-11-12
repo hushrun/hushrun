@@ -194,6 +194,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   plan's `swift package describe` gets a command's own `env NAME=value` assignments.
 - hushrun's `swift` no longer waits for ever for output a program `swift test` left running holds
   open: it passes it on for 5 seconds after `swift test` ends, and that run records no pass.
+- CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
+  or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
+  `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build
+  couldn't be read no longer makes every C and C++ file a source.
 - The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
   the current directory, a relative one is from it, and a link to one of hushrun's own programs
   is passed over.

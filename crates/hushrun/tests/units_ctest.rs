@@ -986,6 +986,70 @@ fn a_skipped_test_in_a_run_that_failed_records_no_pass() {
     );
 }
 
+// covers: C-49, C-30
+#[test]
+fn a_source_no_program_is_built_from_is_in_the_rest_set() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        // t_case reads cases/one.c at run time, by a path it was built with, which no build
+        // edge names; t_all names the repository's cases directory, and reads every source; a
+        // custom command no test program depends on compiles tools/embed.c; include_copy/x.h is
+        // a header nothing includes.
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(own C)\nenable_testing()\n\
+                     add_executable(t_case tests/t_case.c)\n\
+                     target_compile_definitions(t_case PRIVATE CASE=\"${CMAKE_SOURCE_DIR}/cases/one.c\")\n\
+                     add_executable(t_all tests/t_all.c)\nadd_executable(t_p tests/t_p.c)\n\
+                     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/embed.txt COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/tools/embed.c ${CMAKE_BINARY_DIR}/embed.txt DEPENDS tools/embed.c)\n\
+                     add_custom_target(embed ALL DEPENDS ${CMAKE_BINARY_DIR}/embed.txt)\n\
+                     add_test(NAME case COMMAND t_case)\nadd_test(NAME all COMMAND t_all ${CMAKE_SOURCE_DIR}/cases)\n\
+                     add_test(NAME p COMMAND t_p)\n",
+                ),
+                file("cases/one.c", "int one = 1;\n"),
+                file("tools/embed.c", "int embed;\n"),
+                file("include_copy/x.h", "int x;\n"),
+                file(
+                    "tests/t_case.c",
+                    "#include <stdio.h>\n#include <string.h>\nint main(void) {\n\
+                     \x20 char line[64] = {0}; FILE *f = fopen(CASE, \"r\"); if (!f) return 1;\n\
+                     \x20 fgets(line, sizeof line, f); fclose(f); return strcmp(line, \"int one = 1;\\n\") != 0;\n}\n",
+                ),
+                file("tests/t_all.c", "int main(void) { return 0; }\n"),
+                file("tests/t_p.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}\n{}\n{}", first.stdout, first.stderr);
+        // No program's build gives these files to it: they are in the rest set, so a change to
+        // one runs every program; t_all reading every source doesn't make them sources.
+        let map = store::map(&p.cache);
+        for path in ["cases/one.c", "tools/embed.c", "include_copy/x.h"] {
+            assert!(map["rest"][path].is_string(), "{at}: {path}: {map:#}");
+        }
+        assert!(map["rest"]["tests/t_case.c"].is_null(), "{at}: {map:#}");
+        // cases/one.c changes: t_case runs, and fails.
+        p.write("cases/one.c", "int one = 2;\n");
+        let second = p.run(CTEST, &[]);
+        assert!(
+            second.ran().contains(&"case".to_string()),
+            "{at}\n{}\n{}",
+            second.stdout,
+            second.stderr
+        );
+        assert_ne!(second.code, 0, "{at}");
+    }
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

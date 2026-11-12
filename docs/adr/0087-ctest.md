@@ -204,3 +204,20 @@ The decision:
   what its `ctest` will.
 - The real `ctest` is the one a shell would start: an empty `PATH` entry is the current directory
   and a relative one is from it, and a link into a directory of hushrun's programs is passed over.
+
+## Amendment 4: a source no program is built from is in the rest set (2026-11-12)
+
+Decision 5 made a file of a source kind a source when some program read it; with a program whose
+build couldn't be read, "every source" counted too, so one such program (a test that names the
+repository's directory, another generator) made every file of a source kind a source. A test that
+reads such a file at run time (a compiler's test suite feeding `cases/*.c` to its program, a header
+a script copies) then didn't run when it changed: the file was on the "every source" program's list
+only.
+
+The decision, the rule: **a file of a source kind that a build's graph gives to no program of the
+check is in the rest set, so a change to it runs everything; a file the graph gives to a program is
+on that program's list only.** Sources are what the walks found; a program that reads every source
+still reads them all, but makes none of them a source. The plan's file lists, for its check before
+leaving out, the C and C++ files of the sources and units sets only. Cost: a repository with many
+sources no program is built from reuses less, since each of them is in every key; `tests.ignore`
+is how a person says a tree isn't read by any test.

@@ -195,3 +195,19 @@ The decision:
   only it names.
 - The real `swift` is the one a shell would start: an empty `PATH` entry is the current directory
   and a relative one is from it, and a link into a directory of hushrun's programs is passed over.
+
+## Amendment 2: a source no test target reads is in the rest set (2026-11-12)
+
+Decision 4 made every file of a compiled kind below any target's directory a source. A target no
+test target depends on (an executable a test runs with `swift run`, a plugin nobody uses here) was
+then on no list and in no key: a change to it ran nothing, though a test may build or run it.
+
+The decision, the rule: **a file of a source kind that the graph gives to no test target of the
+check is in the rest set, so a change to it runs every test target; a file the graph gives to a
+test target is on that target's list only.** Sources are the files of a compiled kind below a
+target's directory that a test target reads. A file below no target's directory (`Fixtures/`,
+`Examples/`, a nested package this one doesn't depend on) was in the rest set already, and stays
+there even when a test target reads its package whole for a plugin. A non-Swift file SwiftPM
+doesn't compile (`.metal`, a resource) is in the rest set as before; one it does (`.c`, `.m`)
+follows the rule. Cost: a package with many targets no test reads reuses less, since each of their
+files is in every key; `tests.ignore` is how a person says a tree isn't read by any test.

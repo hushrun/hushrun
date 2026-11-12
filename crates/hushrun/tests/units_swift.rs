@@ -1089,3 +1089,57 @@ fn the_tools_hushrun_starts_for_swift_get_commands_own_env_assignments() {
         "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
     );
 }
+
+// covers: C-48, C-30
+#[cfg(unix)]
+#[test]
+fn a_swift_file_no_test_target_reads_is_in_the_rest_set() {
+    let files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file("Package.swift", "// swift-tools-version: 6.0\n"),
+        file("Sources/Core/Core.swift", "public let core = 1\n"),
+        file("Sources/Extra/Extra.swift", "public let extra = 1\n"),
+        file("Sources/Greet/Greet.swift", "public let greet = 1\n"),
+        file("Tests/CoreTests/CoreTests.swift", "// a\n"),
+        file("Tests/GreetTests/GreetTests.swift", "// b\n"),
+        file("Fixtures/case.swift", "let fixture = 1\n"),
+        file("Examples/Demo/main.swift", "print(1)\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fake = std::fs::canonicalize(dir.path()).unwrap().join("swift");
+    let r = Repo::new(&fake, &files);
+    fake_env_swift(&fake.parent().unwrap().join("bin"), &r.repo);
+    let fake = fake.parent().unwrap().join("bin/swift");
+    let r = Repo {
+        path: std::env::join_paths([
+            fake.parent().unwrap(),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap(),
+        ..r
+    };
+    let first = r.run(SWIFT_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // Extra is a target no test target depends on here, and Fixtures and Examples are below no
+    // target: a test may read or build them at run time, so they are in the rest set and a change
+    // to one runs every test target. What a test target reads stays a source.
+    let map = r.map();
+    for path in [
+        "Sources/Extra/Extra.swift",
+        "Fixtures/case.swift",
+        "Examples/Demo/main.swift",
+    ] {
+        assert!(map["rest"][path].is_string(), "{path}: {map:#}");
+    }
+    assert!(map["rest"]["Sources/Core/Core.swift"].is_null(), "{map:#}");
+    r.write("Sources/Extra/Extra.swift", "public let extra = 2\n");
+    let second = r.run(SWIFT_TEST, &[]);
+    assert!(
+        second
+            .line("hushrun: unit: ")
+            .starts_with("hushrun: unit: all 2 test files run"),
+        "{}",
+        second.stderr
+    );
+}
