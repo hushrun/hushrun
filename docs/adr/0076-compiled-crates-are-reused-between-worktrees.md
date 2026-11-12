@@ -92,6 +92,15 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    build. A compile during which a read file changed, by size, dates, inode or device, is `built,
    not stored`.
 
+   Linux dates files from a clock that moves once a tick (1 ms at `HZ=1000`) and lags the real
+   one, and two rules follow from it. The compile's start is the date the file system gives an
+   empty file the wrapper creates in the output folder just before the compile, so it is read on
+   the same clock as the files (B-11); with the real start less 20 ms, as first built, a build
+   script's output and the libraries a link takes, written a few milliseconds before the compile,
+   counted as changed during it. And the memo of the compiler's identity is kept only when every
+   folder and file it is trusted by is dated before the memo, since a folder changed twice in one
+   tick keeps its date (B-17) (`m6-linux.md`).
+
    Two of those parts are narrower than first built. A native search folder (`-L native=`) is
    keyed, by its names and its static libraries, for a library only: a library can bundle a static
    library found there with nothing reporting it. A linked output has none in its key, since cargo
@@ -147,7 +156,9 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
    temporary folder and renamed into place as one folder, after a bundle already there is moved
    aside and removed, so no bundle is ever there in part. The dep-info file and the recorded
    compiler messages are written with this folder's paths, the notices cargo waits on last. A step
-   that fails before the first message is written ends in rustc running.
+   that fails before the first message is written ends in rustc running. On a file system that
+   can't clone, such as ext4 on Linux, each reused file is a full copy of the store's, which costs
+   disk and time (see Consequences).
 8. **One store for the machine, not one per repository** (B-13). The store is `<cache
    directory>/build`, or `HUSHRUN_BUILD_DIR`. A key commits to everything a block was built from,
    so a block is as valid in another repository as in the one that built it, and dependencies two
@@ -204,6 +215,16 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
     for their dependency folder: nobody debugs those, and without it each holds the folder it was
     linked in. Those two made all 20 and 14 proc macros identical in M0, where without them all
     differed (`m0-cli.md`, `m0-back.md`). They are reused anywhere unless B-10 finds a root in them.
+
+    On Linux none of these steps is needed, and proc macros, build-script binaries and programs
+    move all the same. ELF has no install name and no debug map. The dev profile's DWARF is linked
+    into the output itself, and with the workspace remap its paths are relative. The GNU build ID
+    is a hash of the output's own bytes, so it holds no path. The wrapper adds only the two remaps
+    there, and `programs: tied` changes nothing. In `observe` on arm64 Linux, all 20 proc macros,
+    33 build scripts and 58 movable programs found the block another checkout built and matched it
+    byte for byte; the other 12 programs tie for the reason above (`m6-linux.md`). On Linux rustc
+    also hands the linker a search folder inside its temporary folder, whose name is new at each
+    compile; it is not a link input (B-18), or every linked output would have a key of its own.
 11. **A setting keeps programs tied, for whoever wants that** (B-21). `programs` in `build.json`
     is `movable`, the default, or `tied`, the behavior first built: none of the three additions,
     the program stored with the debug objects it names and reused only in the target folder that
@@ -340,6 +361,25 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
 
   Real disk is `df` on a separate volume, where a reused file is a clone of the store's and is
   counted once.
+- **Tested on arm64 Linux, in a container** (`m6-linux.md`): Debian 13 in Docker on the
+  maintainer's Mac, kernel 6.12, GNU ld 2.45 through `cc`, the target on ext4, and the CLI's
+  `cargo test --workspace --no-run`, 428 compiles a commit. A block against a fresh compile: 0
+  differences in 5,564 compiles over 13 commit builds, and 0 in 8,132 counting the runs before the
+  last two fixes. A further checkout of the same commit, its target beside it, reused 402 to 407
+  of 428 compiles. Linux needed four fixes, each with a test that failed there first: three unit
+  tests that assumed macOS's file dates, the compiler's memo (B-17), the compile's start (B-11)
+  and rustc's temporary search folder (B-18), all described above.
+- **On ext4 a reuse is a copy, so it saves time but not disk.** Three checkouts, each with its
+  target inside it, took 38,997 MB of real disk with reuse on (27,529 MB of checkouts and an
+  11,367 MB store, apparent) against 35,164 MB without: 11% more, where APFS took 50% less. Linux
+  outputs are larger too, since each test binary keeps its DWARF: the first build stored 9.16 GB,
+  against 4.13 GB on macOS. Time still dropped: a further checkout took 22.8 to 23.6 s wall and
+  58.8 to 61.2 s CPU, against 74.2 to 87.1 s wall and 284.9 to 324.7 s CPU with no wrapper. A
+  reused program takes a median of about 0.5 s to copy and hash, up to 6.7 s for the largest test
+  binaries.
+- **Not tested on Linux:** x86-64; other file systems (btrfs or XFS with reflinks, tmpfs,
+  overlayfs, NFS); other linkers (`lld`, `mold`); musl and cross targets; a distribution's rustc
+  without rustup; `hushrun run` by hand, beyond its tests.
 - **What it does not do.**
   - It doesn't shrink a target. Blocks make one cheap to delete; cleaning targets is later.
   - Build scripts still run in each target, such as ring's C compile.
@@ -376,6 +416,9 @@ maintainers' gate and every branch switch compiles the same crates again, and ea
   - the gate sharing the worktrees' store, with `check-local.sh` setting `HUSHRUN_BUILD_DIR`. The
     gate's export, which gave every file the commit's date, now extracts with `tar -x -m`, fixed
     in the owner's script on his word, "fix what you found";
+  - whether B-18's Linux change bumps the second key's schema. It changes which inputs a Linux
+    program's, proc macro's or build script's key holds, and none on macOS; the schema was left at
+    `hushrun.build-block/v4` so that macOS stores don't rebuild for nothing (`m6-linux.md`);
   - pushing and releasing. Nothing is released.
 
 ## Alternatives considered
