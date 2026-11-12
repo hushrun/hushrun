@@ -612,6 +612,46 @@ fn a_failing_teardown_of_a_wider_fixture_keeps_every_test_it_served_from_a_pass(
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
 }
 
+// covers: C-32
+#[test]
+fn in_observe_a_start_that_left_out_what_nothing_listed_records_no_unit_and_keeps_its_exit() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // Nothing was planned to be left out: running again with nothing left out would be the same
+    // run, and could fail one that passed.
+    let r = Repo::new(&[
+        ("hushrun.yaml", &yaml("observe")),
+        (".gitignore", "__pycache__/\n"),
+        ("fake.py", FAKE_RUNNER),
+        ("test_a.py", "def test_a():\n    pass\n"),
+    ]);
+    let state = r.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = python();
+    let state_dir = state.to_string_lossy().into_owned();
+    let ran = r.run(
+        &["run", "unit", "--", &python, "fake.py"],
+        &[
+            ("FAKE_STATE", state_dir.as_str()),
+            ("FAKE_FILES", "test_a.py"),
+            ("FAKE_LEFT_OUT", "1 2"),
+            ("FAKE_EXIT_2", "1"),
+        ],
+    );
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1, "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit: test files weren't observed: its adapter left out what nothing listed (2 features of test_a.py nobody listed)"
+        ),
+        "{}",
+        ran.stderr
+    );
+    assert_eq!(r.unit_results(), 0);
+    assert!(r.newest_result().get("units").is_none());
+}
+
 // covers: C-39
 #[test]
 fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {

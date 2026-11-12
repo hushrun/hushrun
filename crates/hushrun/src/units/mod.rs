@@ -92,6 +92,9 @@ pub struct Session {
     run_dir: PathBuf,
     /// Where COMMAND runs.
     cwd: PathBuf,
+    /// \[C-32\] This start is the one with nothing left out, after one whose adapter left out
+    /// what the plan didn't list.
+    whole: bool,
     /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool an adapter starts
     /// for it gets.
     assigned: Vec<(String, String)>,
@@ -604,6 +607,7 @@ impl Session {
             plan_notes: Vec::new(),
             run_dir: dir.clone(),
             cwd: cwd.to_path_buf(),
+            whole: false,
             assigned,
             dir,
             cache,
@@ -930,6 +934,22 @@ impl Session {
             }
         };
         let left_out = read.left_out.clone().or(unlisted);
+        // \[C-32\] Left out what nothing listed, in a start whose plan listed nothing (`observe`,
+        // or a plan that reused nothing): another start would be the same, and could fail one that
+        // passed. No unit is recorded, said once, and COMMAND's own exit stands.
+        let listed = self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| !plan.reuse.is_empty() || !plan.tests.listed().is_empty());
+        if let Some(why) = &left_out
+            && !listed
+            && !self.whole
+        {
+            return Observed::unread(
+                &end.base.check,
+                &format!("its adapter left out what nothing listed ({why})"),
+            );
+        }
         let watches = facts::watches(&files);
         // \[C-40\] Why the adapter watched no test, when it says.
         let unwatched = files.iter().find_map(|f| {
@@ -1034,6 +1054,7 @@ impl Session {
         }
         self.run_dir = dir;
         self.plan = None;
+        self.whole = true;
         Ok(())
     }
 

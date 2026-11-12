@@ -242,3 +242,7 @@ first; the plugin's are in ADR 0080's Amendment 2.
   told by unit), fails still record, and the run says so once. No rule says a failed COMMAND with
   no failed unit keeps nothing: a package that fails to build beside fifty that passed keeps the
   fifty.
+- **Left out in `observe`.** Amendment 4's second start ran in `observe` too, where nothing was
+  listed: it would be the same run, and a second start that failed turned a passing COMMAND into a
+  failure. Now only a start whose plan listed something runs again; any other records no unit,
+  says why once, and keeps COMMAND's exit code.
