@@ -29,30 +29,76 @@ pub struct Found {
 /// that remain, in their first order.
 pub struct Needles {
     finders: Vec<Finder<'static>>,
+    /// For each needle, whether a hit counts only where it ends a name ([`ends_name`]).
+    bounded: Vec<bool>,
     /// The length of the longest needle, so a chunk keeps enough of the one before it.
     longest: usize,
     chunk: usize,
 }
 
+/// Whether a byte can be part of a file's name: a folder followed by one is another name.
+fn name_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~')
+}
+
+/// Whether a hit ending at `end` ends a name there: the bytes end, or no name character follows
+/// (`/roots.rs` and `/rootfs` are not the folder `/root`; `/root/x`, `"/root"` and `/root\0`
+/// are). Only the byte after counts. The byte before can be a name character in front of a real
+/// path (`-I/root/include`, or the length rustc writes before a string in crate metadata), so it
+/// never rules a hit out.
+pub fn ends_name(bytes: &[u8], end: usize) -> bool {
+    end >= bytes.len() || !name_char(bytes[end])
+}
+
+/// Whether `text` holds `needle` where it ends a name ([`ends_name`]).
+pub fn holds_path(text: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && memchr::memmem::find_iter(text, needle)
+            .any(|start| ends_name(text, start + needle.len()))
+}
+
 impl Needles {
     /// Builds one searcher per distinct, non-empty needle.
     pub fn new(needles: Vec<Vec<u8>>) -> Needles {
-        let mut kept: Vec<Vec<u8>> = Vec::with_capacity(needles.len());
+        Needles::with_bounds(needles.into_iter().map(|needle| (needle, false)).collect())
+    }
+
+    /// Builds one searcher per distinct, non-empty needle, each with whether a hit counts only
+    /// where it ends a name ([`ends_name`]). [`Needles::all_in_file_hashed`] and
+    /// [`Needles::all_in_bytes`] keep to it.
+    pub fn with_bounds(needles: Vec<(Vec<u8>, bool)>) -> Needles {
+        let mut kept: Vec<(Vec<u8>, bool)> = Vec::with_capacity(needles.len());
         for needle in needles {
-            if !needle.is_empty() && !kept.contains(&needle) {
+            if !needle.0.is_empty() && !kept.contains(&needle) {
                 kept.push(needle);
             }
         }
-        let longest = kept.iter().map(Vec::len).max().unwrap_or(0);
+        let longest = kept.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
         let finders = kept
             .iter()
-            .map(|needle| Finder::new(needle).into_owned())
+            .map(|(needle, _)| Finder::new(needle).into_owned())
             .collect();
         Needles {
             finders,
+            bounded: kept.iter().map(|(_, bounded)| *bounded).collect(),
             longest,
             chunk: CHUNK,
         }
+    }
+
+    /// Whether needle `index` is in `bytes`, by its own rule. `at_end` says whether the bytes end
+    /// where the file does; a bounded needle's hit at the end of bytes that don't is not judged
+    /// here: the bytes kept for the next chunk hold it again, with the byte after it.
+    fn hit(&self, index: usize, bytes: &[u8], at_end: bool) -> bool {
+        let finder = &self.finders[index];
+        if !self.bounded[index] {
+            return finder.find(bytes).is_some();
+        }
+        let len = finder.needle().len();
+        finder.find_iter(bytes).any(|start| {
+            let end = start + len;
+            (end < bytes.len() || at_end) && ends_name(bytes, end)
+        })
     }
 
     /// The needles kept, in the order [`Found::needle`] counts them.
@@ -89,7 +135,12 @@ impl Needles {
     pub fn all_in_file_hashed(&self, path: &Path) -> io::Result<(Vec<bool>, Digest, u64)> {
         let mut file = crate::regular::open(path)?;
         let mut hasher = Hasher::new();
-        let keep = self.longest.saturating_sub(1);
+        // A bounded needle's hit is judged with the byte after it: one more kept.
+        let keep = if self.bounded.contains(&true) {
+            self.longest
+        } else {
+            self.longest.saturating_sub(1)
+        };
         let chunk = self.chunk.max(1);
         let mut buf = vec![0u8; keep + chunk];
         let mut have = 0usize;
@@ -105,14 +156,16 @@ impl Needles {
             hasher.update(&buf[have..have + n]);
             size += n as u64;
             have += n;
-            for (index, finder) in self.finders.iter().enumerate() {
-                if !found[index] && finder.find(&buf[..have]).is_some() {
-                    found[index] = true;
-                }
+            for (index, hit) in found.iter_mut().enumerate() {
+                *hit = *hit || self.hit(index, &buf[..have], false);
             }
             let tail = keep.min(have);
             buf.copy_within(have - tail..have, 0);
             have = tail;
+        }
+        // The file's last bytes, now known to be its end.
+        for (index, hit) in found.iter_mut().enumerate() {
+            *hit = *hit || self.hit(index, &buf[..have], true);
         }
         Ok((found, Digest::from_bytes(hasher.finish()), size))
     }
@@ -120,9 +173,8 @@ impl Needles {
     /// Every needle found anywhere in `bytes`, as one flag per needle in the order
     /// [`Needles::needles`] gives them: [`Needles::all_in_file_hashed`] for bytes already read.
     pub fn all_in_bytes(&self, bytes: &[u8]) -> Vec<bool> {
-        self.finders
-            .iter()
-            .map(|finder| finder.find(bytes).is_some())
+        (0..self.finders.len())
+            .map(|index| self.hit(index, bytes, true))
             .collect()
     }
 
@@ -208,7 +260,13 @@ impl Needles {
     /// A copy of the same needles, read `chunk` bytes at a time.
     #[cfg(test)]
     fn clone_with(&self, chunk: usize) -> Needles {
-        Needles::new(self.needles().map(<[u8]>::to_vec).collect()).with_chunk(chunk)
+        Needles::with_bounds(
+            self.needles()
+                .map(<[u8]>::to_vec)
+                .zip(self.bounded.iter().copied())
+                .collect(),
+        )
+        .with_chunk(chunk)
     }
 }
 
@@ -255,6 +313,50 @@ mod tests {
         // The first-hit search stops at the earliest needle and says nothing of the others.
         let (first, _, _) = n.in_file_hashed(&path).unwrap();
         assert_eq!(first.map(|f| f.needle), Some(1));
+    }
+
+    // covers: B-10
+    #[test]
+    fn a_bounded_needle_counts_only_where_it_ends_a_name_in_every_chunk_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = Needles::with_bounds(vec![(b"/root".to_vec(), true), (b"/root".to_vec(), false)]);
+        let cases: [(&[u8], bool); 10] = [
+            (b"/root", true),
+            (b"/root/.cargo/x", true),
+            (b"\0\0\0\0\0\0\0\0\0\0/root", true),
+            (b"x \"/root\" y", true),
+            (b"/root\xc1", true),
+            // The byte before never rules a hit out: a flag, or a length in crate metadata.
+            (b"-I/root/include", true),
+            (b"\x2e/root/project/src/lib.rs\xc1", true),
+            (b"/rootfs/etc and /roots.rs", false),
+            (b"/root2 /root.d /root_ /root- /root~", false),
+            (b"/rootb then /root:", true),
+        ];
+        for (text, whole) in cases {
+            let mut bytes = filler(13);
+            bytes.extend_from_slice(text);
+            for at_end in [false, true] {
+                let bytes = if at_end {
+                    bytes.clone()
+                } else {
+                    let mut b = bytes.clone();
+                    b.extend(filler(11));
+                    b
+                };
+                assert_eq!(n.all_in_bytes(&bytes), [whole, true], "{text:?}");
+                assert_eq!(n.all_in_bytes(text), [whole, true], "{text:?} alone");
+                let path = write(dir.path(), "out", &bytes);
+                for chunk in [1, 2, 3, 5, 6, 7, 16, 1 << 20] {
+                    let (found, sha, _) = n.clone_with(chunk).all_in_file_hashed(&path).unwrap();
+                    assert_eq!(found, [whole, true], "{text:?} chunk {chunk}");
+                    assert_eq!(sha, Digest::of(&bytes));
+                }
+            }
+        }
+        assert!(holds_path(b"a /root/b", b"/root"));
+        assert!(!holds_path(b"a/rooted", b"/root"));
+        assert!(!holds_path(b"anything", b""));
     }
 
     // covers: B-10

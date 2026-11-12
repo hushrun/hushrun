@@ -351,8 +351,17 @@ impl Search {
             add(text.as_bytes().to_vec(), Some(*folder));
         }
         let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
+        // A machine's folder counts only where it ends a name: a home such as `/root` begins
+        // many a crate's own text (`/rootfs`, `/roots.rs`). A root counts wherever it is.
+        let needles = texts
+            .into_iter()
+            .map(|(text, kinds)| {
+                let bounded = kinds.iter().all(Option::is_some);
+                (text, bounded)
+            })
+            .collect();
         Search {
-            needles: Needles::new(texts.into_iter().map(|(text, _)| text).collect()),
+            needles: Needles::with_bounds(needles),
             kinds,
         }
     }
@@ -2153,6 +2162,58 @@ mod tests {
         // The probe leaves nothing behind.
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 2);
+    }
+
+    // covers: B-10, B-24
+    #[test]
+    fn a_short_home_is_found_in_an_output_only_where_it_ends_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = "/workspace/app";
+        let paths = RootPaths {
+            workspace: ws.to_string(),
+            package: Some(ws.to_string()),
+            script_out: None,
+            out_dir: format!("{ws}/target/debug/deps"),
+            deps: vec![],
+            native: vec![],
+            package_id: "app-0.1.0".to_string(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
+        };
+        // A container's root user: the home is a short, common name.
+        let machine = Machine {
+            cargo_home: Some("/root/.cargo".into()),
+            toolchain: Some("/root/.rustup/toolchains/stable-x".into()),
+            toolchain_view: None,
+            rustup_home: Some("/root/.rustup".into()),
+            home: Some("/root".into()),
+        };
+        let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
+        let search = Search::new(&roots);
+        let found = |bytes: &[u8]| {
+            let path = dir.path().join("out.rlib");
+            std::fs::write(&path, bytes).unwrap();
+            search
+                .file(path, "out.rlib".into(), OutputKind::Link)
+                .unwrap()
+                .machine
+        };
+        // Names that merely begin with `/root`: a crate's own text.
+        let own = b"\0oci/rootfs/etc\0src/roots.rs\0tree/root.rs\0";
+        assert!(found(own).is_empty(), "{:?}", found(own));
+        // The home itself, as a path or the whole text.
+        assert_eq!(
+            found(b"\0/root/notes.txt\0"),
+            BTreeSet::from([Folder::Home])
+        );
+        assert_eq!(found(b"/root"), BTreeSet::from([Folder::Home]));
+        assert_eq!(found(b"-I/root/include"), BTreeSet::from([Folder::Home]));
+        assert_eq!(
+            found(b"x \"/root/.cargo/registry/src/a.rs\""),
+            BTreeSet::from([Folder::Home, Folder::CargoHome])
+        );
     }
 
     // covers: B-2

@@ -208,9 +208,12 @@ sections): the place is the roots, and the block is reused only where they are t
 compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
 only if a second compile, with that variable naming a link to the same folder, gives the same
 bytes. In the same pass every output is searched for the folders that name the machine: the cargo
-home, the rustup home and the home folder, each in its given and resolved forms. Those don't
-change the place, which is about this machine's checkouts; they decide whether the block may
-leave the machine (B-24).
+home, the rustup home and the home folder, each in its given and resolved forms. Such a folder
+is found only where it ends a name: the bytes end there, or the next byte is not a letter, digit,
+`.`, `_`, `-` or `~`, so a home `/root` is not found in `/rootfs` or `/roots.rs`. The byte before
+never rules a hit out (`-I/root/include`; the length crate metadata writes before a string). Those
+don't change the place, which is about this machine's checkouts; they decide whether the block
+may leave the machine (B-24).
 
 **B-11 Changed while compiling.** The wrapper records each read file's size, dates, inode and
 device around the compile and around its hashing. A compile is stored only if no read file
@@ -437,7 +440,8 @@ exactly as before, whatever the answer. The reasons:
 - `cargo-home-in-output`, `rustup-home-in-output`, `home-in-output`: an output holds that folder
   (B-10).
 - `cargo-home-in-record`, `rustup-home-in-record`, `home-in-record`: a key, the hint or what the
-  block records beside its files (its dep-info, its messages) holds that folder.
+  block records beside its files (its dep-info, its messages) holds that folder, where it ends a
+  name (B-10).
 - `variable-names-base`: a variable the compile read names a base, and a second compile with it
   naming another folder didn't give the same bytes, or couldn't be made.
 - `extern`: a proc macro among its externs is one a dependent on another machine would name
