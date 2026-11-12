@@ -1114,6 +1114,48 @@ fn a_custom_commands_depfile_is_read() {
     }
 }
 
+// covers: C-49
+#[test]
+fn on_makefiles_a_source_newer_than_its_object_is_a_stale_program() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    if which("make").is_none() {
+        return;
+    }
+    let p = Project::new(&cmake, "Unix Makefiles", &shop("reuse"));
+    // tests/t_misc.c was saved while the build ran: newer than its object, older than the
+    // program. make builds the object again; the program ran old code.
+    let touch = |stamp: &str, path: &str| {
+        let made = Command::new("touch")
+            .args(["-t", stamp])
+            .arg(p.repo.join(path))
+            .status()
+            .unwrap();
+        assert!(made.success(), "{path}");
+    };
+    touch(
+        "202001010000",
+        "build/CMakeFiles/t_misc.dir/tests/t_misc.c.o",
+    );
+    touch("202101010000", "tests/t_misc.c");
+    touch("202201010000", "build/t_misc");
+    let shim = p.shim(&["--test-dir", "build"], json!({}), None, &[]);
+    assert_eq!(
+        shim.unit("t_misc")["notFollowed"][0]["why"],
+        json!("stale program"),
+        "{:#}",
+        shim.facts
+    );
+    assert!(
+        shim.unit("t_greet")["notFollowed"]
+            .as_array()
+            .is_none_or(|n| n.is_empty()),
+        "{:#}",
+        shim.facts
+    );
+}
+
 // covers: C-49, C-32
 #[test]
 fn two_ctest_starts_in_one_command_never_add_up_to_a_program_that_ran_whole() {

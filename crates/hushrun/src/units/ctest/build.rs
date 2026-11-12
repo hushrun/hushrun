@@ -6,7 +6,9 @@
 //!   `ninja -t deps`. Up to date when `ninja -n <program>` has no work.
 //! - **Makefiles:** every `CMakeFiles/<target>.dir/build.make`'s rules, walked from the program,
 //!   and each object's compiler depfile, `<object>.d`, a precompiled header's included (GCC
-//!   writes what the header read only there). Up to date when no file it read is newer than it.
+//!   writes what the header read only there). Up to date, as make decides, when no object is older
+//!   than a file its depfile names, the program older than no object, and no file it read newer
+//!   than the program.
 //!   Both gave the same files in the spike.
 //! - A header or source a build rule writes (a generator the project builds and runs) reads what
 //!   that rule reads, to the end, in both: its script, its template, the program it runs, and that
@@ -498,6 +500,8 @@ impl<'a> Walker<'a> {
         // rule reads, to the end: its script, its template, and the program it runs, whose own
         // objects' depfiles are read in turn.
         let mut asked: BTreeSet<String> = BTreeSet::new();
+        let mut stale: Option<String> = None;
+        let mut made_files: Vec<PathBuf> = Vec::new();
         let mut pending = objects;
         while let Some(object) = pending.pop() {
             if !asked.insert(object.clone()) {
@@ -509,6 +513,14 @@ impl<'a> Walker<'a> {
                 None => build.join(format!("{object}.d")),
             };
             let files = depfile_deps(&depfile)?;
+            // As make decides: the object (or the custom command's output) is older than a file
+            // its depfile names, so the build would make it again, and the program ran old code.
+            if stale.is_none() {
+                let made = build.join(&object);
+                stale = newer_than(&made, files.iter().map(|f| build.join(f)))
+                    .map(|why| format!("{why}, after {object} was made"));
+            }
+            made_files.push(build.join(&object));
             for file in files {
                 match self.place(&file, build) {
                     Place::Repo(rel) => {
@@ -554,7 +566,9 @@ impl<'a> Walker<'a> {
         if configured {
             out.reads.extend(configure_inputs_make(build, self));
         }
-        out.stale = newer_than(program, out.reads.iter().map(|r| self.root.join(r)));
+        out.stale = stale
+            .or_else(|| newer_than(program, made_files.into_iter()))
+            .or_else(|| newer_than(program, out.reads.iter().map(|r| self.root.join(r))));
         Some(out)
     }
 }
