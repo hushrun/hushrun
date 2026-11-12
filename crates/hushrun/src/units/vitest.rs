@@ -420,7 +420,14 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     let mut seen_by: BTreeMap<String, WorkerSaw> = BTreeMap::new();
     for worker in &workers {
         for unit in &worker.units {
-            let Some(name) = relative(&root, Path::new(&unit.unit)) else {
+            // \[ADR 0081\] A worker that tells tests names its unit from the root.
+            let path = Path::new(&unit.unit);
+            let path = if path.is_relative() {
+                root.join(path)
+            } else {
+                path.to_path_buf()
+            };
+            let Some(name) = relative(&root, &path) else {
                 continue;
             };
             let entry = seen_by.entry(name).or_default();

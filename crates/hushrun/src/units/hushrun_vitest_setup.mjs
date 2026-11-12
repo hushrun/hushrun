@@ -737,8 +737,10 @@ function testsFacts(F) {
   if (F.concurrent) {
     for (const b of F.tests.values()) notFollowed.push(...b.notFollowed);
   }
+  // The unit by its path from the root, as every reader of tests one by one names it.
   const unit = {
     ...whole,
+    unit: relativeTo(F.root, whole.unit) ?? whole.unit,
     notFollowed: dedupe(notFollowed),
     tests: told,
   };

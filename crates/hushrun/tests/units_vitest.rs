@@ -1060,12 +1060,9 @@ fn tests_vitest(
             continue;
         }
         let facts: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let unit = std::fs::canonicalize(facts["units"][0]["unit"].as_str().unwrap()).unwrap();
-        let unit = unit
-            .strip_prefix(std::fs::canonicalize(&r.repo).unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        // A worker that tells tests names its unit from the root (ADR 0081).
+        let unit = facts["units"][0]["unit"].as_str().unwrap().to_string();
+        assert!(!Path::new(&unit).is_absolute(), "{unit}");
         workers.insert(unit, facts);
     }
     Told {
