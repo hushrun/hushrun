@@ -2205,3 +2205,84 @@ fn what_a_module_opened_is_kept_with_the_module() {
         .collect();
     assert_eq!(opens["src/prices.ts"], ["data/price.txt"]);
 }
+
+/// What a run says when a second start of the runner in COMMAND wasn't observed.
+const SECOND_START: &str = "no test file or test records a pass: Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
+
+// covers: C-32, C-43
+#[cfg(unix)]
+#[test]
+fn a_second_start_of_vitest_in_one_command_keeps_every_pass_of_the_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // The first start runs both files, and passes; the second runs them again with FAILNOW set,
+    // and f1 fails there. Only the first start is observed.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/f.test.ts",
+            "import { test, expect } from 'vitest'\ntest('f1', () => { expect(process.env.FAILNOW).toBeUndefined() })\ntest('f2', () => {})\n",
+        ),
+    ];
+    let r = Repo::new(&files);
+    // As a package script does under `pnpm vitest`: a stand-in `pnpm` that starts it twice.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run && FAILNOW=1 node_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    // The second start's failure is COMMAND's.
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // No pass of that run is kept: f1 failed in the second start.
+    let map = r.map();
+    for (unit, test) in [("test/f.test.ts", "f1"), ("test/a.test.ts", "a1")] {
+        assert_ne!(
+            map["units"][unit]["tests"][test], "passed",
+            "{unit}::{test}: {map:#}"
+        );
+    }
+    // The run says why, once.
+    assert_eq!(
+        ran.stderr.matches(SECOND_START).count(),
+        1,
+        "{}",
+        ran.stderr
+    );
+    // The same COMMAND with one start: as before, its passes are kept and nothing is said.
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    let once = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(once.code, 0, "{}", once.stderr);
+    assert!(!once.stderr.contains("records a pass"), "{}", once.stderr);
+    assert_eq!(r.map()["units"]["test/f.test.ts"]["tests"]["f1"], "passed");
+}

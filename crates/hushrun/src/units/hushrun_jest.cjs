@@ -49,6 +49,9 @@ function install(S) {
   const RUN_SCHEMA = 'hushrun.units/v0';
   const REPORTER = path.join(__dirname, 'hushrun-jest-reporter.cjs');
   const dir = process.env.HUSHRUN_UNITS;
+  // [C-32] The start that claimed the run, as this process inherited it: set in its workers and in
+  // a Jest one of its tests starts; unset in another start of Jest beside it in COMMAND.
+  const inheritedRun = process.env.HUSHRUN_JEST_RUN || '';
   // Our own reads and writes go through these, captured before anything is wrapped.
   const own = {
     readFileSync: fs.readFileSync,
@@ -1172,6 +1175,22 @@ function install(S) {
     return true;
   }
   function notClaimed() {
+    // [C-32] Another start of Jest beside the one that claimed the run (a script's `jest a && jest
+    // b`): what it runs isn't observed, so it leaves a `.started` file saying why, never removed,
+    // and no pass of the run is kept.
+    if (!inheritedRun && !S.secondStart) {
+      S.secondStart = true;
+      try {
+        own.writeFileSync(
+          path.join(dir, `jest-second-${process.pid}.started`),
+          JSON.stringify({
+            why: "Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
+          }),
+        );
+      } catch (err) {
+        note('second start', err);
+      }
+    }
     // A Jest started inside a test file of the run: neither it nor its workers write.
     delete process.env.HUSHRUN_JEST_RUN;
     delete process.env.HUSHRUN_JEST_START;

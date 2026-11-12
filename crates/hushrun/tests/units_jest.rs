@@ -2454,3 +2454,81 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
         );
     }
 }
+
+/// What a run says when a second start of the runner in COMMAND wasn't observed.
+const SECOND_START: &str = "no test file or test records a pass: Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
+
+// covers: C-32, C-44
+#[cfg(unix)]
+#[test]
+fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for jest in jests() {
+        // The first start runs both files, and passes; the second runs them again with FAILNOW
+        // set, and f1 fails there. Only the first start is observed.
+        let r = Repo::new(
+            &jest,
+            &[
+                file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("test/a.test.js", "test('a1', () => {});\n"),
+                file(
+                    "test/f.test.js",
+                    "test('f1', () => { expect(process.env.FAILNOW).toBeUndefined(); });\ntest('f2', () => {});\n",
+                ),
+            ],
+        );
+        // As a package script does under `pnpm jest`: a stand-in `pnpm` that starts it twice.
+        let bin = r.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("pnpm"), "#!/bin/sh\nnode node_modules/jest/bin/jest.js --ci && FAILNOW=1 node node_modules/jest/bin/jest.js --ci\n").unwrap();
+        std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        // The second start's failure is COMMAND's.
+        assert_eq!(ran.code, 1, "Jest {}: {}", jest.major, ran.out());
+        // No pass of that run is kept: f1 failed in the second start.
+        let map = r.map();
+        for (unit, test) in [("test/f.test.js", "f1"), ("test/a.test.js", "a1")] {
+            assert_ne!(
+                map["units"][unit]["tests"][test], "passed",
+                "Jest {}: {unit}::{test}: {map:#}",
+                jest.major
+            );
+        }
+        // The run says why, once.
+        assert_eq!(
+            ran.stderr.matches(SECOND_START).count(),
+            1,
+            "Jest {}: {}",
+            jest.major,
+            ran.stderr
+        );
+        // The same COMMAND with one start: as before, its passes are kept and nothing is said.
+        std::fs::write(
+            bin.join("pnpm"),
+            "#!/bin/sh\nnode node_modules/jest/bin/jest.js --ci\n",
+        )
+        .unwrap();
+        let once = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(once.code, 0, "Jest {}: {}", jest.major, once.out());
+        assert!(
+            !once.stderr.contains("records a pass"),
+            "Jest {}: {}",
+            jest.major,
+            once.stderr
+        );
+        assert_eq!(
+            r.map()["units"]["test/f.test.js"]["tests"]["f1"],
+            "passed",
+            "Jest {}",
+            jest.major
+        );
+    }
+}

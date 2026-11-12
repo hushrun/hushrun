@@ -698,19 +698,38 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
 /// begins (`<anything>.started`), and removes once its facts file is written whole.
 pub const STARTED_SUFFIX: &str = ".started";
 
-/// \[C-32\] Whether a start of the runner began and never said it ended: a `<anything>.started`
-/// file left in the run's directory `dir` after COMMAND.
-pub fn unfinished_starts(dir: &Path) -> bool {
-    std::fs::read_dir(dir).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
+/// \[C-32\] Why a start of the runner never said what it saw, when one didn't: a
+/// `<anything>.started` file left in the run's directory `dir` after COMMAND. The reason is the
+/// `why` of the first such file, by name, whose content is a JSON object with a string `why`;
+/// else [`ENDED_EARLY`].
+pub fn unfinished_starts(dir: &Path) -> Option<String> {
+    let mut left: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
             entry.file_type().is_ok_and(|t| t.is_file())
                 && entry
                     .file_name()
                     .to_str()
                     .is_some_and(|name| name.ends_with(STARTED_SUFFIX))
         })
-    })
+        .map(|entry| entry.path())
+        .collect();
+    if left.is_empty() {
+        return None;
+    }
+    left.sort();
+    let said = left.iter().find_map(|path| {
+        let bytes = std::fs::read(path).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let why = value.get("why")?.as_str()?.trim();
+        (!why.is_empty()).then(|| why.chars().take(300).collect::<String>())
+    });
+    Some(said.unwrap_or_else(|| ENDED_EARLY.to_string()))
 }
+
+/// \[C-32\] Why a `.started` file was left, when it doesn't say.
+pub const ENDED_EARLY: &str = "a start of its runner ended before it said what it saw";
 
 /// \[C-32\] Why the first file of `files` that says so ran on a stale build.
 pub fn stale_build(files: &[FactsFile]) -> Option<String> {
@@ -771,6 +790,30 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: C-32
+    #[test]
+    fn a_started_file_left_says_its_own_why_or_that_its_start_ended_early() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(unfinished_starts(dir.path()), None);
+        // pytest's: its pid, which says nothing of why.
+        std::fs::write(dir.path().join("pytest-7.started"), "7").unwrap();
+        assert_eq!(unfinished_starts(dir.path()).as_deref(), Some(ENDED_EARLY));
+        // One that says why, in a JSON object: that is the reason, whatever else was left.
+        std::fs::write(
+            dir.path().join("jest-9.started"),
+            r#"{"why": "Jest started more than once"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unfinished_starts(dir.path()).as_deref(),
+            Some("Jest started more than once")
+        );
+        // A file of another name is no start.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("jest-claim"), "9").unwrap();
+        assert_eq!(unfinished_starts(other.path()), None);
+    }
 
     fn file(adapter: &str, units: Vec<UnitFacts>) -> FactsFile {
         FactsFile {

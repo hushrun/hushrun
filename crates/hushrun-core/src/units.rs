@@ -646,7 +646,7 @@ pub enum NotKept {
     Unfinished,
     /// Of a test file: some of its tests were reused one by one, so it didn't run whole.
     TestsReused,
-    /// A start of the runner ended before it said what it saw.
+    /// A start of the runner didn't say what it saw: it ended first, or wasn't observed.
     UnfinishedStart,
     /// It was skipped, or one of its tests was, in a run whose COMMAND failed.
     SkippedInFailedRun,
@@ -677,7 +677,7 @@ impl NotKept {
                 "some of its tests were reused one by one the last time it ran, so it didn't run whole and keeps no pass of its own"
             }
             (NotKept::UnfinishedStart, _) => {
-                "a start of its runner ended before it said what it saw, so no pass of that run is kept"
+                "a start of its runner didn't say what it saw, so no pass of that run is kept"
             }
             (NotKept::SkippedInFailedRun, true) => {
                 "it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"

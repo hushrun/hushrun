@@ -88,7 +88,26 @@ function relativeTo(root, file) {
 
 export default function hushrun() {
   const dir = process.env.HUSHRUN_UNITS;
-  if (!dir || !fs.existsSync(dir) || !claim(dir)) return noop();
+  if (!dir || !fs.existsSync(dir)) return noop();
+  if (!claim(dir)) {
+    // [C-32] Another start of Vitest beside the one that claimed the run (a script's `vitest run a
+    // && vitest run b`), which no claimer above it named: what it runs isn't observed, so it
+    // leaves a `.started` file saying why, never removed, and no pass of the run is kept. A
+    // Vitest a test starts inherits the claimer's start, and adds nothing.
+    if (!process.env.HUSHRUN_VITEST_START) {
+      try {
+        fs.writeFileSync(
+          path.join(dir, `vitest-second-${process.pid}.started`),
+          JSON.stringify({
+            why: "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
+          }),
+        );
+      } catch {
+        // Unwritable: the run's own facts still say what the first start saw.
+      }
+    }
+    return noop();
+  }
   // [C-32] One id for this start of Vitest and every worker of it, whatever its projects or
   // --shard: only the start that claimed the run writes.
   process.env.HUSHRUN_VITEST_START ??= `vitest-${process.pid}-${Date.now()}`;

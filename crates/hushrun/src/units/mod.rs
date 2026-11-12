@@ -1000,13 +1000,13 @@ impl Session {
         // \[C-32\] What holds for the whole run, in each unit's facts, for the one function.
         let mut read = read;
         for seen in read.seen.values_mut() {
-            seen.facts.unfinished_start = unfinished;
+            seen.facts.unfinished_start = unfinished.is_some();
             seen.facts.stale_build = stale.is_some();
         }
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
-        if unfinished {
+        if let Some(why) = &unfinished {
             observed.lines.push(format!(
-                "{}: no test file or test records a pass: a start of its runner ended before it said what it saw",
+                "{}: no test file or test records a pass: {why}",
                 end.base.check
             ));
         }

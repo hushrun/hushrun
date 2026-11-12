@@ -170,3 +170,16 @@ so a second Vitest in one COMMAND adds nothing. Its own merge keeps C-32's rules
 whole only when it did in every project that ran it, and a test finished only where every worker
 that told it, and didn't leave it out, finished it. When Vitest says its run ended more than once,
 the main process's file adds each end to the earlier ones instead of replacing them.
+
+## Amendment 3: a second start in one COMMAND (2026-11-12)
+
+Only the start of Vitest that claims the run writes facts, so with a script such as
+`vitest a && vitest b` the second start went unobserved, and the store kept passes
+of the first for tests the second failed. A start that finds the run claimed, and that no start
+above it named (`HUSHRUN_VITEST_START`, which a Vitest one of the run's tests starts inherits, and adds
+nothing), now leaves a `.started` file in the run's directory and never removes it (C-32). Its
+content says why, `{"why": "Vitest started more than once in its command, and hushrun observes
+only the first start: what another start ran can't be told"}`, which the core says once in place
+of its own sentence: the contract now reads a `.started` file's `why`, when its content is a JSON
+object with one. No unit and no test of that run records a pass; a fail records as usual, and the
+second start's own failure is COMMAND's. A COMMAND with one start is unchanged.
