@@ -532,6 +532,11 @@ fn a_put_the_end_of_the_command_cuts_off_counts_a_cut_off_and_the_third_drops_it
         }
         until("put under way", || !relay.state().puts.is_empty());
         relay.end_check(&[]);
+        // Each run tried once, and its end cut the PUT off before it arrived whole: no claim
+        // is left behind.
+        assert_eq!(fake.count(route::BEGIN), n as usize);
+        assert_eq!(fake.count(route::STORE_PUT), 0);
+        assert!(no_claims(&m), "run {n} left its claim");
         let left = waiting(&m);
         if n < 3 {
             assert_eq!(left.len(), 1);
@@ -540,6 +545,18 @@ fn a_put_the_end_of_the_command_cuts_off_counts_a_cut_off_and_the_third_drops_it
             assert!(left.is_empty(), "the third cut-off drops the marker");
         }
     }
+    // Dropped, not stored and not discarded: the block stays here, and nothing goes up again.
+    assert!(
+        fake.block(address(&key))
+            .is_none_or(|b| b.state != hushrun_testkit::fake_build::BlockState::Stored)
+    );
+    assert!(m.store.block(&key).unwrap().is_some());
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    assert!(waiting(&m).is_empty() && no_claims(&m));
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::BEGIN), 3);
 }
 
 // covers: B-29
