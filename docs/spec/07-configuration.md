@@ -45,6 +45,8 @@ deploy:
 
 [ADR 0037] `backend` is the URL of an org on a server that speaks `hushrun-results/v0`, under the same rules as `repository_url`: where the repository's `hushrun run`s share results (C-11).
 
+`build.env` is a list of environment variables' names, each once: every compile of the repository's build blocks is keyed by their values, on every machine and in both forms of `hushrun run`, for a build that reads one without telling the compiler (B-35). It is part of no check's definition (E-6) and no run's key (C-9).
+
 **C-4** `scopes.<name>` is `{include: [glob], exclude: [glob]}`, and the name follows the L-2 pattern. `digest.exclude` applies to every scope.
 
 [ADR 0037] `scopes.<name>.external` lists what the scope's checks build against outside the repository, each `{path, include: [glob], exclude: [glob]}`: `path` is the top of a git checkout, relative to the repository's root and `/`-separated, such as `../cli`, and `include` is `["**"]` by default. Each path is listed once. It is part of a run's key (C-9), and of no event: `digest` and evidence are about the repository's own files.

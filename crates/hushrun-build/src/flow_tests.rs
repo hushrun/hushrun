@@ -505,6 +505,7 @@ fn world_with(mode: Mode, change: impl FnOnce(&mut settings::Settings)) -> World
         exe: &exe,
         in_ci: false,
         repository: Some("test/repo"),
+        repository_env: &[],
         env: &|_| None,
         now: SystemTime::now(),
     })
@@ -3018,6 +3019,7 @@ fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
         exe: &exe,
         in_ci: false,
         repository: Some("test/repo"),
+        repository_env: &[],
         env: &|_| None,
         now: SystemTime::now(),
     })
@@ -3420,6 +3422,7 @@ fn a_machine_on(
         exe: &exe,
         in_ci: false,
         repository: Some("test/repo"),
+        repository_env: &[],
         env: &env,
         now: SystemTime::now(),
     })
@@ -4160,4 +4163,50 @@ fn a_long_value_no_ci_set_holds_its_block_back_and_ci_values_and_keyed_ones_dont
     // Too short to search for.
     let (_, r) = with_value_in_output("FOO_TOKEN", "short", false);
     assert!(r.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-35, B-5
+#[test]
+fn a_variable_the_repository_names_in_build_env_is_in_every_key() {
+    let mut w = world(Mode::On);
+    let settings = w.dir.path().join("build.json");
+    let exe = w.dir.path().join("hushrun");
+    let cache = w.dir.path().join("cache");
+    let named = ["APP_FLAVOR".to_string()];
+    w.session = session::begin(&Start {
+        settings: &settings,
+        cache_dir: Some(&cache),
+        exe: &exe,
+        in_ci: false,
+        repository: Some("test/repo"),
+        repository_env: &named,
+        env: &|_| None,
+        now: SystemTime::now(),
+    })
+    .unwrap();
+    // A build that reads it without telling the compiler: the dep-info doesn't name it.
+    w.plan(
+        "a",
+        Plan {
+            leak_var: Some("APP_FLAVOR".into()),
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    settle();
+    let with = |value: &'static str| {
+        move |fake: &mut Fake| {
+            from_a_registry(fake);
+            fake.vars.insert("APP_FLAVOR".into(), value.into());
+        }
+    };
+    let first = w.call_with(&ws, "a", &[], with("one-flavour-of-it"));
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    // Keyed, its value in the output keeps nothing here.
+    assert!(first.entry.unwrap().portable.unwrap().portable);
+    let other = w.call_with(&ws, "a", &[], with("another-flavour-of-it"));
+    assert_eq!(other.outcome(), STORED, "{}", other.stderr);
+    assert!(!other.entry.unwrap().found);
+    let again = w.call_with(&ws, "a", &[], with("one-flavour-of-it"));
+    assert_eq!(again.outcome(), REUSED, "{}", again.stderr);
 }

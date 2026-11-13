@@ -41,6 +41,8 @@ pub struct Start<'a> {
     pub in_ci: bool,
     /// The repository's name, when hushrun knows it. Blocks record it (B-13).
     pub repository: Option<&'a str>,
+    /// The repository's `build: env:` (B-35): variables every compile is keyed by.
+    pub repository_env: &'a [String],
     /// The environment of `hushrun run`.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
     /// The command's time.
@@ -88,6 +90,10 @@ pub struct Current {
     pub never_store: Vec<String>,
     /// The person's extra variables for the first key (B-5).
     pub env: Vec<String>,
+    /// The repository's `build: env:` (B-35): variables every compile of the repository is
+    /// keyed by, on every machine.
+    #[serde(default)]
+    pub repository_env: Vec<String>,
     /// Nothing is stored with less free space than this (B-22). 0 turns the rule off.
     pub min_free_gb: u32,
     /// What the wrapper does with a program on an Apple target (B-9, B-21).
@@ -515,6 +521,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         keep_days: settings.keep_days,
         never_store: settings.never_store,
         env: settings.env,
+        repository_env: start.repository_env.to_vec(),
         min_free_gb: settings.min_free_gb,
         programs: settings.programs,
         repository: start.repository.map(str::to_string),
@@ -729,6 +736,7 @@ mod tests {
             exe,
             in_ci: false,
             repository: None,
+            repository_env: &[],
             env,
             now: UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
         }

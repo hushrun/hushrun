@@ -324,6 +324,7 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
             None => match build_session::begin(
                 system_time(wrap::now(app.global)),
                 repository.as_deref(),
+                &policy.build_env,
             ) {
                 Ok(session) => Some(session),
                 Err(why) => {

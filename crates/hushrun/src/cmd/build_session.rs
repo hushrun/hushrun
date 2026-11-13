@@ -27,8 +27,13 @@ const STORE_DIR: &str = "HUSHRUN_BUILD_DIR";
 /// Starts the session for a command hushrun is about to run, when reuse is on here. With none,
 /// the command runs as usual (B-19), and `Err` holds the one line the person should read,
 /// without hushrun's prefix: settings or a variable that can't be used, or a binary hushrun
-/// can't find. Every other reason for none is silent.
-pub(crate) fn begin(now: SystemTime, repository: Option<&str>) -> Result<Session, Option<String>> {
+/// can't find. Every other reason for none is silent. `repository_env` is the repository's
+/// `build: env:` (B-35), which every compile of the run is keyed by.
+pub(crate) fn begin(
+    now: SystemTime,
+    repository: Option<&str>,
+    repository_env: &[String],
+) -> Result<Session, Option<String>> {
     let Some(settings) = Credentials::build_settings_path() else {
         return Err(None);
     };
@@ -39,6 +44,7 @@ pub(crate) fn begin(now: SystemTime, repository: Option<&str>) -> Result<Session
         cache_dir: cache_dir.as_deref(),
         in_ci: hushrun_ci::in_ci(&Env::from_process()),
         repository,
+        repository_env,
         env: &env,
         now,
         folder: std::env::current_dir().ok(),
@@ -106,6 +112,8 @@ struct Here<'a> {
     cache_dir: Option<&'a Path>,
     in_ci: bool,
     repository: Option<&'a str>,
+    /// The repository's `build: env:` (B-35).
+    repository_env: &'a [String],
     env: &'a dyn Fn(&str) -> Option<OsString>,
     now: SystemTime,
     /// The folder `hushrun run` runs in: the check before COMMAND looks at the target folders
@@ -129,6 +137,7 @@ impl<'a> Here<'a> {
             exe,
             in_ci: self.in_ci,
             repository: self.repository,
+            repository_env: self.repository_env,
             env,
             now: self.now,
         }
@@ -196,6 +205,7 @@ mod tests {
             cache_dir: Some(dir),
             in_ci: false,
             repository: None,
+            repository_env: &[],
             env,
             now: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
             folder: None,

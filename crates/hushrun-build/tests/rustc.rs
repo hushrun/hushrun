@@ -66,6 +66,7 @@ fn world_in(mode: Mode) -> World {
         exe: &wrapper_exe(),
         in_ci: false,
         repository: None,
+        repository_env: &[],
         env: &env,
         now: SystemTime::now(),
     })

@@ -137,6 +137,7 @@ impl World {
             exe: &exe,
             in_ci: false,
             repository: Some("test/e2e"),
+            repository_env: &[],
             env: &env,
             now: SystemTime::now(),
         })
@@ -2016,6 +2017,7 @@ mod two_machines {
                 exe: &wrapper_exe(),
                 in_ci: false,
                 repository: Some("test/two-machines"),
+                repository_env: &[],
                 env: &env,
                 now: SystemTime::now(),
             })

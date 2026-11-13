@@ -768,6 +768,7 @@ impl Call<'_> {
         }
 
         let mut extra: Vec<String> = self.current.env.clone();
+        extra.extend(self.current.repository_env.iter().cloned());
         if let Some(script) = &script {
             extra.extend(script.rustc_env.iter().map(|(name, _)| name.clone()));
         }

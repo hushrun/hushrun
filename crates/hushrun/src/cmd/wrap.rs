@@ -885,6 +885,7 @@ impl<'a> BuildRun<'a> {
         let session = match build_session::begin(
             system_time(now(global)),
             code.and_then(Code::repository_here).as_deref(),
+            code.map_or(&[][..], |code| &code.build_env),
         ) {
             Ok(session) => Some(session),
             Err(why) => {
@@ -1277,6 +1278,8 @@ struct Code {
     variant: Option<results::Variant>,
     /// \[ADR 0068\] The check's `tests`, when they aren't off (C-5).
     tests: Option<hushrun_core::units::Tests>,
+    /// The repository's `build: env:` (B-35): variables every compile is keyed by.
+    build_env: Vec<String>,
 }
 
 impl Code {
@@ -1312,6 +1315,11 @@ impl Code {
             .as_ref()
             .and_then(|policy| policy.tests.get(check))
             .cloned();
+        let build_env = current
+            .policy
+            .as_ref()
+            .map(|policy| policy.build_env.clone())
+            .unwrap_or_default();
         Ok(Code {
             key,
             check: check.clone(),
@@ -1330,6 +1338,7 @@ impl Code {
             scopes: current.scopes,
             variant: None,
             tests,
+            build_env,
         })
     }
 
