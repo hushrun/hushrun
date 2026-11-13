@@ -28,6 +28,9 @@ pub struct Case {
     /// Its `name`: a method, with a parametrized invocation's text after it; empty for a class's
     /// own failure (Surefire 3.5 and older).
     pub name: String,
+    /// \[C-39\] The `name` of the `testsuite` it is in: the class Surefire ran, whose report
+    /// it is, which a JUnit 4 suite's case doesn't name.
+    pub suite: String,
     pub time_ms: u64,
     pub outcome: Outcome,
 }
@@ -51,15 +54,24 @@ pub fn cases(bytes: &[u8]) -> Result<Vec<Case>, String> {
     let mut out = Vec::new();
     // The test case being read, and the depth of its element.
     let mut open: Option<(Case, usize)> = None;
+    let mut suite = String::new();
     loop {
         let event = reader.read_event().map_err(|e| e.to_string())?;
         match event {
             Event::Start(e) => {
                 depth += 1;
-                element(&e, depth, &mut root, &mut open, &mut out, false)?;
+                element(&e, depth, &mut root, &mut open, &mut out, &mut suite, false)?;
             }
             Event::Empty(e) => {
-                element(&e, depth + 1, &mut root, &mut open, &mut out, true)?;
+                element(
+                    &e,
+                    depth + 1,
+                    &mut root,
+                    &mut open,
+                    &mut out,
+                    &mut suite,
+                    true,
+                )?;
             }
             Event::End(e) => {
                 if let Some((_, at)) = &open
@@ -91,6 +103,7 @@ fn element(
     root: &mut Option<String>,
     open: &mut Option<(Case, usize)>,
     out: &mut Vec<Case>,
+    suite: &mut String,
     empty: bool,
 ) -> Result<(), String> {
     let name = e.local_name().as_ref().to_string();
@@ -98,6 +111,18 @@ fn element(
         *root = Some(name.clone());
     }
     match name.as_str() {
+        "testsuite" => {
+            suite.clear();
+            for attr in e.attributes() {
+                let attr = attr.map_err(|e| e.to_string())?;
+                if attr.key.local_name().as_ref() == "name" {
+                    let value = attr
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(|e| e.to_string())?;
+                    suite.push_str(&value);
+                }
+            }
+        }
         "testcase" => {
             if open.is_some() {
                 return Err("a testcase inside a testcase".into());
@@ -105,6 +130,7 @@ fn element(
             let mut case = Case {
                 classname: String::new(),
                 name: String::new(),
+                suite: suite.clone(),
                 time_ms: 0,
                 outcome: Outcome::Passed,
             };

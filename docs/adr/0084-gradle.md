@@ -77,7 +77,8 @@ and C-46 hold over §4.5.
    provider computed when the task starts and no input of the task, while what the list holds is
    an input (`hushrunLeftOut`), so another list makes the task run and the same list at another
    path keeps it up to date. JUnit 4 has no hook: Gradle's filter patterns, 250 tests a task at most
-   (the spike measured 16 to 19 s for 5,000), past which they simply run. Kotest's tests have no
+   (the spike measured 16 to 19 s for 5,000), past which they simply run [Amendment 15: the plan
+   is told the cap]. Kotest's tests have no
    method to leave out: they run. A task left with no test by hushrun doesn't fail: no source when
    every class is out, `failOnNoMatchingTests` off and Gradle 9's convention when tests are. The
    task's own `--tests` applies too; a class missing because of it hasn't gone away, and its row
@@ -303,6 +304,55 @@ build published it. Amendment 11's rules now come first there too: a jar a remot
 fine, one a project of the build published reads that project, a file of it that git tracks is
 read as a file, and any other is `not observed` for the same reason, in the same words.
 
+## Amendment 13: a JUnit 4 suite's cases no test class owns (2026-11-13)
+
+A JUnit 4 class run by `AllTests` (a static `suite()`, as Guava's testlib builds them) runs cases
+whose class is no test class of its task, or none that loads. The script named a test class only
+by the class an invocation names, so the suite class was no unit at all: its cases were dropped,
+no count held them, and it ran every time unseen. The decision: the script also names the classes
+of each invocation's parents, and a case whose class no test class of the task is belongs to its
+nearest parent that is (the suite class that ran it), with its own id (`testlib.Checks.testOne`).
+Such a class is told never left out, of itself and of each of its tests: it keeps no pass of its
+own, runs every time, and no plan counts it as reused; its failures are its own, so the other
+classes of a failed run keep their passes. Gradle doesn't run a class that only has a static
+`suite()`, without `@RunWith(AllTests.class)` or `TestCase` as its superclass.
+
+## Amendment 14: test tasks Gradle didn't execute (2026-11-13)
+
+Runs on kotlinpoet showed that with every test task up to date (the person ran the tests before
+adopting hushrun, the usual case) each run said "all 41 test files run: none had passed here yet"
+and "passed in 0.8s", ran nothing, recorded nothing, and did so again until an input changed; once
+it said "passed in 0.7s: 158 tests, 27 skipped", counts read from an earlier run's report files
+written within the two seconds of slack the report search allows. The decisions:
+
+- A report counts as the run's only when the run wrote it: `hushrun_reports::before` takes what
+  the search finds before COMMAND starts, and `find_changed` drops a file that is the same as
+  then, whatever its time. The run's report search is to take that snapshot before COMMAND and
+  search with it after.
+- When Gradle executed no test task of a start, each being up to date or from the build cache, the
+  script's build service writes, at the end of the build, one facts file with no task and a note:
+  `Gradle ran no test: :a:test and :b:test were up to date, so nothing ran and nothing was learned
+  of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run
+  them`, and `ranNothing`, the tasks. The run says the note once, as any note.
+- hushrun doesn't force the tasks itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
+  stays as written and the build as it was (ADR 0084's first rule). Gradle's up to date is its own
+  reuse, proven on the same inputs; running the tests anyway costs the person the time hushrun is
+  there to save, changes what the build cache holds, and would make a hushrun run differ from a
+  plain one in what it executes. Saying it once, with the way to make Gradle run them, leaves the
+  choice where it was.
+
+## Amendment 15: the plan and JUnit 4's 250 tests a task (2026-11-13)
+
+Runs on kotlinpoet showed a second run's line say "59 of 965 tests run" while about 206 ran: the
+script leaves out at most 250 tests of a JUnit 4 task by filter patterns (the spike measured 16 to
+19 s of Gradle's own filtering for 5,000), and the plan counted every test it listed as left out.
+The cap stays, since past it the filtering costs more than the tests it saves. The decision: the
+script tells, in each JUnit 4 task's facts, `settings.leaveOutAtMost` (`most`, 250, and `units`,
+the task's test classes), and that it attempts the listed tests in the order of their ids and skips
+a class of the default package or of a package named with a capital, which Gradle's patterns would
+match by simple name. The plan is to keep what the last run here said and list at most `most`
+of a group's tests, in that order, counting the others as run.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's
@@ -321,6 +371,20 @@ were taken on a quiet machine; the Gradle 9.3.1 rows while other builds loaded i
 under half a second there is noise. Of the JUnit Platform's cost on Gradle 9.3.1, about 0.4 s came
 from the hook's events, which this adapter didn't read then (with them sent nowhere: 2,103; it
 reads them since Amendment 3); on Gradle 8.14.5 they cost nothing measurable.
+
+### On real projects (2026-11-13)
+
+Runs on junit-pioneer (Gradle 9.7.1, JUnit 6) and square/kotlinpoet (Gradle 9.9.1, Kotlin,
+multi-project), with Maven's commons-cli and gson beside them: 118 mutations whose failing set
+wasn't empty and 60 replayed commits, with no wrong reuse, constants inlined across modules,
+resources and generated sources included. What they also measured:
+
+- `observe` cost 9 to 36% of the wall time on these four projects.
+- Every switch between a plain Gradle run and a hushrun run reruns the test tasks and discards the
+  configuration cache entry (`environment variable 'HUSHRUN_GRADLE' has changed`); hushrun after
+  hushrun keeps both (kotlinpoet; junit-pioneer discards its entry anyway, since jreleaser's
+  `marker.txt` changes).
+- A wrapper older than Gradle 8.14 was not evaluated.
 
 ## Not built
 

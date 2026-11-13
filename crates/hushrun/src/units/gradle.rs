@@ -411,6 +411,9 @@ struct UnitSaw {
     tests: BTreeMap<String, TestSaw>,
     /// A task reported tests for it: its tests are known.
     told: bool,
+    /// \[C-39\] It ran cases no test class of the task is (a JUnit 4 `suite()`'s), charged to it:
+    /// nothing of it can be left out.
+    generated: bool,
 }
 
 impl UnitSaw {
@@ -437,6 +440,7 @@ impl UnitSaw {
         self.paths.extend(one.paths);
         self.repositories.extend(one.repositories);
         self.told |= one.told;
+        self.generated |= one.generated;
         for (id, saw) in one.tests {
             match self.tests.get_mut(&id) {
                 None => {
@@ -617,6 +621,17 @@ fn units_of(
         .filter(|(_, class)| class.open)
         .map(|(outer, _)| outer.as_str())
         .collect();
+    // What a class ran that names another (a suite's cases): open for both.
+    for jvm in events.iter().flat_map(BTreeMap::values) {
+        for ((runner, named), class) in &jvm.generated {
+            if class.open {
+                open.insert(runner.as_str());
+                if !named.is_empty() {
+                    open.insert(named.as_str());
+                }
+            }
+        }
+    }
     open.extend(stopped.iter().flatten().map(String::as_str));
     // \[C-39\] Classes whose tests the hook saw with no method to leave them out by (Kotest's):
     // their tests are never left out, so none is ever counted as reused.
@@ -647,8 +662,11 @@ fn units_of(
                 .filter_map(|s| s.c.as_deref().map(outer_of)),
         )
         .collect();
-    // Each test's invocations, by outer class and id.
+    // Each test's invocations, by outer class and id. \[C-39\] A case whose class is no test class
+    // of the task (a JUnit 4 suite's, as Guava's testlib builds) is the nearest parent's that is,
+    // the class that ran it, which can leave nothing of it out (`generated`).
     let mut by_class: BTreeMap<&str, BTreeMap<String, Vec<&Invocation>>> = BTreeMap::new();
+    let mut generated: BTreeSet<&str> = BTreeSet::new();
     for inv in &report.invocations {
         let Some(class) = inv.c.as_deref() else {
             continue;
@@ -657,8 +675,19 @@ fn units_of(
             continue;
         }
         let Some(id) = test_id(inv) else { continue };
+        let mut owner = outer_of(class);
+        if !report.names.contains_key(owner)
+            && let Some(parent) = inv
+                .p
+                .iter()
+                .map(|(_, of)| outer_of(of))
+                .find(|of| report.names.contains_key(*of))
+        {
+            owner = parent;
+            generated.insert(parent);
+        }
         by_class
-            .entry(outer_of(class))
+            .entry(owner)
             .or_default()
             .entry(id)
             .or_default()
@@ -684,6 +713,7 @@ fn units_of(
         one.deselected = left_out_classes.contains(outer.as_str()) && events.is_none();
         let class_whole = whole && !open.contains(outer.as_str());
         one.complete = class_whole;
+        one.generated = generated.contains(outer.as_str());
         one.failed = class_failed.contains(outer.as_str());
         // A class left out whole ran nothing, and Gradle never named its tests.
         one.told = !one.deselected;
@@ -701,7 +731,7 @@ fn units_of(
                 failed,
                 deselected: false,
                 skipped,
-                never_left_out: unnamed.contains(outer.as_str()),
+                never_left_out: unnamed.contains(outer.as_str()) || one.generated,
                 duration_ms: invs.iter().map(|inv| inv.ms).fold(0, u64::saturating_add),
             };
             one.failed |= failed;
@@ -736,7 +766,15 @@ fn units_of(
 /// Reads what the Gradle adapter wrote in a run's directory, for the repository whose files are
 /// `tree`. `Ok(None)` when it wrote nothing; `Err` says why nothing can be told.
 pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, String> {
-    let mine: Vec<&FactsFile> = files.iter().filter(|f| f.adapter == ADAPTER).collect();
+    // \[C-32\] A file of no task but the build's note that Gradle ran no test (`ranNothing`),
+    // which the run says as it says any note: the tasks' own files say what they were.
+    let mine: Vec<&FactsFile> = files
+        .iter()
+        .filter(|f| {
+            f.adapter == ADAPTER
+                && (f.settings.contains_key(ADAPTER) || !f.settings.contains_key("ranNothing"))
+        })
+        .collect();
     if mine.is_empty() {
         return Ok(None);
     }
@@ -819,6 +857,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
                     not_followed,
                     deselected: saw.deselected,
                     skipped: saw.skipped,
+                    never_left_out: saw.generated,
                     ..Facts::default()
                 },
                 reads,

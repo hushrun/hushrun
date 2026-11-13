@@ -643,6 +643,11 @@ fn a_task_gradle_didnt_execute_records_nothing() {
         "{}",
         again.stdout
     );
+    // \[C-32\] One true line: no test ran, why, and what makes Gradle run them.
+    assert_eq!(
+        line(&again, "hushrun: unit: Gradle ran no test"),
+        "hushrun: unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, so nothing ran and nothing was learned of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run them"
+    );
     assert_eq!(
         r.newest_result()["units"],
         json!({"total": 5, "ran": 0, "reused": 0})
@@ -1920,4 +1925,178 @@ fn a_jar_from_a_file_repository_in_the_checkout_is_read_by_the_project_that_publ
             .contains(&json!("lib/src/main/java/lib/Lib.java")),
         "{map:#}"
     );
+}
+
+/// Projects `testlib`, `core` and `other` under JUnit 4: `core`'s `MapSuiteTest` has a static
+/// `suite()`, run by `AllTests` (Gradle runs no class with a `suite()` alone), that runs `testlib`'s cases, as Guava's testlib does, one of a class no test file is
+/// (`testlib.Checks`) and one whose class doesn't load (`testlib.Gone`). The suite's `testTwo` and
+/// `check` fail when `SHOP_OTHER` asks; `AskTest` when `FAIL` does.
+fn suites(tests: &str) -> Vec<(String, String)> {
+    let mut files = build(Framework::Junit4, &["testlib", "core", "other"], tests);
+    let calc = |project: &str, a: u32| {
+        format!(
+            "package shop.{project};\nimport org.junit.*;\npublic class CalcTest {{ @Test public void adds() {{ Assert.assertEquals({}, {a} + 1); }} }}\n",
+            a + 1
+        )
+    };
+    files.extend([
+        file("testlib/build.gradle", "dependencies { implementation 'junit:junit:4.13.2' }\n"),
+        file(
+            "testlib/src/main/java/testlib/Checks.java",
+            "package testlib;\nimport junit.framework.TestCase;\npublic class Checks extends TestCase {\n  private final String subject;\n  public Checks(String method, String subject) { super(method); this.subject = subject; }\n  @Override public String getName() { return super.getName() + \"[\" + subject + \"]\"; }\n  public void testOne() { assertTrue(subject.length() > 0); }\n  public void testTwo() { assertNull(System.getenv(\"SHOP_OTHER\")); }\n}\n",
+        ),
+        file(
+            "testlib/src/main/java/testlib/Described.java",
+            "package testlib;\nimport junit.framework.*;\nimport org.junit.runner.Describable;\nimport org.junit.runner.Description;\npublic class Described implements Test, Describable {\n  public int countTestCases() { return 1; }\n  public Description getDescription() { return Description.createTestDescription(\"testlib.Gone\", \"check\"); }\n  public void run(TestResult result) {\n    result.startTest(this);\n    if (System.getenv(\"SHOP_OTHER\") != null) result.addFailure(this, new AssertionFailedError(\"asked\"));\n    result.endTest(this);\n  }\n}\n",
+        ),
+        file("core/build.gradle", "dependencies { testImplementation project(':testlib') }\n"),
+        file(
+            "core/src/test/java/shop/core/MapSuiteTest.java",
+            "package shop.core;\nimport junit.framework.Test;\nimport junit.framework.TestSuite;\nimport testlib.*;\n@org.junit.runner.RunWith(org.junit.runners.AllTests.class)\npublic class MapSuiteTest {\n  public static Test suite() {\n    TestSuite suite = new TestSuite(\"maps\");\n    suite.addTest(new Checks(\"testOne\", \"maps\"));\n    suite.addTest(new Checks(\"testTwo\", \"maps\"));\n    suite.addTest(new Described());\n    return suite;\n  }\n}\n",
+        ),
+        file("core/src/test/java/shop/core/CalcTest.java", &calc("core", 1)),
+        file(
+            "core/src/test/java/shop/core/AskTest.java",
+            "package shop.core;\nimport org.junit.*;\npublic class AskTest { @Test public void failsWhenAsked() { Assert.assertNull(System.getenv(\"FAIL\")); } }\n",
+        ),
+        file("other/src/test/java/shop/other/CalcTest.java", &calc("other", 1)),
+    ]);
+    files
+}
+
+const G_SUITE: &str = "core/src/test/java/shop/core/MapSuiteTest.java";
+const G_CORE_CALC: &str = "core/src/test/java/shop/core/CalcTest.java";
+
+// covers: C-39, C-46
+#[test]
+fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_counted_as_reused() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&suites("{mode: reuse, unit: test}"));
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    // The suite's cases are the suite class's tests, by the class each names.
+    let map = r.map();
+    let suite_tests: Vec<&String> = map["units"][G_SUITE]["tests"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{map:#}"))
+        .keys()
+        .collect();
+    assert_eq!(
+        suite_tests,
+        [
+            "testlib.Checks.testOne",
+            "testlib.Checks.testTwo",
+            "testlib.Gone.check"
+        ],
+        "{map:#}"
+    );
+
+    // A change in `other`: core's plain classes are reused, the suite class runs, as nothing of
+    // it can be left out, and the plan says so.
+    r.write(
+        "other/src/test/java/shop/other/CalcTest.java",
+        "package shop.other;\nimport org.junit.*;\npublic class CalcTest { @Test public void adds() { Assert.assertEquals(3, 2 + 1); } }\n",
+    );
+    let second = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    // The suite ran: Gradle 9 files its cases under the suite class, Gradle 8 under theirs.
+    let reports: String = std::fs::read_dir(r.repo.join("core/build/test-results/test"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    assert!(
+        reports.contains("<testcase name=\"testOne"),
+        "{}",
+        second.stdout
+    );
+    assert_eq!(
+        line(&second, "hushrun: unit: "),
+        "hushrun: unit: 5 of 6 tests run, in 3 of 4 test classes; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+    );
+    let why = r.run(&["why", "unit", G_SUITE], &[]);
+    assert!(!why.stdout.contains("would be reused"), "{}", why.stdout);
+    assert!(why.stdout.contains("can't leave it out"), "{}", why.stdout);
+
+    // The suite's cases fail: the suite class failed, and core's plain classes, which ran, keep
+    // their passes.
+    r.write(
+        G_CORE_CALC,
+        "package shop.core;\nimport org.junit.*;\npublic class CalcTest { @Test public void adds() { Assert.assertEquals(2, 0 + 2); } }\n",
+    );
+    let failed = r.run(&command(&gradle, &[]), &[("SHOP_OTHER", "1")]);
+    assert_eq!(failed.code, 1, "{}\n{}", failed.stderr, failed.stdout);
+    let map = r.map();
+    assert_eq!(
+        map["units"][G_CORE_CALC]["tests"]["shop.core.CalcTest.adds"], "passed",
+        "{map:#}"
+    );
+    assert_eq!(
+        map["units"][G_SUITE]["tests"]["testlib.Gone.check"], "failed",
+        "{map:#}"
+    );
+    r.clean();
+}
+
+/// A JUnit 4 task of one class with 300 tests that pass and one, `flips`, that fails when asked: a
+/// run that fails, so that the next lists the 300.
+fn many_junit4(gradle: &str) -> Repo {
+    let mut body = String::from(
+        "package shop.app;\nimport org.junit.*;\npublic class ManyTest {\n  @Test public void flips() { Assert.assertNull(System.getenv(\"FAIL\")); }\n",
+    );
+    for n in 0..300 {
+        body.push_str(&format!("  @Test public void t{n:03}() {{}}\n"));
+    }
+    body.push_str("}\n");
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    files.push(file("app/src/test/java/shop/app/ManyTest.java", &body));
+    let r = Repo::new(&files);
+    let first = r.run(&command(gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    r
+}
+
+// covers: C-39, C-46
+#[test]
+fn a_junit4_task_tells_how_many_of_its_tests_it_leaves_out_at_most() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let r = many_junit4(&gradle());
+    // The task's report, as the script keeps it in the task's outputs, as in its facts.
+    let kept: Value = serde_json::from_slice(
+        &std::fs::read(r.repo.join("app/build/hushrun/test.json")).expect("the kept report"),
+    )
+    .unwrap();
+    assert_eq!(
+        kept["report"]["leaveOutAtMost"],
+        json!({"most": 250, "units": ["app/src/test/java/shop/app/ManyTest.java"]})
+    );
+    r.clean();
+}
+
+// covers: C-39, C-46
+#[test]
+#[ignore = "the plan's part, listing at most `leaveOutAtMost` of a group's tests, is the core's"]
+fn a_junit4_task_leaves_out_every_test_the_plan_counts_as_reused() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let r = many_junit4(&gradle());
+    let second = r.run(&command(&gradle(), &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    // What the plan said would run is what ran.
+    let said = line(&second, "hushrun: unit: ");
+    let ran = r.xml_cases("app", "shop.app.ManyTest");
+    let counted: usize = said["hushrun: unit: ".len()..]
+        .split(' ')
+        .next()
+        .and_then(|n| n.replace(',', "").parse().ok())
+        .unwrap_or_else(|| panic!("{said}"));
+    assert_eq!(counted, ran.len(), "{said}\n{ran:?}");
+    r.clean();
 }

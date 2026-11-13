@@ -322,6 +322,21 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
   at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
   names) is now read by that module's tests.
+- Maven: after a build that failed and stopped the reactor, the next run no longer says a file of
+  a module the build didn't reach "is gone" and runs every test class: such a module keeps what
+  the last run that reached it learned.
+- Maven: a JUnit 4 class whose static `suite()` runs cases of classes no test file is (Guava's
+  testlib) is no longer counted as reused while it runs every time: its cases are its own, it is
+  told as never left out, and a failure of one no longer costs every other class of a failed run
+  its pass. Under Gradle such a class (with `@RunWith(AllTests.class)`) was no test class at all,
+  and its cases were dropped from the counts: now they are its own, in the same way.
+- Gradle: a run in which every test task was up to date, or came from the build cache, now says
+  so in one line, with what makes Gradle run them, instead of a line that read as if tests ran.
+  The report search can tell a report the run didn't write from one it did, however new its
+  time (`hushrun_reports::before` and `find_changed`).
+- Gradle: each JUnit 4 task's facts now say how many of its tests it leaves out at most
+  (`settings.leaveOutAtMost`, 250, by filter patterns), so that a plan can count past them as run
+  rather than reused.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

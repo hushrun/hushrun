@@ -199,12 +199,60 @@ can't be read makes every reactor module join. Maven's built-in descriptors (`bi
 `project`, `jar-with-dependencies`) take only the module's own files and its dependencies, which
 the closure holds already.
 
+## Amendment 8: a module the build didn't reach keeps what it learned (2026-11-13)
+
+Runs on real projects (gson, a reactor of several modules) showed that after a build that failed
+and stopped the reactor, the next run said an existing file "is gone, and any test may have read
+it" and ran everything. The extension's file names every module, but the modules after the failure
+ran no class, so this run's sets were made from the modules that ran: the files of the others went
+to the rest set, and the next plan, made from the map's units, put them back among the units and
+sources, a difference it reported as a file gone. The decision: a module of which this run saw no
+class (the build stopped before it, or COMMAND didn't select it) keeps what the last run that
+reached it learned: the test files the map lists below it stay units, and the directories its units
+read stay where the sources are. The sets after a run are then those a plan from files would make,
+and a file is gone only when it isn't on disk. A unit named by no file (`<module>::<class>`) of
+such a module still leaves the map, as one the run didn't tell does, and runs next time.
+
+## Amendment 9: a suite's cases no test file owns (2026-11-13)
+
+Runs on gson showed its Guava-testlib suites (JUnit 4 classes with a static `suite()`:
+`LinkedTreeMapSuiteTest`, `JsonObjectAsMapSuiteTest`, `JsonArrayAsListSuiteTest`, about 3,170 of
+4,926 invocations) counted as reused and run every time: their cases are named by testlib's
+classes, so the suite class itself kept a pass with no test, the plan listed it, and the hook,
+which sees only those cases (and JUnit 4's `AllTests` runner, which ignores a filter), left nothing
+of it out. A case whose class doesn't load named no class at all, and made every pass of a failed
+run hold only when COMMAND passed. The decision: a case whose class is no test file of its module
+(nor nested in one) belongs to the class that ran it, as the hook's event's unique id says (its
+first `runner` or `class` segment) or, from reports, the `testsuite` that holds it; its id is the
+class it names, a `.` and its method (`testlib.Checks.testOne`), or its JUnit 4 display name's when
+its class doesn't load. Such a class is told never left out (`neverLeftOut`, of the class and of
+each of its tests), so it keeps no pass of its own, runs every time, and a plan counts it as run;
+its failures are its own, so a failed run keeps the other classes' passes. A case run by a suite
+whose class is a test file of the module (`@SuiteClasses`) stays that file's. A test or failure
+for which neither says a class still makes the run's passes hold only when COMMAND passed, and the
+adapter says so (`notKept`, for `hushrun why`).
+
+## Measured on real projects (2026-11-13)
+
+Runs on apache/commons-cli and google/gson (Surefire 3.6.1), with junit-pioneer and kotlinpoet
+under Gradle beside them: 118 mutations whose failing set wasn't empty and 60 replayed commits, with
+no wrong reuse, constants inlined across modules, resources and generated sources included. What
+they also measured:
+
+- `observe` cost 9 to 36% of the wall time on these four projects.
+- jsoup couldn't be used: its JDK 11+ profile sets `additionalClasspathElements`, which leaves
+  hushrun's hook out, and nothing is left out there.
+- Apache RAT, bound before the tests in Apache's parent POM, fails an Apache project's build on an
+  untracked `hushrun.yaml` that has no licence header ("Unexpected count for UNAPPROVED"): the file
+  needs the ASF header as YAML comments, or an exclusion in RAT's configuration.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0
   and Surefire 3.0.0-M4 and later for JUnit 5, 3.6 and later for JUnit 4.
 - The set of sources depends on which modules' tests ran: the first run after that set changes
-  (a module's tests running for the first time, or not at all) runs everything once.
+  (a module's tests running for the first time) runs everything once; [Amendment 8] a module
+  whose tests didn't run this time keeps its place.
 - A change below a module's roots runs every class of that module and of the modules that depend
   on it: Maven gives no finer graph than modules.
 - The repository now holds two built jars and their sources; a change to the sources needs a

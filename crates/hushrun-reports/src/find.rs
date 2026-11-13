@@ -93,9 +93,52 @@ pub struct Search {
     pub cut_short: bool,
 }
 
-/// The report files the run `q` describes may have written; `None` when the search went past
-/// its bounds, so that a summary is whole or absent.
-pub fn find(q: &Query<'_>) -> Option<Search> {
+/// \[C-27\] The report files a run's search reaches, as they were before its command started:
+/// each one's modification time and length, by path from the root. A file the same after the run
+/// wasn't written by it, though its time is within [`CLOCK`] of the start (a run that ended just
+/// before, or a task Gradle found up to date).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Before {
+    files: std::collections::BTreeMap<String, (SystemTime, u64)>,
+}
+
+/// What [`find_changed`] compares with: the files the search `q` reaches now, taken before the
+/// command starts. Empty when the search went past its bounds: then nothing is told apart.
+pub fn before(q: &Query<'_>) -> Before {
+    let Some((found, _)) = reached(q) else {
+        return Before::default();
+    };
+    let files = found
+        .into_iter()
+        .filter_map(|f| {
+            let meta = std::fs::symlink_metadata(&f.path).ok()?;
+            meta.file_type()
+                .is_file()
+                .then(|| Some((f.rel, (meta.modified().ok()?, meta.len()))))?
+        })
+        .collect();
+    Before { files }
+}
+
+/// \[C-27\] As [`find`], without the files that are as `before` found them: only what the run
+/// wrote counts as its reports.
+pub fn find_changed(q: &Query<'_>, before: &Before) -> Option<Search> {
+    let mut search = find(q)?;
+    search.files.retain(|f| {
+        let Some(had) = before.files.get(&f.rel) else {
+            return true;
+        };
+        std::fs::symlink_metadata(&f.path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
+            .is_none_or(|now| now != *had)
+    });
+    Some(search)
+}
+
+/// Every file the patterns of `q` reach, by one bounded walk, and whether it fell short where a
+/// reader's pattern goes; `None` past its bounds.
+fn reached(q: &Query<'_>) -> Option<(Vec<Found>, bool)> {
     let cwd = rel_of(q.root, q.cwd).unwrap_or_default();
     let mut sources: Vec<String> = Vec::new();
     let from_cwd = |path: &str| join(&cwd, path);
@@ -136,6 +179,13 @@ pub fn find(q: &Query<'_>) -> Option<Search> {
     };
     let mut found: Vec<Found> = Vec::new();
     let cut_short = walk(q.root, &globs, &readers, &mut budget, &mut found)?;
+    Some((found, cut_short))
+}
+
+/// The report files the run `q` describes may have written; `None` when the search went past
+/// its bounds, so that a summary is whole or absent.
+pub fn find(q: &Query<'_>) -> Option<Search> {
+    let (mut found, cut_short) = reached(q)?;
     let since = q
         .started
         .checked_sub(CLOCK)
