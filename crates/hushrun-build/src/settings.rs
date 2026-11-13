@@ -158,9 +158,40 @@ impl Settings {
 /// The settings saved at `path`. A missing file is the defaults; a file that can't be read, isn't
 /// valid or comes from a newer hushrun is an error.
 pub fn load(path: &Path) -> Result<Settings, SettingsError> {
+    let Some(stored) = read(path)? else {
+        return Ok(Settings::default());
+    };
+    let defaults = Settings::default();
+    let settings = Settings {
+        mode: stored.mode.unwrap_or(defaults.mode),
+        keep_days: stored.keep_days.unwrap_or(defaults.keep_days),
+        never_store: stored.never_store.unwrap_or(defaults.never_store),
+        env: stored.env.unwrap_or(defaults.env),
+        min_free_gb: stored.min_free_gb.unwrap_or(defaults.min_free_gb),
+        programs: stored.programs.unwrap_or(defaults.programs),
+        share: stored.share.unwrap_or(defaults.share),
+    };
+    settings.check(path)?;
+    Ok(settings)
+}
+
+/// B-25: the mode of reuse on a machine where no person is signed in (a sandbox), before the
+/// command's variables: `on`, unless the file at `path` says `off`, which wins there as it does
+/// everywhere. No file, or one that names no mode, leaves it `on`; nothing else in the file is
+/// read for a sandbox. A file that can't be read or isn't valid is an error, as in [`load`]: it
+/// can't say whether `off` is written. The one definition, for the run and `hushrun build status`.
+pub fn sandbox_mode(path: &Path) -> Result<Mode, SettingsError> {
+    Ok(match read(path)?.and_then(|stored| stored.mode) {
+        Some(Mode::Off) => Mode::Off,
+        Some(Mode::Observe | Mode::On) | None => Mode::On,
+    })
+}
+
+/// The file at `path` as written; `None` when there is none.
+fn read(path: &Path) -> Result<Option<Stored>, SettingsError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(SettingsError::Read {
                 path: path.to_path_buf(),
@@ -185,19 +216,9 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         }
         _ => return Err(invalid(format!("\"version\" must be {VERSION}"))),
     }
-    let stored: Stored = serde_json::from_value(value).map_err(|err| invalid(err.to_string()))?;
-    let defaults = Settings::default();
-    let settings = Settings {
-        mode: stored.mode.unwrap_or(defaults.mode),
-        keep_days: stored.keep_days.unwrap_or(defaults.keep_days),
-        never_store: stored.never_store.unwrap_or(defaults.never_store),
-        env: stored.env.unwrap_or(defaults.env),
-        min_free_gb: stored.min_free_gb.unwrap_or(defaults.min_free_gb),
-        programs: stored.programs.unwrap_or(defaults.programs),
-        share: stored.share.unwrap_or(defaults.share),
-    };
-    settings.check(path)?;
-    Ok(settings)
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(|err| invalid(err.to_string()))
 }
 
 /// Changes the settings at `path` with `change` and saves them, while no other hushrun does:
@@ -406,6 +427,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/hushrun/build.json");
         (dir, path)
+    }
+
+    // covers: B-25
+    #[test]
+    fn in_a_sandbox_only_a_written_off_turns_reuse_off() {
+        use super::sandbox_mode;
+        let (_dir, path) = file();
+        // No file: nobody wrote anything.
+        assert_eq!(sandbox_mode(&path).unwrap(), Mode::On);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A file that names no mode.
+        fs::write(&path, br#"{"version": 1, "keep_days": 7}"#).unwrap();
+        assert_eq!(sandbox_mode(&path).unwrap(), Mode::On);
+        for (written, mode) in [("off", Mode::Off), ("observe", Mode::On), ("on", Mode::On)] {
+            fs::write(&path, format!(r#"{{"version": 1, "mode": "{written}"}}"#)).unwrap();
+            assert_eq!(sandbox_mode(&path).unwrap(), mode, "{written}");
+        }
+        // As `hushrun build off` writes it.
+        update(&path, |s| s.mode = Mode::Off).unwrap();
+        assert_eq!(sandbox_mode(&path).unwrap(), Mode::Off);
+        // A file that can't say whether `off` is written is an error, not a default.
+        fs::write(&path, b"{").unwrap();
+        assert!(matches!(
+            sandbox_mode(&path),
+            Err(SettingsError::Invalid { .. })
+        ));
     }
 
     // covers: B-1

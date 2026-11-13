@@ -232,7 +232,7 @@ offline.
 - Build blocks: an agent's sandbox with the network reuses and shares when its org shares. A run
   under an agent token on a machine where no person is signed in now has reuse on, in the store,
   and shares as the org's mode says, as the table of who shares says; `HUSHRUN_BUILD=off` still
-  turns it off. Before, only a run from a saved `hushrun build fetch` counted as a sandbox, so a
+  turns it off, and so does an `off` written on the machine (below). Before, only a run from a saved `hushrun build fetch` counted as a sandbox, so a
   sandbox with the network reused nothing unless `HUSHRUN_BUILD=on` was set.
 - `hushrun build fetch` with nothing to sign in with says to set `HUSHRUN_AGENT` for the phase,
   the variable the documentation gives an agent's string, and that an agent token in
@@ -335,6 +335,12 @@ offline.
   are left out, and only in that system; the shell's `_`, `PWD` and `OLDPWD` are left out too.
   Before, any name under a CI prefix was left out, and a 14-byte `BUILD_ENV` reached another
   machine, whose program printed the first machine's value.
+- Build blocks: **a written `hushrun build off` wins in a sandbox too.** Where no person is
+  signed in and the run carries an agent token, reuse is on by default; a settings file there
+  that says `"mode": "off"` now turns it off, for the run and for a saved fetch, and nothing is
+  shared. No file, or one that names no mode, leaves reuse on, and `HUSHRUN_BUILD` still sets one
+  command's mode over either. A settings file there that can't be read turns reuse off and says
+  so. `hushrun build status` says the same.
 - With `tests: observe` or `reuse`, a Vitest test that awaits `promisify(exec)` or
   `promisify(execFile)` gets `{ stdout, stderr }` again, and a rejection carries both, as without
   hushrun: the setup module's wrappers now keep what they wrap carries, `util.promisify.custom`

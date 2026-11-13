@@ -1476,15 +1476,70 @@ fn an_agents_run_where_a_person_is_signed_in_follows_that_persons_settings_off_b
     assert!(off.status.success());
     let said = sandbox_run(&b, &fake, |_| {});
     assert!(!said.contains("build:"), "{said}");
+}
 
-    // No person signed in, and an agent token: a sandbox, whatever settings file lies there.
+// covers: B-25
+#[test]
+fn a_written_build_off_wins_in_a_sandbox_and_no_setting_leaves_reuse_on() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    // No person signed in, and an agent token: a sandbox. Its settings file says `off`, as
+    // `hushrun build off` writes it: nothing is reused, asked or said.
     let c = Machine::new(dir.path(), "c", Some(&a.repo));
     std::fs::write(
         c.root.join("build.json"),
         br#"{"version": 1, "mode": "off"}"#,
     )
     .unwrap();
+    let opens = fake.count(route::OPEN);
     let said = sandbox_run(&c, &fake, |_| {});
+    assert!(!said.contains("build:"), "{said}");
+    assert_eq!(fake.count(route::OPEN), opens);
+    assert!(!c.root.join("cache/build").exists());
+    // `hushrun build status` says the same, from the same definition.
+    let sharing = |m: &Machine| {
+        let output = m
+            .hushrun(&fake)
+            .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+            .env_remove("HUSHRUN_BUILD")
+            .args(["build", "status", "--format", "json"])
+            .output()
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        status["sharing"].clone()
+    };
+    assert_eq!(
+        sharing(&c),
+        serde_json::json!({"mode": "off", "why": "build reuse is off on this machine"})
+    );
+    // `HUSHRUN_BUILD=on` is this command's mode, over the file, as on a person's machine.
+    let said = sandbox_run(&c, &fake, |cmd| {
+        cmd.env("HUSHRUN_BUILD", "on");
+    });
+    assert!(
+        said.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{said}"
+    );
+    // A settings file that names no mode has no `off` written: reuse stays on, the sandbox's
+    // default, as with no file at all.
+    let d = Machine::new(dir.path(), "d", Some(&a.repo));
+    std::fs::write(
+        d.root.join("build.json"),
+        br#"{"version": 1, "keep_days": 7}"#,
+    )
+    .unwrap();
+    let said = sandbox_run(&d, &fake, |_| {});
+    assert!(
+        said.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{said}"
+    );
+    let e = Machine::new(dir.path(), "e", Some(&a.repo));
+    assert!(!e.root.join("build.json").exists());
+    assert_eq!(sharing(&e)["mode"], "on");
+    let said = sandbox_run(&e, &fake, |_| {});
     assert!(
         said.contains("2 of 2 crates reused (2 from the shared store)"),
         "{said}"

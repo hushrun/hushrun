@@ -213,8 +213,8 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 /// What a `hushrun run NAME -- COMMAND` from this shell does (B-25), as far as this machine can
 /// tell without asking the backend: the one function's answer, the org taken as sharing at the
 /// most it can. A CI job with no backend to ask has nothing to share with.
-fn run_here(effective: &settings::Settings) -> hushrun_build::share::Does {
-    use hushrun_build::share::{Does, Off, Org, Sharing, what_a_run_does};
+fn run_here(place: &Place, effective: &settings::Settings) -> hushrun_build::share::Does {
+    use hushrun_build::share::{Caller, Does, Off, Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
@@ -229,14 +229,24 @@ fn run_here(effective: &settings::Settings) -> hushrun_build::share::Does {
         };
     }
     let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
-    what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None))
+    // In a sandbox nobody chose a mode: reuse is on unless the settings file says `off`, and
+    // `HUSHRUN_BUILD` sets this shell's over either, as the run reads them.
+    let local = match caller {
+        Caller::Agent { sandbox: true } => place
+            .overrides()
+            .and_then(|o| o.mode)
+            .or_else(|| settings::sandbox_mode(&place.settings).ok())
+            .unwrap_or(Mode::Off),
+        _ => effective.mode,
+    };
+    what_a_run_does(caller, local, effective.share, Org::Shares(None))
 }
 
 /// The `ci` line of `hushrun build status` (B-2, B-31): what `hushrun run` does in this CI job,
 /// and why, from [`run_here`].
-fn ci_here(effective: &settings::Settings) -> String {
+fn ci_here(place: &Place, effective: &settings::Settings) -> String {
     use hushrun_build::share::{Off, Sharing};
-    let does = run_here(effective);
+    let does = run_here(place, effective);
     match (does.local, does.sharing) {
         (Mode::Off, Sharing::Off(off)) => {
             let hint = match off {
@@ -255,9 +265,9 @@ fn ci_here(effective: &settings::Settings) -> String {
 
 /// What sharing does here, as far as this machine can tell without asking the backend (B-25):
 /// the word, and why.
-fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
+fn sharing_here(place: &Place, effective: &settings::Settings) -> (&'static str, String) {
     use hushrun_build::share::Sharing;
-    let does = run_here(effective);
+    let does = run_here(place, effective);
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),
         Sharing::Observe => (
@@ -441,7 +451,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "programs": effective.as_ref().map(|s| s.programs.as_str()),
             "share": effective.as_ref().map(|s| s.share.as_str()),
             "sharing": effective.as_ref().map(|s| {
-                let (word, why) = sharing_here(s);
+                let (word, why) = sharing_here(place, s);
                 json!({"mode": word, "why": why})
             }),
             "in_ci": in_ci,
@@ -488,7 +498,10 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
         // file here says.
         line(
             "ci",
-            ci_here(effective.as_ref().unwrap_or(&settings::Settings::default())),
+            ci_here(
+                place,
+                effective.as_ref().unwrap_or(&settings::Settings::default()),
+            ),
         );
     }
     if let Some(value) = &wrapper {
@@ -537,7 +550,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 )
             ),
         );
-        let (word, why) = sharing_here(effective);
+        let (word, why) = sharing_here(place, effective);
         line(
             "share",
             format!(

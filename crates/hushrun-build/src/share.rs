@@ -131,10 +131,13 @@ fn sharing_of(mode: Mode, why_off: Off) -> Sharing {
 /// | CI otherwise | off | off |
 /// | An agent token where a person is signed in, the org shares | that person's local mode | the org's mode, lowered as for the person |
 /// | An agent token where a person is signed in, otherwise | that person's local mode | off |
-/// | An agent token in a sandbox, the org shares | on | the org's mode |
+/// | An agent token in a sandbox, the org shares, no `off` written or set there | on | the org's mode |
 /// | An agent token in a sandbox, otherwise | off | off |
 ///
-/// `own` is the person's share setting (B-33), `local` B-1's mode, both for this command.
+/// `own` is the person's share setting (B-33), `local` B-1's mode, both for this command. For a
+/// sandbox `local` is [`crate::settings::sandbox_mode`] with the command's `HUSHRUN_BUILD` over
+/// it: on by default there, and `off` only where the machine's settings file or the variable
+/// says so.
 pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does {
     let (local, sharing) = modes(caller, local, own, org);
     let reads_only = matches!(
@@ -179,13 +182,12 @@ fn modes(caller: Caller, local: Mode, own: Mode, org: Org) -> (Mode, Sharing) {
             (_, None) => (Mode::Off, Sharing::Off(Off::OrgDoesntShare)),
         },
         Caller::Agent { sandbox } => {
-            let local = if sandbox {
-                match org_mode {
-                    Some(_) => Mode::On,
-                    None => Mode::Off,
-                }
-            } else {
-                local
+            // In a sandbox `local` is `settings::sandbox_mode`'s answer for this command: on,
+            // unless the machine's settings file or `HUSHRUN_BUILD` says `off`.
+            let local = match (sandbox, org_mode) {
+                (true, Some(_)) if local != Mode::Off => Mode::On,
+                (true, _) => Mode::Off,
+                (false, _) => local,
             };
             let sharing = match org_mode {
                 None => Sharing::Off(Off::OrgDoesntShare),
@@ -314,18 +316,36 @@ mod tests {
                 uploads: false,
             }
         );
-        let sandbox = what_a_run_does(
+        // A sandbox with no `off` written or set: on, whatever a person's share setting would be.
+        for local in [Mode::On, Mode::Observe] {
+            let sandbox = what_a_run_does(
+                Caller::Agent { sandbox: true },
+                local,
+                Mode::Off,
+                Org::Shares(Some(Mode::On)),
+            );
+            assert_eq!(
+                sandbox,
+                Does {
+                    local: Mode::On,
+                    sharing: Sharing::On,
+                    uploads: true,
+                }
+            );
+        }
+        // A written or set `off` wins there too.
+        let off = what_a_run_does(
             Caller::Agent { sandbox: true },
             Mode::Off,
-            Mode::Off,
+            Mode::On,
             Org::Shares(Some(Mode::On)),
         );
         assert_eq!(
-            sandbox,
+            off,
             Does {
-                local: Mode::On,
-                sharing: Sharing::On,
-                uploads: true,
+                local: Mode::Off,
+                sharing: Sharing::Off(Off::LocalOff),
+                uploads: false,
             }
         );
         // On a person's machine, the agent gets the machine's local mode, and the person's

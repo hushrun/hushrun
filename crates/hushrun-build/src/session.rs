@@ -590,18 +590,24 @@ pub const CI_MIN_FREE_GB: u32 = 2;
 /// file is read there: reuse is on unless `HUSHRUN_BUILD` says otherwise, the floor is
 /// [`CI_MIN_FREE_GB`], and `HUSHRUN_BUILD_DIR` is not followed, so nothing outlives the job.
 pub fn begin_in_ci(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
-    begin_without_settings(start, store, CI_MIN_FREE_GB)
+    begin_without_settings(start, store, Mode::On, CI_MIN_FREE_GB)
 }
 
-/// B-25, B-36: starts a session on a machine where no person is signed in (a sandbox) whose
-/// store holds a fresh fetch: reuse is on unless `HUSHRUN_BUILD` says otherwise, in `store`.
+/// B-25, B-36: starts a session in `store` on a machine where no person is signed in (a
+/// sandbox): reuse is on unless the machine's settings file says `off`
+/// ([`settings::sandbox_mode`]), and `HUSHRUN_BUILD` sets this command's mode over either.
 pub fn begin_in_sandbox(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
-    begin_without_settings(start, store, crate::settings::MIN_FREE_GB)
+    let mode = settings::sandbox_mode(start.settings)
+        .map_err(|err| NotBegun::Unusable(err.to_string()))?;
+    begin_without_settings(start, store, mode, settings::MIN_FREE_GB)
 }
 
+/// A session whose settings are the defaults but for `mode` and the floor, and the command's
+/// variables.
 fn begin_without_settings(
     start: &Start<'_>,
     store: &Path,
+    mode: Mode,
     min_free_gb: u32,
 ) -> Result<Session, NotBegun> {
     if cfg!(windows) {
@@ -610,7 +616,7 @@ fn begin_without_settings(
     let overrides =
         Overrides::from(start.env).map_err(|err| NotBegun::Unusable(err.to_string()))?;
     let settings = Settings {
-        mode: Mode::On,
+        mode,
         min_free_gb,
         ..Settings::default()
     }

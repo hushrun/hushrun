@@ -761,7 +761,7 @@ caller asks it again from the same facts and nobody stores the answer:
 | CI otherwise | off | off |
 | An agent token where a person is signed in, the org shares | that person's local mode, `off` until the person chose one | the org's mode, lowered as for the person, by the person's settings |
 | An agent token where a person is signed in, otherwise | that person's local mode | off |
-| An agent token in a sandbox (no person signed in), the org shares | on | the org's mode |
+| An agent token in a sandbox (no person signed in), the org shares, no `off` written or set there | on | the org's mode |
 | An agent token in a sandbox, otherwise | off | off |
 
 "The org shares" is read from the run's results lookup, whose answer carries `Hushrun-Build:
@@ -797,13 +797,20 @@ as the one function that maps a run's credential to its row says (`build_session
 `build_session::signed_in_here`, for the session, the relay and `hushrun build status`). An
 agent token's run there whose org shares (its results lookup said so, or, with none made, `open`
 says so within 5 seconds, which the run waits for as a CI job does) begins a session in the
-store with reuse on unless `HUSHRUN_BUILD` says otherwise, and its relay shares as the org's mode
-says; a run from a saved fetch (B-36) on a machine where no person is signed in to the fetch's
+store with reuse on, and its relay shares as the org's mode says. A written `off` wins there as
+it does everywhere: where the machine's settings file says `"mode": "off"`, as `hushrun build
+off` writes it, the run has no session, reuses and shares nothing, and says nothing. Nothing
+else in the file is read for a sandbox: no file, or one that names no mode, leaves reuse on,
+`observe` or `on` written there change nothing, and a file that can't be read turns reuse off
+and says why in one line, since it can't say whether `off` is written. `HUSHRUN_BUILD` sets
+one command's mode over either (`settings::sandbox_mode` is the one definition, for the run and
+`hushrun build status`); a run from a saved fetch (B-36) on a machine where no person is signed in to the fetch's
 backend is one too, the fetch standing for the token that made it. One whose org doesn't share
 runs as it would without any of this, and says nothing. Where a person is signed in, an agent's
 run with a token is that person's machine's: it follows the person's build settings, `off` until
 the person turns reuse on (B-1), so build reuse never turns on there without someone choosing
-it. A settings file, or none, says nothing about what the machine is. *Rests on:* a person's
+it. A settings file, or none, says nothing about what the machine is; it says only whether
+reuse is `off` there. *Rests on:* a person's
 sign-in being on the machines people work at and not in a sandbox's image. *Breaks if:* a
 sandbox's image carries a person's saved sign-in for the backend: its agent runs follow that
 person's settings, off by default, and reuse nothing until `HUSHRUN_BUILD=on`; or a person who
@@ -1078,8 +1085,8 @@ run's store there is its own. A step of that job whose backend answered nothing,
 serves it as above, gets the wrapper and reads the fetch only, in place of the one line B-2 says;
 this is where a coding agent that runs on a GitHub Actions runner behind a firewall is served. No
 run deletes the fetch. A machine where no person is signed in to the fetch's backend is a
-sandbox (B-25): reuse is on there, and sharing is the org's mode as saved; where one is, that
-person's settings decide. *Rests on:*
+sandbox (B-25): reuse is on there unless its settings file says `off`, and sharing is the
+org's mode as saved; where one is, that person's settings decide. *Rests on:*
 a sandbox's later phases running the same repository and toolchain as its setup, so the keys
 they compute are the ones the fetch's manifest names; and the packs staying sealed with each
 block's key, so the fetch holds nothing a compile here couldn't make. *Breaks if:* a block the
