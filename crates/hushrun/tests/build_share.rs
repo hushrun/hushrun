@@ -106,6 +106,11 @@ impl Machine {
         };
         let key = root.join("machine.pem");
         std::fs::write(&key, hushrun_testkit::world::test_key(7).to_pem().as_str()).unwrap();
+        // git's global configuration for the runs: an empty file of this machine's own. Its
+        // path is in no compiled output, where `/dev/null` is: on Linux a proc macro's file
+        // holds that string, from the standard library linked into it, and the run would keep
+        // the macro's block on the machine for holding the variable's value (B-24).
+        std::fs::write(root.join("gitconfig"), "").unwrap();
         Machine { root, repo }
     }
 
@@ -127,7 +132,7 @@ impl Machine {
             .env("HUSHRUN_BUILD_AUDIT", "none")
             .env("CARGO_TERM_COLOR", "never")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
         cmd
     }
 
