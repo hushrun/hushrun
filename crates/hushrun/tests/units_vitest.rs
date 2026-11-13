@@ -2789,3 +2789,33 @@ fn wrapped_node_functions_keep_what_callers_see_and_their_promisified_forms_stay
         "{map:#}"
     );
 }
+
+// covers: C-35, C-43
+#[test]
+fn with_tests_one_by_one_the_runners_wrappers_keep_what_callers_see_too() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // With tests one by one the setup module also wraps Vitest's runner (a suite's and a test's
+    // start and end) and the file's list of tasks: each keeps the name and length of what it wraps,
+    // as Node's functions keep theirs; and Node's keep `promisify.custom` here as well.
+    let files = vec![
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, reads: test}"),
+        ),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/runner.test.ts",
+            "import { test, expect, TestRunner } from 'vitest'\nimport { promisify } from 'node:util'\nimport { execFile } from 'node:child_process'\ntest('runner', async () => {\n  const p: any = TestRunner.prototype\n  const hooks = ['onBeforeRunSuite', 'onAfterRunSuite', 'onBeforeRunTask']\n  // hushrun's own wrappers, in place\n  for (const k of hooks) expect(String(p[k])).toContain('guard(')\n  expect(hooks.map((k) => [p[k].name, p[k].length])).toEqual(hooks.map((k) => [k, 1]))\n  const tasks: any = TestRunner.getCurrentSuite().file.tasks\n  expect(Object.prototype.hasOwnProperty.call(tasks, 'push')).toBe(true)\n  expect([tasks.push.name, tasks.push.length]).toEqual(['push', 1])\n  expect(typeof (execFile as any)[promisify.custom]).toBe('function')\n  const out = await promisify(execFile)(process.execPath, ['-e', 'process.stdout.write(\"out\")'])\n  expect(out).toEqual({ stdout: 'out', stderr: '' })\n  const { Worker } = await import('node:worker_threads')\n  expect([Worker.name, Worker.length]).toEqual(['Worker', 1])\n})\n",
+        ),
+    ];
+    let r = Repo::new(&files);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+}

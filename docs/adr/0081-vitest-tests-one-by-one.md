@@ -241,3 +241,19 @@ jest-community/jest-extended), with no wrong reuse in 270 mutations and replays 
   valibot sets `isolate: false`.
 
 That is the cost and the benefit today.
+
+## Amendment 6: the wrappers keep what they wrap carries (2026-11-13)
+
+Main's fix for `promisify(exec)` made the setup module's wrappers of Node's functions keep their
+`name`, `length` and own properties, wrapping a property that is a function with the same record.
+Merged here, two things follow:
+
+- `fs.realpath.native` and `fs.realpathSync.native` are now wrapped, and Vite's resolver resolves
+  each module it loads through them. With `reads: test` that put every module the file imports
+  in loading's reads, so every test read them: a test that never called into `src/calc.ts` ran
+  again when it changed. A path `native` resolves is now a read of the test file alone, as main
+  wants it, and never of a test, a suite or loading.
+- Every wrapper this module makes keeps what it wraps carries, by one function (`carry`):
+  Vitest's runner methods it wraps for tests one by one (a suite's and a test's start and end, a
+  run's end), the file's list of tasks' `push`, `worker_threads.Worker` and `process.dlopen`, not
+  only Node's file and process functions.

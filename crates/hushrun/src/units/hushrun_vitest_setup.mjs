@@ -74,6 +74,27 @@ function message(err) {
   return err && err.message ? err.message : String(err);
 }
 
+// What a wrapper carries of what it wraps, so that callers see what they would without hushrun:
+// its `name` and `length`, and its own properties (`util.promisify.custom` on `exec`, `native` on
+// `fs.realpath`). Every wrapper this file makes goes through it, Node's and Vitest's runner's
+// alike. `each` may change a property's descriptor first; `fail` hears what couldn't be carried.
+function carry(wrapped, original, fail, each = (key, desc) => desc) {
+  for (const key of Reflect.ownKeys(original)) {
+    if (key === 'prototype' || key === 'arguments' || key === 'caller') continue;
+    try {
+      Object.defineProperty(wrapped, key, each(key, Object.getOwnPropertyDescriptor(original, key)));
+    } catch (err) {
+      fail(err);
+    }
+  }
+  return wrapped;
+}
+
+// Where a wrapper that couldn't carry what it wraps says so: an error of the adapter's.
+const carried = (what) => (err) => {
+  globalThis[STATE]?.errors.push(`${what}: ${message(err)}`.slice(0, 500));
+};
+
 function install() {
   const state = {
     reads: new Set(),
@@ -102,6 +123,13 @@ function install() {
       if (state.file && state.file.watch) keptBy(state.file, p);
     }
   });
+  // [ADR 0081] A path `fs.realpath.native` resolves is a read of the test file alone, never of a
+  // test, a suite or loading: Vite's resolver resolves through it each module it loads, which with
+  // `reads: test` would make every test read every module the file imports.
+  const resolved = (value) => note('read', () => {
+    const p = pathOf(value);
+    if (p) state.reads.add(p);
+  });
   const listed = (value) => note('list', () => {
     const p = pathOf(value);
     if (p) {
@@ -121,34 +149,32 @@ function install() {
   // properties, such as `util.promisify.custom` on `exec` and `execFile` (`{ stdout, stderr }`)
   // or `native` on `fs.realpath`. One that is a function is wrapped with the same record, since
   // Node's calls the original it closed over, and what it does would go unseen; one that is what
-  // it wraps (`fs.promises.opendir`'s own `promisify.custom`) is the wrapper.
-  const observing = (original, record, made = new Map()) => {
+  // it wraps (`fs.promises.opendir`'s own `promisify.custom`) is the wrapper. `own` names the
+  // record of a property that records otherwise (`native`).
+  const observing = (original, record, own = {}, made = new Map()) => {
     if (made.has(original)) return made.get(original);
     const wrapped = function (...args) {
       record(args[0], args);
       return original.apply(this, args);
     };
     made.set(original, wrapped);
-    for (const key of Reflect.ownKeys(original)) {
-      if (key === 'prototype' || key === 'arguments' || key === 'caller') continue;
-      const desc = Object.getOwnPropertyDescriptor(original, key);
+    return carry(wrapped, original, (err) => note('wrap', () => { throw err; }), (key, desc) => {
       if (key !== 'name' && key !== 'length' && typeof desc.value === 'function') {
-        desc.value = observing(desc.value, record, made);
+        desc.value = observing(desc.value, own[key] || record, {}, made);
       }
-      note('wrap', () => Object.defineProperty(wrapped, key, desc));
-    }
-    return wrapped;
+      return desc;
+    });
   };
-  const wrap = (target, name, record) => {
+  const wrap = (target, name, record, own) => {
     const original = target[name];
     if (typeof original !== 'function') return;
-    target[name] = observing(original, record);
+    target[name] = observing(original, record, own);
   };
   for (const target of [fs, fs.promises]) {
     for (const name of ['readFile', 'readFileSync', 'open', 'openSync', 'createReadStream',
       'stat', 'statSync', 'lstat', 'lstatSync', 'access', 'accessSync', 'existsSync',
       'realpath', 'realpathSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync']) {
-      wrap(target, name, read);
+      wrap(target, name, read, { native: resolved });
     }
     for (const name of ['readdir', 'readdirSync', 'opendir', 'opendirSync']) {
       wrap(target, name, listed);
@@ -163,18 +189,18 @@ function install() {
   }
   const Worker = workerThreads.Worker;
   if (typeof Worker === 'function') {
-    workerThreads.Worker = class extends Worker {
+    workerThreads.Worker = carry(class extends Worker {
       constructor(...args) {
         unfollowed({ why: 'worker', detail: String(args[0]).slice(0, 200) });
         super(...args);
       }
-    };
+    }, Worker, (err) => note('wrap', () => { throw err; }));
   }
   const dlopen = process.dlopen;
-  process.dlopen = function (...args) {
+  process.dlopen = carry(function (...args) {
     unfollowed({ why: 'native', detail: String(args[1]).slice(0, 200) });
     return dlopen.apply(this, args);
-  };
+  }, dlopen, (err) => note('wrap', () => { throw err; }));
   module.syncBuiltinESMExports();
   return state;
 }
@@ -264,14 +290,14 @@ function startFile(told) {
       configurable: true,
       enumerable: false,
       writable: true,
-      value(...items) {
+      value: carry(function (...items) {
         try {
           items.forEach(remember);
         } catch {
           // Without them no skipped test is told, which only runs more.
         }
         return push.apply(this, items);
-      },
+      }, push, carried('wrap')),
     });
   }
   state.file = {
@@ -496,6 +522,11 @@ function hooks() {
     });
     return out;
   };
+  // Each keeps what callers see of the method it wraps.
+  for (const [key, original] of [['onBeforeRunSuite', onBeforeRunSuite],
+    ['onAfterRunSuite', onAfterRunSuite], ['onBeforeRunTask', onBeforeRunTask]]) {
+    if (typeof original === 'function') carry(proto[key], original, carried('wrap'));
+  }
 }
 
 // The runner's own methods Vitest wrapped when it made it: a test's end, after its hooks, its
@@ -535,6 +566,11 @@ function own(runner) {
     }
     return onAfterRunFiles?.call(this, ...args);
   };
+  // Each keeps what callers see of the method it wraps.
+  for (const [key, original] of [['onAfterRunTask', onAfterRunTask],
+    ['onAfterRunFiles', onAfterRunFiles]]) {
+    if (typeof original === 'function') carry(runner[key], original, carried('wrap'));
+  }
 }
 
 // A test that skipped itself (`ctx.skip()`) ends with no `onAfterRunTask`: its window closes at
