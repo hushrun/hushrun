@@ -6,10 +6,11 @@
 //!
 //! What it holds, each in one place:
 //!
-//! - **Its phase** ([`Phase`]): opening, answering, resting (three failures in a row: every
-//!   waiting wrapper is answered "none" at once, and every new one for 30 seconds), stopped (the
-//!   org doesn't share, the server can't be reached, or it refused the caller mid-run). Moved by
-//!   [`State::phase_now`], `open`'s answer, [`State::failed`] and [`State::stop`] only.
+//! - **Its phase** ([`Phase`]): opening, answering, resting (three requests in a row that errored
+//!   or timed out: for 30 seconds no new request goes to the network, and wrappers are answered
+//!   from what the relay holds), stopped (the org doesn't share, the server can't be reached, or
+//!   it refused the caller mid-run). Moved by [`State::phase_now`], `open`'s answer,
+//!   [`State::failed`] and [`State::stop`] only.
 //! - **What the run shares** ([`Sharing`]): `hushrun_build::share::what_a_run_does`, asked again
 //!   once `open` answers.
 //! - **Each download** ([`Download`]): queued, downloading, arrived (a sealed pack in
@@ -167,7 +168,8 @@ pub(crate) enum Phase {
     /// `open` is under way: every request is answered "none".
     Opening,
     Answering,
-    /// Three failures in a row: "none" to everyone until then.
+    /// Three failures in a row: until then no new request goes to the network, and wrappers are
+    /// answered from what the relay holds.
     Resting(Instant),
     Stopped(Stop),
 }
@@ -312,11 +314,20 @@ impl State {
         &self.phase
     }
 
+    /// Whether a new request may go to the network now: only while answering (B-26).
     fn answering(&mut self, now: Instant) -> bool {
         matches!(self.phase_now(now), Phase::Answering)
     }
 
-    /// One more failure; the third in a row rests the relay.
+    /// Whether a wrapper is answered from what the relay holds now (hints already downloaded,
+    /// packs already in `incoming/`, vouches already known): while answering, and while resting,
+    /// which stops new requests to the network and nothing else (B-26).
+    fn serving(&mut self, now: Instant) -> bool {
+        matches!(self.phase_now(now), Phase::Answering | Phase::Resting(_))
+    }
+
+    /// One more failure (a request that errored or timed out, never a give-up); the third in a
+    /// row rests the relay.
     fn failed(&mut self, now: Instant, rest: Duration) {
         self.failures += 1;
         if self.failures >= FAILURES_TO_REST && self.phase == Phase::Answering {
@@ -373,6 +384,19 @@ impl State {
             .filter(|f| f.state == Download::Downloading)
             .map(|f| f.found.bytes.saturating_sub(f.bytes))
             .sum()
+    }
+
+    /// How long `fetch` would take from now at `rate`, the one estimate a start and a give-up are
+    /// decided by (B-26): its own bytes still to come, and, while it waits in the queue, those of
+    /// the downloads running ahead of it and a round trip.
+    fn to_finish(&self, fetch: &Fetch, rate: f64) -> Duration {
+        let remaining = fetch.found.bytes.saturating_sub(fetch.bytes);
+        let (behind, extra) = if fetch.state == Download::Downloading {
+            (remaining, Duration::ZERO)
+        } else {
+            (self.ahead() + remaining, ROUND_TRIP)
+        };
+        Duration::from_secs_f64(behind as f64 / rate.max(1.0)) + extra
     }
 }
 
@@ -760,7 +784,8 @@ impl Relay {
         // compare, once each, and a prefetch would only download those blocks a second time.
         let manifest = {
             let mut state = self.state();
-            if state.sharing != Sharing::On {
+            // Resting, it waits for a wrapper after the rest.
+            if state.sharing != Sharing::On || !state.answering(Instant::now()) {
                 return;
             }
             state.manifest.take()
@@ -839,7 +864,8 @@ impl Relay {
     }
 
     async fn lookup_hints(&self, addresses: &[Hex32]) {
-        if self.saved {
+        // Resting, nothing new is asked (B-26).
+        if self.saved || !self.state().answering(Instant::now()) {
             return;
         }
         let body = HintsLookupRequest {
@@ -877,7 +903,8 @@ impl Relay {
     /// A lookup of `addresses` (B-26: "this is the use"); what it found, or `None` when it
     /// failed.
     async fn lookup(&self, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
-        if self.saved {
+        // Resting, nothing new is asked (B-26).
+        if self.saved || !self.state().answering(Instant::now()) {
             return None;
         }
         let body = LookupRequest {
@@ -944,12 +971,16 @@ impl Relay {
         let address = Relay::address(&step);
         let known = {
             let mut state = self.state();
+            let now = Instant::now();
             // A downloaded hint only leads to a fetch, which shared `observe` never makes.
-            if !state.answering(Instant::now()) || state.sharing != Sharing::On {
+            if !state.serving(now) || state.sharing != Sharing::On {
                 return Answer::None;
             }
             if state.hints_asked.contains(&address) {
                 Some(state.sealed_hints.remove(&address).unwrap_or_default())
+            } else if !state.answering(now) {
+                // Resting: hints already downloaded are answered, nothing new is asked.
+                return Answer::None;
             } else {
                 None
             }
@@ -993,7 +1024,7 @@ impl Relay {
         let _ = class;
         {
             let mut state = self.state();
-            if !state.answering(Instant::now()) || state.sharing != Sharing::On {
+            if !state.serving(Instant::now()) || state.sharing != Sharing::On {
                 return Answer::None;
             }
         }
@@ -1013,7 +1044,8 @@ impl Relay {
                 })
                 .collect()
         };
-        if !unknown.is_empty() {
+        // Resting, nothing new is asked: only what the run knows answers.
+        if !unknown.is_empty() && self.state().answering(Instant::now()) {
             self.lookup(&unknown, true).await;
         }
         let chosen = {
@@ -1072,10 +1104,15 @@ impl Relay {
                 );
             }
             let speed = state.speed();
+            let resting = !state.answering(now);
             let Some(fetch) = state.fetches.get(&address) else {
                 return Answer::None;
             };
             if matches!(fetch.state, Download::Dropped | Download::Published) {
+                return Answer::None;
+            }
+            // Resting: a download not under way would be a new request.
+            if resting && fetch.state == Download::Queued {
                 return Answer::None;
             }
             // The cost: the smallest of the uploader's (scaled by this machine's speed), this
@@ -1086,21 +1123,24 @@ impl Relay {
                 cost = cost.min(Duration::from_millis(ms));
             }
             let budget = cost / 2;
-            let size = fetch.found.bytes.saturating_sub(fetch.bytes);
             match state.meter.rate(now) {
                 None => {
                     // No rate yet: the first fetch asked for runs to its end as the
-                    // measurement; every other one is "none" until a rate exists.
-                    if state.measuring.is_some_and(|m| m != address) {
+                    // measurement; every other one is "none" until a rate exists, unless it is
+                    // under way already.
+                    if fetch.state == Download::Queued
+                        && state.measuring.is_some_and(|m| m != address)
+                    {
                         return Answer::None;
                     }
-                    state.measuring = Some(address);
+                    if state.measuring.is_none() {
+                        state.measuring = Some(address);
+                    }
                 }
                 Some(rate) => {
-                    let ahead = state.ahead();
-                    let expected =
-                        Duration::from_secs_f64((ahead + size) as f64 / rate.max(1.0)) + ROUND_TRIP;
-                    if expected >= budget {
+                    // One that wouldn't finish within its budget is not started, nor waited
+                    // for: a miss, which counts as no failure.
+                    if state.to_finish(fetch, rate) >= budget {
                         return Answer::None;
                     }
                 }
@@ -1136,12 +1176,12 @@ impl Relay {
             }
             let now = Instant::now();
             let mut state = self.state();
-            if !state.answering(now) {
+            if !state.serving(now) {
                 return Answer::None;
             }
+            let resting = !state.answering(now);
             let measuring = state.measuring == Some(address);
             let rate = state.meter.rate(now);
-            let ahead = state.ahead();
             let Some(fetch) = state.fetches.get(&address) else {
                 return Answer::None;
             };
@@ -1151,28 +1191,20 @@ impl Relay {
                 Download::Queued | Download::Downloading => {}
             }
             let elapsed = now.saturating_duration_since(started);
-            let remaining = fetch.found.bytes.saturating_sub(fetch.bytes);
-            // Given up as soon as the projected finish passes half the cost.
+            // Given up as soon as the projected finish passes half the cost, or, resting, while
+            // it hasn't started: no new request goes until the rest is over.
             let projected = match rate {
-                Some(rate) => {
-                    let behind = if fetch.state == Download::Downloading {
-                        remaining
-                    } else {
-                        ahead + remaining
-                    };
-                    elapsed + Duration::from_secs_f64(behind as f64 / rate.max(1.0))
-                }
+                Some(rate) => elapsed + state.to_finish(fetch, rate),
                 None => elapsed,
             };
-            if projected > budget || elapsed >= budget {
+            let queued_at_rest = resting && fetch.state == Download::Queued;
+            if projected > budget || elapsed >= budget || queued_at_rest {
                 if let Some(fetch) = state.fetches.get_mut(&address) {
                     fetch.waited = false;
                 }
-                if !measuring {
-                    if let Some(fetch) = state.fetches.get(&address) {
-                        fetch.cancel.store(true, Ordering::Relaxed);
-                    }
-                    state.failed(now, tuning.rest);
+                // A give-up is no failure: nothing errored (B-26).
+                if !measuring && let Some(fetch) = state.fetches.get(&address) {
+                    fetch.cancel.store(true, Ordering::Relaxed);
                 }
                 return Answer::None;
             }
@@ -1184,7 +1216,8 @@ impl Relay {
         let mut starts = Vec::new();
         {
             let mut state = self.state();
-            if matches!(state.phase, Phase::Stopped(_)) {
+            // Resting or stopped: no new download starts; those under way go on (B-26).
+            if !state.answering(Instant::now()) {
                 return;
             }
             let free = self.config.store.free_bytes().unwrap_or(u64::MAX);
@@ -1450,7 +1483,14 @@ impl Relay {
         match self.state().phase_now(Instant::now()).clone() {
             Phase::Opening | Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
             Phase::Stopped(_) => return Answer::None,
-            Phase::Resting(_) | Phase::Answering => {}
+            // Resting, only what the run knows answers: nothing new is asked.
+            Phase::Resting(_) => {
+                return match self.state().vouched.get(&address) {
+                    Some(served) if *served == Some(outputs) => self.renew(key, address, outputs),
+                    _ => Answer::None,
+                };
+            }
+            Phase::Answering => {}
         }
         // Then the run's one lookup of stale vouches answers it, waited for within the block's
         // budget, half what its compile costs, as a fetch is (B-26).
@@ -1493,6 +1533,12 @@ impl Relay {
         if served != Some(outputs) {
             return Answer::None;
         }
+        self.renew(key, address, outputs)
+    }
+
+    /// Renews the downloaded block `key`'s entry for this run's host, org and repository, a
+    /// server having said it serves it with `outputs` (B-34).
+    fn renew(&self, key: Digest, address: Hex32, outputs: Hex32) -> Answer {
         let found = self.state().found.get(&address).map(|f| f.0.clone());
         let scope = found.map(|f| f.scope);
         let entry = Vouch {
@@ -1805,7 +1851,7 @@ impl Relay {
     }
 
     async fn report(&self, address: Hex32, scope: &str, problem: blocks::Problem) {
-        if self.saved || matches!(self.state().phase, Phase::Stopped(_)) {
+        if self.saved || !self.state().answering(Instant::now()) {
             return;
         }
         let body = ReportRequest {

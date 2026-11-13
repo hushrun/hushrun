@@ -1990,3 +1990,158 @@ fn a_stalled_begin_or_commit_is_cut_off_at_the_end_s_one_deadline() {
     assert_eq!(fake.count(route::CLOSE), 1);
     assert!(no_claims(&m));
 }
+
+/// A cold machine whose prefetch of `crates` (their hints and their packs) has arrived.
+fn prefetched(fake: &FakeBuild, crates: &[(Digest, Digest)], m: &Machine) -> Arc<Relay> {
+    for (_, step) in crates {
+        let hint = blocks::pack::seal_hint(step.as_bytes(), b"{\"a hint\":1}").unwrap();
+        fake.seed_hint(address(step), &hint);
+    }
+    fake.set_manifest(
+        crates
+            .iter()
+            .map(|(key, step)| Pair(address(step), address(key)))
+            .collect(),
+    );
+    let relay = start(fake, m, |_| {});
+    begin(&relay, m);
+    until("open", || answering(&relay));
+    // The first wrapper that misses starts the prefetch; the rest arrives before cargo asks.
+    ask(
+        &relay,
+        Request::Hints {
+            step: Digest::of(b"not in the manifest"),
+        },
+    );
+    until("prefetched", || {
+        let state = relay.state();
+        crates.iter().all(|(key, _)| {
+            state
+                .fetches
+                .get(&address(key))
+                .is_some_and(|f| matches!(f.state, super::Download::Arrived(_)))
+        })
+    });
+    relay
+}
+
+/// Eight wrappers starting together, each asking for its crate's hints and then its block, as
+/// the wrapper does: what each got.
+fn eight_wrappers(relay: &Arc<Relay>, crates: &[(Digest, Digest)]) -> Vec<(Answer, Answer)> {
+    std::thread::scope(|scope| {
+        let asked: Vec<_> = crates
+            .iter()
+            .map(|(key, step)| {
+                let relay = relay.clone();
+                scope.spawn(move || {
+                    let hints = ask(&relay, Request::Hints { step: *step });
+                    let fetched = ask(
+                        &relay,
+                        Request::Fetch {
+                            step: *step,
+                            keys: vec![*key],
+                            class: LocalClass::Library,
+                            // Small crates: 40 ms here, a budget of 20.
+                            local_ms: Some(40),
+                        },
+                    );
+                    (hints, fetched)
+                })
+            })
+            .collect();
+        asked.into_iter().map(|t| t.join().unwrap()).collect()
+    })
+}
+
+// covers: B-26, B-30
+#[test]
+fn a_give_up_is_no_failure_and_a_rest_still_serves_what_arrived() {
+    // Eight small crates the prefetch brought, and three more blocks outside the manifest.
+    let fake = FakeBuild::start();
+    let crates = served(&fake, 8, 5_000, 2_000);
+    let stalled: Vec<(Digest, Digest)> = (0..3u8)
+        .map(|i| {
+            let src = machine();
+            let (key, step) = block(&src.store, 200 + i, 2_000, None);
+            let packed = super::pack::pack_block(&src.store, &key, &src.session).unwrap();
+            fake.put_block(
+                address(&key),
+                "person/1",
+                &packed.pack.bytes().unwrap(),
+                packed.outputs,
+                2_000,
+                blocks::Class::Library,
+            );
+            (key, step)
+        })
+        .collect();
+    let m = machine();
+    let relay = prefetched(&fake, &crates, &m);
+    // The store stalls once the rate is known: three fetches that rate lets start are given up
+    // within their budgets.
+    fake.delay(route::STORE_GET, Duration::from_secs(2));
+    for (key, step) in &stalled {
+        let answer = ask(
+            &relay,
+            Request::Fetch {
+                step: *step,
+                keys: vec![*key],
+                class: LocalClass::Library,
+                local_ms: Some(600),
+            },
+        );
+        assert_eq!(answer, Answer::None);
+    }
+    // Each was started, then given up.
+    assert_eq!(fake.count(route::STORE_GET), crates.len() + stalled.len());
+    assert!(answering(&relay), "three give-ups rested the relay");
+    for (n, (hints, fetched)) in eight_wrappers(&relay, &crates).into_iter().enumerate() {
+        assert_eq!(hints, Answer::Hints { count: 1 }, "{n}");
+        assert_eq!(fetched, Answer::Ready { key: crates[n].0 }, "{n}");
+    }
+    relay.end_check(&[]);
+    assert_eq!(fake.closes()[0].counts.unused_downloads, 0);
+
+    // Three lookups that fail rest the relay: no new request goes, and what arrived still serves.
+    let fake = FakeBuild::start();
+    let crates = served(&fake, 8, 5_000, 2_000);
+    let m = machine();
+    let relay = prefetched(&fake, &crates, &m);
+    fake.fail(route::LOOKUP, 500, 3);
+    for n in 0..3u8 {
+        ask(
+            &relay,
+            Request::Fetch {
+                step: Digest::of(&[n, 9]),
+                keys: vec![Digest::of(&[n, 8])],
+                class: LocalClass::Library,
+                local_ms: None,
+            },
+        );
+    }
+    assert!(matches!(relay.state().phase, super::Phase::Resting(_)));
+    let lookups = fake.count(route::LOOKUP);
+    let hint_lookups = fake.count(route::HINTS_LOOKUP);
+    for (n, (hints, fetched)) in eight_wrappers(&relay, &crates).into_iter().enumerate() {
+        assert_eq!(hints, Answer::Hints { count: 1 }, "{n}");
+        assert_eq!(fetched, Answer::Ready { key: crates[n].0 }, "{n}");
+    }
+    // A key the run knows nothing of is a miss, and asks nothing.
+    let unknown = Digest::of(b"unknown");
+    assert_eq!(
+        ask(
+            &relay,
+            Request::Fetch {
+                step: unknown,
+                keys: vec![unknown],
+                class: LocalClass::Library,
+                local_ms: None,
+            },
+        ),
+        Answer::None
+    );
+    assert_eq!(ask(&relay, Request::Hints { step: unknown }), Answer::None);
+    assert_eq!(fake.count(route::LOOKUP), lookups);
+    assert_eq!(fake.count(route::HINTS_LOOKUP), hint_lookups);
+    relay.end_check(&[]);
+}

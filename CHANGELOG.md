@@ -183,6 +183,12 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a fresh machine reuses what its prefetch downloaded. A wrapper that gives up on a
+  download that wouldn't arrive within half its compile no longer counts as a failure; only a
+  request that errors or times out does, and three of those rest the relay, which then sends
+  nothing new but still answers from the hints, packs and vouches it holds. Before, three give-ups
+  on small crates at the start of a parallel build rested it for 30 seconds, during which it
+  answered no hint request: in one run 232 packs (199 MB) were downloaded and 1 crate reused.
 - Build blocks in CI: a job whose tracked files differ from its commit (a version bump or a
   nightly `cargo update` before the build) names no commit in its build requests, so the backend
   doesn't take what it builds for that commit's; it is checked once per run. Before, every job

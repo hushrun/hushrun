@@ -655,16 +655,26 @@ server also knew, and taken as equal until it has three), what this machine's ow
 the same first key took, and 60 seconds. The **rate** is the link's throughput over all
 downloads together, partial and abandoned ones included; with no rate yet, the first fetch a
 wrapper asks for runs to its end as the measurement, its wrapper waiting no longer than half the
-cost, and every other request is a miss until a rate exists. A fetch is started only when its
-expected finish (the bytes still to come ahead of it and its own, over the rate, and a round
-trip) is under half the cost; it goes to the front of the queue, and it is given up as soon as
-its projected finish passes half the cost. A give-up and a failed download count as failures;
-three in a row answer every waiting wrapper at once and every new one for 30 seconds. A 401, 403
-or 404 in the middle of a run stops every request for the rest of the run, keeps the markers
-(B-29) and says one line; a server that can't be reached says one line too. Every failure ends
-in rustc running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting,
-so that the worst a wrong guess adds to one crate is half its compile time; and the socket being
-no boundary inside one OS user, whose processes can read the machine's key anyway.
+cost, and every other request is a miss until a rate exists, unless its download is under way
+already. One estimate (`State::to_finish`) decides a start and a give-up: a download's own bytes
+still to come over the rate, and, while it waits in the queue, those of the downloads running
+ahead of it and a round trip. A fetch whose estimate isn't under half the cost is not started
+and not waited for; one that is goes to the front of the queue, and it is given up as soon as
+elapsed time and the estimate pass half the cost. A miss and a give-up are no failure: nothing
+errored, and a parallel build's first small crates give up by the dozen. A **failure** is a
+request that errored or timed out: a network error, a 5xx, a lookup or a download that failed
+(a download that fails its checks included). Three in a row **rest** the relay for 30 seconds:
+no new request goes to the network (no lookup, hint lookup, download, `begin`, report), and
+every wrapper is answered from what the relay holds: hints the prefetch downloaded, packs
+already in `incoming/`, downloads already under way, vouches already known. A 401, 403 or 404 in
+the middle of a run stops every request for the rest of the run, keeps the markers (B-29) and
+says one line; a server that can't be reached says one line too. Every failure ends in rustc
+running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting, so that
+the worst a wrong guess adds to one crate is half its compile time; packs already downloaded
+costing nothing more to open, so a rest that dropped them would only waste them; and the socket
+being no boundary inside one OS user, whose processes can read the machine's key anyway.
+*Breaks if:* the link's rate falls after a fetch started: the fetch is given up within half its
+cost, and its bytes so far are spent for nothing.
 
 **B-27 Addresses and sealing.** A block's **address** is SHA-256 of `hushrun.block-address/v1`,
 a newline, the kind, a newline and the key's 32 bytes; a first key's address is the same of the
