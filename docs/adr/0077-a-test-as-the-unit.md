@@ -436,3 +436,9 @@ place.
   what it is now, by the sets as they are (`is now a test file`, `is now a source`, `is now in
   `tests.ignore``); a source now in the rest set `is no longer a source`, not new; only a file
   not on disk is gone.
+- **Why a failed run keeps no pass, said by the run.** Maven's adapter says why when a case no
+  class owns kept the run's passes (`hushrun couldn't tell which test class 1 of its tests or
+  failures belong to, so no pass of a run that failed is kept`), and only `hushrun why` read it.
+  A run that failed, whose failures aren't told by unit, now says the adapter's words once after
+  COMMAND, `hushrun: <NAME>: <why>`, beside the line for a start that didn't say what it saw, by
+  the one path that keeps them with each row; a facts file's own `notKept` takes the same path.

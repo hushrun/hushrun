@@ -1473,6 +1473,55 @@ fn a_test_that_ends_its_fork_with_system_exit_records_no_pass() {
     }
 }
 
+// covers: C-32, C-47
+#[test]
+fn a_failed_run_with_a_case_no_class_owns_says_once_why_it_keeps_no_pass() {
+    let Some(maven) = maven() else { return };
+    // When asked to fail, OrphanTest writes a report beside Surefire's whose failing case names
+    // no class, as a runner that loses its class does; PriceTest fails too, so the build fails.
+    let orphan = format!(
+        r#"package shop.other;
+
+import org.junit.jupiter.api.Test;
+import java.nio.file.*;
+
+class OrphanTest {{
+  @Test void writes() throws Exception {{
+    if (System.getenv("{FAIL}") == null) return;
+    Path dir = Paths.get("target", "surefire-reports");
+    Files.createDirectories(dir);
+    Files.write(dir.resolve("TEST-orphan.xml"), ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        + "<testsuite name=\"orphan\" tests=\"1\" failures=\"1\">"
+        + "<testcase classname=\"\" name=\"lost\" time=\"0.001\"><failure message=\"lost\"/></testcase>"
+        + "</testsuite>\n").getBytes("UTF-8"));
+  }}
+}}
+"#
+    );
+    let mut files = shop("reuse");
+    files.push(file(
+        "other/src/test/java/shop/other/OrphanTest.java",
+        &orphan,
+    ));
+    let r = Repo::new(&files, maven);
+    let failed = r.run(&[], &["--fail-at-end", "test"], &[(FAIL, "1")]);
+    assert_ne!(failed.code, 0, "{}\n{}", failed.stderr, failed.stdout);
+    let why = "hushrun: unit: hushrun couldn't tell which test class 1 of its tests or failures belong to, so no pass of a run that failed is kept";
+    assert_eq!(
+        failed.stderr.lines().filter(|l| *l == why).count(),
+        1,
+        "{}\n{}",
+        failed.stderr,
+        failed.stdout
+    );
+    // Nothing passed is kept: the classes that passed run again.
+    assert!(
+        !r.unit_results().contains_key("pass"),
+        "{:?}",
+        r.unit_results()
+    );
+}
+
 /// A module of the reactor: `name`, its parent the reactor's, with `body` inside `<project>`.
 fn reactor_module(name: &str, body: &str) -> String {
     format!(

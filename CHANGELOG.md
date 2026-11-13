@@ -148,6 +148,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Fixed
 
+- A Maven run that failed with a test or failure no class could be told for says once why it
+  keeps no pass (`hushrun couldn't tell which test class 1 of its tests or failures belong to,
+  …`); only `hushrun why` said it before.
 - The plan's line, `observe`'s and `hushrun ready` no longer call a file gone when it is on disk
   and only moved between the sets (a source that is a test file now, a file `tests.ignore` names
   now): they say what it is now, as `hushrun why` does, by the same function.

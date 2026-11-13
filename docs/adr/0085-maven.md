@@ -230,7 +230,7 @@ each of its tests), so it keeps no pass of its own, runs every time, and a plan 
 its failures are its own, so a failed run keeps the other classes' passes. A case run by a suite
 whose class is a test file of the module (`@SuiteClasses`) stays that file's. A test or failure
 for which neither says a class still makes the run's passes hold only when COMMAND passed, and the
-adapter says so (`notKept`, for `hushrun why`).
+adapter says so (`notKept`, for `hushrun why`; ADR 0077's Amendment 16 has the run say it once).
 
 ## Measured on real projects (2026-11-13)
 

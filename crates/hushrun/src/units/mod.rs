@@ -1166,12 +1166,22 @@ impl Session {
             seen.facts.stale_build = stale.is_some();
             seen.facts.left_out_again = left_out.is_some() && self.whole;
         }
+        let by_unit = read.failures_by_unit;
+        let failed_words = mode.words.failed.clone();
         let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
+        // \[C-32\] What holds for the whole run, said once: a start that didn't say what it saw,
+        // or, in a run that failed whose failures aren't told by unit, the adapter's words for why
+        // no pass of it is kept (Maven's cases no class owns, a facts file's `notKept`).
         if let Some(why) = &unfinished {
             observed.lines.push(format!(
                 "{}: no test file or test records a pass: {why}",
                 end.base.check
             ));
+        } else if !end.command_passed
+            && !by_unit
+            && let Some(why) = failed_words.filter(|why| !why.is_empty())
+        {
+            observed.lines.push(format!("{}: {why}", end.base.check));
         }
         observed.left_out = left_out;
         observed.stale_build = stale;
