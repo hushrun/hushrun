@@ -50,6 +50,12 @@ pub enum Request {
         step: Digest,
         outputs: hushrun_core::blocks::Hex32,
     },
+    /// Whether the run still shares, or would if its server could be reached (B-34): asked
+    /// before a block that was only downloaded is reused on a fresh entry, and answered from
+    /// what the relay knows, at once and without the network. [`Answer::Ok`]: it does, `open`
+    /// is under way, or no server could be reached. [`Answer::None`]: sharing stopped by a
+    /// decision (`open` said the org doesn't share, or refused the caller).
+    Sharing,
     /// A compile of this run built and stored `key`: the relay decides whether it goes up, and
     /// in shared `observe` compares it with the shared store's copy.
     Built {

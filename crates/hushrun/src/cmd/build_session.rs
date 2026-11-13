@@ -77,12 +77,42 @@ pub(crate) fn begin(
     };
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
+        // B-34: the run would share, and its backend answered nothing it was asked.
+        let unreached = unreached(&session, &start, sandbox);
         match start_sharing(&mut session, start, repository, &env, sandbox) {
-            Ok(_) | Err(None) => {}
-            Err(Some(line)) => session.add_line(line),
+            Ok(_) => {}
+            Err(line) => {
+                if let Some(line) = line {
+                    session.add_line(line);
+                }
+                if unreached {
+                    let _ = session.set_unreached();
+                }
+            }
         }
     }
     Ok(session)
+}
+
+/// B-34: whether this run has no relay because its backend couldn't be reached, and for no
+/// other reason: the run's results lookup got no answer of any kind (so nothing said whether
+/// the org shares), and what the run does would share had it said yes. A person who turned
+/// sharing off here, a local mode of `off`, or an answer without `Hushrun-Build: on` is a
+/// decision, and so is every run [`begin`] is handed no backend for.
+fn unreached(session: &Session, start: &ShareStart, sandbox: bool) -> bool {
+    use hushrun_build::share::{Org, Sharing, what_a_run_does};
+    if start.access.answered || start.access.shares || start.open_decides || cfg!(not(unix)) {
+        return false;
+    }
+    let current = session.current();
+    let caller = caller(Some(&start.access), false, sandbox);
+    let does = what_a_run_does(
+        caller,
+        current.mode,
+        current.share_setting,
+        Org::Shares(None),
+    );
+    !matches!(does.sharing, Sharing::Off(_))
 }
 
 /// The store's fresh fetch (B-36), with its folder, when it may serve this run: see
@@ -601,7 +631,7 @@ pub(crate) fn platform() -> String {
 /// their wait, `close` goes with the manifest and the counts), then the session's summary,
 /// with what the relay said.
 pub(crate) fn finish(mut session: Session, now: SystemTime) -> hushrun_build::session::Summary {
-    if session.current().share.is_some()
+    if session.current().share.relay().is_some()
         && let Some(relay) = crate::cmd::build_relay::Relay::running()
     {
         let entries = session.current().entries();

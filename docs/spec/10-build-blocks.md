@@ -1101,9 +1101,24 @@ counts can show.
 **B-34 A downloaded block is reused only while a server the run belongs to vouches for it.** A
 block built here is reused as any. A block only downloaded is never reused as a download again
 once any server said it no longer serves it: its record keeps that "no" (B-32), whatever the
-network does afterwards, and a run with no relay, which asks nothing, honours it too. Otherwise
-it is reused without asking while its entry for this run's host, org and repository is under 24
-hours old; else the wrapper asks the relay, which answers within the block's **budget**, half
+network does afterwards, and a run with no relay, which asks nothing, honours it too. **A run
+that is not sharing by a decision reuses no block it only downloaded**, whatever its entry's
+age: the org doesn't share (the results lookup's answer carried no `Hushrun-Build: on`, or
+`open` said so), the person set this machine to `share off` or its local mode says so, nobody
+is signed in, or the command is `hushrun run CHECK…`, which never shares (B-25). It is a miss:
+rustc runs, and the block that compile builds takes the downloaded one's place and is from then
+on built here (B-32), so a key is compiled once because of it. A run with no relay reuses a
+download only when it would share and **its backend couldn't be reached**: its results lookup
+got no answer of any kind, which the session records before COMMAND starts
+(`session::Shared::Unreached`, the one state every wrapper of the run reads, set by
+`build_session::unreached`); then an entry of any age counts, for the blocks this machine's own
+hints lead to. In a run with a relay, a download
+is reused without asking a server while its entry for this run's host, org and repository is
+under 24 hours old, unless the relay says sharing stopped for the run by a decision (`open`
+said the org doesn't share or that the run's sharing is off, or a request was refused with 401,
+403 or 404), which the wrapper asks it before each such reuse and the relay answers from its
+phase, at once and without the network; a relay that doesn't answer is no decision. On an older
+entry the wrapper asks the relay, which answers within the block's **budget**, half
 what its compile took (B-26). "Served, with these outputs" lets it be reused. **The server can't
 be reached** means `open` failed, or hasn't answered within that budget: only then does an entry
 of any age count, and the block is reused. Once `open` has answered, a stale entry is never
@@ -1133,7 +1148,9 @@ the rest, counts as used too); and cargo never waiting on the network longer tha
 may save. *Breaks if:* `open` takes longer than a block's budget: that block is reused as on a
 machine that can't reach the server, until a run whose `open` answers in time; or a server says
 "no" by mistake (a lookup answered for the wrong repository): the block compiles here from then
-on, a cost and never a wrong reuse.
+on, a cost and never a wrong reuse; or the results lookup is answered by something that is not the
+backend (a proxy's error page): the run takes that for an org that doesn't share, and compiles
+its downloads once.
 
 **B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
 `build: env:` list; every compile of that repository is keyed by their values (B-5), on every

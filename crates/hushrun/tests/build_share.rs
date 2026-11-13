@@ -791,6 +791,127 @@ fn a_withdrawn_download_is_not_reused_once_its_entry_is_a_day_old_and_the_no_is_
     assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
 }
 
+/// Two machines whose libraries are at their second version. A built and uploaded it. B compiled
+/// the first version itself, so its own hints lead to each library's key, then downloaded the
+/// second from the shared store: blocks it only downloaded, which a run with no relay finds.
+fn built_and_downloaded(dir: &Path, fake: &FakeBuild) -> (Machine, Machine) {
+    let a = Machine::new(dir, "a", None);
+    let b = Machine::new(dir, "b", Some(&a.repo));
+    let (_, said) = timed_build(&b, fake, "off");
+    assert!(said.contains("2 crates built"), "{said}");
+    for m in [&a, &b] {
+        std::fs::write(
+            m.repo.join("dep/src/lib.rs"),
+            "pub fn two() -> u32 {\n    (0..3).map(|x| x * 1).sum::<u32>() - 1\n}\n",
+        )
+        .unwrap();
+        git::commit_all(&m.repo, "second");
+    }
+    let (code, stderr) = a.build(fake);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stderr) = b.build(fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
+    (a, b)
+}
+
+/// `cargo clean`, then `cargo build` through hushrun, the command as `change` leaves it: what
+/// the run said.
+fn rebuilt(m: &Machine, fake: &FakeBuild, change: fn(&mut assert_cmd::Command)) -> String {
+    let clean = std::process::Command::new("cargo")
+        .args(["clean", "-q"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&m.repo)
+        .status()
+        .unwrap();
+    assert!(clean.success());
+    let mut cmd = m.hushrun(fake);
+    change(&mut cmd);
+    let output = cmd
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    stderr
+}
+
+/// B-34: a run that isn't sharing by a decision compiles what B only downloaded, once, and
+/// reuses it from then on; what A built itself is reused all along.
+fn a_decision_reuses_no_download(
+    a: &Machine,
+    b: &Machine,
+    fake: &FakeBuild,
+    change: fn(&mut assert_cmd::Command),
+) {
+    let said = rebuilt(b, fake, change);
+    assert!(said.contains("2 crates built, none reused"), "{said}");
+    let said = rebuilt(b, fake, change);
+    assert!(said.contains("2 of 2 crates reused"), "{said}");
+    let said = rebuilt(a, fake, change);
+    assert!(said.contains("2 of 2 crates reused"), "{said}");
+}
+
+// covers: B-34
+#[test]
+fn once_the_org_stops_sharing_a_downloaded_block_is_compiled_once_and_one_built_here_is_reused() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = built_and_downloaded(dir.path(), &fake);
+    fake.set_sharing(false);
+    a_decision_reuses_no_download(&a, &b, &fake, |_| {});
+}
+
+// covers: B-34
+#[test]
+fn with_share_off_here_a_downloaded_block_is_compiled_once_and_one_built_here_is_reused() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = built_and_downloaded(dir.path(), &fake);
+    a_decision_reuses_no_download(&a, &b, &fake, |cmd| {
+        cmd.env("HUSHRUN_BUILD_SHARE", "off");
+    });
+}
+
+// covers: B-34
+#[test]
+fn signed_out_a_downloaded_block_is_compiled_once_and_one_built_here_is_reused() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = built_and_downloaded(dir.path(), &fake);
+    a_decision_reuses_no_download(&a, &b, &fake, |cmd| {
+        cmd.env_remove("HUSHRUN_TOKEN");
+    });
+}
+
+// covers: B-34
+#[test]
+fn with_the_network_cut_and_sharing_on_a_downloaded_block_of_any_age_is_reused() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = built_and_downloaded(dir.path(), &fake);
+    assert!(age_vouches(&b.root.join("cache/build")) > 0);
+    fake.set_unreachable(true);
+    for m in [&b, &a] {
+        let said = rebuilt(m, &fake, |_| {});
+        assert!(said.contains("2 of 2 crates reused"), "{said}");
+    }
+    // Still only downloaded: the network back, the server is asked about them again.
+    fake.set_unreachable(false);
+    let seen = fake.seen().len();
+    let said = rebuilt(&b, &fake, |_| {});
+    assert!(said.contains("2 of 2 crates reused"), "{said}");
+    assert_eq!(lookups_since(&fake, seen), vec![(false, 2)], "{said}");
+}
+
 /// The workspace, with a `hushrun.yaml` of two scopes, one for each library.
 fn scoped_workspace(root: &Path) -> PathBuf {
     let repo = workspace(root);

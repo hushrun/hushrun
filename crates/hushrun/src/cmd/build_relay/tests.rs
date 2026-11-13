@@ -1400,6 +1400,54 @@ fn three_failures_rest_the_relay_and_a_refusal_stops_it_for_the_run() {
 
 // covers: B-34
 #[test]
+fn a_relay_says_sharing_stopped_only_when_a_decision_stopped_it() {
+    // Sharing: yes, from `open` on its way too.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    assert_eq!(ask(&relay, Request::Sharing), Answer::Ok);
+    until("open", || answering(&relay));
+    assert_eq!(ask(&relay, Request::Sharing), Answer::Ok);
+    relay.end_check(&[]);
+    // `open` says the org doesn't share: a decision.
+    let off = FakeBuild::start();
+    off.set_sharing(false);
+    let m = machine();
+    let relay = start(&off, &m, |_| {});
+    begin(&relay, &m);
+    until("stopped", || {
+        matches!(relay.state().phase, super::Phase::Stopped(_))
+    });
+    assert_eq!(ask(&relay, Request::Sharing), Answer::None);
+    relay.end_check(&[]);
+    // The caller is refused: a decision.
+    let refusing = FakeBuild::start();
+    refusing.fail(route::OPEN, 403, 2);
+    let m = machine();
+    let relay = start(&refusing, &m, |_| {});
+    begin(&relay, &m);
+    until("stopped", || {
+        matches!(relay.state().phase, super::Phase::Stopped(_))
+    });
+    assert_eq!(ask(&relay, Request::Sharing), Answer::None);
+    relay.end_check(&[]);
+    // A server that can't be reached is none.
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.access.base = "http://127.0.0.1:9/o/acme".into();
+        c.tuning.open = Duration::from_millis(300);
+    });
+    begin(&relay, &m);
+    until("stopped", || {
+        matches!(relay.state().phase, super::Phase::Stopped(_))
+    });
+    assert_eq!(ask(&relay, Request::Sharing), Answer::Ok);
+    relay.end_check(&[]);
+}
+
+// covers: B-34
+#[test]
 fn a_withdrawn_block_is_not_vouched_for_and_an_unreachable_server_is_offline() {
     let fake = FakeBuild::start();
     let crates = served(&fake, 1, 10_000, 1000);

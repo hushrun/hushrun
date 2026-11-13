@@ -1018,7 +1018,7 @@ impl Call<'_> {
         common: &mut Option<Result<Common, NotStored>>,
         found: &mut Option<Found>,
     ) -> Lookup {
-        let share = self.current.share.as_ref();
+        let share = self.current.share.relay();
         let local = store.hints(&cx.step);
         if local.is_empty() && share.is_none() {
             return Lookup::Missing;
@@ -1225,26 +1225,44 @@ impl Call<'_> {
     }
 
     /// Whether a block may be reused as far as who vouches for it goes (B-34), as
-    /// [`Origin::standing`] says. A block built here, or with no record, may. One only
-    /// downloaded never may once a server said it no longer serves it; it may when its entry for
-    /// this run's host, org and repository is under a day old; else the relay asks the server,
-    /// and "served" or "no server could be reached in this run" lets it. With no relay in the
-    /// run, nothing can be asked, as offline: it may.
+    /// [`Origin::standing`] and the run's [`Shared`](crate::session::Shared) say. A block built
+    /// here, or with no record, may. One only downloaded never may once a server said it no
+    /// longer serves it, and never in a run that isn't sharing by a decision. In a run whose
+    /// backend couldn't be reached, its entry of any age counts. With a relay: on an entry for
+    /// this run's host, org and repository under a day old it may unless the relay says sharing
+    /// stopped by a decision; else the relay asks the server, and "served" or "no server could
+    /// be reached in this run" lets it.
     fn vouched(&self, key: &Digest, step: &Digest, block: &Block, origin: Option<&Origin>) -> bool {
+        use crate::session::Shared;
         let Some(origin) = origin else {
             return true;
         };
-        let share = self.current.share.as_ref();
-        let run = share.map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
-        let share = match (origin.standing(run, epoch_ms(self.ports.now())), share) {
-            (Standing::Any | Standing::Fresh, _) | (Standing::Stale, None) => return true,
-            (Standing::Withdrawn, _) => return false,
-            (Standing::Stale, Some(share)) => share,
-        };
-        let asked = Request::Vouch {
-            key: *key,
-            step: *step,
-            outputs: outputs_of(block),
+        let run = self
+            .current
+            .share
+            .relay()
+            .map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
+        let standing = origin.standing(run, epoch_ms(self.ports.now()));
+        let (share, asked) = match (standing, &self.current.share) {
+            (Standing::Any, _) => return true,
+            (Standing::Withdrawn, _) | (_, Shared::Off) => return false,
+            (_, Shared::Unreached) => return true,
+            // Only an answer that says so stops a reuse: a relay that is gone is no decision.
+            (Standing::Fresh, Shared::Relay(share)) => {
+                return !matches!(
+                    self.ports
+                        .relay(&share.socket, &Request::Sharing, relay::WAIT),
+                    Some(Answer::None)
+                );
+            }
+            (Standing::Stale, Shared::Relay(share)) => (
+                share,
+                Request::Vouch {
+                    key: *key,
+                    step: *step,
+                    outputs: outputs_of(block),
+                },
+            ),
         };
         matches!(
             self.ports.relay(&share.socket, &asked, relay::WAIT),
@@ -1512,7 +1530,7 @@ impl Call<'_> {
                 until,
                 now,
             );
-            if let Some(share) = &self.current.share {
+            if let Some(share) = self.current.share.relay() {
                 let _ = self.ports.relay(
                     &share.socket,
                     &Request::Report {
@@ -1544,7 +1562,7 @@ impl Call<'_> {
         // B-29: the relay hears of a block this run built and stored, and decides whether it
         // goes up; in shared `observe` it compares it with the shared store's copy.
         if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
-            (&self.current.share, verdict.outcome, log.key)
+            (self.current.share.relay(), verdict.outcome, log.key)
         {
             let portable = log.portable.as_ref().is_some_and(|p| p.portable);
             let _ = self.ports.relay(
@@ -2351,7 +2369,7 @@ impl Call<'_> {
         let run = self
             .current
             .share
-            .as_ref()
+            .relay()
             .map(|share| share.run.clone())
             .or_else(|| {
                 self.current
@@ -2362,7 +2380,7 @@ impl Call<'_> {
             .unwrap_or_default();
         let origin = Origin::built_here(
             &run,
-            self.current.share.as_ref().map(|share| share.by.clone()),
+            self.current.share.relay().map(|share| share.by.clone()),
         );
         let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
             o.is_some_and(Origin::downloaded_only)
@@ -2451,7 +2469,7 @@ impl Call<'_> {
                 o.is_some_and(Origin::downloaded_only)
             };
             let replaced = store.replace(key, description, files, origin, now, only_downloaded);
-            if let Some(share) = &self.current.share {
+            if let Some(share) = self.current.share.relay() {
                 let _ = self.ports.relay(
                     &share.socket,
                     &Request::Report {
@@ -2531,7 +2549,7 @@ impl Call<'_> {
                         until,
                         now,
                     );
-                    if let Some(share) = &self.current.share {
+                    if let Some(share) = self.current.share.relay() {
                         let _ = self.ports.relay(
                             &share.socket,
                             &Request::Report {

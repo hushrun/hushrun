@@ -128,10 +128,9 @@ pub struct Current {
     pub audit: Audit,
     /// The session's folder.
     pub folder: PathBuf,
-    /// The relay of this run, when it shares through a backend (B-26): where its socket is and
-    /// who the run is. `None`: no relay, and nothing goes to or comes from a shared store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share: Option<Share>,
+    /// How the run stands with its backend's shared store (B-26, B-34).
+    #[serde(default)]
+    pub share: Shared,
     /// The person's share setting for this command (B-33): it lowers the org's shared mode on
     /// this machine and never raises it.
     #[serde(default = "share_on")]
@@ -140,6 +139,35 @@ pub struct Current {
 
 fn share_on() -> Mode {
     Mode::On
+}
+
+/// How a run stands with its backend's shared store (B-26, B-34): the one state every wrapper of
+/// the run reads to know whether there is a relay to ask, and whether a block that was only
+/// downloaded may be reused.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shared {
+    /// The run shares nothing, by a decision: the org doesn't share, the person turned sharing
+    /// off on this machine, nobody is signed in, or the command is one that never shares.
+    /// Nothing goes to or comes from a shared store, and a block that was only downloaded is
+    /// not reused (B-34).
+    #[default]
+    Off,
+    /// The run would share, and its backend was asked in this run and couldn't be reached: no
+    /// relay, and a downloaded block's entry of any age counts (B-34).
+    Unreached,
+    /// The run's relay: where its socket is and who the run is.
+    Relay(Share),
+}
+
+impl Shared {
+    /// The run's relay, when it has one.
+    pub fn relay(&self) -> Option<&Share> {
+        match self {
+            Shared::Relay(share) => Some(share),
+            Shared::Off | Shared::Unreached => None,
+        }
+    }
 }
 
 /// What a wrapper needs of its run's relay (B-26, B-32).
@@ -635,7 +663,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
                 .and_then(OsStr::to_str),
         ),
         folder,
-        share: None,
+        share: Shared::Off,
         share_setting: settings.share,
     };
     write_current(&current)
@@ -675,7 +703,18 @@ impl Session {
     /// Names the run's relay in `session.json` (B-26), before COMMAND starts, so every wrapper
     /// of the run finds it. The file is rewritten whole.
     pub fn set_share(&mut self, share: Share) -> std::io::Result<()> {
-        self.current.share = Some(share);
+        self.current.share = Shared::Relay(share);
+        write_current(&self.current)
+    }
+
+    /// Records in `session.json`, before COMMAND starts, that the run would share and its
+    /// backend couldn't be reached (B-34). A run with a relay keeps it: the relay is what knows
+    /// whether its server can be reached.
+    pub fn set_unreached(&mut self) -> std::io::Result<()> {
+        if self.current.share != Shared::Off {
+            return Ok(());
+        }
+        self.current.share = Shared::Unreached;
         write_current(&self.current)
     }
 
@@ -748,7 +787,7 @@ impl Session {
             summary.lines.push(AUDIT_OFF.to_string());
         }
         // B-24: with a shared store, what the search for unkeyed values held back, by name.
-        if current.share.is_some() && summary.counts.unkeyed > 0 {
+        if current.share.relay().is_some() && summary.counts.unkeyed > 0 {
             let n = summary.counts.unkeyed;
             summary.lines.push(format!(
                 "build: {} {} on this machine: {} the value of {}, which no key holds (a project names such a variable under build: env:)",

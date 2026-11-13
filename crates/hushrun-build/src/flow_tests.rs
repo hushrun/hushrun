@@ -653,6 +653,11 @@ impl World {
             .unwrap();
     }
 
+    /// The run would share, and its backend couldn't be reached (B-34).
+    fn unreached(&mut self) {
+        self.session.set_unreached().unwrap();
+    }
+
     fn store(&self) -> Store {
         Store::new(&self.session.current().store)
     }
@@ -4758,6 +4763,16 @@ fn download(from: &Store, to: &Store, key: &Digest, date_ms: u64) -> bool {
     .is_ok()
 }
 
+/// Gives `to` the hints compiles in `from` wrote, as its own: what a machine that once compiled
+/// those crates itself holds, and what a run with no relay finds a downloaded block by.
+fn hint_as_own(from: &Store, to: &Store) {
+    for step in from.steps() {
+        for hint in from.hints(&step) {
+            to.add_hint(&step, &hint, SystemTime::now()).unwrap();
+        }
+    }
+}
+
 /// A relay that serves what `from` holds, publishing into `to`, and answers `vouch` to a
 /// vouch request.
 fn serving(from: Store, to: Store, vouched: Option<Answer>) -> Rc<RefCell<RelayStandIn>> {
@@ -4818,7 +4833,8 @@ fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in
         relay.borrow().asked[..],
         [Request::Hints { .. }, Request::Fetch { .. }]
     ));
-    // A second reuse is audited as any block is, and asks the relay nothing: the entry is fresh.
+    // A second reuse is audited as any block is, and asks no server: the entry is fresh, and
+    // the relay is asked only whether the run still shares.
     fs::remove_file(w.rlib(&ws, "a")).unwrap();
     let stand_in = relay.clone();
     let r = w.call_with(&ws, "a", &[], move |fake| {
@@ -4828,7 +4844,18 @@ fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in
     assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
     assert!(!r.entry.unwrap().downloaded);
     assert_eq!(r.seen.first_audits, 0);
-    assert_eq!(relay.borrow().asked.len(), 2);
+    assert!(
+        matches!(
+            relay.borrow().asked[..],
+            [
+                Request::Hints { .. },
+                Request::Fetch { .. },
+                Request::Sharing
+            ]
+        ),
+        "{:?}",
+        relay.borrow().asked
+    );
 }
 
 // covers: B-34
@@ -4885,6 +4912,102 @@ fn a_downloaded_block_is_reused_without_asking_for_a_day_then_only_while_a_serve
     // A block built here is never asked about.
     let (r, asked) = run(Some(Answer::None));
     assert_eq!((r.outcome(), asked), (REUSED, false));
+}
+
+// covers: B-34
+#[test]
+fn a_run_that_is_not_sharing_reuses_no_block_it_only_downloaded_and_builds_it_once() {
+    let (other, key) = built_elsewhere();
+    // No relay, by a decision (the org doesn't share, `share off`, signed out): a download of
+    // any age, fetched a moment ago too, is a miss. rustc runs, and its block takes the place.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.built.is_some() && origin.vouched.is_empty());
+    // From then on it is built here, and reused as any block is.
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+}
+
+// covers: B-34
+#[test]
+fn a_run_whose_backend_couldnt_be_reached_reuses_a_download_of_any_age() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.unreached();
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(
+        &other.store(),
+        &w.store(),
+        &key,
+        now_ms() - 3 * DAY_MS
+    ));
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(w.store().origin(&key).unwrap().downloaded_only());
+    // A "no" a server said once still holds.
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.renew(Vouch {
+                word: crate::origin::Word::Withdrawn,
+                ..vouch(now_ms())
+            });
+            Some(o)
+        })
+        .unwrap();
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+}
+
+// covers: B-34
+#[test]
+fn a_fresh_download_is_not_reused_once_the_runs_relay_says_sharing_stopped_by_a_decision() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let run = |sharing: Option<Answer>| {
+        let relay = relay_answering(move |request| match request {
+            Request::Sharing => sharing.clone(),
+            _ => Some(Answer::Ok),
+        });
+        let stand_in = relay.clone();
+        let _ = fs::remove_file(w.rlib(&ws, "a"));
+        let r = w.call_with(&ws, "a", &[], move |fake| {
+            from_a_registry(fake);
+            fake.relay = Some(stand_in);
+        });
+        let asked = relay.borrow().asked.clone();
+        (r, asked)
+    };
+    // Sharing, opening, or a server that can't be reached: reused, and no server is asked.
+    let (r, asked) = run(Some(Answer::Ok));
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(
+        !asked.iter().any(|r| matches!(r, Request::Vouch { .. })),
+        "{asked:?}"
+    );
+    // A relay that doesn't answer is no decision.
+    let (r, _) = run(None);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    // `open` said the org doesn't share, or refused the caller: a miss, and the compile's block
+    // takes the download's place.
+    let (r, _) = run(Some(Answer::None));
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(w.store().origin(&key).unwrap().built.is_some());
 }
 
 // covers: B-34

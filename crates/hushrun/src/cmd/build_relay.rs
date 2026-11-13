@@ -721,6 +721,7 @@ impl Relay {
                 self.fetch(step, keys, class, local_ms).await
             }
             Request::Vouch { key, outputs, .. } => self.vouch(key, outputs).await,
+            Request::Sharing => self.still_sharing(),
             Request::Built { .. } => {
                 self.built(request);
                 Answer::Ok
@@ -1573,6 +1574,21 @@ impl Relay {
     }
 
     // --- vouching ------------------------------------------------------------------------
+
+    /// B-34: whether a block that was only downloaded may be reused on a fresh entry: not once
+    /// sharing stopped for this run by a decision, `open`'s "the org doesn't share" (or what
+    /// the run does saying off) or a refusal of the caller. While `open` is under way, while the
+    /// relay answers or rests, and when the server couldn't be reached, it may. Answered from
+    /// the phase alone, without the network.
+    fn still_sharing(&self) -> Answer {
+        match self.state().phase_now(Instant::now()) {
+            Phase::Stopped(Stop::Off(_) | Stop::Refused(_)) => Answer::None,
+            Phase::Opening
+            | Phase::Answering
+            | Phase::Resting(_)
+            | Phase::Stopped(Stop::Offline(_)) => Answer::Ok,
+        }
+    }
 
     /// B-34: whether a server the run belongs to still serves the downloaded block `key` with
     /// `outputs`, for a wrapper whose entry is stale, answered within the block's budget, half

@@ -194,6 +194,14 @@ offline.
 
 ### Fixed
 
+- Build blocks: **a run that is not sharing reuses no block it only downloaded.** After an admin
+  turned an org's sharing off or deleted its blocks, after `hushrun build share off`, and signed
+  out, a machine went on reusing the blocks it had downloaded for as long as it used them: a run
+  with no relay was taken for one that is offline. Now only a run that would share and whose
+  backend couldn't be reached counts a download whatever its age. Where sharing is off by a
+  decision (the org's, the person's, nobody signed in, `open` saying no, a refused caller, or
+  `hushrun run CHECK…`), the crate is compiled, once, and that block is built here from then on.
+  A block built here is reused as before.
 - Build blocks: a program, proc macro or build script whose `-l` library is found in a folder
   the C driver or `ld` adds (the system's library folders, `LIBRARY_PATH`'s, on macOS the SDK's)
   no longer reuses one linked against another file there. Such a library was "covered by the SDK
