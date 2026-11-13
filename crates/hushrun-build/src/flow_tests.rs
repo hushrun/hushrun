@@ -543,6 +543,30 @@ impl Ports for Fake {
         relay.asked.push(request.clone());
         (relay.answer)(request)
     }
+
+    /// A C driver that says its `ld` is `FAKE_LD` (a path, or a name looked up as `collect2`
+    /// does), or else itself.
+    fn asker(&self) -> Box<crate::link::Ask<'static>> {
+        let ld = self.vars.get("FAKE_LD").cloned();
+
+        Box::new(move |program: &Path, args: &[String], _path: &OsStr| {
+            let last = args.last().map(String::as_str).unwrap_or_default();
+            if last.starts_with("-print-prog-name=") {
+                let said = ld.clone().unwrap_or_else(|| program.display().to_string());
+                return Some(crate::link::Answer {
+                    success: true,
+                    stdout: format!("{said}\n"),
+                });
+            }
+            if last == "-print-search-dirs" {
+                return Some(crate::link::Answer {
+                    success: true,
+                    stdout: "install: /x/\nprograms: =\n".into(),
+                });
+            }
+            Some(crate::link::Answer::default())
+        })
+    }
 }
 
 /// A store, a session, a fake toolchain and checkouts.
@@ -1808,6 +1832,124 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     assert_eq!(run(&linker), STORED, "the linker -fuse-ld names changed");
 }
 
+/// Links crate `a` of `ws` as a proc macro whose link line is `line` (`{ws}` stands for the
+/// checkout), with `vars` added to the call's variables and `more` arguments.
+fn link_proc_macro(
+    w: &World,
+    ws: &Path,
+    line: &str,
+    vars: &[(&str, &str)],
+    more: &[&str],
+) -> Outcome {
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(ws, "a", more);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    w.call_args(ws, "a", args, |fake| {
+        for (name, value) in vars {
+            fake.vars.insert((*name).to_string(), (*value).to_string());
+        }
+    })
+    .outcome()
+}
+
+/// Makes `path` an executable file holding `text`.
+#[cfg(unix)]
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _ = fs::remove_file(path);
+    fs::write(path, text).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: B-18
+#[cfg(unix)]
+#[test]
+fn another_ld_earlier_on_path_is_another_link() {
+    // A gcc driver says only `ld`: `collect2` takes the first on `PATH`. The driver, the line
+    // and every file rustc names stay the same.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    let early = w.dir.path().join("early");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&early).unwrap();
+    executable(&bin.join("ld"), "ld one");
+    let path = std::env::join_paths([&early, &bin]).unwrap();
+    let path = path.to_str().unwrap();
+    let vars = [("PATH", path), ("FAKE_LD", "ld")];
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let link = || link_proc_macro(&w, &ws, line, &vars, &[]);
+    assert_eq!(link(), STORED);
+    assert_eq!(link(), REUSED);
+    executable(&early.join("ld"), "ld two");
+    assert_eq!(link(), STORED, "another ld runs now");
+    assert_eq!(link(), REUSED);
+    // The same `ld` put back by a package that keeps its size and date: another file.
+    let meta = fs::metadata(early.join("ld")).unwrap();
+    executable(&early.join("ld"), "ld 3x");
+    let file = fs::File::options()
+        .write(true)
+        .open(early.join("ld"))
+        .unwrap();
+    file.set_modified(meta.modified().unwrap()).unwrap();
+    drop(file);
+    assert_eq!(link(), STORED, "the ld was replaced in place");
+    // The driver can't say which `ld` it runs, or it is found nowhere: nothing is stored.
+    let nowhere = [("PATH", "/nonexistent"), ("FAKE_LD", "ld")];
+    assert_eq!(
+        link_proc_macro(&w, &ws, line, &nowhere, &[]),
+        not_stored(NotStored::LinkInputs)
+    );
+}
+
+// covers: B-18
+#[cfg(unix)]
+#[test]
+fn a_specs_or_configuration_file_is_built_and_not_stored_and_ld_path_is_the_linker() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/my.specs"), b"*link: -fuse-ld=lld").unwrap();
+    for option in [
+        r#""-specs={ws}/tools/my.specs""#,
+        r#""--specs={ws}/tools/my.specs""#,
+        r#""--specs" "{ws}/tools/my.specs""#,
+        r#""--config" "{ws}/tools/my.cfg""#,
+        r#""--config={ws}/tools/my.cfg""#,
+    ] {
+        let line = format!(
+            r#""{{ws}}/tools/cc" "{{ws}}/target/debug/deps/x.o" {option} "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#
+        );
+        assert_eq!(
+            link_proc_macro(&w, &ws, &line, &[], &[]),
+            not_stored(NotStored::LinkInputs),
+            "{option}"
+        );
+    }
+    // clang's `--ld-path=` names the linker, whatever `-fuse-ld` says.
+    fs::write(ws.join("tools/ld.mine"), b"one").unwrap();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-fuse-ld=lld" "--ld-path={ws}/tools/ld.mine" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), STORED);
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), REUSED);
+    fs::write(ws.join("tools/ld.mine"), b"two").unwrap();
+    assert_eq!(
+        link_proc_macro(&w, &ws, line, &[], &[]),
+        STORED,
+        "the linker --ld-path names changed"
+    );
+}
+
 // covers: B-4
 #[test]
 fn a_target_that_is_not_one_of_the_compilers_own_passes_through() {
@@ -2595,6 +2737,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             run_memo: None,
             store: None,
             seal: None,
+            ask: None,
         };
         let common = cx.common().unwrap();
         hints

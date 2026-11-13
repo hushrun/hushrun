@@ -521,3 +521,66 @@ fn a_variable_apples_linker_reads_by_itself_changes_a_linked_outputs_key() {
         assert_eq!(again, plain, "{name}");
     }
 }
+
+/// A proc macro `m` linked in `ws` through the wrapper with `env`: the log entry.
+fn proc_macro_with(w: &World, ws: &Path, env: &[(&str, &str)]) -> Entry {
+    write(
+        &ws.join("m/lib.rs"),
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n",
+    );
+    let (out, entry) = w.call_as(
+        ws,
+        "m",
+        "m/lib.rs",
+        "proc-macro",
+        &["--extern", "proc_macro"],
+        env,
+    );
+    ok(&out);
+    entry
+}
+
+/// The first `name` on `PATH`.
+fn on_path(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no {name} on PATH"))
+}
+
+// covers: B-18
+#[test]
+fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path() {
+    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc's own folders have none: an
+    // `ld` put earlier on `PATH` (here a script that runs the real one) is another linker, with
+    // the same driver, line and files. Apple's driver runs the selected Xcode's `ld` whatever
+    // `PATH` says, so there the block is still reused.
+    let w = world();
+    let ws = w.checkout("ws");
+    let early = w.dir.path().join("early");
+    fs::create_dir_all(&early).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(early.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let path = path.to_str().unwrap();
+    let first = proc_macro_with(&w, &ws, &[("PATH", path)]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let again = proc_macro_with(&w, &ws, &[("PATH", path)]);
+    assert!(reused(&again), "{again:?}");
+    let real = on_path("ld");
+    write(
+        &early.join("ld"),
+        &format!("#!/bin/sh\nexec {} \"$@\"\n", real.display()),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(early.join("ld"), fs::Permissions::from_mode(0o755)).unwrap();
+    let after = proc_macro_with(&w, &ws, &[("PATH", path)]);
+    if cfg!(target_os = "macos") {
+        assert!(reused(&after), "{after:?}");
+    } else {
+        assert!(!after.found, "the ld on PATH changed: {after:?}");
+        assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+    }
+}

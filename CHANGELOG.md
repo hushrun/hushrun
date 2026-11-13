@@ -194,6 +194,15 @@ offline.
 
 ### Fixed
 
+- Build blocks: a program, proc macro or build script no longer reuses one linked by another
+  `ld`. The key named the C driver (`cc`) by its size and date, not the `ld` it runs, which
+  `collect2` takes from `PATH`: another `ld` earlier on `PATH` linked other bytes under the same
+  key. Now the driver is asked which `ld` it runs (`-print-prog-name`, then `collect2`'s search),
+  at every link and before every lookup, and that file is keyed by where it lies, size, dates and
+  inode; on macOS it is the selected Xcode's `ld`. clang's `--ld-path=` is taken as the linker,
+  and a link given a specs or configuration file (`-specs=`, `--config`) builds without storing.
+  About 12 ms more per link and per lookup on macOS, where the driver answers slowly, and
+  about 1 ms on Linux with gcc.
 - Build blocks: a program, proc macro or build script linked with a variable the linker reads
   from its own environment set no longer reuses one linked without it. Apple's `ld` reads
   `RC_UUID_SALT` (every output's UUID) and `LD_APPLICATION_EXTENSION_SAFE` and `LD_NO_ENCRYPT`

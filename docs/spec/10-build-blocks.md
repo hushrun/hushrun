@@ -245,8 +245,8 @@ metadata can't be found, and a tied proc macro,
   looked at;
 - `link`: for a linked output, every library the linker was handed, by SHA-256; every place the
   linker may take a library named with `-l` from in its `-L` and `-F` folders, and every file an
-  option names for it (a linker script, a symbol list), by SHA-256 or as absent; the linker and
-  the SDK (B-18);
+  option names for it (a linker script, a symbol list), by SHA-256 or as absent; the C driver,
+  the `ld` it runs and the SDK (B-18);
 - `place`: `anywhere`, or the roots themselves (B-10).
 
 **B-7 Hints.** To compute the second key before compiling, the wrapper needs the list of what to
@@ -461,20 +461,56 @@ with no `RUSTUP_TOOLCHAIN` is passed through.
 
 **B-18 Programs.** A program's inputs include every library the linker was handed, which rustc
 reports with `--print=link-args`; the libraries named with `-l` and the files options name, as
-B-6's `link` says; the linker, and the linker `-fuse-ld` names (found as `ld.<name>` or `<name>`
-in the `-B` folders, then on `PATH`), each by where it lies (B-8) and, under a root, its SHA-256,
-else its size and modification time; and the SDK, by where it lies and the date of its settings
-file. A linker or SDK outside every root ties the block. Where that list can't be read, where a file it names is gone or can't be found, or where a
-linker script names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`, `STARTUP`), the
-outcome is `built, not stored`. Every other argument of the link line that is the path of an
-existing regular file (an object a `link-arg` names, `-bundle_loader`'s, `-dylib_file`'s), and is
-not an output of the compile, is an input by SHA-256. A `-B` folder outside the compiler's
-sysroot is `built, not stored`. Files in rustc's own temporary folder, and the search folder
-rustc makes in it (`-L <output folder>/rustcXXXXXX/raw-dylibs` on Linux), are not inputs: what
-they hold comes from the compile, and their name is new at each compile. What rustc
-prints on stdout goes on to the wrapper's stdout, but the linker command. The `dsymutil` rustc
-runs for a debug bundle (B-9), the first on `PATH`, is an input like the linker. A program is
-stored with its debug bundle: every file under `<program>.dSYM`, named by its path from the
+B-6's `link` says; the C driver (`cc`, `-C linker`), found as rustc runs it, on the link
+command's `PATH`, by where it lies (B-8) and, under a root, its SHA-256, else its size and
+modification time; the `ld` that driver runs, the same way and, outside the roots, also its
+change time and inode, so that a file put in its place with the same size and date (a package
+that keeps dates, a link retargeted by `update-alternatives`) is another `ld`; and the SDK, by
+where it lies and the date of its settings file. A driver, `ld` or SDK outside every root ties
+the block.
+
+*Which `ld` runs* is asked of the driver at every link, and again before every lookup: never
+remembered, never taken from a hint. When rustc runs `rust-lld` itself (`-flavor` first, as for
+WebAssembly and many embedded targets) that program is the `ld`, asked nothing, and searches no
+folder of its own. clang's `--ld-path=`, or a `-fuse-ld=` that holds a `/`, is it.
+Otherwise the driver is asked `-print-prog-name=ld`, or `-print-prog-name=ld.<name>` for the
+line's `-fuse-ld=<name>` (gcc asked `-fuse-ld=lld -print-prog-name=ld` still says `ld`), with
+the line's options that change its answers (`-B`, `-fuse-ld=`, `--ld-path=`, `--sysroot`, the
+target, `-m*`, the GCC installation clang takes, the kind of output), the link command's `PATH`
+and `LC_ALL=C`. A path in the answer is the `ld`: clang searches `PATH` itself, and Apple's driver
+names the selected Xcode's `ld`, so the key follows `xcode-select` and `DEVELOPER_DIR` and not
+`PATH`. A bare name is looked up as gcc's `collect2` does: `real-ld`, `collect-ld`, then the name,
+each in the `-B` folders and the driver's program folders (`-print-search-dirs`, `programs:`),
+then the name on the link command's `PATH`. That `PATH` is rustc's own entries (the toolchain's
+`bin`) and then the one rustc inherited, which a lookup takes from its own variables; the hint
+keeps the question (the driver's name when rustc gave a bare one, which the lookup finds again
+on that `PATH`, rustc's entries and the options, roots replaced), never the answer, and a hint
+without it is not followed. A driver that can't be asked or whose answer can't be read (a
+`-C linker` that is another linker run directly, as `ld.lld` or `mold`), and an `ld` found
+nowhere, are `built, not stored`. A link given a gcc specs file (`-specs=`, `--specs=`,
+`--specs`) or a clang configuration file (`--config`, and the folders one is looked for in) is
+`built, not stored`: either can change which `ld` runs and what it is handed.
+
+Cost, measured per link on rustc 1.94 (median of 15 links of a proc macro and of a program,
+against the same without the question): on macOS (Xcode 27.2 through `/usr/bin/cc`) about 12 ms
+more at the link and 12 ms more at the lookup, nearly all of it the one question, which the shim
+answers slowly; on Linux with gcc 14 two questions of about 0.6 ms each; a clang driver answers
+in about 15 ms a question. *Rests on:* a driver running the `ld` it names for
+`-print-prog-name` or, for a bare name, the one `collect2`'s search finds (gcc 14, clang 19 and
+Apple's driver checked). *Breaks if:* a driver ran another `ld` than it names (a wrapper script
+that ignores `-print-prog-name`, which then answers for itself as the `ld`).
+
+Where that list can't be read, where a file it names is gone or can't be found, or where a
+linker script an option names names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`,
+`STARTUP`), the outcome is `built, not stored`. Every other argument of the link line that is
+the path of an existing regular file (an object a `link-arg` names, `-bundle_loader`'s,
+`-dylib_file`'s), and is not an output of the compile, is an input by SHA-256. A `-B` folder
+outside the compiler's sysroot is `built, not stored`. Files in rustc's own temporary folder, and
+the search folder rustc makes in it (`-L <output folder>/rustcXXXXXX/raw-dylibs` on Linux), are
+not inputs: what they hold comes from the compile, and their name is new at each compile. What
+rustc prints on stdout goes on to the wrapper's stdout, but the linker command. The `dsymutil`
+rustc runs for a debug bundle (B-9), the first on `PATH`, is an input like the driver. A program
+is stored with its debug bundle: every file under `<program>.dSYM`, named by its path from the
 output folder; a bundle with no DWARF file, or that holds anything but folders and regular
 files, is `built, not stored`. A program the wrapper leaves as it is (B-9) is stored with the
 debug objects it names.

@@ -235,6 +235,28 @@ pub struct Link {
     pub sdk_path: Option<Located>,
     /// Where the `dsymutil` the compile runs is. Kept for the hint; the key holds only `linker`.
     pub dsymutil_path: Option<Located>,
+    /// How to ask again which `ld` the link runs. Kept for the hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<LinkQuery>,
+}
+
+/// What a hint keeps to ask again, before a lookup, which `ld` a link runs (B-7, B-18): never
+/// the answer, which follows the files as they are then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkQuery {
+    /// The C driver as rustc named it, when that is a bare name: found again on the link's
+    /// `PATH`. `None` when it is a path, the hint's `linker`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// The entries the link command's `PATH` has before the one rustc inherited (the
+    /// toolchain's own `bin`), roots replaced (B-8).
+    pub path_before: Vec<String>,
+    /// Whether the link command's `PATH` ends with the inherited one, which the lookup takes
+    /// from its own variables; when it doesn't, `path_before` is all of it.
+    pub path_inherits: bool,
+    /// The driver's options the questions pass on ([`crate::link::LinkArgs::driver_flags`]),
+    /// roots replaced.
+    pub flags: Vec<String>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -254,6 +276,9 @@ pub struct LinkList {
     /// Where the `dsymutil` a program's compile runs is (B-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsymutil: Option<Located>,
+    /// How to ask again which `ld` runs; a hint without it is not followed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<LinkQuery>,
 }
 
 /// Where a block may be reused (B-10).
@@ -690,6 +715,7 @@ impl ReadList {
                 ld: l.ld_path.clone(),
                 sdk: l.sdk_path.clone(),
                 dsymutil: l.dsymutil_path.clone(),
+                query: l.query.clone(),
             }),
             place: match observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
@@ -989,6 +1015,7 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    query: None,
                 })
             }),
             ("a file the linker reads", |o| {
@@ -1004,6 +1031,7 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    query: None,
                 })
             }),
             ("place", |o| {
@@ -1034,6 +1062,7 @@ mod tests {
                 ld_path: None,
                 sdk_path: None,
                 dsymutil_path: None,
+                query: None,
             });
             o.key().unwrap()
         };
@@ -1105,6 +1134,7 @@ mod tests {
             ld_path: None,
             sdk_path: None,
             dsymutil_path: None,
+            query: None,
         });
         o
     }
@@ -1303,6 +1333,7 @@ mod tests {
             ld_path: Some(Located::Shared("/usr/bin/ld.lld".into())),
             sdk_path: Some(Located::Outside("/sdk".into())),
             dsymutil_path: None,
+            query: None,
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);
@@ -1329,6 +1360,7 @@ mod tests {
                 ld: Some(Located::Shared("/usr/bin/ld.lld".into())),
                 sdk: Some(Located::Outside("/sdk".into())),
                 dsymutil: None,
+                query: None,
             })
         );
         assert_eq!(hint.place, PlaceKind::Tied);

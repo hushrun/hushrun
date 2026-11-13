@@ -117,6 +117,27 @@ pub trait Ports {
     ) -> Option<relay::Answer> {
         relay::ask(socket, request, wait)
     }
+    /// What asks the C driver which `ld` a link runs (B-18): runs it with the wrapper's
+    /// variables, the link's `PATH` and `LC_ALL=C`. Tests stand in for the driver.
+    fn asker(&self) -> Box<link::Ask<'static>> {
+        Box::new(ask_program)
+    }
+}
+
+/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path` and
+/// `LC_ALL=C`, and nothing on stdin, for one of B-18's questions. `None` when it can't start.
+fn ask_program(program: &Path, args: &[String], path: &OsStr) -> Option<link::Answer> {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .env("PATH", path)
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some(link::Answer {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+    })
 }
 
 /// One compiler call. The process's own arguments are `[<this name>, <rustc>, <args>…]`, as
@@ -178,7 +199,9 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         ports.file_clock(&Path::new(invocation.cwd()).join(invocation.out_dir())),
         start,
     );
+    let asker = ports.asker();
     Call {
+        asker: &*asker,
         ports,
         err,
         current: &current,
@@ -256,6 +279,9 @@ fn epoch_ms(time: SystemTime) -> u64 {
 
 /// One call the wrapper handles, after the probes and the session.
 struct Call<'a> {
+    /// Asks the C driver (B-18), apart from `ports` so that a lookup's context can hold it
+    /// while the call runs rustc.
+    asker: &'a link::Ask<'a>,
     ports: &'a mut dyn Ports,
     err: &'a mut dyn Write,
     current: &'a Current,
@@ -908,6 +934,7 @@ impl Call<'_> {
             run_memo: Some(&self.current.folder),
             store: Some(&store),
             seal: store.seal(),
+            ask: Some(self.asker),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -1951,20 +1978,35 @@ impl Call<'_> {
                 return Err(NotStored::LinkInputs);
             }
         }
-        let path_var = args
-            .set_var("PATH")
-            .map(OsString::from)
-            .or_else(|| self.env.get("PATH").map(OsStr::to_os_string));
+        // A specs or configuration file can change which `ld` runs and what it is handed.
+        if args.driver_reads_options() {
+            return Err(NotStored::LinkInputs);
+        }
+        let inherited = self.env.get("PATH");
+        let (path_before, path_inherits) = link::path_parts(args.set_var("PATH"), inherited);
+        let path_var = link::link_path(&path_before, path_inherits, inherited);
         let linker =
             link::linker(&args.linker, path_var.as_deref(), &cwd).ok_or(NotStored::LinkInputs)?;
-        // The linker the driver runs instead of its own (B-18).
-        let ld = match &inputs.fuse_ld {
-            None => None,
-            Some(name) => Some(
-                link::fuse_linker(name, &inputs.prefixes, path_var.as_deref(), &cwd)
-                    .ok_or(NotStored::LinkInputs)?
-                    .path,
-            ),
+        // Which `ld` the driver runs, asked at every link (B-18).
+        let query = link::Query {
+            driver: linker.path.clone(),
+            flags: args.driver_flags(),
+            path: path_var.clone().unwrap_or_default(),
+            cwd: cwd.clone(),
+        };
+        let environment =
+            link::environment(&query, self.asker).map_err(|_| NotStored::LinkInputs)?;
+        let ld = Some(environment.ld.clone());
+        let placeholders = |text: &str| cx.roots.to_placeholders(text);
+        let kept = crate::key::LinkQuery {
+            program: (!args.linker.contains('/')).then(|| args.linker.clone()),
+            path_before: path_before
+                .iter()
+                .map(|entry| entry.to_str().map(placeholders))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(NotStored::LinkInputs)?,
+            path_inherits,
+            flags: query.flags.iter().map(|flag| placeholders(flag)).collect(),
         };
         let mut outside = false;
         let mut changed = false;
@@ -1984,8 +2026,8 @@ impl Call<'_> {
             stat.is_some_and(|stat| inputs::dated_after(stat, start))
                 || inputs::links_changed(&path, start, &mut links)
         };
-        // The linker, the one `-fuse-ld` names and the SDK, located like every other path, so a
-        // path under another checkout is never recorded as it is (B-8).
+        // The driver, the `ld` it runs and the SDK, located like every other path, so a path
+        // under another checkout is never recorded as it is (B-8).
         let linker_at = cx.located_path(&linker.path)?;
         let ld_at = match &ld {
             Some(path) => Some(cx.located_path(path)?),
@@ -2116,6 +2158,7 @@ impl Call<'_> {
             ld_path: ld_at,
             sdk_path: sdk_at,
             dsymutil_path: dsymutil_at,
+            query: Some(kept),
         };
         Ok(Linked {
             link,

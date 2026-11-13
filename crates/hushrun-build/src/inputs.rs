@@ -53,6 +53,9 @@ pub struct Context<'a> {
     /// The store's seal ([`Store::seal`]): only a record sealed with it answers for a file
     /// without a read; `None` hashes every file in an output folder.
     pub seal: Option<sidecar::Seal>,
+    /// Asks the C driver which `ld` a link runs (B-18), again before every lookup; `None`
+    /// follows no hint of a linked output.
+    pub ask: Option<&'a link::Ask<'a>>,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -854,11 +857,6 @@ impl Context<'_> {
                 state: self.state_now(at, watched)?,
             });
         }
-        let linker = self.open_at(&list.linker)?;
-        let ld = match &list.ld {
-            Some(at) => Some((at, self.open_at(at)?)),
-            None => None,
-        };
         let sdk = match &list.sdk {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
@@ -867,19 +865,50 @@ impl Context<'_> {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
         };
+        // Which driver and which `ld` run now: asked again, never taken from the hint (B-18).
+        let query = list.query.as_ref()?;
+        let ask = self.ask?;
+        let from = |text: &str| self.roots.from_placeholders(text).ok();
+        let before = query
+            .path_before
+            .iter()
+            .map(|entry| from(entry).map(PathBuf::from))
+            .collect::<Option<Vec<_>>>()?;
+        let path = link::link_path(&before, query.path_inherits, self.env.get("PATH"));
+        let cwd = PathBuf::from(self.invocation.cwd());
+        let (linker_at, linker) = match &query.program {
+            Some(name) => {
+                let found = link::linker(name, path.as_deref(), &cwd)?.path;
+                (self.located(&found).ok()?, found)
+            }
+            None => (list.linker.clone(), self.open_at(&list.linker)?),
+        };
+        let asked = link::Query {
+            driver: linker.clone(),
+            flags: query
+                .flags
+                .iter()
+                .map(|flag| from(flag))
+                .collect::<Option<Vec<_>>>()?,
+            path: path.unwrap_or_default(),
+            cwd,
+        };
+        let environment = link::environment(&asked, ask).ok()?;
+        let ld_at = self.located(&environment.ld).ok()?;
         Some(Link {
             libraries,
             files,
             linker: linkers_text(
-                (&list.linker, &linker),
-                ld.as_ref().map(|(at, p)| (*at, p.as_path())),
+                (&linker_at, &linker),
+                Some((&ld_at, &environment.ld)),
                 dsymutil.as_ref().map(|(at, p)| (*at, p.as_path())),
             )?,
             sdk: sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
-            linker_path: list.linker.clone(),
-            ld_path: list.ld.clone(),
+            linker_path: linker_at,
+            ld_path: Some(ld_at),
             sdk_path: list.sdk.clone(),
             dsymutil_path: list.dsymutil.clone(),
+            query: Some(query.clone()),
         })
     }
 
@@ -1139,9 +1168,22 @@ pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
     Some(format!("{place} {} {}", stat.size, stat.mtime_ns))
 }
 
+/// The identity of the `ld` a C driver runs (B-18): as [`linker_text`], and for one not under a
+/// root of the checkout also its change time and inode, so that a file put in its place with the
+/// same size and modification time (a package that keeps dates, a link retargeted to a copy) is
+/// another `ld`. `None` when it can't be read.
+pub fn ld_text(at: &Located, path: &Path) -> Option<String> {
+    let text = linker_text(at, path)?;
+    if matches!(at, Located::Rooted(rooted) if !rooted.root.is_base()) {
+        return Some(text);
+    }
+    let stat = Stat::of(&fs::metadata(path).ok()?);
+    Some(format!("{text} {} {}", stat.ctime_ns, stat.inode))
+}
+
 /// The identity of the linkers a link ran: the driver's ([`linker_text`]) and, on a line of
-/// its own, the one `-fuse-ld` named; then, on a line that says what it is, the `dsymutil` that
-/// wrote a program's debug bundle (B-9). `None` when one can't be read.
+/// its own, the `ld` it runs ([`ld_text`]); then, on a line that says what it is, the
+/// `dsymutil` that wrote a program's debug bundle (B-9). `None` when one can't be read.
 pub fn linkers_text(
     driver: (&Located, &Path),
     ld: Option<(&Located, &Path)>,
@@ -1150,7 +1192,7 @@ pub fn linkers_text(
     let mut text = linker_text(driver.0, driver.1)?;
     if let Some((at, path)) = ld {
         text.push('\n');
-        text.push_str(&linker_text(at, path)?);
+        text.push_str(&ld_text(at, path)?);
     }
     if let Some((at, path)) = dsymutil {
         text.push_str("\ndsymutil ");
