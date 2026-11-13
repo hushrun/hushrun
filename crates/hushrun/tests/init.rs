@@ -6469,6 +6469,67 @@ fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files(
     assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
 }
 
+// covers: C-15, C-35 (ADR 0081: where its config keeps Vitest from being observed, init says so in
+// one line instead of proposing a line that would add nothing)
+#[test]
+fn init_says_when_vitests_config_keeps_its_test_files_from_being_observed() {
+    let (_server, fake) = Fake::start(true);
+    // svgo's shape: Vitest 4, `typecheck.enabled`, the test script `vitest run`, pnpm.
+    let package = r#"{
+  "name": "shop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {"test": "vitest run"},
+  "devDependencies": {"vitest": "^4.1.10"}
+}
+"#;
+    let r = Repo::new(&[
+        ("package.json", package),
+        ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: github.com/acme/shop\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (
+            "vitest.config.js",
+            "import { defineConfig } from 'vitest/config';\nexport default defineConfig({\n  test: {\n    include: ['test/**/*.test.js'],\n    typecheck: { include: ['test/**/*.test-d.ts'], enabled: true },\n  },\n});\n",
+        ),
+    ]);
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("vitest.config.js: nothing to add: its config turns on typecheck, which runs the type checker outside Vitest's workers, and hushrun can't look at Vitest's test files there, so test (tests in hushrun.yaml) runs every test file each time"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+    // `isolate: false` likewise; with neither, the line.
+    r.write(
+        "vitest.config.js",
+        "export default { test: { isolate: false } };\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(
+        out.stdout
+            .contains("vitest.config.js: nothing to add: its config sets isolate: false"),
+        "{}",
+        out.stdout
+    );
+    r.write(
+        "vitest.config.js",
+        "export default { test: { typecheck: { enabled: false } } };\n",
+    );
+    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+    assert!(
+        out.stdout
+            .contains("vitest.config.js: add `plugins: [process.env.HUSHRUN_VITEST ?"),
+        "{}",
+        out.stdout
+    );
+}
+
 // covers: C-15, C-44 (ADR 0082: init proposes the line Jest's config needs where a script replaces
 // NODE_OPTIONS, and writes none)
 #[test]

@@ -229,6 +229,13 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
                 return None;
             }
             let name = config.file_name()?.to_string_lossy().into_owned();
+            // \[ADR 0081, amended\] Where the adapter would observe nothing, the line would add
+            // nothing: say so, so that "not here" isn't read as "nothing to do".
+            if let Some(why) = unobservable(&text) {
+                return Some(format!(
+                    "{name}: nothing to add: its config {why}, and hushrun can't look at Vitest's test files there, so {names} (tests in hushrun.yaml) runs every test file each time"
+                ));
+            }
             Some(format!(
                 "{name}: add `{CONFIG_LINE}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml); without HUSHRUN_VITEST, which hushrun sets, it adds nothing"
             ))
@@ -236,6 +243,45 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
         None => Some(format!(
             "vitest.config.ts: write `export default {{ {CONFIG_LINE} }}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml)"
         )),
+    }
+}
+
+/// \[ADR 0081, amended\] What in a Vitest config's text keeps the adapter from observing any test
+/// file, as the plugin finds it when Vitest runs (`typecheck`, `isolate: false`, the browser): the
+/// words for init's line, or `None`. Read from the text, without whitespace: what it misses, the
+/// run says when it observes nothing.
+fn unobservable(text: &str) -> Option<&'static str> {
+    let flat: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\'' && *c != '"')
+        .collect();
+    // Whether the object after `key:{` holds `enabled:true`.
+    let enables = |key: &str| {
+        let open = format!("{key}:{{");
+        flat.match_indices(&open).any(|(at, _)| {
+            let mut depth = 0usize;
+            let body: String = flat[at + open.len() - 1..]
+                .chars()
+                .take_while(|c| {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    depth > 0
+                })
+                .collect();
+            body.contains("enabled:true")
+        })
+    };
+    if enables("typecheck") {
+        Some("turns on typecheck, which runs the type checker outside Vitest's workers")
+    } else if flat.contains("isolate:false") {
+        Some("sets isolate: false, so test files share a worker")
+    } else if enables("browser") {
+        Some("runs tests in a browser")
+    } else {
+        None
     }
 }
 
