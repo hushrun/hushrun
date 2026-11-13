@@ -354,3 +354,26 @@ ninja and make don't build its objects again either, so the program runs what wa
 and Amendment 8's rule, which goes by the same times, can't tell. hushrun keys each program by the
 files' contents, so the key is the new one; only the program's being old goes unseen. This is kept,
 not fixed: telling it would mean hashing every file a program was built from at every run.
+
+## Amendment 12: a command changed and not built (2026-11-12)
+
+The confirmation pass found what Amendment 8 gave up: `target_compile_definitions(t_a PRIVATE FAIL)`
+added, the build configured again (`cmake -S . -B build`) and not built, recorded the old
+program's pass, though ninja (`ninja -n t_a`) and make (`flags.make` newer than `t_a.c.o`) would
+both build it again. The rule takes one more input: **an object, a link or the program is also
+old when the command that would make it now isn't the one that made it.** The build tool's own
+record says so, and nothing else is asked of it:
+
+- **Makefiles:** an object against its target's `flags.make`, a library or program against its
+  target's `link.txt`. CMake writes each again only when its content changes (a run: configuring
+  again after a comment changes neither), so one newer than what it makes means its command
+  changed since.
+- **Ninja:** `ninja -n -d explain <program>` (a dry run) read only for its `command line changed
+  for <output>` lines, about the program, its objects and its libraries: Ninja compares each
+  command's hash with what its log recorded when it last ran it. `build.ninja`'s time, which
+  changes on any configure, isn't used. When ninja doesn't answer, whether the commands changed
+  can't be told: the program is `not observed`, which doesn't keep the run's pass.
+
+The line says `t_a ran old code: the command that makes CMakeFiles/t_a.dir/tests/t_a.c.o changed
+after it was made (ninja says so); build before ctest`, with the file on Makefiles. The target that
+runs on every build, a FAT build directory and a comment configured again stay up to date.

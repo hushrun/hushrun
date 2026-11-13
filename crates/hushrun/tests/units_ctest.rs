@@ -1469,6 +1469,103 @@ fn make_whole_seconds() -> bool {
     !version.contains("GNU Make ") || version.contains("GNU Make 3.")
 }
 
+// covers: C-49, C-32
+#[test]
+fn a_command_changed_and_configured_without_a_build_is_old_until_built() {
+    let link_flag = if cfg!(target_os = "macos") {
+        "-Wl,-dead_strip"
+    } else {
+        "-Wl,--as-needed"
+    };
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let base = "cmake_minimum_required(VERSION 3.19)\nproject(flags C)\nenable_testing()\n\
+                        add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                        add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n";
+            let p = Project::new(
+                &cmake,
+                generator,
+                &[
+                    file("hushrun.yaml", &yaml("reuse")),
+                    file(".gitignore", "build/\n"),
+                    file("CMakeLists.txt", base),
+                    file(
+                        "tests/t_a.c",
+                        "int main(void) {\n#ifdef FAIL\n  return 1;\n#endif\n  return 0;\n}\n",
+                    ),
+                    file("tests/t_b.c", "int main(void) { return 0; }\n"),
+                ],
+            );
+            let configure = |text: &str| {
+                p.write("CMakeLists.txt", text);
+                git::commit_all(&p.repo, "configure");
+                let out = p
+                    .tool("cmake")
+                    .args(["-S", ".", "-B", "build"])
+                    .output()
+                    .expect("cmake");
+                assert!(
+                    out.status.success(),
+                    "{at}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // A comment, configured: no command changes, and nothing is old.
+            let commented = format!("{base}# a comment\n");
+            configure(&commented);
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            assert!(not_recorded(&ran).is_empty(), "{at}: {}", ran.stderr);
+            // A link flag, configured and not built: t_b ran as linked before.
+            let linked = format!("{commented}target_link_options(t_b PRIVATE {link_flag})\n");
+            configure(&linked);
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            let said = not_recorded(&ran);
+            assert!(
+                said.len() == 1
+                    && said[0].contains("t_b ran old code: the command that makes t_b changed")
+                    && said[0].ends_with("; build before ctest"),
+                "{at}: {}",
+                ran.stderr
+            );
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert_eq!(built.code, 0, "{at}: {}", built.stderr);
+            assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
+            // A definition that makes t_a fail, configured and not built: its old program
+            // passes, and the pass isn't recorded.
+            configure(&format!(
+                "{linked}target_compile_definitions(t_a PRIVATE FAIL)\n"
+            ));
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            let said = not_recorded(&ran);
+            assert!(
+                said.len() == 1
+                    && said[0].contains(
+                        "t_a ran old code: the command that makes CMakeFiles/t_a.dir/tests/t_a.c.o changed"
+                    )
+                    && said[0].ends_with("; build before ctest"),
+                "{at}: {}",
+                ran.stderr
+            );
+            assert!(
+                !ran.stderr.contains("it won't run again on this code"),
+                "{at}: {}",
+                ran.stderr
+            );
+            // Built, it fails, as it does.
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert_ne!(built.code, 0, "{at}: {}", built.stderr);
+        }
+    }
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {

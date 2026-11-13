@@ -601,6 +601,12 @@ impl<'a> Walker<'a> {
             .map(|e| e.linked.clone())
             .unwrap_or_default();
         let made = |rel: &str| outputs.contains(rel);
+        let commands = match explained(ninja, build, target, &self.assigned) {
+            Some(changed) => Commands::Changed(changed),
+            None => Commands::Unknown(
+                "whether the commands that make it changed can't be told: ninja -n -d explain didn't answer".into(),
+            ),
+        };
         let judged = self.judge(
             build,
             target,
@@ -610,6 +616,7 @@ impl<'a> Walker<'a> {
                 made: &made,
                 linked: &linked,
                 whole_seconds: false,
+                commands: &commands,
             },
         );
         out.stale = Stale::either(judged, out.stale.take());
@@ -775,6 +782,19 @@ impl<'a> Walker<'a> {
         }
         let extras = self.extras.get(build).cloned().unwrap_or_default();
         let made = |rel: &str| graph.contains_key(rel);
+        // Each object's target's `flags.make`, and each link's `link.txt`.
+        let mut files: BTreeMap<String, String> = graph
+            .keys()
+            .filter(|node| is_object(node))
+            .filter_map(|node| {
+                let at = node.find(".dir/")?;
+                Some((node.clone(), format!("{}/flags.make", &node[..at + 4])))
+            })
+            .collect();
+        for (dir, output) in &extras.links {
+            files.insert(output.clone(), format!("{dir}/link.txt"));
+        }
+        let commands = Commands::Files(files);
         out.stale = self.judge(
             build,
             target,
@@ -784,6 +804,7 @@ impl<'a> Walker<'a> {
                 made: &made,
                 linked: &extras.linked,
                 whole_seconds,
+                commands: &commands,
             },
         );
         if configured {
@@ -951,6 +972,36 @@ fn deps(
         }
     }
     Some(out)
+}
+
+/// \[ADR 0087\] The outputs whose command line changed since Ninja's log recorded them, of what
+/// building `target` would do, as `ninja -n -d explain` says (`command line changed for <output>`):
+/// `None` when it doesn't answer. Nothing is built: it is a dry run.
+fn explained(
+    ninja: &Path,
+    build: &Path,
+    target: &str,
+    assigned: &[(String, String)],
+) -> Option<BTreeSet<String>> {
+    let output = super::run::tool(ninja, build, assigned)
+        .arg("-C")
+        .arg(build)
+        .args(["-n", "-d", "explain", target])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    Some(
+        text.lines()
+            .filter_map(|l| l.strip_prefix("ninja explain: command line changed for "))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// `program`'s output in `dir`, when it exits 0, with COMMAND's environment and its own
@@ -1341,6 +1392,22 @@ struct Made<'g> {
     linked: &'g BTreeSet<String>,
     /// Its make compares times by the second.
     whole_seconds: bool,
+    /// What tells whether the command that would make a file now is the one that made it.
+    commands: &'g Commands,
+}
+
+/// \[ADR 0087\] What tells whether the command that would make a file now is the one that made
+/// it: a flag or a link option configured since, and not built.
+enum Commands {
+    /// Makefiles: each made file's file that holds its command (an object's target's
+    /// `flags.make`, a link's `link.txt`), which CMake writes again only when it changes: newer
+    /// than the made file, the command changed after it was made.
+    Files(BTreeMap<String, String>),
+    /// Ninja: the outputs whose command line changed since its log recorded them, as
+    /// `ninja -n -d explain` says.
+    Changed(BTreeSet<String>),
+    /// It can't be told, and why.
+    Unknown(String),
 }
 
 impl Walker<'_> {
@@ -1432,6 +1499,38 @@ impl Walker<'_> {
                     cure(part, newer, g.whole_seconds)
                 )));
             }
+        }
+        // The command that would make it, or one of its parts, now isn't the one that did.
+        let mut made: Vec<&str> = parts.iter().map(String::as_str).collect();
+        made.push(target);
+        match g.commands {
+            Commands::Files(files) => {
+                for node in made {
+                    let (Some(file), Some(made_at)) =
+                        (files.get(node), self.time(&build.join(node)))
+                    else {
+                        continue;
+                    };
+                    let Some(changed) = self.time(&build.join(file)) else {
+                        continue;
+                    };
+                    let newer = newer(changed, made_at);
+                    if newer != Newer::No {
+                        return Some(Stale::Old(format!(
+                            "the command that makes {node} changed after it was made ({file}){}",
+                            cure(file, newer, g.whole_seconds)
+                        )));
+                    }
+                }
+            }
+            Commands::Changed(changed) => {
+                if let Some(node) = made.into_iter().find(|n| changed.contains(*n)) {
+                    return Some(Stale::Old(format!(
+                        "the command that makes {node} changed after it was made (ninja says so); build before ctest"
+                    )));
+                }
+            }
+            Commands::Unknown(why) => return Some(Stale::Unknown(why.clone())),
         }
         None
     }
