@@ -40,7 +40,8 @@ container, where the link and the store don't exist. It MUST NOT set it either w
 is set already, or on Windows. In CI (C-14's detection) it sets it only when the run's results
 lookup carried `Hushrun-Build: on`, the job can be asked as itself (B-31), and the relay's `open`
 answers within 5 seconds of its start: then in the job's own store (B-31), and only then does
-cargo start. With no answer to the results lookup and a fetch an earlier step of the job saved
+cargo start. In CI only `NAME -- COMMAND` sets it (B-25); `CHECK…` never does there. With no
+answer to the results lookup and a fetch an earlier step of the job saved
 that serves the run (B-36), it sets it too, and the run reads that fetch only. With no answer to
 the results lookup or to `open` in time otherwise, COMMAND runs unwrapped and the run says one
 line, `build reuse is off for this run: the backend didn't answer in time`; a job
@@ -644,10 +645,18 @@ to the repository, not to a scope: a run that can't tell which code it is (sever
 repository with no scope chosen; its `open` is the one request that asks whether the org shares,
 and an org that doesn't share says nothing there either. Only a run that can't read the
 repository at all doesn't share, and says so in one line when it has a credential to share
-with. In this version a
-CI job still passes through (B-2), and only `hushrun run NAME -- COMMAND` shares. *Rests on:*
-the backend's header and `open` saying what the org decided, and the machine's settings being
-its own. A run never shares more than its local mode allows: with local `observe`, sharing
+with.
+
+The table is `hushrun run NAME -- COMMAND`'s, on a person's machine, in a sandbox and in a CI job
+(B-2, B-31): that form alone shares. `hushrun run CHECK…` shares nothing, in any row: it starts no
+relay, so it neither downloads from nor uploads to the shared store, and asks the backend nothing
+about blocks. Outside CI it reuses this machine's own store as B-1's mode says (and so nothing in
+a sandbox, which has no settings file), and reads a saved fetch that serves it (B-36) as any run
+does; in CI it sets no wrapper at all. *Rests on:* the backend's header and `open` saying what the
+org decided, and the machine's settings being its own; `hushrun run CHECK…` handing its session
+no backend to share through (`cmd::run` begins each check's session with none, ADR 0078), so it
+never learns that the org shares. *Breaks if:* a project's CI runs its builds as checks of `hushrun.yaml`: it reuses
+nothing there, and its sandboxes reuse only what a fetch saved. A run never shares more than its local mode allows: with local `observe`, sharing
 observes too.
 
 A **sandbox** is a machine with no person's settings file (B-21), as the one function that maps

@@ -1,7 +1,9 @@
 //! B-2, B-19: the build blocks' session for a command hushrun is about to run, the one
 //! definition both forms of `hushrun run` use: `NAME -- COMMAND` (`cmd::wrap`) and each check of
 //! hushrun.yaml that runs here (`cmd::run`). An isolated check runs in a container where the link
-//! and the store don't exist, so it never asks for one.
+//! and the store don't exist, so it never asks for one. Only `NAME -- COMMAND` hands [`begin`] a
+//! backend to share through ([`ShareStart`]): `CHECK…` hands none, so it shares nothing (B-25),
+//! reads only a saved fetch outside CI, and in CI begins no session.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

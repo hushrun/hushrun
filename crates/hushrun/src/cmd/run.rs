@@ -324,7 +324,8 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         let timeout = args.timeout.or(def.timeout);
         // B-2: a check run here compiles through the wrapper, in one session for all its
         // attempts. An isolated one never begins a session: its container has neither the link
-        // nor the store.
+        // nor the store. B-25: no backend is handed to share through, so a check shares nothing,
+        // and in CI gets no session.
         let build = match isolation {
             Some(_) => None,
             None => match build_session::begin(

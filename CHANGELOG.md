@@ -13,17 +13,20 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):
 when an org's backend keeps a shared store of compiled crates and the person lets this machine
 take part, `hushrun run NAME -- COMMAND` uploads what it builds, sealed with each block's own key,
-and reuses what another machine built. Off unless the org shares.
+and reuses what another machine built. Off unless the org shares. `hushrun run CHECK…` shares
+nothing: it reuses this machine's own store, and reads a saved fetch, but never asks the backend.
 
 Sharing build blocks in CI and sandboxes ([ADR 0079](docs/adr/0079-sharing-build-blocks-in-ci-and-sandboxes.md)):
-a CI job whose org shares gets the wrapper, in a store that goes with the job, and asks as itself
-with its ID token; an agent's sandbox fetches at setup what its later runs reuse offline.
+a CI job's `hushrun run NAME -- COMMAND` whose org shares gets the wrapper, in a store that goes
+with the job, and asks as itself with its ID token (`hushrun run CHECK…` gets none in CI); an
+agent's sandbox shares as the org's mode says, and fetches at setup what its later runs reuse
+offline.
 
 ### Added
 
-- Contract: **in CI, `hushrun run` sets `RUSTC_WRAPPER` when the org shares build blocks**: the
-  results lookup carried `Hushrun-Build: on`, the job can be asked as itself, and `open` answered
-  within 5 seconds. The store is `hushrun-build-<run>-<attempt>-<digest>` under `RUNNER_TEMP`,
+- Contract: **in CI, `hushrun run NAME -- COMMAND` sets `RUSTC_WRAPPER` when the org shares build
+  blocks** (`hushrun run CHECK…` never does there): the results lookup carried `Hushrun-Build:
+  on`, the job can be asked as itself, and `open` answered within 5 seconds. The store is `hushrun-build-<run>-<attempt>-<digest>` under `RUNNER_TEMP`,
   named by the job (elsewhere a folder of the run's, removed with it), with a 2 GB floor. A backend that didn't answer in time is one line,
   `build reuse is off for this run: the backend didn't answer in time`; an org that doesn't share
   changes nothing.
@@ -60,8 +63,8 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   **`HUSHRUN_BUILD_SESSION`** is set by `hushrun run` for the wrapper, not for people.
 - Contract: **`hushrun run` sets `RUSTC_WRAPPER`** for the command it runs, in both forms, when
   the mode is not `off`: to a link named `hushrun-rustc` that points at the hushrun binary. It
-  doesn't when `RUSTC_WRAPPER` is set already, in CI, on Windows, for an isolated check, or with
-  no cache directory. A `cargo` outside `hushrun run` is untouched, and cargo's configuration is
+  doesn't when `RUSTC_WRAPPER` is set already, on Windows, for an isolated check, or with no cache
+  directory; in CI only `NAME -- COMMAND` sets it, when the org shares (above). A `cargo` outside `hushrun run` is untouched, and cargo's configuration is
   never edited. With `tests: reuse`, the build made before the command and a test file's second
   run compile through it too, in the same session, and the run says once what its compiles came
   to.
