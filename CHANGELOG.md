@@ -194,6 +194,14 @@ offline.
 
 ### Fixed
 
+- Contract: **a person's or an agent's token used in CI says so.** Every build request of such a
+  run and its results lookup carry `Hushrun-Ci: 1`, and the lookup names the run's repository
+  (`?repository=`). The backend then lets the token read that repository's trusted blocks alone
+  and write nothing, and `open` says `"untrusted": "credential"`: the run uploads nothing, makes
+  no marker, and says once `build: this job reads the repository's trusted blocks and writes
+  none: it uses a person's or an agent's token in CI, not the job's own ID token`. Before, a main
+  job and a pull request job holding one token shared that token's scope. Outside CI nothing
+  changes, and a job's own ID token is asked as before.
 - Build blocks: **a run that is not sharing reuses no block it only downloaded.** After an admin
   turned an org's sharing off or deleted its blocks, after `hushrun build share off`, and signed
   out, a machine went on reusing the blocks it had downloaded for as long as it used them: a run

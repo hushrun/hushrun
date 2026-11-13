@@ -987,7 +987,18 @@ one to the job itself. With no ID token (a pull request from a fork, a job witho
 `id-token: write`) sharing is off and the run says why in one line, whatever else the
 environment holds: an agent token in `HUSHRUN_TOKEN` or `HUSHRUN_AGENT` reads nothing there, and a
 results answer obtained with it never sets the wrapper. Anywhere else in CI an agent token reads
-the org's blocks and uploads none, whatever the policy says.
+the org's blocks and uploads none, whatever the policy says. **A person's or an agent's token
+used in CI says so:** every build request of such a run, and its results lookup, carries
+`Hushrun-Ci: 1` (`hushrun_core::blocks::CI_HEADER`; one test each for the relay's client and the
+lookup, `Client::says_ci` and `results::Server::says_ci`: the run is a CI job's and its
+credential is a token, never a job's ID token), and the lookup names the run's repository
+(`?repository=`, what the CI provider says, else what the run read), so that the backend
+answers `Hushrun-Build` by CI's rule for that repository and not by the token's. The backend
+then gives it the repository's trusted blocks to read and nothing to write, and `open` answers
+`"untrusted": "credential"` with `writes: false`: the run makes no marker (B-29) and says once
+`build: this job reads the repository's trusted blocks and writes none: it uses a person's or an
+agent's token in CI, not the job's own ID token`. A CLI from before the word reads it as
+`unknown`. Outside CI no request carries the header.
 Every request, lookups included, names the workspace's commit when one can be read, and in CI
 only while the files git tracks are as that commit has them, checked once per run
 (`wrap::build_commit`, a `git diff` of the worktree against the commit): a job that changed a

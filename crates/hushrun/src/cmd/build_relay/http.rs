@@ -43,6 +43,8 @@ pub(crate) struct Client {
     http: reqwest::Client,
     base: String,
     credential: super::credential::Credential,
+    /// The run is a CI job's (B-31).
+    in_ci: bool,
 }
 
 fn install_crypto_provider() {
@@ -56,6 +58,7 @@ impl Client {
     pub(crate) fn new(
         base: &str,
         credential: super::credential::Credential,
+        in_ci: bool,
     ) -> Result<Client, String> {
         install_crypto_provider();
         let http = reqwest::Client::builder()
@@ -68,7 +71,15 @@ impl Client {
             http,
             base: base.trim_end_matches('/').to_string(),
             credential,
+            in_ci,
         })
+    }
+
+    /// B-31: whether this client's requests say they come from CI: a CI job's whose credential
+    /// is a token (`hushrun_core::blocks::CI_HEADER`), as its results lookup says too. A job's
+    /// own ID token says who it is by itself.
+    fn says_ci(&self) -> bool {
+        self.in_ci && matches!(self.credential, super::credential::Credential::Token(_))
     }
 
     /// What tells this client's credential apart, never the secret.
@@ -127,6 +138,9 @@ impl Client {
                 .body(bytes.clone());
             if let Some(signature) = &signature {
                 request = request.header("hushrun-signature", signature);
+            }
+            if self.says_ci() {
+                request = request.header(hushrun_core::blocks::CI_HEADER, "1");
             }
             let response = match request.send().await {
                 Ok(response) => response,

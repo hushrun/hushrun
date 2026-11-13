@@ -65,6 +65,10 @@ pub struct Seen {
     pub authorization: Option<String>,
     /// The `Hushrun-Signature` header, when there was one.
     pub signature: Option<String>,
+    /// The `Hushrun-Ci` header, when there was one: the caller says it runs in CI.
+    pub ci: Option<String>,
+    /// The query's parameters, percent-decoded.
+    pub query: Vec<(String, String)>,
     /// The body, but for the object store's, which is only counted.
     pub body: Vec<u8>,
 }
@@ -639,6 +643,8 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         path: request.path.clone(),
         authorization: request.header("authorization").map(str::to_string),
         signature: request.header("hushrun-signature").map(str::to_string),
+        ci: request.header("hushrun-ci").map(str::to_string),
+        query: request.query.clone(),
         body: if store_object.is_some() {
             Vec::new()
         } else {

@@ -235,6 +235,96 @@ fn an_org_that_doesnt_share_pays_no_request_and_sharing_off_here_asks_nothing() 
     assert_eq!(fake.count(route::OPEN), 0);
 }
 
+/// The results lookups the fake saw: each one's `Hushrun-Ci` header and `repository` parameter.
+fn results_lookups(fake: &FakeBuild) -> Vec<(Option<String>, Option<String>)> {
+    fake.seen()
+        .into_iter()
+        .filter(|s| s.route == route::RESULTS && s.method == "GET")
+        .map(|s| {
+            let repository = s
+                .query
+                .iter()
+                .find(|(name, _)| name == "repository")
+                .map(|(_, value)| value.clone());
+            (s.ci, repository)
+        })
+        .collect()
+}
+
+// covers: B-31
+#[test]
+fn a_token_in_ci_says_so_on_the_results_lookup_and_every_build_request_and_names_the_repository() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    std::fs::write(
+        a.repo.join("hushrun.yaml"),
+        "version: 1\nrepository: example.com/acme/shop\n",
+    )
+    .unwrap();
+    git::commit_all(&a.repo, "named");
+    // CI that isn't GitHub Actions, with an agent token: the job's only credential.
+    let output = a
+        .hushrun(&fake)
+        .env("CI", "true")
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    let lookups = results_lookups(&fake);
+    assert!(!lookups.is_empty(), "{stderr}");
+    for (ci, repository) in &lookups {
+        assert_eq!(ci.as_deref(), Some("1"), "{lookups:?}");
+        assert_eq!(
+            repository.as_deref(),
+            Some("example.com/acme/shop"),
+            "{lookups:?}"
+        );
+    }
+    let build: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .collect();
+    assert!(build.iter().any(|s| s.route == route::OPEN), "{stderr}");
+    assert!(
+        build.iter().all(|s| s.ci.as_deref() == Some("1")),
+        "{:?}",
+        build.iter().map(|s| (&s.route, &s.ci)).collect::<Vec<_>>()
+    );
+
+    // Outside CI the same token says nothing of the kind, anywhere.
+    let fake = FakeBuild::start();
+    let output = a
+        .hushrun(&fake)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    assert!(!results_lookups(&fake).is_empty(), "{stderr}");
+    assert!(fake.seen().iter().all(|s| s.ci.is_none()), "{stderr}");
+}
+
 /// What a GitHub Actions job's environment adds: its own temporary folder, the variables that
 /// let it mint ID tokens from the fake, and an agent token beside them.
 fn in_github_actions(cmd: &mut assert_cmd::Command, fake: &FakeBuild, runner_temp: &Path) {

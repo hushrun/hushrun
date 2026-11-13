@@ -610,6 +610,7 @@ fn killing_the_relay_after_begin_and_running_again_ends_with_the_block_stored() 
     let client = super::http::Client::new(
         &fake.url(),
         super::credential::Credential::Token(FakeBuild::TOKEN.into()),
+        false,
     )
     .unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1812,6 +1813,104 @@ fn every_request_carries_the_workspace_s_commit_and_an_untrusted_job_says_why_on
             "no {route} in {routes:?}"
         );
     }
+}
+
+/// The `Hushrun-Ci` header of every build request the fake saw.
+fn ci_marks(fake: &FakeBuild) -> Vec<(String, Option<String>)> {
+    fake.seen()
+        .into_iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .map(|s| (s.route, s.ci))
+        .collect()
+}
+
+// covers: B-31
+#[test]
+fn a_token_in_ci_says_so_on_every_build_request_reads_only_and_is_told_why_once() {
+    // The server's answer to a person's or an agent's token that says it runs in CI.
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| {
+        p.untrusted = Some(blocks::Untrusted::Credential);
+        p.writes = false;
+        p.write = None;
+    });
+    let crates = served(&fake, 1, 10_000, 1000);
+    let (key, step) = crates[0];
+    let m = machine();
+    let relay = start_at(
+        m.store.clone(),
+        access(&fake, FakeBuild::AGENT_TOKEN),
+        |c| {
+            c.caller = hushrun_build::share::Caller::Ci {
+                id_token: false,
+                agent_token: true,
+            };
+        },
+    );
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(&relay, Request::Hints { step });
+    ask(
+        &relay,
+        Request::Fetch {
+            step,
+            keys: vec![key],
+            class: LocalClass::Library,
+            local_ms: None,
+        },
+    );
+    // What the job builds itself gets no marker: nothing of it could go up.
+    let (own, own_step) = block(&m.store, 9, 2_000, Some(relay.by.clone()));
+    assert_eq!(ask(&relay, built(own, own_step)), Answer::Ok);
+    let lines = relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert!(fake.begins().is_empty());
+    let says: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("a person's or an agent's token"))
+        .collect();
+    assert_eq!(says.len(), 1, "{lines:?}");
+    assert!(
+        says[0].contains("reads the repository's trusted blocks and writes none"),
+        "{lines:?}"
+    );
+    let marks = ci_marks(&fake);
+    for route in [
+        route::OPEN,
+        route::HINTS_LOOKUP,
+        route::LOOKUP,
+        route::CLOSE,
+    ] {
+        assert!(
+            marks.iter().any(|(r, _)| r == route),
+            "no {route}: {marks:?}"
+        );
+    }
+    assert!(
+        marks.iter().all(|(_, ci)| ci.as_deref() == Some("1")),
+        "{marks:?}"
+    );
+
+    // Outside CI the same token says nothing of the kind, and neither does a job's ID token.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start_at(
+        m.store.clone(),
+        access(&fake, FakeBuild::AGENT_TOKEN),
+        |c| c.caller = hushrun_build::share::Caller::Agent { sandbox: true },
+    );
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(&relay, Request::Hints { step });
+    relay.end_check(&[]);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    relay.end_check(&[]);
+    let marks = ci_marks(&fake);
+    assert!(marks.len() >= 4, "{marks:?}");
+    assert!(marks.iter().all(|(_, ci)| ci.is_none()), "{marks:?}");
 }
 
 fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {

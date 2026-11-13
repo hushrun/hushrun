@@ -398,9 +398,18 @@ pub enum Untrusted {
     /// The run started before the branch was listed, was withdrawn by an admin, or was flagged
     /// for suspending too many keys.
     Run,
+    /// The caller is a person's or an agent's token that says it runs in CI (`Hushrun-Ci`), not
+    /// the job's own ID token: it reads the repository's trusted blocks and writes nothing.
+    Credential,
     #[serde(other)]
     Unknown,
 }
+
+/// The header a person's or an agent's token sends with every build request and every results
+/// lookup it makes from CI (any value counts). The backend then treats it as a CI job that isn't
+/// trusted: it reads its repository's trusted blocks alone, writes nothing, and `open` says
+/// [`Untrusted::Credential`].
+pub const CI_HEADER: &str = "Hushrun-Ci";
 
 /// The limits a client keeps to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

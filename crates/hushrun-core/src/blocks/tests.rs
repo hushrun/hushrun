@@ -204,6 +204,7 @@ fn open_and_its_policy() {
         ("environment", Untrusted::Environment),
         ("runner", Untrusted::Runner),
         ("run", Untrusted::Run),
+        ("credential", Untrusted::Credential),
         ("a-new-reason", Untrusted::Unknown),
     ] {
         assert_eq!(

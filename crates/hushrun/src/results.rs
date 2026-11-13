@@ -527,6 +527,10 @@ struct Server {
     reads_as: Option<String>,
     /// Whether such a lookup was answered.
     answered: Cell<bool>,
+    /// B-31: the repository this run's lookups name when they say they come from CI
+    /// ([`Server::says_ci`]): what the CI provider says, else what the run read
+    /// ([`Backend::names_repository`]).
+    ci_repository: RefCell<Option<String>>,
     /// In GitHub Actions: the ID token endpoint and the request token (B-31).
     oidc: Option<(String, String)>,
     /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
@@ -895,6 +899,7 @@ impl Backend {
                 in_github,
                 reads_as,
                 answered: Cell::new(false),
+                ci_repository: RefCell::new(hushrun_ci::context(&env).repository),
                 oidc,
                 keeps_no_hints: Cell::new(false),
             })),
@@ -907,6 +912,17 @@ impl Backend {
         match &self.store {
             Store::Server(server) if server.withheld => Some(&server.base),
             _ => None,
+        }
+    }
+
+    /// B-31: the repository this run is of, as a result it records would name it, for the
+    /// lookups of a CI job whose credential is a token. What the CI provider says stays.
+    pub fn names_repository(&self, repository: Option<&str>) {
+        if let Store::Server(server) = &self.store {
+            let mut named = server.ci_repository.borrow_mut();
+            if named.is_none() {
+                *named = repository.map(str::to_string);
+            }
         }
     }
 
@@ -1093,11 +1109,27 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
-                let (status, body) = match &query {
-                    Some(query) => server.ledger.json_get_query(&path, query),
-                    None => server.ledger.json_request("GET", &path, None),
-                }
-                .map_err(plain)?;
+                // B-31: a person's or an agent's token in CI says so, and names its repository,
+                // so the answer's `Hushrun-Build` is CI's and not the token's.
+                let says_ci = server.says_ci();
+                let query = match (server.ci_repository.borrow().as_deref(), query) {
+                    (Some(repository), query)
+                        if says_ci
+                            && !query.as_deref().is_some_and(|q| q.contains("repository=")) =>
+                    {
+                        let named = format!("repository={}", query_value(repository));
+                        Some(match query {
+                            Some(query) => format!("{query}&{named}"),
+                            None => named,
+                        })
+                    }
+                    (_, query) => query,
+                };
+                let header = says_ci.then(|| (hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                let (status, body) = server
+                    .ledger
+                    .json_get_with(&path, query.as_deref(), header)
+                    .map_err(plain)?;
                 if status != 200 {
                     return Err(server.refused(status, &body, "reading the newest result"));
                 }
@@ -1577,6 +1609,18 @@ impl Server {
     }
 
     /// Who signs this server's results: a person's token, an agent token, or nobody.
+    /// B-31: whether this server's results lookups say they come from CI (`Hushrun-Ci`): a CI
+    /// job whose credential is a person's or an agent's token. A job's ID token says who it is
+    /// by itself, and a lookup with no credential asks as the repository's CI already. The
+    /// relay's requests of such a run say the same (`hushrun_core::blocks::CI_HEADER`).
+    fn says_ci(&self) -> bool {
+        self.in_ci
+            && matches!(
+                self.credential,
+                Credential::Token { .. } | Credential::Agent
+            )
+    }
+
     fn signer(&self) -> Signer {
         let Some(token) = self.token.as_deref() else {
             return Signer::Nobody;

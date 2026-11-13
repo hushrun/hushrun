@@ -290,6 +290,8 @@ fn skip_or_run(
     let mut anyway: Option<RanAnyway> = None;
     let mut decided: Option<RunResult> = None;
     if let (Some(code), Some(backend)) = (code, backend) {
+        // B-31: a token's lookup from CI names the repository the run is of.
+        backend.names_repository(code.repository_here().as_deref());
         // \[ADR 0049\] The newest result that counts in this job, and this variant (C-10).
         let variant = code.variant.as_ref().map(|variant| variant.key.as_str());
         if args.force {

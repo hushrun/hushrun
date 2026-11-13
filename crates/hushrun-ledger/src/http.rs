@@ -311,6 +311,17 @@ impl HttpLedger {
         self.json_call(Method::GET, path, Some(query.to_string()), None, None)
     }
 
+    /// A GET of `path`, with a query when there is one, and one more header: a results lookup
+    /// that says it comes from CI (the build protocol's `Hushrun-Ci`).
+    pub fn json_get_with(
+        &self,
+        path: &str,
+        query: Option<&str>,
+        header: Option<(&'static str, String)>,
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        self.json_call(Method::GET, path, query.map(str::to_string), None, header)
+    }
+
     /// [`HttpLedger::json_request`] with one more header, such as a result's machine signature
     /// (ADR 0028).
     pub fn json_request_with(

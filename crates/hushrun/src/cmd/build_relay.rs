@@ -504,7 +504,9 @@ impl Relay {
             (None, Some(_)) => credential::Credential::Nothing,
             (None, None) => return Err("no credential to send".to_string()),
         };
-        let client = Client::new(&config.access.base, credential)?;
+        // B-31: a person's or an agent's token in CI says on every request that it runs there.
+        let in_ci = matches!(config.caller, Caller::Ci { .. });
+        let client = Client::new(&config.access.base, credential, in_ci)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -2316,6 +2318,9 @@ pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
         }
         blocks::Untrusted::Run => {
             "its run started before the branch was listed, or an admin withdrew it"
+        }
+        blocks::Untrusted::Credential => {
+            "it uses a person's or an agent's token in CI, not the job's own ID token"
         }
         blocks::Untrusted::Unknown => "the backend says it isn't trusted",
     }
