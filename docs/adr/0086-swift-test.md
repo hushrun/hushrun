@@ -284,3 +284,36 @@ Two limits a third review found are kept, and said here rather than fixed:
   extracted with its times) isn't built again by SwiftPM, whose build goes by times, and the run
   tests what was built before. hushrun keys a target by the files' contents, so the next run's key
   is the new one, but nothing tells it the products are old.
+
+## Amendment 7: swift by its path in a shell line (2026-11-13)
+
+A wrapper COMMAND whose text starts `swift test` by a path (`sh -c "/usr/bin/swift test"`), where
+a package is, says what a COMMAND that starts it by its path says: `COMMAND starts swift by its
+path, and hushrun's swift is on PATH`. It said nothing before.
+
+## Amendment 8: a test's own time (2026-11-13)
+
+On swift-argument-parser (Swift Testing), a run said `reusing 317 tests saved about 2m 57s` of a
+suite that takes 3 seconds. A recorded stream of ten tests run at once (each waiting 300 ms, the
+run 0.36 s) showed why: each test's `testEnded` less its `testStarted` is its wall time, about
+0.35 s, and Swift Testing runs a target's tests at once in one process, so the ten summed to ten
+times the run. A test's time is now its share of each moment it ran (that moment's length divided
+among the tests running then): the shares add up to the run's time at most, and a test that ran
+alone keeps its whole time. XCTest's durations were checked the same way and kept: the console's
+`(… seconds)` and the xunit file's `time` are measured in the process that ran the test, one test
+at a time (a `--parallel` worker runs one at a time too).
+
+## Amendment 9: what the first real runs measured (2026-11-13)
+
+The first runs on real packages (swift-argument-parser, Swift Testing, 7 test targets and 569
+tests; swift-numerics, XCTest, 3 targets and 70 tests; replayed commits and mutations some test
+notices) found no wrong reuse. What they measured:
+
+- **Cost.** One more `swift package describe`, one `swift package dump-package` and one `swift test
+  list --skip-build` a run, and the event stream: on swift-argument-parser 4.49 s against 3.01 s of
+  wall time (+49%, +24% of CPU time), over ten pairs; on swift-numerics about 18%.
+- **A file outside the sources runs everything.** A change to `README.md`, a snapshot or
+  `Package.swift` runs every test target, since a test may read any file of the package that no
+  target compiles (the rest set, C-30). A person says a tree isn't read with `tests.ignore`.
+- On Linux, an XCTest class whose name is in two targets is never reused, as C-48 says: the
+  console doesn't name the target.

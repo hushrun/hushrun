@@ -612,7 +612,7 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
             assert_eq!(second.code, 0, "{at}\n{}\n{}", second.stdout, second.stderr);
             assert_eq!(
                 second.line("hushrun: unit: "),
-                "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check",
+                "hushrun: unit: 3 of 5 test programs run; 2 already passed on the files they read, and 1 more that did runs as a check",
                 "{at}"
             );
             let ran = second.ran();
@@ -1651,6 +1651,164 @@ fn a_rule_that_leaves_its_output_as_it_was_keeps_its_program_up_to_date_where_th
     }
 }
 
+// covers: C-49, C-32
+#[test]
+fn a_build_tree_older_than_its_configuration_records_no_pass_until_configured_and_built() {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let base = "cmake_minimum_required(VERSION 3.19)\nproject(conf C)\nenable_testing()\n\
+                        include(cmake/opts.cmake)\n\
+                        add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                        add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n";
+            let p = Project::new(
+                &cmake,
+                generator,
+                &[
+                    file("hushrun.yaml", &yaml("reuse")),
+                    file(".gitignore", "build/\n"),
+                    file("README.md", "# conf\n"),
+                    file("CMakeLists.txt", base),
+                    file("cmake/opts.cmake", "# options\n"),
+                    file(
+                        "tests/t_a.c",
+                        "int main(void) {\n#ifdef FAIL\n  return 1;\n#endif\n  return 0;\n}\n",
+                    ),
+                    file("tests/t_b.c", "int main(void) { return 0; }\n"),
+                ],
+            );
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // A file no configure reads: nothing is old.
+            p.write("README.md", "# conf\n\nA note.\n");
+            git::commit_all(&p.repo, "readme");
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            assert!(not_recorded(&ran).is_empty(), "{at}: {}", ran.stderr);
+            // Each edit to what configuring reads, neither configured nor built: the old programs
+            // pass, and nothing is recorded; configured and built, the run fails, as it does.
+            for (path, edited, original) in [
+                (
+                    "CMakeLists.txt",
+                    base.replace(
+                        "include(cmake/opts.cmake)\n",
+                        "include(cmake/opts.cmake)\nadd_compile_options(-DFAIL)\n",
+                    ),
+                    base.to_string(),
+                ),
+                (
+                    "CMakeLists.txt",
+                    format!("{base}set_tests_properties(b PROPERTIES WILL_FAIL TRUE)\n"),
+                    base.to_string(),
+                ),
+                (
+                    "cmake/opts.cmake",
+                    "# options\nadd_compile_definitions(FAIL)\n".to_string(),
+                    "# options\n".to_string(),
+                ),
+            ] {
+                p.write(path, &edited);
+                git::commit_all(&p.repo, "edit");
+                let ran = p.run(CTEST, &[]);
+                assert_eq!(ran.code, 0, "{at}: {path}: {}", ran.stderr);
+                let said = not_recorded(&ran);
+                assert!(
+                    !said.is_empty()
+                        && said[0].ends_with(&format!(
+                            "{path} changed after build was configured; configure and build before ctest"
+                        )),
+                    "{at}: {path}: {}",
+                    ran.stderr
+                );
+                p.build();
+                let built = p.run(CTEST, &[]);
+                assert_ne!(built.code, 0, "{at}: {path}: {}", built.stderr);
+                assert!(
+                    not_recorded(&built).is_empty(),
+                    "{at}: {path}: {}",
+                    built.stderr
+                );
+                p.write(path, &original);
+                git::commit_all(&p.repo, "back");
+                p.build();
+                let back = p.run(CTEST, &[]);
+                assert_eq!(back.code, 0, "{at}: {path}: {}", back.stderr);
+                assert!(
+                    not_recorded(&back).is_empty(),
+                    "{at}: {path}: {}",
+                    back.stderr
+                );
+            }
+            // An untouched tree records, and the next run skips.
+            assert!(p.run(CTEST, &[]).stderr.contains("unit skipped"), "{at}");
+        }
+    }
+}
+
+// covers: C-49, C-37
+#[test]
+fn on_a_stale_build_the_runs_line_and_why_say_the_same_of_each_program() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(two C)\nenable_testing()\n\
+                     add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                     target_include_directories(t_a PRIVATE inc)\ntarget_include_directories(t_b PRIVATE inc)\n\
+                     add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n",
+                ),
+                file("inc/a.h", "#define A 1\n"),
+                file("inc/p.h", "#define P 1\n"),
+                file("inc/b.h", "#define B 1\n"),
+                file(
+                    "tests/t_a.c",
+                    "#include \"a.h\"\n#include \"p.h\"\nint main(void) { return A == P ? 0 : 1; }\n",
+                ),
+                file(
+                    "tests/t_b.c",
+                    "#include \"b.h\"\nint main(void) { return B == 1 ? 0 : 1; }\n",
+                ),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+        // p.h changes, and nothing builds: t_a is stale, and a.h, which only t_a reads, is no
+        // new file of any kind.
+        p.write("inc/p.h", "#define P 1 /* 2 */\n");
+        git::commit_all(&p.repo, "p");
+        let ran = p.run(CTEST, &[]);
+        let line = ran.line("hushrun: unit: ");
+        // One of the two already passed on the files it read (it may run as a check), as `why`
+        // says below; nothing is new.
+        assert!(
+            (line.starts_with("hushrun: unit: 1 of 2 test programs run; 1 already passed")
+                || line.starts_with(
+                    "hushrun: unit: all 2 test programs run; 1 that already passed on the files it read runs as a check"
+                ))
+                && !line.contains(" is new"),
+            "{at}: {}",
+            ran.stderr
+        );
+        // `hushrun why` says the same of each.
+        let why = |unit: &str| p.run(&["why", "unit", unit], &[]).stdout;
+        assert!(
+            why("t_b").starts_with("t_b would be reused"),
+            "{at}: {}",
+            why("t_b")
+        );
+        assert!(why("t_a").starts_with("t_a runs"), "{at}: {}", why("t_a"));
+    }
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {
@@ -1739,7 +1897,7 @@ fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {
         let changed = p.run(CTEST, &[]);
         assert_eq!(
             changed.line("hushrun: unit: "),
-            "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that did runs as a check",
+            "hushrun: unit: 5 of 8 test programs run; 3 already passed on the files they read, and 1 more that did runs as a check",
             "{at}"
         );
         let ran = changed.ran();
@@ -2264,7 +2422,7 @@ fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         second.line("hushrun: unit: "),
-        "hushrun: unit: 3 of 7 tests run, in 2 of 5 test files; 4 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 3 of 7 tests run, in 2 of 5 test programs; 4 already passed on the files they read, and 2 more that did run as a check"
     );
     assert!(second.ran().contains(&"cart_total".to_string()));
     let units = &p.newest_result()["units"];
@@ -2649,7 +2807,7 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     assert_eq!(line.code, 0, "{}", line.stderr);
     assert_eq!(
         line.line("hushrun: unit: with `tests: reuse`"),
-        "hushrun: unit: with `tests: reuse`, all 5 test files would have run: none had passed here yet on the files it read"
+        "hushrun: unit: with `tests: reuse`, all 5 test programs would have run: none had passed here yet on the files it read"
     );
     // A stale program is observed as one: it ran old code.
     let p = Project::new(&cmake, generator, &shop("observe"));

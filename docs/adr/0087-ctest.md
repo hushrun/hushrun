@@ -395,3 +395,61 @@ hasn't run since and the object is old, as before. Makefiles record nothing of i
 stays old there, and the line names the cure: `VERSION changed after
 CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest; if the build
 leaves build/ver.h as it was, touch build/ver.h, then build before ctest`.
+
+## Amendment 14: a tree older than its own configuration (2026-11-13)
+
+The first runs on real repositories found a wrong result on fmt, on Ninja and Makefiles alike:
+`add_compile_options(-ffinite-math-only)` added to `CMakeLists.txt`, or
+`set_tests_properties(args-test PROPERTIES WILL_FAIL TRUE)` to `test/CMakeLists.txt`, neither
+configured nor built, recorded the old programs' passes; once built, four tests failed, the
+check skipped, and a later run left those four out as passed. Amendment 12 caught a command
+configured and not built; a file edited and not configured was what Amendment 8 called unseen,
+and a test's own properties aren't a command at all.
+
+CMake records which files configuring read, so the build can run it again (the regeneration rule's
+inputs in `build.ninja`, `CMAKE_MAKEFILE_DEPENDS` in `CMakeFiles/Makefile.cmake`), and when it
+last configured (`CMakeFiles/cmake.check_cache`, written again by every configure). **When any of
+those files of the repository is newer than the last configure, the whole build tree is old:**
+what the build would make, and which tests it would list, can't be told from it. Every program of
+it is old, so no test of the start keeps a pass and the check's pass isn't recorded, and the line
+says what a person does: `CMakeLists.txt changed after build was configured; configure and build
+before ctest`. This replaces Amendment 6's check, which applied only to a program that read a file
+configuring wrote. Kept out: files outside the repository (CMake's own modules, a toolchain file
+elsewhere), `CMakePresets.json` and `CMakeUserPresets.json`, a `CONFIGURE_DEPENDS` glob's check
+(in the build directory), and a file rewritten with its time unchanged. A file no configure reads,
+such as `README.md`, makes nothing old.
+
+## Amendment 15: a stale program's files keep their sets (2026-11-13)
+
+On fmt, `include/fmt/printf.h` edited and not built made the run say `all 22 test files run:
+include/fmt/args.h is new`, while `hushrun why` said only printf-test would run. A run showed what
+made it: the plan left a stale program out of the sources the build's graph names, as it left its
+unit unkeyed, so a header only stale programs read (and their own files) fell into the rest set,
+where the map had never held them: "new", and in every key. A stale program's files now keep their
+sets as its graph gives them; only its unit is unkeyed, and runs. The plan's line and `hushrun why`
+go by the same sets.
+
+## Amendment 16: a shell line that starts ctest by its path (2026-11-13)
+
+Every way around hushrun's `ctest` said so, but one: `sh -c "/opt/cmake/bin/ctest …"` said nothing.
+A wrapper whose text starts `ctest` by a path, and never by its name nor another runner, now says
+what a COMMAND that does says: `test files aren't observed: COMMAND starts ctest by its path
+(/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest``.
+`swift` started by its path in a wrapper's text, where a package is, says the same as COMMAND's
+(ADR 0086).
+
+## Amendment 17: what the first real runs measured (2026-11-13)
+
+The first runs on real repositories (fmt on Ninja and on Makefiles with shared libraries, and FTXUI,
+whose 412 tests are discovered with `gtest_discover_tests` in one program; replayed commits and
+mutations some test notices) found one wrong result (Amendment 14) and no wrong reuse besides.
+What they measured:
+
+- **Cost.** CTest's listing, the walk and the record add about half a second to a run on fmt
+  (`ctest` alone 0.08 s, through hushrun 0.53 s), whatever is reused; on FTXUI about 0.8 s on a
+  1.9 s run.
+- **A file outside the sources runs everything.** A change to `README.md` runs every program,
+  since a test may read any file of the repository that isn't one of the build's sources (the
+  rest set, C-30). A person says a tree isn't read with `tests.ignore`.
+- A program that discovers its tests (FTXUI's one program) is one unit: any change to what it is
+  built from runs all of its tests.

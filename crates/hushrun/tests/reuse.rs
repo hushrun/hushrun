@@ -184,8 +184,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))
@@ -1124,7 +1139,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
     assert_eq!(
         first.plan_line(),
-        "hushrun: test: all 5 test files run: none had passed here yet on the files it read"
+        "hushrun: test: all 5 test binaries run: none had passed here yet on the files it read"
     );
     // One crate changes: its test binary runs, with one audited of the four others.
     r.write(
@@ -1135,7 +1150,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         changed.plan_line(),
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
     );
     let units = r.newest_result()["units"].clone();
     assert!(units["savedMs"].is_u64(), "{units}");
@@ -1180,7 +1195,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
     );
 
     // The flag: what the flagged test reads and no dep-info names. Every other binary changes, so
@@ -1615,7 +1630,7 @@ fn build_reuse_and_test_reuse_work_in_the_same_run() {
     assert_eq!(tests[0].0, 0, "{tests:?}");
     assert_eq!(
         tests[1].1,
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
     );
     assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
     assert_ne!(tests[2].0, 0, "{tests:?}");

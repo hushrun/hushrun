@@ -404,6 +404,7 @@ fn decided_run(
         unwatched: None,
         shared: &Shared::default(),
         words: RunWords::default(),
+        noun: "test file",
     };
     let observed = decide(
         &end,
@@ -1144,4 +1145,20 @@ fn a_run_in_ci_that_imported_an_older_store_says_what_to_change_in_its_cache_ste
     let cache = tempfile::tempdir().unwrap();
     let path = db::path(cache.path(), None);
     assert_eq!(db::upgrade(&path), None);
+}
+
+// covers: C-39
+#[test]
+fn each_adapter_counts_its_test_files_in_its_own_word() {
+    assert_eq!(super::test_files(1, "test program"), "1 test program");
+    assert_eq!(super::test_files(22, "test program"), "22 test programs");
+    assert_eq!(super::test_files(7, "test target"), "7 test targets");
+    assert_eq!(super::test_files(3, "test binary"), "3 test binaries");
+    assert_eq!(super::test_files(2, "test class"), "2 test classes");
+    assert_eq!(super::test_files(5, "package"), "5 packages");
+    assert_eq!(super::test_files(2, "test file"), "2 test files");
+    assert_eq!(
+        super::test_files_grouped(2140, "test target"),
+        "2,140 test targets"
+    );
 }
