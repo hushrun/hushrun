@@ -882,7 +882,7 @@ fn one_local_repository_reason(not_followed: BTreeSet<NotFollowed>) -> BTreeSet<
     out.insert(NotFollowed {
         why: LOCAL_REPOSITORY.into(),
         detail: format!(
-            "hushrun doesn't know what built {named}, which the tests take from a local Maven repository: put mavenLocal() after the remote repositories, or filter it to this build's own group"
+            "hushrun doesn't know what built {named}, which the tests take from a local Maven repository: filter mavenLocal() to this build's own group, or, where a remote repository has the same coordinates (check it), put mavenLocal() after that repository"
         ),
     });
     out

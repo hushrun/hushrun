@@ -1041,7 +1041,7 @@ fn jars_of_a_local_maven_repository_nothing_here_built_are_one_reason_a_person_c
     let local = out.iter().find(|n| n.why == LOCAL_REPOSITORY).unwrap();
     assert_eq!(
         local.detail,
-        "hushrun doesn't know what built a:a:1, b:b:1, c:c:1 and 2 more, which the tests take from a local Maven repository: put mavenLocal() after the remote repositories, or filter it to this build's own group"
+        "hushrun doesn't know what built a:a:1, b:b:1, c:c:1 and 2 more, which the tests take from a local Maven repository: filter mavenLocal() to this build's own group, or, where a remote repository has the same coordinates (check it), put mavenLocal() after that repository"
     );
     assert_eq!(
         coordinates_of("com/acme/thing/1.0/thing-1.0.jar").as_deref(),
