@@ -66,6 +66,7 @@ pub mod origin;
 pub mod outbox;
 pub mod portable;
 pub mod regular;
+pub mod relay;
 pub mod restore;
 pub mod rlib;
 pub mod roots;

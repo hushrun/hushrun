@@ -126,6 +126,24 @@ pub struct Current {
     pub audit: Audit,
     /// The session's folder.
     pub folder: PathBuf,
+    /// The relay of this run, when it shares through a backend (B-26): where its socket is and
+    /// who the run is. `None`: no relay, and nothing goes to or comes from a shared store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<Share>,
+}
+
+/// What a wrapper needs of its run's relay (B-26, B-32).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Share {
+    /// The relay's socket.
+    pub socket: PathBuf,
+    /// The relay's run: the name of its folders in the store.
+    pub run: String,
+    /// Who the run is: the backend's host, the org and the credential's fingerprint.
+    pub by: crate::origin::Identity,
+    /// The run's repository as the server reads it; empty when none.
+    #[serde(default)]
+    pub repository: String,
 }
 
 /// One compile's line in the run's log (B-20).
@@ -512,6 +530,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         .join(SESSIONS)
         .join(format!("{millis}-{}", std::process::id()));
     std::fs::create_dir_all(&folder)
+        .and_then(|()| private(&folder))
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", folder.display())))?;
     let link = link_to(&store, start.exe)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", store.display())))?;
@@ -541,12 +560,10 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
                 .and_then(OsStr::to_str),
         ),
         folder,
+        share: None,
     };
-    let file = current.folder.join(SESSION_FILE);
-    serde_json::to_vec(&current)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(&file, bytes))
-        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", file.display())))?;
+    write_current(&current)
+        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", current.folder.display())))?;
     Ok(Session {
         current,
         link,
@@ -554,7 +571,37 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
     })
 }
 
+/// Writes `session.json` whole: a temporary file in the session's folder, then a rename, so a
+/// wrapper never reads half of it.
+fn write_current(current: &Current) -> std::io::Result<()> {
+    let file = current.folder.join(SESSION_FILE);
+    let temp = current
+        .folder
+        .join(format!(".{SESSION_FILE}.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(current).map_err(std::io::Error::other)?;
+    std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, &file))
+}
+
+/// Makes `folder` this user's alone (mode 0700): the relay's socket lives in it (B-26).
+#[cfg(unix)]
+fn private(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn private(_folder: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 impl Session {
+    /// Names the run's relay in `session.json` (B-26), before COMMAND starts, so every wrapper
+    /// of the run finds it. The file is rewritten whole.
+    pub fn set_share(&mut self, share: Share) -> std::io::Result<()> {
+        self.current.share = Some(share);
+        write_current(&self.current)
+    }
+
     /// Makes, before COMMAND starts, the sysroot without sources the compiles of this run will
     /// be given for the toolchain at `sysroot`, when it has sources (B-9, B-17), so that the
     /// wrappers find it whole and only read it. `None` when it has none or the view can't be
