@@ -912,7 +912,7 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
         let lost = r.run(&command);
         assert_eq!(lost.code, 0, "{}", lost.out());
         assert!(
-            lost.stderr.contains("hushrun: unit: test files weren't observed: Jest wrote nothing for hushrun: its processes didn't load hushrun's adapter, as when a script sets NODE_OPTIONS instead of adding to it (`NODE_OPTIONS=--experimental-vm-modules jest`); keep what it had (`NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest`), or put this line first in jest.config.js: `process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);`"),
+            lost.stderr.contains("hushrun: unit: test files weren't observed: Jest wrote nothing for hushrun: its processes didn't load hushrun's adapter, as when a script sets NODE_OPTIONS instead of adding to it (`NODE_OPTIONS=--experimental-vm-modules jest`); keep what it had (`NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest`), or put this line first in jest.config.js: `if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`"),
             "Jest {}: {}",
             jest.major,
             lost.stderr
@@ -920,7 +920,7 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
         // The line, first in the config: the run is observed through it, workers included.
         r.write(
             "jest.config.js",
-            &format!("process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);\n{CONFIG}"),
+            &format!("if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);\n{CONFIG}"),
         );
         let loaded = r.run(&command);
         assert_eq!(loaded.code, 0, "{}", loaded.out());
@@ -938,6 +938,19 @@ fn a_script_that_replaces_node_options_is_said_with_the_fix_and_the_config_line_
                 "src/pricing.js",
                 "test/cart.test.js"
             ]
+        );
+        // The form proposed before 0.14 still loads it: whoever added it isn't told it's missing.
+        r.write(
+            "jest.config.js",
+            &format!("process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);\n{CONFIG}"),
+        );
+        let before = r.run(&command);
+        assert_eq!(before.code, 0, "{}", before.out());
+        assert!(
+            !before.stderr.contains("weren't observed"),
+            "Jest {}: {}",
+            jest.major,
+            before.stderr
         );
         // An ES module config takes the other form, in band and with workers alike.
         r.write("package.json", "{\"name\": \"shop\", \"private\": true}\n");

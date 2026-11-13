@@ -1,6 +1,6 @@
 // [ADR 0071] hushrun's Vitest adapter: the Vite plugin a repository's Vitest config loads with
 //
-//   plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]
+//   plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]
 //
 // which `hushrun init` proposes. Without HUSHRUN_VITEST (hushrun sets it only for a check whose
 // `tests` aren't off), the line adds nothing. With it, and HUSHRUN_UNITS naming the run's

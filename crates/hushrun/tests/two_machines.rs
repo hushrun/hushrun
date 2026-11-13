@@ -106,7 +106,7 @@ const NO_HOST: &str = "http://127.0.0.1:9";
 
 /// The Vitest these tests are written against.
 const VITEST: &str = "4.1.12";
-const VITEST_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())],";
+const VITEST_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined],";
 
 fn tools(what: &str, here: bool) -> bool {
     if here {

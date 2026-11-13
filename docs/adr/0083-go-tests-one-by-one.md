@@ -207,3 +207,28 @@ output, `go test`'s pipe, as its own), and exits with the binary's code. `go tes
 sees without hushrun, the binary gone and its output still open, and its own wait decides: late
 output inside it arrives and the package is `ok`; past it, `go test` prints its line and fails the
 package, on its own timing. The runner needs no knowledge of the delay.
+
+## Amendment 5: `hushrun why` decides from the run's sets, and what real projects measured (2026-11-13)
+
+At a clean head of stretchr/testify with passes recorded, `hushrun why unit
+'assert::TestEventuallyWithTFalse'` said `internal/spew/dumpcgo_test.go is gone, and any test may
+have read it`, so every test file runs, while the run in that state reused 5 of 8 packages. The
+file is on disk, with the build tags `cgo && testcgo`, so `go list` leaves it out of every package:
+the run classed it in the rest set and kept it there, but `why` took every `_test.go` file of a
+package the map knows for a test file, found it missing from its rest set, and called it gone. Now
+the run, its plan and `why` class the files by one function (`gotest::sets_of`), from the test files
+and sources `go list` named under COMMAND's tags and environment, which the map keeps; only a map
+that kept no listing falls back to the package rule. And `why` never calls a file on disk gone:
+one of the rest set then that is a test file or a source now "can change what tests load".
+`hushrun ready` makes no plan for Go (it would have to start `go list`), so it can't disagree.
+
+What the first runs on real repositories measured (2026-11-13, stretchr/testify and gin-gonic/gin:
+54 mutations with failures and 30 replayed commits, no wrong reuse):
+
+- `observe` cost 13% of wall time on a 5-second suite, and about half a second fixed on a
+  half-second one: each package's binary starts twice, once to list and once to test.
+- With nothing changed, 329 to 446 of testify's 475 tests and 212 to 637 of gin's 641 were left
+  out.
+- A test with a tight timing window failed more often under hushrun than plain: testify's
+  `TestEventuallyTrue`, with 100 ms, 3 of about 65 runs against 0 of about 60, because the listing
+  and the pipes add load.

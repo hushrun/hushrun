@@ -4,7 +4,9 @@
 //!
 //! The fixtures need Node and Vitest 4.1.12, installed from npm outside the repository, with
 //! `HUSHRUN_TEST_VITEST` naming its `node_modules` (CI: `npm install --prefix <dir>
-//! vitest@4.1.12`). They say so and pass where it is missing, unless `HUSHRUN_TEST_TOOLS=required`.
+//! vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6`; TypeScript and Node's types for the test of
+//! a config that type-checks itself). They say so and pass where it is missing, unless
+//! `HUSHRUN_TEST_TOOLS=required`.
 
 #[path = "common/store.rs"]
 mod store;
@@ -69,7 +71,7 @@ const CLEARED: &[&str] = &[
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";
-const LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())],";
+const LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined],";
 
 /// The `node_modules` with the pinned Vitest, when this machine has it.
 fn vitest_modules() -> Option<PathBuf> {
@@ -442,7 +444,7 @@ fn without_the_config_line_or_one_run_vitest_is_left_alone_and_says_why() {
     let ran = r.run(VITEST_RUN);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert!(
-        ran.stderr.contains("hushrun: unit: test files aren't observed: Vitest loads hushrun's adapter from one line in vite.config.ts, which `hushrun init` proposes: `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`"),
+        ran.stderr.contains("hushrun: unit: test files aren't observed: Vitest loads hushrun's adapter from one line in vite.config.ts, which `hushrun init` proposes: `plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]`"),
         "{}",
         ran.stderr
     );
@@ -2586,4 +2588,142 @@ fn why_says_a_second_start_of_vitest_kept_every_pass_of_its_run_out() {
         let why = why_of(&r, unit);
         assert!(why.contains(said), "{unit}: {why}");
     }
+}
+
+/// The line `hushrun init` proposed before 0.14, which a config that type-checks itself refuses:
+/// `process.env.X && …` is `"" | Promise<any> | undefined`, and `""` is no `PluginOption`.
+const OLD_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]";
+
+// covers: C-15, C-35
+#[test]
+fn the_line_init_proposes_for_vitest_passes_a_config_that_type_checks_itself() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let modules = vitest_modules().expect("Vitest");
+    let typed = ["typescript/package.json", "@types/node/package.json"]
+        .iter()
+        .all(|p| modules.join(p).is_file());
+    if !tools(
+        "TypeScript and @types/node beside Vitest (HUSHRUN_TEST_VITEST)",
+        typed,
+    ) {
+        return;
+    }
+    // What init proposes, for a project like svgo's: Vitest 4, its test script `vitest run`.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"vitest run\"}, \"devDependencies\": {\"vitest\": \"4.1.12\"}}\n",
+        ),
+        file("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        file(
+            "vitest.config.ts",
+            "import { defineConfig } from 'vitest/config'\nexport default defineConfig({ test: {} })\n",
+        ),
+        file(
+            "tsconfig.json",
+            "{\"compilerOptions\": {\"strict\": true, \"noEmit\": true, \"module\": \"nodenext\", \"moduleResolution\": \"nodenext\", \"target\": \"es2022\", \"skipLibCheck\": true, \"types\": [\"node\"]}, \"include\": [\"vitest.config.ts\", \"test/**/*\"]}\n",
+        ),
+        file(
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\ntest('one', () => { expect(1).toBe(1) })\n",
+        ),
+        file(
+            "test/a.test-d.ts",
+            "import { expectTypeOf, test } from 'vitest'\ntest('types', () => { expectTypeOf(1).toEqualTypeOf<number>() })\n",
+        ),
+    ]);
+    let init = r.run(&["init", "--local", "--dry-run"]);
+    let said = format!("{}\n{}", init.stdout, init.stderr);
+    let proposed = said
+        .split("vitest.config.ts: add `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("init proposed no line for Vitest:\n{said}"))
+        .to_string();
+    // The config type-checks itself (`typecheck.enabled`, under `strict`), in three forms.
+    let forms = |line: &str| -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "defineConfig",
+                format!(
+                    "import {{ defineConfig }} from 'vitest/config'\nexport default defineConfig({{\n  {line},\n  test: {{ typecheck: {{ enabled: true }} }},\n}})\n"
+                ),
+            ),
+            (
+                "an object of ViteUserConfig",
+                format!(
+                    "import type {{ ViteUserConfig }} from 'vitest/config'\nconst config: ViteUserConfig = {{\n  {line},\n  test: {{ typecheck: {{ enabled: true }} }},\n}}\nexport default config\n"
+                ),
+            ),
+            (
+                "a project's plugins",
+                format!(
+                    "import {{ defineConfig, defineProject }} from 'vitest/config'\nexport default defineConfig({{\n  test: {{ typecheck: {{ enabled: true }}, projects: [defineProject({{ {line}, test: {{ name: 'one', typecheck: {{ enabled: true }} }} }})] }},\n}})\n"
+                ),
+            ),
+        ]
+    };
+    // Plain Vitest, no hushrun anywhere: the project's own test command.
+    let vitest_run = || {
+        let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
+        Repo::clean(&mut cmd);
+        let out = cmd.arg("run").current_dir(&r.repo).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                plain(&String::from_utf8_lossy(&out.stdout)),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    for ((form, before), (_, after)) in forms(OLD_LINE).into_iter().zip(forms(&proposed)) {
+        r.write("vitest.config.ts", &before);
+        let (code, out) = vitest_run();
+        assert!(
+            code != 0 && out.contains("is not assignable to type 'PluginOption'"),
+            "{form}, the old line: {out}"
+        );
+        r.write("vitest.config.ts", &after);
+        let (code, out) = vitest_run();
+        assert_eq!(code, 0, "{form}, `{proposed}`: {out}");
+    }
+}
+
+// covers: C-35
+#[test]
+fn a_config_with_the_line_init_proposed_before_still_loads_the_adapter() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A repository that added the line before 0.14 isn't told it is missing, and is observed.
+    let mut files = shop("observe");
+    files.retain(|(p, _)| p != "vitest.config.ts");
+    files.push(file(
+        "vitest.config.ts",
+        &format!(
+            "import {{ defineConfig }} from 'vitest/config'\n\nexport default defineConfig({{\n  {OLD_LINE},\n}})\n"
+        ),
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        !first.stderr.contains("aren't observed"),
+        "{}",
+        first.stderr
+    );
+    assert_eq!(
+        r.reads("test/cart.test.ts"),
+        [
+            "src/cart.ts",
+            "src/pricing.ts",
+            "test/cart.test.ts",
+            "vitest.config.ts"
+        ]
+    );
 }

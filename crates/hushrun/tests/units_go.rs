@@ -1877,3 +1877,74 @@ fn an_audited_go_test_that_fails_again_alone_suspends_the_checks_reuse() {
     );
     assert_eq!(store::disagreements(&r.cache), ["cart::TestOk"]);
 }
+
+/// A module whose package `p` has a test file and a source file only the build tag `extra` takes
+/// in, as testify's `dumpcgo_test.go` (`cgo && testcgo`) is; and a package `q`.
+fn tagged() -> Vec<(String, String)> {
+    vec![
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, ignore: [\"docs/**\"]}"),
+        ),
+        file("go.mod", &format!("module {MODULE}\n\ngo 1.21\n")),
+        file("p/p.go", "package p\n\nfunc One() int { return 1 }\n"),
+        file(
+            "p/p_test.go",
+            "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tif One() != 1 {\n\t\tt.Fatal(\"one\")\n\t}\n}\n",
+        ),
+        file(
+            "p/tagged.go",
+            "//go:build extra\n\npackage p\n\nfunc Two() int { return 2 }\n",
+        ),
+        file(
+            "p/tagged_test.go",
+            "//go:build extra\n\npackage p\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {\n\tif Two() != 2 {\n\t\tt.Fatal(\"two\")\n\t}\n}\n",
+        ),
+        file("q/q.go", "package q\n"),
+        file(
+            "q/q_test.go",
+            "package q\n\nimport \"testing\"\n\nfunc TestQ(t *testing.T) {}\n",
+        ),
+    ]
+}
+
+// covers: C-37, C-45
+#[test]
+fn why_decides_from_the_files_go_list_names_under_commands_tags() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    for tags in [&[][..], &["-tags", "extra"][..]] {
+        let r = Repo::new(&tagged());
+        let mut command = vec!["run", "unit", "--", "go", "test"];
+        command.extend(tags);
+        command.push("./...");
+        let first = r.run(&command, &[]);
+        assert_eq!(
+            first.code, 0,
+            "{tags:?}: {}\n{}",
+            first.stdout, first.stderr
+        );
+        // A file no rule reads: the check runs again, and its packages, whose files didn't
+        // change, are reused, whatever the tags leave out of them.
+        r.write("docs/notes.md", "notes\n");
+        let why_test = r.run(&["why", "unit", "p::TestA"], &[]);
+        let why_package = r.run(&["why", "unit", "p"], &[]);
+        for (what, why) in [("p::TestA", &why_test), ("p", &why_package)] {
+            assert_eq!(why.code, 0, "{tags:?} {what}: {}", why.stderr);
+            assert!(
+                why.stdout.starts_with(&format!("{what} would be reused: ")),
+                "{tags:?} {what}: {}",
+                why.stdout
+            );
+            assert!(!why.stdout.contains("is gone"), "{tags:?}: {}", why.stdout);
+        }
+        let again = r.run(&command, &[]);
+        assert_eq!(again.code, 0, "{tags:?}: {}", again.stderr);
+        assert!(
+            again.stderr.contains("already passed on the files"),
+            "{tags:?}: {}",
+            again.stderr
+        );
+    }
+}

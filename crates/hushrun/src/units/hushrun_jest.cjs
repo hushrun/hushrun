@@ -6,7 +6,7 @@
 // which hushrun sets, or, where a script replaces NODE_OPTIONS, with one line at the top of the
 // Jest config that `hushrun init` proposes:
 //
-//   process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);
+//   if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);
 //
 // Without HUSHRUN_UNITS and its hushrun.json (C-32) it does nothing at all. With them, it wraps
 // Node's `fs`, `child_process`, `worker_threads` and `process.dlopen` (they record only while a

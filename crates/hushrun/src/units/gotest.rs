@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use hushrun_core::glob::Pattern;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
 use super::adapter::{
@@ -663,6 +664,24 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
         );
     }
     out
+}
+
+/// \[ADR 0083, amended\] The sets of a Go check: its test files, and its sources, as `go list`
+/// named them (`unit_files`, `named`) under COMMAND's tags and environment; any other file of the
+/// tree, a file with a build tag the tags leave out included, is in the rest set. The run, its plan
+/// and `hushrun why` all ask this one function.
+pub fn sets_of(
+    tree: &Tree,
+    unit_files: &BTreeSet<String>,
+    named: &BTreeSet<String>,
+    ignore: &[Pattern],
+) -> Sets {
+    units::classify(
+        tree.paths(),
+        &|path| unit_files.contains(path),
+        Sources::Named(named, SOURCE_KINDS),
+        ignore,
+    )
 }
 
 /// What the Go adapter observed of a run, before hushrun decides any state.
@@ -1448,12 +1467,7 @@ impl Adapter for Recognized {
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
         let listed = list(self, at.root, at.cwd, at.assigned)?;
-        let sets = units::classify(
-            at.tree.paths(),
-            &|path| listed.unit_files.contains(path),
-            Sources::Named(&listed.named, SOURCE_KINDS),
-            at.ignore,
-        );
+        let sets = sets_of(at.tree, &listed.unit_files, &listed.named, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let known = listed
             .units
@@ -1499,12 +1513,7 @@ impl Adapter for Recognized {
                 seen.tests = Some(tests);
             }
         }
-        let sets = units::classify(
-            at.tree.paths(),
-            &|path| observed.unit_files.contains(path),
-            Sources::Named(&observed.named, SOURCE_KINDS),
-            at.ignore,
-        );
+        let sets = sets_of(at.tree, &observed.unit_files, &observed.named, at.ignore);
         let unit_files = Some(observed.unit_files.clone());
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let planned = observed
@@ -1544,13 +1553,17 @@ impl Adapter for Recognized {
         asked.to_string()
     }
 
+    /// \[C-37\] The run's sets, by the run's function, from what `go list` named in the run that
+    /// wrote the map (under COMMAND's tags and environment): a test file the tags leave out of
+    /// every package is in the rest set here as it was there. Only a map that kept no listing
+    /// takes each `_test.go` file of a package it knows for a test file.
     fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        if !at.map.unit_files.is_empty() {
+            return sets_of(at.tree, &at.map.unit_files, &at.map.sources, at.ignore);
+        }
         units::classify(
             at.tree.paths(),
-            &|p| {
-                p.ends_with("_test.go")
-                    && (at.map.unit_files.contains(p) || at.map.units.contains_key(&package_of(p)))
-            },
+            &|p| p.ends_with("_test.go") && at.map.units.contains_key(&package_of(p)),
             Sources::Named(&at.map.sources, SOURCE_KINDS),
             at.ignore,
         )

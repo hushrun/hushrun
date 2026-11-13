@@ -207,3 +207,37 @@ top-level `notKept` would, so that `hushrun why` says it of each test file of th
 that passed included, rather than the core's "its run failed, and its adapter doesn't report each
 failure by test file". Each test that didn't fail keeps it as its own `notKept`.
 
+
+## Amendment 5: the config line a project type-checks, and what real projects measured (2026-11-13)
+
+The line ADR 0071 has init propose, `plugins: [process.env.HUSHRUN_VITEST &&
+import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`, broke svgo's own test command:
+svgo (Vitest 4.1.10) type-checks its `vitest.config.js` (`typecheck.enabled`), the expression is
+`"" | Promise<any> | undefined`, `""` is no `PluginOption`, and plain Vitest, with no hushrun
+anywhere, failed with every test passed. Init now proposes `plugins: [process.env.HUSHRUN_VITEST ?
+import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]`, which types as a plugin
+option under `strict` in `defineConfig`, an object of `ViteUserConfig` and a project's plugins
+(tested; the old line fails each, and a plain object without a type takes both). Vitest 4 has no
+`vitest.workspace` file; its `projects` is tested. The adapter still looks for `HUSHRUN_VITEST`, so
+a config with the old line loads it and isn't told it is missing.
+
+On svgo, with a check's `tests` on, init proposed the line, which would add nothing: `typecheck`
+makes every test file `not observed`. Where a config's text turns on `typecheck`, sets `isolate:
+false` or runs tests in a browser, init now proposes no line and says so in one. Without `tests` on
+in `hushrun.yaml`, init says nothing of test files: they stay off until a check asks (ADR 0068).
+
+What the first runs on real repositories measured (2026-11-13, with Vitest: eemeli/yaml at 528ef30
+and svg/svgo at 31194fb; beside pytest's pallets/click and encode/httpx and Jest's moment/luxon and
+jest-community/jest-extended), with no wrong reuse in 270 mutations and replays of real commits:
+
+- In `observe`, `reads: file` cost 10 to 46% of wall time across the six projects, and `reads: test`
+  81 to 453%. yaml: 3.1 s plain, about 17 s with each test watched (+453% wall, +177% CPU); its
+  `reads: file` +15%. svgo: `reads: test` +94%.
+- On mutations, `reads: test` ran only about 2 to 10% fewer tests than `reads: file` on these
+  projects, because their tests import the package through a barrel or `__init__` that re-exports
+  everything: yaml's source mutations reran a mean of 3,272 of 3,404 tests with `reads: test` and
+  3,337 with `reads: file`, and nearly every replayed commit reran everything in both.
+- Most Vitest 4 projects tried can't be observed at all: zod, svgo and pinia turn on `typecheck`,
+  valibot sets `isolate: false`.
+
+That is the cost and the benefit today.
