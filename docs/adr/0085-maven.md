@@ -232,6 +232,20 @@ whose class is a test file of the module (`@SuiteClasses`) stays that file's. A 
 for which neither says a class still makes the run's passes hold only when COMMAND passed, and the
 adapter says so (`notKept`, for `hushrun why`).
 
+## Measured on real projects (2026-11-13)
+
+Runs on apache/commons-cli and google/gson (Surefire 3.6.1), with junit-pioneer and kotlinpoet
+under Gradle beside them: 118 mutations whose failing set wasn't empty and 60 replayed commits, with
+no wrong reuse, constants inlined across modules, resources and generated sources included. What
+they also measured:
+
+- `observe` cost 9 to 36% of the wall time on these four projects.
+- jsoup couldn't be used: its JDK 11+ profile sets `additionalClasspathElements`, which leaves
+  hushrun's hook out, and nothing is left out there.
+- Apache RAT, bound before the tests in Apache's parent POM, fails an Apache project's build on an
+  untracked `hushrun.yaml` that has no licence header ("Unexpected count for UNAPPROVED"): the file
+  needs the ASF header as YAML comments, or an exclusion in RAT's configuration.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0

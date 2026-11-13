@@ -372,6 +372,20 @@ under half a second there is noise. Of the JUnit Platform's cost on Gradle 9.3.1
 from the hook's events, which this adapter didn't read then (with them sent nowhere: 2,103; it
 reads them since Amendment 3); on Gradle 8.14.5 they cost nothing measurable.
 
+### On real projects (2026-11-13)
+
+Runs on junit-pioneer (Gradle 9.7.1, JUnit 6) and square/kotlinpoet (Gradle 9.9.1, Kotlin,
+multi-project), with Maven's commons-cli and gson beside them: 118 mutations whose failing set
+wasn't empty and 60 replayed commits, with no wrong reuse, constants inlined across modules,
+resources and generated sources included. What they also measured:
+
+- `observe` cost 9 to 36% of the wall time on these four projects.
+- Every switch between a plain Gradle run and a hushrun run reruns the test tasks and discards the
+  configuration cache entry (`environment variable 'HUSHRUN_GRADLE' has changed`); hushrun after
+  hushrun keeps both (kotlinpoet; junit-pioneer discards its entry anyway, since jreleaser's
+  `marker.txt` changes).
+- A wrapper older than Gradle 8.14 was not evaluated.
+
 ## Not built
 
 - **`reads: test`**: a test is taken to have read what its class read (RFC 0004 §6).
