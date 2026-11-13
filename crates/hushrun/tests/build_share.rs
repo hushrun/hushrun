@@ -1435,3 +1435,153 @@ fn a_job_whose_tracked_files_differ_from_its_commit_names_no_commit() {
         "{sent:?}"
     );
 }
+
+/// The block in the store under `store` whose files are `dep`'s, its files overwritten with
+/// zeros of the same sizes and its record saying so: a download this compiler can't load, as one
+/// from a machine whose bytes are wrong would be. Its key and first key.
+fn spoil_dep(store: &Path) -> (hushrun_core::Digest, hushrun_core::Digest) {
+    fn records(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                records(&path, out);
+            } else if path.file_name().is_some_and(|n| n == "block.json") {
+                out.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    records(&store.join("blocks"), &mut found);
+    let mut spoiled = None;
+    for json in found {
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+        let names: Vec<String> = record["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect();
+        if !names.iter().any(|n| n.starts_with("libdep-")) {
+            continue;
+        }
+        for file in record["files"].as_array_mut().unwrap() {
+            let path = json
+                .with_file_name("files")
+                .join(file["name"].as_str().unwrap());
+            let zeros = vec![0u8; file["size"].as_u64().unwrap() as usize];
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, &zeros).unwrap();
+            file["sha256"] = serde_json::to_value(hushrun_core::Digest::of(&zeros)).unwrap();
+        }
+        std::fs::remove_file(&json).unwrap();
+        std::fs::write(&json, serde_json::to_vec(&record).unwrap()).unwrap();
+        let key: hushrun_core::Digest = serde_json::from_value(record["key"].clone()).unwrap();
+        let step: hushrun_core::Digest =
+            serde_json::from_value(record["description"]["step"].clone()).unwrap();
+        spoiled = Some((key, step));
+    }
+    spoiled.expect("dep's block")
+}
+
+/// `dep`'s outputs in the workspace's target folder.
+fn dep_outputs(repo: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(repo.join("target/debug/deps"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with("libdep-") && (name.ends_with(".rlib") || name.ends_with(".rmeta"))
+        })
+        .collect()
+}
+
+// covers: B-15, B-34
+#[test]
+fn a_dependent_that_cant_load_a_downloaded_block_suspends_it_and_reports_it_rejected() {
+    let fake = FakeBuild::start();
+    // A scope of its own, so the report's is the one the block's record names.
+    fake.set_scopes(Some("person/7"), &["person/7"]);
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (code, stderr) = b.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
+    // B's copy of `dep` turns out to be bytes its compiler can't load, and `app` changes, so it
+    // compiles against the reused `dep`.
+    let store = b.root.join("cache/build");
+    let (key, step) = spoil_dep(&store);
+    std::fs::write(
+        b.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 0\n}\n",
+    )
+    .unwrap();
+    let reports = fake.reports().len();
+    let (code, stderr) = clean_build(&b, &fake);
+    assert_ne!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains(
+            "app could not load reused dep; suspended and removed so cargo builds them again"
+        ),
+        "{stderr}"
+    );
+    // Reported once, `rejected`, to the scope the block's record names.
+    let sent = fake.reports();
+    assert_eq!(sent.len(), reports + 1, "{sent:?}\n{stderr}");
+    let report = sent.last().unwrap();
+    let origin = hushrun_build::store::Store::new(&store)
+        .origin(&key)
+        .expect("the block's record");
+    assert_eq!(origin.vouched[0].scope, "person/7");
+    assert_eq!(report.scope, origin.vouched[0].scope);
+    assert_eq!(
+        report.address,
+        hushrun_core::blocks::address("rustc/1", key.as_bytes())
+    );
+    assert_eq!(report.problem, hushrun_core::blocks::Problem::Rejected);
+    // Its first key is suspended for the kept days (15), and its reused files are gone.
+    let local = hushrun_build::store::Store::new(&store);
+    let now = std::time::SystemTime::now();
+    let day = Duration::from_secs(86_400);
+    assert!(local.suspended_at(&step, now).is_some());
+    assert!(local.suspended_at(&step, now + day * 14).is_some());
+    assert!(local.suspended_at(&step, now + day * 16).is_none());
+    assert_eq!(dep_outputs(&b.repo), Vec::<PathBuf>::new());
+    // The next run builds `dep` here, and the build passes.
+    let stderr = warm_build(&b, &fake);
+    assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
+    assert_eq!(fake.reports().len(), reports + 1);
+}
+
+/// `cargo clean`, then `cargo build` through hushrun, which may fail: its exit code and stderr.
+fn clean_build(m: &Machine, fake: &FakeBuild) -> (i32, String) {
+    let clean = std::process::Command::new("cargo")
+        .args(["clean", "-q"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&m.repo)
+        .status()
+        .unwrap();
+    assert!(clean.success());
+    let output = m
+        .hushrun(fake)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
