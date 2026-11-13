@@ -892,12 +892,16 @@ fn a_warm_build_with_stale_vouches_waits_for_open_at_most_half_each_compile_and_
     let (fresh, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
     assert!(age_vouches(&b.root.join("cache/build")) > 0);
-    fake.delay(route::OPEN, Duration::from_secs(10));
+    let delay = Duration::from_secs(10);
+    fake.delay(route::OPEN, delay);
     let seen = fake.seen().len();
     let (stale, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
+    // Bounded by the delay injected, not by the machine's speed: a crate that waited for `open`
+    // itself spends all 10 seconds, and two builds of a loaded machine differ by a second or
+    // two with nothing waiting.
     assert!(
-        stale < fresh.mul_f64(1.1) + Duration::from_millis(900),
+        stale < fresh + delay / 2,
         "with stale vouches {stale:?}, fresh {fresh:?}: {stderr}"
     );
     assert_eq!(lookups_since(&fake, seen), vec![], "{stderr}");
