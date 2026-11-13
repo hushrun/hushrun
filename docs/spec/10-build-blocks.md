@@ -1028,7 +1028,10 @@ the server, without fetching, about every block in the store only downloaded who
 this run's host, org and repository is stale, as the store's records list them, as soon as
 `open` answers (`Relay::ask_vouches`), in as few lookups as the lookup's limit allows; one runs
 at a time, and a question about a block it didn't name waits for it to end and then starts the
-next. At the end of a check it asks again, within the uploads' cut, about every downloaded block
+next. A lookup that panics is over when it panics, as one that returned is (`ask_vouches` marks
+it so however it ends): a question about the block it was started for is a miss at once, the
+next question about a block no lookup named starts one, and the end of the check waits for it
+no longer. At the end of a check it asks again, within the uploads' cut, about every downloaded block
 the check reused that no lookup of the run answered for, so that a machine in daily use never
 goes stale. Every answer is written into the block's record: served with its outputs renews the
 entry, anything else is a "no". On a person's machine a downloaded library's first reuse is

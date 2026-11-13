@@ -1635,6 +1635,22 @@ impl Relay {
     /// downloaded whose entry for this run's host, org and repository is stale, as the store's
     /// records say, and `first`. One runs at a time (`vouching`, set by the caller).
     async fn ask_vouches(self: Arc<Relay>, first: Option<Digest>) {
+        // However the lookup ends, a panic included, it is over: the end of the command waits
+        // for it no longer, the next question about a block no lookup named starts one, and a
+        // question about `first` is a miss at once (B-29, B-34).
+        struct Over<'a>(&'a Relay, Option<Digest>);
+        impl Drop for Over<'_> {
+            fn drop(&mut self) {
+                let mut state = self.0.state();
+                if let Some(first) = &self.1 {
+                    state.vouch_asked.remove(&Relay::address(first));
+                }
+                state.vouching = false;
+            }
+        }
+        let _over = Over(&self, first);
+        #[cfg(test)]
+        fault::vouches();
         let relay = self.clone();
         let stale = self
             .runtime
@@ -1654,11 +1670,6 @@ impl Relay {
                 .collect()
         };
         self.ask_about(&asked).await;
-        let mut state = self.state();
-        if let Some(first) = first {
-            state.vouch_asked.remove(&Relay::address(&first));
-        }
-        state.vouching = false;
     }
 
     /// B-34: asks the server, without fetching, whether it still serves `keys`, downloaded blocks
@@ -2349,10 +2360,21 @@ pub(crate) mod fault {
     pub(crate) static UPLOAD: AtomicBool = AtomicBool::new(false);
     /// Set just before the upload loop's panic.
     pub(crate) static UPLOAD_PANICKED: AtomicBool = AtomicBool::new(false);
+    /// The run's lookup of stale vouches panics as it starts, once.
+    pub(crate) static VOUCHES: AtomicBool = AtomicBool::new(false);
+    /// Set just before that panic.
+    pub(crate) static VOUCHES_PANICKED: AtomicBool = AtomicBool::new(false);
 
     pub(crate) fn fetch() {
         if FETCH.load(Ordering::Relaxed) {
             panic!("the test's panic: a fetch");
+        }
+    }
+
+    pub(crate) fn vouches() {
+        if VOUCHES.swap(false, Ordering::Relaxed) {
+            VOUCHES_PANICKED.store(true, Ordering::Relaxed);
+            panic!("the test's panic: a lookup of stale vouches");
         }
     }
 

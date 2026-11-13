@@ -212,6 +212,10 @@ offline.
   names. The record alone decided which first key was suspended and which download was reported,
   so a planted record could get a good shared block reported. Now only a block the run's own
   store confirms is acted on; any other such crate is removed so cargo builds it.
+- Build blocks: a lookup of stale vouches that panics no longer holds up its run. Its mark stayed
+  set, so the end of the command waited until uploads were cut off, and every later question
+  about a stale download waited out its budget and was a miss. Now the mark goes however the
+  lookup ends, and the next question starts a lookup of its own.
 - Build blocks: an upload that panics in the middle of a run no longer holds up the end of its
   command. The end waited its whole deadline (10 seconds on a person's machine, up to 2 minutes in
   a CI job), then sent no `close`, and no later check in the same process uploaded anything. Now

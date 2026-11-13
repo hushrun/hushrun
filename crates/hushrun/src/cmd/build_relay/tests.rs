@@ -2645,3 +2645,101 @@ fn a_backend_gone_mid_run_is_said_once_and_uploads_rest_as_downloads_do() {
     // Nothing was lost: every block waits for the next run.
     assert_eq!(waiting(&m).len(), 16);
 }
+
+/// Set in the process [`a_lookup_of_stale_vouches_that_panics_holds_up_neither_questions_nor_the_end`]
+/// starts to be the run whose lookup panics: the store, the session folder, the fake's URL and
+/// origin, and the stale block's key and first key, one a line.
+const PANICKING_VOUCHES: &str = "HUSHRUN_TEST_PANICKING_VOUCHES";
+
+// covers: B-29, B-34
+#[cfg(unix)]
+#[test]
+fn a_lookup_of_stale_vouches_that_panics_holds_up_neither_questions_nor_the_end() {
+    if let Ok(world) = std::env::var(PANICKING_VOUCHES) {
+        return panicking_vouches(&world);
+    }
+    let fake = FakeBuild::start();
+    let m = machine();
+    // A download whose compile took 4 seconds: a question about it may wait 2.
+    let (key, step) = stale_download(&fake, &m, 4_000);
+    let world = [
+        m.store.root().display().to_string(),
+        m.session.display().to_string(),
+        fake.url(),
+        fake.origin(),
+        key.hex(),
+        step.hex(),
+    ]
+    .join("\n");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "cmd::build_relay::tests::a_lookup_of_stale_vouches_that_panics_holds_up_neither_questions_nor_the_end",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PANICKING_VOUCHES, world)
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(said.contains("1 passed"), "{said}");
+    assert!(
+        said.contains("the test's panic: a lookup of stale vouches"),
+        "{said}"
+    );
+    // The question after the panic was asked of the server, and the end sent `close`.
+    assert_eq!(fake.count(route::LOOKUP), 1, "{said}");
+    assert_eq!(fake.count(route::CLOSE), 1, "{said}");
+}
+
+/// The run whose lookup of stale vouches panics as `open` answers, in a process of its own: a
+/// wrapper's question about a stale download still gets a lookup of its own and an answer well
+/// within its budget, and the end of the command doesn't wait for the lookup that is gone.
+#[cfg(unix)]
+fn panicking_vouches(world: &str) {
+    use std::sync::atomic::Ordering;
+    let lines: Vec<&str> = world.lines().collect();
+    let [store, session, base, host, key, step] = lines[..] else {
+        panic!("{world}")
+    };
+    let store = Store::new(Path::new(store));
+    let (key, step) = (
+        Digest::from_hex(key).unwrap(),
+        Digest::from_hex(step).unwrap(),
+    );
+    super::fault::VOUCHES.store(true, Ordering::Relaxed);
+    let relay = start_at(store, access_at(base, host, FakeBuild::TOKEN), |c| {
+        c.tuning.end_wait = Duration::from_secs(6);
+        c.tuning.close = Duration::from_secs(3);
+    });
+    relay
+        .begin_check(Path::new(session), None, &|_| None)
+        .unwrap();
+    until("open", || answering(&relay));
+    until("the lookup's panic", || {
+        super::fault::VOUCHES_PANICKED.load(Ordering::Relaxed)
+    });
+    let asked = Instant::now();
+    let answer = ask(
+        &relay,
+        Request::Vouch {
+            key,
+            step,
+            outputs: Hex32([1; 32]),
+        },
+    );
+    // The server doesn't know it: a "no", from a lookup, not from a budget run out.
+    assert_eq!(answer, Answer::None);
+    let took = asked.elapsed();
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    // The end doesn't wait for a lookup that is gone: well within its 6 seconds, `close` sent.
+    let ended = Instant::now();
+    relay.end_check(&[]);
+    let took = ended.elapsed();
+    assert!(took < Duration::from_secs(3), "{took:?}");
+}
