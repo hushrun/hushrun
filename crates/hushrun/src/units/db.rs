@@ -95,6 +95,10 @@ CREATE TABLE checks (
     -- [C-32] What the adapter said when the check's last run here executed no test (Gradle's test
     -- tasks up to date), as it said it; none after a run that executed some.
     ran_nothing TEXT CHECK (ran_nothing IS NULL OR length(ran_nothing) BETWEEN 1 AND 2000),
+    -- [C-46] Each Gradle JUnit 4 task's test files and the most of their tests it leaves out, as
+    -- the last run that told them said: a JSON array of {most, units}.
+    leave_out_at_most TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(leave_out_at_most)
+                                                         AND json_type(leave_out_at_most) = 'array'),
     -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
     written_at INTEGER NOT NULL
 ) STRICT;
@@ -704,15 +708,16 @@ pub fn load(path: &Path, check_id: &Digest) -> Loaded {
 }
 
 fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
-    let Some((check, whole_ms, ran_nothing)) = conn
+    let Some((check, whole_ms, ran_nothing, leave_out_at_most)) = conn
         .query_row(
-            "SELECT id, whole_ms, ran_nothing FROM checks WHERE check_id = ?1",
+            "SELECT id, whole_ms, ran_nothing, leave_out_at_most FROM checks WHERE check_id = ?1",
             [check_id.hex()],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -724,6 +729,9 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
         reported: true,
         whole_ms: whole_ms.and_then(|ms| u64::try_from(ms).ok()),
         ran_nothing,
+        // One that doesn't read as groups limits nothing: every listed test is left out, as
+        // before the store kept them.
+        leave_out_at_most: serde_json::from_str(&leave_out_at_most).unwrap_or_default(),
         ..Map::default()
     };
     let mut names: HashMap<i64, String> = HashMap::new();
@@ -963,6 +971,9 @@ pub struct Write<'a> {
     pub whole_ms: Option<u64>,
     /// \[C-32\] What the adapter said when this run executed no test; `None` clears it.
     pub ran_nothing: Option<&'a str>,
+    /// \[C-46\] What each JUnit 4 task leaves out at most, as this run told it; `None` keeps what
+    /// the store has (no task told).
+    pub leave_out_at_most: Option<&'a [super::store::LeaveOutAtMost]>,
     /// The edges this run saw.
     pub edges: &'a BTreeSet<Edge>,
     pub disagreements: &'a [Disagreement],
@@ -1119,12 +1130,13 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     let command = serde_json::to_string(&w.base.command).unwrap_or_else(|_| "[]".into());
     let check: i64 = tx.query_row(
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at, silent_runs,
-                             whole_ms, ran_nothing)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)
+                             whole_ms, ran_nothing, leave_out_at_most)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, coalesce(?10, '[]'))
          ON CONFLICT (check_id) DO UPDATE SET name = excluded.name, command = excluded.command,
              cwd = excluded.cwd, scope = excluded.scope, adapter = excluded.adapter,
              written_at = excluded.written_at, silent_runs = 0,
              ran_nothing = excluded.ran_nothing,
+             leave_out_at_most = coalesce(?10, checks.leave_out_at_most),
              whole_ms = CASE
                  WHEN excluded.whole_ms IS NULL THEN checks.whole_ms
                  WHEN checks.whole_ms IS NULL THEN excluded.whole_ms
@@ -1141,6 +1153,8 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             w.whole_ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
             w.ran_nothing
                 .map(|said| said.chars().take(2000).collect::<String>()),
+            w.leave_out_at_most
+                .map(|groups| serde_json::to_string(groups).unwrap_or_else(|_| "[]".into())),
         ],
         |row| row.get(0),
     )?;

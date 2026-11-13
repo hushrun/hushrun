@@ -1048,3 +1048,31 @@ fn jars_of_a_local_maven_repository_nothing_here_built_are_one_reason_a_person_c
         Some("com.acme:thing:1.0")
     );
 }
+
+// covers: C-46
+#[test]
+fn a_junit4_task_leaves_out_its_first_tests_by_id_and_none_its_patterns_cant_name() {
+    let group = |most: usize, units: &[&str]| super::super::store::LeaveOutAtMost {
+        most,
+        units: units.iter().map(|u| (*u).to_string()).collect(),
+    };
+    let listed = [
+        ("a::shop.A.t2", "a", "shop.A.t2"),
+        ("a::shop.A.t1", "a", "shop.A.t1"),
+        ("a::shop.A.t3", "a", "shop.A.t3"),
+        // The default package, and a package named with a capital: no pattern for either.
+        ("b::Bare.t1", "b", "Bare.t1"),
+        ("c::Shop.C.t1", "c", "Shop.C.t1"),
+        // No JUnit 4 task: every one is left out.
+        ("d::shop.D.t1", "d", "shop.D.t1"),
+    ];
+    let left_in = left_in(
+        &[group(2, &["a"]), group(250, &["b", "c"])],
+        listed.iter().copied(),
+    );
+    // Of a's three, the first two by id are left out, the third runs.
+    assert_eq!(
+        left_in.into_iter().collect::<Vec<_>>(),
+        ["a::shop.A.t3", "b::Bare.t1", "c::Shop.C.t1"]
+    );
+}

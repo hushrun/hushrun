@@ -148,6 +148,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Fixed
 
+- With tests as the unit, a Gradle JUnit 4 task's plan counts only the tests the task will leave
+  out (250 at most, by id): a class of 300 tests that passed said "7 of 301 tests run" while 51 ran.
 - After a Gradle run whose test tasks were all up to date, the next plan no longer says `all 5
   test classes run: none had passed here yet`: it says none of them is left out, and that the last
   run here executed none of them. Such a run no longer bounds what reuse can save.

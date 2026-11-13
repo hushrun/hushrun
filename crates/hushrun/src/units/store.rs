@@ -775,6 +775,17 @@ pub struct Map {
     /// \[C-32\] What the adapter said when the check's last run here executed no test, as it said
     /// it (Gradle's test tasks up to date); `None` after a run that executed some.
     pub ran_nothing: Option<String>,
+    /// \[C-46\] Each JUnit 4 test task's test files and the most of their tests it leaves out by
+    /// name, as the check's last run that told them said.
+    pub leave_out_at_most: Vec<LeaveOutAtMost>,
+}
+
+/// \[C-46\] A Gradle JUnit 4 task leaves out at most `most` of the tests of `units`, its test
+/// files, by name: past them its tests run ([`super::gradle::left_in`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaveOutAtMost {
+    pub most: usize,
+    pub units: BTreeSet<String>,
 }
 
 impl Map {

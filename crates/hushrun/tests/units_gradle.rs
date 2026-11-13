@@ -2141,7 +2141,6 @@ fn a_junit4_task_tells_how_many_of_its_tests_it_leaves_out_at_most() {
 
 // covers: C-39, C-46
 #[test]
-#[ignore = "the plan's part, listing at most `leaveOutAtMost` of a group's tests, is the core's"]
 fn a_junit4_task_leaves_out_every_test_the_plan_counts_as_reused() {
     if !tools(NEEDS, has_gradle()) {
         return;

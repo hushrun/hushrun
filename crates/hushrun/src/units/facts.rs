@@ -774,6 +774,20 @@ pub fn ran_nothing(files: &[FactsFile]) -> Option<String> {
     )
 }
 
+/// \[C-46\] What each JUnit 4 task of the run leaves out at most (`settings.leaveOutAtMost`,
+/// `{most, units}`), one group per facts file that says it; `None` when no facts file of a task
+/// told what it ran (`settings.gradle`), as in a run that executed none, so that the store keeps
+/// what it had.
+pub fn leave_out_at_most(files: &[FactsFile]) -> Option<Vec<super::store::LeaveOutAtMost>> {
+    let told = files.iter().any(|f| f.settings.contains_key("gradle"));
+    let groups: Vec<super::store::LeaveOutAtMost> = files
+        .iter()
+        .filter_map(|f| f.settings.get("leaveOutAtMost"))
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    (told || !groups.is_empty()).then_some(groups)
+}
+
 /// \[C-32\] Why the first file of `files` that says so left out what the plan didn't list.
 pub fn left_out(files: &[FactsFile]) -> Option<String> {
     files

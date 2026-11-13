@@ -352,7 +352,7 @@ script tells, in each JUnit 4 task's facts, `settings.leaveOutAtMost` (`most`, 2
 the task's test classes), and that it attempts the listed tests in the order of their ids and skips
 a class of the default package or of a package named with a capital, which Gradle's patterns would
 match by simple name. The plan is to keep what the last run here said and list at most `most`
-of a group's tests, in that order, counting the others as run.
+of a group's tests, in that order, counting the others as run (done: ADR 0077's Amendment 16).
 
 ## Measured
 

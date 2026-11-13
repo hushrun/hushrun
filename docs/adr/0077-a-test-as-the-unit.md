@@ -459,3 +459,13 @@ place.
   last run here executed none of them, so none kept a pass on the files it read`, through
   `why_every`'s `said`. The run's last line gives no counts: the reports the tasks left are as
   the run found them. `hushrun ready` speaks of CI's machine, not this one, and is unchanged.
+- **A JUnit 4 task leaves out at most 250 tests.** The plan listed every test it could reuse, and
+  the script left out the first 250 of a JUnit 4 task by id, so kotlinpoet's line said "59 of 965
+  tests run" while about 206 ran; a test class of 300 said 7 where 51 ran. The store keeps each
+  task's group with the check (`leave_out_at_most`, `{most, units}`), replaced by each run whose
+  tasks told what they ran and kept through one that ran none, and one function
+  (`gradle::left_in`), which the script mirrors, takes of what the second tier would list, per
+  group, the first `most` by id as strings, none whose class (the id up to its last `.`, as a JUnit
+  4 method has no `.`) is in the default package or a package named with a capital. Those it
+  leaves in aren't listed, so they count as running; they keep their pass, so one that fails gets
+  the second run as any listed test does.

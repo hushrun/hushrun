@@ -199,6 +199,9 @@ struct TestPassed {
 struct PlannedTests {
     passed: BTreeMap<String, TestPassed>,
     audited: BTreeSet<String>,
+    /// \[C-46\] Tests a JUnit 4 task wouldn't leave out though they could be ([`gradle::left_in`]):
+    /// not listed, so counted as running.
+    left_in: BTreeSet<String>,
     /// \[C-34\] The tests, by name, of each test file the first tier could reuse whole that holds
     /// a test the audit runs: its other tests are left out one by one instead.
     whole: BTreeMap<String, (String, String)>,
@@ -222,7 +225,7 @@ impl PlannedTests {
                     .map(|(name, (unit, id))| (name, (unit, id))),
             );
         for (name, (unit, id)) in tests {
-            if !self.audited.contains(name) {
+            if !self.audited.contains(name) && !self.left_in.contains(name) {
                 out.entry(unit.clone()).or_default().push(id.clone());
             }
         }
@@ -234,6 +237,7 @@ impl PlannedTests {
         let name = units::test_name(unit, id);
         (self.passed.contains_key(&name) || self.whole.contains_key(&name))
             && !self.audited.contains(&name)
+            && !self.left_in.contains(&name)
     }
 
     /// \[C-34\] The test files the first tier could reuse whole of which the audit runs a test.
@@ -390,10 +394,24 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
         .iter()
         .filter(|(_, (unit, _, _))| audited_files.contains(unit))
         .map(|(name, (unit, id, _))| (name.clone(), (unit.clone(), id.clone())))
-        .collect();
+        .collect::<BTreeMap<String, (String, String)>>();
+    // \[C-46\] What a JUnit 4 task leaves out at most, of what would be listed: the rest runs.
+    let left_in = gradle::left_in(
+        &at.map.leave_out_at_most,
+        passed
+            .iter()
+            .map(|(name, t)| (name.as_str(), t.unit.as_str(), t.id.as_str()))
+            .chain(
+                whole
+                    .iter()
+                    .map(|(name, (unit, id))| (name.as_str(), unit.as_str(), id.as_str())),
+            )
+            .filter(|(name, _, _)| !audited.contains(*name)),
+    );
     Ok(PlannedTests {
         passed,
         audited,
+        left_in,
         whole,
         known,
     })
@@ -1194,6 +1212,7 @@ impl Session {
         observed.left_out = left_out;
         observed.stale_build = stale;
         observed.ran_nothing = facts::ran_nothing(&files);
+        observed.leave_out_at_most = facts::leave_out_at_most(&files);
         // \[C-32\] What an adapter's facts say people should know of this run, each said once.
         let notes: BTreeSet<&str> = files
             .iter()
@@ -1837,6 +1856,8 @@ pub struct Observed {
     /// \[C-32\] The runner executed no test (`settings.ranNothing`), with its adapter's note: the
     /// store keeps it with the check, and the next plan's line goes by it.
     ran_nothing: Option<String>,
+    /// \[C-46\] What each JUnit 4 task of the run leaves out at most; `None` when no task told.
+    leave_out_at_most: Option<Vec<store::LeaveOutAtMost>>,
     /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing in a run that
     /// passed: counted, and the second such run in a row forgets the check, word and map.
     silent: bool,
@@ -1911,6 +1932,7 @@ impl Observed {
             // A run that executed no test took nothing of the tests' time.
             whole_ms: (reused_nothing && self.ran_nothing.is_none()).then_some(duration_ms),
             ran_nothing: self.ran_nothing.as_deref(),
+            leave_out_at_most: self.leave_out_at_most.as_deref(),
             edges: &self.edges,
             disagreements: &found,
             hints: &self.received,
