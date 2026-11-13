@@ -1998,8 +1998,15 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
     );
     let second = r.run(&command(&gradle, &[]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    // The suite ran: Gradle 9 files its cases under the suite class, Gradle 8 under theirs.
+    let reports: String = std::fs::read_dir(r.repo.join("core/build/test-results/test"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
     assert!(
-        !r.xml_cases("core", "shop.core.MapSuiteTest").is_empty(),
+        reports.contains("<testcase name=\"testOne"),
         "{}",
         second.stdout
     );
