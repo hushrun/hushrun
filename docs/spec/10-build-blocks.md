@@ -437,10 +437,18 @@ lies outside the shared folders, for its unit record (B-23). Otherwise rustc rep
 wrapper, and so does it for a call whose arguments can't be read (B-4). A suspended key is never
 reused. `hushrun build clean` clears it.
 
-**B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
-chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the
-block's. A difference serves the fresh outputs, suspends the key and is reported. Programs and
-proc macros are not compared. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
+**B-16 Audit.** In `on`, one in fifty of the compiles that could be reused runs anyway, chosen by
+a hash of the key and the run's start, whatever its class. Its outputs are compared byte for byte
+with the block's: a library's, and a program's, a proc macro's or a build-script binary's, each
+file of a program's debug bundle among them (less `Contents/Resources/Relocations`, which is
+never stored, B-9). A difference serves the fresh outputs, suspends the key and is reported. In
+`observe` every block found is compared the same way, and a compile whose block's messages don't
+serve its form is compared too. *Rests on:* a link being as deterministic as rustc's own output
+(the same link repeated, at the same path and at two, gave the same bytes on Linux and on macOS
+with B-9's changes), so that a difference means a block built from other inputs than its key
+names: a link environment B-37 missed, or bytes that were tampered with. *Breaks if:* a linker
+wrote something of its own each time (a time, a random UUID): every audit of such outputs would
+differ and suspend its key, which loses reuse and never serves wrong bytes. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
 every such compile when it is `every` and none when it is `none`; any other value keeps one in
 fifty. `every` is what a replay that compares two machines asks for. `none` removes the one check
 that catches two compiles with one key and different bytes, for whoever sets it, CI or not: it is
@@ -1236,7 +1244,7 @@ goes up. The relay publishes a download only to answer a wrapper still waiting f
 the store's own publish (first writer wins), never in shared `observe`. A block that was only
 downloaded may give way to this run's download or compile; a block built here never does. A
 compile whose own publish finds a block there compares outputs: a block built here is a second
-opinion for a library, and a difference is treated as B-16 treats one; a block only downloaded
+opinion for every class (B-16), and a difference is treated as B-16 treats one; a block only downloaded
 is replaced where the two differ, its first key suspended as B-34 says, and the difference
 reported. The replacement is one step under the block's lock (the two folders exchange names), so
 no other publish lands between the old block leaving and the new one arriving; where the
@@ -1307,8 +1315,8 @@ next question about a block no lookup named starts one, and the end of the check
 no longer. At the end of a check it asks again, within the uploads' cut, about every downloaded block
 the check reused that no lookup of the run answered for, so that a machine in daily use never
 goes stale. Every answer is written into the block's record: served with its outputs renews the
-entry, anything else is a "no". On a person's machine a downloaded library's first reuse is
-audited one time in ten, which the record notes, then one in fifty as any (B-16). A difference
+entry, anything else is a "no". On a person's machine a downloaded block's first reuse, of any
+class (B-16), is audited one time in ten, which the record notes, then one in fifty as any (B-16). A difference
 found by an audit or a comparison of a downloaded block, and a dependent that can't load one
 (B-15), suspend its first key for `keep_days`, not until `hushrun build clean`, and are reported
 to the scope the record names: `differs`, `rejected`, or `unreadable` for a pack that failed its

@@ -23,6 +23,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
   for a linked output that holds the toolchain's own folder (B-10). A program that bakes its
   checkout stays `tied`. On macOS proc macros and build scripts still hold the toolchain's path.
 
+- **The audit compares every class** (B-16): a program, a proc macro or a build-script binary that
+  could be reused is compiled one time in fifty (every time with `HUSHRUN_BUILD_AUDIT=every`, in
+  `observe` whenever found) and compared byte for byte, each file of a program's debug bundle
+  included; a difference suspends its key as for a library. A downloaded block's first reuse on a
+  person's machine is audited one time in ten whatever its class, and a compile that finds its
+  block already stored is a second opinion for every class.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

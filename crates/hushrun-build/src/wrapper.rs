@@ -1206,7 +1206,7 @@ impl Call<'_> {
     }
 
     /// A block found under `key`, when its description is this compile's: the lookup's answer,
-    /// with the audit's pick (B-16), one in ten on a downloaded library's first reuse here.
+    /// with the audit's pick (B-16), one in ten on a downloaded block's first reuse here.
     #[allow(clippy::too_many_arguments)]
     fn found(
         &self,
@@ -1222,10 +1222,10 @@ impl Call<'_> {
             .filter(|d| d.step == step && d.class == self.invocation.class())?;
         let serves_form = description.messages.form() == self.invocation.form()
             || description.messages.only_notices();
-        let first_download = self.invocation.class() == Class::Library
-            && origin
-                .as_ref()
-                .is_some_and(|o| o.downloaded_only() && !o.reused);
+        // Every class, linked outputs among them (B-16, B-34).
+        let first_download = origin
+            .as_ref()
+            .is_some_and(|o| o.downloaded_only() && !o.reused);
         let started = self.current.started_ms;
         let audit = self.current.audit.picks(|| {
             if first_download {
@@ -2537,9 +2537,8 @@ impl Call<'_> {
         };
         let compared = compare_outputs(&produced.outputs, &block);
         if there.built.is_some() {
-            if self.invocation.class() == Class::Library {
-                *second = compared;
-            }
+            // Every class: a linked output is as deterministic as a library (B-16, B-32).
+            *second = compared;
             return Stored::AlreadyHad;
         }
         if !there.downloaded_only() {

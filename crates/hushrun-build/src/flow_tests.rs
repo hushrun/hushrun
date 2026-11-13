@@ -1495,6 +1495,56 @@ fn a_block_that_differs_from_a_fresh_compile_suspends_its_key() {
     assert!(w.store().suspended(&only_step(&w)).is_some());
 }
 
+// covers: B-16
+#[test]
+fn an_audit_finds_a_proc_macro_or_a_debug_bundle_that_differs_from_its_block() {
+    // Every class is compared byte for byte, a program's debug bundle file by file: a block
+    // whose bytes are not what this machine links (tampered, or an input E missed) suspends.
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), STORED);
+    let step = w.session.current().entries().last().unwrap().step.unwrap();
+    // The linker now writes other bytes for the same inputs.
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            link_salt: Some("another linker".into()),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = w.call_args(&ws, "a", args, |fake| fake.audit = true);
+    let entry = r.entry.unwrap();
+    assert!(entry.found && entry.differed, "{entry:?}");
+    assert_eq!(entry.outcome, not_stored(NotStored::Differed));
+    assert!(w.store().suspended(&step).is_some());
+
+    // A program whose debug bundle alone differs.
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let ws = program_checkout(&w, "ws");
+    settle();
+    assert_eq!(call_program(&w, &ws, &[]).outcome(), STORED);
+    let step = w.session.current().entries().last().unwrap().step.unwrap();
+    w.plan("a", program_plan(true));
+    let tools = ws.join("tools").to_str().unwrap().to_string();
+    settle();
+    let r = w.call_args(&ws, "a", program_args(&w, &ws, &[]), move |fake| {
+        fake.vars.insert("PATH".into(), tools);
+        fake.audit = true;
+    });
+    let entry = r.entry.unwrap();
+    assert!(entry.found && entry.differed, "{entry:?}");
+    assert_eq!(entry.outcome, not_stored(NotStored::Differed));
+    assert!(w.store().suspended(&step).is_some());
+}
+
 // covers: B-22
 #[test]
 fn low_free_space_stores_nothing() {
@@ -5139,6 +5189,42 @@ fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in
         "{:?}",
         relay.borrow().asked
     );
+}
+
+// covers: B-16, B-34
+#[test]
+fn a_downloaded_proc_macros_first_reuse_is_audited_one_in_ten_like_a_librarys() {
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let call = |w: &World, ws: &Path, relay: Option<Rc<RefCell<RelayStandIn>>>| {
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                ..Plan::default()
+            },
+        );
+        settle();
+        let mut args = w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        w.call_args(ws, "a", args, move |fake| {
+            from_a_registry(fake);
+            fake.relay = relay;
+        })
+    };
+    let other = world(Mode::On);
+    let there = other.checkout("ws");
+    with_tools(&there);
+    assert_eq!(call(&other, &there, None).outcome(), STORED);
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let relay = serving(other.store(), w.store(), None);
+    let r = call(&w, &ws, Some(relay));
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(r.entry.unwrap().downloaded);
+    assert_eq!(r.seen.first_audits, 1);
 }
 
 // covers: B-34
