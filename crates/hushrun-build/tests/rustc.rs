@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use std::time::SystemTime;
 
 use hushrun_build::model::{Mode, Outcome, PassedThrough};
+use hushrun_build::portable::Reason;
 use hushrun_build::session::{self, Entry, Session, Start};
 use hushrun_build::settings;
 
@@ -437,7 +438,7 @@ fn a_proc_macros_metadata_is_found_and_is_the_same_whichever_way_it_was_linked()
     assert_ne!(hushrun_build::metadata::of(&other), Some(meta));
 }
 
-// covers: B-5
+// covers: B-5, B-24
 #[test]
 fn target_cpu_native_is_resolved_by_the_real_compiler_and_still_reused() {
     let w = world();
@@ -449,8 +450,11 @@ fn target_cpu_native_is_resolved_by_the_real_compiler_and_still_reused() {
     let (out, first) = call(&one);
     ok(&out);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    // Stored and reused here, never portable: rustc gives the code generator more of the CPU
+    // than it prints (B-24 `native-cpu`).
     let portable = first.portable.unwrap();
-    assert!(portable.portable, "{portable:?}");
+    assert!(!portable.portable, "{portable:?}");
+    assert_eq!(portable.reasons, [Reason::NativeCpu], "{portable:?}");
     // What `native` is here was asked once and kept, with a CPU's name in it.
     let memos = w.session.current().store.join("compilers");
     let native: Vec<String> = fs::read_dir(&memos)
