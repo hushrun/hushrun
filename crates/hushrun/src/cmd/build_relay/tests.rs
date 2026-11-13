@@ -944,7 +944,8 @@ fn served(fake: &FakeBuild, n: u8, size: usize, cost_ms: u32) -> Vec<(Digest, Di
 // covers: B-26
 #[test]
 fn on_a_slow_link_with_no_manifest_a_build_takes_at_most_a_tenth_longer() {
-    // 5 Mbit/s, crates of 300 ms that pack to about 1 MB, as a fast laptop makes them.
+    // 5 Mbit/s for the whole link, crates of 300 ms that pack to about 1 MB, as a fast laptop
+    // makes them.
     let fake = FakeBuild::start();
     fake.throttle_store(625_000);
     let crates = served(&fake, 8, 1_000_000, 300);
@@ -953,6 +954,15 @@ fn on_a_slow_link_with_no_manifest_a_build_takes_at_most_a_tenth_longer() {
     begin(&relay, &m);
     until("open", || answering(&relay));
     let compile = Duration::from_millis(300);
+    // The same build with sharing off, measured here and now, so that a loaded machine's
+    // slower sleeps count on both sides.
+    let off = {
+        let started = Instant::now();
+        for _ in &crates {
+            std::thread::sleep(compile);
+        }
+        started.elapsed()
+    };
     let started = Instant::now();
     for (key, step) in &crates {
         let answer = ask(
@@ -969,7 +979,6 @@ fn on_a_slow_link_with_no_manifest_a_build_takes_at_most_a_tenth_longer() {
         }
     }
     let took = started.elapsed();
-    let off = compile * crates.len() as u32;
     relay.end_check(&[]);
     assert!(
         took <= off + off / 10,

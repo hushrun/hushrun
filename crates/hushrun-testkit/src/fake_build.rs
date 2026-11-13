@@ -17,7 +17,6 @@
 //! request by route and keeps what each carried ([`FakeBuild::seen`]).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -29,7 +28,7 @@ use hushrun_core::blocks::{
 };
 use serde_json::{Value, json};
 
-use crate::http::{Reply, Request, Response, Server};
+use crate::http::{self, Reply, Request, Response, Server};
 
 /// The routes the fake counts, pauses and fails by.
 pub mod route {
@@ -132,7 +131,8 @@ struct State {
     failures: Vec<Failure>,
     counts: BTreeMap<String, usize>,
     seen: Vec<Seen>,
-    store_rate: Arc<AtomicU64>,
+    /// The link between the machines and the object store: one rate for all of its traffic.
+    store_link: Arc<http::Link>,
     /// Bytes the object store was asked to send, whole or cut off.
     served_bytes: u64,
     /// ID tokens the fake's token endpoint issued, each with its expiry in seconds since the
@@ -162,7 +162,7 @@ impl FakeBuild {
 
     /// A fake for the org `org`, which answers at `/o/<org>` only.
     pub fn start_for(org: &str) -> FakeBuild {
-        let store_rate = Arc::new(AtomicU64::new(0));
+        let store_link = http::Link::new();
         let state = Arc::new(Mutex::new(State {
             org: org.to_string(),
             origin: String::new(),
@@ -182,21 +182,18 @@ impl FakeBuild {
             failures: Vec::new(),
             counts: BTreeMap::new(),
             seen: Vec::new(),
-            store_rate: store_rate.clone(),
+            store_link: store_link.clone(),
             served_bytes: 0,
             id_tokens: Vec::new(),
             id_token_seconds: 300,
             audiences: Vec::new(),
         }));
         let shared = state.clone();
-        let rate = store_rate;
+        let link = store_link;
         let server = Server::start_with(
             move |method, path| {
-                if method == "PUT" && path.starts_with("/store/") {
-                    rate.load(Ordering::SeqCst)
-                } else {
-                    0
-                }
+                (method == "PUT" && path.starts_with("/store/") && link.rate() > 0)
+                    .then(|| link.clone())
             },
             move |request| handle(&shared, request),
         );
@@ -320,11 +317,10 @@ impl FakeBuild {
         });
     }
 
-    /// Holds the object store's downloads and uploads to `bytes_per_second` (0: no limit).
+    /// Holds the object store's downloads and uploads, all together, to `bytes_per_second` (0:
+    /// no limit): one link for every connection, so eight downloads at once share the rate.
     pub fn throttle_store(&self, bytes_per_second: u64) {
-        self.state()
-            .store_rate
-            .store(bytes_per_second, Ordering::SeqCst);
+        self.state().store_link.set_rate(bytes_per_second);
     }
 
     /// Makes every upload link given so far expire now.
@@ -731,10 +727,10 @@ fn store(state: &mut State, request: &Request, object: &str, pause: Option<Durat
             Some(bytes) => {
                 state.served_bytes += bytes.len() as u64;
                 let response = Response::bytes(200, bytes.clone());
-                match state.store_rate.load(Ordering::SeqCst) {
+                match state.store_link.rate() {
                     0 => answer(response, pause),
-                    // Held to a rate, it answers at once: the rate is the delay.
-                    rate => Reply::Slow(rate, response),
+                    // Held to a rate, it answers at once: the link is the delay.
+                    _ => Reply::Slow(state.store_link.clone(), response),
                 }
             }
             None => answer(Response::new(404), pause),
@@ -1232,5 +1228,46 @@ mod tests {
                 .filter(|s| s.route.starts_with("store"))
                 .all(|s| s.authorization.is_none())
         );
+    }
+
+    #[test]
+    fn a_throttled_store_is_one_link_that_downloads_at_once_share() {
+        // Per connection, four downloads at once would each get the whole rate and end in the
+        // time one takes. On one link they share it: together they take four times as long.
+        let fake = FakeBuild::start();
+        let pack = vec![7u8; 64 * 1024];
+        let urls: Vec<String> = (1..=4)
+            .map(|n| {
+                fake.put_block(
+                    address(n),
+                    "person/1",
+                    &pack,
+                    address(n + 10),
+                    10,
+                    Class::Library,
+                );
+                let lookup = json!({"kind": "rustc/1", "addresses": [address(n)], "fetch": true});
+                let (_, answer) = post(&fake, "blocks/lookup", &lookup);
+                answer["found"][0]["get"]["url"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        // 512 KiB a second: one pack alone takes an eighth of a second, four take half of one.
+        fake.throttle_store(512 * 1024);
+        let started = Instant::now();
+        let pack = &pack;
+        std::thread::scope(|scope| {
+            for url in &urls {
+                let fake = &fake;
+                scope.spawn(move || {
+                    let (_, _, bytes) = call(fake, "GET", url, b"", &[]);
+                    assert_eq!(bytes.len(), pack.len());
+                });
+            }
+        });
+        let together = started.elapsed();
+        assert!(together >= Duration::from_millis(450), "{together:?}");
     }
 }

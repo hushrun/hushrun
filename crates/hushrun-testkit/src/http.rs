@@ -1,12 +1,12 @@
 //! A minimal HTTP/1.1 server on the loopback, for tests that need a service to talk to: one
 //! thread per connection and one request per connection (`connection: close`). A body can be
-//! read and written at a set rate, for tests of what a slow link does ([`Server::start_with`],
-//! [`Reply::Slow`]).
+//! read and written through a [`Link`] of a set rate, shared by every connection that uses it,
+//! for tests of what a slow link does ([`Server::start_with`], [`Reply::Slow`]).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A request, read whole.
@@ -85,14 +85,61 @@ pub enum Reply {
     Later(Duration, Response),
     /// Closes the connection without answering.
     Close,
-    /// Answers with the body written at most this many bytes a second. A client that goes away
-    /// stops it.
-    Slow(u64, Response),
+    /// Answers with the body written through a link, which every connection using it shares:
+    /// eight bodies at once each get an eighth of its rate. A client that goes away stops it.
+    Slow(Arc<Link>, Response),
 }
 
-/// How fast a request's body is read, decided from its method and path once its head is read:
-/// bytes a second, 0 for as fast as it comes.
-pub type ReadRate = dyn Fn(&str, &str) -> u64 + Send + Sync;
+/// A link of one rate, shared by every body that goes through it, in either direction: what a
+/// slow connection between a machine and a store is. 0 is no limit.
+#[derive(Debug)]
+pub struct Link {
+    rate: AtomicU64,
+    /// When the link is next free: each piece takes its turn after the ones before it.
+    next: Mutex<Instant>,
+}
+
+impl Link {
+    /// A link with no limit until [`Link::set_rate`].
+    pub fn new() -> Arc<Link> {
+        Arc::new(Link {
+            rate: AtomicU64::new(0),
+            next: Mutex::new(Instant::now()),
+        })
+    }
+
+    /// Holds the link to `bytes_per_second` (0: no limit).
+    pub fn set_rate(&self, bytes_per_second: u64) {
+        self.rate.store(bytes_per_second, Ordering::SeqCst);
+    }
+
+    /// The link's rate, 0 for no limit.
+    pub fn rate(&self) -> u64 {
+        self.rate.load(Ordering::SeqCst)
+    }
+
+    /// Waits until `bytes` more may go through: after every piece that took its turn before.
+    fn pass(&self, bytes: usize) {
+        let rate = self.rate();
+        if rate == 0 {
+            return;
+        }
+        let due = {
+            let mut next = self.next.lock().unwrap_or_else(|p| p.into_inner());
+            let now = Instant::now();
+            let start = (*next).max(now);
+            *next = start + Duration::from_secs_f64(bytes as f64 / rate as f64);
+            *next
+        };
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+    }
+}
+
+/// The link a request's body is read through, decided from its method and path once its head
+/// is read: `None` for as fast as it comes.
+pub type ReadLink = dyn Fn(&str, &str) -> Option<Arc<Link>> + Send + Sync;
 
 /// A running server. Dropping it stops accepting connections.
 pub struct Server {
@@ -103,16 +150,16 @@ pub struct Server {
 impl Server {
     /// Listens on a free loopback port and answers each request with `handler`.
     pub fn start(handler: impl Fn(Request) -> Reply + Send + Sync + 'static) -> Server {
-        Server::start_with(|_, _| 0, handler)
+        Server::start_with(|_, _| None, handler)
     }
 
-    /// [`Server::start`], reading each request's body at the rate `read_rate` gives for its
-    /// method and path.
+    /// [`Server::start`], reading each request's body through the link `read_link` gives for
+    /// its method and path.
     pub fn start_with(
-        read_rate: impl Fn(&str, &str) -> u64 + Send + Sync + 'static,
+        read_link: impl Fn(&str, &str) -> Option<Arc<Link>> + Send + Sync + 'static,
         handler: impl Fn(Request) -> Reply + Send + Sync + 'static,
     ) -> Server {
-        let read_rate: Arc<ReadRate> = Arc::new(read_rate);
+        let read_rate: Arc<ReadLink> = Arc::new(read_link);
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr = listener.local_addr().expect("local address");
         let stop = Arc::new(AtomicBool::new(false));
@@ -152,7 +199,7 @@ impl Drop for Server {
 
 fn serve(
     stream: TcpStream,
-    read_rate: &ReadRate,
+    read_rate: &ReadLink,
     handler: &(dyn Fn(Request) -> Reply + Send + Sync),
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -168,25 +215,14 @@ fn serve(
         Reply::Close => {
             let _ = stream.shutdown(Shutdown::Both);
         }
-        Reply::Slow(rate, response) => write_slowly(stream, &response, rate),
+        Reply::Slow(link, response) => write_slowly(stream, &response, Some(&link)),
     }
 }
 
 /// The piece a throttled body is read or written in.
 const PIECE: usize = 16 * 1024;
 
-/// Waits until `done` bytes since `start` are within `rate` bytes a second.
-fn pace(start: Instant, done: usize, rate: u64) {
-    if rate == 0 {
-        return;
-    }
-    let due = Duration::from_secs_f64(done as f64 / rate as f64);
-    if let Some(wait) = due.checked_sub(start.elapsed()) {
-        std::thread::sleep(wait);
-    }
-}
-
-fn read_request(stream: &TcpStream, read_rate: &ReadRate) -> Option<Request> {
+fn read_request(stream: &TcpStream, read_rate: &ReadLink) -> Option<Request> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
@@ -227,15 +263,16 @@ fn read_request(stream: &TcpStream, read_rate: &ReadRate) -> Option<Request> {
         }
     } else if let Some(length) = header("content-length") {
         let length: usize = length.parse().ok()?;
-        let rate = read_rate(&method, target.split('?').next().unwrap_or(""));
-        let start = Instant::now();
+        let link = read_rate(&method, target.split('?').next().unwrap_or(""));
         body = Vec::with_capacity(length.min(64 << 20));
         let mut piece = vec![0; PIECE];
         while body.len() < length {
             let want = PIECE.min(length - body.len());
+            if let Some(link) = &link {
+                link.pass(want);
+            }
             reader.read_exact(&mut piece[..want]).ok()?;
             body.extend_from_slice(&piece[..want]);
-            pace(start, body.len(), rate);
         }
     }
     let (path, query) = target.split_once('?').unwrap_or((&target, ""));
@@ -257,10 +294,10 @@ fn read_request(stream: &TcpStream, read_rate: &ReadRate) -> Option<Request> {
 }
 
 fn write_response(stream: TcpStream, response: &Response) {
-    write_slowly(stream, response, 0);
+    write_slowly(stream, response, None);
 }
 
-fn write_slowly(mut stream: TcpStream, response: &Response, rate: u64) {
+fn write_slowly(mut stream: TcpStream, response: &Response, link: Option<&Link>) {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
         response.status,
@@ -273,16 +310,14 @@ fn write_slowly(mut stream: TcpStream, response: &Response, rate: u64) {
     head.push_str("\r\n");
     let written = (|| {
         stream.write_all(head.as_bytes())?;
-        if rate == 0 {
-            stream.write_all(&response.body)?;
-        } else {
-            let start = Instant::now();
-            let mut done = 0;
-            for piece in response.body.chunks(PIECE) {
-                stream.write_all(piece)?;
-                stream.flush()?;
-                done += piece.len();
-                pace(start, done, rate);
+        match link {
+            None => stream.write_all(&response.body)?,
+            Some(link) => {
+                for piece in response.body.chunks(PIECE) {
+                    link.pass(piece.len());
+                    stream.write_all(piece)?;
+                    stream.flush()?;
+                }
             }
         }
         stream.flush()
