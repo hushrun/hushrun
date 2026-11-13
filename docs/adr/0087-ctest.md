@@ -418,3 +418,13 @@ configuring wrote. Kept out: files outside the repository (CMake's own modules, 
 elsewhere), `CMakePresets.json` and `CMakeUserPresets.json`, a `CONFIGURE_DEPENDS` glob's check
 (in the build directory), and a file rewritten with its time unchanged. A file no configure reads,
 such as `README.md`, makes nothing old.
+
+## Amendment 15: a stale program's files keep their sets (2026-11-13)
+
+On fmt, `include/fmt/printf.h` edited and not built made the run say `all 22 test files run:
+include/fmt/args.h is new`, while `hushrun why` said only printf-test would run. A run showed what
+made it: the plan left a stale program out of the sources the build's graph names, as it left its
+unit unkeyed, so a header only stale programs read (and their own files) fell into the rest set,
+where the map had never held them: "new", and in every key. A stale program's files now keep their
+sets as its graph gives them; only its unit is unkeyed, and runs. The plan's line and `hushrun why`
+go by the same sets.

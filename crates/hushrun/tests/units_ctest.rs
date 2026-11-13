@@ -1745,6 +1745,70 @@ fn a_build_tree_older_than_its_configuration_records_no_pass_until_configured_an
     }
 }
 
+// covers: C-49, C-37
+#[test]
+fn on_a_stale_build_the_runs_line_and_why_say_the_same_of_each_program() {
+    let Some(cmake) = with_cmake().into_iter().next() else {
+        return;
+    };
+    for generator in generators(&cmake) {
+        let at = format!("CMake {:?}, {generator}", cmake.version);
+        let p = Project::new(
+            &cmake,
+            generator,
+            &[
+                file("hushrun.yaml", &yaml("reuse")),
+                file(".gitignore", "build/\n"),
+                file(
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.19)\nproject(two C)\nenable_testing()\n\
+                     add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                     target_include_directories(t_a PRIVATE inc)\ntarget_include_directories(t_b PRIVATE inc)\n\
+                     add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n",
+                ),
+                file("inc/a.h", "#define A 1\n"),
+                file("inc/p.h", "#define P 1\n"),
+                file("inc/b.h", "#define B 1\n"),
+                file(
+                    "tests/t_a.c",
+                    "#include \"a.h\"\n#include \"p.h\"\nint main(void) { return A == P ? 0 : 1; }\n",
+                ),
+                file(
+                    "tests/t_b.c",
+                    "#include \"b.h\"\nint main(void) { return B == 1 ? 0 : 1; }\n",
+                ),
+            ],
+        );
+        let first = p.run(CTEST, &[]);
+        assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+        // p.h changes, and nothing builds: t_a is stale, and a.h, which only t_a reads, is no
+        // new file of any kind.
+        p.write("inc/p.h", "#define P 1 /* 2 */\n");
+        git::commit_all(&p.repo, "p");
+        let ran = p.run(CTEST, &[]);
+        let line = ran.line("hushrun: unit: ");
+        // One of the two already passed on the files it read (it may run as a check), as `why`
+        // says below; nothing is new.
+        assert!(
+            (line.starts_with("hushrun: unit: 1 of 2 test files run; 1 already passed")
+                || line.starts_with(
+                    "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+                ))
+                && !line.contains(" is new"),
+            "{at}: {}",
+            ran.stderr
+        );
+        // `hushrun why` says the same of each.
+        let why = |unit: &str| p.run(&["why", "unit", unit], &[]).stdout;
+        assert!(
+            why("t_b").starts_with("t_b would be reused"),
+            "{at}: {}",
+            why("t_b")
+        );
+        assert!(why("t_a").starts_with("t_a runs"), "{at}: {}", why("t_a"));
+    }
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {

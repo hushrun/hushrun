@@ -164,20 +164,27 @@ impl Recognized {
         for (unit, built_here) in programs {
             let Some(b) = built
                 .get(unit)
-                .filter(|b| built_here && b.stale.is_none() && b.refused.is_none())
+                .filter(|b| built_here && b.refused.is_none())
             else {
                 out.units.insert(unit.to_string(), None);
                 continue;
             };
-            // \[C-30\] Only what the graph gives a program is a source (see `read`).
+            // \[C-30\] Only what the graph gives a program is a source (see `read`); a stale
+            // program's graph is the build's still, so its files keep their sets, and the run's
+            // line says what `hushrun why` says of them, from the map's.
             out.named
                 .extend(b.reads.iter().filter(|f| build::is_source(f)).cloned());
+            out.unit_files.extend(b.own.iter().cloned());
+            // A stale program ran old code: it isn't keyed, so it runs.
+            if b.stale.is_some() {
+                out.units.insert(unit.to_string(), None);
+                continue;
+            }
             let reads: BTreeSet<String> = if b.every_source {
                 every.clone()
             } else {
                 b.reads.clone()
             };
-            out.unit_files.extend(b.own.iter().cloned());
             out.units
                 .insert(unit.to_string(), Some((reads, b.own.clone())));
         }

@@ -354,6 +354,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   an included `.cmake` file edited, and not configured) records no pass, the check's included,
   and says to configure and build before ctest. Before, the old programs' passes were recorded,
   and later runs left out tests that failed once built.
+- CTest: on a stale build the run's line no longer calls a file only a stale program reads new
+  ("all 22 test files run: include/fmt/args.h is new"): a stale program's files keep their sets,
+  so the line and `hushrun why` say the same.
 - CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
   no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
   Makefiles the line says which file to touch.
