@@ -412,3 +412,48 @@ proptest! {
         prop_assert!(open_hint(&KEY, &bytes).is_none());
     }
 }
+
+// covers: B-28
+#[test]
+fn a_pack_that_would_unpack_past_its_room_is_refused_before_any_file_is_written() {
+    // 16 MiB of zeros packs to a few kilobytes: far more than 64 times the pack.
+    let zeros = vec![0u8; 16 << 20];
+    let (record, packed) = pack(&KEY, &[("libbig.rlib", &zeros)]);
+    assert!((packed.len() as u64) * MOST_EXPANSION < zeros.len() as u64);
+    let expect = expect(&record, &packed);
+    let mut files = Files::default();
+    let refused = open_within(
+        &mut &packed[..],
+        &expect,
+        Some(Room::for_pack(packed.len() as u64, u64::MAX)),
+        &mut files,
+    );
+    assert!(matches!(refused, Err(PackError::NoRoom(_))), "{refused:?}");
+    assert!(files.files.is_empty(), "a file was written");
+    assert!(!refused.unwrap_err().unreadable());
+    // Within 64 times, but more than the disk can take above its floor: refused the same way.
+    let (record, packed) = pack(&KEY, SMALL);
+    let expect = self::expect(&record, &packed);
+    let mut files = Files::default();
+    let refused = open_within(
+        &mut &packed[..],
+        &expect,
+        Some(Room {
+            most: u64::MAX,
+            free: 10,
+        }),
+        &mut files,
+    );
+    assert!(matches!(refused, Err(PackError::NoRoom(_))), "{refused:?}");
+    assert!(files.files.is_empty());
+    // With room, it opens.
+    let mut files = Files::default();
+    open_within(
+        &mut &packed[..],
+        &expect,
+        Some(Room::for_pack(packed.len() as u64, u64::MAX)),
+        &mut files,
+    )
+    .unwrap();
+    assert_eq!(files.files.len(), 2);
+}

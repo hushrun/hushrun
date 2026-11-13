@@ -268,7 +268,12 @@ impl Opened {
 
 /// Opens the pack at `path` with `expect` into a new folder `dir`. The checks run in the
 /// format's order; nothing is published here.
-pub(crate) fn open_pack(path: &Path, expect: &Expect, dir: &Path) -> Result<Opened, PackError> {
+pub(crate) fn open_pack(
+    path: &Path,
+    expect: &Expect,
+    room: Option<pack::Room>,
+    dir: &Path,
+) -> Result<Opened, PackError> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).map_err(PackError::Io)?;
     let mut sink = Unpack {
@@ -278,7 +283,7 @@ pub(crate) fn open_pack(path: &Path, expect: &Expect, dir: &Path) -> Result<Open
     };
     let opened = (|| {
         let mut input = io::BufReader::new(File::open(path).map_err(PackError::Io)?);
-        let record = pack::open(&mut input, expect, &mut sink)?;
+        let record = pack::open_within(&mut input, expect, room, &mut sink)?;
         if let Some(mut file) = sink.current.take() {
             file.flush().map_err(PackError::Io)?;
         }

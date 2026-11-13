@@ -668,7 +668,10 @@ last chunk, with data after it, or with a chunk over 1 MiB fails), each file's s
 against the record, that the record names the key and the first key it was asked for, and that
 the **digest of outputs** (SHA-256 of the canonical JSON of the files sorted by name, each its
 name, size and SHA-256, and nothing else) is the row's. A pack that fails any check is dropped
-and reported `unreadable`. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs
+and reported `unreadable`. Before it writes any file, the reader refuses a record whose files
+come to more than 64 times the pack, or to more than the disk can take above the free-space floor
+(B-22); that is a compile, not a report, and each file stops at its declared size whatever the
+stream holds. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs
 being computed again from what was unpacked, so that no comparison rests on the uploader's word;
 zstd giving the same stream for one version of it, so two versions of hushrun may give two packs
 of one block, which costs a wait and nothing else.

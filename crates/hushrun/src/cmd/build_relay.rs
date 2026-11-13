@@ -1366,7 +1366,12 @@ impl Relay {
             outputs: Some(found.outputs),
         };
         let dir = path.with_extension("open");
-        let opened = pack::open_pack(path, &expect, &dir).map_err(|err| err.unreadable())?;
+        // C5: what the disk can take above its floor, and at most 64 times the pack.
+        let free = self.config.store.free_bytes().unwrap_or(u64::MAX);
+        let floor = u64::from(self.config.min_free_gb).saturating_mul(1 << 30);
+        let room = blocks::pack::Room::for_pack(found.bytes, free.saturating_sub(floor));
+        let opened =
+            pack::open_pack(path, &expect, Some(room), &dir).map_err(|err| err.unreadable())?;
         let date = self.state().server_date_ms.unwrap_or_else(now_ms);
         let origin = Origin::downloaded(self.vouch_entry(found, date));
         let published = pack::publish(

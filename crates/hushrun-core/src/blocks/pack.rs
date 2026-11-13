@@ -149,6 +149,30 @@ pub struct Expect {
     pub outputs: Option<Hex32>,
 }
 
+/// How many times its own size a pack may unpack to on a reader (C5): past it the record is
+/// refused before any file is written.
+pub const MOST_EXPANSION: u64 = 64;
+
+/// What a reader has room for (C5): checked against the record's total before any file is
+/// written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Room {
+    /// The most this pack may unpack to: its size times [`MOST_EXPANSION`].
+    pub most: u64,
+    /// What the disk can take, above its floor.
+    pub free: u64,
+}
+
+impl Room {
+    /// The room for a pack of `pack_bytes` on a disk with `free` bytes above its floor.
+    pub fn for_pack(pack_bytes: u64, free: u64) -> Room {
+        Room {
+            most: pack_bytes.saturating_mul(MOST_EXPANSION),
+            free,
+        }
+    }
+}
+
 /// Where [`open`] writes a block's files: `file` before each file's bytes, then its bytes in
 /// pieces.
 pub trait Sink {
@@ -199,6 +223,11 @@ pub enum PackError {
     /// A file changed while it was packed: it isn't what its record says. Nothing is sent.
     #[error("{name:?} changed while it was packed")]
     Changed { name: String },
+    /// The record's files come to more than this reader has room for (C5): more than
+    /// [`MOST_EXPANSION`] times the pack, or more than the disk can take above its floor.
+    /// Nothing was written.
+    #[error("the pack would unpack to more than {0}")]
+    NoRoom(&'static str),
     /// Reading or writing failed.
     #[error("{0}")]
     Io(#[from] io::Error),
@@ -208,7 +237,10 @@ impl PackError {
     /// Whether the pack itself is wrong, which a reader reports as `unreadable`: every error but
     /// one of input and output, or of the writer's own files.
     pub fn unreadable(&self) -> bool {
-        !matches!(self, PackError::Io(_) | PackError::Changed { .. })
+        !matches!(
+            self,
+            PackError::Io(_) | PackError::Changed { .. } | PackError::NoRoom(_)
+        )
     }
 
     /// How a log line names the error, in one word.
@@ -227,6 +259,7 @@ impl PackError {
             PackError::Outputs => "outputs",
             PackError::TooLarge => "too-large",
             PackError::Changed { .. } => "changed",
+            PackError::NoRoom(_) => "no-room",
             PackError::Io(_) => "io",
         }
     }
@@ -675,12 +708,23 @@ pub fn open(
     expect: &Expect,
     sink: &mut dyn Sink,
 ) -> Result<PackRecord, PackError> {
+    open_within(input, expect, None, sink)
+}
+
+/// [`open`], refusing before any file is written a record whose files come to more than `room`
+/// (C5); and every file stops at its declared size, as always.
+pub fn open_within(
+    input: &mut dyn Read,
+    expect: &Expect,
+    room: Option<Room>,
+    sink: &mut dyn Sink,
+) -> Result<PackRecord, PackError> {
     let mut counted = Counted {
         inner: input,
         hasher: Sha256::new(),
         bytes: 0,
     };
-    let opened = open_counted(&mut counted, expect, sink);
+    let opened = open_counted(&mut counted, expect, room, sink);
     if expect.pack_sha256.is_some() || expect.bytes.is_some() {
         // A wrong pack is said to be wrong before anything it holds is judged: read the rest.
         let mut rest = [0u8; 64 * 1024];
@@ -710,6 +754,7 @@ pub fn open(
 fn open_counted(
     counted: &mut Counted<'_>,
     expect: &Expect,
+    room: Option<Room>,
     sink: &mut dyn Sink,
 ) -> Result<PackRecord, PackError> {
     let mut head = [0u8; HEADER_BYTES];
@@ -747,7 +792,7 @@ fn open_counted(
     if let Err(err) = chunks.next_chunk() {
         return Err(stream_error(err, &failed, PackError::Decompress));
     }
-    let result = read_stream(&mut chunks, &failed, sink);
+    let result = read_stream(&mut chunks, &failed, room, sink);
     let record = match result {
         Ok(record) => record,
         Err(err) => {
@@ -788,6 +833,7 @@ fn open_counted(
 fn read_stream(
     chunks: &mut Chunks<'_, '_>,
     failed: &Rc<RefCell<Option<PackError>>>,
+    room: Option<Room>,
     sink: &mut dyn Sink,
 ) -> Result<PackRecord, PackError> {
     let mut decoder = zstd::stream::read::Decoder::new(&mut *chunks)
@@ -808,6 +854,18 @@ fn read_stream(
         return Err(PackError::Record("is cut short"));
     }
     let record = parse_record(&bytes)?;
+    if let Some(room) = room {
+        let total = record
+            .files
+            .iter()
+            .fold(0u64, |total, file| total.saturating_add(file.size));
+        if total > room.most {
+            return Err(PackError::NoRoom("64 times its own size"));
+        }
+        if total > room.free {
+            return Err(PackError::NoRoom("the disk can take above its floor"));
+        }
+    }
     let mut buf = vec![0u8; 64 * 1024];
     for (index, file) in record.files.iter().enumerate() {
         sink.file(index, &file.name, file.size)?;
