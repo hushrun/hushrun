@@ -347,6 +347,12 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: the plan's listing is taken once, by the `ctest` COMMAND starts, and never by a later
   start or one under a wrapper, which list for themselves; and a failed test the listing didn't
   name (one discovery added after it) keeps every pass of its `ctest` out.
+- CTest: a flag or a link option configured and not built makes the program old, as the build
+  sees it: on Makefiles by `flags.make` and `link.txt`, on Ninja by what its log records of each
+  command. Before, the old program's pass was recorded.
+- CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
+  no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
+  Makefiles the line says which file to touch.
 - CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
   program a test program waits for or has compiled in, and a program a test names by a relative
   path are now read; on Makefiles a source newer than its object makes the program stale; an

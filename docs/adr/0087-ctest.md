@@ -354,3 +354,44 @@ ninja and make don't build its objects again either, so the program runs what wa
 and Amendment 8's rule, which goes by the same times, can't tell. hushrun keys each program by the
 files' contents, so the key is the new one; only the program's being old goes unseen. This is kept,
 not fixed: telling it would mean hashing every file a program was built from at every run.
+
+## Amendment 12: a command changed and not built (2026-11-12)
+
+The confirmation pass found what Amendment 8 gave up: `target_compile_definitions(t_a PRIVATE FAIL)`
+added, the build configured again (`cmake -S . -B build`) and not built, recorded the old
+program's pass, though ninja (`ninja -n t_a`) and make (`flags.make` newer than `t_a.c.o`) would
+both build it again. The rule takes one more input: **an object, a link or the program is also
+old when the command that would make it now isn't the one that made it.** The build tool's own
+record says so, and nothing else is asked of it:
+
+- **Makefiles:** an object against its target's `flags.make`, a library or program against its
+  target's `link.txt`. CMake writes each again only when its content changes (a run: configuring
+  again after a comment changes neither), so one newer than what it makes means its command
+  changed since.
+- **Ninja:** `ninja -n -d explain <program>` (a dry run) read only for its `command line changed
+  for <output>` lines, about the program, its objects and its libraries: Ninja compares each
+  command's hash with what its log recorded when it last ran it. `build.ninja`'s time, which
+  changes on any configure, isn't used. When ninja doesn't answer, whether the commands changed
+  can't be told: the program is `not observed`, which doesn't keep the run's pass.
+
+The line says `t_a ran old code: the command that makes CMakeFiles/t_a.dir/tests/t_a.c.o changed
+after it was made (ninja says so); build before ctest`, with the file on Makefiles. The target that
+runs on every build, a FAT build directory and a comment configured again stay up to date.
+
+## Amendment 13: a rule that leaves its output as it was (2026-11-12)
+
+Amendment 8 named, as the case its rule gets wrong, a rule that leaves its output untouched when
+it would write the same bytes (`copy_if_different`). The confirmation pass showed what it costs:
+an edit to `VERSION` that leaves `ver.h`'s bytes the same, or a `git checkout` that rewrites
+`VERSION`, left `t_ver` old on every `cmake --build && ctest`, and building didn't cure it. A branch
+switch that touches only a generator's input does that to ordinary projects.
+
+Where the build tool records the fact, it decides. Ninja's log says when the rule that writes a
+file last ran: for a rule with `restat` (CMake's custom commands) that left its output as it was,
+it logs the newest input's time then. A file a rule writes whose logged time is no earlier than
+every file it was made from is current, whatever its own time, and nothing it was made from makes
+an object old on its account; otherwise (no entry, or an input newer than the entry) the rule
+hasn't run since and the object is old, as before. Makefiles record nothing of it, so the object
+stays old there, and the line names the cure: `VERSION changed after
+CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest; if the build
+leaves build/ver.h as it was, touch build/ver.h, then build before ctest`.

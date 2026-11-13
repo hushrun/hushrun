@@ -1437,13 +1437,215 @@ fn a_source_saved_in_the_second_its_object_was_made_says_what_cures_it() {
             p.build();
             let built = p.run(CTEST, &[]);
             assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
-        } else {
+        } else if make_whole_seconds() {
             assert!(
                 said[0].ends_with(
                     "in the same second: make compares whole seconds, and won't make it again; touch tests/t_misc.c, then build before ctest"
                 ),
                 "{at}: {}",
                 said[0]
+            );
+        } else {
+            // GNU Make 4 compares the times whole too: a build cures it.
+            assert!(
+                said[0].ends_with("; build before ctest") && !said[0].contains("touch"),
+                "{at}: {}",
+                said[0]
+            );
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
+        }
+    }
+}
+
+/// Whether the `make` the Makefiles build runs compares times by the second, as GNU Make before 4
+/// (macOS's 3.81) does, which is what hushrun asks it.
+fn make_whole_seconds() -> bool {
+    let version = which("make")
+        .and_then(|make| Command::new(make).arg("--version").output().ok())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    !version.contains("GNU Make ") || version.contains("GNU Make 3.")
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_command_changed_and_configured_without_a_build_is_old_until_built() {
+    let link_flag = if cfg!(target_os = "macos") {
+        "-Wl,-dead_strip"
+    } else {
+        "-Wl,--as-needed"
+    };
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let base = "cmake_minimum_required(VERSION 3.19)\nproject(flags C)\nenable_testing()\n\
+                        add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                        add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n";
+            let p = Project::new(
+                &cmake,
+                generator,
+                &[
+                    file("hushrun.yaml", &yaml("reuse")),
+                    file(".gitignore", "build/\n"),
+                    file("CMakeLists.txt", base),
+                    file(
+                        "tests/t_a.c",
+                        "int main(void) {\n#ifdef FAIL\n  return 1;\n#endif\n  return 0;\n}\n",
+                    ),
+                    file("tests/t_b.c", "int main(void) { return 0; }\n"),
+                ],
+            );
+            let configure = |text: &str| {
+                p.write("CMakeLists.txt", text);
+                git::commit_all(&p.repo, "configure");
+                let out = p
+                    .tool("cmake")
+                    .args(["-S", ".", "-B", "build"])
+                    .output()
+                    .expect("cmake");
+                assert!(
+                    out.status.success(),
+                    "{at}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // A comment, configured: no command changes, and nothing is old.
+            let commented = format!("{base}# a comment\n");
+            configure(&commented);
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            assert!(not_recorded(&ran).is_empty(), "{at}: {}", ran.stderr);
+            // A link flag, configured and not built: t_b ran as linked before.
+            let linked = format!("{commented}target_link_options(t_b PRIVATE {link_flag})\n");
+            configure(&linked);
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            let said = not_recorded(&ran);
+            assert!(
+                said.len() == 1
+                    && said[0].contains("t_b ran old code: the command that makes t_b changed")
+                    && said[0].ends_with("; build before ctest"),
+                "{at}: {}",
+                ran.stderr
+            );
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert_eq!(built.code, 0, "{at}: {}", built.stderr);
+            assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
+            // A definition that makes t_a fail, configured and not built: its old program
+            // passes, and the pass isn't recorded.
+            configure(&format!(
+                "{linked}target_compile_definitions(t_a PRIVATE FAIL)\n"
+            ));
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            let said = not_recorded(&ran);
+            assert!(
+                said.len() == 1
+                    && said[0].contains(
+                        "t_a ran old code: the command that makes CMakeFiles/t_a.dir/tests/t_a.c.o changed"
+                    )
+                    && said[0].ends_with("; build before ctest"),
+                "{at}: {}",
+                ran.stderr
+            );
+            assert!(
+                !ran.stderr.contains("it won't run again on this code"),
+                "{at}: {}",
+                ran.stderr
+            );
+            // Built, it fails, as it does.
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert_ne!(built.code, 0, "{at}: {}", built.stderr);
+        }
+    }
+}
+
+// covers: C-49, C-32
+#[test]
+fn a_rule_that_leaves_its_output_as_it_was_keeps_its_program_up_to_date_where_the_build_says_it_ran()
+ {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            // ver.h is made from VERSION's first line, and written only when its bytes change.
+            let p = Project::new(
+                &cmake,
+                generator,
+                &[
+                    file("hushrun.yaml", &yaml("reuse")),
+                    file(".gitignore", "build/\n"),
+                    file(
+                        "CMakeLists.txt",
+                        "cmake_minimum_required(VERSION 3.19)\nproject(ver C)\nenable_testing()\n\
+                         add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/ver.h COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/VERSION -DOUT=${CMAKE_BINARY_DIR}/ver.h -P ${CMAKE_SOURCE_DIR}/ver.cmake DEPENDS ${CMAKE_SOURCE_DIR}/VERSION ${CMAKE_SOURCE_DIR}/ver.cmake)\n\
+                         add_executable(t_ver tests/t_ver.c ${CMAKE_BINARY_DIR}/ver.h)\ntarget_include_directories(t_ver PRIVATE ${CMAKE_BINARY_DIR})\n\
+                         add_executable(t_p tests/t_p.c)\nadd_test(NAME ver COMMAND t_ver)\nadd_test(NAME p COMMAND t_p)\n",
+                    ),
+                    file(
+                        "ver.cmake",
+                        "file(STRINGS ${IN} v LIMIT_COUNT 1)\nfile(WRITE ${OUT}.tmp \"#define VER \\\"${v}\\\"\\n\")\n\
+                         execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OUT}.tmp ${OUT})\n",
+                    ),
+                    file("VERSION", "1.0\n"),
+                    file(
+                        "tests/t_ver.c",
+                        "#include \"ver.h\"\nint main(void) { return VER[0] == '1' ? 0 : 1; }\n",
+                    ),
+                    file("tests/t_p.c", "int main(void) { return 0; }\n"),
+                ],
+            );
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // A note added to VERSION, and built: the rule runs, and ver.h stays as it was.
+            p.write("VERSION", "1.0\n# a note\n");
+            git::commit_all(&p.repo, "note");
+            p.build();
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            let said = not_recorded(&ran);
+            if generator == "Ninja" {
+                // Ninja's log says the rule ran after VERSION changed: ver.h is current, and so
+                // is t_ver.
+                assert!(said.is_empty(), "{at}: {}", ran.stderr);
+            } else {
+                // Nothing records that the rule ran: t_ver is old, and the line says what cures
+                // it.
+                assert!(
+                    said.len() == 1
+                        && said[0].ends_with(
+                            "VERSION changed after CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest; if the build leaves build/ver.h as it was, touch build/ver.h, then build before ctest"
+                        ),
+                    "{at}: {}",
+                    ran.stderr
+                );
+                let touched = Command::new("touch")
+                    .arg(p.repo.join("build/ver.h"))
+                    .status()
+                    .unwrap();
+                assert!(touched.success());
+                p.build();
+                let cured = p.run(CTEST, &[]);
+                assert!(not_recorded(&cured).is_empty(), "{at}: {}", cured.stderr);
+            }
+            // VERSION changed, and not built: the rule hasn't run since, and t_ver is old.
+            p.write("VERSION", "1.1\n# a note\n");
+            git::commit_all(&p.repo, "version");
+            let stale = p.run(CTEST, &[]);
+            assert_eq!(stale.code, 0, "{at}: {}", stale.stderr);
+            let said = not_recorded(&stale);
+            assert!(
+                said.len() == 1
+                    && said[0].contains(
+                        "t_ver ran old code: VERSION changed after CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest"
+                    ),
+                "{at}: {}",
+                stale.stderr
             );
         }
     }

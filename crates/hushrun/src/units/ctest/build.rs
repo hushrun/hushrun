@@ -106,6 +106,8 @@ pub struct Walker<'a> {
     walking: BTreeSet<PathBuf>,
     /// Each file's modification time, once read.
     times: HashMap<PathBuf, Option<SystemTime>>,
+    /// Each Ninja build directory's log, once read ([`Walker::ninja_log`]).
+    logs: HashMap<PathBuf, BTreeMap<String, SystemTime>>,
 }
 
 /// What a build directory says of its programs beside its graph.
@@ -165,6 +167,7 @@ impl<'a> Walker<'a> {
             extras: HashMap::new(),
             walking: BTreeSet::new(),
             times: HashMap::new(),
+            logs: HashMap::new(),
         }
     }
 
@@ -601,6 +604,13 @@ impl<'a> Walker<'a> {
             .map(|e| e.linked.clone())
             .unwrap_or_default();
         let made = |rel: &str| outputs.contains(rel);
+        let commands = match explained(ninja, build, target, &self.assigned) {
+            Some(changed) => Commands::Changed(changed),
+            None => Commands::Unknown(
+                "whether the commands that make it changed can't be told: ninja -n -d explain didn't answer".into(),
+            ),
+        };
+        let log = self.ninja_log(build);
         let judged = self.judge(
             build,
             target,
@@ -610,6 +620,8 @@ impl<'a> Walker<'a> {
                 made: &made,
                 linked: &linked,
                 whole_seconds: false,
+                commands: &commands,
+                ran: Some(&log),
             },
         );
         out.stale = Stale::either(judged, out.stale.take());
@@ -775,6 +787,19 @@ impl<'a> Walker<'a> {
         }
         let extras = self.extras.get(build).cloned().unwrap_or_default();
         let made = |rel: &str| graph.contains_key(rel);
+        // Each object's target's `flags.make`, and each link's `link.txt`.
+        let mut files: BTreeMap<String, String> = graph
+            .keys()
+            .filter(|node| is_object(node))
+            .filter_map(|node| {
+                let at = node.find(".dir/")?;
+                Some((node.clone(), format!("{}/flags.make", &node[..at + 4])))
+            })
+            .collect();
+        for (dir, output) in &extras.links {
+            files.insert(output.clone(), format!("{dir}/link.txt"));
+        }
+        let commands = Commands::Files(files);
         out.stale = self.judge(
             build,
             target,
@@ -784,6 +809,8 @@ impl<'a> Walker<'a> {
                 made: &made,
                 linked: &extras.linked,
                 whole_seconds,
+                commands: &commands,
+                ran: None,
             },
         );
         if configured {
@@ -951,6 +978,36 @@ fn deps(
         }
     }
     Some(out)
+}
+
+/// \[ADR 0087\] The outputs whose command line changed since Ninja's log recorded them, of what
+/// building `target` would do, as `ninja -n -d explain` says (`command line changed for <output>`):
+/// `None` when it doesn't answer. Nothing is built: it is a dry run.
+fn explained(
+    ninja: &Path,
+    build: &Path,
+    target: &str,
+    assigned: &[(String, String)],
+) -> Option<BTreeSet<String>> {
+    let output = super::run::tool(ninja, build, assigned)
+        .arg("-C")
+        .arg(build)
+        .args(["-n", "-d", "explain", target])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    Some(
+        text.lines()
+            .filter_map(|l| l.strip_prefix("ninja explain: command line changed for "))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// `program`'s output in `dir`, when it exits 0, with COMMAND's environment and its own
@@ -1341,6 +1398,29 @@ struct Made<'g> {
     linked: &'g BTreeSet<String>,
     /// Its make compares times by the second.
     whole_seconds: bool,
+    /// What tells whether the command that would make a file now is the one that made it.
+    commands: &'g Commands,
+    /// Ninja's log: when each output was last made ([`Walker::ninja_log`]); `None` on Makefiles,
+    /// which record nothing of it.
+    ran: Option<&'g BTreeMap<String, SystemTime>>,
+}
+
+/// The repository's files something was made from, each with the file a rule writes it came
+/// through, when it came through one (the nearest to that something).
+type Tracked = BTreeMap<String, Option<String>>;
+
+/// \[ADR 0087\] What tells whether the command that would make a file now is the one that made
+/// it: a flag or a link option configured since, and not built.
+enum Commands {
+    /// Makefiles: each made file's file that holds its command (an object's target's
+    /// `flags.make`, a link's `link.txt`), which CMake writes again only when it changes: newer
+    /// than the made file, the command changed after it was made.
+    Files(BTreeMap<String, String>),
+    /// Ninja: the outputs whose command line changed since its log recorded them, as
+    /// `ninja -n -d explain` says.
+    Changed(BTreeSet<String>),
+    /// It can't be told, and why.
+    Unknown(String),
 }
 
 impl Walker<'_> {
@@ -1399,26 +1479,44 @@ impl Walker<'_> {
                 "; build before ctest".to_string()
             }
         };
-        let mut memo: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut memo: HashMap<String, Tracked> = HashMap::new();
         for object in &objects {
             let Some(made_at) = self.time(&build.join(object)) else {
                 return Some(Stale::Old(format!(
                     "{object} isn't made; build before ctest"
                 )));
             };
-            for file in self.tracked(build, object, g, &mut memo) {
+            for (file, through) in self.tracked(build, object, g, &mut memo) {
                 let Some(changed) = self.time(&self.root.join(&file)) else {
                     return Some(Stale::Old(format!(
                         "{file}, which {object} was made from, is gone; build before ctest"
                     )));
                 };
                 let newer = newer(changed, made_at);
-                if newer != Newer::No {
+                if newer == Newer::No {
+                    continue;
+                }
+                let Some(generated) = through.filter(|_| newer == Newer::Yes || !g.whole_seconds)
+                else {
                     return Some(Stale::Old(format!(
                         "{file} changed after {object} was made{}",
                         cure(&file, newer, g.whole_seconds)
                     )));
-                }
+                };
+                // Through a file a rule writes: a rule that leaves it as it was when its bytes
+                // are the same leaves the object old, and where no log records that the rule
+                // ran (Makefiles), building again doesn't cure it; touching that file does.
+                let shown = self.shown(&build.join(&generated));
+                let touch = if g.ran.is_none() {
+                    format!(
+                        "; if the build leaves {shown} as it was, touch {shown}, then build before ctest"
+                    )
+                } else {
+                    String::new()
+                };
+                return Some(Stale::Old(format!(
+                    "{file} changed after {object} was made, through {shown}: build before ctest{touch}"
+                )));
             }
         }
         for part in &parts {
@@ -1433,6 +1531,38 @@ impl Walker<'_> {
                 )));
             }
         }
+        // The command that would make it, or one of its parts, now isn't the one that did.
+        let mut made: Vec<&str> = parts.iter().map(String::as_str).collect();
+        made.push(target);
+        match g.commands {
+            Commands::Files(files) => {
+                for node in made {
+                    let (Some(file), Some(made_at)) =
+                        (files.get(node), self.time(&build.join(node)))
+                    else {
+                        continue;
+                    };
+                    let Some(changed) = self.time(&build.join(file)) else {
+                        continue;
+                    };
+                    let newer = newer(changed, made_at);
+                    if newer != Newer::No {
+                        return Some(Stale::Old(format!(
+                            "the command that makes {node} changed after it was made ({file}){}",
+                            cure(file, newer, g.whole_seconds)
+                        )));
+                    }
+                }
+            }
+            Commands::Changed(changed) => {
+                if let Some(node) = made.into_iter().find(|n| changed.contains(*n)) {
+                    return Some(Stale::Old(format!(
+                        "the command that makes {node} changed after it was made (ninja says so); build before ctest"
+                    )));
+                }
+            }
+            Commands::Unknown(why) => return Some(Stale::Unknown(why.clone())),
+        }
         None
     }
 
@@ -1443,12 +1573,12 @@ impl Walker<'_> {
         build: &Path,
         node: &str,
         g: &Made<'_>,
-        memo: &mut HashMap<String, BTreeSet<String>>,
-    ) -> BTreeSet<String> {
+        memo: &mut HashMap<String, Tracked>,
+    ) -> Tracked {
         if let Some(done) = memo.get(node) {
             return done.clone();
         }
-        memo.insert(node.to_string(), BTreeSet::new());
+        memo.insert(node.to_string(), Tracked::new());
         let names: Vec<String> = g
             .inputs
             .get(node)
@@ -1457,23 +1587,81 @@ impl Walker<'_> {
             .chain(g.records.get(node).into_iter().flatten())
             .cloned()
             .collect();
-        let mut out = BTreeSet::new();
+        let mut out = Tracked::new();
         for name in names {
             if bookkeeping(&name) {
                 continue;
             }
             match self.place(&name, build) {
                 Place::Repo(rel) => {
-                    out.insert(rel);
+                    out.insert(rel, None);
                 }
                 Place::Build(rel) if (g.made)(&rel) => {
                     let more = self.tracked(build, &rel, g, memo);
-                    out.extend(more);
+                    // \[ADR 0087\] Ninja's log says when the rule that writes it last ran (for a
+                    // rule that leaves its output as it was, the time of its newest input then):
+                    // run after every file it was made from, it is current whatever its own
+                    // time, and nothing it was made from makes anything old on its account.
+                    let ran = g.ran.and_then(|log| log.get(&rel)).copied();
+                    if let Some(ran) = ran
+                        && more.keys().all(|file| {
+                            self.time(&self.root.join(file))
+                                .is_some_and(|t| newer(t, ran) == Newer::No)
+                        })
+                    {
+                        continue;
+                    }
+                    for (file, _) in more {
+                        out.entry(file).or_insert_with(|| Some(rel.clone()));
+                    }
                 }
                 _ => {}
             }
         }
         memo.insert(node.to_string(), out.clone());
+        out
+    }
+
+    /// A path as the person types it: from the repository's root when it is inside, else whole.
+    fn shown(&self, path: &Path) -> String {
+        match path.strip_prefix(self.root) {
+            Ok(inside) => super::select::slashed(inside),
+            Err(_) => path.display().to_string(),
+        }
+    }
+
+    /// \[ADR 0087\] When Ninja's log says each output of `build` was last made: its recorded
+    /// time (for a rule that leaves its output as it was, its newest input's then), by the
+    /// output's path from the top of the build directory. Empty when there is no log.
+    fn ninja_log(&mut self, build: &Path) -> BTreeMap<String, SystemTime> {
+        if let Some(log) = self.logs.get(build) {
+            return log.clone();
+        }
+        let text = std::fs::read(build.join(".ninja_log")).unwrap_or_default();
+        let text = String::from_utf8_lossy(&text);
+        let mut out = BTreeMap::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [_, _, mtime, output, ..] = fields.as_slice() else {
+                continue;
+            };
+            let Ok(mtime) = mtime.parse::<u64>() else {
+                continue;
+            };
+            if mtime == 0 {
+                continue;
+            }
+            // Nanoseconds since Ninja 1.9; seconds before.
+            let at = if mtime > 1_000_000_000_000_000 {
+                UNIX_EPOCH + std::time::Duration::from_nanos(mtime)
+            } else {
+                UNIX_EPOCH + std::time::Duration::from_secs(mtime)
+            };
+            if let Place::Build(rel) = self.place(output, build) {
+                out.insert(rel, at);
+            }
+        }
+        self.logs.insert(build.to_path_buf(), out.clone());
         out
     }
 
