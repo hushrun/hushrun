@@ -88,7 +88,7 @@ Rationale (ADR-0001):
 
 ### 4.1 Adapter rules
 
-**D-9 git, revision mode** (`--rev`, default `HEAD`). Entries come from the revision's tree in the object database, and blob bytes are used as stored; the worktree is never read. Missing objects (blob-less partial clones) fail with `E_MISSING_OBJECTS` and a hint to use a full or shallow clone.
+**D-9 git, revision mode** (`--rev`, default `HEAD`). Entries come from the revision's tree in the object database, and blob bytes are used as stored; the worktree is never read. Missing objects (blob-less or tree-less partial clones) fail with `E_MISSING_OBJECTS` and a hint to use a full or shallow clone.
 
 There are two object readers, and both MUST pass the same vectors:
 
