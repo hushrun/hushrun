@@ -13,6 +13,8 @@ use super::http::Failure;
 const FRESH_FOR: Duration = Duration::from_secs(60);
 
 pub(crate) enum Credential {
+    /// B-36: a sandbox's run from what a fetch saved: nothing is sent anywhere.
+    Nothing,
     Token(String),
     GithubOidc {
         /// `ACTIONS_ID_TOKEN_REQUEST_URL`.
@@ -44,6 +46,7 @@ impl Credential {
     /// secret: a token's fingerprint, or one word for a CI job, whose store dies with it.
     pub(crate) fn fingerprint(&self) -> String {
         match self {
+            Credential::Nothing => hushrun_build::origin::fingerprint("no credential"),
             Credential::Token(token) => hushrun_build::origin::fingerprint(token),
             Credential::GithubOidc { .. } => {
                 hushrun_build::origin::fingerprint("github-actions-id-token")
@@ -64,6 +67,11 @@ impl Credential {
     ) -> Result<String, Failure> {
         let (url, request_token, audience, held) = match self {
             Credential::Token(token) => return Ok(token.clone()),
+            Credential::Nothing => {
+                return Err(Failure::Unreachable(
+                    "this run reads only what a fetch saved, and sends nothing".into(),
+                ));
+            }
             Credential::GithubOidc {
                 url,
                 request_token,

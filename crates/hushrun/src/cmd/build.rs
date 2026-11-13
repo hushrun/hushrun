@@ -29,6 +29,7 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
         BuildCommand::Off => set(global, &place, Mode::Off),
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
+        BuildCommand::Fetch => fetch(global, &place),
         BuildCommand::Share(share) => set_share(
             global,
             &place,
@@ -39,6 +40,78 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
             },
         ),
     }
+}
+
+/// `hushrun build fetch` (B-36): for a sandbox's setup phase, which has the network and a token
+/// that later phases don't. The relay sends `open` for this repository and platform, downloads
+/// what its manifest names that the store lacks, and saves the sealed packs, the sealed hints,
+/// the policy and the rows into the store's `prefetched/`, good for 24 hours. Nothing is
+/// uploaded or closed, and no token or link is written.
+fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
+    use crate::context::{Content, Source};
+    let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build fetch: {why}"));
+    let store = place
+        .store
+        .clone()
+        .ok_or_else(|| failed("hushrun has no cache directory to keep crates in".into()))?;
+    let content = Content::open(global, Source::Repo(hushrun_vcs::Snapshot::Worktree))
+        .map_err(|f| f.error)
+        .map_err(|err| failed(format!("{err:#}")))?;
+    let repository = hushrun_ci::context(&hushrun_ci::Env::from_process())
+        .repository
+        .or_else(|| crate::cmd::wrap::repository_of(&content));
+    let root = std::env::current_dir().ok();
+    let access = match crate::results::Backend::select(root.as_deref()) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_access(),
+        _ => None,
+    }
+    .filter(|access| access.credential.is_some())
+    .ok_or_else(|| failed("no backend is signed in to: set HUSHRUN_TOKEN for this phase".into()))?;
+    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    let config = crate::cmd::build_relay::Config {
+        store: Store::new(&store),
+        caller: crate::cmd::build_session::caller(Some(&access), in_ci),
+        access,
+        repository,
+        commit: None,
+        platform: crate::cmd::build_session::platform(),
+        compiler: std::env::current_dir()
+            .ok()
+            .map(|folder| (std::ffi::OsString::from("rustc"), folder)),
+        local: Mode::On,
+        own: Mode::On,
+        min_free_gb: settings::MIN_FREE_GB,
+        keep_days: hushrun_build::KEEP_DAYS,
+        tuning: crate::cmd::build_relay::Tuning::default(),
+        saved: None,
+    };
+    let relay = std::sync::Arc::new(crate::cmd::build_relay::Relay::start(config).map_err(failed)?);
+    let fetched = relay.fetch_for_later().map_err(failed)?;
+    if global.format == Format::Json {
+        output::print_json(&json!({
+            "blocks": fetched.blocks,
+            "bytes": fetched.bytes,
+            "hints": fetched.hints,
+            "store": store,
+            "good_for_hours": 24,
+        }))?;
+        return Ok(Exit::Ok);
+    }
+    if global.quiet == 0 {
+        output::print(&format!(
+            "Fetched {} compiled {} ({}) and {} {} for later runs here, good for 24 hours. No token was kept.\n",
+            fetched.blocks,
+            if fetched.blocks == 1 {
+                "crate"
+            } else {
+                "crates"
+            },
+            size(fetched.bytes),
+            fetched.hints,
+            if fetched.hints == 1 { "hint" } else { "hints" },
+        ))?;
+    }
+    Ok(Exit::Ok)
 }
 
 /// `hushrun build share on|observe|off` (B-33): saves the share setting, under the settings

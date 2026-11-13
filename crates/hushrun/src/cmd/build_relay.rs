@@ -23,6 +23,7 @@
 mod credential;
 mod http;
 mod pack;
+pub(crate) mod saved;
 mod socket;
 mod upload;
 
@@ -133,6 +134,8 @@ pub(crate) struct Config {
     pub(crate) min_free_gb: u32,
     pub(crate) keep_days: u32,
     pub(crate) tuning: Tuning,
+    /// B-36: a fresh fetch and its folder, for a run that reads only it and sends nothing.
+    pub(crate) saved: Option<(saved::Saved, PathBuf)>,
 }
 
 /// How a check's `open` stood after [`Relay::wait_open`].
@@ -381,6 +384,8 @@ pub(crate) struct Relay {
     machine: Option<crate::machine::Machine>,
     /// The command ended: no new PUT starts.
     ending: AtomicBool,
+    /// B-36: it reads only a fetch, and sends nothing.
+    saved: bool,
     /// What the ends of this process's checks waited in CI, which the next one's wait is less
     /// (B-31).
     waited: Mutex<Duration>,
@@ -408,15 +413,12 @@ impl Relay {
     /// Starts a relay: its runtime, its folder in the store, and the outbox's reconciliation
     /// (claims of dead runs back to waiting, dead runs' folders gone).
     pub(crate) fn start(mut config: Config) -> Result<Relay, String> {
-        let credential = config
-            .access
-            .credential
-            .as_ref()
-            .ok_or_else(|| "no credential to send".to_string())?;
-        let client = Client::new(
-            &config.access.base,
-            credential::Credential::of(credential, &config.access.base),
-        )?;
+        let credential = match (&config.access.credential, &config.saved) {
+            (Some(credential), _) => credential::Credential::of(credential, &config.access.base),
+            (None, Some(_)) => credential::Credential::Nothing,
+            (None, None) => return Err("no credential to send".to_string()),
+        };
+        let client = Client::new(&config.access.base, credential)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -440,6 +442,7 @@ impl Relay {
             run,
             machine,
             ending: AtomicBool::new(false),
+            saved: config.saved.is_some(),
             waited: Mutex::new(Duration::ZERO),
             wake: tokio::sync::Notify::new(),
             state: Mutex::new(State {
@@ -521,10 +524,14 @@ impl Relay {
                 state.phase = Phase::Opening;
             }
         }
-        let relay = self.clone();
-        self.runtime.spawn(async move { relay.open(check).await });
-        let relay = self.clone();
-        self.runtime.spawn(async move { relay.uploads().await });
+        if let Some((saved, folder)) = &self.config.saved {
+            self.take_in_saved(saved, folder);
+        } else {
+            let relay = self.clone();
+            self.runtime.spawn(async move { relay.open(check).await });
+            let relay = self.clone();
+            self.runtime.spawn(async move { relay.uploads().await });
+        }
         Ok(Share {
             socket: path,
             run: self.run.clone(),
@@ -804,6 +811,9 @@ impl Relay {
     }
 
     async fn lookup_hints(&self, addresses: &[Hex32]) {
+        if self.saved {
+            return;
+        }
         let body = HintsLookupRequest {
             kind: KIND.to_string(),
             addresses: addresses.to_vec(),
@@ -839,6 +849,9 @@ impl Relay {
     /// A lookup of `addresses` (B-26: "this is the use"); what it found, or `None` when it
     /// failed.
     async fn lookup(&self, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
+        if self.saved {
+            return None;
+        }
         let body = LookupRequest {
             kind: KIND.to_string(),
             addresses: addresses.to_vec(),
@@ -1677,7 +1690,7 @@ impl Relay {
     }
 
     async fn report(&self, address: Hex32, scope: &str, problem: blocks::Problem) {
-        if matches!(self.state().phase, Phase::Stopped(_)) {
+        if self.saved || matches!(self.state().phase, Phase::Stopped(_)) {
             return;
         }
         let body = ReportRequest {
@@ -1747,7 +1760,7 @@ impl Relay {
             let state = self.state();
             !matches!(state.phase, Phase::Stopped(_) | Phase::Opening) && state.policy.is_some()
         };
-        if let (true, Some(check)) = (shares, &check) {
+        if let (true, false, Some(check)) = (shares, self.saved, &check) {
             let close = self.close_request(check, entries);
             let relay = self.clone();
             self.runtime.block_on(async move {

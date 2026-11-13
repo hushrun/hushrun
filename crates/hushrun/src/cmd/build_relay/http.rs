@@ -181,6 +181,9 @@ impl Client {
         &self,
         link: &hushrun_core::blocks::Link,
     ) -> Option<reqwest::RequestBuilder> {
+        if matches!(self.credential, super::credential::Credential::Nothing) {
+            return None;
+        }
         let method = reqwest::Method::from_bytes(link.method.as_bytes()).ok()?;
         let mut request = self.http.request(method, &link.url);
         for (name, value) in &link.headers {

@@ -548,3 +548,87 @@ fn a_short_value_a_proc_macro_read_without_saying_never_reaches_another_machine(
         "the other machine's value: {printed}\n{stderr}"
     );
 }
+
+/// Whether any file under `dir` holds `needle`.
+fn any_file_holds(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(found) = any_file_holds(&path, needle) {
+                return Some(found);
+            }
+        } else if std::fs::read(&path)
+            .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+// covers: B-36
+#[test]
+fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_token() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
+
+    // The sandbox's setup phase: the network and an agent token, no person's settings.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let output = b
+        .hushrun(&fake)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .env_remove("HUSHRUN_BUILD")
+        .args(["build", "fetch"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}{stderr}");
+    assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
+    let store = b.root.join("cache/build");
+    let packs = store.join("prefetched/packs");
+    assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
+    assert!(!b.root.join("cache/build/build.json").exists());
+
+    // The later phase: no token, and the backend can't be reached.
+    let seen = fake.seen().len();
+    let output = b
+        .hushrun(&fake)
+        .env_remove("HUSHRUN_TOKEN")
+        .env_remove("HUSHRUN_BUILD")
+        .env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme")
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{stderr}"
+    );
+    // It sent nothing, and the fetch is still there for the next run.
+    assert_eq!(fake.seen().len(), seen);
+    assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
+    // No token was written under the store or the sessions, by either phase.
+    for needle in [FakeBuild::AGENT_TOKEN, FakeBuild::TOKEN] {
+        assert_eq!(
+            any_file_holds(&b.root.join("cache"), needle.as_bytes()),
+            None
+        );
+    }
+}

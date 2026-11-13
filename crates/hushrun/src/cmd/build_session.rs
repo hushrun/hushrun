@@ -54,11 +54,107 @@ pub(crate) fn begin(
     if here.in_ci {
         return begin_in_ci(&here, share, repository);
     }
+    // B-36: no backend that shares answered, and the store holds a fresh fetch.
+    if !share.as_ref().is_some_and(|start| start.access.shares)
+        && let Some(found) = saved_fetch(&here)
+    {
+        return begin_from_saved(&here, repository, found);
+    }
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
         match start_sharing(&mut session, start, repository, &env) {
             Ok(_) | Err(None) => {}
             Err(Some(line)) => session.add_line(line),
+        }
+    }
+    Ok(session)
+}
+
+/// The store's fresh fetch (B-36), with its folder.
+fn saved_fetch(here: &Here<'_>) -> Option<(crate::cmd::build_relay::saved::Saved, PathBuf)> {
+    let overrides = hushrun_build::settings::Overrides::from(here.env).ok()?;
+    let store = session::store_dir(here.cache_dir, &overrides)?;
+    crate::cmd::build_relay::saved::Saved::load(&hushrun_build::store::Store::new(&store), here.now)
+}
+
+/// B-36: a run whose store holds a fresh fetch and whose backend gave nothing to share with: a
+/// relay that reads only the fetch, opens its packs as wrappers bring their keys, and sends
+/// nothing. A machine with no person's settings file is a sandbox: reuse is on there; else the
+/// person's mode and share setting decide, as for any run.
+fn begin_from_saved(
+    here: &Here<'_>,
+    repository: Option<&str>,
+    (saved, folder): (crate::cmd::build_relay::saved::Saved, PathBuf),
+) -> Result<Session, Option<String>> {
+    use hushrun_build::share::{Caller, Sharing, what_a_run_does};
+    let sandbox = !here.settings.exists();
+    let overrides = hushrun_build::settings::Overrides::from(here.env)
+        .map_err(|err| Some(format!("{OFF}: {err}")))?;
+    let mut session = match session::store_dir(here.cache_dir, &overrides) {
+        Some(store) if sandbox => begin_sandbox(here, &store)?,
+        _ => begin_with(here, std::env::current_exe(), None)?,
+    };
+    let current = session.current().clone();
+    let caller = if sandbox {
+        Caller::Agent { sandbox: true }
+    } else {
+        Caller::Person { signed_in: true }
+    };
+    let does = what_a_run_does(caller, current.mode, current.share_setting, saved.org());
+    if matches!(does.sharing, Sharing::Off(_)) || cfg!(not(unix)) {
+        return Ok(session);
+    }
+    let access = crate::results::BuildAccess {
+        base: saved.host.clone(),
+        host: saved.host.clone(),
+        org: saved.org.clone(),
+        credential: None,
+        agent: sandbox,
+        machine: None,
+        shares: true,
+        answered: false,
+    };
+    let config = || {
+        Some(crate::cmd::build_relay::Config {
+            store: hushrun_build::store::Store::new(&current.store),
+            access,
+            repository: repository.map(str::to_string),
+            commit: None,
+            platform: platform(),
+            compiler: None,
+            caller,
+            local: current.mode,
+            own: current.share_setting,
+            min_free_gb: current.min_free_gb,
+            keep_days: current.keep_days,
+            tuning: crate::cmd::build_relay::Tuning::default(),
+            saved: Some((saved, folder)),
+        })
+    };
+    let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
+        return Ok(session);
+    };
+    match relay.begin_check(&current.folder, None, here.env) {
+        Ok(share) => {
+            if let Err(err) = session.set_share(share) {
+                session.add_line(format!("build: sharing is off for this run: {err}"));
+            }
+        }
+        Err(line) => session.add_line(line),
+    }
+    Ok(session)
+}
+
+/// A sandbox's session in `store` (B-36), as `begin_with` makes any.
+fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String>> {
+    let exe = std::env::current_exe()
+        .map_err(|err| Some(format!("{OFF}: hushrun can't find its own binary: {err}")))?;
+    let start = here.start(&exe, here.cache_dir, here.env);
+    let mut session = session::begin_in_sandbox(&start, store).or_else(said)?;
+    if let Some(folder) = &here.folder {
+        session.check(folder, Some(Instant::now() + CHECK_BUDGET));
+        if let Some(sysroot) = (here.sysroot)(folder) {
+            session.hide_sources(&sysroot);
         }
     }
     Ok(session)
@@ -240,6 +336,7 @@ fn start_sharing(
             min_free_gb: current.min_free_gb,
             keep_days: current.keep_days,
             tuning: crate::cmd::build_relay::Tuning::default(),
+            saved: None,
         })
     };
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
@@ -258,7 +355,7 @@ fn start_sharing(
 /// The target triple this hushrun was built for: the run's platform when the compiler's own host
 /// can't be asked. The wrapper's keys are what tell two platforms' blocks apart; this only
 /// chooses the manifest.
-fn platform() -> String {
+pub(crate) fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "apple-darwin",
         "linux" if cfg!(target_env = "musl") => "unknown-linux-musl",

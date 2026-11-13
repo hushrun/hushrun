@@ -346,6 +346,10 @@ pub enum BuildCommand {
     /// How much this machine takes part in the org's shared store of compiled crates: on,
     /// observe or off. It can lower the org's shared mode here, never raise it.
     Share(BuildShareArgs),
+    /// For a sandbox's setup, with the network and a token: fetch the crates the org's newest
+    /// build of this repository used, so later runs reuse them with neither. Good for 24 hours;
+    /// no token is kept.
+    Fetch,
 }
 
 /// `hushrun build share on|observe|off` (B-33).
