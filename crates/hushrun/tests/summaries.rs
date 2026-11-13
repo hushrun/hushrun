@@ -278,6 +278,31 @@ fn a_report_older_than_the_run_is_ignored() {
     );
 }
 
+/// S3, closer: a report an earlier run wrote just before this one started, within the two seconds
+/// a clock may be off, and as this run found it: none of its own.
+// covers: C-27
+#[test]
+fn a_report_written_just_before_the_run_and_left_as_it_was_is_ignored() {
+    let r = Repo::new("exit 0\n", &[]);
+    // Written just before the run: within the two seconds before COMMAND starts.
+    let old = r.repo.join("junit.xml");
+    std::fs::copy(vector("junit/basic.xml"), &old).expect("copy");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .expect("open");
+    file.set_modified(SystemTime::now()).expect("now");
+    let out = unit(r.hushrun(), &[]);
+    says(&out, "hushrun: unit passed in ");
+    assert!(!said(&out).contains("tests"), "{}", said(&out));
+    assert_eq!(
+        r.results()[0]["reports"],
+        json!({"filesComplete": true}),
+        "{:?}",
+        r.results()
+    );
+}
+
 /// S4: the command line names its report.
 // covers: C-27
 #[test]

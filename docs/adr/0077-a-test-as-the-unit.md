@@ -442,3 +442,9 @@ place.
   A run that failed, whose failures aren't told by unit, now says the adapter's words once after
   COMMAND, `hushrun: <NAME>: <why>`, beside the line for a start that didn't say what it saw, by
   the one path that keeps them with each row; a facts file's own `notKept` takes the same path.
+- **Reports this run didn't write.** A report counted when it was modified after the run's start
+  less two seconds, so one an earlier run wrote a moment before, or one a Gradle task found up to
+  date left in place, gave the last line counts of tests that didn't run. `hushrun run` now takes
+  the report files the search reaches before each start of COMMAND (`hushrun_reports::before`,
+  each one's modification time and length) and counts afterwards only those that changed
+  (`find_changed`), for every check, whatever its adapter.

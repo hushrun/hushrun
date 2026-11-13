@@ -508,8 +508,11 @@ fn skip_or_run(
     // \[C-32\] COMMAND starts once, or twice when its adapter left out what the plan didn't list:
     // the second start leaves nothing out, and alone decides the run (RFC 0003 principle 5).
     let mut starts = 0;
-    let (status, duration_ms, started, mut observed) = loop {
+    let (status, duration_ms, started, mut observed, before) = loop {
         starts += 1;
+        // \[C-27\] The report files as they are before COMMAND starts: one it leaves as it was
+        // is none of its own, however recent.
+        let before = code.map(|code| code.reports_before(dir, command, reader_paths));
         let clock = Instant::now();
         let started = SystemTime::now();
         let mut child = Command::new(program(&command[0], dir, &path));
@@ -545,7 +548,7 @@ fn skip_or_run(
             return ExitCode::from(exit_code(&status));
         }
         let (Some(code), Some(backend)) = (code, backend) else {
-            break (status, duration_ms, started, None);
+            break (status, duration_ms, started, None, before);
         };
         // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done;
         // none when the files aren't the ones the run's key is for.
@@ -562,7 +565,7 @@ fn skip_or_run(
             )
         });
         let Some(why) = observed.as_ref().and_then(|(o, _)| o.left_out.clone()) else {
-            break (status, duration_ms, started, observed);
+            break (status, duration_ms, started, observed, before);
         };
         let set_up = match session.as_deref_mut() {
             Some(session) if starts == 1 => session.whole_again().map_err(Some),
@@ -619,7 +622,8 @@ fn skip_or_run(
         .and_then(|(o, _)| o.counts.as_ref())
         .map_or(0, |c| c.reused);
     // \[ADR 0048\] What the reports this run wrote say, read after it, pass or fail (C-27).
-    let mut reports = code.reports_of(dir, started, command, reader_paths);
+    let before = before.unwrap_or_default();
+    let mut reports = code.reports_of(dir, started, command, reader_paths, &before);
     // \[C-39\] Tests reused one by one, whose test files may all have run in part.
     let reused_tests = observed
         .as_ref()
@@ -1500,6 +1504,7 @@ impl Code {
         started: SystemTime,
         command: &[String],
         readers: &[String],
+        before: &hushrun_reports::Before,
     ) -> Option<Reports> {
         let query = hushrun_reports::Query {
             root: &self.root,
@@ -1509,8 +1514,26 @@ impl Code {
             declared: &self.reports_files,
             readers,
         };
-        let search = hushrun_reports::find(&query)?;
+        let search = hushrun_reports::find_changed(&query, before)?;
         hushrun_reports::record(&search, &hushrun_reports::Limits::default())
+    }
+
+    /// \[C-27\] The report files the run's search reaches before COMMAND starts, as they are:
+    /// what [`Code::reports_of`] leaves out when COMMAND left it as it was.
+    fn reports_before(
+        &self,
+        dir: &Path,
+        command: &[String],
+        readers: &[String],
+    ) -> hushrun_reports::Before {
+        hushrun_reports::before(&hushrun_reports::Query {
+            root: &self.root,
+            cwd: dir,
+            started: SystemTime::now(),
+            command,
+            declared: &self.reports_files,
+            readers,
+        })
     }
 
     /// Whether the files are still the ones the command started on.

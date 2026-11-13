@@ -148,6 +148,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Fixed
 
+- A report an earlier run wrote in the two seconds before COMMAND started, and COMMAND left as it
+  was, no longer gives the run's last line its counts: only a report the run changed is its own.
 - A Maven run that failed with a test or failure no class could be told for says once why it
   keeps no pass (`hushrun couldn't tell which test class 1 of its tests or failures belong to,
   …`); only `hushrun why` said it before.
