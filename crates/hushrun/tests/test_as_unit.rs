@@ -1816,6 +1816,139 @@ fn a_run_left_out_twice_says_why_through_hushrun_why() {
     }
 }
 
+// covers: C-22, C-33, C-34
+#[test]
+fn when_every_test_file_runs_the_plan_ready_and_why_give_the_same_true_reason() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let python = python();
+    let unit = |name: &str, reads: &[&str], extra: Value| {
+        let mut u = json!({"unit": name, "selected": 1, "finished": 1, "reads": reads,
+                           "tests": [{"id": "t1", "finished": true}]});
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            u[k] = v;
+        }
+        u
+    };
+    let not_followed = json!({"notFollowed": [{"why": "subprocess", "detail": "node"}]});
+    // Each case: the first run's facts and variables, what changes, and the reason every test file
+    // runs on the second.
+    type Case = (
+        &'static str,
+        Value,
+        Vec<(&'static str, &'static str)>,
+        (&'static str, &'static str),
+        &'static str,
+        &'static str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "nothing was followed",
+            json!([
+                unit("test_a.py", &["test_a.py"], not_followed.clone()),
+                unit("test_b.py", &["test_b.py"], not_followed.clone())
+            ]),
+            vec![],
+            ("notes/n.md", "two\n"),
+            "hushrun couldn't follow all that any of them read the last time (a process it started), so they always run",
+            "not-observed",
+        ),
+        (
+            "every test file reads every file",
+            json!([
+                unit("test_a.py", &["test_a.py", "test_b.py"], json!({})),
+                unit("test_b.py", &["test_a.py", "test_b.py"], json!({}))
+            ]),
+            vec![],
+            ("test_a.py", "def t1():\n    pass\n# changed\n"),
+            "test_a.py changed, and every test file reads it",
+            "read-changed",
+        ),
+        (
+            "a file every test file reads changed",
+            json!([
+                unit("test_a.py", &["test_a.py", "app/core.py"], json!({})),
+                unit("test_b.py", &["test_b.py", "app/core.py"], json!({}))
+            ]),
+            vec![],
+            ("app/core.py", "RATE = 2\n"),
+            "app/core.py changed, and every test file reads it",
+            "read-changed",
+        ),
+        (
+            "no pass was kept",
+            json!([
+                unit("test_a.py", &["test_a.py"], json!({})),
+                unit("test_b.py", &["test_b.py"], json!({}))
+            ]),
+            vec![("FAKE_EXIT", "1"), ("FAKE_BY_UNIT", "0")],
+            ("notes/n.md", "two\n"),
+            "none kept a pass the last time they ran here: its run failed, and its adapter doesn't report each failure by test file",
+            "not-kept",
+        ),
+    ];
+    for (name, units, env, (path, text), want, reason) in cases {
+        let r = repo_of(&[
+            (
+                "hushrun.yaml".into(),
+                yaml("{mode: reuse, unit: test, ignore: ['notes/**']}"),
+            ),
+            (".gitignore".into(), "__pycache__/\n".into()),
+            ("fake.py".into(), RULES_RUNNER.into()),
+            ("app/__init__.py".into(), String::new()),
+            ("app/core.py".into(), "RATE = 1\n".into()),
+            ("notes/n.md".into(), "one\n".into()),
+            ("test_a.py".into(), "def t1():\n    pass\n".into()),
+            ("test_b.py".into(), "def t1():\n    pass\n".into()),
+            (
+                "package.json".into(),
+                format!(
+                    "{{\"name\": \"s\", \"private\": true, \"scripts\": {{\"test\": \"hushrun run unit -- {python} fake.py\"}}}}\n"
+                ),
+            ),
+        ]);
+        let units = units.to_string();
+        let mut vars = vec![("FAKE_UNITS", units.as_str())];
+        vars.extend(env.iter().copied());
+        let first = r.run(&["run", "unit", "--", &python, "fake.py"], &vars);
+        assert!(
+            first.stderr.contains("hushrun: unit"),
+            "{name}: {}",
+            first.stderr
+        );
+        r.write(path, text);
+        git::commit_all(&r.repo, "change");
+        let ready = r.run(&["ready"], &[]);
+        let said = ready
+            .stdout
+            .lines()
+            .find(|l| l.contains("a run here would"))
+            .unwrap_or_else(|| panic!("{name}: {}\n{}", ready.stdout, ready.stderr))
+            .trim()
+            .to_string();
+        assert!(
+            said.ends_with(&format!("a run here would run all 2 test files: {want}"))
+                || said.contains(&format!("a run here would run all 2 test files: {want}")),
+            "{name}: {said}"
+        );
+        // `hushrun why` of a test file gives it its own way, for the same cause.
+        let why = why_json(&r, "test_b.py");
+        assert_eq!(why["reason"], reason, "{name}: {why:#}");
+        let second = r.run(
+            &["run", "unit", "--", &python, "fake.py"],
+            &[("FAKE_UNITS", units.as_str())],
+        );
+        assert!(
+            second
+                .stderr
+                .contains(&format!("hushrun: unit: all 2 test files run: {want}")),
+            "{name}: {}",
+            second.stderr
+        );
+    }
+}
+
 /// `hushrun why unit <asked> --format json`, read.
 fn why_json(r: &Repo, asked: &str) -> Value {
     let ran = r.run(&["why", "unit", asked, "--format", "json"], &[]);

@@ -880,13 +880,15 @@ impl Session {
             );
             let rest = rest_of(&sets, input.tree);
             let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
-            match why_all(&map, &rest, &sources) {
-                Some(why) => format!("{all}: {why}"),
-                None if passed.is_empty() => {
-                    format!("{all}: none had passed here yet on the files it read")
-                }
-                None => all,
-            }
+            let why = why_every(
+                &map,
+                input.tree,
+                &rest,
+                &sources,
+                known.iter().map(|(unit, _)| unit),
+                self.adapter.test_file(),
+            );
+            format!("{all}: {why}")
         } else if reused == 0 {
             format!(
                 "{check}: all {} run; {}",
@@ -1310,6 +1312,8 @@ pub enum Previewed {
         tests: Option<TestsCounted>,
         /// \[C-39\] The adapter's word for its test files ([`Adapter::test_file`]).
         noun: &'static str,
+        /// \[C-34\] Why every one runs, when none would be reused, as a run's line says it.
+        why: Option<String>,
     },
     /// The check's reuse is suspended: why, as a run says it.
     Suspended(String),
@@ -1411,6 +1415,18 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             ))
         })
         .flatten();
+    let why = (passed.is_empty()).then(|| {
+        let sources: BTreeSet<String> =
+            found.sets.files(Set::Sources).map(str::to_string).collect();
+        why_every(
+            &map,
+            p.tree,
+            &rest_of(&found.sets, p.tree),
+            &sources,
+            found.known.iter().map(|(unit, _)| unit),
+            adapter.test_file(),
+        )
+    });
     Some(Previewed::Plan {
         total,
         run: total - reused,
@@ -1418,6 +1434,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         audited,
         tests,
         noun: adapter.test_file(),
+        why,
     })
 }
 
@@ -1470,13 +1487,18 @@ pub fn previewed_line(previewed: &Previewed, label: &str, here: bool) -> String 
             run,
             reused,
             noun,
+            why,
             ..
         } => {
             if *reused == 0 {
-                format!(
+                let all = format!(
                     "{label}: {who} run all {}",
                     test_files_grouped(*total as u64, noun)
-                )
+                );
+                match why {
+                    Some(why) => format!("{all}: {why}"),
+                    None => all,
+                }
             } else {
                 let they = if *reused == 1 { "it" } else { "they" };
                 format!(
@@ -2729,13 +2751,15 @@ fn decide(
                 "{check}: with `tests: reuse`, all {} would have run",
                 test_files(counts.total, mode.noun)
             );
-            match why_all(map, &out.rest, &out.sources) {
-                Some(why) => format!("{all}: {why}"),
-                None if !map.reported() => {
-                    format!("{all}: none had passed here yet on the files it read")
-                }
-                None => all,
-            }
+            let why = why_every(
+                map,
+                tree,
+                &out.rest,
+                &out.sources,
+                out.units.keys(),
+                mode.noun,
+            );
+            format!("{all}: {why}")
         } else {
             format!(
                 "{check}: with `tests: reuse`, {would_run} of {} would have run; {reused} already passed on the files {}{saving}",
@@ -2850,6 +2874,65 @@ fn describe(why: &str) -> String {
 
 /// Why every test file would have run though some ran here before: the first file of the rest set
 /// that changed since the map was written, or a source that is new or gone (RFC 0003 §1.2).
+/// \[C-33, C-34\] Why every one of `units` runs, or would, when none is reused: the one reason
+/// the plan's line, `observe`'s and `hushrun ready` give, from what decides the plan, in this
+/// order of truth. A file of the rest set changed, or a source is new or gone ([`why_all`]); a file
+/// every one of them read the last time changed or is gone; none was followed the last time (and
+/// why, from their rows); none kept a pass the last time (and why, from their rows); else none had
+/// passed here yet on the files it read. `noun` is the adapter's word for them.
+fn why_every<'a>(
+    map: &store::Map,
+    tree: &Tree,
+    rest: &BTreeMap<String, String>,
+    sources: &BTreeSet<String>,
+    units: impl Iterator<Item = &'a String> + Clone,
+    noun: &str,
+) -> String {
+    if let Some(why) = why_all(map, rest, sources) {
+        return why;
+    }
+    let none_yet = "none had passed here yet on the files it read".to_string();
+    let rows: Option<Vec<&Mapped>> = units.clone().map(|unit| map.units.get(unit)).collect();
+    let Some(rows) = rows.filter(|rows| !rows.is_empty()) else {
+        return none_yet;
+    };
+    let every = format!("every {noun}");
+    // A file every one of them read, as it was then, now changed or gone.
+    let (first, others) = rows.split_first().unwrap_or((&rows[0], &[]));
+    for (path, then) in &first.reads {
+        if !others.iter().all(|row| row.reads.get(path) == Some(then)) {
+            continue;
+        }
+        match tree.entry(path) {
+            None => return format!("{path} is gone, and {every} read it"),
+            Some((kind, hash)) if format!("{kind} {hash}") != *then => {
+                return format!("{path} changed, and {every} reads it");
+            }
+            Some(_) => {}
+        }
+    }
+    // None of them followed the last time: what wasn't, as their rows say.
+    if rows.iter().all(|row| !row.not_followed.is_empty()) {
+        let whys: BTreeSet<String> = rows
+            .iter()
+            .flat_map(|row| row.not_followed.iter().map(|n| describe(&n.why)))
+            .collect();
+        return format!(
+            "hushrun couldn't follow all that any of them read the last time ({}), so they always run",
+            whys.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    // None of them kept a pass the last time: why, as their rows say.
+    if rows.iter().all(|row| row.not_kept.is_some()) {
+        let why = rows
+            .iter()
+            .find_map(|row| row.not_kept.as_deref())
+            .unwrap_or_default();
+        return format!("none kept a pass the last time they ran here: {why}");
+    }
+    none_yet
+}
+
 fn why_all(
     map: &store::Map,
     rest: &BTreeMap<String, String>,

@@ -369,3 +369,12 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
 - **`ready` in each adapter's word.** `hushrun ready` said "test files" for every adapter while a
   run's lines said "test programs" or "test classes". Its line is now worded by the one function
   beside the run's (`previewed_line`), with the adapter's word.
+- **Why every test file runs.** "all N test files run: none had passed here yet" was printed
+  when every test file wasn't observed (Vitest's typecheck), when an adapter's rule makes every
+  file read everything (ts-jest's language service), when a file they all read changed, and after
+  a failed run that kept no pass. One function now gives the reason for the plan's line,
+  `observe`'s and `hushrun ready`'s, from what decides the plan, in this order of truth: what
+  changed that every unit reads (a rest-set file, a source new or gone, a file every one read);
+  nothing was followed the last time; no pass was kept the last time (with the stored reason);
+  only then that none had passed here yet. `hushrun why` gives each unit its own reason for the
+  same cause.

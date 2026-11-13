@@ -1173,6 +1173,7 @@ fn ready_counts_each_adapters_units_in_its_own_word() {
         audited: 0,
         tests: None,
         noun: "test program",
+        why: None,
     };
     assert_eq!(
         previewed_line(&plan(5, 0), "unit", false),
@@ -1195,6 +1196,7 @@ fn ready_counts_each_adapters_units_in_its_own_word() {
             one_by_one: 2,
         }),
         noun: "test class",
+        why: None,
     };
     assert_eq!(
         previewed_line(&tests, "unit", false),
