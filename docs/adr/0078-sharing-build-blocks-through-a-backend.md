@@ -11,8 +11,8 @@
 equal, and one answer to "may this block leave the machine". What moves them between machines is
 an org's backend, which keeps a shared store behind every machine's own store and serves it to
 the callers its rules allow. The backend's side is its own; this record is the machine's side for
-people's machines. CI and agents' sandboxes come with their own rules later: in CI nothing changes
-here.
+people's machines. CI and agents' sandboxes have their own rules, in
+[ADR 0079](0079-sharing-build-blocks-in-ci-and-sandboxes.md).
 
 The rules were attacked on paper before any of this was built, and the attack changed most of
 them. The points that shaped the design: an upload of "everything the server lacks" would have

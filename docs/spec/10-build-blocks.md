@@ -32,7 +32,12 @@ one session serves every start of COMMAND in the run (a test file that runs once
 it again) and the build `tests: reuse` makes before COMMAND, which is COMMAND's build made first;
 it ends after the last start. It MUST NOT set it for an isolated check: that check runs in a
 container, where the link and the store don't exist. It MUST NOT set it either when `RUSTC_WRAPPER`
-is set already, in CI (C-14's detection), or on Windows. A binary called by that name is the
+is set already, or on Windows. In CI (C-14's detection) it sets it only when the run's results
+lookup carried `Hushrun-Build: on`, the job can be asked as itself (B-31), and the relay's `open`
+answers within 5 seconds of its start: then in the job's own store (B-31), and only then does
+cargo start. With no answer to the results lookup or to `open` in time, COMMAND runs unwrapped and
+the run says one line, `build reuse is off for this run: the backend didn't answer in time`; a job
+whose org doesn't share runs exactly as it would without any of this, and says nothing. A binary called by that name is the
 wrapper and does nothing else; it MUST decide that from its own name, before reading any setting. A
 build outside `hushrun run` neither reads nor fills the store. Cargo's own fingerprints don't count
 the wrapper, so changing the mode never forces a rebuild.
@@ -597,6 +602,7 @@ caller asks it again from the same facts and nobody stores the answer:
 | A person signed in, the org shares, own setting not `off` | the local mode | the lowest of the org's mode, the own setting and the local mode |
 | A person otherwise | the local mode | off |
 | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
+| CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
 | CI otherwise | off | off |
 | An agent token, the org shares | the machine's local mode, or on in a sandbox | the org's mode, lowered on a person's machine as for the person |
 | An agent token otherwise | the machine's local mode, or off in a sandbox | off |
@@ -722,7 +728,44 @@ first key name (64 MiB when it has none) is not followed. *Rests on:* a manifest
 addresses, so a wrong one wastes downloads and can't cause a wrong reuse; and a warm machine
 holding what its manifest names, so it downloads nothing.
 
-The number B-31 is kept for the store in CI, written with sharing in CI.
+**B-31 CI and sandboxes.** A CI job's store is `hushrun-build` under the job's own temporary
+folder (`RUNNER_TEMP` in GitHub Actions; elsewhere a folder of the run's under the system's
+temporary folder, removed when the run's session ends), never the cache directory, and nothing in
+it outlives the job: no person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says
+otherwise, `HUSHRUN_BUILD_DIR` is not followed, and the free-space floor is 2 GB. In GitHub
+Actions every build request carries the job's ID token, whose audience is the backend's URL, also
+when an agent token is set beside it; one within a minute of its expiry is replaced before the
+next request, and a 401 gets a fresh one and one more try. With no ID token (a pull request from a
+fork, a job without `id-token: write`) sharing is off and the run says why in one line. Anywhere
+else in CI an agent token reads the org's blocks and uploads none, whatever the policy says.
+Every request, lookups included, names the workspace's commit when one can be read; a job the
+policy calls untrusted says once, in plain words, why it writes nothing to the repository's
+trusted blocks. The end of the command waits for uploads as one function of its context says
+(`upload::wait_at_end`): a job writing trusted blocks up to 2 minutes, any other up to 20 seconds,
+never longer than a quarter of what the compiles of the blocks still to go took, and both for the
+whole `hushrun run` call; meanwhile uploads go on, since the store goes with the job. *Rests on:*
+the runner emptying its temporary folder when the job ends; the ID token's claims being what the
+backend trusts a job by, so a token copied out of one job can do no more than that job could, for
+minutes; the commit being what the backend checks a trusted job's token against; and a quarter of
+a block's compile being worth waiting for once, since the next job of the repository then
+downloads it rather than compiling. *Breaks if:* a self-hosted runner keeps `RUNNER_TEMP` between
+jobs (then one job's store is the next one's, still never uploaded under another job's token).
+
+**B-36 A sandbox's fetch.** `hushrun build fetch`, run in a sandbox's setup phase with the network
+and a token, sends `open` for the repository and platform, downloads what the manifest names that
+the store lacks, and saves into the store's `prefetched/` the sealed packs, the sealed hints, the
+policy and the rows, with no token and no link, written whole (a new folder renamed in). It is
+good for 24 hours from the time it was fetched, read when it is used; the sweep removes it after.
+A later run whose backend gives nothing to share with (no token, no network) and whose store holds
+a fresh fetch runs a relay from it: the policy as saved, each pack linked into the run's
+`incoming/` and opened when a wrapper brings its key, the hints as saved; it uploads nothing,
+reports nothing and sends no request. No run deletes the fetch. A machine with no person's
+settings file is a sandbox: reuse is on there, and sharing is the org's mode as saved. *Rests on:*
+a sandbox's later phases running the same repository and toolchain as its setup, so the keys
+they compute are the ones the fetch's manifest names; and the packs staying sealed with each
+block's key, so the fetch holds nothing a compile here couldn't make. *Breaks if:* a block the
+server withdrew after the fetch is reused within its 24 hours, as B-34 allows any run that can
+reach no server.
 
 **B-32 Where a block came from.** Beside each block the store keeps a record, `origin.json`,
 written before the block is published and rewritten whole under the block's lock when it

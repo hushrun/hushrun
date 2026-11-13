@@ -13,9 +13,32 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):
 when an org's backend keeps a shared store of compiled crates and the person lets this machine
 take part, `hushrun run NAME -- COMMAND` uploads what it builds, sealed with each block's own key,
-and reuses what another machine built. Off unless the org shares; CI is unchanged.
+and reuses what another machine built. Off unless the org shares.
+
+Sharing build blocks in CI and sandboxes ([ADR 0079](docs/adr/0079-sharing-build-blocks-in-ci-and-sandboxes.md)):
+a CI job whose org shares gets the wrapper, in a store that goes with the job, and asks as itself
+with its ID token; an agent's sandbox fetches at setup what its later runs reuse offline.
 
 ### Added
+
+- Contract: **in CI, `hushrun run` sets `RUSTC_WRAPPER` when the org shares build blocks**: the
+  results lookup carried `Hushrun-Build: on`, the job can be asked as itself, and `open` answered
+  within 5 seconds. The store is `hushrun-build` under `RUNNER_TEMP` (elsewhere a folder of the
+  run's, removed with it), with a 2 GB floor. A backend that didn't answer in time is one line,
+  `build reuse is off for this run: the backend didn't answer in time`; an org that doesn't share
+  changes nothing.
+- Contract: **in GitHub Actions every build request carries the job's ID token**, also beside an
+  agent token, minted again near its expiry and after a 401; with none, sharing is off and the
+  run says why. Elsewhere in CI an agent token reads and never uploads.
+- Contract: **the end of a CI job's command waits for its uploads**: up to 2 minutes for a job
+  that writes trusted blocks, 20 seconds for any other, never more than a quarter of what the
+  waiting blocks' compiles took, for the whole call.
+- Contract: **`hushrun build fetch`**, for a sandbox's setup phase: saves the crates the org's
+  newest build of this repository used, sealed, with no token, into the store's `prefetched/`,
+  good for 24 hours; a later run with no network or token reuses them and sends nothing.
+  `--format json` gives `blocks`, `bytes`, `hints`, `store` and `good_for_hours`.
+- Contract: **lookup requests of the build protocol carry `commit`**, the workspace's, when it can
+  be read; an older backend ignores it.
 
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been
@@ -136,6 +159,13 @@ and reuses what another machine built. Off unless the org shares; CI is unchange
 
 ### Changed
 
+- Build blocks, from a review of the relay: a block whose output holds the value, 8 bytes or more,
+  of any variable no CI system or build tool set stays on the machine (it was 16 for names that
+  don't look like secrets); the prefetch starts at the first compile that asks, so a run that
+  compiles nothing downloads nothing; a stale vouch is decided within half the block's compile
+  time, so a slow backend never delays cargo; a downloaded block that differs from a compile here
+  is suspended as well as replaced; a pack that would unpack past 64 times its size, or past the
+  disk's floor, is refused before any file is written.
 - A block whose output holds the value of an environment variable that looks like a secret and
   isn't in its key, or that was compiled for `target-cpu=native`, never leaves the machine. On the
   machine, `target-cpu=native` is keyed by what the compiler reports for this host, asked once per
