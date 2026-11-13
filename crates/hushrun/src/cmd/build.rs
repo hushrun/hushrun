@@ -15,7 +15,7 @@ use hushrun_build::session;
 use hushrun_build::settings::{self, Overrides, SettingsError};
 use hushrun_build::store::{Status, Store};
 
-use crate::cli::{BuildArgs, BuildCommand, GlobalOpts};
+use crate::cli::{BuildArgs, BuildCommand, GlobalOpts, ShareWord};
 use crate::context;
 use crate::credentials::Credentials;
 use crate::exit::{CmdResult, Exit, Failure};
@@ -29,6 +29,93 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
         BuildCommand::Off => set(global, &place, Mode::Off),
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
+        BuildCommand::Share(share) => set_share(
+            global,
+            &place,
+            match share.mode {
+                ShareWord::On => Mode::On,
+                ShareWord::Observe => Mode::Observe,
+                ShareWord::Off => Mode::Off,
+            },
+        ),
+    }
+}
+
+/// `hushrun build share on|observe|off` (B-33): saves the share setting, under the settings
+/// file's lock.
+fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
+    let mut before = None;
+    let saved = settings::update(&place.settings, |settings| {
+        before = Some(settings.share);
+        settings.share = mode;
+    })
+    .map_err(settings_failure)?;
+    let changed = before != Some(mode);
+    let overridden = place
+        .overrides()
+        .and_then(|o| o.share)
+        .filter(|share| *share != saved.share);
+    if global.format == Format::Json {
+        output::print_json(&json!({
+            "share": saved.share.as_str(),
+            "changed": changed,
+            "settings": place.settings,
+            "overridden_by": overridden.map(|_| "HUSHRUN_BUILD_SHARE"),
+        }))?;
+        return Ok(Exit::Ok);
+    }
+    if global.quiet > 0 {
+        return Ok(Exit::Ok);
+    }
+    let already = if changed { "" } else { "already " };
+    let mut text = match mode {
+        Mode::On => format!(
+            "Sharing is {already}on here: when the org shares compiled crates, this machine shares as the org's mode says.\n"
+        ),
+        Mode::Observe => format!(
+            "Sharing is {already}in observe here: this machine uploads what it builds and compares what it downloads, and reuses no download.\n"
+        ),
+        Mode::Off => format!(
+            "Sharing is {already}off here: nothing goes to or comes from the org's shared store. Reuse on this machine is as the mode says.\n"
+        ),
+    };
+    if let Some(other) = overridden {
+        let _ = writeln!(
+            text,
+            "HUSHRUN_BUILD_SHARE={} overrides it for commands run from this shell.",
+            other.as_str()
+        );
+    }
+    output::print(&text)?;
+    Ok(Exit::Ok)
+}
+
+/// What sharing does here, as far as this machine can tell without asking the backend (B-25):
+/// the word, and why.
+fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
+    use hushrun_build::share::{Caller, Org, Sharing, what_a_run_does};
+    let root = std::env::current_dir().ok();
+    let access = match crate::results::Backend::select(root.as_deref()) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_access(),
+        _ => None,
+    };
+    let caller = match &access {
+        Some(access) if access.agent => Caller::Agent { sandbox: false },
+        Some(_) => Caller::Person { signed_in: true },
+        None => Caller::Person { signed_in: false },
+    };
+    let does = what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None));
+    match does.sharing {
+        Sharing::Off(off) => ("off", off.reason().to_string()),
+        Sharing::Observe => (
+            "observe",
+            "at most: uploads what it builds and compares what it downloads, when the org shares"
+                .to_string(),
+        ),
+        Sharing::On => (
+            "on",
+            "at most: the org's mode decides, observe or on, when the org shares".to_string(),
+        ),
     }
 }
 
@@ -199,6 +286,11 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "store": place.store,
             "keep_days": effective.as_ref().map(|s| s.keep_days),
             "programs": effective.as_ref().map(|s| s.programs.as_str()),
+            "share": effective.as_ref().map(|s| s.share.as_str()),
+            "sharing": effective.as_ref().map(|s| {
+                let (word, why) = sharing_here(s);
+                json!({"mode": word, "why": why})
+            }),
             "in_ci": in_ci,
             "rustc_wrapper_set": wrapper.is_some(),
             "held": held.as_ref().map(held_json),
@@ -290,6 +382,19 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 )
             ),
         );
+        let (word, why) = sharing_here(effective);
+        line(
+            "share",
+            format!(
+                "{} on this machine{}",
+                effective.share.as_str(),
+                named(
+                    place.overrides().is_some_and(|o| o.share.is_some()),
+                    "HUSHRUN_BUILD_SHARE"
+                )
+            ),
+        );
+        line("sharing", format!("{word}: {why}"));
         line(
             "programs",
             match effective.programs {

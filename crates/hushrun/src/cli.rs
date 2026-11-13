@@ -343,6 +343,26 @@ pub enum BuildCommand {
     Status,
     /// Delete every crate kept.
     Clean,
+    /// How much this machine takes part in the org's shared store of compiled crates: on,
+    /// observe or off. It can lower the org's shared mode here, never raise it.
+    Share(BuildShareArgs),
+}
+
+/// `hushrun build share on|observe|off` (B-33).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Args)]
+pub struct BuildShareArgs {
+    /// on: share as the org does; observe: upload and compare, never reuse a download; off:
+    /// nothing goes to or comes from the shared store.
+    #[arg(value_enum)]
+    pub mode: ShareWord,
+}
+
+/// The share setting's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ShareWord {
+    On,
+    Observe,
+    Off,
 }
 
 /// `hushrun hook` (C-23).

@@ -634,3 +634,42 @@ fn an_isolated_check_never_gets_the_wrapper() {
     // The check declares no variables, so none goes in.
     assert!(!runs[0].iter().any(|a| a == "--env"), "{:?}", runs[0]);
 }
+
+// covers: B-25, B-33
+#[test]
+fn build_share_saves_the_share_setting_and_status_says_what_applies() {
+    let w = World::new("acme-api.yaml");
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let saved = build(&w, &["share", "observe"]);
+    assert_eq!(saved.code, 0, "{}", saved.stderr);
+    assert!(
+        saved.stdout.contains("Sharing is in observe here"),
+        "{}",
+        saved.stdout
+    );
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(settings(&w)).unwrap()).unwrap();
+    assert_eq!(file["share"], "observe");
+    assert_eq!(file["mode"], "on", "the local mode stays");
+    let status = status_json(&w);
+    assert_eq!(status["share"], "observe");
+    // Nothing here signs in to a backend: sharing is off, and says why.
+    assert_eq!(status["sharing"]["mode"], "off");
+    assert_eq!(status["sharing"]["why"], "no backend is signed in to");
+    // HUSHRUN_BUILD_SHARE lowers it for one command; the file keeps its own.
+    let shell = Ran::of(
+        hushrun(&w)
+            .env("HUSHRUN_BUILD_SHARE", "off")
+            .args(["build"]),
+    );
+    assert!(
+        shell
+            .stdout
+            .contains("share     off on this machine (HUSHRUN_BUILD_SHARE)"),
+        "{}",
+        shell.stdout
+    );
+    let again: Value =
+        serde_json::from_str(&std::fs::read_to_string(settings(&w)).unwrap()).unwrap();
+    assert_eq!(again["share"], "observe");
+}

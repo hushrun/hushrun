@@ -1067,3 +1067,30 @@ fn a_long_session_folder_gets_its_socket_in_a_private_folder_and_a_wrapper_reach
     relay.end_check(&[]);
     assert!(!Path::new(&share.socket).exists());
 }
+
+// covers: B-5, B-24, B-29
+#[test]
+fn a_block_that_may_not_leave_the_machine_gets_no_marker() {
+    // What the wrapper says of a block built for target-cpu=native, or holding an unkeyed
+    // value: not portable.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let (key, step) = block(&m.store, 71, 5_000, Some(me(&fake)));
+    let answer = ask(
+        &relay,
+        Request::Built {
+            key,
+            step,
+            class: LocalClass::Library,
+            portable: false,
+            cost_ms: 1000,
+        },
+    );
+    assert_eq!(answer, Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert_eq!(fake.count(route::BEGIN), 0);
+}
