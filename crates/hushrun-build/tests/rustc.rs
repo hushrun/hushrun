@@ -584,3 +584,102 @@ fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path
         assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
     }
 }
+
+/// `<dir>/libhrq` as a shared library whose `hrq()` returns `value`, named `version` inside
+/// (its soname, or its install name on macOS), under the file name `file`.
+fn shared_library(dir: &Path, file: &str, value: u32, version: u32) {
+    fs::create_dir_all(dir).unwrap();
+    write(
+        &dir.join("hrq.c"),
+        &format!("int hrq(void) {{ return {value}; }}\n"),
+    );
+    let name = if cfg!(target_os = "macos") {
+        format!("-Wl,-install_name,@rpath/libhrq.{version}.dylib")
+    } else {
+        format!("-Wl,-soname,libhrq.so.{version}")
+    };
+    let made = Command::new("cc")
+        .args(["-shared", "-fPIC", "hrq.c", &name, "-o", file])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(made.success());
+}
+
+// covers: B-6, B-18
+#[test]
+fn a_library_found_in_a_folder_the_driver_hands_ld_is_keyed_by_its_bytes() {
+    // `LIBRARY_PATH`'s text is keyed, but not what its folders hold: a `-l` found there (and in
+    // the system's folders the same way) was keyed by nothing.
+    let w = world();
+    let ws = w.checkout("ws");
+    let lib = w.dir.path().join("lp");
+    let file = if cfg!(target_os = "macos") {
+        "libhrq.dylib"
+    } else {
+        "libhrq.so"
+    };
+    shared_library(&lib, file, 1, 1);
+    write(
+        &ws.join("p/main.rs"),
+        "#[link(name = \"hrq\")]\nunsafe extern \"C\" { fn hrq() -> i32; }\n\
+         fn main() { println!(\"{}\", unsafe { hrq() }); }\n",
+    );
+    let lib_text = lib.to_str().unwrap().to_owned();
+    let link = || {
+        let (out, entry) = w.call_as(
+            &ws,
+            "p",
+            "p/main.rs",
+            "bin",
+            &[],
+            &[("LIBRARY_PATH", &lib_text)],
+        );
+        ok(&out);
+        (entry, fs::read(ws.join("out/p-x")).unwrap())
+    };
+    let (first, before) = link();
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let (again, _) = link();
+    assert!(reused(&again), "{again:?}");
+    // Another library under the same name: the program the linker writes is another.
+    shared_library(&lib, file, 2, 2);
+    let (swapped, after) = link();
+    assert!(before != after, "the program names the other library");
+    assert!(
+        !swapped.found,
+        "the library -lhrq finds changed: {swapped:?}"
+    );
+    assert_eq!(swapped.outcome, Outcome::BuiltAndStored, "{swapped:?}");
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    // GNU `ld` reads a text file there as a linker script, and takes the files it names.
+    fs::remove_file(lib.join(file)).unwrap();
+    shared_library(&lib, "libhrq_impl.so", 3, 3);
+    write(
+        &lib.join(file),
+        &format!(
+            "/* GNU ld script */\nGROUP ( {}/libhrq_impl.so )\n",
+            lib.display()
+        ),
+    );
+    let (scripted, _) = link();
+    assert_eq!(scripted.outcome, Outcome::BuiltAndStored, "{scripted:?}");
+    let (again, _) = link();
+    assert!(reused(&again), "{again:?}");
+    shared_library(&lib, "libhrq_impl.so", 4, 4);
+    let (named, _) = link();
+    assert!(!named.found, "the file the script names changed: {named:?}");
+    // A script that does more than name files: built, not stored.
+    write(
+        &lib.join(file),
+        &format!("SEARCH_DIR({})\nINPUT ( libhrq_impl.so )\n", lib.display()),
+    );
+    let (other, _) = link();
+    assert_eq!(
+        other.outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::LinkInputs),
+        "{other:?}"
+    );
+}

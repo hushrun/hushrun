@@ -53,9 +53,11 @@ pub struct Context<'a> {
     /// The store's seal ([`Store::seal`]): only a record sealed with it answers for a file
     /// without a read; `None` hashes every file in an output folder.
     pub seal: Option<sidecar::Seal>,
-    /// Asks the C driver which `ld` a link runs (B-18), again before every lookup; `None`
-    /// follows no hint of a linked output.
+    /// Asks the C driver and `ld` which `ld` a link runs and where it looks for libraries
+    /// (B-18), again before every lookup; `None` follows no hint of a linked output.
     pub ask: Option<&'a link::Ask<'a>>,
+    /// The call's target is Apple's ([`link::Query::apple`]).
+    pub apple: bool,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -570,7 +572,7 @@ impl Context<'_> {
     /// the linker search for it (`-L native=`, `all=` and bare; `framework=` for a framework),
     /// in order, present (by content, through the record where one exists) or absent. A file
     /// under the build script's output is in `generated` already. A name found in none of them
-    /// is a system library: the SDK and the linker cover it.
+    /// reaches only a link, whose `link` part keys where the linker takes it from (B-18).
     ///
     /// Cost: one stat per candidate, six names per folder, only for calls that have `-l`.
     fn native(
@@ -857,6 +859,13 @@ impl Context<'_> {
                 state: self.state_now(at, watched)?,
             });
         }
+        let mut system = Vec::with_capacity(list.system.len());
+        for at in &list.system {
+            system.push(Read {
+                at: at.clone(),
+                state: self.state_now(at, watched)?,
+            });
+        }
         let sdk = match &list.sdk {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
@@ -865,7 +874,8 @@ impl Context<'_> {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
         };
-        // Which driver and which `ld` run now: asked again, never taken from the hint (B-18).
+        // Which driver and which `ld` run now, and where that `ld` looks: asked again, never
+        // taken from the hint (B-18).
         let query = list.query.as_ref()?;
         let ask = self.ask?;
         let from = |text: &str| self.roots.from_placeholders(text).ok();
@@ -890,11 +900,26 @@ impl Context<'_> {
                 .iter()
                 .map(|flag| from(flag))
                 .collect::<Option<Vec<_>>>()?,
+            ld_sysroot: match &query.ld_sysroot {
+                Some(root) => Some(from(root)?),
+                None => None,
+            },
             path: path.unwrap_or_default(),
             cwd,
+            apple: self.apple,
+            sdk: sdk.as_ref().map(|(_, path)| path.clone()),
+            library_path: self
+                .env
+                .get("LIBRARY_PATH")
+                .map(std::ffi::OsStr::to_os_string),
         };
         let environment = link::environment(&asked, ask).ok()?;
         let ld_at = self.located(&environment.ld).ok()?;
+        let folders = environment
+            .folders
+            .iter()
+            .map(|dir| self.located(dir).ok())
+            .collect::<Option<Vec<_>>>()?;
         Some(Link {
             libraries,
             files,
@@ -908,6 +933,8 @@ impl Context<'_> {
             ld_path: Some(ld_at),
             sdk_path: list.sdk.clone(),
             dsymutil_path: list.dsymutil.clone(),
+            folders,
+            system,
             query: Some(query.clone()),
         })
     }

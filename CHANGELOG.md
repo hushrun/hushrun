@@ -194,6 +194,14 @@ offline.
 
 ### Fixed
 
+- Build blocks: a program, proc macro or build script whose `-l` library is found in a folder
+  the C driver or `ld` adds (the system's library folders, `LIBRARY_PATH`'s, on macOS the SDK's)
+  no longer reuses one linked against another file there. Such a library was "covered by the SDK
+  and the linker" and keyed by nothing, so swapping it kept the key. Now every place it may be
+  found in those folders is keyed by SHA-256 or as absent, a GNU linker script found there
+  (glibc's `libc.so`) has the files it names keyed the same way, and a script that does more, or
+  a sysroot other than `/`, builds without storing. With the `ld` question below, about 5.5 ms
+  more per link and 2.5 ms more per lookup on Linux with gcc, nothing more on macOS.
 - Build blocks: a program, proc macro or build script no longer reuses one linked by another
   `ld`. The key named the C driver (`cc`) by its size and date, not the `ld` it runs, which
   `collect2` takes from `PATH`: another `ld` earlier on `PATH` linked other bytes under the same

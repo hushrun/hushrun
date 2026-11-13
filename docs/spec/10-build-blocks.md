@@ -144,15 +144,15 @@ arguments (a target specification file is already passed through, B-4).
 - `reads`: each file rustc's dep-info lists, as a path from its root with its SHA-256, and each
   place a module of a read `.rs` file could also have been, as absent;
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
-- `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose
-  block may move (`anywhere`) is named by two things together: what it was built from, the key
-  of the block that produced it without its place and without the linker, the SDK and
-  `dsymutil`; and what a dependent's compiler reads from it, the SHA-256 of the crate metadata
-  rustc put in the linked file (its header, length and the metadata, found as the one place in
-  the file where they are), which holds the crate hash a dependent is compiled against and which
+- `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose block
+  may move (`anywhere`) is named by two things together: what it was built from, the key of the
+  block that produced it without its place and without the linker, the SDK, `dsymutil` and the C
+  runtime's places (`link`); and what a dependent's compiler reads from it, the SHA-256 of the crate
+  metadata rustc put in the linked file (its header, length and the metadata, found as the one place
+  in the file where they are), which holds the crate hash a dependent is compiled against and which
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
-  one whose metadata came out different for any reason gives another key, never a dependent
-  that fails to load. The digest is taken from the bytes that are stored, in the read that hashes
+  one whose metadata came out different for any reason gives another key, never a dependent that
+  fails to load. The digest is taken from the bytes that are stored, in the read that hashes
 them, and the block records it; a reuse names the file by that record. *Rests on:* the code a
 dependent's rustc loads from the file and runs, and the metadata it reads, following from what
 the macro was built from (its sources, dependencies, flags, compiler and the libraries linked
@@ -190,8 +190,9 @@ metadata can't be found, and a tied proc macro,
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
   `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A
-  file under `OUT_DIR` is in `generated` already. A name found in none of them is a system
-  library, covered by the SDK and the linker. A `-l` whose file can't be found with certainty
+  file under `OUT_DIR` is in `generated` already. A name found in none of them reaches only a
+  link, where `link` keys every place the linker may take it from (B-18); a library's compile
+  reads nothing of it. A `-l` whose file can't be found with certainty
   (`+verbatim`, a rename or `:file`, a kind this crate doesn't know) is `built, not stored`;
 - `native folders`: for a library, every `-L native=`, `all=` and bare folder, whether or not a
   `-l` names anything in it (a `#[link(kind = "static")]` in the source bundles a static library
@@ -244,9 +245,18 @@ metadata can't be found, and a tied proc macro,
   folder above the roots, and so doesn't tie the block (B-8); B-11 applies to each place it
   looked at;
 - `link`: for a linked output, every library the linker was handed, by SHA-256; every place the
-  linker may take a library named with `-l` from in its `-L` and `-F` folders, and every file an
-  option names for it (a linker script, a symbol list), by SHA-256 or as absent; the C driver,
-  the `ld` it runs and the SDK (B-18);
+  linker may take a library named with `-l` from, in its `-L` and `-F` folders and then in the
+  folders the C driver hands `ld` and those `ld` searches by itself (B-18), with each file a
+  linker script found there names, and every file an option names for it (a linker script, a
+  symbol list), by SHA-256 or as absent; those folders of the driver's and `ld`'s, in order; the
+  C driver, the `ld` it runs and the SDK (B-18). The places in the driver's and `ld`'s folders of
+  the C runtime the standard library asks for (`-lc`, `-lm`, `-lrt`, `-lpthread`, `-ldl`,
+  `-lutil`, `-lgcc_s`, `-lgcc`, `-lgcc_eh`, `-lSystem`), with what their scripts name, and the
+  folders themselves are, like the linker and the SDK, left out of what a dependent names a
+  movable proc macro by; any other library found there, which a crate asked for, is in it. *Rests
+  on:* the standard library calling the C runtime for services whose answer, for one input,
+  doesn't follow its version. *Breaks if:* a macro's expansion depended on the C library's version
+  (a locale, a time zone): B-24's inputs not told;
 - `place`: `anywhere`, or the roots themselves (B-10).
 
 **B-7 Hints.** To compute the second key before compiling, the wrapper needs the list of what to
@@ -491,14 +501,41 @@ nowhere, are `built, not stored`. A link given a gcc specs file (`-specs=`, `--s
 `--specs`) or a clang configuration file (`--config`, and the folders one is looked for in) is
 `built, not stored`: either can change which `ld` runs and what it is handed.
 
+*Where `ld` looks for a library* after rustc's folders (B-6's `link`): first the folders of
+`LIBRARY_PATH`, which gcc and clang both hand `ld` (the variable's text is keyed too, B-5). On
+Apple's targets then the SDK's `usr/lib` and `usr/local/lib` and `/usr/local/lib` (Apple's `ld`
+takes a folder under the SDK when there is one, else the folder itself; each `LIBRARY_PATH`
+folder is taken both ways), and for a framework the SDK's `Library/Frameworks` and
+`System/Library/Frameworks` and `/Library/Frameworks`. Elsewhere the driver's library folders
+(`-print-search-dirs`, `libraries:`, which for clang are the other `-L` folders it hands `ld`),
+then `ld`'s own `SEARCH_DIR`s (`ld --verbose`; none for an `ld` without that option, as `lld`),
+one that starts with `=` under the sysroot `ld --print-sysroot` gives with the line's
+`--sysroot`. Each folder is taken as the kernel finds it (the part that exists resolved on disk,
+the rest by name), each once. Each candidate is by SHA-256, through the run's digests, or absent,
+as in rustc's folders. A file found there that is a GNU linker script (text that is not an
+object, an archive, a Mach-O file or a `.tbd` stub) holding only `GROUP`, `INPUT`, `AS_NEEDED`
+and `OUTPUT_FORMAT`, comments allowed (glibc's `libc.so`, gcc's `libgcc_s.so`), has each file it
+names keyed the same way: an absolute name as it is, a relative one in the script's folder, then
+rustc's working folder, then each search folder, and `-l<name>` as on the line; a script found
+among those is followed too, eight deep at most. Any other script, a name under the sysroot
+(`=…`, `$SYSROOT…`), and any script while that sysroot is other than `/` or nothing, is `built,
+not stored`.
+
 Cost, measured per link on rustc 1.94 (median of 15 links of a proc macro and of a program,
-against the same without the question): on macOS (Xcode 27.2 through `/usr/bin/cc`) about 12 ms
-more at the link and 12 ms more at the lookup, nearly all of it the one question, which the shim
-answers slowly; on Linux with gcc 14 two questions of about 0.6 ms each; a clang driver answers
-in about 15 ms a question. *Rests on:* a driver running the `ld` it names for
+against the same without these questions): on macOS (Xcode 27.2 through `/usr/bin/cc`) about
+12 ms more at the link and 12 ms more at the lookup, nearly all of it the one question, which
+the shim answers slowly; on Linux arm64 with gcc 14 (Debian 13 in a container) about 5.5 ms
+more at the link (four questions, about 1,000 places stat'ed for the standard library's seven
+`-l`, the libraries and scripts hashed once per run) and 2.5 ms more at the lookup. A clang
+driver answers in about 15 ms a question. *Rests on:* a driver running the `ld` it names for
 `-print-prog-name` or, for a bare name, the one `collect2`'s search finds (gcc 14, clang 19 and
-Apple's driver checked). *Breaks if:* a driver ran another `ld` than it names (a wrapper script
-that ignores `-print-prog-name`, which then answers for itself as the `ld`).
+Apple's driver checked); `ld` taking a `-l` only from rustc's `-L` folders, the driver's,
+`LIBRARY_PATH`'s and its own, which `-print-search-dirs` and `ld --verbose` print (strace of GNU
+`ld` 2.44: no other folder opened for a library); and a linker script's names being found as
+written above (the GNU `ld` manual, `INPUT`). *Breaks if:* a driver ran another `ld` than it
+names (a wrapper script that ignores `-print-prog-name`, which then answers for itself as the
+`ld`); an `ld` searched a folder neither shows (one built with a path list `--verbose` doesn't
+print); or a script's names were looked for elsewhere.
 
 Where that list can't be read, where a file it names is gone or can't be found, or where a
 linker script an option names names more files (`INCLUDE`, `INPUT`, `GROUP`, `SEARCH_DIR`,

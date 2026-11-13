@@ -545,10 +545,11 @@ impl Ports for Fake {
     }
 
     /// A C driver that says its `ld` is `FAKE_LD` (a path, or a name looked up as `collect2`
-    /// does), or else itself.
+    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders; an `ld` with no
+    /// such options as `--verbose`.
     fn asker(&self) -> Box<crate::link::Ask<'static>> {
         let ld = self.vars.get("FAKE_LD").cloned();
-
+        let libraries = self.vars.get("FAKE_LIBRARIES").cloned().unwrap_or_default();
         Box::new(move |program: &Path, args: &[String], _path: &OsStr| {
             let last = args.last().map(String::as_str).unwrap_or_default();
             if last.starts_with("-print-prog-name=") {
@@ -561,7 +562,7 @@ impl Ports for Fake {
             if last == "-print-search-dirs" {
                 return Some(crate::link::Answer {
                     success: true,
-                    stdout: "install: /x/\nprograms: =\n".into(),
+                    stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
                 });
             }
             Some(crate::link::Answer::default())
@@ -1767,7 +1768,8 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
         fs::write(ws.join("tools/cc"), b"driver").unwrap();
         fs::write(ws.join("tools/ld.fake"), b"linker one").unwrap();
         fs::create_dir_all(ws.join("vendor")).unwrap();
-        fs::write(ws.join("vendor/libfoo.a"), b"foo one").unwrap();
+        // An archive, as the linker reads it (a text file would be a linker script).
+        fs::write(ws.join("vendor/libfoo.a"), b"!<arch>\nfoo one").unwrap();
         fs::write(ws.join("script.ld"), b"SECTIONS { }").unwrap();
         ws
     };
@@ -1808,13 +1810,13 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     assert_eq!(run(&two), REUSED, "the same inputs elsewhere");
 
     let lib = setup("lib");
-    fs::write(lib.join("vendor/libfoo.a"), b"foo two").unwrap();
+    fs::write(lib.join("vendor/libfoo.a"), b"!<arch>\nfoo two").unwrap();
     assert_eq!(run(&lib), STORED, "a library found through -L changed");
 
     let earlier = setup("earlier");
     fs::write(
         earlier.join("vendor/libfoo.dylib"),
-        b"a dylib the linker prefers",
+        b"\xcf\xfa\xed\xfea dylib the linker prefers",
     )
     .unwrap();
     assert_eq!(
@@ -1948,6 +1950,56 @@ fn a_specs_or_configuration_file_is_built_and_not_stored_and_ld_path_is_the_link
         STORED,
         "the linker --ld-path names changed"
     );
+}
+
+// covers: B-6
+#[cfg(unix)]
+#[test]
+fn a_library_found_in_the_drivers_folders_is_keyed_and_its_scripts_followed() {
+    // On Linux a `-l` that none of rustc's folders holds is found in the folders the driver
+    // reports (`-print-search-dirs`), which the key now names place by place.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/ld"), b"ld").unwrap();
+    let sys = w.dir.path().join("sys");
+    fs::create_dir_all(&sys).unwrap();
+    fs::write(sys.join("libz.so"), b"\x7fELF zlib one").unwrap();
+    let ld = format!("{}/tools/ld", ws.display());
+    let libraries = format!("{}/", sys.display());
+    let vars = [
+        ("FAKE_LD", ld.as_str()),
+        ("FAKE_LIBRARIES", libraries.as_str()),
+    ];
+    let target = ["--target", "x86_64-unknown-linux-gnu"];
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lz" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    let link = || link_proc_macro(&w, &ws, line, &vars, &target);
+    assert_eq!(link(), STORED);
+    assert_eq!(link(), REUSED);
+    fs::write(sys.join("libz.so"), b"\x7fELF zlib two").unwrap();
+    assert_eq!(link(), STORED, "the library -lz finds changed");
+    assert_eq!(link(), REUSED);
+    // glibc's way: `libc.so` is a script that names the library.
+    fs::write(sys.join("libc.so.6"), b"\x7fELF libc one").unwrap();
+    fs::write(
+        sys.join("libc.so"),
+        format!(
+            "/* GNU ld script */\nOUTPUT_FORMAT(elf64-x86-64)\nGROUP ( {}/libc.so.6 AS_NEEDED ( libmissing.so.1 ) )\n",
+            sys.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(link(), STORED, "a script appeared where -lc is found");
+    assert_eq!(link(), REUSED);
+    fs::write(sys.join("libc.so.6"), b"\x7fELF libc two").unwrap();
+    assert_eq!(link(), STORED, "the library the script names changed");
+    // A name the script gives that wasn't there appears beside it.
+    fs::write(sys.join("libmissing.so.1"), b"\x7fELF more").unwrap();
+    assert_eq!(link(), STORED, "a file the script names appeared");
+    // A script that does more than name files can't be followed.
+    fs::write(sys.join("libc.so"), b"SECTIONS { .text : { *(.text) } }").unwrap();
+    assert_eq!(link(), not_stored(NotStored::LinkInputs));
 }
 
 // covers: B-4
@@ -2738,6 +2790,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             store: None,
             seal: None,
             ask: None,
+            apple: true,
         };
         let common = cx.common().unwrap();
         hints

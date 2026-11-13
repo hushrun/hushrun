@@ -117,8 +117,9 @@ pub trait Ports {
     ) -> Option<relay::Answer> {
         relay::ask(socket, request, wait)
     }
-    /// What asks the C driver which `ld` a link runs (B-18): runs it with the wrapper's
-    /// variables, the link's `PATH` and `LC_ALL=C`. Tests stand in for the driver.
+    /// What asks the C driver and `ld` which `ld` a link runs and where it looks for libraries
+    /// (B-18): runs the program with the wrapper's variables, the link's `PATH` and `LC_ALL=C`.
+    /// Tests stand in for the programs.
     fn asker(&self) -> Box<link::Ask<'static>> {
         Box::new(ask_program)
     }
@@ -202,6 +203,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
     let asker = ports.asker();
     Call {
         asker: &*asker,
+        apple: false,
         ports,
         err,
         current: &current,
@@ -279,9 +281,11 @@ fn epoch_ms(time: SystemTime) -> u64 {
 
 /// One call the wrapper handles, after the probes and the session.
 struct Call<'a> {
-    /// Asks the C driver (B-18), apart from `ports` so that a lookup's context can hold it
-    /// while the call runs rustc.
+    /// Asks the C driver and `ld` (B-18), apart from `ports` so that a lookup's context can
+    /// hold it while the call runs rustc.
     asker: &'a link::Ask<'a>,
+    /// The call's target is Apple's: its linker is Apple's `ld` (B-18).
+    apple: bool,
     ports: &'a mut dyn Ports,
     err: &'a mut dyn Write,
     current: &'a Current,
@@ -870,6 +874,7 @@ impl Call<'_> {
         }
         if class != Class::Library {
             let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+            self.apple = apple;
             self.clear_bundle = bundled(inv, apple);
             self.bundle = self.clear_bundle && self.current.programs == Programs::Movable;
             self.link_extra = linked_args(inv, apple, self.bundle);
@@ -935,6 +940,7 @@ impl Call<'_> {
             store: Some(&store),
             seal: store.seal(),
             ask: Some(self.asker),
+            apple: self.apple,
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -1987,12 +1993,17 @@ impl Call<'_> {
         let path_var = link::link_path(&path_before, path_inherits, inherited);
         let linker =
             link::linker(&args.linker, path_var.as_deref(), &cwd).ok_or(NotStored::LinkInputs)?;
-        // Which `ld` the driver runs, asked at every link (B-18).
+        // Which `ld` the driver runs and where it looks for a library after rustc's folders,
+        // asked at every link (B-6, B-18).
         let query = link::Query {
             driver: linker.path.clone(),
             flags: args.driver_flags(),
+            ld_sysroot: args.ld_sysroot(),
             path: path_var.clone().unwrap_or_default(),
             cwd: cwd.clone(),
+            apple: self.apple,
+            sdk: inputs.sdk.clone(),
+            library_path: self.env.get("LIBRARY_PATH").map(OsStr::to_os_string),
         };
         let environment =
             link::environment(&query, self.asker).map_err(|_| NotStored::LinkInputs)?;
@@ -2007,6 +2018,7 @@ impl Call<'_> {
                 .ok_or(NotStored::LinkInputs)?,
             path_inherits,
             flags: query.flags.iter().map(|flag| placeholders(flag)).collect(),
+            ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
         };
         let mut outside = false;
         let mut changed = false;
@@ -2062,16 +2074,59 @@ impl Call<'_> {
             }
         }
         outside |= matches!(sdk_at, Some(Located::Outside(_)));
-        // Libraries named with `-l` found through `-L` and `-F`, and the files options name
-        // (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
+        // Libraries named with `-l` found through `-L` and `-F`, then in the driver's and
+        // `ld`'s own folders, each linker script found among them followed, and the files
+        // options name (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
         let mut files = Vec::new();
+        let mut system = Vec::new();
         let mut keyed: std::collections::BTreeSet<PathBuf> =
             inputs.libraries.iter().cloned().collect();
-        for place in link::library_places(&inputs) {
+        let mut search = inputs.search.clone();
+        for dir in &environment.folders {
+            if !search.contains(dir) {
+                search.push(dir.clone());
+            }
+        }
+        // Each place, whether it goes with the C runtime (left out of a dependent's name), and
+        // how many scripts led to it.
+        let mut queue: std::collections::VecDeque<(PathBuf, bool, u8)> =
+            link::library_places(&inputs)
+                .into_iter()
+                .map(|place| (place, false, 0))
+                .collect();
+        for named in &inputs.named {
+            let runtime = link::C_RUNTIME.contains(&named.as_str());
+            for place in link::places_in(named, &environment.folders, &environment.frameworks) {
+                queue.push_back((place, runtime, 0));
+            }
+        }
+        let mut places_seen = std::collections::BTreeSet::new();
+        while let Some((place, runtime, depth)) = queue.pop_front() {
+            if !places_seen.insert(place.clone()) {
+                continue;
+            }
             let (read, stat, is_outside) = cx.place(&place)?;
             outside |= is_outside;
             changed |= stat.is_some() && moved(&place, stat.as_ref());
-            files.push(read);
+            if read.state != crate::key::ReadState::Absent
+                && let Some(text) = script_text(&place).map_err(|_| NotStored::LinkInputs)?
+            {
+                // A sysroot moves where `ld` finds a script's names; and scripts that lead to
+                // scripts without end are not followed.
+                if environment.sysroot.is_some() || depth >= 8 {
+                    return Err(NotStored::LinkInputs);
+                }
+                let names = link::script_names(&text).map_err(|_| NotStored::LinkInputs)?;
+                for name in &names {
+                    for next in link::script_places(name, &place, &cwd, &search) {
+                        queue.push_back((next, runtime, depth + 1));
+                    }
+                }
+            }
+            match runtime {
+                true => system.push(read),
+                false => files.push(read),
+            }
             keyed.insert(place);
         }
         for (places, script) in link::file_places(&inputs, &cwd) {
@@ -2158,6 +2213,12 @@ impl Call<'_> {
             ld_path: ld_at,
             sdk_path: sdk_at,
             dsymutil_path: dsymutil_at,
+            folders: environment
+                .folders
+                .iter()
+                .map(|dir| cx.located_path(dir))
+                .collect::<Result<Vec<_>, _>>()?,
+            system,
             query: Some(kept),
         };
         Ok(Linked {
@@ -2677,6 +2738,21 @@ fn run_for_output(rustc: &Path, args: &[&str]) -> io::Result<String> {
         )));
     }
     String::from_utf8(out.stdout).map_err(io::Error::other)
+}
+
+/// The text of a file the linker took for a library when it is a GNU linker script
+/// ([`link::is_script`]), up to 1 MiB; `None` for an object, an archive, a stub or any other
+/// binary.
+fn script_text(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(4096).read_to_end(&mut bytes)?;
+    if !link::is_script(path, &bytes) {
+        return Ok(None);
+    }
+    file.take((1 << 20) - 4096).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 /// The real world.

@@ -235,13 +235,23 @@ pub struct Link {
     pub sdk_path: Option<Located>,
     /// Where the `dsymutil` the compile runs is. Kept for the hint; the key holds only `linker`.
     pub dsymutil_path: Option<Located>,
-    /// How to ask again which `ld` the link runs. Kept for the hint.
+    /// The folders the C driver hands `ld` and those `ld` searches by itself, after rustc's own,
+    /// in order: where a `-l` found in none of rustc's folders is looked for (B-6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<Located>,
+    /// Each place in those folders the C runtime the standard library asks for may be (`-lc`,
+    /// `-lm`, …, `-lSystem`, [`crate::link::C_RUNTIME`]), and each place a linker script found
+    /// there names, present or absent. Like the linker and the SDK, and unlike `files`, left out
+    /// of what a dependent names a proc macro by (B-6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<Read>,
+    /// How to ask again which `ld` the link runs and where it looks. Kept for the hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<LinkQuery>,
 }
 
-/// What a hint keeps to ask again, before a lookup, which `ld` a link runs (B-7, B-18): never
-/// the answer, which follows the files as they are then.
+/// What a hint keeps to ask again, before a lookup, which `ld` a link runs and where it looks
+/// for libraries (B-7, B-18): never the answers, which follow the files as they are then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkQuery {
     /// The C driver as rustc named it, when that is a bare name: found again on the link's
@@ -257,6 +267,9 @@ pub struct LinkQuery {
     /// The driver's options the questions pass on ([`crate::link::LinkArgs::driver_flags`]),
     /// roots replaced.
     pub flags: Vec<String>,
+    /// The sysroot the line gives `ld`, roots replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ld_sysroot: Option<String>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -276,7 +289,10 @@ pub struct LinkList {
     /// Where the `dsymutil` a program's compile runs is (B-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsymutil: Option<Located>,
-    /// How to ask again which `ld` runs; a hint without it is not followed.
+    /// The places of the C runtime in the driver's and `ld`'s folders ([`Link::system`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<Located>,
+    /// How to ask again which `ld` runs and where it looks; a hint without it is not followed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<LinkQuery>,
 }
@@ -362,6 +378,8 @@ impl Observed {
         if let Some(link) = body.link.as_mut() {
             link.linker = String::new();
             link.sdk = String::new();
+            link.folders = Vec::new();
+            link.system = Vec::new();
         }
         digest(BLOCK_SCHEMA, &body)
     }
@@ -446,6 +464,8 @@ impl Observed {
                         files: normalize(&link.files, "link files", |r| r.at.clone())?,
                         linker: link.linker.clone(),
                         sdk: link.sdk.clone(),
+                        folders: link.folders.clone(),
+                        system: normalize(&link.system, "link system", |r| r.at.clone())?,
                     })
                 })
                 .transpose()?,
@@ -566,6 +586,11 @@ struct LinkBody {
     files: Vec<Read>,
     linker: String,
     sdk: String,
+    /// In order: the order is the search's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<Located>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<Read>,
 }
 
 /// Sorts `items` by what they name, drops exact repeats, and rejects two that name one thing
@@ -715,6 +740,7 @@ impl ReadList {
                 ld: l.ld_path.clone(),
                 sdk: l.sdk_path.clone(),
                 dsymutil: l.dsymutil_path.clone(),
+                system: sorted(l.system.iter().map(|r| r.at.clone()).collect()),
                 query: l.query.clone(),
             }),
             place: match observed.place {
@@ -1015,6 +1041,8 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    folders: Vec::new(),
+                    system: Vec::new(),
                     query: None,
                 })
             }),
@@ -1031,6 +1059,8 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    folders: Vec::new(),
+                    system: Vec::new(),
                     query: None,
                 })
             }),
@@ -1062,6 +1092,8 @@ mod tests {
                 ld_path: None,
                 sdk_path: None,
                 dsymutil_path: None,
+                folders: Vec::new(),
+                system: Vec::new(),
                 query: None,
             });
             o.key().unwrap()
@@ -1134,9 +1166,54 @@ mod tests {
             ld_path: None,
             sdk_path: None,
             dsymutil_path: None,
+            folders: Vec::new(),
+            system: Vec::new(),
             query: None,
         });
         o
+    }
+
+    // covers: B-6, B-18
+    #[test]
+    fn the_c_runtime_and_the_folders_it_is_in_count_in_the_key_but_not_in_the_name() {
+        let with = |folders: &[&str], system: u8, asked: u8| {
+            let mut o = linked("cc 10 5\nld 1 2 3 4", "", 1);
+            let link = o.link.as_mut().unwrap();
+            link.folders = folders
+                .iter()
+                .map(|f| Located::Shared((*f).into()))
+                .collect();
+            link.system = vec![Read {
+                at: Located::Shared("/usr/lib/x86_64-linux-gnu/libc.so.6".into()),
+                state: ReadState::Present(d(system)),
+            }];
+            // A library a crate asked for, found in the same folders: in `files`.
+            link.files.push(Read {
+                at: Located::Shared("/usr/lib/x86_64-linux-gnu/libz.so".into()),
+                state: ReadState::Present(d(asked)),
+            });
+            o
+        };
+        let base = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 1);
+        // Another C library, other folders, the same folders in another order: other keys.
+        for other in [
+            with(&["/usr/lib/gcc/14", "/usr/lib"], 2, 1),
+            with(&["/usr/lib/gcc/15", "/usr/lib"], 1, 1),
+            with(&["/usr/lib", "/usr/lib/gcc/14"], 1, 1),
+        ] {
+            assert_ne!(base.key().unwrap(), other.key().unwrap());
+            // A dependent names the macro the same: like the linker and the SDK.
+            assert_eq!(base.known_by().unwrap(), other.known_by().unwrap());
+        }
+        // A library a crate asked for is in the name too.
+        let asked = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 2);
+        assert_ne!(base.key().unwrap(), asked.key().unwrap());
+        assert_ne!(base.known_by().unwrap(), asked.known_by().unwrap());
+        // A link with none of these keys as it did.
+        let plain = linked("cc 10 5", "sdk 15", 1);
+        let body = serde_json::to_value(plain.body().unwrap()).unwrap();
+        assert!(body["link"].get("folders").is_none(), "{body}");
+        assert!(body["link"].get("system").is_none(), "{body}");
     }
 
     // covers: B-6
@@ -1333,6 +1410,8 @@ mod tests {
             ld_path: Some(Located::Shared("/usr/bin/ld.lld".into())),
             sdk_path: Some(Located::Outside("/sdk".into())),
             dsymutil_path: None,
+            folders: Vec::new(),
+            system: Vec::new(),
             query: None,
         });
         let hint = ReadList::of(&o);
@@ -1360,6 +1439,7 @@ mod tests {
                 ld: Some(Located::Shared("/usr/bin/ld.lld".into())),
                 sdk: Some(Located::Outside("/sdk".into())),
                 dsymutil: None,
+                system: Vec::new(),
                 query: None,
             })
         );
