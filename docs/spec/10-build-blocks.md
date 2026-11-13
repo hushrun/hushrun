@@ -566,12 +566,17 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   a wrong block.
 - `unkeyed-value`: an output holds, as it is, the value of an environment variable that is in
   neither key (not among the first key's variables, and not named by the dep-info), with a
-  value of 8 bytes or more: a name that reads like a secret (E-12's one definition), or any name
-  that no CI system set itself
-  (`GITHUB_`, `RUNNER_`, `ACTIONS_`, `CI_`, `GITLAB_` and the other systems' documented prefixes)
-  and no build tool did (`CARGO`, `RUSTC`, `RUSTUP_`, `RUST_`, `OUT_DIR`, `HUSHRUN_`). A
-  variable among those whose name reads like a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is
-  searched all the same. A value that holds a root or a folder of the machine is left to those
+  value of 8 bytes or more: a name that reads like a secret (E-12's one definition), or any other
+  name, less three kinds. A CI system's own: the exact names that GitHub Actions, GitLab,
+  Buildkite, CircleCI, Travis, Jenkins, Azure Pipelines, Bitbucket, Drone, TeamCity, AppVeyor or
+  CodeBuild documents setting itself (`GITHUB_SHA`, `RUNNER_OS`, `CI_COMMIT_SHA`,
+  `BUILD_SOURCEVERSION`, …, listed in `portable::SET_BY_CI`), and only while that system is
+  detected (`GITHUB_ACTIONS`, `GITLAB_CI`, `TF_BUILD`, `JENKINS_URL`, … set and not empty); never
+  a prefix, so `BUILD_ENV`, `CI_REGION` or `AGENT_POOL`, a project's own settings, are searched in
+  CI too, and so is a laptop's `BUILD_NUMBER`. A build tool's (`CARGO`, `RUSTC`, `RUSTUP_`,
+  `RUST_`, `OUT_DIR`, `HUSHRUN_`, by prefix). The shell's: `_`, `PWD` and `OLDPWD`, which name
+  where a command started. A name that reads like a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is
+  searched whatever its system. A value that holds a root or a folder of the machine is left to those
   rules. The values are looked for in the same pass over each output as the roots, and only
   the variables' names are recorded, in the description and the run's log, which counts the
   blocks held back and their variables; a value is never written anywhere. *Rests on:* a value
@@ -584,7 +589,8 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   catch a block built with another such value. CI's own variables are left out because their values are
   the same for every job of a repository and turn up by chance (`https://github.com` is in the
   doc comments of nearly half of the libraries on crates.io); a project whose build reads one
-  without telling names it in `build: env:` (B-35).
+  without telling names it in `build: env:` (B-35). It also breaks if a project gives its
+  own setting a name that a detected CI system documents as its own: that value travels.
 - `native-cpu`: it was compiled for this machine's CPU, `-C target-cpu=native` or `-mcpu=native`
   in `-C llvm-args` (B-5), whether or not the compiler said what that is here. *Rests on:* rustc
   handing the code generator every feature of the host CPU, which is more than its printed

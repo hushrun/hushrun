@@ -1707,6 +1707,11 @@ impl Call<'_> {
     fn unkeyed_values(&self, roots: &Roots, tracked: &[&str]) -> Vec<(String, Vec<u8>)> {
         let keyed = self.asked.as_ref().map(|asked| &asked.env);
         let machine = roots.machine_needles();
+        let ci = portable::SetByCi::detect(|name| {
+            self.env
+                .get(name)
+                .map(|value| value.to_string_lossy().into_owned())
+        });
         self.env
             .names()
             .filter(|name| !keyed.is_some_and(|keyed| keyed.contains_key(*name)))
@@ -1714,7 +1719,7 @@ impl Call<'_> {
             .filter_map(|name| {
                 let value = self.env.get(name)?;
                 let bytes = value.as_encoded_bytes();
-                if !portable::unkeyed_candidate(name, bytes) {
+                if !portable::unkeyed_candidate(name, bytes, &ci) {
                     return None;
                 }
                 if let Some(text) = value.to_str()

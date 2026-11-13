@@ -181,6 +181,15 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 - Shared `observe` downloads each block it compares once (it fetched each twice, the prefetch's
   copy unused), and its summary says how many blocks it compared and how many differed.
 
+### Fixed
+
+- Build blocks: a variable whose name merely starts like a CI system's (`BUILD_ENV`,
+  `CI_REGION`, `AGENT_POOL`) is searched for in a block's outputs like any other, so a block
+  holding its value stays on the machine. Only the exact names a CI system documents as its own
+  are left out, and only in that system; the shell's `_`, `PWD` and `OLDPWD` are left out too.
+  Before, any name under a CI prefix was left out, and a 14-byte `BUILD_ENV` reached another
+  machine, whose program printed the first machine's value.
+
 ## [0.13.0] - 2026-11-12
 
 Test by test ([ADR 0068](docs/adr/0068-test-files-observed.md) to

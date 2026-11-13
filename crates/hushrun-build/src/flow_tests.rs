@@ -4281,11 +4281,38 @@ fn with_value_in_output(name: &str, value: &str, tracked: bool) -> (World, Resul
     let r = w.call_with(&ws, "a", &[], |fake| {
         from_a_registry(fake);
         fake.vars.insert(name.into(), value.into());
-        fake.vars
-            .insert("GITHUB_SERVER_URL".into(), "https://github.com".into());
+        // A GitHub Actions job's, and a GitLab job's, among others.
+        for (name, value) in [
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_SERVER_URL", "https://github.com"),
+            ("GITLAB_CI", "true"),
+            ("TF_BUILD", "True"),
+        ] {
+            fake.vars.entry(name.into()).or_insert_with(|| value.into());
+        }
     });
     assert_eq!(r.outcome(), STORED, "{}", r.stderr);
     (w, r)
+}
+
+// covers: B-24
+#[test]
+fn a_projects_own_value_under_a_ci_prefix_holds_its_block_back_in_ci() {
+    // Fourteen bytes of a project's own setting, in a job of each system whose prefix it has.
+    for name in [
+        "BUILD_ENV",
+        "CI_REGION",
+        "AGENT_POOL",
+        "GITHUB_DEPLOY_TARGET",
+    ] {
+        let (_, r) = with_value_in_output(name, "prod-eu-west-1", false);
+        let portable = r.entry.unwrap().portable.unwrap();
+        assert!(!portable.portable, "{name}: {portable:?}");
+        assert_eq!(portable.variables, [name], "{portable:?}");
+    }
+    // A value of the shell's own never does.
+    let (_, r) = with_value_in_output("OLDPWD", "/srv/deploy/prod-eu-west-1", false);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
 }
 
 // covers: B-24

@@ -237,37 +237,723 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
     }
 }
 
-/// The prefixes of the variables a CI system sets itself, documented by each: GitHub Actions,
-/// GitLab, Buildkite, CircleCI, Travis, Jenkins, Azure Pipelines, Bitbucket, Drone, TeamCity,
-/// AppVeyor and Codebuild. Their values (a server's URL, a ref, a run's number) are the same for
-/// every job of a repository and turn up in crates by chance: `https://github.com` is in the
-/// doc comments of nearly half the libraries on crates.io. A name among them that looks like a
-/// secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is searched all the same.
-pub const SET_BY_CI: &[&str] = &[
-    "GITHUB_",
-    "RUNNER_",
-    "ACTIONS_",
-    "CI_",
-    "GITLAB_",
-    "BUILDKITE_",
-    "BUILDKITE",
-    "CIRCLE_",
-    "CIRCLECI",
-    "TRAVIS_",
-    "TRAVIS",
-    "JENKINS_",
-    "BUILD_",
-    "SYSTEM_",
-    "AGENT_",
-    "TF_BUILD",
-    "BITBUCKET_",
-    "DRONE_",
-    "DRONE",
-    "TEAMCITY_",
-    "APPVEYOR_",
-    "APPVEYOR",
-    "CODEBUILD_",
+/// A CI system, the variables that say a compile runs in it, and the exact names it documents as
+/// its own.
+#[derive(Debug)]
+pub struct CiSystem {
+    pub name: &'static str,
+    /// Any of these set, and not empty, says the compile runs in this system.
+    pub detected_by: &'static [&'static str],
+    /// The variables it documents setting itself, by their exact names: never a prefix, since
+    /// `BUILD_ENV`, `CI_REGION` or `AGENT_POOL` is what a project calls its own settings.
+    pub names: &'static [&'static str],
+}
+
+/// The variables each CI system documents setting itself: GitHub Actions, GitLab, Buildkite,
+/// CircleCI, Travis, Jenkins, Azure Pipelines, Bitbucket, Drone, TeamCity, AppVeyor and
+/// CodeBuild. Their values (a server's URL, a ref, a run's number) are the same for every job of
+/// a repository and turn up in crates by chance: `https://github.com` is in the doc comments of
+/// nearly half the libraries on crates.io. A system's names are left out only where that system
+/// is detected, so a laptop's `BUILD_NUMBER` or `WORKSPACE` is searched. A name that looks like
+/// a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`, `CI_COMMIT_AUTHOR`) is searched whatever this list
+/// says and so is never in it, nor is a name a system sets under a documented prefix
+/// (`BUILDKITE_AGENT_META_DATA_*`).
+pub const SET_BY_CI: &[CiSystem] = &[
+    CiSystem {
+        name: "GitHub Actions",
+        detected_by: &["GITHUB_ACTIONS"],
+        names: &[
+            "CI",
+            "GITHUB_ACTION",
+            "GITHUB_ACTION_PATH",
+            "GITHUB_ACTION_REPOSITORY",
+            "GITHUB_ACTIONS",
+            "GITHUB_ACTOR",
+            "GITHUB_ACTOR_ID",
+            "GITHUB_API_URL",
+            "GITHUB_BASE_REF",
+            "GITHUB_ENV",
+            "GITHUB_EVENT_NAME",
+            "GITHUB_EVENT_PATH",
+            "GITHUB_GRAPHQL_URL",
+            "GITHUB_HEAD_REF",
+            "GITHUB_JOB",
+            "GITHUB_OUTPUT",
+            "GITHUB_PATH",
+            "GITHUB_REF",
+            "GITHUB_REF_NAME",
+            "GITHUB_REF_PROTECTED",
+            "GITHUB_REF_TYPE",
+            "GITHUB_REPOSITORY",
+            "GITHUB_REPOSITORY_ID",
+            "GITHUB_REPOSITORY_OWNER",
+            "GITHUB_REPOSITORY_OWNER_ID",
+            "GITHUB_RETENTION_DAYS",
+            "GITHUB_RUN_ATTEMPT",
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_NUMBER",
+            "GITHUB_SERVER_URL",
+            "GITHUB_SHA",
+            "GITHUB_STATE",
+            "GITHUB_STEP_SUMMARY",
+            "GITHUB_TRIGGERING_ACTOR",
+            "GITHUB_WORKFLOW",
+            "GITHUB_WORKFLOW_REF",
+            "GITHUB_WORKFLOW_SHA",
+            "GITHUB_WORKSPACE",
+            "RUNNER_ARCH",
+            "RUNNER_DEBUG",
+            "RUNNER_ENVIRONMENT",
+            "RUNNER_NAME",
+            "RUNNER_OS",
+            "RUNNER_TEMP",
+            "RUNNER_TOOL_CACHE",
+            "ACTIONS_RESULTS_URL",
+            "ACTIONS_CACHE_URL",
+            "ACTIONS_RUNNER_DEBUG",
+            "ACTIONS_STEP_DEBUG",
+        ],
+    },
+    CiSystem {
+        name: "GitLab",
+        detected_by: &["GITLAB_CI"],
+        names: &[
+            "CI",
+            "GITLAB_CI",
+            "GITLAB_FEATURES",
+            "GITLAB_USER_EMAIL",
+            "GITLAB_USER_ID",
+            "GITLAB_USER_LOGIN",
+            "GITLAB_USER_NAME",
+            "CI_API_GRAPHQL_URL",
+            "CI_API_V4_URL",
+            "CI_BUILDS_DIR",
+            "CI_COMMIT_BEFORE_SHA",
+            "CI_COMMIT_BRANCH",
+            "CI_COMMIT_DESCRIPTION",
+            "CI_COMMIT_MESSAGE",
+            "CI_COMMIT_REF_NAME",
+            "CI_COMMIT_REF_PROTECTED",
+            "CI_COMMIT_REF_SLUG",
+            "CI_COMMIT_SHA",
+            "CI_COMMIT_SHORT_SHA",
+            "CI_COMMIT_TAG",
+            "CI_COMMIT_TAG_MESSAGE",
+            "CI_COMMIT_TIMESTAMP",
+            "CI_COMMIT_TITLE",
+            "CI_CONCURRENT_ID",
+            "CI_CONCURRENT_PROJECT_ID",
+            "CI_CONFIG_PATH",
+            "CI_DEBUG_SERVICES",
+            "CI_DEBUG_TRACE",
+            "CI_DEFAULT_BRANCH",
+            "CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX",
+            "CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX",
+            "CI_DEPENDENCY_PROXY_SERVER",
+            "CI_DEPENDENCY_PROXY_USER",
+            "CI_DEPLOY_FREEZE",
+            "CI_DEPLOY_USER",
+            "CI_DISPOSABLE_ENVIRONMENT",
+            "CI_ENVIRONMENT_ACTION",
+            "CI_ENVIRONMENT_NAME",
+            "CI_ENVIRONMENT_SLUG",
+            "CI_ENVIRONMENT_TIER",
+            "CI_ENVIRONMENT_URL",
+            "CI_EXTERNAL_PULL_REQUEST_IID",
+            "CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME",
+            "CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_SHA",
+            "CI_EXTERNAL_PULL_REQUEST_SOURCE_REPOSITORY",
+            "CI_EXTERNAL_PULL_REQUEST_TARGET_BRANCH_NAME",
+            "CI_EXTERNAL_PULL_REQUEST_TARGET_BRANCH_SHA",
+            "CI_EXTERNAL_PULL_REQUEST_TARGET_REPOSITORY",
+            "CI_GITLAB_FIPS_MODE",
+            "CI_HAS_OPEN_REQUIREMENTS",
+            "CI_JOB_ID",
+            "CI_JOB_IMAGE",
+            "CI_JOB_MANUAL",
+            "CI_JOB_NAME",
+            "CI_JOB_NAME_SLUG",
+            "CI_JOB_STAGE",
+            "CI_JOB_STARTED_AT",
+            "CI_JOB_STATUS",
+            "CI_JOB_TIMEOUT",
+            "CI_JOB_URL",
+            "CI_KUBERNETES_ACTIVE",
+            "CI_MERGE_REQUEST_APPROVED",
+            "CI_MERGE_REQUEST_ASSIGNEES",
+            "CI_MERGE_REQUEST_DESCRIPTION",
+            "CI_MERGE_REQUEST_DESCRIPTION_IS_TRUNCATED",
+            "CI_MERGE_REQUEST_DIFF_BASE_SHA",
+            "CI_MERGE_REQUEST_DIFF_ID",
+            "CI_MERGE_REQUEST_DRAFT",
+            "CI_MERGE_REQUEST_EVENT_TYPE",
+            "CI_MERGE_REQUEST_ID",
+            "CI_MERGE_REQUEST_IID",
+            "CI_MERGE_REQUEST_LABELS",
+            "CI_MERGE_REQUEST_MILESTONE",
+            "CI_MERGE_REQUEST_PROJECT_ID",
+            "CI_MERGE_REQUEST_PROJECT_PATH",
+            "CI_MERGE_REQUEST_PROJECT_URL",
+            "CI_MERGE_REQUEST_REF_PATH",
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME",
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_PROTECTED",
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA",
+            "CI_MERGE_REQUEST_SOURCE_PROJECT_ID",
+            "CI_MERGE_REQUEST_SOURCE_PROJECT_PATH",
+            "CI_MERGE_REQUEST_SOURCE_PROJECT_URL",
+            "CI_MERGE_REQUEST_SQUASH_ON_MERGE",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_PROTECTED",
+            "CI_MERGE_REQUEST_TARGET_BRANCH_SHA",
+            "CI_MERGE_REQUEST_TITLE",
+            "CI_NODE_INDEX",
+            "CI_NODE_TOTAL",
+            "CI_OPEN_MERGE_REQUESTS",
+            "CI_PAGES_DOMAIN",
+            "CI_PAGES_HOSTNAME",
+            "CI_PAGES_URL",
+            "CI_PIPELINE_CREATED_AT",
+            "CI_PIPELINE_ID",
+            "CI_PIPELINE_IID",
+            "CI_PIPELINE_NAME",
+            "CI_PIPELINE_SCHEDULE_DESCRIPTION",
+            "CI_PIPELINE_SOURCE",
+            "CI_PIPELINE_TRIGGERED",
+            "CI_PIPELINE_URL",
+            "CI_PROJECT_CLASSIFICATION_LABEL",
+            "CI_PROJECT_DESCRIPTION",
+            "CI_PROJECT_DIR",
+            "CI_PROJECT_ID",
+            "CI_PROJECT_NAME",
+            "CI_PROJECT_NAMESPACE",
+            "CI_PROJECT_NAMESPACE_ID",
+            "CI_PROJECT_NAMESPACE_SLUG",
+            "CI_PROJECT_PATH",
+            "CI_PROJECT_PATH_SLUG",
+            "CI_PROJECT_REPOSITORY_LANGUAGES",
+            "CI_PROJECT_ROOT_NAMESPACE",
+            "CI_PROJECT_TITLE",
+            "CI_PROJECT_URL",
+            "CI_PROJECT_VISIBILITY",
+            "CI_REGISTRY",
+            "CI_REGISTRY_IMAGE",
+            "CI_REGISTRY_USER",
+            "CI_RELEASE_DESCRIPTION",
+            "CI_REPOSITORY_URL",
+            "CI_RUNNER_DESCRIPTION",
+            "CI_RUNNER_EXECUTABLE_ARCH",
+            "CI_RUNNER_ID",
+            "CI_RUNNER_REVISION",
+            "CI_RUNNER_TAGS",
+            "CI_RUNNER_VERSION",
+            "CI_SERVER",
+            "CI_SERVER_FQDN",
+            "CI_SERVER_HOST",
+            "CI_SERVER_NAME",
+            "CI_SERVER_PORT",
+            "CI_SERVER_PROTOCOL",
+            "CI_SERVER_REVISION",
+            "CI_SERVER_SHELL_SSH_HOST",
+            "CI_SERVER_SHELL_SSH_PORT",
+            "CI_SERVER_TLS_CA_FILE",
+            "CI_SERVER_TLS_CERT_FILE",
+            "CI_SERVER_URL",
+            "CI_SERVER_VERSION",
+            "CI_SERVER_VERSION_MAJOR",
+            "CI_SERVER_VERSION_MINOR",
+            "CI_SERVER_VERSION_PATCH",
+            "CI_SHARED_ENVIRONMENT",
+            "CI_TEMPLATE_REGISTRY_HOST",
+        ],
+    },
+    CiSystem {
+        name: "Buildkite",
+        detected_by: &["BUILDKITE"],
+        names: &[
+            "CI",
+            "BUILDKITE",
+            "BUILDKITE_AGENT_ID",
+            "BUILDKITE_AGENT_NAME",
+            "BUILDKITE_BRANCH",
+            "BUILDKITE_BUILD_CHECKOUT_PATH",
+            "BUILDKITE_BUILD_CREATOR",
+            "BUILDKITE_BUILD_CREATOR_EMAIL",
+            "BUILDKITE_BUILD_ID",
+            "BUILDKITE_BUILD_NUMBER",
+            "BUILDKITE_BUILD_PATH",
+            "BUILDKITE_BUILD_URL",
+            "BUILDKITE_COMMAND",
+            "BUILDKITE_COMMIT",
+            "BUILDKITE_JOB_ID",
+            "BUILDKITE_LABEL",
+            "BUILDKITE_MESSAGE",
+            "BUILDKITE_ORGANIZATION_SLUG",
+            "BUILDKITE_PARALLEL_JOB",
+            "BUILDKITE_PARALLEL_JOB_COUNT",
+            "BUILDKITE_PIPELINE_DEFAULT_BRANCH",
+            "BUILDKITE_PIPELINE_ID",
+            "BUILDKITE_PIPELINE_NAME",
+            "BUILDKITE_PIPELINE_PROVIDER",
+            "BUILDKITE_PIPELINE_SLUG",
+            "BUILDKITE_PULL_REQUEST",
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH",
+            "BUILDKITE_PULL_REQUEST_REPO",
+            "BUILDKITE_REBUILT_FROM_BUILD_ID",
+            "BUILDKITE_REBUILT_FROM_BUILD_NUMBER",
+            "BUILDKITE_REPO",
+            "BUILDKITE_RETRY_COUNT",
+            "BUILDKITE_SOURCE",
+            "BUILDKITE_STEP_ID",
+            "BUILDKITE_TAG",
+            "BUILDKITE_TIMEOUT",
+            "BUILDKITE_TRIGGERED_FROM_BUILD_ID",
+            "BUILDKITE_TRIGGERED_FROM_BUILD_NUMBER",
+            "BUILDKITE_TRIGGERED_FROM_BUILD_PIPELINE_SLUG",
+        ],
+    },
+    CiSystem {
+        name: "CircleCI",
+        detected_by: &["CIRCLECI"],
+        names: &[
+            "CI",
+            "CIRCLECI",
+            "CIRCLE_BRANCH",
+            "CIRCLE_BUILD_NUM",
+            "CIRCLE_BUILD_URL",
+            "CIRCLE_JOB",
+            "CIRCLE_NODE_INDEX",
+            "CIRCLE_NODE_TOTAL",
+            "CIRCLE_PR_NUMBER",
+            "CIRCLE_PR_REPONAME",
+            "CIRCLE_PR_USERNAME",
+            "CIRCLE_PREVIOUS_BUILD_NUM",
+            "CIRCLE_PROJECT_REPONAME",
+            "CIRCLE_PROJECT_USERNAME",
+            "CIRCLE_PULL_REQUEST",
+            "CIRCLE_PULL_REQUESTS",
+            "CIRCLE_REPOSITORY_URL",
+            "CIRCLE_SHA1",
+            "CIRCLE_TAG",
+            "CIRCLE_USERNAME",
+            "CIRCLE_WORKFLOW_ID",
+            "CIRCLE_WORKFLOW_JOB_ID",
+            "CIRCLE_WORKFLOW_WORKSPACE_ID",
+            "CIRCLE_WORKING_DIRECTORY",
+        ],
+    },
+    CiSystem {
+        name: "Travis CI",
+        detected_by: &["TRAVIS"],
+        names: &[
+            "CI",
+            "CONTINUOUS_INTEGRATION",
+            "TRAVIS",
+            "TRAVIS_ALLOW_FAILURE",
+            "TRAVIS_APP_HOST",
+            "TRAVIS_BRANCH",
+            "TRAVIS_BUILD_DIR",
+            "TRAVIS_BUILD_ID",
+            "TRAVIS_BUILD_NUMBER",
+            "TRAVIS_BUILD_STAGE_NAME",
+            "TRAVIS_BUILD_WEB_URL",
+            "TRAVIS_COMMIT",
+            "TRAVIS_COMMIT_MESSAGE",
+            "TRAVIS_COMMIT_RANGE",
+            "TRAVIS_COMPILER",
+            "TRAVIS_CPU_ARCH",
+            "TRAVIS_DEBUG_MODE",
+            "TRAVIS_DIST",
+            "TRAVIS_EVENT_TYPE",
+            "TRAVIS_JOB_ID",
+            "TRAVIS_JOB_NAME",
+            "TRAVIS_JOB_NUMBER",
+            "TRAVIS_JOB_WEB_URL",
+            "TRAVIS_OS_NAME",
+            "TRAVIS_OSX_IMAGE",
+            "TRAVIS_PULL_REQUEST",
+            "TRAVIS_PULL_REQUEST_BRANCH",
+            "TRAVIS_PULL_REQUEST_SHA",
+            "TRAVIS_PULL_REQUEST_SLUG",
+            "TRAVIS_REPO_SLUG",
+            "TRAVIS_SECURE_ENV_VARS",
+            "TRAVIS_SUDO",
+            "TRAVIS_TAG",
+            "TRAVIS_TEST_RESULT",
+        ],
+    },
+    CiSystem {
+        name: "Jenkins",
+        detected_by: &["JENKINS_URL", "JENKINS_HOME"],
+        names: &[
+            "BRANCH_IS_PRIMARY",
+            "BRANCH_NAME",
+            "BUILD_DISPLAY_NAME",
+            "BUILD_ID",
+            "BUILD_NUMBER",
+            "BUILD_TAG",
+            "BUILD_URL",
+            "CHANGE_BRANCH",
+            "CHANGE_FORK",
+            "CHANGE_ID",
+            "CHANGE_TARGET",
+            "CHANGE_TITLE",
+            "CHANGE_URL",
+            "EXECUTOR_NUMBER",
+            "GIT_BRANCH",
+            "GIT_COMMIT",
+            "GIT_LOCAL_BRANCH",
+            "GIT_PREVIOUS_COMMIT",
+            "GIT_PREVIOUS_SUCCESSFUL_COMMIT",
+            "GIT_URL",
+            "HUDSON_HOME",
+            "HUDSON_URL",
+            "JENKINS_HOME",
+            "JENKINS_URL",
+            "JOB_BASE_NAME",
+            "JOB_DISPLAY_URL",
+            "JOB_NAME",
+            "JOB_URL",
+            "NODE_LABELS",
+            "NODE_NAME",
+            "RUN_ARTIFACTS_DISPLAY_URL",
+            "RUN_CHANGES_DISPLAY_URL",
+            "RUN_DISPLAY_URL",
+            "RUN_TESTS_DISPLAY_URL",
+            "STAGE_NAME",
+            "TAG_DATE",
+            "TAG_NAME",
+            "TAG_TIMESTAMP",
+            "TAG_UNIXTIME",
+            "WORKSPACE",
+            "WORKSPACE_TMP",
+        ],
+    },
+    CiSystem {
+        name: "Azure Pipelines",
+        detected_by: &["TF_BUILD"],
+        names: &[
+            "TF_BUILD",
+            "AGENT_BUILDDIRECTORY",
+            "AGENT_CONTAINERMAPPING",
+            "AGENT_HOMEDIRECTORY",
+            "AGENT_ID",
+            "AGENT_ISSELFHOSTED",
+            "AGENT_JOBNAME",
+            "AGENT_JOBSTATUS",
+            "AGENT_MACHINENAME",
+            "AGENT_NAME",
+            "AGENT_OS",
+            "AGENT_OSARCHITECTURE",
+            "AGENT_TEMPDIRECTORY",
+            "AGENT_TOOLSDIRECTORY",
+            "AGENT_WORKFOLDER",
+            "BUILD_ARTIFACTSTAGINGDIRECTORY",
+            "BUILD_BINARIESDIRECTORY",
+            "BUILD_BUILDID",
+            "BUILD_BUILDNUMBER",
+            "BUILD_BUILDURI",
+            "BUILD_CONTAINERID",
+            "BUILD_CRONSCHEDULE_DISPLAYNAME",
+            "BUILD_DEFINITIONNAME",
+            "BUILD_DEFINITIONVERSION",
+            "BUILD_QUEUEDBY",
+            "BUILD_QUEUEDBYID",
+            "BUILD_REASON",
+            "BUILD_REPOSITORY_CLEAN",
+            "BUILD_REPOSITORY_GIT_SUBMODULECHECKOUT",
+            "BUILD_REPOSITORY_ID",
+            "BUILD_REPOSITORY_LOCALPATH",
+            "BUILD_REPOSITORY_NAME",
+            "BUILD_REPOSITORY_PROVIDER",
+            "BUILD_REPOSITORY_TFVC_WORKSPACE",
+            "BUILD_REPOSITORY_URI",
+            "BUILD_REQUESTEDFOR",
+            "BUILD_REQUESTEDFOREMAIL",
+            "BUILD_REQUESTEDFORID",
+            "BUILD_SOURCEBRANCH",
+            "BUILD_SOURCEBRANCHNAME",
+            "BUILD_SOURCESDIRECTORY",
+            "BUILD_SOURCEVERSION",
+            "BUILD_SOURCEVERSIONMESSAGE",
+            "BUILD_STAGINGDIRECTORY",
+            "BUILD_TRIGGEREDBY_BUILDID",
+            "BUILD_TRIGGEREDBY_BUILDNUMBER",
+            "BUILD_TRIGGEREDBY_DEFINITIONID",
+            "BUILD_TRIGGEREDBY_DEFINITIONNAME",
+            "BUILD_TRIGGEREDBY_PROJECTID",
+            "COMMON_TESTRESULTSDIRECTORY",
+            "ENVIRONMENT_ID",
+            "ENVIRONMENT_NAME",
+            "ENVIRONMENT_RESOURCEID",
+            "ENVIRONMENT_RESOURCENAME",
+            "PIPELINE_WORKSPACE",
+            "STRATEGY_CYCLENAME",
+            "STRATEGY_NAME",
+            "SYSTEM_ARTIFACTSDIRECTORY",
+            "SYSTEM_COLLECTIONID",
+            "SYSTEM_COLLECTIONURI",
+            "SYSTEM_CULTURE",
+            "SYSTEM_DEBUG",
+            "SYSTEM_DEFAULTWORKINGDIRECTORY",
+            "SYSTEM_DEFINITIONID",
+            "SYSTEM_DEFINITIONNAME",
+            "SYSTEM_HOSTTYPE",
+            "SYSTEM_ISSCHEDULED",
+            "SYSTEM_JOBATTEMPT",
+            "SYSTEM_JOBDISPLAYNAME",
+            "SYSTEM_JOBID",
+            "SYSTEM_JOBNAME",
+            "SYSTEM_JOBPOSITIONINPHASE",
+            "SYSTEM_PARALLELEXECUTIONTYPE",
+            "SYSTEM_PHASEATTEMPT",
+            "SYSTEM_PHASEDISPLAYNAME",
+            "SYSTEM_PHASENAME",
+            "SYSTEM_PLANID",
+            "SYSTEM_PULLREQUEST_ISFORK",
+            "SYSTEM_PULLREQUEST_PULLREQUESTID",
+            "SYSTEM_PULLREQUEST_PULLREQUESTNUMBER",
+            "SYSTEM_PULLREQUEST_SOURCEBRANCH",
+            "SYSTEM_PULLREQUEST_SOURCECOMMITID",
+            "SYSTEM_PULLREQUEST_SOURCEREPOSITORYURI",
+            "SYSTEM_PULLREQUEST_TARGETBRANCH",
+            "SYSTEM_PULLREQUEST_TARGETBRANCHNAME",
+            "SYSTEM_SERVERTYPE",
+            "SYSTEM_STAGEATTEMPT",
+            "SYSTEM_STAGEDISPLAYNAME",
+            "SYSTEM_STAGENAME",
+            "SYSTEM_TASKDEFINITIONSURI",
+            "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+            "SYSTEM_TEAMFOUNDATIONSERVERURI",
+            "SYSTEM_TEAMPROJECT",
+            "SYSTEM_TEAMPROJECTID",
+            "SYSTEM_TIMELINEID",
+            "SYSTEM_TOTALJOBSINPHASE",
+            "SYSTEM_WORKFOLDER",
+        ],
+    },
+    CiSystem {
+        name: "Bitbucket Pipelines",
+        detected_by: &["BITBUCKET_BUILD_NUMBER"],
+        names: &[
+            "CI",
+            "BITBUCKET_BOOKMARK",
+            "BITBUCKET_BRANCH",
+            "BITBUCKET_BUILD_NUMBER",
+            "BITBUCKET_CLONE_DIR",
+            "BITBUCKET_COMMIT",
+            "BITBUCKET_DEPLOYMENT_ENVIRONMENT",
+            "BITBUCKET_DEPLOYMENT_ENVIRONMENT_UUID",
+            "BITBUCKET_DOCKER_HOST_INTERNAL",
+            "BITBUCKET_EXIT_CODE",
+            "BITBUCKET_GIT_HTTP_ORIGIN",
+            "BITBUCKET_GIT_SSH_ORIGIN",
+            "BITBUCKET_PARALLEL_STEP",
+            "BITBUCKET_PARALLEL_STEP_COUNT",
+            "BITBUCKET_PIPELINE_UUID",
+            "BITBUCKET_PR_DESTINATION_BRANCH",
+            "BITBUCKET_PR_DESTINATION_COMMIT",
+            "BITBUCKET_PR_ID",
+            "BITBUCKET_PROJECT_UUID",
+            "BITBUCKET_REPO_FULL_NAME",
+            "BITBUCKET_REPO_OWNER",
+            "BITBUCKET_REPO_OWNER_UUID",
+            "BITBUCKET_REPO_SLUG",
+            "BITBUCKET_REPO_UUID",
+            "BITBUCKET_STEP_TRIGGERER_UUID",
+            "BITBUCKET_STEP_UUID",
+            "BITBUCKET_TAG",
+            "BITBUCKET_WORKSPACE",
+        ],
+    },
+    CiSystem {
+        name: "Drone",
+        detected_by: &["DRONE"],
+        names: &[
+            "CI",
+            "DRONE",
+            "DRONE_BRANCH",
+            "DRONE_BUILD_ACTION",
+            "DRONE_BUILD_CREATED",
+            "DRONE_BUILD_EVENT",
+            "DRONE_BUILD_FINISHED",
+            "DRONE_BUILD_LINK",
+            "DRONE_BUILD_NUMBER",
+            "DRONE_BUILD_PARENT",
+            "DRONE_BUILD_STARTED",
+            "DRONE_BUILD_STATUS",
+            "DRONE_CALVER",
+            "DRONE_COMMIT",
+            "DRONE_COMMIT_AFTER",
+            "DRONE_COMMIT_BEFORE",
+            "DRONE_COMMIT_BRANCH",
+            "DRONE_COMMIT_LINK",
+            "DRONE_COMMIT_MESSAGE",
+            "DRONE_COMMIT_REF",
+            "DRONE_COMMIT_SHA",
+            "DRONE_DEPLOY_TO",
+            "DRONE_FAILED_STAGES",
+            "DRONE_FAILED_STEPS",
+            "DRONE_GIT_HTTP_URL",
+            "DRONE_GIT_SSH_URL",
+            "DRONE_PULL_REQUEST",
+            "DRONE_PULL_REQUEST_TITLE",
+            "DRONE_REMOTE_URL",
+            "DRONE_REPO",
+            "DRONE_REPO_BRANCH",
+            "DRONE_REPO_LINK",
+            "DRONE_REPO_NAME",
+            "DRONE_REPO_NAMESPACE",
+            "DRONE_REPO_OWNER",
+            "DRONE_REPO_SCM",
+            "DRONE_REPO_VISIBILITY",
+            "DRONE_SEMVER",
+            "DRONE_SEMVER_BUILD",
+            "DRONE_SEMVER_ERROR",
+            "DRONE_SEMVER_MAJOR",
+            "DRONE_SEMVER_MINOR",
+            "DRONE_SEMVER_PATCH",
+            "DRONE_SEMVER_PRERELEASE",
+            "DRONE_SEMVER_SHORT",
+            "DRONE_SOURCE_BRANCH",
+            "DRONE_STAGE_ARCH",
+            "DRONE_STAGE_DEPENDS_ON",
+            "DRONE_STAGE_FINISHED",
+            "DRONE_STAGE_KIND",
+            "DRONE_STAGE_MACHINE",
+            "DRONE_STAGE_NAME",
+            "DRONE_STAGE_NUMBER",
+            "DRONE_STAGE_OS",
+            "DRONE_STAGE_STARTED",
+            "DRONE_STAGE_STATUS",
+            "DRONE_STAGE_TYPE",
+            "DRONE_STAGE_VARIANT",
+            "DRONE_STEP_NAME",
+            "DRONE_STEP_NUMBER",
+            "DRONE_SYSTEM_HOST",
+            "DRONE_SYSTEM_HOSTNAME",
+            "DRONE_SYSTEM_PROTO",
+            "DRONE_SYSTEM_VERSION",
+            "DRONE_TAG",
+            "DRONE_TARGET_BRANCH",
+            "DRONE_WORKSPACE",
+        ],
+    },
+    CiSystem {
+        name: "TeamCity",
+        detected_by: &["TEAMCITY_VERSION"],
+        names: &[
+            "BUILD_IS_PERSONAL",
+            "BUILD_NUMBER",
+            "BUILD_VCS_NUMBER",
+            "TEAMCITY_BUILDCONF_NAME",
+            "TEAMCITY_BUILD_PROPERTIES_FILE",
+            "TEAMCITY_CAPTURE_ENV",
+            "TEAMCITY_GIT_PATH",
+            "TEAMCITY_PROJECT_NAME",
+            "TEAMCITY_VERSION",
+        ],
+    },
+    CiSystem {
+        name: "AppVeyor",
+        detected_by: &["APPVEYOR"],
+        names: &[
+            "CI",
+            "APPVEYOR",
+            "APPVEYOR_ACCOUNT_NAME",
+            "APPVEYOR_API_URL",
+            "APPVEYOR_BUILD_FOLDER",
+            "APPVEYOR_BUILD_ID",
+            "APPVEYOR_BUILD_NUMBER",
+            "APPVEYOR_BUILD_VERSION",
+            "APPVEYOR_BUILD_WORKER_IMAGE",
+            "APPVEYOR_FORCED_BUILD",
+            "APPVEYOR_JOB_ID",
+            "APPVEYOR_JOB_NAME",
+            "APPVEYOR_JOB_NUMBER",
+            "APPVEYOR_PROJECT_ID",
+            "APPVEYOR_PROJECT_NAME",
+            "APPVEYOR_PROJECT_SLUG",
+            "APPVEYOR_PULL_REQUEST_HEAD_COMMIT",
+            "APPVEYOR_PULL_REQUEST_HEAD_REPO_BRANCH",
+            "APPVEYOR_PULL_REQUEST_HEAD_REPO_NAME",
+            "APPVEYOR_PULL_REQUEST_NUMBER",
+            "APPVEYOR_PULL_REQUEST_TITLE",
+            "APPVEYOR_REPO_BRANCH",
+            "APPVEYOR_REPO_COMMIT",
+            "APPVEYOR_REPO_COMMIT_MESSAGE",
+            "APPVEYOR_REPO_COMMIT_MESSAGE_EXTENDED",
+            "APPVEYOR_REPO_COMMIT_TIMESTAMP",
+            "APPVEYOR_REPO_NAME",
+            "APPVEYOR_REPO_PROVIDER",
+            "APPVEYOR_REPO_SCM",
+            "APPVEYOR_REPO_TAG",
+            "APPVEYOR_REPO_TAG_NAME",
+            "APPVEYOR_RE_BUILD",
+            "APPVEYOR_RE_RUN_INCOMPLETE",
+            "APPVEYOR_SCHEDULED_BUILD",
+            "APPVEYOR_URL",
+        ],
+    },
+    CiSystem {
+        name: "AWS CodeBuild",
+        detected_by: &["CODEBUILD_BUILD_ID"],
+        names: &[
+            "CODEBUILD_BATCH_BUILD_IDENTIFIER",
+            "CODEBUILD_BUILD_ARN",
+            "CODEBUILD_BUILD_ID",
+            "CODEBUILD_BUILD_IMAGE",
+            "CODEBUILD_BUILD_NUMBER",
+            "CODEBUILD_BUILD_SUCCEEDING",
+            "CODEBUILD_INITIATOR",
+            "CODEBUILD_LOG_PATH",
+            "CODEBUILD_PUBLIC_BUILD_URL",
+            "CODEBUILD_RESOLVED_SOURCE_VERSION",
+            "CODEBUILD_SOURCE_REPO_URL",
+            "CODEBUILD_SOURCE_VERSION",
+            "CODEBUILD_SRC_DIR",
+            "CODEBUILD_START_TIME",
+            "CODEBUILD_WEBHOOK_ACTOR_ACCOUNT_ID",
+            "CODEBUILD_WEBHOOK_BASE_REF",
+            "CODEBUILD_WEBHOOK_EVENT",
+            "CODEBUILD_WEBHOOK_HEAD_REF",
+            "CODEBUILD_WEBHOOK_MERGE_COMMIT",
+            "CODEBUILD_WEBHOOK_PREV_COMMIT",
+            "CODEBUILD_WEBHOOK_TRIGGER",
+        ],
+    },
 ];
+
+/// The variables the shell sets for every command: `_` (the last command's path), `PWD` and
+/// `OLDPWD` (the folders it was in). Their values name where a command was started, not what
+/// it builds.
+const SET_BY_SHELL: &[&str] = &["_", "PWD", "OLDPWD"];
+
+/// The CI systems a compile's environment says it runs in: whose documented names
+/// [`unkeyed_candidate`] leaves out.
+#[derive(Debug, Default)]
+pub struct SetByCi(Vec<&'static CiSystem>);
+
+impl SetByCi {
+    /// The systems detected by `get`, the compile's environment.
+    pub fn detect(get: impl Fn(&str) -> Option<String>) -> SetByCi {
+        SetByCi(
+            SET_BY_CI
+                .iter()
+                .filter(|system| {
+                    system
+                        .detected_by
+                        .iter()
+                        .any(|name| get(name).is_some_and(|value| !value.is_empty()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether a detected system documents `name` as its own.
+    pub fn sets(&self, name: &str) -> bool {
+        self.0.iter().any(|system| system.names.contains(&name))
+    }
+}
 
 /// The prefixes of the variables the build tools set for a compile, and hushrun's own: cargo's
 /// (the ones B-5 keys are skipped as keyed; the rest name folders, flags or jobs), rustc's and
@@ -287,17 +973,17 @@ pub const OTHER_MIN_BYTES: usize = 8;
 
 /// Whether an output holding the value `value` of the variable `name`, which is not in the
 /// compile's key, keeps its block on this machine (B-24): a name that looks like a secret (E-12)
-/// with a value of [`SECRET_MIN_BYTES`] or more, or any variable no CI system or build tool set
-/// itself with a value of [`OTHER_MIN_BYTES`] or more. The caller leaves out values that hold a
-/// root or a folder of this machine, which the search already finds by their own rules.
-pub fn unkeyed_candidate(name: &str, value: &[u8]) -> bool {
+/// with a value of [`SECRET_MIN_BYTES`] or more, or any variable that neither a detected CI
+/// system (`ci`) documents as its own, nor a build tool or the shell set, with a value of
+/// [`OTHER_MIN_BYTES`] or more. The caller leaves out values that hold a root or a folder of this
+/// machine, which the search already finds by their own rules.
+pub fn unkeyed_candidate(name: &str, value: &[u8], ci: &SetByCi) -> bool {
     if hushrun_core::secret_names::is_secret_name(name) {
         return value.len() >= SECRET_MIN_BYTES;
     }
-    let set_by_others = SET_BY_CI
-        .iter()
-        .chain(SET_BY_TOOLS)
-        .any(|prefix| name.starts_with(prefix));
+    let set_by_others = ci.sets(name)
+        || SET_BY_SHELL.contains(&name)
+        || SET_BY_TOOLS.iter().any(|prefix| name.starts_with(prefix));
     !set_by_others && value.len() >= OTHER_MIN_BYTES
 }
 
@@ -589,30 +1275,110 @@ mod tests {
     // covers: B-24
     #[test]
     fn a_value_is_searched_for_when_it_looks_like_a_secret_or_no_one_set_it() {
+        let ci = in_ci(&["GITHUB_ACTIONS", "GITLAB_CI"]);
+        let candidate = |name: &str, value: &[u8]| unkeyed_candidate(name, value, &ci);
         // GitHub's own variables stay out, whatever their length; its token doesn't.
-        assert!(!unkeyed_candidate(
-            "GITHUB_SERVER_URL",
-            b"https://github.com"
-        ));
-        assert!(!unkeyed_candidate("GITHUB_REF", b"refs/heads/main"));
-        assert!(unkeyed_candidate("GITHUB_TOKEN", b"ghs_0123456789"));
-        assert!(unkeyed_candidate("CI_JOB_TOKEN", b"glcbt-0123456789"));
+        assert!(!candidate("GITHUB_SERVER_URL", b"https://github.com"));
+        assert!(!candidate("GITHUB_REF", b"refs/heads/main"));
+        assert!(candidate("GITHUB_TOKEN", b"ghs_0123456789"));
+        assert!(candidate("CI_JOB_TOKEN", b"glcbt-0123456789"));
         // Any name no CI system or build tool set searches from 8 bytes, a secret's too.
-        assert!(unkeyed_candidate("FOO_TOKEN", b"12345678"));
-        assert!(!unkeyed_candidate("FOO_TOKEN", b"1234567"));
-        assert!(unkeyed_candidate("LICENSE_SERVER", b"01234567"));
-        assert!(!unkeyed_candidate("LICENSE_SERVER", b"0123456"));
-        assert!(unkeyed_candidate("GREETING", b"prod-eu-west-1"));
+        assert!(candidate("FOO_TOKEN", b"12345678"));
+        assert!(!candidate("FOO_TOKEN", b"1234567"));
+        assert!(candidate("LICENSE_SERVER", b"01234567"));
+        assert!(!candidate("LICENSE_SERVER", b"0123456"));
+        assert!(candidate("GREETING", b"prod-eu-west-1"));
         // The build tools' own, and hushrun's, stay out unless they look like a secret.
-        assert!(!unkeyed_candidate(
-            "CARGO_TARGET_DIR",
-            b"/home/dev/w/target-long"
+        assert!(!candidate("CARGO_TARGET_DIR", b"/home/dev/w/target-long"));
+        assert!(!candidate("HUSHRUN_BUILD_SESSION", b"/home/dev/.cache/x/y"));
+        assert!(candidate("HUSHRUN_TOKEN", b"hru_0123456789"));
+    }
+
+    fn in_ci(set: &[&str]) -> SetByCi {
+        SetByCi::detect(|name| set.contains(&name).then(|| "true".to_string()))
+    }
+
+    // covers: B-24
+    #[test]
+    fn a_name_under_a_ci_systems_prefix_is_searched_unless_that_system_documents_it() {
+        // A project's own settings under the prefixes CI systems use (N1): searched, in CI too.
+        let everywhere = in_ci(&[
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "TF_BUILD",
+            "JENKINS_URL",
+            "BUILDKITE",
+        ]);
+        for name in [
+            "BUILD_ENV",
+            "CI_REGION",
+            "AGENT_POOL",
+            "SYSTEM_FLAVOR",
+            "RUNNER_PROFILE",
+            "GITHUB_DEPLOY_TARGET",
+            "BUILD_VERSION",
+            "BUILDKITE_AGENT_META_DATA_QUEUE",
+        ] {
+            assert!(
+                unkeyed_candidate(name, b"prod-eu-west-1", &everywhere),
+                "{name}"
+            );
+        }
+        // A system's documented names stay out only where that system runs: a laptop's
+        // `BUILD_NUMBER` or `GITHUB_SHA` is searched.
+        let laptop = in_ci(&[]);
+        assert!(unkeyed_candidate(
+            "GITHUB_SHA",
+            b"0123456789abcdef",
+            &laptop
         ));
         assert!(!unkeyed_candidate(
-            "HUSHRUN_BUILD_SESSION",
-            b"/home/dev/.cache/x/y"
+            "GITHUB_SHA",
+            b"0123456789abcdef",
+            &in_ci(&["GITHUB_ACTIONS"])
         ));
-        assert!(unkeyed_candidate("HUSHRUN_TOKEN", b"hru_0123456789"));
+        assert!(unkeyed_candidate("BUILD_NUMBER", b"12345678", &laptop));
+        assert!(!unkeyed_candidate(
+            "BUILD_NUMBER",
+            b"12345678",
+            &in_ci(&["JENKINS_URL"])
+        ));
+        assert!(!unkeyed_candidate(
+            "BUILD_SOURCEVERSION",
+            b"0123456789abcdef",
+            &in_ci(&["TF_BUILD"])
+        ));
+        assert!(!unkeyed_candidate(
+            "CI_COMMIT_SHA",
+            b"0123456789abcdef",
+            &in_ci(&["GITLAB_CI"])
+        ));
+        // An empty detecting variable detects nothing.
+        let empty = SetByCi::detect(|name| (name == "GITHUB_ACTIONS").then(String::new));
+        assert!(unkeyed_candidate("GITHUB_SHA", b"0123456789abcdef", &empty));
+        // The shell's own, whatever runs it.
+        for name in ["_", "PWD", "OLDPWD"] {
+            assert!(!unkeyed_candidate(name, b"/usr/bin/env", &laptop), "{name}");
+        }
+    }
+
+    #[test]
+    fn each_ci_systems_names_are_exact_and_none_is_a_prefix() {
+        for system in SET_BY_CI {
+            assert!(!system.detected_by.is_empty(), "{}", system.name);
+            for name in system.names {
+                assert!(
+                    !name.is_empty() && !name.ends_with('_'),
+                    "{}: {name}",
+                    system.name
+                );
+                assert!(
+                    !hushrun_core::secret_names::is_secret_name(name),
+                    "{}: {name} looks like a secret",
+                    system.name
+                );
+            }
+        }
     }
 
     // covers: B-24
