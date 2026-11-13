@@ -7,7 +7,7 @@
 //!   process of COMMAND loads through `NODE_OPTIONS=--require`, added to what the environment
 //!   had: no file of the repository changes. A script that replaces `NODE_OPTIONS` loses it; one
 //!   line at the top of the Jest config, which `hushrun init` proposes, loads it from
-//!   `HUSHRUN_JEST` instead ([`CJS_LINE`], [`ESM_LINE`]).
+//!   `HUSHRUN_JEST` instead ([`CJS_LINE`], [`TS_LINE`], [`ESM_LINE`]).
 //! - The unit rule: the test files the adapter listed with Jest's own `SearchSource` in the run
 //!   that wrote the check's map, as Vitest's (ADR 0071).
 //! - Selection: whole test files in Jest's sequencer, after its filters and `--shard`, before any
@@ -39,7 +39,13 @@ pub const SOURCE_KINDS: &[&str] = &[
 /// The variable the config line loads the adapter from.
 pub const VARIABLE: &str = "HUSHRUN_JEST";
 /// The line a CommonJS Jest config needs at its top, where a script replaces `NODE_OPTIONS`.
-pub const CJS_LINE: &str = "process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);";
+/// \[ADR 0082, amended\] A statement, not `process.env.HUSHRUN_JEST && require(…);`, which
+/// ESLint's `no-unused-expressions` refuses in a config a project lints. A config with either form
+/// names [`VARIABLE`], which is what the adapter looks for.
+pub const CJS_LINE: &str = "if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);";
+/// \[ADR 0082, amended\] The line a TypeScript Jest config that compiles to CommonJS needs: no
+/// `require()` call, which typescript-eslint's `no-require-imports` refuses in a TypeScript file.
+pub const TS_LINE: &str = "import { createRequire } from 'node:module'; if (process.env.HUSHRUN_JEST) createRequire(__filename)(process.env.HUSHRUN_JEST);";
 /// The line an ES module Jest config needs at its top.
 pub const ESM_LINE: &str = "import { createRequire } from 'node:module'; if (process.env.HUSHRUN_JEST) createRequire(import.meta.url)(process.env.HUSHRUN_JEST);";
 /// The file every Node process of COMMAND loads.
@@ -270,9 +276,17 @@ pub fn line_for(config: &Path) -> &'static str {
     if name.ends_with(".mjs") || name.ends_with(".mts") {
         return ESM_LINE;
     }
-    if name.ends_with(".cjs") || name.ends_with(".cts") {
+    if name.ends_with(".cjs") {
         return CJS_LINE;
     }
+    if name.ends_with(".cts") {
+        return TS_LINE;
+    }
+    let common = if name.ends_with(".ts") {
+        TS_LINE
+    } else {
+        CJS_LINE
+    };
     let mut dir = config.parent();
     while let Some(here) = dir {
         if let Ok(text) = std::fs::read_to_string(here.join("package.json")) {
@@ -280,12 +294,12 @@ pub fn line_for(config: &Path) -> &'static str {
             return if value["type"] == "module" {
                 ESM_LINE
             } else {
-                CJS_LINE
+                common
             };
         }
         dir = here.parent();
     }
-    CJS_LINE
+    common
 }
 
 /// What the run says when Jest wrote nothing for hushrun: why, and the fix.
@@ -307,7 +321,7 @@ fn nothing_written(recognized: &Recognized, cwd: &Path) -> String {
                 .replace('\\', "/"),
             line_for(config)
         ),
-        None => "or give Jest a config file whose first line is `process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);`".into(),
+        None => format!("or give Jest a config file whose first line is `{CJS_LINE}`"),
     };
     format!(
         "Jest wrote nothing for hushrun: its processes didn't load hushrun's adapter, as when a script sets NODE_OPTIONS instead of adding to it (`NODE_OPTIONS=--experimental-vm-modules jest`); keep what it had (`NODE_OPTIONS=\"$NODE_OPTIONS --experimental-vm-modules\" jest`), {fix}"
@@ -965,6 +979,14 @@ mod tests {
         std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         assert_eq!(line_for(&dir.path().join("jest.config.js")), CJS_LINE);
         assert_eq!(line_for(&dir.path().join("jest.config.mjs")), ESM_LINE);
+        // \[ADR 0082, amended\] A TypeScript config that compiles to CommonJS calls no `require`.
+        assert_eq!(line_for(&dir.path().join("jest.config.ts")), TS_LINE);
+        assert_eq!(line_for(&dir.path().join("jest.config.cts")), TS_LINE);
+        // Each line is a statement, never an expression: a lint's `no-unused-expressions`.
+        for line in [CJS_LINE, TS_LINE, ESM_LINE] {
+            assert!(line.contains("if (process.env.HUSHRUN_JEST) "), "{line}");
+            assert!(!line.contains("&&"), "{line}");
+        }
     }
 
     fn tree_of(paths: &[&str]) -> Tree {

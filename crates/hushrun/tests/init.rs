@@ -6493,20 +6493,23 @@ fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {
     ]);
     let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    let line = "jest.config.cjs: add `process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);` as its first line, so that hushrun can look at Jest's test files for test (tests in hushrun.yaml): the script test sets NODE_OPTIONS, which drops hushrun's adapter";
+    let line = "jest.config.cjs: add `if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);` as its first line, so that hushrun can look at Jest's test files for test (tests in hushrun.yaml): the script test sets NODE_OPTIONS, which drops hushrun's adapter";
     assert!(
         out.stdout.contains("Change by hand:") && out.stdout.contains(line),
         "{}",
         out.stdout
     );
     assert_eq!(r.read("jest.config.cjs"), "module.exports = {};\n");
-    // With the line there, or a script that keeps what NODE_OPTIONS had, it proposes nothing.
-    r.write(
-        "jest.config.cjs",
+    // With the line there, in the form proposed now or in the one proposed before 0.14, or a
+    // script that keeps what NODE_OPTIONS had, it proposes nothing.
+    for there in [
+        "if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);\nmodule.exports = {};\n",
         "process.env.HUSHRUN_JEST && require(process.env.HUSHRUN_JEST);\nmodule.exports = {};\n",
-    );
-    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
-    assert!(!out.stdout.contains("HUSHRUN_JEST"), "{}", out.stdout);
+    ] {
+        r.write("jest.config.cjs", there);
+        let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+        assert!(!out.stdout.contains("HUSHRUN_JEST"), "{}", out.stdout);
+    }
     r.write("jest.config.cjs", "module.exports = {};\n");
     r.write(
         "package.json",
