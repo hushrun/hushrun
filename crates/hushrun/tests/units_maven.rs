@@ -2064,3 +2064,191 @@ fn a_module_an_inline_or_shared_assembly_descriptor_takes_is_read_by_that_module
         );
     }
 }
+
+/// A reactor whose `core` has a JUnit 4 class with a static `suite()` that builds a JUnit 3 suite
+/// of `testlib`'s checks, as Guava's testlib does: its cases are named by `testlib.Checks`, a class
+/// of no test file, and one by `testlib.Gone`, which no class is. Only the suite class says which
+/// class they came from. Beside it, two plain classes, and `other`, an unrelated module.
+/// `AskTest` fails when asked; the suite's `testTwo` and its `check` fail when `SHOP_OTHER` asks.
+fn suites(tests: &str) -> Vec<(String, String)> {
+    let junit4 = r#"<dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version></dependency>
+    <dependency><groupId>org.junit.vintage</groupId><artifactId>junit-vintage-engine</artifactId><version>5.14.4</version><scope>test</scope></dependency>"#;
+    let pom = |name: &str, deps: &str| {
+        format!(
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>shop</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>{name}</artifactId>
+  <dependencies>{deps}</dependencies>
+</project>
+"#
+        )
+    };
+    let calc_test = |name: &str, a: u32| {
+        format!(
+            "package shop.{name};\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class CalcTest {{\n  @Test public void adds() {{ assertEquals({}, {a} + 1); }}\n}}\n",
+            a + 1
+        )
+    };
+    vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(
+            "pom.xml",
+            &parent(&["testlib", "core", "other"], "4", "3.5.4").replace(
+                "<dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency></dependencies>",
+                "",
+            ),
+        ),
+        file("testlib/pom.xml", &pom("testlib", junit4)),
+        file(
+            "testlib/src/main/java/testlib/Checks.java",
+            &format!(
+                r#"package testlib;
+
+import junit.framework.TestCase;
+
+public class Checks extends TestCase {{
+  private final String subject;
+  public Checks(String method, String subject) {{ super(method); this.subject = subject; }}
+  @Override public String getName() {{ return super.getName() + "[" + subject + "]"; }}
+  public void testOne() {{ assertTrue(subject.length() > 0); }}
+  public void testTwo() {{ assertNull(System.getenv("{OTHER}")); }}
+}}
+"#
+            ),
+        ),
+        file(
+            "testlib/src/main/java/testlib/Described.java",
+            &format!(
+                r#"package testlib;
+
+import junit.framework.AssertionFailedError;
+import junit.framework.Test;
+import junit.framework.TestResult;
+import org.junit.runner.Describable;
+import org.junit.runner.Description;
+
+public class Described implements Test, Describable {{
+  public int countTestCases() {{ return 1; }}
+  public Description getDescription() {{ return Description.createTestDescription("testlib.Gone", "check"); }}
+  public void run(TestResult result) {{
+    result.startTest(this);
+    if (System.getenv("{OTHER}") != null) result.addFailure(this, new AssertionFailedError("asked"));
+    result.endTest(this);
+  }}
+}}
+"#
+            ),
+        ),
+        file(
+            "core/pom.xml",
+            &pom(
+                "core",
+                &format!("{junit4}<dependency><groupId>shop</groupId><artifactId>testlib</artifactId><version>1.0</version></dependency>"),
+            ),
+        ),
+        file(
+            "core/src/test/java/shop/core/MapSuiteTest.java",
+            "package shop.core;\n\nimport junit.framework.Test;\nimport junit.framework.TestSuite;\nimport testlib.Checks;\nimport testlib.Described;\n\npublic class MapSuiteTest {\n  public static Test suite() {\n    TestSuite suite = new TestSuite(\"maps\");\n    suite.addTest(new Checks(\"testOne\", \"maps\"));\n    suite.addTest(new Checks(\"testTwo\", \"maps\"));\n    suite.addTest(new Described());\n    return suite;\n  }\n}\n",
+        ),
+        file("core/src/test/java/shop/core/CalcTest.java", &calc_test("core", 1)),
+        file(
+            "core/src/test/java/shop/core/AskTest.java",
+            &format!(
+                "package shop.core;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class AskTest {{\n  @Test public void failsWhenAsked() {{ assertNull(System.getenv(\"{FAIL}\")); }}\n}}\n"
+            ),
+        ),
+        file("other/pom.xml", &pom("other", junit4)),
+        file("other/src/test/java/shop/other/CalcTest.java", &calc_test("other", 1)),
+    ]
+}
+
+const SUITE_TEST: &str = "core/src/test/java/shop/core/MapSuiteTest.java";
+const CORE_CALC_TEST: &str = "core/src/test/java/shop/core/CalcTest.java";
+
+// covers: C-39, C-47
+#[test]
+fn a_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_counted_as_reused() {
+    let Some(maven) = maven() else { return };
+    let r = Repo::new(&suites("{mode: reuse, unit: test}"), maven);
+    let first = r.run(&[], &["test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    // The suite's cases are the suite class's tests, by the class each names; no unit is made of
+    // a class no test file is.
+    let map = r.map();
+    let units: Vec<&String> = map["units"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        units,
+        [
+            "core/src/test/java/shop/core/AskTest.java",
+            CORE_CALC_TEST,
+            SUITE_TEST,
+            "other/src/test/java/shop/other/CalcTest.java"
+        ],
+        "{map:#}"
+    );
+    let suite_tests: Vec<&String> = map["units"][SUITE_TEST]["tests"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{map:#}"))
+        .keys()
+        .collect();
+    assert_eq!(
+        suite_tests,
+        [
+            "testlib.Checks.testOne",
+            "testlib.Checks.testTwo",
+            "testlib.Gone.check"
+        ],
+        "{map:#}"
+    );
+
+    // A change in `other`: core's plain classes are reused, the suite class runs, as the hook
+    // can't leave it out, and the plan says so.
+    r.write(
+        "other/src/test/java/shop/other/CalcTest.java",
+        "package shop.other;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class CalcTest {\n  @Test public void adds() { assertEquals(3, 2 + 1); }\n}\n",
+    );
+    let second = r.run(&[], &["test"], &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stderr, second.stdout);
+    assert!(
+        second.ran().contains_key("shop.core.MapSuiteTest"),
+        "{:?}",
+        second.ran()
+    );
+    // Its three tests run, other's one, and the class of core's two the audit takes.
+    assert_eq!(
+        second.line("hushrun: unit: "),
+        "hushrun: unit: 5 of 6 tests run, in 3 of 4 test files; 1 already passed on the files it read, and 1 more that did runs as a check"
+    );
+    let why = r
+        .hushrun()
+        .args(["why", "unit", SUITE_TEST])
+        .output()
+        .expect("hushrun");
+    let said = String::from_utf8_lossy(&why.stdout);
+    assert!(!said.contains("would be reused"), "{said}");
+    assert!(said.contains("can't leave it out"), "{said}");
+
+    // The suite's cases fail, one of which names no class: the suite class failed, and the plain
+    // classes of a module that ran keep their passes.
+    r.write(
+        CORE_CALC_TEST,
+        "package shop.core;\n\nimport org.junit.Test;\nimport static org.junit.Assert.*;\n\npublic class CalcTest {\n  @Test public void adds() { assertEquals(2, 0 + 2); }\n}\n",
+    );
+    let failed = r.run(&[], &["test"], &[(OTHER, "1")]);
+    assert_eq!(failed.code, 1, "{}\n{}", failed.stderr, failed.stdout);
+    assert!(
+        failed.ran().contains_key("shop.core.CalcTest"),
+        "{:?}",
+        failed.ran()
+    );
+    let map = r.map();
+    assert_eq!(
+        map["units"][CORE_CALC_TEST]["tests"]["adds"], "passed",
+        "{map:#}"
+    );
+    assert_eq!(
+        map["units"][SUITE_TEST]["tests"]["testlib.Gone.check"], "failed",
+        "{map:#}"
+    );
+}

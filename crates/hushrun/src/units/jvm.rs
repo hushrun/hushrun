@@ -110,6 +110,11 @@ pub struct JvmEvents {
     pub list_unread: Option<String>,
     /// By top-level class, `pkg.Outer`.
     pub classes: BTreeMap<String, ClassEvents>,
+    /// \[C-39\] What a class ran that names another top-level class, or none (a JUnit 4 class's
+    /// `suite()`, as Guava's testlib builds them): by the top-level class that ran it, as its
+    /// unique id's first `runner` or `class` segment says, and the top-level class it names (empty
+    /// when it names none). The adapter tells which of them a test file of the repository owns.
+    pub generated: BTreeMap<(String, String), ClassEvents>,
     /// Tests, or failures, whose class can't be told.
     pub unattributed: u64,
     /// What the hook left out, each as it said it: class, method, and the entry that listed it.
@@ -187,6 +192,9 @@ pub struct ClassEvents {
     pub left_out: bool,
     /// Why the hook kept something of it that the list named.
     pub kept: BTreeSet<String>,
+    /// \[C-39\] It ran cases no test file of the repository owns (a JUnit 4 `suite()`'s), which
+    /// the adapter charged to it: the hook can't leave them out, nor the class, which runs whole.
+    pub generated: bool,
 }
 
 /// What a JVM's events say of one test, over every invocation of it.
@@ -235,6 +243,35 @@ fn from_uid(uid: &str) -> (Option<String>, Option<String>) {
     (class, method)
 }
 
+/// The class a JUnit Platform unique id says ran what it names: its first `runner` (JUnit Vintage)
+/// or `class` segment, `[engine:junit-vintage]/[runner:pkg.Suite]/…` is `pkg.Suite`.
+fn runner_of(uid: &str) -> Option<&str> {
+    uid.split("]/[").find_map(|segment| {
+        let segment = segment.trim_start_matches('[').trim_end_matches(']');
+        let (kind, value) = segment.split_once(':')?;
+        matches!(kind, "runner" | "class").then_some(value)
+    })
+}
+
+/// A JUnit Vintage test's class and method from its unique id's last segment, JUnit 4's display
+/// name `method(pkg.Class)`, for a test whose source names neither (its class doesn't load).
+fn from_display(uid: &str) -> (Option<String>, Option<String>) {
+    let last = uid.rsplit("]/[").next().unwrap_or(uid);
+    let last = last.trim_start_matches('[').trim_end_matches(']');
+    let Some(("test", value)) = last.split_once(':') else {
+        return (None, None);
+    };
+    match value
+        .strip_suffix(')')
+        .and_then(|inner| inner.rsplit_once('('))
+    {
+        Some((method, class)) if !class.is_empty() => {
+            (Some(class.to_string()), Some(method.to_string()))
+        }
+        _ => (None, Some(value.to_string())),
+    }
+}
+
 /// A test's top-level class and id, from its class's binary name and its method's name: whole,
 /// or up to its first `[` when `cut` (JUnit 4's Parameterized names an invocation `name[0: x=1]`).
 pub fn test_id(class: &str, method: &str, cut: bool) -> (String, String) {
@@ -258,8 +295,8 @@ pub fn test_id(class: &str, method: &str, cut: bool) -> (String, String) {
 /// Reads one event file's bytes.
 pub fn read_events(bytes: &[u8]) -> JvmEvents {
     let mut out = JvmEvents::default();
-    // Each invocation by its unique id: (top class, test id when a test, still open).
-    let mut uids: BTreeMap<String, (String, Option<String>, bool)> = BTreeMap::new();
+    // Each invocation by its unique id: (where it goes, test id when a test, still open).
+    let mut uids: BTreeMap<String, (Of, Option<String>, bool)> = BTreeMap::new();
     let text = String::from_utf8_lossy(bytes);
     for line in text.split('\n') {
         if line.is_empty() {
@@ -322,86 +359,185 @@ pub fn read_events(bytes: &[u8]) -> JvmEvents {
             kind @ ("started" | "skipped" | "finished") => {
                 out.listened = true;
                 let failed = kind == "finished" && field("status") == Some("FAILED");
-                let Some(class) = class else {
-                    // An engine's own container, or a test with no class: nothing ties it to a
-                    // class, so a failure of it, or any test, is no class's.
-                    if is_test || failed {
-                        out.unattributed += 1;
+                let uid = field("uid").unwrap_or("").to_string();
+                let runner = runner_of(&uid).map(|r| r.split('$').next().unwrap_or(r).to_string());
+                // A case whose source names no class: the class that ran it owns it, when its
+                // id names one (a JUnit 4 suite's case whose class doesn't load), with the class
+                // and method its display name gives.
+                let generated_only = class.is_none() && runner.is_some();
+                if generated_only && vintage && is_test {
+                    (class, method) = from_display(&uid);
+                }
+                let foreign = |runner: &String| match class.as_deref() {
+                    _ if generated_only => true,
+                    Some(class) => class.split('$').next().unwrap_or(class) != runner,
+                    None => false,
+                };
+                let Some(runner) = runner.filter(foreign) else {
+                    let Some(class) = class else {
+                        // An engine's own container, or a test with no class: nothing ties it to
+                        // a class, so a failure of it, or any test, is no class's.
+                        if is_test || failed {
+                            out.unattributed += 1;
+                        }
+                        continue;
+                    };
+                    if let Some(m) = &method
+                        && (kind == "started" || kind == "skipped")
+                    {
+                        out.seen.insert(format!("{class}#{m}"));
                     }
+                    let (top, id) = test_id(&class, method.as_deref().unwrap_or(""), vintage);
+                    let own_class = class == top && method.is_none();
+                    let of = Of::Class(top);
+                    record(
+                        &mut out,
+                        &mut uids,
+                        &of,
+                        kind,
+                        &event,
+                        is_test,
+                        own_class,
+                        failed,
+                        &uid,
+                        id,
+                        method.is_some(),
+                    );
                     continue;
                 };
-                if let Some(m) = &method
-                    && (kind == "started" || kind == "skipped")
-                {
-                    out.seen.insert(format!("{class}#{m}"));
-                }
-                let (top, id) = test_id(&class, method.as_deref().unwrap_or(""), vintage);
-                let uid = field("uid").unwrap_or("").to_string();
-                let entry = out.classes.entry(top.clone()).or_default();
-                let own_class = class == top && method.is_none();
-                if is_test && method.is_none() {
-                    entry.unnamed = true;
-                }
-                let test = (is_test || method.is_some()).then(|| id.clone());
-                match kind {
-                    "started" => {
-                        uids.insert(uid, (top, test.clone(), true));
-                        if let Some(id) = &test {
-                            entry.tests.entry(id.clone()).or_default().started = true;
-                        } else if own_class {
-                            entry.started = true;
-                        }
-                    }
-                    "skipped" => {
-                        if let Some(id) = &test {
-                            let t = entry.tests.entry(id.clone()).or_default();
-                            t.finished = true;
-                            t.skipped = true;
-                        } else if own_class {
-                            entry.skipped = true;
-                        }
+                // What `runner` ran that another class, or none, names.
+                let (named, id) = match &class {
+                    Some(class) if !generated_only => {
+                        test_id(class, method.as_deref().unwrap_or(""), vintage)
                     }
                     _ => {
-                        if let Some(open) = uids.get_mut(&uid) {
-                            open.2 = false;
-                        }
-                        let ms = event
-                            .get("ms")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
-                        if let Some(id) = &test {
-                            let t = entry.tests.entry(id.clone()).or_default();
-                            if is_test {
-                                t.finished = true;
-                                t.duration_ms = t.duration_ms.saturating_add(ms);
-                                if field("status") == Some("ABORTED") {
-                                    t.skipped = true;
-                                }
-                            }
-                            t.failed |= failed;
-                        } else {
-                            entry.failed |= failed;
-                            if own_class {
-                                entry.finished = true;
-                            }
-                        }
+                        let name = method.as_deref().unwrap_or("");
+                        let name = name.split('[').next().unwrap_or(name);
+                        let id = match &class {
+                            Some(class) => format!("{class}.{name}"),
+                            None => name.to_string(),
+                        };
+                        (String::new(), id)
                     }
-                }
+                };
+                let of = Of::Generated(runner, named);
+                record(
+                    &mut out,
+                    &mut uids,
+                    &of,
+                    kind,
+                    &event,
+                    is_test,
+                    false,
+                    failed,
+                    &uid,
+                    id,
+                    method.is_some(),
+                );
             }
             _ => {}
         }
     }
-    for (top, test, open) in uids.into_values() {
+    for (of, test, open) in uids.into_values() {
         if !open {
             continue;
         }
-        let entry = out.classes.entry(top).or_default();
+        let entry = of.entry(&mut out);
         entry.open = true;
         if let Some(id) = test {
             entry.tests.entry(id).or_default().open = true;
         }
     }
     out
+}
+
+/// Where an event of a JVM's file goes: a top-level class's events, or what a class ran that
+/// another class, or none, names ([`JvmEvents::generated`]).
+#[derive(Debug, Clone)]
+enum Of {
+    Class(String),
+    Generated(String, String),
+}
+
+impl Of {
+    fn entry<'a>(&self, out: &'a mut JvmEvents) -> &'a mut ClassEvents {
+        match self {
+            Of::Class(top) => out.classes.entry(top.clone()).or_default(),
+            Of::Generated(runner, named) => out
+                .generated
+                .entry((runner.clone(), named.clone()))
+                .or_default(),
+        }
+    }
+}
+
+/// One start, skip or end of a test or container, into the events of `of`: a test's (`id`, when
+/// the event is a test's or names a method), else the class's own (`own_class`) or a container
+/// of it, whose failure is the class's.
+#[allow(clippy::too_many_arguments)]
+fn record(
+    out: &mut JvmEvents,
+    uids: &mut BTreeMap<String, (Of, Option<String>, bool)>,
+    of: &Of,
+    kind: &str,
+    event: &serde_json::Value,
+    is_test: bool,
+    own_class: bool,
+    failed: bool,
+    uid: &str,
+    id: String,
+    has_method: bool,
+) {
+    let field = |name: &str| event.get(name).and_then(serde_json::Value::as_str);
+    let entry = of.entry(out);
+    if is_test && !has_method {
+        entry.unnamed = true;
+    }
+    let test = (is_test || has_method).then_some(id);
+    match kind {
+        "started" => {
+            uids.insert(uid.to_string(), (of.clone(), test.clone(), true));
+            if let Some(id) = &test {
+                entry.tests.entry(id.clone()).or_default().started = true;
+            } else if own_class {
+                entry.started = true;
+            }
+        }
+        "skipped" => {
+            if let Some(id) = &test {
+                let t = entry.tests.entry(id.clone()).or_default();
+                t.finished = true;
+                t.skipped = true;
+            } else if own_class {
+                entry.skipped = true;
+            }
+        }
+        _ => {
+            if let Some(open) = uids.get_mut(uid) {
+                open.2 = false;
+            }
+            let ms = event
+                .get("ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if let Some(id) = &test {
+                let t = entry.tests.entry(id.clone()).or_default();
+                if is_test {
+                    t.finished = true;
+                    t.duration_ms = t.duration_ms.saturating_add(ms);
+                    if field("status") == Some("ABORTED") {
+                        t.skipped = true;
+                    }
+                }
+                t.failed |= failed;
+            } else {
+                entry.failed |= failed;
+                if own_class {
+                    entry.finished = true;
+                }
+            }
+        }
+    }
 }
 
 /// \[C-32\] Why the hook's events say it left out what `listed`, the lines of its list, didn't

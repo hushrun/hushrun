@@ -293,6 +293,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Maven: after a build that failed and stopped the reactor, the next run no longer says a file of
   a module the build didn't reach "is gone" and runs every test class: such a module keeps what
   the last run that reached it learned.
+- Maven: a JUnit 4 class whose static `suite()` runs cases of classes no test file is (Guava's
+  testlib) is no longer counted as reused while it runs every time: its cases are its own, it is
+  told as never left out, and a failure of one no longer costs every other class of a failed run
+  its pass.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

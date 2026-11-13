@@ -427,6 +427,19 @@ struct ClassSeen {
     /// From reports: the class was skipped whole (JUnit 4's `@Ignore` on it).
     case_class_skipped: bool,
     from_reports: bool,
+    /// \[C-39\] Its reports hold cases no test file owns, charged to it.
+    generated: bool,
+}
+
+/// \[C-39\] The id of a case no test file owns, charged to the class that ran it: the top-level
+/// class it names, a `.`, and its id there (`testlib.Checks.testOne`), which no method of the
+/// class itself has; its id alone when it names no class.
+fn generated_id(named: &str, id: &str) -> String {
+    if named.is_empty() {
+        id.to_string()
+    } else {
+        format!("{named}.{id}")
+    }
 }
 
 impl ClassSeen {
@@ -447,6 +460,22 @@ impl ClassSeen {
             return;
         }
         let (_, id) = jvm::test_id(class, method_of_case(&case.name), true);
+        let slot = self.cases.entry(id).or_default();
+        slot.0.push(case.outcome);
+        slot.1 = slot.1.saturating_add(case.time_ms);
+    }
+
+    /// \[C-39\] A case of a report of this class that no test file owns (its `classname` names
+    /// another class, or none): a test of this class by that class's name and its method.
+    fn add_generated_case(&mut self, case: &reports::Case) {
+        self.from_reports = true;
+        self.generated = true;
+        let (top, id) = jvm::test_id(&case.classname, method_of_case(&case.name), true);
+        let id = if case.classname.is_empty() {
+            method_of_case(&case.name).to_string()
+        } else {
+            generated_id(&top, &id)
+        };
         let slot = self.cases.entry(id).or_default();
         slot.0.push(case.outcome);
         slot.1 = slot.1.saturating_add(case.time_ms);
@@ -520,6 +549,8 @@ pub struct Observed {
     pub refused: Option<String>,
     /// \[C-32\] Why the hook left out what the plan didn't list.
     pub left_out: Option<String>,
+    /// \[C-37\] Why a run that failed keeps no pass: tests or failures no class could be told for.
+    pub not_kept: Option<String>,
     /// \[C-47\] The directory of every module of the reactor inside the repository, and of those
     /// of which this run saw a class: the build reached them.
     pub modules: BTreeSet<String>,
@@ -578,6 +609,17 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     let listened = events
         .values()
         .any(|e| e.listened || e.classes.values().any(|c| c.left_out));
+    // \[C-39\] A top-level class a test file of `module` is: else what a suite's case names (a
+    // tester of Guava's testlib), which the suite that ran it owns.
+    let owned =
+        |module: &Module, top: &str| !top.is_empty() && unit_of(module, top, tree).1.is_none();
+    let add_events = |seen: &mut BTreeMap<(String, String), ClassSeen>, key, ce: &ClassEvents| {
+        let entry: &mut ClassSeen = seen.entry(key).or_default();
+        entry.events = Some(match entry.events.take() {
+            None => ce.clone(),
+            Some(had) => merge_events(had, ce),
+        });
+    };
     for jvm_events in events.values() {
         let dir = jvm_events.basedir.as_ref().or(jvm_events.dir.as_ref());
         let module = dir
@@ -588,6 +630,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             if jvm_events
                 .classes
                 .values()
+                .chain(jvm_events.generated.values())
                 .any(|c| !c.tests.is_empty() || c.failed)
             {
                 unattributed += 1;
@@ -595,11 +638,27 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             continue;
         };
         for (class, ce) in &jvm_events.classes {
-            let entry = seen.entry((module.dir.clone(), class.clone())).or_default();
-            entry.events = Some(match entry.events.take() {
-                None => ce.clone(),
-                Some(had) => merge_events(had, ce),
-            });
+            add_events(&mut seen, (module.dir.clone(), class.clone()), ce);
+        }
+        for ((runner, named), ce) in &jvm_events.generated {
+            if owned(module, named) {
+                // A test class of the repository that a suite ran (`@SuiteClasses`): its own.
+                add_events(&mut seen, (module.dir.clone(), named.clone()), ce);
+                continue;
+            }
+            let charged = ClassEvents {
+                tests: ce
+                    .tests
+                    .iter()
+                    .map(|(id, t)| (generated_id(named, id), t.clone()))
+                    .collect(),
+                failed: ce.failed,
+                open: ce.open,
+                unnamed: ce.unnamed,
+                generated: true,
+                ..ClassEvents::default()
+            };
+            add_events(&mut seen, (module.dir.clone(), runner.clone()), &charged);
         }
     }
 
@@ -622,12 +681,21 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                 continue;
             };
             for case in cases {
+                let suite = case.suite.split('$').next().unwrap_or(&case.suite);
+                let class = case.classname.as_str();
+                let top = class.split('$').next().unwrap_or(class).to_string();
+                // \[C-39\] A case no test file owns, in the report of a class one does (a
+                // suite's): that class's.
+                if top != suite && !owned(module, &top) && owned(module, suite) {
+                    seen.entry((module.dir.clone(), suite.to_string()))
+                        .or_default()
+                        .add_generated_case(&case);
+                    continue;
+                }
                 if case.classname.is_empty() {
                     unattributed += 1;
                     continue;
                 }
-                let class = case.classname.as_str();
-                let top = class.split('$').next().unwrap_or(class).to_string();
                 seen.entry((module.dir.clone(), top))
                     .or_default()
                     .add_case(&case);
@@ -637,6 +705,11 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
 
     let mut out = Observed {
         failures_by_unit: unattributed == 0,
+        not_kept: (unattributed > 0).then(|| {
+            format!(
+                "hushrun couldn't tell which test class {unattributed} of its tests or failures belong to, so no pass of a run that failed is kept"
+            )
+        }),
         modules: modules.keys().cloned().collect(),
         reached: seen.keys().map(|(dir, _)| dir.clone()).collect(),
         ..Observed::default()
@@ -775,6 +848,7 @@ fn merge_events(mut a: ClassEvents, b: &ClassEvents) -> ClassEvents {
     a.open |= b.open;
     a.unnamed |= b.unnamed;
     a.left_out |= b.left_out;
+    a.generated |= b.generated;
     a.kept.extend(b.kept.iter().cloned());
     for (id, t) in &b.tests {
         let into = a.tests.entry(id.clone()).or_default();
@@ -802,6 +876,8 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
     let mut tests: BTreeMap<String, MergedTest> = BTreeMap::new();
     let (class_failed, open, mut complete, deselected, unnamed);
     let mut class_skipped = false;
+    // \[C-39\] It ran cases no test file owns: the hook leaves nothing of it out.
+    let generated = c.generated || c.events.as_ref().is_some_and(|e| e.generated);
     if let Some(e) = c.events.as_ref().filter(|e| {
         e.started
             || e.finished
@@ -823,6 +899,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
                     failed: t.failed,
                     deselected: t.left_out && !t.started,
                     skipped: t.skipped && !t.failed,
+                    never_left_out: generated,
                     duration_ms: t.duration_ms,
                     ..MergedTest::default()
                 },
@@ -870,6 +947,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
                     finished,
                     failed,
                     skipped: skipped && !failed,
+                    never_left_out: generated,
                     duration_ms: *ms,
                     ..MergedTest::default()
                 },
@@ -912,6 +990,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
             failed: class_failed,
             deselected,
             skipped,
+            never_left_out: generated,
             ..Facts::default()
         },
         reads: BTreeSet::new(),
@@ -1046,6 +1125,7 @@ impl Adapter for Recognized {
             unit_files: Some(observed.unit_files),
             refused: observed.refused,
             left_out: observed.left_out,
+            not_kept: observed.not_kept,
             received: shared.received,
             ..Read::default()
         }))
