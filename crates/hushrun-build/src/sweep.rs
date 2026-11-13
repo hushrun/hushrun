@@ -85,9 +85,13 @@ pub fn force(store: &Store, now: SystemTime, keep_days: u32) -> SweepReport {
         report.compilers = compilers.removed;
         report.errors += compilers.errors;
     }
+    // B-36: a sandbox's fetch is good for a day, whatever the blocks' kept days.
+    let fetched = crate::prefetched::sweep(store, now);
+    report.leftovers += fetched.removed;
+    report.errors += fetched.errors;
     if let Some(before) = now.checked_sub(DAY) {
         let leftovers = store.remove_leftovers(before);
-        report.leftovers = leftovers.removed;
+        report.leftovers += leftovers.removed;
         report.errors += leftovers.errors;
     }
     report

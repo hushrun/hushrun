@@ -65,6 +65,7 @@ pub mod model;
 pub mod origin;
 pub mod outbox;
 pub mod portable;
+pub mod prefetched;
 pub mod regular;
 pub mod relay;
 pub mod restore;

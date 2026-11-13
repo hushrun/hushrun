@@ -311,8 +311,9 @@ pub fn alive(store: &Store, run: &str) -> bool {
     process_alive(pid)
 }
 
+/// Whether the process `pid` is running.
 #[cfg(unix)]
-fn process_alive(pid: i32) -> bool {
+pub(crate) fn process_alive(pid: i32) -> bool {
     match rustix::process::Pid::from_raw(pid) {
         Some(pid) => match rustix::process::test_kill_process(pid) {
             Ok(()) => true,
@@ -323,7 +324,7 @@ fn process_alive(pid: i32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn process_alive(_pid: i32) -> bool {
+pub(crate) fn process_alive(_pid: i32) -> bool {
     false
 }
 
