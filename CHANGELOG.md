@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a `commit` answering `differs`, an upload that arrived broken, keeps the block
+  built here and tries it again later; only `begin` refusing `differs` (a trusted copy with other
+  bytes) discards it, and the run says in one line how many blocks it discarded. Before, a
+  `commit` answering `differs` deleted the machine's own good block, silently: in one run a store
+  fell from 360 blocks to 62.
 - Build blocks: a fresh machine reuses what its prefetch downloaded. A wrapper that gives up on a
   download that wouldn't arrive within half its compile no longer counts as a failure; only a
   request that errors or times out does, and three of those rest the relay, which then sends

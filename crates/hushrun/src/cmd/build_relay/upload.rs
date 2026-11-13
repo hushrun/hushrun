@@ -8,8 +8,8 @@
 //! | claimed | sent | packed, `begin` answered `put`, the PUT succeeded or found it there |
 //! | sent | done | `commit` answered `stored` |
 //! | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope`, `suspended`; or the block is gone here, or can't be packed as recorded |
-//! | claimed, sent | done, the local block discarded | `begin` or `commit` answered `differs` |
-//! | claimed, sent | waiting, with a date | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing` or `gone`, any word this version doesn't know |
+//! | claimed | done, the local block discarded (and said) | `begin` refused `differs`: a trusted copy with other bytes exists |
+//! | claimed, sent | waiting, with a date | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing`, `gone` or `differs` (the upload arrived broken), any word this version doesn't know |
 //! | claimed, sent | waiting, one more cut-off | the command's end cut off its `begin`, PUT or `commit` in flight |
 //! | waiting | done | three cut-offs |
 //!
@@ -78,8 +78,12 @@ pub(crate) fn after_put(status: Option<u16>) -> Move {
 pub(crate) fn after_commit(state: CommitState) -> Move {
     match state {
         CommitState::Stored => Move::Done,
-        CommitState::Differs => Move::DoneDiscard,
-        CommitState::Missing | CommitState::Gone | CommitState::Unknown => Move::Later,
+        // The store holds a size or SHA-256 other than the one `begin` named: the upload arrived
+        // broken, and the block here is good. Only `begin`'s `differs` says a trusted copy with
+        // other bytes exists.
+        CommitState::Differs | CommitState::Missing | CommitState::Gone | CommitState::Unknown => {
+            Move::Later
+        }
     }
 }
 
@@ -236,7 +240,9 @@ impl Relay {
             }
             Move::DoneDiscard => {
                 let _ = outbox.done(&run, &marker.key);
-                let _ = self.config.store.discard(&marker.key);
+                if self.config.store.discard(&marker.key).is_ok() {
+                    self.state().tally.discarded += 1;
+                }
             }
             Move::Later => release(marker, Back::Later(now_ms() + LATER.as_millis() as u64)),
             Move::Next => {}
@@ -633,7 +639,7 @@ mod tests {
         assert_eq!(after_put(Some(500)), Move::Later);
         assert_eq!(after_put(None), Move::Later);
         assert_eq!(after_commit(CommitState::Stored), Move::Done);
-        assert_eq!(after_commit(CommitState::Differs), Move::DoneDiscard);
+        assert_eq!(after_commit(CommitState::Differs), Move::Later);
         assert_eq!(after_commit(CommitState::Missing), Move::Later);
         assert_eq!(after_commit(CommitState::Gone), Move::Later);
         assert_eq!(after_commit(CommitState::Unknown), Move::Later);

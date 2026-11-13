@@ -248,6 +248,8 @@ struct Tally {
     compared: u64,
     compared_others: u64,
     compared_differed: u64,
+    /// Blocks built here this check discarded (B-29): said in one line.
+    discarded: u64,
 }
 
 /// A check the relay serves.
@@ -2035,6 +2037,15 @@ impl Relay {
             .filter(|m| m.by == self.by)
             .count();
         let mut lines = std::mem::take(&mut state.lines);
+        // B-29: a block built here that was discarded is never silent.
+        if state.tally.discarded > 0 {
+            let n = state.tally.discarded;
+            lines.push(format!(
+                "build: {n} {} built here {} discarded: the repository's trusted copy has other bytes, and is served in its place",
+                if n == 1 { "block" } else { "blocks" },
+                if n == 1 { "was" } else { "were" },
+            ));
+        }
         // B-20, B-33: shared `observe` says what it compared and how many differed.
         if state.sharing == Sharing::Observe && state.tally.compared > 0 {
             lines.push(observed_line(

@@ -731,8 +731,8 @@ move is a file written whole or a rename:
 | claimed | sent | packed, `begin` answered `put`, and the PUT succeeded or found the object there |
 | sent | done | `commit` answered `stored` |
 | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope` or `suspended`; the block is gone, or no longer matches its record |
-| claimed, sent | done, the local block discarded | `begin` or `commit` answered `differs` |
-| claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing` or `gone`, any word this version doesn't know |
+| claimed | done, the local block discarded | `begin` refused `differs`: a trusted copy with other bytes exists |
+| claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing`, `gone` or `differs`, any word this version doesn't know |
 | claimed, sent | waiting, one more cut-off | the end of the command cut off its `begin`, PUT or `commit` in flight |
 | waiting | done | three cut-offs |
 | any | done | the block is gone, or the marker is older than `keep_days` (B-14) |
@@ -746,6 +746,10 @@ within it. Uploads (the drain in CI, the PUTs, and the `begin` and `commit` requ
 are cut off when `close`'s 5 seconds, or half the deadline if that is less, are all that is
 left, and `close` goes within what is left; a request still waited on at the deadline, whatever
 its own timeout, is abandoned. The rest waits for the next run, and the run says how many wait.
+`commit` answering `differs` means the object store holds a size or SHA-256 other than the one
+`begin` named: the upload arrived broken, and the block here stays and goes again later. Only
+`begin` refusing `differs` says a trusted copy with other bytes exists, and only then is a local
+block discarded; the run says in one line how many it discarded.
 *Rests on:* the record of where a block came from (B-32), which keeps a block from going up under
 another name or into another org, and undoing a withdrawal; and packs being the same bytes on
 every try (B-27), so a retry after a crash finds its upload under way.

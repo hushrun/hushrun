@@ -431,13 +431,14 @@ fn every_row_of_the_outbox() {
             },
         ),
         (
+            // The upload arrived broken: the block here is good, and goes again later.
             "commit differs",
             Row {
                 begin: None,
                 commit: Some("differs"),
                 put_fails: false,
-                waits: false,
-                discarded: true,
+                waits: true,
+                discarded: false,
             },
         ),
         (
@@ -478,7 +479,7 @@ fn every_row_of_the_outbox() {
                 && Outbox::new(&m.store).waiting().len() == usize::from(row.waits)
                 && no_claims(&m)
         });
-        relay.end_check(&[]);
+        let lines = relay.end_check(&[]);
         let left = waiting(&m);
         assert_eq!(left.len(), usize::from(row.waits), "{name}");
         if row.waits {
@@ -489,6 +490,17 @@ fn every_row_of_the_outbox() {
             row.discarded,
             "{name}: the local block"
         );
+        // A block discarded here is never silent.
+        let said: Vec<&String> = lines.iter().filter(|l| l.contains("discarded")).collect();
+        if row.discarded {
+            assert_eq!(
+                said,
+                [&"build: 1 block built here was discarded: the repository's trusted copy has other bytes, and is served in its place".to_string()],
+                "{name}"
+            );
+        } else {
+            assert!(said.is_empty(), "{name}: {lines:?}");
+        }
     }
 }
 
