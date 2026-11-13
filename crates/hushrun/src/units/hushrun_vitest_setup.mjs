@@ -60,15 +60,32 @@ function install() {
     const p = pathOf(value);
     if (p) state.dirs.add(p);
   });
-  const wrap = (target, name, record) => {
-    const original = target[name];
-    if (typeof original !== 'function') return;
+  // A wrapper keeps what callers can see on what it wraps: its `name` and `length`, and its own
+  // properties, such as `util.promisify.custom` on `exec` and `execFile` (`{ stdout, stderr }`)
+  // or `native` on `fs.realpath`. One that is a function is wrapped with the same record, since
+  // Node's calls the original it closed over, and what it does would go unseen; one that is what
+  // it wraps (`fs.promises.opendir`'s own `promisify.custom`) is the wrapper.
+  const observing = (original, record, made = new Map()) => {
+    if (made.has(original)) return made.get(original);
     const wrapped = function (...args) {
       record(args[0], args);
       return original.apply(this, args);
     };
-    Object.defineProperty(wrapped, 'name', { value: original.name });
-    target[name] = wrapped;
+    made.set(original, wrapped);
+    for (const key of Reflect.ownKeys(original)) {
+      if (key === 'prototype' || key === 'arguments' || key === 'caller') continue;
+      const desc = Object.getOwnPropertyDescriptor(original, key);
+      if (key !== 'name' && key !== 'length' && typeof desc.value === 'function') {
+        desc.value = observing(desc.value, record, made);
+      }
+      note('wrap', () => Object.defineProperty(wrapped, key, desc));
+    }
+    return wrapped;
+  };
+  const wrap = (target, name, record) => {
+    const original = target[name];
+    if (typeof original !== 'function') return;
+    target[name] = observing(original, record);
   };
   for (const target of [fs, fs.promises]) {
     for (const name of ['readFile', 'readFileSync', 'open', 'openSync', 'createReadStream',

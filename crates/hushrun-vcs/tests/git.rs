@@ -230,6 +230,134 @@ fn blobless_partial_clones_fail_with_missing_objects() {
     digest(&open(&shallow, ReaderChoice::Auto), &Snapshot::default()).unwrap();
 }
 
+const READERS: [ReaderChoice; 3] = [ReaderChoice::Gix, ReaderChoice::Cli, ReaderChoice::Auto];
+
+/// A partial clone with `filter` of a reachable origin that has `a.txt` and `sub/b.txt`, and
+/// the ids of its commit's tree, `sub` and `a.txt`.
+struct PartialClone {
+    _dir: tempfile::TempDir,
+    clone: std::path::PathBuf,
+    tree: String,
+    sub: String,
+    blob: String,
+}
+
+fn partial_clone(filter: &str) -> PartialClone {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git::init(&origin, "sha1");
+    git::run(&origin, &["config", "uploadpack.allowFilter", "true"], None);
+    git::run(
+        &origin,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        None,
+    );
+    write(&origin, "a.txt", b"a\n");
+    write(&origin, "sub/b.txt", b"b\n");
+    git::commit_all(&origin, "one");
+    let clone = dir.path().join("clone");
+    git::run(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-checkout",
+            &format!("--filter={filter}"),
+            &format!("file://{}", origin.display()),
+            clone.to_str().unwrap(),
+        ],
+        None,
+    );
+    PartialClone {
+        tree: git::text(&origin, &["rev-parse", "HEAD^{tree}"]),
+        sub: git::text(&origin, &["rev-parse", "HEAD:sub"]),
+        blob: git::text(&origin, &["rev-parse", "HEAD:a.txt"]),
+        clone,
+        _dir: dir,
+    }
+}
+
+/// Whether `repo` has `object`, asked so that no git fetches it.
+fn has(repo: &Path, object: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e", object])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "hushrun_no_lazy_fetch")
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[track_caller]
+fn assert_missing(err: &hushrun_vcs::Error, object: &str) {
+    assert_eq!(err.code(), Some("E_MISSING_OBJECTS"), "{err}");
+    assert!(err.to_string().contains(object), "{object}: {err}");
+    assert!(err.to_string().contains("full or shallow clone"), "{err}");
+}
+
+// covers: D-9
+#[test]
+fn tree_less_partial_clones_fail_with_missing_objects_and_fetch_nothing() {
+    let partial = partial_clone("tree:0");
+    let repo = &partial.clone;
+    for reader in READERS {
+        let vcs = open(repo, reader);
+        let err = digest(&vcs, &Snapshot::default()).unwrap_err();
+        assert_missing(&err, &partial.tree);
+        // The commit names its tree, which needn't be there to be named.
+        assert_eq!(vcs.tree("HEAD").unwrap(), Some(partial.tree.clone()));
+        let listing = vcs.list(&Snapshot::Rev("HEAD".into())).unwrap_err();
+        assert_missing(&listing, &partial.tree);
+        let err = vcs.read_file_at("HEAD", "a.txt").unwrap_err();
+        assert_missing(&err, &partial.tree);
+    }
+    assert!(!has(repo, &partial.tree), "a tree was fetched");
+}
+
+// covers: D-9
+#[test]
+fn a_missing_subtree_is_named() {
+    let partial = partial_clone("tree:1");
+    let repo = &partial.clone;
+    assert!(has(repo, &partial.tree));
+    for reader in READERS {
+        let vcs = open(repo, reader);
+        let err = digest(&vcs, &Snapshot::default()).unwrap_err();
+        assert_missing(&err, &partial.sub);
+        let err = vcs.read_file_at("HEAD", "sub/b.txt").unwrap_err();
+        assert_missing(&err, &partial.sub);
+    }
+    assert!(!has(repo, &partial.sub), "a tree was fetched");
+}
+
+// covers: D-9
+#[test]
+fn every_read_of_a_blob_a_blob_less_clone_lacks_is_missing_objects() {
+    let partial = partial_clone("blob:none");
+    let repo = &partial.clone;
+    for reader in READERS {
+        let vcs = open(repo, reader);
+        let listing = vcs.list(&Snapshot::default()).unwrap();
+        let entry = listing.find("a.txt").unwrap();
+        let err = vcs.read_entry(entry).unwrap_err();
+        assert_missing(&err, &partial.blob);
+        let err = vcs
+            .read_entries(&[entry], &mut |_, _| panic!("no bytes"))
+            .unwrap_err();
+        assert_missing(&err, &partial.blob);
+        let err = vcs.read_file_at("HEAD", "a.txt").unwrap_err();
+        assert_missing(&err, &partial.blob);
+        // A path that isn't there is not a missing object.
+        let err = vcs.read_file_at("HEAD", "nope.txt").unwrap_err();
+        assert_eq!(err.code(), None, "{err}");
+    }
+    assert!(!has(repo, &partial.blob), "a blob was fetched");
+}
+
 // covers: D-9
 #[test]
 fn revisions_resolve_to_commit_tree_and_ref() {

@@ -9,7 +9,7 @@
 //! each part measures.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -199,6 +199,9 @@ fn venv(dir: &Path) -> Result<PathBuf> {
             "import yaml, sys; sys.exit(yaml.__version__ != sys.argv[1])",
         ])
         .arg(PYYAML)
+        // A venv without PyYAML is expected here: the traceback it prints would read as the
+        // run's failure in CI's log.
+        .stderr(Stdio::null())
         .status()?;
     if !has.success() {
         step(&format!("installing PyYAML {PYYAML}"));
