@@ -25,16 +25,20 @@ again: its setup phase has the network and a token, and its later phases may hav
   another job's store found there is removed unread, and only markers of this job and store go
   up (B-31).
 - **The job's ID token, always, in GitHub Actions.** Beside an agent token too: what the
-  backend trusts a job by are the token's claims. Minted again within a minute of its expiry
-  and after a 401. Anywhere else in CI an agent token reads and never uploads (B-31).
+  backend trusts a job by are the token's claims. Renewed in the background within a minute of
+  its expiry and sent until it expires, minted again after a 401, waited for only within a
+  request's own deadline, and never minted once the command has ended. Anywhere else in CI an
+  agent token reads and never uploads (B-31).
 - **The commit on every request**, lookups included, so a backend that decides trust by the
-  commit decides it for every request (B-31); an older backend ignores the field.
+  commit decides it for every request (B-31); an older backend ignores the field. A job whose
+  tracked files differ from its commit names none.
 - **The end of a job waits for its uploads**, longer for a job that writes trusted blocks, never
-  more than a quarter of what the waiting blocks cost to compile, for the whole call (B-31).
+  more than a quarter of what the waiting blocks cost to compile, for the whole call: one
+  deadline, `close` within it (B-29, B-31).
 - **`hushrun build fetch` for sandboxes.** The setup phase saves sealed packs, hints and the
   policy for 24 hours, no token; later phases run a relay from it that sends nothing (B-36).
-- **From the review of the relay as built:** a question about a stale vouch is answered within
-  the block's budget, so cargo never waits on a slow `open` (B-34); the prefetch starts at the
+- **From the review of the relay as built:** a question about a stale vouch never waits for
+  `open`, and the run's stale vouches are asked in one lookup (B-34); the prefetch starts at the
   first wrapper that misses (B-30); a pack can't unpack past 64 times its size or the disk's
   floor (B-28); a downloaded block that differs is suspended and replaced in one step (B-32);
   and every variable no CI system set is searched for from 8 bytes (B-24).
