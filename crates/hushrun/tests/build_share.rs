@@ -168,7 +168,6 @@ fn a_library_one_machine_built_is_reused_on_another_from_the_shared_store() {
     let close = fake.closes().last().cloned().expect("a close");
     assert!(close.manifest.len() >= 2, "{close:?}");
     assert_eq!(close.counts.built, 2);
-    fake.set_manifest(close.manifest);
 
     // B: another checkout, another store, another target folder.
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
@@ -603,7 +602,6 @@ fn a_warm_build_with_stale_vouches_and_a_slow_open_takes_what_it_takes_with_shar
     let a = Machine::new(dir.path(), "a", None);
     let (code, stderr) = a.build(&fake);
     assert_eq!(code, 0, "{stderr}");
-    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
     let (code, stderr) = b.build(&fake);
     assert_eq!(code, 0, "{stderr}");
@@ -737,27 +735,57 @@ fn any_file_holds(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
 /// agent token, in the repository `github.com/acme/shop`.
 fn fetched_sandbox(dir: &Path, fake: &FakeBuild) -> Machine {
     let a = Machine::new(dir, "a", None);
+    set_origin(&a, "https://github.com/acme/shop.git");
     let (code, stderr) = a.build(fake);
     assert_eq!(code, 0, "{stderr}");
-    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
     let b = Machine::new(dir, "b", Some(&a.repo));
     set_origin(&b, "https://github.com/acme/shop.git");
+    let (said, stderr) = fetch(&b, fake, &[]);
+    assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
+    b
+}
+
+/// `hushrun build fetch CHECK…` in a sandbox's setup phase: its stdout and stderr.
+fn fetch(b: &Machine, fake: &FakeBuild, checks: &[&str]) -> (String, String) {
     let output = b
         .hushrun(fake)
         .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
         .env_remove("HUSHRUN_BUILD")
         .args(["build", "fetch"])
+        .args(checks)
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{said}{stderr}");
+    (said, stderr)
+}
+
+// covers: B-36
+#[test]
+fn a_fetch_asks_for_each_check_it_names_and_gets_only_that_checks_manifest() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    set_origin(&a, "https://github.com/acme/shop.git");
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    set_origin(&b, "https://github.com/acme/shop.git");
+    // A check nobody ran: its manifest is empty, as the backend's would be.
+    let (said, stderr) = fetch(&b, &fake, &["lint"]);
+    assert!(said.contains("Fetched 0 compiled crates"), "{said}{stderr}");
+    // The check that built them, by the name `hushrun run` ran it under.
+    let (said, stderr) = fetch(&b, &fake, &["lint", "build"]);
     assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
-    b
+    let opens = fake.opens();
+    let named: Vec<_> = opens.iter().rev().take(2).map(|o| o.check).collect();
+    assert!(named.iter().all(Option::is_some), "{opens:?}");
+    assert_ne!(named[0], named[1]);
 }
 
 fn set_origin(m: &Machine, url: &str) {
-    git::run(&m.repo, &["remote", "set-url", "origin", url], None);
+    git::run(&m.repo, &["config", "remote.origin.url", url], None);
 }
 
 /// A later phase of the sandbox: no token unless `change` gives one, the backend the fake's org
@@ -884,9 +912,9 @@ fn a_github_job_whose_backend_is_cut_off_reuses_what_its_setup_step_fetched() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None);
+    set_origin(&a, "https://github.com/acme/shop.git");
     let (code, stderr) = a.build(&fake);
     assert_eq!(code, 0, "{stderr}");
-    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
 
     // A coding agent's job: its setup step fetches with the job's ID token.
     let b = Machine::new(dir.path(), "b", Some(&a.repo));

@@ -122,6 +122,8 @@ struct State {
     hints: BTreeMap<Hex32, Vec<Vec<u8>>>,
     suspended: BTreeSet<Hex32>,
     opens: Vec<OpenRequest>,
+    /// The manifests kept, newest last: each close's, and those a test seeded.
+    manifests: Vec<Kept>,
     closes: Vec<CloseRequest>,
     reports: Vec<ReportRequest>,
     begins: Vec<BeginRequest>,
@@ -145,6 +147,33 @@ struct State {
     unreachable: bool,
     /// The paths of the requests dropped so.
     dropped: Vec<String>,
+}
+
+/// A manifest the fake keeps, as the backend keeps one per repository, check and platform: from
+/// a close, or seeded by a test (with no repository and no platform: any).
+#[derive(Debug, Clone)]
+struct Kept {
+    repository: Option<String>,
+    check: Option<Hex32>,
+    platform: Option<String>,
+    pairs: Vec<Pair>,
+}
+
+/// The manifest `open` answers, as the contract says ([`OpenRequest::check`]): for an `open`
+/// naming a check, the newest kept for that check of the repository and platform, else none; for
+/// one naming none, the newest kept of the repository and platform, whatever its check.
+fn manifest_for(kept: &[Kept], open: &OpenRequest) -> Vec<Pair> {
+    kept.iter()
+        .rev()
+        .find(|k| {
+            k.repository
+                .as_ref()
+                .is_none_or(|r| Some(r) == open.repository.as_ref())
+                && k.platform.as_ref().is_none_or(|p| *p == open.platform)
+                && (open.check.is_none() || k.check == open.check)
+        })
+        .map(|k| k.pairs.clone())
+        .unwrap_or_default()
 }
 
 /// A running fake of the build protocol for one org.
@@ -177,6 +206,7 @@ impl FakeBuild {
             hints: BTreeMap::new(),
             suspended: BTreeSet::new(),
             opens: Vec::new(),
+            manifests: Vec::new(),
             closes: Vec::new(),
             reports: Vec::new(),
             begins: Vec::new(),
@@ -281,9 +311,26 @@ impl FakeBuild {
         state.policy.read = read.iter().map(|s| s.to_string()).collect();
     }
 
-    /// The manifest `open` answers.
+    /// Seeds a manifest kept under no check, for any repository and platform: what an `open`
+    /// naming no check answers until a close keeps a newer one. An `open` naming a check gets
+    /// only that check's (kept from a close, or [`FakeBuild::set_check_manifest`]).
     pub fn set_manifest(&self, manifest: Vec<Pair>) {
-        self.state().policy.manifest = manifest;
+        self.state().manifests.push(Kept {
+            repository: None,
+            check: None,
+            platform: None,
+            pairs: manifest,
+        });
+    }
+
+    /// Seeds the manifest of the check `check`, for any repository and platform.
+    pub fn set_check_manifest(&self, check: Hex32, manifest: Vec<Pair>) {
+        self.state().manifests.push(Kept {
+            repository: None,
+            check: Some(check),
+            platform: None,
+            pairs: manifest,
+        });
     }
 
     // --- what tests steer --------------------------------------------------------------------
@@ -639,8 +686,10 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         _ if request.method != "POST" => error(405, "method_not_allowed", "POST only"),
         route::OPEN => match serde_json::from_slice::<OpenRequest>(&request.body) {
             Ok(open) => {
+                let mut policy = state.policy.clone();
+                policy.manifest = manifest_for(&state.manifests, &open);
                 state.opens.push(open);
-                Response::json(200, &serde_json::to_value(&state.policy).expect("json"))
+                Response::json(200, &serde_json::to_value(&policy).expect("json"))
             }
             Err(err) => invalid(err),
         },
@@ -664,6 +713,8 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         },
         route::HINTS => match serde_json::from_slice::<HintsRequest>(&request.body) {
             Ok(sent) if sent.hints.len() > blocks::MOST_HINTS_SENT => too_many(),
+            // Hints go into the caller's own scope: a caller that writes nowhere keeps none.
+            Ok(_) if !state.policy.writes => to_json(&HintsResponse { stored: 0 }),
             Ok(sent) => {
                 let stored = sent.hints.len() as u32;
                 for hint in sent.hints {
@@ -697,9 +748,30 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
             Err(err) => invalid(err),
         },
         route::CLOSE => match serde_json::from_slice::<CloseRequest>(&request.body) {
+            Ok(close) if close.manifest.len() > blocks::MOST_MANIFEST => too_many(),
             Ok(close) => {
                 // Sent again with the same run, it counts once.
                 if !state.closes.iter().any(|c| c.run == close.run) {
+                    // The manifest is kept for the repository, check and platform, unless the
+                    // one kept has more than twice its entries (the contract's 7 days aside).
+                    let kept = state.manifests.iter().rposition(|k| {
+                        k.repository == close.repository
+                            && k.check == close.check
+                            && k.platform.as_deref() == Some(close.platform.as_str())
+                    });
+                    let smaller = kept
+                        .is_some_and(|i| close.manifest.len() * 2 < state.manifests[i].pairs.len());
+                    if !smaller && !close.manifest.is_empty() {
+                        if let Some(i) = kept {
+                            state.manifests.remove(i);
+                        }
+                        state.manifests.push(Kept {
+                            repository: close.repository.clone(),
+                            check: close.check,
+                            platform: Some(close.platform.clone()),
+                            pairs: close.manifest.clone(),
+                        });
+                    }
                     state.closes.push(close);
                 }
                 Response::json(200, &json!({}))
@@ -737,6 +809,13 @@ fn too_many() -> Response {
 fn store(state: &mut State, request: &Request, object: &str, pause: Option<Duration>) -> Reply {
     match request.method.as_str() {
         "PUT" => {
+            // A link works for as long as it said: a PUT on one that expired is refused.
+            let expired = state.blocks.iter().any(|b| {
+                b.object == object && b.link_expires.is_some_and(|until| until <= Instant::now())
+            });
+            if expired {
+                return answer(Response::new(403), pause);
+            }
             if state.objects.contains_key(object) {
                 return answer(Response::new(412), pause);
             }
@@ -1038,6 +1117,55 @@ mod tests {
 
     fn address(n: u8) -> Hex32 {
         Hex32([n; 32])
+    }
+
+    // covers: B-30, B-36
+    #[test]
+    fn open_answers_the_named_checks_manifest_or_the_repositorys_newest() {
+        let fake = FakeBuild::start();
+        let close = |check: Option<Hex32>, repository: &str, pairs: Vec<Pair>| {
+            let mut run = [0u8; 32];
+            run[0] = fake.closes().len() as u8;
+            let body = json!({
+                "kind": "rustc/1",
+                "run": Hex32(run),
+                "repository": repository,
+                "check": check,
+                "platform": "aarch64-apple-darwin",
+                "manifest": pairs,
+            });
+            assert_eq!(post(&fake, "close", &body).0, 200);
+        };
+        let open = |check: Option<Hex32>, repository: &str| {
+            let body = json!({
+                "kind": "rustc/1",
+                "repository": repository,
+                "check": check,
+                "platform": "aarch64-apple-darwin",
+            });
+            let (status, policy) = post(&fake, "open", &body);
+            assert_eq!(status, 200);
+            serde_json::from_value::<Policy>(policy).unwrap().manifest
+        };
+        let shop = "github.com/acme/shop";
+        let (build, test) = (address(1), address(2));
+        let one = vec![Pair(address(10), address(11))];
+        let two = vec![Pair(address(20), address(21))];
+        close(Some(build), shop, one.clone());
+        close(Some(test), shop, two.clone());
+        // A check gets its own manifest, never another check's.
+        assert_eq!(open(Some(build), shop), one);
+        assert_eq!(open(Some(test), shop), two);
+        assert_eq!(open(Some(address(3)), shop), Vec::new());
+        // No check: the repository's newest.
+        assert_eq!(open(None, shop), two);
+        // Another repository's: none.
+        assert_eq!(open(None, "github.com/acme/other"), Vec::new());
+        assert_eq!(open(Some(build), "github.com/acme/other"), Vec::new());
+        // A seeded manifest under no check answers only an `open` naming none.
+        fake.set_manifest(one.clone());
+        assert_eq!(open(None, "github.com/acme/other"), one);
+        assert_eq!(open(Some(address(3)), shop), Vec::new());
     }
 
     #[test]

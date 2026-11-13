@@ -447,14 +447,7 @@ fn start_sharing(
     if matches!(does.sharing, Sharing::Off(_)) {
         return Err(None);
     }
-    let check = hushrun_core::blocks::Hex32::sha256(
-        format!(
-            "hushrun.build-check/v1\n{}\n{}",
-            repository.unwrap_or_default(),
-            start.check
-        )
-        .as_bytes(),
-    );
+    let check = check_id(repository, &start.check);
     let store = hushrun_build::store::Store::new(&current.store);
     let config = || {
         Some(crate::cmd::build_relay::Config {
@@ -489,6 +482,19 @@ fn start_sharing(
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
     Ok(relay)
+}
+
+/// A check's id, as the build protocol names it (B-26): a digest of the repository and the
+/// check's name, so that the name itself never leaves the machine. The one definition a run and
+/// `hushrun build fetch` use.
+pub(crate) fn check_id(repository: Option<&str>, check: &str) -> hushrun_core::blocks::Hex32 {
+    hushrun_core::blocks::Hex32::sha256(
+        format!(
+            "hushrun.build-check/v1\n{}\n{check}",
+            repository.unwrap_or_default()
+        )
+        .as_bytes(),
+    )
 }
 
 /// The target triple this hushrun was built for: the run's platform when the compiler's own host

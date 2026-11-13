@@ -793,9 +793,12 @@ after another on one runner and the runner gives them the same request token (th
 and uploads what an earlier leg of the same run built, in the same scope); or another process can
 read a job's environment, which holds the request token.
 
-**B-36 A sandbox's fetch.** `hushrun build fetch`, run in a sandbox's setup phase with the network
-and a token, sends `open` for the repository and platform, downloads what the manifest names that
-the store lacks, and saves into the store's `prefetched/` the sealed packs, the sealed hints, the
+**B-36 A sandbox's fetch.** `hushrun build fetch [CHECK]...`, run in a sandbox's setup phase with
+the network and a token, sends `open` for the repository and platform once for each check named,
+by its id as `hushrun run` names it (B-26: a digest of the repository and the check's name), or
+once naming no check, which the backend answers with the repository's newest manifest for the
+platform, whatever its check (`OpenRequest::check`); an `open` naming a check gets that check's
+manifest only. It downloads what the manifests name that the store lacks, and saves into the store's `prefetched/` the sealed packs, the sealed hints, the
 policy and the rows, with no token and no link, written whole (a new folder renamed in). It is
 good for 24 hours from the time it was fetched, read when it is used; the sweep removes it after.
 A fetch serves only a later run of the same host, org and repository (the run's backend, as the

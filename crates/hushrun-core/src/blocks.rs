@@ -341,7 +341,11 @@ pub struct OpenRequest {
     /// can't read one. In CI, a job whose commit isn't its token's `sha` is not trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// The check's id, as the local store names it.
+    /// The check's id, as the local store names it: a digest of the repository and the check's
+    /// name. It chooses the manifest that comes back: an `open` naming a check gets the newest
+    /// manifest kept for that check (of the repository and platform), or none; one naming none
+    /// (`hushrun build fetch` with no check) gets the repository's newest for the platform,
+    /// whatever its check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<Hex32>,
     /// The target triple the run builds for.

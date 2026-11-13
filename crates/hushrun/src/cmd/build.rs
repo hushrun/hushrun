@@ -23,13 +23,13 @@ use crate::output::{self, Format};
 
 pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
     let place = Place::read()?;
-    match args.command.unwrap_or(BuildCommand::Status) {
+    match args.command.clone().unwrap_or(BuildCommand::Status) {
         BuildCommand::On => set(global, &place, Mode::On),
         BuildCommand::Observe => set(global, &place, Mode::Observe),
         BuildCommand::Off => set(global, &place, Mode::Off),
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
-        BuildCommand::Fetch => fetch(global, &place),
+        BuildCommand::Fetch(fetch_args) => fetch(global, &place, &fetch_args.checks),
         BuildCommand::Share(share) => set_share(
             global,
             &place,
@@ -42,12 +42,14 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
     }
 }
 
-/// `hushrun build fetch` (B-36): for a sandbox's setup phase, which has the network and a token
-/// that later phases don't. The relay sends `open` for this repository and platform, downloads
-/// what its manifest names that the store lacks, and saves the sealed packs, the sealed hints,
-/// the policy and the rows into the store's `prefetched/`, good for 24 hours. Nothing is
-/// uploaded or closed, and no token or link is written.
-fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
+/// `hushrun build fetch [CHECK]...` (B-36): for a sandbox's setup phase, which has the network
+/// and a token that later phases don't. The relay sends `open` for this repository and platform,
+/// once for each check named (by its id, as `hushrun run` names it), or once naming none, which
+/// asks for the repository's newest manifest; downloads what the manifests name that the store
+/// lacks; and saves the sealed packs, the sealed hints, the policy and the rows into the store's
+/// `prefetched/`, good for 24 hours. Nothing is uploaded or closed, and no token or link is
+/// written.
+fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
     use crate::context::{Content, Source};
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build fetch: {why}"));
     let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
@@ -102,8 +104,21 @@ fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
         tuning: crate::cmd::build_relay::Tuning::default(),
         saved: None,
     };
+    let checks: Vec<Option<hushrun_core::blocks::Hex32>> = if checks.is_empty() {
+        vec![None]
+    } else {
+        checks
+            .iter()
+            .map(|name| {
+                Some(crate::cmd::build_session::check_id(
+                    config.repository.as_deref(),
+                    name,
+                ))
+            })
+            .collect()
+    };
     let relay = std::sync::Arc::new(crate::cmd::build_relay::Relay::start(config).map_err(failed)?);
-    let fetched = relay.fetch_for_later().map_err(failed)?;
+    let fetched = relay.fetch_for_later(&checks).map_err(failed)?;
     if global.format == Format::Json {
         output::print_json(&json!({
             "blocks": fetched.blocks,

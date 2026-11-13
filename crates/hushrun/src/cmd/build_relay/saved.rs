@@ -94,31 +94,38 @@ pub(crate) struct Fetched {
 }
 
 impl Relay {
-    /// B-36, `hushrun build fetch`: `open`, then the prefetch of its manifest to the end, then
+    /// B-36, `hushrun build fetch`: for each of `checks` (`None`: no check, the repository's
+    /// newest manifest), `open` naming it, then the prefetch of its manifest to the end; then
     /// the sealed packs, hints, policy and rows saved whole into the store's `prefetched/`. No
     /// `close`, no upload. The error is the line to say.
-    pub(crate) fn fetch_for_later(self: &Arc<Relay>) -> Result<Fetched, String> {
+    pub(crate) fn fetch_for_later(
+        self: &Arc<Relay>,
+        checks: &[Option<Hex32>],
+    ) -> Result<Fetched, String> {
         let relay = self.clone();
+        let checks = checks.to_vec();
         self.runtime.block_on(async move {
-            relay.clone().open(None).await;
-            if let Phase::Stopped(stop) = relay.state().phase.clone() {
-                return Err(match stop {
-                    Stop::Off(why) | Stop::Offline(why) | Stop::Refused(why) => why,
-                });
-            }
-            relay.clone().prefetch_at_first_miss().await;
             let deadline = Instant::now() + FETCH_FOR;
-            loop {
-                let busy = relay
-                    .state()
-                    .fetches
-                    .values()
-                    .any(|f| matches!(f.state, Download::Queued | Download::Downloading));
-                if !busy || Instant::now() >= deadline {
-                    break;
+            for check in checks {
+                relay.clone().open(check).await;
+                if let Phase::Stopped(stop) = relay.state().phase.clone() {
+                    return Err(match stop {
+                        Stop::Off(why) | Stop::Offline(why) | Stop::Refused(why) => why,
+                    });
                 }
-                relay.pump();
-                tokio::time::sleep(relay.config.tuning.tick).await;
+                relay.clone().prefetch_at_first_miss().await;
+                loop {
+                    let busy = relay
+                        .state()
+                        .fetches
+                        .values()
+                        .any(|f| matches!(f.state, Download::Queued | Download::Downloading));
+                    if !busy || Instant::now() >= deadline {
+                        break;
+                    }
+                    relay.pump();
+                    tokio::time::sleep(relay.config.tuning.tick).await;
+                }
             }
             Ok(())
         })?;

@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- `hushrun build fetch [CHECK]...` takes the checks to fetch for, by the names `hushrun run` runs
+  them under, and asks the backend for each one's newest manifest; with none, it asks for the
+  repository's newest. Before, it named no check, and a backend that matches the check exactly
+  answered an empty manifest, so a sandbox fetched nothing. The test fake now answers each
+  `open` with the named check's manifest, as the contract says.
 - In GitHub Actions, `hushrun build fetch` saves into the job's own store, and a later step of
   the same job whose backend can't be reached reuses what it fetched, read only, as a sandbox's
   later phase does: a coding agent on a GitHub Actions runner behind a firewall is served. Before,

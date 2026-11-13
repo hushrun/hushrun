@@ -331,7 +331,7 @@ pub struct BuildArgs {
 }
 
 /// `hushrun build`'s commands (B-1, B-21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum BuildCommand {
     /// Reuse compiled crates in commands `hushrun run` runs.
     On,
@@ -347,9 +347,17 @@ pub enum BuildCommand {
     /// observe or off. It can lower the org's shared mode here, never raise it.
     Share(BuildShareArgs),
     /// For a sandbox's setup, with the network and a token: fetch the crates the org's newest
-    /// build of this repository used, so later runs reuse them with neither. Good for 24 hours;
-    /// no token is kept.
-    Fetch,
+    /// build of each check named used (of this repository, with none named), so later runs reuse
+    /// them with neither. Good for 24 hours; no token is kept.
+    Fetch(BuildFetchArgs),
+}
+
+/// `hushrun build fetch [CHECK]...` (B-36).
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BuildFetchArgs {
+    /// The checks whose newest builds to fetch, by the names `hushrun run` runs them under
+    /// (`hushrun run build -- cargo build` is `build`). With none, the repository's newest build.
+    pub checks: Vec<String>,
 }
 
 /// `hushrun build share on|observe|off` (B-33).
