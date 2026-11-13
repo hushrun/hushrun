@@ -345,6 +345,8 @@ pub(crate) struct Relay {
     machine: Option<crate::machine::Machine>,
     /// The command ended: no new PUT starts.
     ending: AtomicBool,
+    /// A marker was written: the upload loop looks now rather than at its next turn.
+    wake: tokio::sync::Notify,
 }
 
 static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
@@ -392,6 +394,7 @@ impl Relay {
             run,
             machine,
             ending: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
             state: Mutex::new(State {
                 phase: Phase::Opening,
                 policy: None,
@@ -1407,7 +1410,9 @@ impl Relay {
                     self.config.repository.clone(),
                     SystemTime::now(),
                 );
-                let _ = Outbox::new(&self.config.store).add(&marker);
+                if Outbox::new(&self.config.store).add(&marker).is_ok() {
+                    self.wake.notify_one();
+                }
             }
         }
         if sharing == Sharing::Observe && class == LocalClass::Library {

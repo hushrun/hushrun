@@ -153,7 +153,8 @@ impl Relay {
                 .filter(|m| m.by == self.by && m.not_before_ms <= now)
                 .collect();
             if ready.is_empty() {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(200), self.wake.notified()).await;
                 continue;
             }
             let most = if running > 0 {
