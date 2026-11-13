@@ -901,6 +901,7 @@ impl<'a> BuildRun<'a> {
             code.and_then(Code::repository_here).as_deref(),
             code.map_or(&[][..], |code| &code.build_env),
             share,
+            &|| backend.and_then(Backend::build_place),
         ) {
             Ok(session) => Some(session),
             Err(why) => {

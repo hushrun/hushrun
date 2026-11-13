@@ -796,16 +796,24 @@ and a token, sends `open` for the repository and platform, downloads what the ma
 the store lacks, and saves into the store's `prefetched/` the sealed packs, the sealed hints, the
 policy and the rows, with no token and no link, written whole (a new folder renamed in). It is
 good for 24 hours from the time it was fetched, read when it is used; the sweep removes it after.
-A later run whose backend gives nothing to share with (no token, no network) and whose store holds
-a fresh fetch runs a relay from it: the policy as saved, each pack linked into the run's
-`incoming/` and opened when a wrapper brings its key, the hints as saved; it uploads nothing,
-reports nothing and sends no request. No run deletes the fetch. A machine with no person's
+A fetch serves only a later run of the same host, org and repository (the run's backend, as the
+`HUSHRUN_BACKEND` variable, the repository's files or a login name it, and its repository, as
+B-26 names it), and only while that backend answered no request of the run: an answer always wins
+over a fetch, that the org doesn't share, a 401 or a 403 included, and a run that names no backend
+or no repository, or a fetch that names none, is no match (`saved::Saved::serves`, the one
+definition). Such a run whose store holds a fresh fetch runs a relay from it: the policy as
+saved, each pack linked into the run's `incoming/` and opened when a wrapper brings its key,
+the hints as saved; it uploads nothing, reports nothing and sends no request. No run deletes the fetch. A machine with no person's
 settings file is a sandbox: reuse is on there, and sharing is the org's mode as saved. *Rests on:*
 a sandbox's later phases running the same repository and toolchain as its setup, so the keys
 they compute are the ones the fetch's manifest names; and the packs staying sealed with each
 block's key, so the fetch holds nothing a compile here couldn't make. *Breaks if:* a block the
 server withdrew after the fetch is reused within its 24 hours, as B-34 allows any run that can
-reach no server.
+reach no server; or the org turns sharing off while the backend can't be reached, which a run
+there learns only when it can. A network that refuses the backend with an answer of its own (a
+proxy's 403) counts as the backend's answer, and the fetch then serves nothing: a cost, not a
+wrong block. A sandbox whose later phases have the network and no token gets a 401, and so
+nothing from its fetch, for the same reason.
 
 **B-32 Where a block came from.** Beside each block the store keeps a record, `origin.json`,
 written before the block is published and rewritten whole under the block's lock when it

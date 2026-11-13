@@ -52,6 +52,22 @@ impl Saved {
         (saved.schema == SCHEMA).then_some((saved, folder))
     }
 
+    /// B-36: whether this fetch may serve a run whose backend is `place` and whose repository is
+    /// `repository`: only one of the same host, org and repository, and only while that backend
+    /// answered nothing in the run. An answer always wins over a fetch: that the org doesn't
+    /// share, a 401 or a 403 included. A run that names no backend, or no repository, is not the
+    /// fetch's.
+    pub(crate) fn serves(
+        &self,
+        place: Option<&crate::results::BuildPlace>,
+        repository: Option<&str>,
+    ) -> bool {
+        place.is_some_and(|place| {
+            !place.answered && place.host == self.host && place.org == self.org
+        }) && self.repository.is_some()
+            && self.repository.as_deref() == repository
+    }
+
     /// The org's mode, as the policy said it.
     pub(crate) fn org(&self) -> Org {
         if !self.policy.sharing {
@@ -219,5 +235,56 @@ impl Relay {
             }
             _ => Phase::Answering,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::results::BuildPlace;
+
+    fn saved(repository: Option<&str>) -> Saved {
+        Saved {
+            schema: SCHEMA.into(),
+            fetched_ms: 0,
+            host: "https://api.example.com".into(),
+            org: "acme".into(),
+            repository: repository.map(str::to_string),
+            policy: serde_json::from_value(serde_json::json!({
+                "sharing": true, "keptDays": 30, "allowanceBytes": 0, "heldBytes": 0
+            }))
+            .unwrap(),
+            found: Vec::new(),
+            hints: Vec::new(),
+        }
+    }
+
+    fn place(host: &str, org: &str, answered: bool) -> BuildPlace {
+        BuildPlace {
+            host: host.into(),
+            org: org.into(),
+            answered,
+        }
+    }
+
+    // covers: B-36
+    #[test]
+    fn a_fetch_serves_only_its_host_org_and_repository_while_the_backend_answered_nothing() {
+        let shop = Some("github.com/acme/shop");
+        let fetch = saved(shop);
+        let here = place("https://api.example.com", "acme", false);
+        assert!(fetch.serves(Some(&here), shop));
+        assert!(!fetch.serves(Some(&here), Some("github.com/acme/other")));
+        assert!(!fetch.serves(Some(&here), None));
+        assert!(!fetch.serves(Some(&place("https://api.example.com", "beta", false)), shop));
+        assert!(!fetch.serves(
+            Some(&place("https://other.example.com", "acme", false)),
+            shop
+        ));
+        // Any answer from the backend wins: sharing off, 401, 403.
+        assert!(!fetch.serves(Some(&place("https://api.example.com", "acme", true)), shop));
+        // A run that names no backend, or a fetch that names no repository, is no match.
+        assert!(!fetch.serves(None, shop));
+        assert!(!saved(None).serves(Some(&here), None));
     }
 }

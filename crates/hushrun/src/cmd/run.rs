@@ -295,6 +295,12 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         .clone()
         .or_else(|| wrap::repository_of(&content));
     let mut said_off = false;
+    // B-36: the backend a saved fetch must be from, found only when the store holds one; a
+    // check asks it nothing.
+    let place = || match crate::results::Backend::select(Some(content.vcs.root())) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_place(),
+        _ => None,
+    };
     for Prepared {
         name,
         why,
@@ -326,6 +332,7 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
                 repository.as_deref(),
                 &policy.build_env,
                 None,
+                &place,
             ) {
                 Ok(session) => Some(session),
                 Err(why) => {

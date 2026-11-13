@@ -1244,6 +1244,26 @@ pub struct BuildAccess {
     pub answered: bool,
 }
 
+/// The backend a run's results go to, as a saved fetch is compared with (B-36): its origin and
+/// org, as a relay names them, and whether it answered any request of this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPlace {
+    pub host: String,
+    pub org: String,
+    pub answered: bool,
+}
+
+impl BuildPlace {
+    fn of(base: &str, answered: bool) -> Option<BuildPlace> {
+        let url = LedgerUrl::parse(base).ok()?;
+        Some(BuildPlace {
+            host: crate::credentials::origin(&url),
+            org: hosted::org_of(base).unwrap_or_else(|| base.to_string()),
+            answered,
+        })
+    }
+}
+
 /// What a relay's requests carry (B-26, B-31).
 #[derive(Clone)]
 pub enum BuildCredential {
@@ -1259,6 +1279,16 @@ pub enum BuildCredential {
 }
 
 impl Backend {
+    /// The backend a saved fetch must be from (B-36): a server, or the one the repository names
+    /// while nothing here signs in to it, which is asked nothing. `None` when nothing names one.
+    pub fn build_place(&self) -> Option<BuildPlace> {
+        match &self.store {
+            Store::Server(server) => BuildPlace::of(&server.base, server.ledger.answered_any()),
+            Store::File(_, _, Local::SignedOut { base, .. }) => BuildPlace::of(base, false),
+            Store::File(_, _, Local::Unnamed) => None,
+        }
+    }
+
     /// What a relay needs (B-26, B-31): for a server, the credential its build requests carry.
     /// In CI that is the job's ID token and nothing else, also beside an agent token (B-31); in
     /// GitHub Actions with none, the credential is `None`, whatever token the job holds; in other

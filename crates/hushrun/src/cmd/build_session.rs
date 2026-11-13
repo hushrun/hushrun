@@ -28,12 +28,14 @@ const STORE_DIR: &str = "HUSHRUN_BUILD_DIR";
 /// the command runs as usual (B-19), and `Err` holds the one line the person should read,
 /// without hushrun's prefix: settings or a variable that can't be used, or a binary hushrun
 /// can't find. Every other reason for none is silent. `repository_env` is the repository's
-/// `build: env:` (B-35), which every compile of the run is keyed by.
+/// `build: env:` (B-35), which every compile of the run is keyed by. `place` gives the run's
+/// backend, which a saved fetch must be from (B-36), asked only when the store holds one.
 pub(crate) fn begin(
     now: SystemTime,
     repository: Option<&str>,
     repository_env: &[String],
     share: Option<ShareStart>,
+    place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
     let Some(settings) = Credentials::build_settings_path() else {
         return Err(None);
@@ -54,10 +56,9 @@ pub(crate) fn begin(
     if here.in_ci {
         return begin_in_ci(&here, share, repository);
     }
-    // B-36: no backend that shares answered, and the store holds a fresh fetch.
-    if !share.as_ref().is_some_and(|start| start.access.shares)
-        && let Some(found) = saved_fetch(&here)
-    {
+    // B-36: the run's backend answered nothing, and the store holds a fresh fetch from it, of
+    // this repository.
+    if let Some(found) = saved_fetch(&here, place) {
         return begin_from_saved(&here, repository, found);
     }
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
@@ -70,11 +71,16 @@ pub(crate) fn begin(
     Ok(session)
 }
 
-/// The store's fresh fetch (B-36), with its folder.
-fn saved_fetch(here: &Here<'_>) -> Option<(crate::cmd::build_relay::saved::Saved, PathBuf)> {
+/// The store's fresh fetch (B-36), with its folder, when it may serve this run: see
+/// [`Saved::serves`](crate::cmd::build_relay::saved::Saved::serves).
+fn saved_fetch(
+    here: &Here<'_>,
+    place: &dyn Fn() -> Option<crate::results::BuildPlace>,
+) -> Option<(crate::cmd::build_relay::saved::Saved, PathBuf)> {
     let overrides = hushrun_build::settings::Overrides::from(here.env).ok()?;
     let store = session::store_dir(here.cache_dir, &overrides)?;
     crate::cmd::build_relay::saved::Saved::load(&hushrun_build::store::Store::new(&store), here.now)
+        .filter(|(saved, _)| saved.serves(place().as_ref(), here.repository))
 }
 
 /// B-36: a run whose store holds a fresh fetch and whose backend gave nothing to share with: a

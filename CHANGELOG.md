@@ -183,6 +183,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- `hushrun build fetch`: a saved fetch serves only a run of the same backend host, org and
+  repository, and only while that backend answers nothing in the run; an answer always wins,
+  that the org doesn't share, a 401 or a 403 included. Before, a fetch served another repository,
+  another org, and a run whose backend said the org had turned sharing off.
 - In GitHub Actions, when the job has an ID token (`permissions: id-token: write`), results
   requests carry it before an agent token or `HUSHRUN_TOKEN` beside it, as the repository's
   ledger already did, so the answer that turns build sharing on is one to the job itself. A job

@@ -141,6 +141,10 @@ struct State {
     id_token_seconds: u64,
     /// The audiences the token endpoint was asked for.
     audiences: Vec<String>,
+    /// Every connection is closed unanswered, as a network that drops it does.
+    unreachable: bool,
+    /// The paths of the requests dropped so.
+    dropped: Vec<String>,
 }
 
 /// A running fake of the build protocol for one org.
@@ -187,6 +191,8 @@ impl FakeBuild {
             id_tokens: Vec::new(),
             id_token_seconds: 300,
             audiences: Vec::new(),
+            unreachable: false,
+            dropped: Vec::new(),
         }));
         let shared = state.clone();
         let link = store_link;
@@ -315,6 +321,18 @@ impl FakeBuild {
             status,
             times,
         });
+    }
+
+    /// Makes the whole server, the object store included, unreachable or reachable again: a
+    /// request's connection is closed with no answer, and the request is not recorded among
+    /// those [`FakeBuild::seen`] lists, only among [`FakeBuild::dropped`].
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.state().unreachable = unreachable;
+    }
+
+    /// The paths of the requests an unreachable server dropped, oldest first.
+    pub fn dropped(&self) -> Vec<String> {
+        self.state().dropped.clone()
     }
 
     /// Holds the object store's downloads and uploads, all together, to `bytes_per_second` (0:
@@ -539,6 +557,10 @@ fn route_of(below: &str) -> Option<&'static str> {
 
 fn handle(shared: &Mutex<State>, request: Request) -> Reply {
     let mut state = shared.lock().expect("fake build state");
+    if state.unreachable {
+        state.dropped.push(request.path.clone());
+        return Reply::Close;
+    }
     let store_object = request.path.strip_prefix("/store/").map(str::to_string);
     let prefix = format!("/o/{}/", state.org);
     let route: String = match (&store_object, request.path.strip_prefix(&prefix)) {

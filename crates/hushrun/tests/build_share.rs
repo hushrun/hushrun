@@ -733,20 +733,17 @@ fn any_file_holds(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
     None
 }
 
-// covers: B-36
-#[test]
-fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_token() {
-    let fake = FakeBuild::start();
-    let dir = tempfile::tempdir().unwrap();
-    let a = Machine::new(dir.path(), "a", None);
-    let (code, stderr) = a.build(&fake);
+/// A sandbox, `b`, whose setup phase fetched what machine `a` built, with the network and an
+/// agent token, in the repository `github.com/acme/shop`.
+fn fetched_sandbox(dir: &Path, fake: &FakeBuild) -> Machine {
+    let a = Machine::new(dir, "a", None);
+    let (code, stderr) = a.build(fake);
     assert_eq!(code, 0, "{stderr}");
     fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
-
-    // The sandbox's setup phase: the network and an agent token, no person's settings.
-    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let b = Machine::new(dir, "b", Some(&a.repo));
+    set_origin(&b, "https://github.com/acme/shop.git");
     let output = b
-        .hushrun(&fake)
+        .hushrun(fake)
         .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
         .env_remove("HUSHRUN_BUILD")
         .args(["build", "fetch"])
@@ -756,18 +753,24 @@ fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_toke
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{said}{stderr}");
     assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
-    let store = b.root.join("cache/build");
-    let packs = store.join("prefetched/packs");
-    assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
-    assert!(!b.root.join("cache/build/build.json").exists());
+    b
+}
 
-    // The later phase: no token, and the backend can't be reached.
-    let seen = fake.seen().len();
-    let output = b
-        .hushrun(&fake)
-        .env_remove("HUSHRUN_TOKEN")
-        .env_remove("HUSHRUN_BUILD")
-        .env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme")
+fn set_origin(m: &Machine, url: &str) {
+    git::run(&m.repo, &["remote", "set-url", "origin", url], None);
+}
+
+/// A later phase of the sandbox: no token unless `change` gives one, the backend the fake's org
+/// unless `change` names another. Its stderr.
+fn later_phase(
+    b: &Machine,
+    fake: &FakeBuild,
+    change: impl FnOnce(&mut assert_cmd::Command),
+) -> String {
+    let mut cmd = b.hushrun(fake);
+    cmd.env_remove("HUSHRUN_TOKEN").env_remove("HUSHRUN_BUILD");
+    change(&mut cmd);
+    let output = cmd
         .args([
             "run",
             "build",
@@ -781,12 +784,41 @@ fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_toke
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{stderr}");
+    let clean = std::process::Command::new("cargo")
+        .args(["clean", "-q"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&b.repo)
+        .status()
+        .unwrap();
+    assert!(clean.success());
+    stderr
+}
+
+// covers: B-36
+#[test]
+fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_token() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let b = fetched_sandbox(dir.path(), &fake);
+    let store = b.root.join("cache/build");
+    let packs = store.join("prefetched/packs");
+    assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
+    assert!(!b.root.join("cache/build/build.json").exists());
+
+    // The later phase: no token, and the backend can't be reached.
+    fake.set_unreachable(true);
+    let stderr = later_phase(&b, &fake, |_| {});
     assert!(
         stderr.contains("2 of 2 crates reused (2 from the shared store)"),
         "{stderr}"
     );
-    // It sent nothing, and the fetch is still there for the next run.
-    assert_eq!(fake.seen().len(), seen);
+    // It sent no build request, and the fetch is still there for the next run.
+    fake.set_unreachable(false);
+    let dropped = fake.dropped();
+    assert!(
+        dropped.iter().all(|path| !path.contains("/v0/build/")),
+        "{dropped:?}"
+    );
     assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
     // No token was written under the store or the sessions, by either phase.
     for needle in [FakeBuild::AGENT_TOKEN, FakeBuild::TOKEN] {
@@ -795,4 +827,53 @@ fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_toke
             None
         );
     }
+}
+
+// covers: B-36
+#[test]
+fn a_fetch_serves_only_its_own_repository_and_org_and_only_while_the_backend_cant_answer() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let b = fetched_sandbox(dir.path(), &fake);
+    let reused = "from the shared store";
+
+    // Offline, in another repository: nothing from the fetch.
+    fake.set_unreachable(true);
+    set_origin(&b, "https://github.com/acme/other.git");
+    let stderr = later_phase(&b, &fake, |_| {});
+    assert!(!stderr.contains(reused), "{stderr}");
+    set_origin(&b, "https://github.com/acme/shop.git");
+
+    // Offline, naming another org on the same host: nothing.
+    let beta = fake.url().replace("/o/acme", "/o/beta");
+    let stderr = later_phase(&b, &fake, |cmd| {
+        cmd.env("HUSHRUN_BACKEND", &beta);
+    });
+    assert!(!stderr.contains(reused), "{stderr}");
+
+    // Offline, another host: nothing.
+    let stderr = later_phase(&b, &fake, |cmd| {
+        cmd.env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme");
+    });
+    assert!(!stderr.contains(reused), "{stderr}");
+
+    // The backend answers that the org doesn't share: its answer wins.
+    fake.set_unreachable(false);
+    fake.set_sharing(false);
+    let stderr = later_phase(&b, &fake, |cmd| {
+        cmd.env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN);
+    });
+    assert!(!stderr.contains(reused), "{stderr}");
+    // It answers 401 to a run with no token: that wins too.
+    fake.set_sharing(true);
+    let stderr = later_phase(&b, &fake, |_| {});
+    assert!(!stderr.contains(reused), "{stderr}");
+
+    // And offline, in its own repository and org, the fetch serves.
+    fake.set_unreachable(true);
+    let stderr = later_phase(&b, &fake, |_| {});
+    assert!(
+        stderr.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{stderr}"
+    );
 }
