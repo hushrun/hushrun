@@ -724,6 +724,75 @@ fn a_warm_machine_downloads_nothing() {
     assert_eq!(fake.served_bytes(), 0);
 }
 
+// covers: B-26
+#[test]
+fn a_store_host_that_cant_be_reached_is_named_once_and_nothing_more() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let mut pairs = Vec::new();
+    for seed in [61u8, 62, 63] {
+        let (key, step) = block(&a.store, seed, 20_000, Some(me(&fake)));
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            5000,
+            blocks::Class::Library,
+        );
+        pairs.push(Pair(address(&step), address(&key)));
+    }
+    fake.set_manifest(pairs.clone());
+    // The backend answers; its links point at a host nothing listens on.
+    fake.set_store_origin("http://127.0.0.1:9");
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let step = Digest::of(&[61, 2]);
+    let _ = ask(&relay, Request::Hints { step });
+    until("downloads failed", || {
+        let state = relay.state();
+        state.fetches.len() == pairs.len()
+            && state
+                .fetches
+                .values()
+                .all(|f| f.state == super::Download::Dropped)
+    });
+    let lines = relay.end_check(&[]);
+    let named: Vec<&String> = lines.iter().filter(|l| l.contains("127.0.0.1")).collect();
+    assert_eq!(named.len(), 1, "{lines:?}");
+    assert_eq!(
+        named[0],
+        "build: the shared store's host, 127.0.0.1, can't be reached from here: where this network allows only some hosts, allow 127.0.0.1 to reuse what other machines built"
+    );
+    // No link, path or object name reaches any line.
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("/store/") || l.contains("person")),
+        "{lines:?}"
+    );
+}
+
+// covers: B-26
+#[test]
+fn a_store_link_is_named_by_its_host_alone() {
+    assert_eq!(
+        super::store_host(
+            "https://acct.r2.cloudflarestorage.com/blocks/person/1/ab?X-Amz-Signature=deadbeef&X-Amz-Credential=key"
+        )
+        .as_deref(),
+        Some("acct.r2.cloudflarestorage.com")
+    );
+    assert_eq!(
+        super::store_host("https://user:secret@store.example:8443/o?sig=1").as_deref(),
+        Some("store.example")
+    );
+    assert_eq!(super::store_host("not a link"), None);
+}
+
 // covers: B-30
 #[test]
 fn a_cold_machine_prefetches_the_manifest_s_libraries_and_opens_them_when_asked() {

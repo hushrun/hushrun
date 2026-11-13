@@ -1057,6 +1057,31 @@ fn an_agents_sandbox_with_the_network_reuses_and_shares_when_the_org_shares() {
     assert_eq!(fake.count(route::OPEN), opens);
 }
 
+// covers: B-26, B-36
+#[test]
+fn a_fetch_whose_store_host_cant_be_reached_names_the_host_to_allow() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    set_origin(&a, "https://github.com/acme/shop.git");
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    set_origin(&b, "https://github.com/acme/shop.git");
+    // The backend answers; its store's host doesn't.
+    fake.set_store_origin("http://127.0.0.1:9");
+    let (said, stderr) = fetch(&b, &fake, &[]);
+    assert!(said.contains("Fetched 0 compiled crates"), "{said}{stderr}");
+    assert_eq!(
+        stderr
+            .matches("the shared store's host, 127.0.0.1, can't be reached from here")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("/store/"), "{stderr}");
+}
+
 // covers: B-36
 #[test]
 fn a_fetch_with_nothing_to_sign_in_with_names_the_agents_variable() {

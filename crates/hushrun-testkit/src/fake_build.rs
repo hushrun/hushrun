@@ -377,6 +377,13 @@ impl FakeBuild {
         self.state().unreachable = unreachable;
     }
 
+    /// Makes every link the fake gives from now on point at `origin` instead of its own object
+    /// store: as for a sandbox behind an allow-list that reaches the backend and not the store,
+    /// when nothing listens there.
+    pub fn set_store_origin(&self, origin: &str) {
+        self.state().origin = origin.trim_end_matches('/').to_string();
+    }
+
     /// The paths of the requests an unreachable server dropped, oldest first.
     pub fn dropped(&self) -> Vec<String> {
         self.state().dropped.clone()

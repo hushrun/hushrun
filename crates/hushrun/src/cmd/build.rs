@@ -126,7 +126,14 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
             .collect()
     };
     let relay = std::sync::Arc::new(crate::cmd::build_relay::Relay::start(config).map_err(failed)?);
-    let fetched = relay.fetch_for_later(&checks).map_err(failed)?;
+    let fetched = relay.fetch_for_later(&checks);
+    // What the relay said on the way, such as a store's host it couldn't reach (B-26).
+    if global.quiet == 0 {
+        for line in relay.take_lines() {
+            eprintln!("hushrun: {line}");
+        }
+    }
+    let fetched = fetched.map_err(failed)?;
     if global.format == Format::Json {
         output::print_json(&json!({
             "blocks": fetched.blocks,

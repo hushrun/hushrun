@@ -371,7 +371,16 @@ impl Relay {
                 // link names in its headers.
                 let (body, file) = p.pack.into_body().ok()?;
                 let sent = match relay.client.link(&link) {
-                    Some(request) => request.body(body).send().await.ok(),
+                    Some(request) => match request.body(body).send().await {
+                        Ok(response) => Some(response),
+                        // B-26: the store's host, named once, by its name alone.
+                        Err(err) => {
+                            if err.is_connect() {
+                                relay.state().store_unreachable(&link.url);
+                            }
+                            None
+                        }
+                    },
                     None => None,
                 };
                 if let Some(file) = file {

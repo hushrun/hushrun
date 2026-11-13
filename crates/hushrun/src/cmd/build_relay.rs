@@ -118,6 +118,16 @@ const UNPACKED_PER_PACKED: u64 = 4;
 /// shared storage by contract alone, and none is set yet. Never "upgrade": no plan gives it.
 pub(crate) const BY_CONTRACT: &str = "the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it";
 
+/// The host of an object store's link, and nothing else of it: no scheme, port, user, path or
+/// query, which may hold a signature.
+pub(crate) fn store_host(link: &str) -> Option<String> {
+    reqwest::Url::parse(link)
+        .ok()?
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
+}
+
 /// What starts a relay (B-26).
 pub(crate) struct Config {
     pub(crate) store: Store,
@@ -310,6 +320,8 @@ struct State {
     uploading: bool,
     /// The relay rested once this run: said once (B-26).
     rested: bool,
+    /// The object store's host couldn't be reached once this run: said once (B-26).
+    store_unreachable: bool,
     /// The run's platform, once asked.
     platform: Option<String>,
 }
@@ -387,6 +399,21 @@ impl State {
         };
         self.say(line);
         self.phase = Phase::Stopped(stop);
+    }
+
+    /// B-26: a request to the object store couldn't connect to its host (a sandbox behind an
+    /// allow-list reaches the backend and not the store): the run's first says which host to
+    /// allow, in one line, by its name alone, never the link, its path or its query.
+    fn store_unreachable(&mut self, link: &str) {
+        let Some(host) = store_host(link) else {
+            return;
+        };
+        if !self.store_unreachable {
+            self.store_unreachable = true;
+            self.say(format!(
+                "build: the shared store's host, {host}, can't be reached from here: where this network allows only some hosts, allow {host} to reuse what other machines built"
+            ));
+        }
     }
 
     fn say(&mut self, line: String) {
@@ -543,6 +570,7 @@ impl Relay {
                 puts: HashMap::new(),
                 uploading: false,
                 rested: false,
+                store_unreachable: false,
                 platform: None,
             }),
             config,
@@ -616,6 +644,12 @@ impl Relay {
     /// B-2, B-31: waits at most `within` for the check's `open` to answer, for a CI job, whose
     /// wrapper is set only once the org said it shares. What it found: answering, the org's
     /// no, a stop with its line, or no answer yet.
+    /// The lines the relay has said and no check's end has taken: for `hushrun build fetch`
+    /// (B-36), which ends no check.
+    pub(crate) fn take_lines(&self) -> Vec<String> {
+        std::mem::take(&mut self.state().lines)
+    }
+
     pub(crate) fn wait_open(&self, within: Duration) -> Opened {
         let deadline = Instant::now() + within;
         loop {
@@ -1356,10 +1390,16 @@ impl Relay {
                 .client
                 .link(link)
                 .ok_or_else(|| Failure::Failed("a link this version can't follow".into()))?;
-            let mut response = request
-                .send()
-                .await
-                .map_err(|err| Failure::Unreachable(http::chain(&err)))?;
+            // A link's URL is signed: no error that names it reaches a line.
+            let mut response = match request.send().await {
+                Ok(response) => response,
+                Err(err) => {
+                    if err.is_connect() {
+                        self.state().store_unreachable(&link.url);
+                    }
+                    return Err(Failure::Unreachable(http::chain(&err.without_url())));
+                }
+            };
             if !response.status().is_success() {
                 return Err(Failure::Failed(format!(
                     "the store answered {}",
@@ -1378,7 +1418,7 @@ impl Relay {
                 let chunk = response
                     .chunk()
                     .await
-                    .map_err(|err| Failure::Unreachable(http::chain(&err)))?;
+                    .map_err(|err| Failure::Unreachable(http::chain(&err.without_url())))?;
                 let Some(chunk) = chunk else { break };
                 got += chunk.len() as u64;
                 if got > found.bytes {
@@ -1853,8 +1893,14 @@ impl Relay {
         let Some(request) = self.client.link(&link) else {
             return;
         };
-        let Ok(response) = request.send().await else {
-            return;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                if err.is_connect() {
+                    self.state().store_unreachable(&link.url);
+                }
+                return;
+            }
         };
         if !response.status().is_success() {
             return;

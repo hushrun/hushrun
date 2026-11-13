@@ -709,8 +709,14 @@ download, `begin`, report; the upload loop claims nothing new), and
 every wrapper is answered from what the relay holds: hints the prefetch downloaded, packs
 already in `incoming/`, downloads already under way, vouches already known. A 401, 403 or 404 in
 the middle of a run stops every request for the rest of the run, keeps the markers (B-29) and
-says one line; a server that can't be reached says one line too. Every failure ends in rustc
-running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting, so that
+says one line; a server that can't be reached says one line too. A download, a comparison's
+download or a PUT that can't connect to the object store's host (a sandbox behind an allow-list
+reaches the backend and not the store) says, once per run, which host to allow:
+`build: the shared store's host, <host>, can't be reached from here: where this network allows
+only some hosts, allow <host> to reuse what other machines built`, the host alone
+(`build_relay::store_host`), never the link, its path or its query, which hold a signature; no
+error that names a link reaches any line. `hushrun build fetch` says it too. Every failure ends
+in rustc running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting, so that
 the worst a wrong guess adds to one crate is half its compile time; packs already downloaded
 costing nothing more to open, so a rest that dropped them would only waste them; and the socket
 being no boundary inside one OS user, whose processes can read the machine's key anyway.

@@ -191,6 +191,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: when the shared store's host can't be reached while the backend can (a sandbox
+  behind an allow-list), the run says once which host to allow, by its name alone, and so does
+  `hushrun build fetch`. Before, downloads failed silently, and a line about the backend could
+  carry a download's signed link.
 - `hushrun build status` in CI says what `hushrun run NAME -- COMMAND` does in the job and why,
   from the same function a run asks: reuse in the job's own store when the org shares (reading
   only with an agent token outside GitHub Actions), or nothing, because there is no backend or the
