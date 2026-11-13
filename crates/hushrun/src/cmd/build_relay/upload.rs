@@ -129,8 +129,7 @@ impl Relay {
             let (go, running) = {
                 let mut state = self.state();
                 let phase = state.phase_now(Instant::now()).clone();
-                let writes =
-                    self.config.access.uploads && state.policy.as_ref().is_some_and(|p| p.writes);
+                let writes = state.uploads && state.policy.as_ref().is_some_and(|p| p.writes);
                 let running = state
                     .fetches
                     .values()

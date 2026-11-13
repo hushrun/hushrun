@@ -93,17 +93,14 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 /// What sharing does here, as far as this machine can tell without asking the backend (B-25):
 /// the word, and why.
 fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
-    use hushrun_build::share::{Caller, Org, Sharing, what_a_run_does};
+    use hushrun_build::share::{Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     };
-    let caller = match &access {
-        Some(access) if access.agent => Caller::Agent { sandbox: false },
-        Some(_) => Caller::Person { signed_in: true },
-        None => Caller::Person { signed_in: false },
-    };
+    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
     let does = what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None));
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),

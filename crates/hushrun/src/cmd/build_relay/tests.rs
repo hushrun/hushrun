@@ -50,6 +50,7 @@ fn tuning() -> Tuning {
         rest: Duration::from_secs(30),
         end_wait: Duration::from_secs(2),
         close: Duration::from_secs(2),
+        ci_open: Duration::from_secs(2),
         downloads: 8,
         tick: Duration::from_millis(5),
         spill: super::pack::IN_MEMORY,
@@ -63,12 +64,12 @@ fn access(fake: &FakeBuild, token: &str) -> crate::results::BuildAccess {
         org: "acme".into(),
         credential: Some(crate::results::BuildCredential::Token(token.into())),
         agent: token.starts_with("hra_"),
-        uploads: true,
         machine: Some(crate::machine::Machine {
             key: SigningKey::generate_p256().unwrap(),
             source: "test".into(),
         }),
         shares: true,
+        answered: true,
     }
 }
 
@@ -80,6 +81,7 @@ fn start(fake: &FakeBuild, m: &Machine, change: impl FnOnce(&mut Config)) -> Arc
         commit: None,
         platform: "aarch64-apple-darwin".into(),
         compiler: None,
+        caller: hushrun_build::share::Caller::Person { signed_in: true },
         local: Mode::On,
         own: Mode::On,
         min_free_gb: 0,
@@ -664,7 +666,11 @@ fn a_marker_goes_up_only_from_the_host_org_and_credential_that_built_it() {
     // One of ours, sent, shows the loop ran past them.
     let (k4, s4) = block(&m.store, 24, 5_000, Some(me(&fake)));
     ask(&relay, built(k4, s4));
-    until("ours stored", || fake.block(address(&k4)).is_some());
+    until("ours stored", || {
+        fake.block(address(&k4))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    until("ours done", || no_claims(&m));
     relay.end_check(&[]);
     let begun: Vec<Hex32> = fake
         .begins()
@@ -1252,6 +1258,10 @@ fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {
         });
         c.access.agent = false;
         c.access.machine = None;
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
     }
 }
 
@@ -1355,7 +1365,14 @@ fn a_caller_the_policy_lets_write_nothing_or_ci_without_an_id_token_uploads_noth
                 FakeBuild::AGENT_TOKEN.into(),
             ));
             c.access.agent = true;
-            c.access.uploads = uploads;
+            c.caller = if uploads {
+                hushrun_build::share::Caller::Agent { sandbox: false }
+            } else {
+                hushrun_build::share::Caller::Ci {
+                    id_token: false,
+                    agent_token: true,
+                }
+            };
         });
         begin(&relay, &m);
         until("open", || answering(&relay));
@@ -1369,4 +1386,46 @@ fn a_caller_the_policy_lets_write_nothing_or_ci_without_an_id_token_uploads_noth
             "writes {agent_writes}, uploads {uploads}"
         );
     }
+}
+
+// covers: B-2
+#[test]
+fn a_ci_job_waits_for_open_at_most_its_wait_and_never_holds_the_relay_meanwhile() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    let started = Instant::now();
+    assert_eq!(
+        relay.wait_open(Duration::from_secs(5)),
+        super::Opened::Answering
+    );
+    // `open` itself is quick: the wait took no more than it.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    relay.end_check(&[]);
+
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_secs(3));
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    let started = Instant::now();
+    assert_eq!(
+        relay.wait_open(Duration::from_millis(500)),
+        super::Opened::Unanswered
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    relay.end_check(&[]);
+
+    let fake = FakeBuild::start();
+    fake.set_sharing(false);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    assert_eq!(relay.wait_open(Duration::from_secs(5)), super::Opened::Off);
+    relay.end_check(&[]);
 }

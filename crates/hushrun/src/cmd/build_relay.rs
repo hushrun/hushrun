@@ -65,6 +65,8 @@ pub(crate) struct Tuning {
     pub(crate) end_wait: Duration,
     /// How long `close` gets.
     pub(crate) close: Duration,
+    /// How long a CI job waits for `open` before cargo starts (B-2).
+    pub(crate) ci_open: Duration,
     /// Downloads at once.
     pub(crate) downloads: usize,
     /// How often a waiting fetch looks at its progress.
@@ -82,6 +84,7 @@ impl Default for Tuning {
             rest: Duration::from_secs(30),
             end_wait: Duration::from_secs(5),
             close: Duration::from_secs(5),
+            ci_open: Duration::from_secs(5),
             downloads: 8,
             tick: Duration::from_millis(20),
             spill: pack::IN_MEMORY,
@@ -116,12 +119,26 @@ pub(crate) struct Config {
     /// The compiler cargo will call and the folder it runs in: its host, as `rustc -vV` says
     /// it, is the run's platform, asked in the background before `open`. `None`: `platform`.
     pub(crate) compiler: Option<(std::ffi::OsString, PathBuf)>,
+    /// Who the run is, for B-25's table: [`crate::cmd::build_session::caller`].
+    pub(crate) caller: Caller,
     /// B-1's mode and the person's share setting, for this command (B-33).
     pub(crate) local: Mode,
     pub(crate) own: Mode,
     pub(crate) min_free_gb: u32,
     pub(crate) keep_days: u32,
     pub(crate) tuning: Tuning,
+}
+
+/// How a check's `open` stood after [`Relay::wait_open`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Opened {
+    Answering,
+    /// The org doesn't share, or what the run does says off.
+    Off,
+    /// The server couldn't be reached or refused: why.
+    Stopped(String),
+    /// No answer within the wait.
+    Unanswered,
 }
 
 /// Why sharing stopped for the rest of the run.
@@ -234,6 +251,8 @@ struct State {
     phase: Phase,
     policy: Option<Policy>,
     sharing: Sharing,
+    /// Whether the run may upload, as [`what_a_run_does`] says; the policy decides the rest.
+    uploads: bool,
     /// Lines for the person, each once.
     lines: Vec<String>,
     /// Lookups this run: found, with when, and addresses known missing.
@@ -402,8 +421,7 @@ impl Relay {
             credential: client.fingerprint(),
         };
         let machine = config.access.machine.take();
-        let caller = Caller::Person { signed_in: true };
-        let sharing = what_a_run_does(caller, config.local, config.own, Org::Shares(None)).sharing;
+        let does = what_a_run_does(config.caller, config.local, config.own, Org::Shares(None));
         Ok(Relay {
             by,
             client,
@@ -415,7 +433,8 @@ impl Relay {
             state: Mutex::new(State {
                 phase: Phase::Opening,
                 policy: None,
-                sharing,
+                sharing: does.sharing,
+                uploads: does.uploads,
                 lines: Vec::new(),
                 found: HashMap::new(),
                 missing: HashSet::new(),
@@ -449,11 +468,7 @@ impl Relay {
 
     /// The caller's kind for B-25's table.
     fn caller(&self) -> Caller {
-        if self.config.access.agent {
-            Caller::Agent { sandbox: false }
-        } else {
-            Caller::Person { signed_in: true }
-        }
+        self.config.caller
     }
 
     /// Begins a check (B-26): binds a socket in the session's folder, starts answering it, and
@@ -503,6 +518,26 @@ impl Relay {
             by: self.by.clone(),
             repository: self.config.repository.clone().unwrap_or_default(),
         })
+    }
+
+    /// B-2, B-31: waits at most `within` for the check's `open` to answer, for a CI job, whose
+    /// wrapper is set only once the org said it shares. What it found: answering, the org's
+    /// no, a stop with its line, or no answer yet.
+    pub(crate) fn wait_open(&self, within: Duration) -> Opened {
+        let deadline = Instant::now() + within;
+        loop {
+            // The phase alone: the state's lock is not held while this waits.
+            let phase = self.state().phase_now(Instant::now()).clone();
+            match phase {
+                Phase::Answering | Phase::Resting(_) => return Opened::Answering,
+                Phase::Stopped(Stop::Off(_)) => return Opened::Off,
+                Phase::Stopped(Stop::Offline(why) | Stop::Refused(why)) => {
+                    return Opened::Stopped(why);
+                }
+                Phase::Opening if Instant::now() >= deadline => return Opened::Unanswered,
+                Phase::Opening => std::thread::sleep(self.config.tuning.tick),
+            }
+        }
     }
 
     /// Accepts the wrappers' connections: one request each, each in its own thread, answered
@@ -643,6 +678,7 @@ impl Relay {
                     let does =
                         what_a_run_does(self.caller(), self.config.local, self.config.own, org);
                     state.sharing = does.sharing;
+                    state.uploads = does.uploads;
                     let manifest = policy.manifest.clone();
                     // A CI job on a branch its repository lists that isn't trusted: why, once.
                     if let Some(untrusted) = policy.untrusted {

@@ -1230,9 +1230,9 @@ pub struct BuildAccess {
     pub machine: Option<crate::machine::Machine>,
     /// Whether an answer of this run carried `Hushrun-Build: on`.
     pub shares: bool,
-    /// Whether the run may upload at all (B-31): not in CI outside GitHub Actions, where an
-    /// agent token reads and never writes. Even then the policy decides.
-    pub uploads: bool,
+    /// Whether the server answered any request of this run: without, whether the org shares is
+    /// unknown, which a CI job says (B-2).
+    pub answered: bool,
 }
 
 /// What a relay's requests carry (B-26, B-31).
@@ -1255,22 +1255,20 @@ impl Backend {
         };
         let url = LedgerUrl::parse(&server.base).ok()?;
         let agent_token = matches!(server.signer(), Signer::Agent);
-        let (credential, agent, uploads) = if server.in_ci {
+        let (credential, agent) = if server.in_ci {
             match (server.oidc.clone(), server.token.clone()) {
                 (Some((url, request_token)), _) => (
                     Some(BuildCredential::GithubOidc { url, request_token }),
                     false,
-                    true,
                 ),
-                // Anywhere else in CI an agent token reads the org's blocks, and writes none.
-                (None, Some(token)) if agent_token => {
-                    (Some(BuildCredential::Token(token)), true, false)
-                }
-                (None, _) => (None, false, false),
+                // Anywhere else in CI an agent token reads the org's blocks, and writes none
+                // (`hushrun_build::share::what_a_run_does`).
+                (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),
+                (None, _) => (None, false),
             }
         } else {
             let token = server.token.clone()?;
-            (Some(BuildCredential::Token(token)), agent_token, true)
+            (Some(BuildCredential::Token(token)), agent_token)
         };
         Some(BuildAccess {
             base: server.base.clone(),
@@ -1284,7 +1282,7 @@ impl Backend {
                 server.key().ok().flatten()
             },
             shares: server.ledger.build_sharing_seen(),
-            uploads,
+            answered: server.ledger.answered_any(),
         })
     }
 }

@@ -231,3 +231,147 @@ fn an_org_that_doesnt_share_pays_no_request_and_sharing_off_here_asks_nothing() 
     assert!(output.status.success());
     assert_eq!(fake.count(route::OPEN), 0);
 }
+
+/// What a GitHub Actions job's environment adds: its own temporary folder, the variables that
+/// let it mint ID tokens from the fake, and an agent token beside them.
+fn in_github_actions(cmd: &mut assert_cmd::Command, fake: &FakeBuild, runner_temp: &Path) {
+    std::fs::create_dir_all(runner_temp).unwrap();
+    cmd.env("CI", "true")
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_REPOSITORY", "acme/shop")
+        .env("RUNNER_TEMP", runner_temp)
+        .env("ACTIONS_ID_TOKEN_REQUEST_URL", fake.id_token_url())
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            FakeBuild::ID_TOKEN_REQUEST,
+        )
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN);
+}
+
+/// `hushrun run build -- …` in a GitHub Actions job: COMMAND prints the wrapper it was given,
+/// then builds. Its exit code, stdout and stderr.
+fn ci_build(
+    m: &Machine,
+    fake: &FakeBuild,
+    change: impl FnOnce(&mut assert_cmd::Command),
+) -> (i32, String, String) {
+    let mut cmd = m.hushrun(fake);
+    in_github_actions(&mut cmd, fake, &m.root.join("runner-temp"));
+    change(&mut cmd);
+    let output = cmd
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; cargo build --offline && sleep 2",
+        ])
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// covers: B-2, B-31
+#[test]
+fn a_github_actions_job_shares_with_its_id_token_from_a_store_that_goes_with_the_job() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stdout.contains("wrapper=none"),
+        "{stdout}\n{stderr}\n{:?}",
+        fake.seen()
+            .iter()
+            .map(|s| format!("{} {} {:?}", s.method, s.path, s.authorization))
+            .collect::<Vec<_>>()
+    );
+    // Every build request carried an ID token the fake minted, never the agent token beside it.
+    let minted = fake.id_tokens();
+    assert!(!minted.is_empty(), "{stderr}");
+    let build: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .collect();
+    assert!(!build.is_empty(), "{stderr}");
+    for seen in &build {
+        let bearer = seen.authorization.as_deref().unwrap_or_default();
+        assert!(
+            minted.iter().any(|t| bearer == format!("Bearer {t}")),
+            "{} carried {bearer}",
+            seen.path
+        );
+    }
+    assert_eq!(fake.audiences()[0], fake.url());
+    // What it built went up from the job's own store, under its temporary folder, and nothing
+    // went into the cache, which outlives the job.
+    assert!(!fake.stored().is_empty(), "{stderr}");
+    let store = a.root.join("runner-temp/hushrun-build");
+    assert!(store.join("blocks").is_dir() || store.is_dir(), "{stderr}");
+    assert!(!a.root.join("cache/build").exists());
+    // The runner empties the folder when the job ends: the store goes with it.
+    std::fs::remove_dir_all(a.root.join("runner-temp")).unwrap();
+    assert!(!walk_any(&a.root, "hushrun-build"));
+}
+
+fn walk_any(dir: &Path, name: &str) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let path = entry.path();
+            path.file_name().is_some_and(|n| n == name)
+                || (path.is_dir() && !path.is_symlink() && walk_any(&path, name))
+        })
+}
+
+// covers: B-2
+#[test]
+fn a_job_whose_org_doesnt_share_runs_unwrapped_and_says_nothing() {
+    let fake = FakeBuild::start();
+    fake.set_sharing(false);
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    assert!(!stderr.contains("hushrun: build reuse"), "{stderr}");
+    assert!(!stderr.contains("hushrun: build:"), "{stderr}");
+    assert_eq!(fake.count(route::OPEN), 0);
+    assert!(!a.root.join("runner-temp/hushrun-build").exists());
+}
+
+// covers: B-2
+#[test]
+fn a_job_whose_backend_doesnt_answer_runs_unwrapped_with_one_line() {
+    // The results lookup gets no answer at all.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stdout, stderr) = ci_build(&a, &fake, |cmd| {
+        cmd.env("HUSHRUN_BACKEND", "http://127.0.0.1:9/o/acme");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    let line = "build reuse is off for this run: the backend didn't answer in time";
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+
+    // The results lookup answers, and `open` takes longer than the 5 seconds a job gives it.
+    fake.delay(route::OPEN, Duration::from_secs(8));
+    let started = Instant::now();
+    let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(fake.stored().is_empty());
+}

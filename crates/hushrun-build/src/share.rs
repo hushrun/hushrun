@@ -19,8 +19,10 @@ pub enum Caller {
     /// A person's machine. `signed_in`: a backend and a credential for it (a login or a personal
     /// token), so `open` can be asked.
     Person { signed_in: bool },
-    /// A CI job. `id_token`: the job can mint an ID token for the backend.
-    Ci { id_token: bool },
+    /// A CI job. `id_token`: the job can mint an ID token for the backend (GitHub Actions).
+    /// `agent_token`: an agent token is the job's credential, as in CI outside GitHub Actions,
+    /// where it reads the org's blocks and uploads none (B-31).
+    Ci { id_token: bool, agent_token: bool },
     /// An agent token. `sandbox`: a machine with no person's settings (a cloud sandbox); else a
     /// person's machine where the agent runs, whose local mode applies.
     Agent { sandbox: bool },
@@ -94,6 +96,9 @@ pub struct Does {
     /// Sharing through the backend. Before `open` answers it is the most the run may share; the
     /// org's mode can only lower it.
     pub sharing: Sharing,
+    /// Whether the run may upload what it builds: with sharing on or observing, but never a CI
+    /// job without an ID token (B-31). The policy `open` answers decides the rest.
+    pub uploads: bool,
 }
 
 /// The lower of two modes: `off` below `observe` below `on`.
@@ -122,12 +127,29 @@ fn sharing_of(mode: Mode, why_off: Off) -> Sharing {
 /// | A person signed in, the org shares, own setting not `off` | the local mode | the lowest of the org's mode, the own setting and the local mode |
 /// | A person otherwise | the local mode | off |
 /// | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
+/// | CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
 /// | CI otherwise | off | off |
 /// | An agent token, the org shares | the machine's local mode, or on in a sandbox | the org's mode, lowered on a person's machine as for the person |
 /// | An agent token otherwise | the machine's local mode, or off in a sandbox | off |
 ///
 /// `own` is the person's share setting (B-33), `local` B-1's mode, both for this command.
 pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does {
+    let (local, sharing) = modes(caller, local, own, org);
+    let reads_only = matches!(
+        caller,
+        Caller::Ci {
+            id_token: false,
+            ..
+        }
+    );
+    Does {
+        local,
+        sharing,
+        uploads: !reads_only && !matches!(sharing, Sharing::Off(_)),
+    }
+}
+
+fn modes(caller: Caller, local: Mode, own: Mode, org: Org) -> (Mode, Sharing) {
     // Before `open` answers, the org's mode is taken as `on`, the most it can be.
     let org_mode = match org {
         Org::NotSharing => None,
@@ -136,10 +158,7 @@ pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does
     match caller {
         Caller::Person { signed_in } => {
             if local == Mode::Off {
-                return Does {
-                    local,
-                    sharing: Sharing::Off(Off::LocalOff),
-                };
+                return (local, Sharing::Off(Off::LocalOff));
             }
             let sharing = match (signed_in, org_mode) {
                 (false, _) => Sharing::Off(Off::SignedOut),
@@ -147,21 +166,15 @@ pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does
                 (true, Some(_)) if own == Mode::Off => Sharing::Off(Off::OwnSetting),
                 (true, Some(org)) => sharing_of(lowest(lowest(org, own), local), Off::OwnSetting),
             };
-            Does { local, sharing }
+            (local, sharing)
         }
-        Caller::Ci { id_token } => match (id_token, org_mode) {
-            (true, Some(org)) => Does {
-                local: Mode::On,
-                sharing: sharing_of(org, Off::OrgDoesntShare),
-            },
-            (false, Some(_)) => Does {
-                local: Mode::Off,
-                sharing: Sharing::Off(Off::NoIdToken),
-            },
-            (_, None) => Does {
-                local: Mode::Off,
-                sharing: Sharing::Off(Off::OrgDoesntShare),
-            },
+        Caller::Ci {
+            id_token,
+            agent_token,
+        } => match (id_token || agent_token, org_mode) {
+            (true, Some(org)) => (Mode::On, sharing_of(org, Off::OrgDoesntShare)),
+            (false, Some(_)) => (Mode::Off, Sharing::Off(Off::NoIdToken)),
+            (_, None) => (Mode::Off, Sharing::Off(Off::OrgDoesntShare)),
         },
         Caller::Agent { sandbox } => {
             let local = if sandbox {
@@ -179,7 +192,7 @@ pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does
                 Some(_) if own == Mode::Off => Sharing::Off(Off::OwnSetting),
                 Some(org) => sharing_of(lowest(lowest(org, own), local), Off::OwnSetting),
             };
-            Does { local, sharing }
+            (local, sharing)
         }
     }
 }
@@ -263,16 +276,42 @@ mod tests {
     // covers: B-25
     #[test]
     fn ci_and_agents_follow_the_table() {
-        let ci = |id_token, org| what_a_run_does(Caller::Ci { id_token }, Mode::Off, Mode::On, org);
+        let ci = |id_token, agent_token, org| {
+            what_a_run_does(
+                Caller::Ci {
+                    id_token,
+                    agent_token,
+                },
+                Mode::Off,
+                Mode::On,
+                org,
+            )
+        };
+        for agent_token in [false, true] {
+            assert_eq!(
+                ci(true, agent_token, Org::Shares(Some(Mode::Observe))),
+                Does {
+                    local: Mode::On,
+                    sharing: Sharing::Observe,
+                    uploads: true,
+                }
+            );
+            assert_eq!(ci(true, agent_token, Org::NotSharing).local, Mode::Off);
+        }
         assert_eq!(
-            ci(true, Org::Shares(Some(Mode::Observe))),
+            ci(false, false, Org::Shares(Some(Mode::On))).local,
+            Mode::Off
+        );
+        // Outside GitHub Actions an agent token reads the org's blocks into the job's store, and
+        // uploads none.
+        assert_eq!(
+            ci(false, true, Org::Shares(Some(Mode::On))),
             Does {
                 local: Mode::On,
-                sharing: Sharing::Observe
+                sharing: Sharing::On,
+                uploads: false,
             }
         );
-        assert_eq!(ci(true, Org::NotSharing).local, Mode::Off);
-        assert_eq!(ci(false, Org::Shares(Some(Mode::On))).local, Mode::Off);
         let sandbox = what_a_run_does(
             Caller::Agent { sandbox: true },
             Mode::Off,
@@ -283,7 +322,8 @@ mod tests {
             sandbox,
             Does {
                 local: Mode::On,
-                sharing: Sharing::On
+                sharing: Sharing::On,
+                uploads: true,
             }
         );
         // On a person's machine, the agent gets the machine's local mode, and the person's

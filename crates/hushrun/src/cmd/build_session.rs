@@ -51,11 +51,131 @@ pub(crate) fn begin(
         folder: std::env::current_dir().ok(),
         sysroot: &|folder| rustc_sysroot(folder, &env),
     };
-    let mut session = begin_with(&here, std::env::current_exe())?;
+    if here.in_ci {
+        return begin_in_ci(&here, share, repository);
+    }
+    let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
-        start_sharing(&mut session, start, repository, &env);
+        match start_sharing(&mut session, start, repository, &env) {
+            Ok(_) | Err(None) => {}
+            Err(Some(line)) => session.add_line(line),
+        }
     }
     Ok(session)
+}
+
+/// The line a CI job reads when the backend didn't answer in time, the results lookup or `open`
+/// (B-2): COMMAND runs as it would without hushrun.
+const NO_ANSWER: &str = "build reuse is off for this run: the backend didn't answer in time";
+
+/// Where a CI job's store is (B-31), and who removes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CiStore {
+    /// Under the job's own temporary folder (`RUNNER_TEMP`), which the runner empties when the
+    /// job ends.
+    Job(PathBuf),
+    /// No such folder: a folder of this process's under the system's temporary folder, removed
+    /// when the run's session ends.
+    Run(PathBuf),
+}
+
+impl CiStore {
+    fn of(env: &dyn Fn(&str) -> Option<OsString>) -> CiStore {
+        match env("RUNNER_TEMP").map(PathBuf::from) {
+            Some(temp) if temp.is_absolute() => CiStore::Job(temp.join("hushrun-build")),
+            _ => CiStore::Run(
+                std::env::temp_dir().join(format!("hushrun-build-{}", std::process::id())),
+            ),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            CiStore::Job(path) | CiStore::Run(path) => path,
+        }
+    }
+}
+
+/// Who the run is, for B-25's table: the one mapping from what the backend gives the relay's
+/// requests to `hushrun_build::share::Caller`, for the session, the relay and `hushrun build
+/// status`.
+pub(crate) fn caller(
+    access: Option<&crate::results::BuildAccess>,
+    in_ci: bool,
+) -> hushrun_build::share::Caller {
+    use crate::results::BuildCredential;
+    use hushrun_build::share::Caller;
+    let credential = access.and_then(|access| access.credential.as_ref());
+    let agent = access.is_some_and(|access| access.agent);
+    match credential {
+        _ if in_ci => Caller::Ci {
+            id_token: matches!(credential, Some(BuildCredential::GithubOidc { .. })),
+            agent_token: matches!(credential, Some(BuildCredential::Token(_))) && agent,
+        },
+        Some(_) if agent => Caller::Agent { sandbox: false },
+        Some(_) => Caller::Person { signed_in: true },
+        None => Caller::Person { signed_in: false },
+    }
+}
+
+/// B-2, B-31: a CI job's session. Only when the run's results lookup said the org shares
+/// (`Hushrun-Build: on`), the job can be asked as itself, and `open` answers within 5 seconds:
+/// then the wrapper is set, in a store under the job's own temporary folder. Else COMMAND runs as
+/// it always has, silent when the org doesn't share, one line when the backend didn't answer
+/// or the job has no credential.
+fn begin_in_ci(
+    here: &Here<'_>,
+    share: Option<ShareStart>,
+    repository: Option<&str>,
+) -> Result<Session, Option<String>> {
+    use hushrun_build::share::{Org, Sharing, what_a_run_does};
+    let Some(start) = share else {
+        return Err(None);
+    };
+    if !start.access.shares {
+        return Err((!start.access.answered).then(|| NO_ANSWER.to_string()));
+    }
+    let does = what_a_run_does(
+        caller(Some(&start.access), true),
+        hushrun_build::model::Mode::On,
+        hushrun_build::model::Mode::On,
+        Org::Shares(None),
+    );
+    if let Sharing::Off(off) = does.sharing {
+        let hint = match off {
+            hushrun_build::share::Off::NoIdToken => {
+                " (give the job `permissions: id-token: write`)"
+            }
+            _ => "",
+        };
+        return Err(Some(format!("{OFF}: {}{hint}", off.reason())));
+    }
+    let store = CiStore::of(here.env);
+    let mut session = begin_with(here, std::env::current_exe(), Some(store.path()))?;
+    let abandon = |session: Session, line: Option<String>| {
+        session.finish(here.now);
+        if let CiStore::Run(path) = &store {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        Err(line)
+    };
+    let relay = match start_sharing(&mut session, start, repository, here.env) {
+        Ok(relay) => relay,
+        Err(line) => return abandon(session, line),
+    };
+    let wait = crate::cmd::build_relay::Tuning::default().ci_open;
+    match relay.wait_open(wait) {
+        crate::cmd::build_relay::Opened::Answering => Ok(session),
+        opened => {
+            let said = relay.end_check(&[]);
+            let line = match opened {
+                crate::cmd::build_relay::Opened::Unanswered => Some(NO_ANSWER.to_string()),
+                crate::cmd::build_relay::Opened::Stopped(_) => said.into_iter().next(),
+                _ => None,
+            };
+            abandon(session, line)
+        }
+    }
 }
 
 /// What sharing through a backend needs from the command that runs (B-26).
@@ -70,23 +190,19 @@ pub(crate) struct ShareStart {
 
 /// B-25, B-26: when the run's results lookup said the org shares and what the run does allows
 /// it, the process's relay begins the check, and the session names its socket. Every reason for
-/// no relay but a failure is silent; a failure is one line in the summary.
+/// no relay but a failure is silent (`Err(None)`); a failure is its line.
 fn start_sharing(
     session: &mut Session,
     start: ShareStart,
     repository: Option<&str>,
     env: &dyn Fn(&str) -> Option<OsString>,
-) {
-    use hushrun_build::share::{Caller, Org, Sharing, what_a_run_does};
+) -> Result<std::sync::Arc<crate::cmd::build_relay::Relay>, Option<String>> {
+    use hushrun_build::share::{Org, Sharing, what_a_run_does};
     if !start.access.shares || cfg!(not(unix)) {
-        return;
+        return Err(None);
     }
     let current = session.current().clone();
-    let caller = if start.access.agent {
-        Caller::Agent { sandbox: false }
-    } else {
-        Caller::Person { signed_in: true }
-    };
+    let caller = caller(Some(&start.access), hushrun_ci::in_ci(&Env::from_process()));
     let does = what_a_run_does(
         caller,
         current.mode,
@@ -94,7 +210,7 @@ fn start_sharing(
         Org::Shares(None),
     );
     if matches!(does.sharing, Sharing::Off(_)) {
-        return;
+        return Err(None);
     }
     let check = hushrun_core::blocks::Hex32::sha256(
         format!(
@@ -112,6 +228,7 @@ fn start_sharing(
             repository: repository.map(str::to_string),
             commit: start.commit.filter(|c| hushrun_core::blocks::is_commit(c)),
             platform: platform(),
+            caller,
             compiler: std::env::current_dir().ok().map(|folder| {
                 let rustc = env("RUSTC")
                     .filter(|value| !value.is_empty())
@@ -126,17 +243,16 @@ fn start_sharing(
         })
     };
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
-        session.add_line("build: sharing is off for this run: the relay couldn't start".into());
-        return;
+        return Err(Some(
+            "build: sharing is off for this run: the relay couldn't start".into(),
+        ));
     };
-    match relay.begin_check(&current.folder, Some(check), env) {
-        Ok(share) => {
-            if let Err(err) = session.set_share(share) {
-                session.add_line(format!("build: sharing is off for this run: {err}"));
-            }
-        }
-        Err(line) => session.add_line(line),
+    let share = relay.begin_check(&current.folder, Some(check), env)?;
+    if let Err(err) = session.set_share(share) {
+        relay.end_check(&[]);
+        return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
+    Ok(relay)
 }
 
 /// The target triple this hushrun was built for: the run's platform when the compiler's own host
@@ -165,7 +281,15 @@ pub(crate) fn finish(mut session: Session, now: SystemTime) -> hushrun_build::se
             session.add_line(line);
         }
     }
-    session.finish(now)
+    let store = session.current().store.clone();
+    let summary = session.finish(now);
+    // B-31: a CI job's store with no job folder to go with goes with the run.
+    if hushrun_ci::in_ci(&Env::from_process())
+        && CiStore::of(&|name| hushrun_ci::var_os(name)) == CiStore::Run(store.clone())
+    {
+        let _ = std::fs::remove_dir_all(&store);
+    }
+    summary
 }
 
 /// Whether a toolchain under rustup's home could have sources (`lib/rustlib/src` or
@@ -259,7 +383,12 @@ impl<'a> Here<'a> {
     }
 }
 
-fn begin_with(here: &Here<'_>, exe: std::io::Result<PathBuf>) -> Result<Session, Option<String>> {
+/// Begins the session; in CI, `ci_store` is the job's own store, and nothing else begins one.
+fn begin_with(
+    here: &Here<'_>,
+    exe: std::io::Result<PathBuf>,
+    ci_store: Option<&Path>,
+) -> Result<Session, Option<String>> {
     let exe = match exe {
         Ok(exe) => exe,
         Err(err) => {
@@ -267,6 +396,9 @@ fn begin_with(here: &Here<'_>, exe: std::io::Result<PathBuf>) -> Result<Session,
             // decides whether reuse is wanted here, and creates nothing: it stops at the store.
             let no_store = |name: &str| (name != STORE_DIR).then(|| (here.env)(name)).flatten();
             let lost = format!("{OFF}: hushrun can't find its own binary: {err}");
+            if ci_store.is_some() {
+                return Err(Some(lost));
+            }
             return match session::begin(&here.start(Path::new(""), None, &no_store)) {
                 Err(NotBegun::NoCache) => Err(Some(lost)),
                 Ok(session) => {
@@ -277,7 +409,12 @@ fn begin_with(here: &Here<'_>, exe: std::io::Result<PathBuf>) -> Result<Session,
             };
         }
     };
-    let mut session = session::begin(&here.start(&exe, here.cache_dir, here.env)).or_else(said)?;
+    let start = here.start(&exe, here.cache_dir, here.env);
+    let mut session = match ci_store {
+        Some(store) => session::begin_in_ci(&start, store),
+        None => session::begin(&start),
+    }
+    .or_else(said)?;
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
@@ -358,13 +495,13 @@ mod tests {
 
         // Off: nothing to say, found or not.
         assert_eq!(
-            begin_with(&here(dir.path(), &settings, &none), lost()).err(),
+            begin_with(&here(dir.path(), &settings, &none), lost(), None).err(),
             Some(None)
         );
 
         settings::update(&settings, |s| s.mode = Mode::On).unwrap();
         assert_eq!(
-            begin_with(&here(dir.path(), &settings, &none), lost()).err(),
+            begin_with(&here(dir.path(), &settings, &none), lost(), None).err(),
             Some(Some(
                 "build reuse is off for this run: hushrun can't find its own binary: no such process"
                     .to_string()
@@ -374,22 +511,22 @@ mod tests {
         let elsewhere = dir.path().join("elsewhere");
         let named = elsewhere.clone().into_os_string();
         let variable = move |name: &str| (name == STORE_DIR).then(|| named.clone());
-        assert!(begin_with(&here(dir.path(), &settings, &variable), lost()).is_err());
+        assert!(begin_with(&here(dir.path(), &settings, &variable), lost(), None).is_err());
         assert!(!store.exists());
         assert!(!elsewhere.exists());
 
         // A wrapper the person set, or CI: silent, as when the binary is found.
         let set = |name: &str| (name == "RUSTC_WRAPPER").then(|| OsString::from("sccache"));
         assert_eq!(
-            begin_with(&here(dir.path(), &settings, &set), lost()).err(),
+            begin_with(&here(dir.path(), &settings, &set), lost(), None).err(),
             Some(None)
         );
         let mut ci = here(dir.path(), &settings, &none);
         ci.in_ci = true;
-        assert_eq!(begin_with(&ci, lost()).err(), Some(None));
+        assert_eq!(begin_with(&ci, lost(), None).err(), Some(None));
         // A variable that can't be used says so, whatever the binary.
         let nonsense = |name: &str| (name == "HUSHRUN_BUILD").then(|| OsString::from("nonsense"));
-        let said = begin_with(&here(dir.path(), &settings, &nonsense), lost())
+        let said = begin_with(&here(dir.path(), &settings, &nonsense), lost(), None)
             .err()
             .flatten()
             .unwrap();
@@ -401,7 +538,7 @@ mod tests {
         // Found, it begins.
         let exe = dir.path().join("hushrun");
         std::fs::write(&exe, b"binary").unwrap();
-        let session = begin_with(&here(dir.path(), &settings, &none), Ok(exe)).unwrap();
+        let session = begin_with(&here(dir.path(), &settings, &none), Ok(exe), None).unwrap();
         assert!(store.join("sessions").is_dir());
         session.finish(SystemTime::UNIX_EPOCH);
     }
@@ -445,13 +582,13 @@ mod tests {
         let mut elsewhere = here(&root, &settings, &none);
         elsewhere.folder = Some(root.join("elsewhere"));
         std::fs::create_dir_all(root.join("elsewhere")).unwrap();
-        let session = begin_with(&elsewhere, Ok(exe.clone())).unwrap();
+        let session = begin_with(&elsewhere, Ok(exe.clone()), None).unwrap();
         assert!(rlib.exists(), "another folder's crates are not checked");
         assert!(session.finish(SystemTime::UNIX_EPOCH).lines().is_empty());
 
         let mut in_ws = here(&root, &settings, &none);
         in_ws.folder = Some(ws.join("app"));
-        let session = begin_with(&in_ws, Ok(exe)).unwrap();
+        let session = begin_with(&in_ws, Ok(exe), None).unwrap();
         assert!(!rlib.exists());
         assert_eq!(
             session.finish(SystemTime::UNIX_EPOCH).lines(),

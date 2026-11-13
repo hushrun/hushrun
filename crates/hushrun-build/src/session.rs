@@ -527,7 +527,8 @@ pub fn store_dir(cache_dir: Option<&Path>, overrides: &Overrides) -> Option<Path
     }
 }
 
-/// Starts a session, or says why there is none.
+/// Starts a session, or says why there is none. Never in CI: there a session begins only in the
+/// job's own store, with [`begin_in_ci`].
 pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
     if cfg!(windows) {
         return Err(NotBegun::Windows);
@@ -549,6 +550,39 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
     let Some(store) = store_dir(start.cache_dir, &overrides) else {
         return Err(NotBegun::NoCache);
     };
+    begin_at(start, settings, store)
+}
+
+/// The free-space floor of a store in CI, in gigabytes (B-31): a runner's disk is small, and the
+/// store goes with the job.
+pub const CI_MIN_FREE_GB: u32 = 2;
+
+/// B-2, B-31: starts a CI job's session in `store`, a folder under the job's own temporary
+/// folder that goes with the job, for a job whose org shares build blocks. No person's settings
+/// file is read there: reuse is on unless `HUSHRUN_BUILD` says otherwise, the floor is
+/// [`CI_MIN_FREE_GB`], and `HUSHRUN_BUILD_DIR` is not followed, so nothing outlives the job.
+pub fn begin_in_ci(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
+    if cfg!(windows) {
+        return Err(NotBegun::Windows);
+    }
+    let overrides =
+        Overrides::from(start.env).map_err(|err| NotBegun::Unusable(err.to_string()))?;
+    let settings = Settings {
+        mode: Mode::On,
+        min_free_gb: CI_MIN_FREE_GB,
+        ..Settings::default()
+    }
+    .with(&overrides);
+    if settings.mode == Mode::Off {
+        return Err(NotBegun::Off);
+    }
+    if (start.env)(RUSTC_WRAPPER).is_some_and(|value| !value.is_empty()) {
+        return Err(NotBegun::WrapperSet);
+    }
+    begin_at(start, settings, store.to_path_buf())
+}
+
+fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Session, NotBegun> {
     let millis = start
         .now
         .duration_since(UNIX_EPOCH)
