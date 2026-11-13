@@ -199,12 +199,27 @@ can't be read makes every reactor module join. Maven's built-in descriptors (`bi
 `project`, `jar-with-dependencies`) take only the module's own files and its dependencies, which
 the closure holds already.
 
+## Amendment 8: a module the build didn't reach keeps what it learned (2026-11-13)
+
+Runs on real projects (gson, a reactor of several modules) showed that after a build that failed
+and stopped the reactor, the next run said an existing file "is gone, and any test may have read
+it" and ran everything. The extension's file names every module, but the modules after the failure
+ran no class, so this run's sets were made from the modules that ran: the files of the others went
+to the rest set, and the next plan, made from the map's units, put them back among the units and
+sources, a difference it reported as a file gone. The decision: a module of which this run saw no
+class (the build stopped before it, or COMMAND didn't select it) keeps what the last run that
+reached it learned: the test files the map lists below it stay units, and the directories its units
+read stay where the sources are. The sets after a run are then those a plan from files would make,
+and a file is gone only when it isn't on disk. A unit named by no file (`<module>::<class>`) of
+such a module still leaves the map, as one the run didn't tell does, and runs next time.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0
   and Surefire 3.0.0-M4 and later for JUnit 5, 3.6 and later for JUnit 4.
 - The set of sources depends on which modules' tests ran: the first run after that set changes
-  (a module's tests running for the first time, or not at all) runs everything once.
+  (a module's tests running for the first time) runs everything once; [Amendment 8] a module
+  whose tests didn't run this time keeps its place.
 - A change below a module's roots runs every class of that module and of the modules that depend
   on it: Maven gives no finer graph than modules.
 - The repository now holds two built jars and their sources; a change to the sources needs a

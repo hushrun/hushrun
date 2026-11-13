@@ -290,6 +290,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
   at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
   names) is now read by that module's tests.
+- Maven: after a build that failed and stopped the reactor, the next run no longer says a file of
+  a module the build didn't reach "is gone" and runs every test class: such a module keeps what
+  the last run that reached it learned.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

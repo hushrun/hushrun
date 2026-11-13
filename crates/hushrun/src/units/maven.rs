@@ -520,6 +520,42 @@ pub struct Observed {
     pub refused: Option<String>,
     /// \[C-32\] Why the hook left out what the plan didn't list.
     pub left_out: Option<String>,
+    /// \[C-47\] The directory of every module of the reactor inside the repository, and of those
+    /// of which this run saw a class: the build reached them.
+    pub modules: BTreeSet<String>,
+    pub reached: BTreeSet<String>,
+}
+
+/// \[C-47\] What the last run that reached a module learned, for the modules this run's build
+/// didn't reach (it stopped at a failure before them, or COMMAND didn't select them): the test
+/// files `map` lists below them, and the directories its units of them read. A file of theirs is
+/// then where the plan from files puts it, never the rest, and no file there is gone that isn't.
+fn unreached(map: &super::store::Map, observed: &Observed) -> (BTreeSet<String>, BTreeSet<String>) {
+    let module_of = |path: &str| -> Option<String> {
+        if let Some((dir, _)) = path.split_once("::") {
+            return Some(dir.to_string());
+        }
+        observed
+            .modules
+            .iter()
+            .filter(|dir| below(path, dir))
+            .max_by_key(|dir| if *dir == "." { 0 } else { dir.len() })
+            .cloned()
+    };
+    let kept = |path: &str| !module_of(path).is_some_and(|dir| observed.reached.contains(&dir));
+    let files = map
+        .unit_files
+        .iter()
+        .filter(|path| kept(path))
+        .cloned()
+        .collect();
+    let dirs = map
+        .units
+        .iter()
+        .filter(|(unit, _)| !observed.seen.contains_key(*unit) && kept(unit))
+        .flat_map(|(_, mapped)| mapped.dirs.iter().cloned())
+        .collect();
+    (files, dirs)
 }
 
 /// Reads what the extension, the hook and the reports say of a run in the repository at `root`
@@ -601,6 +637,8 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
 
     let mut out = Observed {
         failures_by_unit: unattributed == 0,
+        modules: modules.keys().cloned().collect(),
+        reached: seen.keys().map(|(dir, _)| dir.clone()).collect(),
         ..Observed::default()
     };
     // \[C-32\] Something of this run failed: a failure no class owns, or any class's.
@@ -979,10 +1017,14 @@ impl Adapter for Recognized {
     }
 
     fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
-        let Some(observed) = observe(at.files, at.root, at.tree)? else {
+        let Some(mut observed) = observe(at.files, at.root, at.tree)? else {
             return Ok(None);
         };
-        let dirs: BTreeSet<String> = observed.dirs.values().flatten().cloned().collect();
+        let (files, mut dirs) = unreached(at.map, &observed);
+        observed
+            .unit_files
+            .extend(files.into_iter().filter(|f| at.tree.contains(f)));
+        dirs.extend(observed.dirs.values().flatten().cloned());
         let sets = classify(at.tree, &observed.unit_files, &dirs, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let planned = observed

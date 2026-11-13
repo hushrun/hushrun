@@ -1375,6 +1375,61 @@ fn a_module_this_command_didnt_build_keeps_its_sources_on_the_lists_of_the_tests
     );
 }
 
+// covers: C-30, C-47
+#[test]
+fn the_modules_a_failed_build_never_reached_keep_what_the_last_run_that_reached_them_learned() {
+    let Some(maven) = maven() else { return };
+    for args in [&["test"][..], &["--fail-at-end", "test"][..]] {
+        let mut files = shop("reuse");
+        files.push(file("notes.txt", "a file of the rest\n"));
+        let r = Repo::new(&files, maven.clone());
+        let first = r.run(&[], args, &[]);
+        assert_eq!(
+            first.code, 0,
+            "{args:?}: {}\n{}",
+            first.stderr, first.stdout
+        );
+        // lib changes and its PriceTest fails: Maven stops before app (and before other, at
+        // once), whose classes never run.
+        r.write(
+            "lib/src/main/java/shop/lib/Price.java",
+            "package shop.lib;\n\npublic class Price {\n  public static int of(int x) { return x + x; }\n}\n",
+        );
+        let failed = r.run(&[], args, &[(FAIL, "1")]);
+        assert_eq!(
+            failed.code, 1,
+            "{args:?}: {}\n{}",
+            failed.stderr, failed.stdout
+        );
+        assert!(
+            !failed.ran().contains_key("shop.app.CartTest"),
+            "{args:?}: {:?}",
+            failed.ran()
+        );
+        let map = r.map();
+        for path in [CART_TEST, "app/src/main/java/shop/app/Cart.java"] {
+            assert!(map["rest"][path].is_null(), "{args:?}: {path}: {map:#}");
+        }
+        // The next run reuses what passed on the files it read (other's classes, in the first
+        // run), and says nothing of a file that is there.
+        let next = r.run(&[], args, &[]);
+        assert_eq!(next.code, 0, "{args:?}: {}\n{}", next.stderr, next.stdout);
+        let line = next.line("hushrun: unit: ");
+        assert!(!line.contains("gone"), "{args:?}: {line}");
+        assert!(line.contains(" of 6 test files run; "), "{args:?}: {line}");
+        at_most_the_audit(&next.ran(), &["shop.lib.PriceTest", "shop.app.CartTest"]);
+        // A file of the rest that really is gone still says so.
+        std::fs::remove_file(r.repo.join("notes.txt")).expect("remove");
+        let gone = r.run(&[], args, &[]);
+        assert_eq!(gone.code, 0, "{args:?}: {}\n{}", gone.stderr, gone.stdout);
+        assert_eq!(
+            gone.line("hushrun: unit: "),
+            "hushrun: unit: all 6 test files run: notes.txt is gone, and any test may have read it",
+            "{args:?}"
+        );
+    }
+}
+
 // covers: C-32, C-47
 #[test]
 fn a_test_that_ends_its_fork_with_system_exit_records_no_pass() {
