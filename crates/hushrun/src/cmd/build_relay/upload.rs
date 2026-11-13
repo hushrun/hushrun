@@ -350,6 +350,7 @@ impl Relay {
             .await;
         match committed {
             Ok(answered) => {
+                let mut stored = Vec::new();
                 for marker in sent {
                     let address: Hex32 = Relay::address(&marker.key);
                     let state = answered
@@ -361,9 +362,11 @@ impl Relay {
                     let step = after_commit(state);
                     if step == Move::Done {
                         self.state().tally.uploaded += 1;
+                        stored.push(marker.step);
                     }
                     finish(&marker, step);
                 }
+                self.send_hints(&stored).await;
             }
             Err(failure) => {
                 if let Failure::Refused(..) = failure {
@@ -376,6 +379,69 @@ impl Relay {
         }
     }
 }
+
+impl Relay {
+    /// B-30: the hints of the first keys of blocks just stored, sealed with each first key, so
+    /// another machine can find the second key. The newest few of each, within the protocol's
+    /// limits; a hint is never trusted, so one that fails to go costs only a reuse elsewhere.
+    async fn send_hints(&self, steps: &[hushrun_core::Digest]) {
+        let limits = self
+            .state()
+            .policy
+            .as_ref()
+            .map(|p| p.limits.clone())
+            .unwrap_or_default();
+        let mut hints = Vec::new();
+        let mut bytes = 0usize;
+        for step in steps {
+            for hint in self
+                .config
+                .store
+                .hints(step)
+                .into_iter()
+                .take(HINTS_PER_BLOCK)
+            {
+                let Ok(sealed) = blocks::pack::seal_hint(step.as_bytes(), &hint) else {
+                    continue;
+                };
+                if sealed.len() > limits.hint_bytes as usize
+                    || hints.len() >= limits.hints_sent as usize
+                    || bytes + sealed.len() > limits.hints_sent_bytes as usize
+                {
+                    continue;
+                }
+                bytes += sealed.len();
+                hints.push(blocks::SentHint {
+                    address: Relay::address(step),
+                    list: blocks::Base64(sealed),
+                });
+            }
+        }
+        if hints.is_empty() {
+            return;
+        }
+        let request = blocks::HintsRequest {
+            kind: super::KIND.to_string(),
+            hints,
+            commit: self.config.commit.clone(),
+        };
+        let sent = self
+            .client
+            .post::<_, blocks::HintsResponse>(
+                blocks::HINTS_PATH,
+                &request,
+                self.config.tuning.lookup,
+                None,
+            )
+            .await;
+        if let Err(failure @ Failure::Refused(..)) = sent {
+            self.state().stop(Stop::Refused(failure.line()));
+        }
+    }
+}
+
+/// How many of a first key's newest hints go up with its block.
+const HINTS_PER_BLOCK: usize = 2;
 
 /// When the command ends (B-29): no new PUT starts; those in flight get `wait`, then are cut off
 /// (their markers count a cut-off). Returns once the check's upload loop has stopped.

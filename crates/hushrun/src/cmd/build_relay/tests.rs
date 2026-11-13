@@ -201,6 +201,9 @@ fn a_block_built_here_goes_up_and_another_machine_reuses_it() {
     begin(&relay, &a);
     until("open", || answering(&relay));
     let (key, step) = block(&a.store, 1, 300_000, Some(me(&fake)));
+    a.store
+        .add_hint(&step, b"{\"hint\":1}", SystemTime::now())
+        .unwrap();
     assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
     until("stored", || {
         fake.block(address(&key))
@@ -211,6 +214,13 @@ fn a_block_built_here_goes_up_and_another_machine_reuses_it() {
     assert!(lines.is_empty(), "{lines:?}");
     let row = fake.block(address(&key)).unwrap();
     assert_eq!(row.hint_address, Some(address(&step)));
+    // Its hint went with it, sealed with the first key.
+    let sealed = fake.hints(address(&step));
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(
+        blocks::pack::open_hint(step.as_bytes(), &sealed[0]),
+        Some(b"{\"hint\":1}".to_vec())
+    );
     // The pack is the same bytes when packed again: what a retry sends.
     let again = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
     assert_eq!(
