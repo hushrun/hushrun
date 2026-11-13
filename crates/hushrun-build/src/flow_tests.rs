@@ -550,23 +550,27 @@ impl Ports for Fake {
     fn asker(&self) -> Box<crate::link::Ask<'static>> {
         let ld = self.vars.get("FAKE_LD").cloned();
         let libraries = self.vars.get("FAKE_LIBRARIES").cloned().unwrap_or_default();
-        Box::new(move |program: &Path, args: &[String], _path: &OsStr| {
-            let last = args.last().map(String::as_str).unwrap_or_default();
-            if last.starts_with("-print-prog-name=") {
-                let said = ld.clone().unwrap_or_else(|| program.display().to_string());
-                return Some(crate::link::Answer {
-                    success: true,
-                    stdout: format!("{said}\n"),
-                });
-            }
-            if last == "-print-search-dirs" {
-                return Some(crate::link::Answer {
-                    success: true,
-                    stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
-                });
-            }
-            Some(crate::link::Answer::default())
-        })
+        Box::new(
+            move |program: &Path, args: &[String], _path: &OsStr, _env: &[_]| {
+                let last = args.last().map(String::as_str).unwrap_or_default();
+                if last.starts_with("-print-prog-name=") {
+                    let said = ld.clone().unwrap_or_else(|| program.display().to_string());
+                    return Some(crate::link::Answer {
+                        success: true,
+                        stdout: format!("{said}\n"),
+                        ..Default::default()
+                    });
+                }
+                if last == "-print-search-dirs" {
+                    return Some(crate::link::Answer {
+                        success: true,
+                        stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
+                        ..Default::default()
+                    });
+                }
+                Some(crate::link::Answer::default())
+            },
+        )
     }
 }
 

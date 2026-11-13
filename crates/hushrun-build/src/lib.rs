@@ -58,6 +58,7 @@ pub mod invocation;
 pub mod key;
 pub mod known;
 pub mod link;
+pub mod linkenv;
 pub mod memo;
 pub mod messages;
 pub mod metadata;

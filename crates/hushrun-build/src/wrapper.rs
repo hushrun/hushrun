@@ -125,19 +125,32 @@ pub trait Ports {
     }
 }
 
-/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path` and
-/// `LC_ALL=C`, and nothing on stdin, for one of B-18's questions. `None` when it can't start.
-fn ask_program(program: &Path, args: &[String], path: &OsStr) -> Option<link::Answer> {
-    let out = std::process::Command::new(program)
+/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path`,
+/// `LC_ALL=C` and `env` applied, and nothing on stdin, for one of B-18's and B-37's questions.
+/// `None` when it can't start.
+fn ask_program(
+    program: &Path,
+    args: &[String],
+    path: &OsStr,
+    env: &[(String, Option<String>)],
+) -> Option<link::Answer> {
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .env("PATH", path)
         .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    for (name, value) in env {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let out = command.output().ok()?;
     Some(link::Answer {
         success: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
 }
 

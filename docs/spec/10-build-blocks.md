@@ -560,6 +560,94 @@ output folder; a bundle with no DWARF file, or that holds anything but folders a
 files, is `built, not stored`. A program the wrapper leaves as it is (B-9) is stored with the
 debug objects it names.
 
+**B-37 The link environment.** For a linked output, **E** is the identity by content of what,
+outside rustc's own command line, decides the link's bytes. One function computes it, from the
+link's own command (rustc's `--print=link-args` line) and this machine's files, at the link and
+again before every lookup, from the question the hint keeps (the driver as rustc named it, the
+line without its inputs and output, the variables the line set, roots replaced), never from an
+answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** of entries, each
+(role, name asked for, digest), so which file answered which request is part of it:
+
+1. the C driver's dry run: the line without its inputs (each object and library given by path)
+   and its output, with `-o /nonexistent/hushrun-link -###`, the link's `PATH` and the variables
+   the line set (`SDKROOT`, `LC_ALL`, …). Its **whole text**, every word, with rustc's temporary
+   folder names (`rustcXXXXXX`) and gcc's temporary files (`ccXXXXXX.res`) made fixed and roots
+   and bases replaced by their names, also after an option's letters (`-L{…}`). The text holds
+   every flag the link passes, not only the files it names: `-C rpath` writes the checkout's
+   depth into a program as a relative `RUNPATH` (`$ORIGIN/../../…`), which no search of the
+   outputs can see and which the text carries; so does the loader's path the driver adds;
+2. the driver by SHA-256, except on Apple's targets, where `cc` is a shim that runs the selected
+   Xcode's clang and the dry run is all clang gives a link of objects; the program the dry run's
+   last command names (`collect2`, or the `ld` clang runs); the `ld` `collect2` runs, taken from
+   that command (its `-fuse-ld=`) and found as `collect2` finds it: gcc's configured
+   `--with-ld=`, else `real-ld`, `collect-ld`, then `ld` or `ld.<name>` in the dry run's
+   `COMPILER_PATH`, then on the link's `PATH`; the plugin it loads (`-plugin`); and every shared
+   library each of those loads, transitively, where the loader would find it: ELF `DT_NEEDED`
+   through `DT_RPATH` (when there is no `DT_RUNPATH`), `LD_LIBRARY_PATH`, `DT_RUNPATH`, the
+   folders `/etc/ld.so.conf` lists and `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib`, with each
+   program's loader (`PT_INTERP`); Mach-O load commands through the image's and the program's
+   `LC_RPATH`, `@loader_path` and `@executable_path`, a system library that lies only in macOS's
+   shared cache (`/usr/lib/…`, `/System/…`) by its name;
+3. every absolute path of an existing file on that command, by SHA-256: the start files
+   (`Scrt1.o`, `crti.o`, `crtbeginS.o`, …), the compiler runtime, `lto-wrapper`;
+4. each library a `-l` of that command names, when it is the C runtime the standard library asks
+   for (`c`, `m`, `rt`, `pthread`, `dl`, `util`, `gcc_s`, `gcc`, `gcc_eh`, `System`) or one the
+   driver added, as `ld` finds it: the command's `-L` folders in order (on Apple's targets each
+   under the SDK first when it is there), then `ld`'s own (`ld --verbose`'s `SEARCH_DIR`s;
+   Apple's: the SDK's `usr/lib` and `usr/local/lib`, and `/usr/local/lib`), `.so` before `.a`
+   while the command links dynamically and `.a` alone while it links statically (`-Bstatic`,
+   `-Bdynamic`, `--push-state`, `--pop-state`), `.tbd`, `.dylib`, `.so`, `.a` on Apple's; and each
+   file a GNU linker script found there names (B-18's reading), eight deep at most. Any other
+   `-l` is a crate's, keyed by content in `link` wherever it is found (B-6), and so stays in
+   what a dependent names a proc macro by;
+5. every file under the toolchain's `<sysroot>/lib/rustlib/<host>/bin/` (`rust-lld`,
+   `gcc-ld/*`, `rust-objcopy`), which B-17 doesn't hash and rustc runs (`rust-lld` is the default
+   linker on x86-64 Linux, `rust-objcopy` strips on macOS), with what each loads; and the
+   `dsymutil` rustc runs when a program gets a debug bundle, first on `PATH`, and on Apple's
+   targets, when that is the `/usr/bin` shim, the selected Xcode's beside its `ld`;
+6. on Apple's targets the SDK the dry run names (`-syslibroot`): its `SDKSettings.json` and
+   `System/Library/CoreServices/SystemVersion.plist` by content, and the `-platform_version`
+   triple.
+
+Where a file lies is in E only as far as the dry run's text says it (two installs of one image
+have the same text); the places searched and found empty are not in it. A file that appears
+earlier in a search (another `ld` earlier on `PATH`, a newer GCC beside the old one) changes
+which file answers, so **nothing about E is remembered**: the dry run and every search run again
+at each link and each lookup. Only each file's SHA-256 is remembered, for the run, by the path as
+found and its stat (size, both dates, inode, device; B-6's run digests), so a link retargeted to
+another file is another file. The list is stored with the block (its description's
+`link_environment`), never in a key but by its digest.
+
+E is **unknown**, with why, when: the dry run doesn't say it is gcc (`gcc version …`) or clang
+(`… clang version …`), judged from its output, never from the driver's name (a wrapper script
+named `clang` that runs clang is clang); the dry run exits with an error, prints `error:`, or
+names no program; that program is neither `collect2` nor an `ld` hushrun knows (`ld`, `ld.bfd`,
+`ld.gold`, `ld.lld`, `ld64.lld`, `ld64`, `ld-classic`); a `-fuse-ld=` on rustc's line or on the
+command names anything but `bfd`, `gold` and `lld` (`mold`); `ld --print-sysroot`, with the
+command's `--sysroot`, is neither `/` nor empty (an `ld` that can't say: the command's own
+`--sysroot`); a linker script does more than name files; a `-l` or a library a program loads is
+found nowhere; a library search folder holds a `$` word other than `$ORIGIN`; the link's
+environment sets `LD_PRELOAD`, `LD_AUDIT`, any `DYLD_` variable but `DYLD_LIBRARY_PATH` and
+`DYLD_FALLBACK_LIBRARY_PATH`, or one of those or `LD_LIBRARY_PATH` with a folder that is neither
+a root nor a base (cargo's `deps` and rustup's toolchain `lib` are both) and, for the macOS
+fallback, not one of the defaults cargo adds (`$HOME/lib`, `/usr/local/lib`, `/usr/lib`); or the
+link itself does link-time optimization: `-C lto` or `-C linker-plugin-lto` on rustc's line, or
+a `-flto…` on the link line. The standard library's own bitcode (`.llvmbc` sections inside its
+objects) is not that: the linker takes those objects' code. *Rests on:* a link's bytes following
+from the files it reads and the programs it runs, which the driver's dry run and the loaders
+name; and the dry run printing the command the driver runs (gcc 14, clang 19 and Apple's clang
+checked; equal E gave equal bytes on seven pairs of machines and different E different bytes,
+Debian 12 against 13 among them). *Breaks if:* a program on the way read a file neither the dry
+run nor its loader names (a configuration file of its own, a plugin it searches for itself);
+the driver changed what it adds without printing it in its dry run; a library came from the
+loader's cache (`ld.so.cache`) where `ld.so.conf`'s folders don't lead, or from a
+`glibc-hwcaps` subfolder; macOS's shared cache held another version of a library a linker program
+loads and that changed what it writes; or the `ld` of a gcc built with a default linker path
+other than `--with-ld=` ran instead. The linker's version text is not asked: the `ld` it would
+describe is in E by content.
+
+Cost, measured per link on rustc 1.94: see B-18.
+
 **B-19 Every failure runs rustc.** An error computing a key or reading the store MUST end in
 rustc running as asked with nothing stored; an error putting a block's files in place ends in a
 compile with the wrapper's changes and nothing stored (B-12). A call that runs rustc as asked
