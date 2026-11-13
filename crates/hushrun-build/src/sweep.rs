@@ -31,6 +31,9 @@ pub struct SweepReport {
     /// Compiler memos and views without sources no run used for the kept days, and what a
     /// maker of a view left (B-17).
     pub compilers: u64,
+    /// Markers of the outbox dropped (B-29), claims of dead runs put back, and folders of dead
+    /// runs removed (B-26).
+    pub outbox: u64,
     /// Steps that failed and were skipped. Another process removing the same thing first is
     /// not one.
     pub errors: u64,
@@ -73,6 +76,10 @@ pub fn force(store: &Store, now: SystemTime, keep_days: u32) -> SweepReport {
         let out_dirs = store.remove_stale_out_dirs(cutoff);
         report.out_dirs = out_dirs.removed;
         report.errors += out_dirs.errors;
+        let runs = crate::outbox::remove_dead_runs(store);
+        let markers = crate::outbox::Outbox::new(store).sweep(now, keep_days);
+        report.outbox = runs.removed + markers.removed;
+        report.errors += runs.errors + markers.errors;
         let leftover = now.checked_sub(DAY).unwrap_or(now);
         let compilers = store.remove_unused_compilers(cutoff, leftover);
         report.compilers = compilers.removed;

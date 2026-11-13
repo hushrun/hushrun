@@ -63,6 +63,7 @@ pub mod messages;
 pub mod metadata;
 pub mod model;
 pub mod origin;
+pub mod outbox;
 pub mod portable;
 pub mod regular;
 pub mod restore;

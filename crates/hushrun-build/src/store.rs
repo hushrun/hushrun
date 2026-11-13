@@ -172,9 +172,11 @@ pub struct RepositoryUsage {
 
 /// What one step of a sweep did: how many things it removed and how many errors it met.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Tally {
-    pub(crate) removed: u64,
-    pub(crate) errors: u64,
+pub struct Tally {
+    /// How many things it removed or moved.
+    pub removed: u64,
+    /// How many errors it met.
+    pub errors: u64,
 }
 
 /// `block.json`, as read.
@@ -1645,7 +1647,14 @@ mod tests {
         let built = Origin::built_here("1-2", None);
         assert_eq!(
             w.store
-                .replace(&key(1), &description("r"), &compiled, &built, day(1), only_downloaded)
+                .replace(
+                    &key(1),
+                    &description("r"),
+                    &compiled,
+                    &built,
+                    day(1),
+                    only_downloaded
+                )
                 .unwrap(),
             Replaced::Stored
         );
@@ -1674,14 +1683,28 @@ mod tests {
             .unwrap();
         assert_eq!(
             w.store
-                .replace(&key(2), &description("r"), &downloaded, &built, day(1), only_downloaded)
+                .replace(
+                    &key(2),
+                    &description("r"),
+                    &downloaded,
+                    &built,
+                    day(1),
+                    only_downloaded
+                )
                 .unwrap(),
             Replaced::Kept
         );
         // With nothing there it is a publish.
         assert_eq!(
             w.store
-                .replace(&key(3), &description("r"), &downloaded, &built, day(1), only_downloaded)
+                .replace(
+                    &key(3),
+                    &description("r"),
+                    &downloaded,
+                    &built,
+                    day(1),
+                    only_downloaded
+                )
                 .unwrap(),
             Replaced::Stored
         );
@@ -1701,7 +1724,10 @@ mod tests {
         );
         assert_eq!(w.store.suspended_at(&key(1), day(16)), None);
         w.store.suspend(&key(2), "for good", day(1)).unwrap();
-        assert_eq!(w.store.suspended_at(&key(2), day(400)).as_deref(), Some("for good"));
+        assert_eq!(
+            w.store.suspended_at(&key(2), day(400)).as_deref(),
+            Some("for good")
+        );
     }
 
     // covers: B-30
@@ -1709,7 +1735,9 @@ mod tests {
     fn downloaded_hints_are_kept_apart_and_a_cost_is_remembered() {
         let w = world();
         w.store.add_hint(&key(1), b"local", day(1)).unwrap();
-        w.store.add_shared_hint(&key(1), b"downloaded", day(2)).unwrap();
+        w.store
+            .add_shared_hint(&key(1), b"downloaded", day(2))
+            .unwrap();
         assert_eq!(w.store.hints(&key(1)), vec![b"local".to_vec()]);
         assert_eq!(w.store.shared_hints(&key(1)), vec![b"downloaded".to_vec()]);
         assert_eq!(w.store.step_cost(&key(1)), None);
