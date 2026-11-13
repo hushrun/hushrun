@@ -1757,6 +1757,8 @@ impl Relay {
     /// rest stays in the outbox; `close` goes once with the manifest and the counts; the socket
     /// goes. The lines for the person.
     pub(crate) fn end_check(self: &Arc<Relay>, entries: &[Entry]) -> Vec<String> {
+        // B-31: no ID token is minted once the end has begun.
+        self.client.ending(true);
         let end = self.end();
         let wait = upload::wait_at_end(&self.config.tuning, &end);
         let relay = self.clone();
@@ -1862,6 +1864,7 @@ impl Relay {
         state.tally = Tally::default();
         drop(state);
         self.ending.store(false, Ordering::Relaxed);
+        self.client.ending(false);
         lines
     }
 

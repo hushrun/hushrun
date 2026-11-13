@@ -991,3 +991,70 @@ fn a_github_job_whose_backend_is_cut_off_reuses_what_its_setup_step_fetched() {
         "{dropped:?}"
     );
 }
+
+/// A cold `cargo build` through hushrun in a GitHub Actions job, timed by COMMAND's own marks:
+/// what cargo took, what the run took after COMMAND ended, and its stdout and stderr.
+fn timed_ci_build(m: &Machine, fake: &FakeBuild) -> (Duration, Duration, String) {
+    let marks = m.root.join("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    let mut cmd = m.hushrun(fake);
+    in_github_actions(&mut cmd, fake, &m.root.join("runner-temp"));
+    let output = cmd
+        .env("MARKS", &marks)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; touch \"$MARKS/start\"; cargo build --offline; touch \"$MARKS/end\"",
+        ])
+        .output()
+        .unwrap();
+    let exited = std::time::SystemTime::now();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(!said.contains("wrapper=none"), "{said}");
+    let mark = |name: &str| {
+        std::fs::metadata(marks.join(name))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let cargo = mark("end").duration_since(mark("start")).unwrap();
+    let after = exited.duration_since(mark("end")).unwrap();
+    (cargo, after, said)
+}
+
+// covers: B-26, B-31
+#[test]
+fn a_slow_id_token_endpoint_slows_neither_cargo_nor_the_end_of_a_job() {
+    // Two cold jobs, each against its own backend, whose ID tokens live 61 seconds: every
+    // request finds the token held within a minute of its expiry.
+    let dir = tempfile::tempdir().unwrap();
+    let prompt = FakeBuild::start();
+    prompt.set_id_token_seconds(61);
+    let a = Machine::new(dir.path(), "a", None);
+    let (cargo_prompt, after_prompt, said) = timed_ci_build(&a, &prompt);
+    assert!(said.contains("2 crates built"), "{said}");
+    // The second's endpoint takes 3 seconds to mint.
+    let slow = FakeBuild::start();
+    slow.set_id_token_seconds(61);
+    slow.delay("/id-token", Duration::from_secs(3));
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (cargo_slow, after_slow, said) = timed_ci_build(&b, &slow);
+    assert!(said.contains("2 crates built"), "{said}");
+    assert!(
+        cargo_slow < cargo_prompt.mul_f64(1.1) + Duration::from_secs(1),
+        "cargo took {cargo_slow:?} against {cargo_prompt:?}: {said}"
+    );
+    assert!(
+        after_slow < after_prompt + Duration::from_secs(1),
+        "the end took {after_slow:?} against {after_prompt:?}: {said}"
+    );
+}

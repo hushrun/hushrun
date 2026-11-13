@@ -768,8 +768,15 @@ folder, so that a marker or a block another run left is never this run's, whatev
 was made with. No person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says
 otherwise, `HUSHRUN_BUILD_DIR` is not followed, and the free-space floor is 2 GB. In GitHub
 Actions every build request carries the job's ID token, whose audience is the backend's URL, also
-when an agent token is set beside it; one within a minute of its expiry is replaced before the
-next request, and a 401 gets a fresh one and one more try. The results lookup whose `Hushrun-Build` answer sets the
+when an agent token is set beside it. One place decides what a request carries
+(`Credential::bearer`): a token with more than a minute left is sent; one with less starts a
+mint in the background and is still sent until its real expiry, also when that renewal fails;
+a 401 gets a fresh one and one more try. At most one mint is in flight, and it gets 5 seconds
+whoever waits for it; a request with no token it may send (none yet, the held one expired, or
+the one a 401 refused) waits for that mint only within its own deadline, and a mint that fails
+or comes later counts, for that request, as a server that can't be reached (B-26). No mint
+starts once the end of the command has begun: `close` and the last uploads carry the token held
+while it is good, or go unsent. The results lookup whose `Hushrun-Build` answer sets the
 wrapper carries the ID token too, before any token the environment holds (C-13), so the answer is
 one to the job itself. With no ID token (a pull request from a fork, a job without
 `id-token: write`) sharing is off and the run says why in one line, whatever else the
@@ -787,7 +794,9 @@ backend trusts a job by, so a token copied out of one job can do no more than th
 minutes; the commit being what the backend checks a trusted job's token against; and a quarter of
 a block's compile being worth waiting for once, since the next job of the repository then
 downloads it rather than compiling; and the request token being the job's alone. *Breaks if:*
-a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
+the token endpoint fails for longer than a token lives (5 minutes on GitHub): from the held
+token's expiry, every request is a miss and the job compiles as it would without a shared store,
+its uploads lost; a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
 one left there (a file it lacks permission to delete): that store is never read or uploaded, but
 it takes disk; the legs of one matrix job, which share the run, attempt and job name, run one
 after another on one runner and the runner gives them the same request token (then a leg reuses

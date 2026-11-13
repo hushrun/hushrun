@@ -76,6 +76,11 @@ impl Client {
         self.credential.fingerprint()
     }
 
+    /// B-31: no ID token is minted from the start of a command's end wait to its check's end.
+    pub(crate) fn ending(&self, ending: bool) {
+        self.credential.ending(ending);
+    }
+
     /// `POST {base}/{path}` with `body`, within `timeout`; one more try after a 503 or 429 whose
     /// `Retry-After` fits, or a connection that failed at once (every request may be sent again).
     pub(crate) async fn post<B: Serialize, R: DeserializeOwned>(
@@ -100,10 +105,15 @@ impl Client {
         let url = format!("{}/{path}", self.base);
         let deadline = tokio::time::Instant::now() + timeout;
         let mut tries = 0;
-        let mut fresh = false;
+        // The token a 401 refused: never sent again.
+        let mut refused: Option<String> = None;
         loop {
             tries += 1;
-            let token = self.credential.bearer(&self.http, fresh).await?;
+            // B-31: a token to mint is waited for within this request's deadline.
+            let token = self
+                .credential
+                .bearer(&self.http, refused.as_deref(), deadline)
+                .await?;
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
                 return Err(Failure::Unreachable(format!("{url}: no answer in time")));
@@ -153,8 +163,8 @@ impl Client {
                         });
                 }
                 // An ID token the backend no longer takes: mint a fresh one and try once more.
-                401 if !fresh && self.credential.renews() => {
-                    fresh = true;
+                401 if refused.is_none() && self.credential.renews() => {
+                    refused = Some(token);
                     tries -= 1;
                 }
                 401 | 403 | 404 | 405 => {

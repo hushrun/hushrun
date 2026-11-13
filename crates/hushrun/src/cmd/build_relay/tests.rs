@@ -1449,7 +1449,8 @@ fn in_ci_every_build_request_carries_the_job_s_id_token_and_it_is_minted_again_b
         fake.audiences()
     );
 
-    // One within a minute of expiring is replaced before the next request.
+    // One within a minute of expiring is renewed in the background, and the next request
+    // carries the new one.
     let fake = FakeBuild::start();
     fake.set_id_token_seconds(30);
     let m = machine();
@@ -1462,12 +1463,24 @@ fn in_ci_every_build_request_carries_the_job_s_id_token_and_it_is_minted_again_b
             step: Digest::of(b"s"),
         },
     );
+    until("renewed", || fake.id_tokens().len() == 2);
+    ask(
+        &relay,
+        Request::Hints {
+            step: Digest::of(b"t"),
+        },
+    );
     relay.end_check(&[]);
     let sent = bearers(&fake);
     let tokens = fake.id_tokens();
-    assert_eq!(tokens.len(), sent.len(), "a fresh one each time: {sent:?}");
+    assert!(
+        sent.iter()
+            .all(|b| tokens.iter().any(|t| *b == format!("Bearer {t}"))),
+        "{sent:?}"
+    );
     assert_eq!(sent[0], format!("Bearer {}", tokens[0]));
-    assert_eq!(sent[1], format!("Bearer {}", tokens[1]));
+    assert_eq!(sent[1], format!("Bearer {}", tokens[0]));
+    assert_eq!(sent[2], format!("Bearer {}", tokens[1]));
 }
 
 // covers: B-31
@@ -1738,4 +1751,100 @@ fn a_warm_target_with_an_empty_store_downloads_nothing() {
     assert_eq!(fake.count(route::LOOKUP), 0);
     assert_eq!(fake.count(route::HINTS_LOOKUP), 0);
     assert_eq!(fake.served_bytes(), 0);
+}
+
+/// The fake's ID token endpoint, as a route [`FakeBuild::delay`] and [`FakeBuild::fail`] take.
+const ID_TOKEN: &str = "/id-token";
+
+// covers: B-26, B-31
+#[test]
+fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_its_wait() {
+    // Tokens that live 61 seconds, so that every request finds the one held within a minute of
+    // its expiry, from an endpoint that takes 3 seconds to answer.
+    let fake = FakeBuild::start();
+    fake.set_id_token_seconds(61);
+    fake.delay(ID_TOKEN, Duration::from_secs(3));
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        with_id_token(&fake)(c);
+        c.tuning.open = Duration::from_secs(10);
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    // Each request carries the token held while a renewal runs: none waits for the endpoint.
+    let started = Instant::now();
+    for n in 0..4u8 {
+        assert_eq!(
+            ask(
+                &relay,
+                Request::Hints {
+                    step: Digest::of(&[n])
+                }
+            ),
+            Answer::None
+        );
+    }
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(1_500), "{took:?}");
+    until("the renewal reached the endpoint", || {
+        fake.count(ID_TOKEN) >= 2
+    });
+    // The end mints nothing: `close` carries the token held, and the end doesn't wait.
+    let minted = fake.count(ID_TOKEN);
+    let started = Instant::now();
+    relay.end_check(&[]);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    assert_eq!(fake.count(ID_TOKEN), minted);
+    assert_eq!(fake.count(route::CLOSE), 1);
+
+    // A renewal that fails leaves the token held in use until its real expiry.
+    let fake = FakeBuild::start();
+    fake.set_id_token_seconds(61);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    fake.fail(ID_TOKEN, 500, 1_000);
+    for n in 0..3u8 {
+        ask(
+            &relay,
+            Request::Hints {
+                step: Digest::of(&[n]),
+            },
+        );
+    }
+    assert!(answering(&relay));
+    let lines = relay.end_check(&[]);
+    assert!(!lines.iter().any(|l| l.contains("stopped")), "{lines:?}");
+    let tokens = fake.id_tokens();
+    assert_eq!(tokens.len(), 1);
+    let sent = bearers(&fake);
+    assert!(sent.len() >= 5, "{sent:?}");
+    assert!(
+        sent.iter().all(|b| *b == format!("Bearer {}", tokens[0])),
+        "{sent:?}"
+    );
+
+    // With no token to send, a mint later than the request's deadline is, for that request, a
+    // server that can't be reached: `open`'s two tries take their deadlines, not the endpoint's.
+    let fake = FakeBuild::start();
+    fake.delay(ID_TOKEN, Duration::from_secs(3));
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        with_id_token(&fake)(c);
+        c.tuning.open = Duration::from_millis(500);
+    });
+    let started = Instant::now();
+    begin(&relay, &m);
+    until("stopped", || {
+        matches!(relay.state().phase, super::Phase::Stopped(_))
+    });
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    let lines = relay.end_check(&[]);
+    assert!(
+        lines.iter().any(|l| l.contains("can't be reached")),
+        "{lines:?}"
+    );
 }

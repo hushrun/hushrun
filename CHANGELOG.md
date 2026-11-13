@@ -183,6 +183,13 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks in GitHub Actions: a slow ID token endpoint no longer slows cargo or holds the job
+  after its command. A token near its expiry is renewed in the background and still sent until it
+  expires, also when the renewal fails; a request with no token waits for the one mint in flight
+  only within its own deadline (5 seconds at most for the mint), and no token is minted once the
+  command has ended. Before, every request waited in turn for each mint: with an endpoint taking
+  9 seconds, cargo took 96.7 seconds against 37.6, and the job stayed 65 seconds after its
+  command.
 - Build blocks: a run that uploads nothing (one from a saved fetch, an agent token's in CI)
   leaves no outbox marker for what it builds and says nothing about uploads; before, a sandbox's
   offline run said blocks waited to upload, under a credential no run could have. Shared
