@@ -80,17 +80,31 @@ struct SharedStore {
     /// Whether the org shares: `off`, `observe` or `on`.
     #[serde(default)]
     sharing: Option<String>,
+    /// Why the allowance is 0, in `open`'s word, when the server says: the plan includes no
+    /// shared store, or sets its storage by contract alone and none is set yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<hushrun_core::blocks::OffReason>,
 }
 
 impl SharedStore {
     /// The line `hushrun repository usage` writes: `3.2 GB held, of 10 GB`, and why it shrinks.
+    /// With no allowance there is nothing to hold it against: the line says why there is none,
+    /// in the server's word when it gave one, never `0 of 0`.
     fn line(&self) -> String {
+        use hushrun_core::blocks::OffReason;
         let size = crate::cmd::build::size;
-        let mut line = format!(
-            "{} held, of {}",
-            size(self.held_bytes),
-            size(self.allowance_bytes)
-        );
+        let held = match self.held_bytes {
+            0 => "nothing held".to_string(),
+            bytes => format!("{} held", size(bytes)),
+        };
+        let mut line = match (self.allowance_bytes, self.reason) {
+            (0, Some(OffReason::Contract)) => {
+                format!("{held}: the plan sets its storage by contract, and none is set yet")
+            }
+            (0, Some(OffReason::Plan)) => format!("{held}: the plan includes no shared storage"),
+            (0, Some(OffReason::Unknown) | None) => format!("{held}: no storage is set for it"),
+            (allowance, _) => format!("{} held, of {}", size(self.held_bytes), size(allowance)),
+        };
         match (self.state.as_deref(), self.today_bytes, &self.smaller_from) {
             (Some("trimming"), Some(today), Some(from)) => {
                 let _ = write!(line, ": being trimmed to {} from {from}", size(today));

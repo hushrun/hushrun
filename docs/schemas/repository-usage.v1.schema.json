@@ -65,7 +65,8 @@
             "today_bytes": {"description": "What the plan, a contract and any bonus give today: the allowance from `smaller_from` on.", "$ref": "#/$defs/optionalCount"},
             "smaller_from": {"description": "The day (YYYY-MM-DD) the allowance in force falls to `today_bytes`, when it will.", "type": ["string", "null"]},
             "state": {"description": "ok; over, holding more than the allowance and being brought down; or trimming, a smaller allowance is coming and the store holds more.", "type": ["string", "null"]},
-            "sharing": {"description": "Whether the org shares: off, observe or on.", "type": ["string", "null"]}
+            "sharing": {"description": "Whether the org shares: off, observe or on.", "type": ["string", "null"]},
+            "reason": {"description": "Why the allowance is 0, when the server says: plan (the plan includes no shared store) or contract (the plan sets its storage by contract, and none is set yet). Absent when the server gives none; a word this version doesn't know is written as unknown.", "type": "string"}
           }
         },
         "repository_checks": {"description": "This repository's checks this period: its entries in `repositories`, ignoring case; null when `repository` is.", "$ref": "#/$defs/optionalCount"},

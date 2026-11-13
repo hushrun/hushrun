@@ -194,6 +194,11 @@ offline.
 
 ### Fixed
 
+- `hushrun repository usage`: an org whose shared store has no allowance no longer reads
+  `0 bytes held, of 0 bytes`. The line says why there is none, from the usage answer's `reason`
+  when the backend sends one: `nothing held: the plan sets its storage by contract, and none is
+  set yet`, or `the plan includes no shared storage`; with no reason, `no storage is set for it`.
+  Contract: `usage.shared_store` in `hushrun.repository.usage/v1` may carry `reason`.
 - Build blocks: a run that passes through because `RUSTC_WRAPPER` is set already (sccache, for
   one) says so where its org shares build blocks: `build reuse is off for this run: another
   compiler wrapper is set (RUSTC_WRAPPER)`. Before, it said nothing, and the shared store was
