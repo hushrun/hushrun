@@ -2031,3 +2031,61 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
     r.clean();
 }
 
+/// A JUnit 4 task of one class with 300 tests that pass and one, `flips`, that fails when asked: a
+/// run that fails, so that the next lists the 300.
+fn many_junit4(gradle: &str) -> Repo {
+    let mut body = String::from(
+        "package shop.app;\nimport org.junit.*;\npublic class ManyTest {\n  @Test public void flips() { Assert.assertNull(System.getenv(\"FAIL\")); }\n",
+    );
+    for n in 0..300 {
+        body.push_str(&format!("  @Test public void t{n:03}() {{}}\n"));
+    }
+    body.push_str("}\n");
+    let mut files = build(Framework::Junit4, &["app"], "{mode: reuse, unit: test}");
+    files.push(file("app/src/test/java/shop/app/ManyTest.java", &body));
+    let r = Repo::new(&files);
+    let first = r.run(&command(gradle, &[]), &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    r
+}
+
+// covers: C-39, C-46
+#[test]
+fn a_junit4_task_tells_how_many_of_its_tests_it_leaves_out_at_most() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let r = many_junit4(&gradle());
+    // The task's report, as the script keeps it in the task's outputs, as in its facts.
+    let kept: Value = serde_json::from_slice(
+        &std::fs::read(r.repo.join("app/build/hushrun/test.json")).expect("the kept report"),
+    )
+    .unwrap();
+    assert_eq!(
+        kept["report"]["leaveOutAtMost"],
+        json!({"most": 250, "units": ["app/src/test/java/shop/app/ManyTest.java"]})
+    );
+    r.clean();
+}
+
+// covers: C-39, C-46
+#[test]
+#[ignore = "the plan's part, listing at most `leaveOutAtMost` of a group's tests, is the core's"]
+fn a_junit4_task_leaves_out_every_test_the_plan_counts_as_reused() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let r = many_junit4(&gradle());
+    let second = r.run(&command(&gradle(), &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    // What the plan said would run is what ran.
+    let said = line(&second, "hushrun: unit: ");
+    let ran = r.xml_cases("app", "shop.app.ManyTest");
+    let counted: usize = said["hushrun: unit: ".len()..]
+        .split(' ')
+        .next()
+        .and_then(|n| n.replace(',', "").parse().ok())
+        .unwrap_or_else(|| panic!("{said}"));
+    assert_eq!(counted, ran.len(), "{said}\n{ran:?}");
+    r.clean();
+}

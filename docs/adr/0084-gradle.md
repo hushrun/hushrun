@@ -77,7 +77,8 @@ and C-46 hold over §4.5.
    provider computed when the task starts and no input of the task, while what the list holds is
    an input (`hushrunLeftOut`), so another list makes the task run and the same list at another
    path keeps it up to date. JUnit 4 has no hook: Gradle's filter patterns, 250 tests a task at most
-   (the spike measured 16 to 19 s for 5,000), past which they simply run. Kotest's tests have no
+   (the spike measured 16 to 19 s for 5,000), past which they simply run [Amendment 15: the plan
+   is told the cap]. Kotest's tests have no
    method to leave out: they run. A task left with no test by hushrun doesn't fail: no source when
    every class is out, `failOnNoMatchingTests` off and Gradle 9's convention when tests are. The
    task's own `--tests` applies too; a class missing because of it hasn't gone away, and its row
@@ -339,6 +340,18 @@ written within the two seconds of slack the report search allows. The decisions:
   there to save, changes what the build cache holds, and would make a hushrun run differ from a
   plain one in what it executes. Saying it once, with the way to make Gradle run them, leaves the
   choice where it was.
+
+## Amendment 15: the plan and JUnit 4's 250 tests a task (2026-11-13)
+
+Runs on kotlinpoet showed a second run's line say "59 of 965 tests run" while about 206 ran: the
+script leaves out at most 250 tests of a JUnit 4 task by filter patterns (the spike measured 16 to
+19 s of Gradle's own filtering for 5,000), and the plan counted every test it listed as left out.
+The cap stays, since past it the filtering costs more than the tests it saves. The decision: the
+script tells, in each JUnit 4 task's facts, `settings.leaveOutAtMost` (`most`, 250, and `units`,
+the task's test classes), and that it attempts the listed tests in the order of their ids and skips
+a class of the default package or of a package named with a capital, which Gradle's patterns would
+match by simple name. The plan is to keep what the last run here said and list at most `most`
+of a group's tests, in that order, counting the others as run.
 
 ## Measured
 

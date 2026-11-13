@@ -302,6 +302,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   so in one line, with what makes Gradle run them, instead of a line that read as if tests ran.
   The report search can tell a report the run didn't write from one it did, however new its
   time (`hushrun_reports::before` and `find_changed`).
+- Gradle: each JUnit 4 task's facts now say how many of its tests it leaves out at most
+  (`settings.leaveOutAtMost`, 250, by filter patterns), so that a plan can count past them as run
+  rather than reused.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

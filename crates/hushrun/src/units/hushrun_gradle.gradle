@@ -144,6 +144,7 @@ class HushrunRun {
     static String factsText(Map report, List<String> errors, String start = null) {
         Map facts = [schema: FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
                      settings: [gradle: report], errors: errors ?: []]
+        if (report.leaveOutAtMost != null) facts.settings.leaveOutAtMost = report.leaveOutAtMost
         if (start != null) facts.start = start
         JsonOutput.toJson(facts)
     }
@@ -649,6 +650,9 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         }
         suiteFailures.each { if (it.c) outers << HushrunRun.outerOf(it.c as String) }
         HushrunReport.addNames(report, s, outers)
+        // [ADR 0084, Amendment 15] What a plan needs to count only what a JUnit 4 task leaves out:
+        // at most this many of its tests, taken in the order of their ids.
+        if (framework == "junit4") report.leaveOutAtMost = [most: HushrunRun.MOST_PATTERN_TESTS, units: new ArrayList(report.names.values()).sort()]
         if (framework == null) report.notFollowed << [why: "test-framework", detail: "a test framework hushrun doesn't know"]
         List<String> all = new ArrayList<>(errors)
         if (s != null) all.addAll(s.errors)
