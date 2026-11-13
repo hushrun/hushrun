@@ -848,6 +848,25 @@ fn a_sandbox_fetches_at_setup_then_reuses_with_the_network_cut_and_keeps_no_toke
         "{dropped:?}"
     );
     assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
+    // A later phase that compiles a crate of its own uploads nothing, so it leaves no marker
+    // nobody could send, and says nothing about uploads.
+    std::fs::write(
+        b.repo.join("app/src/lib.rs"),
+        "pub fn four() -> u32 {\n    dep::two() * 2 + 0\n}\n",
+    )
+    .unwrap();
+    fake.set_unreachable(true);
+    let stderr = later_phase(&b, &fake, |_| {});
+    fake.set_unreachable(false);
+    assert!(stderr.contains("1 of 2 crates reused"), "{stderr}");
+    assert!(!stderr.contains("upload"), "{stderr}");
+    let markers: Vec<_> = std::fs::read_dir(store.join("outbox"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert!(markers.is_empty(), "{markers:?}");
     // No token was written under the store or the sessions, by either phase.
     for needle in [FakeBuild::AGENT_TOKEN, FakeBuild::TOKEN] {
         assert_eq!(

@@ -921,6 +921,69 @@ fn in_observe_nothing_is_published_and_a_difference_is_counted_reported_and_susp
     );
 }
 
+// covers: B-33
+#[test]
+fn observe_opens_what_it_compares_within_the_room_a_download_gets() {
+    let fake = FakeBuild::start();
+    fake.set_mode(blocks::Mode::Observe);
+    fake.set_scopes(None, &["person/1", "person/9"]);
+    // A block of 8 MiB of zeros, whose pack is a few KB: past 64 times its size.
+    let other = machine();
+    let key = Digest::of(b"zeros");
+    let step = Digest::of(b"zeros-step");
+    let src = other.store.root().with_file_name("zeros.rlib");
+    std::fs::write(&src, vec![0u8; 8 << 20]).unwrap();
+    other
+        .store
+        .publish_with_origin(
+            &key,
+            &json!({"step": step, "class": "library"}),
+            &[NewFile {
+                name: "liba.rlib".into(),
+                source: src.clone(),
+            }],
+            &Origin::built_here("1-1", None),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let theirs = super::pack::pack_block(&other.store, &key, &other.session).unwrap();
+    let pack = theirs.pack.bytes().unwrap();
+    assert!((pack.len() as u64) * blocks::pack::MOST_EXPANSION < 8 << 20);
+    fake.put_block(
+        address(&key),
+        "person/9",
+        &pack,
+        theirs.outputs,
+        1000,
+        blocks::Class::Library,
+    );
+    // This machine built the same block.
+    let m = machine();
+    m.store
+        .publish_with_origin(
+            &key,
+            &json!({"step": step, "class": "library"}),
+            &[NewFile {
+                name: "liba.rlib".into(),
+                source: src,
+            }],
+            &Origin::built_here("1-1", Some(me(&fake))),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    relay
+        .runtime
+        .block_on(relay.clone().compare(key, address(&key)));
+    // Downloaded, then refused before it was unpacked: nothing compared, nothing reported.
+    assert_eq!(fake.count(route::STORE_GET), 1);
+    assert_eq!(relay.state().tally.compared, 0);
+    assert!(fake.reports().is_empty());
+    relay.end_check(&[]);
+}
+
 /// A store holding `n` libraries of `size` bytes, each in the fake's object store too.
 fn served(fake: &FakeBuild, n: u8, size: usize, cost_ms: u32) -> Vec<(Digest, Digest)> {
     let src = machine();

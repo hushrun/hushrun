@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a run that uploads nothing (one from a saved fetch, an agent token's in CI)
+  leaves no outbox marker for what it builds and says nothing about uploads; before, a sandbox's
+  offline run said blocks waited to upload, under a credential no run could have. Shared
+  `observe`'s comparison opens a downloaded pack within the room a download gets (64 times its
+  size, and the disk's floor), so a pack made to expand costs it no more work than a download.
 - `hushrun build fetch [CHECK]...` takes the checks to fetch for, by the names `hushrun run` runs
   them under, and asks the backend for each one's newest manifest; with none, it asks for the
   repository's newest. Before, it named no check, and a backend that matches the check exactly

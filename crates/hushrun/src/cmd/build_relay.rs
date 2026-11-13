@@ -1398,10 +1398,7 @@ impl Relay {
             outputs: Some(found.outputs),
         };
         let dir = path.with_extension("open");
-        // C5: what the disk can take above its floor, and at most 64 times the pack.
-        let free = self.config.store.free_bytes().unwrap_or(u64::MAX);
-        let floor = u64::from(self.config.min_free_gb).saturating_mul(1 << 30);
-        let room = blocks::pack::Room::for_pack(found.bytes, free.saturating_sub(floor));
+        let room = self.room_for(found.bytes);
         let opened =
             pack::open_pack(path, &expect, Some(room), &dir).map_err(|err| err.unreadable())?;
         let date = self.state().server_date_ms.unwrap_or_else(now_ms);
@@ -1560,7 +1557,9 @@ impl Relay {
                 let sample = cost_ms as f64 / f64::from(found.cost_ms);
                 state.speed.push(sample);
             }
-            let writes = state.policy.as_ref().is_some_and(|p| p.writes);
+            // A run that uploads nothing (a fetch's, B-36; an agent token's in CI) leaves no
+            // marker nobody could send.
+            let writes = state.uploads && state.policy.as_ref().is_some_and(|p| p.writes);
             (writes, state.sharing)
         };
         if matches!(sharing, Sharing::Off(_)) {
@@ -1593,6 +1592,15 @@ impl Relay {
             self.runtime
                 .spawn(async move { relay.compare(key, address).await });
         }
+    }
+
+    /// C5: what a pack of `pack_bytes` may unpack to here, the one rule a download and shared
+    /// `observe`'s comparison open by: what the disk can take above its floor, and at most 64
+    /// times the pack.
+    fn room_for(&self, pack_bytes: u64) -> blocks::pack::Room {
+        let free = self.config.store.free_bytes().unwrap_or(u64::MAX);
+        let floor = u64::from(self.config.min_free_gb).saturating_mul(1 << 30);
+        blocks::pack::Room::for_pack(pack_bytes, free.saturating_sub(floor))
     }
 
     /// B-33: shared `observe`'s comparison of a block built here with the shared store's copy:
@@ -1630,6 +1638,9 @@ impl Relay {
             bytes: Some(found.bytes),
             outputs: Some(found.outputs),
         };
+        // C5: the room a download gets, though nothing is written: a pack made to expand costs
+        // no more CPU here than it could disk there.
+        let room = self.room_for(found.bytes);
         let verdict = self
             .runtime
             .spawn_blocking(move || {
@@ -1642,7 +1653,12 @@ impl Relay {
                         Ok(())
                     }
                 }
-                let record = blocks::pack::open(&mut bytes.as_ref(), &expect, &mut Discard)?;
+                let record = blocks::pack::open_within(
+                    &mut bytes.as_ref(),
+                    &expect,
+                    Some(room),
+                    &mut Discard,
+                )?;
                 let local = store.block(&key).ok().flatten();
                 Ok::<_, blocks::pack::PackError>((record, local))
             })
@@ -1832,7 +1848,10 @@ impl Relay {
                 "build: {waiting} {} weren't uploaded before the job's command ended",
                 if waiting == 1 { "block" } else { "blocks" },
             ));
-        } else if waiting > 0 && !end.in_ci && !matches!(state.phase, Phase::Stopped(Stop::Off(_)))
+        } else if waiting > 0
+            && !end.in_ci
+            && state.uploads
+            && !matches!(state.phase, Phase::Stopped(Stop::Off(_)))
         {
             lines.push(format!(
                 "build: {waiting} {} to upload {} for the next run",

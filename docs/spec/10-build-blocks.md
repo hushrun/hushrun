@@ -697,8 +697,9 @@ the **digest of outputs** (SHA-256 of the canonical JSON of the files sorted by 
 name, size and SHA-256, and nothing else) is the row's. A pack that fails any check is dropped
 and reported `unreadable`. Before it writes any file, the reader refuses a record whose files
 come to more than 64 times the pack, or to more than the disk can take above the free-space floor
-(B-22); that is a compile, not a report, and each file stops at its declared size whatever the
-stream holds. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs
+(B-22), by one rule (`Relay::room_for`) for a download and for shared `observe`'s comparison
+(B-33), which writes nothing but would spend as much work; that is a compile, not a report (in
+`observe`, no comparison), and each file stops at its declared size whatever the stream holds. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs
 being computed again from what was unpacked, so that no comparison rests on the uploader's word;
 zstd giving the same stream for one version of it, so two versions of hushrun may give two packs
 of one block, which costs a wait and nothing else.
@@ -808,7 +809,9 @@ over a fetch, that the org doesn't share, a 401 or a 403 included, and a run tha
 or no repository, or a fetch that names none, is no match (`saved::Saved::serves`, the one
 definition). Such a run whose store holds a fresh fetch runs a relay from it: the policy as
 saved, each pack linked into the run's `incoming/` and opened when a wrapper brings its key,
-the hints as saved; it uploads nothing, reports nothing and sends no request. In CI the fetch is
+the hints as saved; it uploads nothing, reports nothing and sends no request, and so leaves no
+outbox marker for what it builds and says nothing about uploads (as any run that uploads nothing,
+such as an agent token's in CI). In CI the fetch is
 saved in the job's own store (B-31), which only a GitHub Actions job with an ID token has, so that
 a later step of the same job finds it; elsewhere in CI `hushrun build fetch` refuses, since each
 run's store there is its own. A step of that job whose backend answered nothing, and whose fetch
@@ -852,8 +855,9 @@ has its own mode, `observe` or `on`, the org's, set by its admin and returned by
 may lower it for the machine (`hushrun build share on|observe|off`, `HUSHRUN_BUILD_SHARE` for
 one command) and never raise it. In shared `observe` a machine keeps all its local reuse, uploads
 what it builds, never waits for or publishes a download, and compares: after a compile stores a
-library, the relay downloads the shared store's copy in the background, opens it, and compares
-its files with the local block's. A difference suspends the first key here for `keep_days` and is
+library, the relay downloads the shared store's copy in the background, opens it within the room
+a download gets (B-28's 64 times the pack and the disk's floor), and compares its files with the
+local block's. A difference suspends the first key here for `keep_days` and is
 reported `differs` to the scope the copy came from. `close` counts the comparisons, those of
 blocks another machine wrote, and those that differed; comparisons not finished when the command
 ends are dropped. Each compared block is downloaded once, by its comparison: there is no
