@@ -39,6 +39,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   `--format json` gives `blocks`, `bytes`, `hints`, `store` and `good_for_hours`.
 - Contract: **lookup requests of the build protocol carry `commit`**, the workspace's, when it can
   be read; an older backend ignores it.
+- Contract: **`hushrun repository usage` shows the org's shared store** when the backend's usage
+  answer carries `shared_store`: `shared     3.2 GB held, of 10 GB`, and, when a smaller allowance
+  is coming, `being trimmed to 10 GB from 2026-11-03`. `--format json` passes it on as
+  `usage.shared_store`, only when the server sent it; an answer without it reads as before.
 - Contract: **`open`'s off reason `contract`** (`OffReason::Contract` in `hushrun_core::blocks`):
   the org's plan sets its shared storage by contract alone, and none is set yet. The run says so
   in one line and to get in touch with hushrun to set it; an older CLI reads the word as unknown.

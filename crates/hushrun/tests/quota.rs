@@ -607,6 +607,60 @@ fn repository_usage_json_lists_free_checks_apart_from_the_plans() {
 
 // covers: C-19, C-12
 #[test]
+fn repository_usage_shows_the_shared_store_when_the_server_says_it() {
+    let w = World::new("acme-api.yaml");
+    let results = FakeResults::start();
+    let with_store = |store: Value| {
+        let mut answer = usage_answer();
+        answer["shared_store"] = store;
+        answer
+    };
+    results.set_usage(with_store(json!({
+        "held_bytes": 3_200_000_000u64, "allowance_bytes": 10_000_000_000u64,
+        "today_bytes": 10_000_000_000u64, "smaller_from": null, "state": "ok", "sharing": "on",
+    })));
+    assert_eq!(
+        usage_text(with_results(&w, &results)),
+        expected_usage(
+            &results,
+            "repository github.com/Acme/api: 800 of them (65%)
+shared     3.2 GB held, of 10 GB
+"
+        )
+    );
+    let out = usage_json(with_results(&w, &results));
+    assert_eq!(out["usage"]["shared_store"]["held_bytes"], 3_200_000_000u64);
+    assert_eq!(out["usage"]["shared_store"]["state"], "ok");
+
+    // A smaller allowance is coming, and the store holds more than it: being trimmed, and when.
+    results.set_usage(with_store(json!({
+        "held_bytes": 12_000_000_000u64, "allowance_bytes": 50_000_000_000u64,
+        "today_bytes": 10_000_000_000u64, "smaller_from": "2026-11-03", "state": "trimming",
+        "sharing": "on",
+    })));
+    assert!(
+        usage_text(with_results(&w, &results))
+            .contains("shared     12 GB held, of 50 GB: being trimmed to 10 GB from 2026-11-03\n"),
+    );
+
+    // An org that never shared: the server sends null, and there's no line.
+    results.set_usage(with_store(Value::Null));
+    assert_eq!(
+        usage_text(with_results(&w, &results)),
+        expected_usage(
+            &results,
+            "repository github.com/Acme/api: 800 of them (65%)\n"
+        )
+    );
+    assert!(
+        usage_json(with_results(&w, &results))["usage"]
+            .get("shared_store")
+            .is_none()
+    );
+}
+
+// covers: C-19, C-12
+#[test]
 fn repository_usage_of_a_server_without_free_prints_what_it_always_did() {
     let w = World::new("acme-api.yaml");
     let results = FakeResults::start();

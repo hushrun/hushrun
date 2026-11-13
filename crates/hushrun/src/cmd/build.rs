@@ -638,7 +638,7 @@ fn blocks(n: u64) -> String {
 }
 
 /// A size as people read it: bytes, KB, MB, GB or TB, in thousands as file managers count.
-fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1000 {
         return format!("{bytes} bytes");
