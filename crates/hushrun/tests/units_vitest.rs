@@ -885,3 +885,65 @@ fn vitest_hazards_miss_no_failure() {
     }
     assert!(reused > 0);
 }
+
+// covers: C-31, C-35
+#[test]
+fn wrapped_node_functions_keep_what_callers_see_and_their_promisified_forms_stay_observed() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // Node's `exec` and `execFile` carry `util.promisify.custom`, which resolves to `{ stdout,
+    // stderr }`, and `fs.realpath` and `fs.realpathSync` carry `native`. Each test fails if the
+    // setup module's wrapper drops what it wraps carries; and a child process a promisified form
+    // starts is still one hushrun can't follow.
+    let t = |body: &str| {
+        format!(
+            "import {{ test, expect }} from 'vitest'\nimport {{ promisify }} from 'node:util'\nimport {{ exec, execFile }} from 'node:child_process'\nimport fs from 'node:fs'\nconst node = process.execPath\nconst script = 'process.stdout.write(\"out\"); process.stderr.write(\"err\")'\n{body}\n"
+        )
+    };
+    let files = vec![
+        file("hushrun.yaml", &yaml("observe")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("src/data.ts", "export const data = 1\n"),
+        file(
+            "test/execfile.test.ts",
+            &t(
+                "test('execFile', async () => {\n  expect(typeof (execFile as any)[promisify.custom]).toBe('function')\n  expect([execFile.name, execFile.length]).toEqual(['execFile', 4])\n  const run = promisify(execFile)\n  expect(await run(node, ['-e', script])).toEqual({ stdout: 'out', stderr: 'err' })\n  const failed: any = await run(node, ['-e', script + '; process.exit(3)']).then(() => null, (e) => e)\n  expect([failed.code, failed.stdout, failed.stderr]).toEqual([3, 'out', 'err'])\n})",
+            ),
+        ),
+        file(
+            "test/exec.test.ts",
+            &t(
+                "test('exec', async () => {\n  const run = promisify(exec)\n  const line = `${JSON.stringify(node)} -e ${JSON.stringify(script)}`\n  expect(await run(line)).toEqual({ stdout: 'out', stderr: 'err' })\n  const failed: any = await run(line + ' && exit 3 || exit 3').then(() => null, (e) => e)\n  expect([failed.code, failed.stdout, failed.stderr]).toEqual([3, 'out', 'err'])\n})",
+            ),
+        ),
+        file(
+            "test/realpath.test.ts",
+            &t(
+                "test('realpath', async () => {\n  expect(fs.realpathSync.native('src/data.ts')).toBe(fs.realpathSync('src/data.ts'))\n  const got = await new Promise((ok, no) => fs.realpath.native('src/data.ts', (e, p) => (e ? no(e) : ok(p))))\n  expect(got).toBe(fs.realpathSync('src/data.ts'))\n})",
+            ),
+        ),
+    ];
+    let r = Repo::new(&files);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    let map = r.map();
+    for unit in ["test/execfile.test.ts", "test/exec.test.ts"] {
+        assert_eq!(
+            map["units"][unit]["notFollowed"],
+            json!(["subprocess"]),
+            "{unit}: {map:#}"
+        );
+    }
+    // What `native` looked at is a read, as what `realpath` looks at is.
+    assert!(
+        r.reads("test/realpath.test.ts")
+            .contains(&"src/data.ts".to_string()),
+        "{map:#}"
+    );
+}

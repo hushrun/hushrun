@@ -6,6 +6,15 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- With `tests: observe` or `reuse`, a Vitest test that awaits `promisify(exec)` or
+  `promisify(execFile)` gets `{ stdout, stderr }` again, and a rejection carries both, as without
+  hushrun: the setup module's wrappers now keep what they wrap carries, `util.promisify.custom`
+  among it, and `fs.realpath.native` and `fs.realpathSync.native` are there again. A child
+  process the promisified form starts is still recorded as one hushrun can't follow, and a path
+  `native` resolves as a file the test file read.
+
 ## [0.14.0] - 2026-11-13
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate
