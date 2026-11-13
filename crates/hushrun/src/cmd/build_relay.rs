@@ -112,6 +112,9 @@ pub(crate) struct Config {
     pub(crate) commit: Option<String>,
     /// The target the run builds for.
     pub(crate) platform: String,
+    /// The compiler cargo will call and the folder it runs in: its host, as `rustc -vV` says
+    /// it, is the run's platform, asked in the background before `open`. `None`: `platform`.
+    pub(crate) compiler: Option<(std::ffi::OsString, PathBuf)>,
     /// B-1's mode and the person's share setting, for this command (B-33).
     pub(crate) local: Mode,
     pub(crate) own: Mode,
@@ -258,6 +261,8 @@ struct State {
     puts: HashMap<Digest, tokio::task::AbortHandle>,
     /// The upload loop of the check is running.
     uploading: bool,
+    /// The run's platform, once asked.
+    platform: Option<String>,
 }
 
 impl State {
@@ -421,6 +426,7 @@ impl Relay {
                 server_date_ms: None,
                 puts: HashMap::new(),
                 uploading: false,
+                platform: None,
             }),
             config,
         })
@@ -557,13 +563,37 @@ impl Relay {
 
     // --- open and the prefetch ----------------------------------------------------------
 
+    /// The run's platform: the host of the compiler cargo will call (`rustc -vV`'s `host:`), so
+    /// that a hushrun built for one target and run under emulation names the compiler's own;
+    /// asked once, off cargo's path. When it can't be asked, the target hushrun was built for.
+    async fn platform(&self) -> String {
+        if let Some(known) = self.state().platform.clone() {
+            return known;
+        }
+        let asked = match self.config.compiler.clone() {
+            Some((rustc, folder)) => self
+                .runtime
+                .spawn_blocking(move || compiler_host(&rustc, &folder))
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let platform = asked
+            .filter(|p| blocks::is_platform(p))
+            .unwrap_or_else(|| self.config.platform.clone());
+        self.state().platform = Some(platform.clone());
+        platform
+    }
+
     async fn open(self: Arc<Relay>, check: Option<Hex32>) {
+        let platform = self.platform().await;
         let body = OpenRequest {
             kind: KIND.to_string(),
             repository: self.config.repository.clone(),
             commit: self.config.commit.clone(),
             check,
-            platform: self.config.platform.clone(),
+            platform,
         };
         let mut answer = Err(Failure::Unreachable(String::new()));
         for _ in 0..2 {
@@ -1683,12 +1713,34 @@ impl Relay {
             run: check.run,
             repository: self.config.repository.clone(),
             check: check.check,
-            platform: self.config.platform.clone(),
+            platform: state
+                .platform
+                .clone()
+                .unwrap_or_else(|| self.config.platform.clone()),
             commit: self.config.commit.clone(),
             manifest,
             counts,
         }
     }
+}
+
+/// The `host:` line of `<rustc> -vV`, run in `folder` (where the rustup proxy picks the
+/// folder's toolchain).
+fn compiler_host(rustc: &std::ffi::OsStr, folder: &Path) -> Option<String> {
+    let out = std::process::Command::new(rustc)
+        .arg("-vV")
+        .current_dir(folder)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(|h| h.trim().to_string()))
 }
 
 fn dedup(items: impl Iterator<Item = Hex32>) -> Vec<Hex32> {

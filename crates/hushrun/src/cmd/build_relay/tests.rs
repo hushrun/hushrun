@@ -78,6 +78,7 @@ fn start(fake: &FakeBuild, m: &Machine, change: impl FnOnce(&mut Config)) -> Arc
         repository: Some("github.com/acme/shop".into()),
         commit: None,
         platform: "aarch64-apple-darwin".into(),
+        compiler: None,
         local: Mode::On,
         own: Mode::On,
         min_free_gb: 0,
@@ -1138,4 +1139,41 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+// covers: B-26
+#[cfg(unix)]
+#[test]
+fn open_names_the_platform_of_the_compiler_s_host() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    // A stand-in compiler whose host is not the one hushrun was built for.
+    let rustc = m.session.join("rustc");
+    std::fs::write(
+        &rustc,
+        "#!/bin/sh\nprintf 'rustc 1.94.0\\nhost: x86_64-unknown-linux-gnu\\n'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let relay = start(&fake, &m, |c| {
+        c.compiler = Some((rustc.clone().into_os_string(), m.session.clone()));
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    relay.end_check(&[]);
+    assert_eq!(fake.opens()[0].platform, "x86_64-unknown-linux-gnu");
+    assert_eq!(fake.closes()[0].platform, "x86_64-unknown-linux-gnu");
+    // Unaskable: the target hushrun was built for, as the config names it.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.compiler = Some(("/home/dev/no-such-rustc".into(), m.session.clone()));
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    relay.end_check(&[]);
+    assert_eq!(fake.opens()[0].platform, "aarch64-apple-darwin");
 }

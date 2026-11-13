@@ -112,6 +112,12 @@ fn start_sharing(
             repository: repository.map(str::to_string),
             commit: start.commit.filter(|c| hushrun_core::blocks::is_commit(c)),
             platform: platform(),
+            compiler: std::env::current_dir().ok().map(|folder| {
+                let rustc = env("RUSTC")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| OsString::from("rustc"));
+                (rustc, folder)
+            }),
             local: current.mode,
             own: current.share_setting,
             min_free_gb: current.min_free_gb,
@@ -133,8 +139,9 @@ fn start_sharing(
     }
 }
 
-/// The target triple this hushrun was built for: what `open` names as the run's platform. The
-/// wrapper's keys are what tell two platforms' blocks apart; this only chooses the manifest.
+/// The target triple this hushrun was built for: the run's platform when the compiler's own host
+/// can't be asked. The wrapper's keys are what tell two platforms' blocks apart; this only
+/// chooses the manifest.
 fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "apple-darwin",
