@@ -228,6 +228,17 @@ fn open_and_its_policy() {
     .unwrap();
     assert_eq!(newer.reason, Some(OffReason::Unknown));
     assert_eq!(newer.mode, Some(Mode::Unknown));
+    // A plan whose shared storage only a contract sets, before one does.
+    let contract: Policy = serde_json::from_value(json!({
+        "sharing": false, "reason": "contract", "keptDays": 30, "allowanceBytes": 0,
+        "heldBytes": 0,
+    }))
+    .unwrap();
+    assert_eq!(contract.reason, Some(OffReason::Contract));
+    assert_eq!(
+        serde_json::to_value(OffReason::Contract).unwrap(),
+        json!("contract")
+    );
 }
 
 #[test]

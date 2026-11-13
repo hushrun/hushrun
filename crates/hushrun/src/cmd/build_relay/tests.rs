@@ -1608,6 +1608,29 @@ fn a_ci_job_waits_for_open_at_most_its_wait_and_never_holds_the_relay_meanwhile(
     relay.end_check(&[]);
 }
 
+// covers: B-25
+#[test]
+fn an_org_whose_plan_sets_storage_by_contract_is_told_to_get_in_touch_once() {
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| {
+        p.sharing = false;
+        p.reason = Some(blocks::OffReason::Contract);
+    });
+    let m = machine();
+    // Also where `open` decides whether the org shares, which is otherwise silent.
+    let relay = start(&fake, &m, |c| c.open_decides = true);
+    begin(&relay, &m);
+    assert_eq!(relay.wait_open(Duration::from_secs(5)), super::Opened::Off);
+    let lines = relay.end_check(&[]);
+    let said: Vec<&String> = lines.iter().filter(|l| l.contains("contract")).collect();
+    assert_eq!(said.len(), 1, "{lines:?}");
+    assert_eq!(
+        said[0],
+        "build: sharing is off for this run: the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it"
+    );
+    assert!(!lines.iter().any(|l| l.contains("upgrade")), "{lines:?}");
+}
+
 fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
     Request::Built {
         key,

@@ -359,6 +359,9 @@ pub struct OpenRequest {
 pub enum OffReason {
     /// The org's plan includes no shared store.
     Plan,
+    /// The org's plan sets its shared storage by contract alone, and none is set yet. A client
+    /// from before this word reads it as [`OffReason::Unknown`].
+    Contract,
     #[serde(other)]
     Unknown,
 }

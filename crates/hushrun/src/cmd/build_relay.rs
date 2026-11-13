@@ -114,6 +114,10 @@ const MEASURED_FOR: Duration = Duration::from_millis(100);
 /// A download's unpacked size is taken as this many times its pack, for the free-space floor.
 const UNPACKED_PER_PACKED: u64 = 4;
 
+/// Why sharing is off when `open` answers the reason `contract` (B-25): the org's plan sets its
+/// shared storage by contract alone, and none is set yet. Never "upgrade": no plan gives it.
+const BY_CONTRACT: &str = "the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it";
+
 /// What starts a relay (B-26).
 pub(crate) struct Config {
     pub(crate) store: Store,
@@ -782,8 +786,16 @@ impl Relay {
                             untrusted_words(untrusted)
                         ));
                     }
+                    // B-25: the org shares, and its plan sets its storage by contract alone,
+                    // which none set yet: said, also where `open` decides, since the org did
+                    // turn sharing on.
+                    let by_contract = policy.reason == Some(blocks::OffReason::Contract);
                     state.policy = Some(policy);
                     match does.sharing {
+                        Sharing::Off(hushrun_build::share::Off::OrgDoesntShare) if by_contract => {
+                            state.stop(Stop::Off(BY_CONTRACT.to_string()));
+                            return;
+                        }
                         Sharing::Off(off) => {
                             let off = Stop::Off(off.reason().to_string());
                             if self.config.open_decides && !policy_shares {

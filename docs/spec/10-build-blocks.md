@@ -646,6 +646,16 @@ the backend's header and `open` saying what the org decided, and the machine's s
 its own. A run never shares more than its local mode allows: with local `observe`, sharing
 observes too.
 
+When `open` answers that sharing is off although the org shares, it gives one reason
+(`hushrun_core::blocks::OffReason`): `plan`, the org's plan includes no shared store; or
+`contract`, the org's plan sets its shared storage by contract alone and none is set yet. For
+`contract` the run says one line, also where `open` decides whether the org shares (which is
+otherwise silent), since the org did turn sharing on: `build: sharing is off for this run: the
+org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to
+set it`; it never says to upgrade, since no plan gives that storage. A reason this version doesn't
+know reads as unknown, and the run says what it says for an org that doesn't share. *Rests on:*
+the backend naming `contract` only for a plan whose storage no plan change gives.
+
 **B-26 The relay, and its deadlines.** The part of the `hushrun run` process that talks to the
 shared store for the wrappers is the **relay**, one per process; it sends `open` and `close`
 once for each check, since a manifest belongs to a check. The wrappers reach it over a Unix
