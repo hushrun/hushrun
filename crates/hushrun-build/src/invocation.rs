@@ -299,6 +299,26 @@ const LINKER_ONLY: [&str; 6] = [
     "DEVELOPER_DIR",
 ];
 
+/// The prefixes of the variables the linker reads from its own environment, keyed for a linked
+/// output (B-5): Apple's `ld` reads `LD_*` and `RC_*` ones it documents nowhere (Xcode 27.2:
+/// `RC_UUID_SALT` changes every output's UUID, `LD_APPLICATION_EXTENSION_SAFE` and
+/// `LD_NO_ENCRYPT` a dynamic library's header), GNU `ld` `LD_*` ones and `collect2` its
+/// `COLLECT_*` ones. A prefix, since a linker update can add a variable without saying so.
+const LINKER_READS_PREFIXES: [&str; 3] = ["LD_", "RC_", "COLLECT_"];
+
+/// The other variables GNU `ld` reads from its own environment (B-5): the default emulation and
+/// object format.
+const LINKER_READS: [&str; 2] = ["LDEMULATION", "GNUTARGET"];
+
+/// Whether the linker may read a variable from its own environment ([`LINKER_READS_PREFIXES`],
+/// [`LINKER_READS`]).
+fn linker_reads(name: &str) -> bool {
+    LINKER_READS.contains(&name)
+        || LINKER_READS_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
 /// keyed. Every other `-Z` passes through (B-4).
 const UNSTABLE_KEYED: [&str; 5] = [
@@ -1179,7 +1199,9 @@ fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Packag
         // A library is written by rustc itself: no C driver or linker runs for it, so what only
         // they read is not its input, and would tie its key to how this machine is set up.
         let linker_only = class == Class::Library && LINKER_ONLY.contains(&name.as_str());
-        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str())) && !linker_only {
+        // A linked output: every variable the linker reads from its own environment.
+        let linker = class != Class::Library && linker_reads(name);
+        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) || linker) && !linker_only {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
@@ -2020,6 +2042,60 @@ pub(crate) mod tests {
                 (!linker_only).then_some("x"),
                 "{name}"
             );
+        }
+    }
+
+    // covers: B-5
+    #[test]
+    fn variables_the_linker_reads_by_itself_are_keyed_for_a_linked_output() {
+        // Apple's `ld` reads `LD_*` and `RC_*` variables it documents nowhere, GNU `ld` its
+        // emulation and `collect2` its own: keyed by prefix for every linked output, never for
+        // a library, which links nothing.
+        let keyed = [
+            "LD_APPLICATION_EXTENSION_SAFE",
+            "LD_NO_ENCRYPT",
+            "RC_UUID_SALT",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "LDEMULATION",
+            "GNUTARGET",
+            "COLLECT_NO_DEMANGLE",
+        ];
+        let not_keyed = [
+            "LDFLAGS",
+            "XLD_FOO",
+            "MY_LD_X",
+            "RCX",
+            "GNUTARGETS",
+            "COLLECT",
+        ];
+        let program = minimal("").replace("--crate-type lib", "--crate-type bin");
+        let proc_macro = minimal("").replace("--crate-type lib", "--crate-type proc-macro");
+        let build_script = program.replace("--crate-name x", "--crate-name build_script_build");
+        for line in [&program, &proc_macro, &build_script] {
+            let class = handled(&argv(line), &Env::default()).class();
+            assert_ne!(class, Class::Library, "{line}");
+            for name in keyed {
+                let env = Env::from_vars([(name, "1")]);
+                let inv = handled(&argv(line), &env);
+                assert_eq!(
+                    inv.key_env().get(name).map(String::as_str),
+                    Some("1"),
+                    "{name} for {class:?}"
+                );
+            }
+            for name in not_keyed {
+                let env = Env::from_vars([(name, "1")]);
+                let inv = handled(&argv(line), &env);
+                assert_eq!(inv.key_env().get(name), None, "{name} for {class:?}");
+            }
+        }
+        for name in keyed {
+            let env = Env::from_vars([(name, "1")]);
+            let library = handled(&argv(&minimal("")), &env);
+            assert_eq!(library.class(), Class::Library);
+            assert_eq!(library.key_env().get(name), None, "{name} for a library");
         }
     }
 

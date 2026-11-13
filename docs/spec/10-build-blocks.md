@@ -79,13 +79,26 @@ rustc reads without an `env-dep` line (`RUSTC_BOOTSTRAP`, `MACOSX_DEPLOYMENT_TAR
 `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
 `XROS_DEPLOYMENT_TARGET`, `SDKROOT`, `RUSTC_FORCE_RUSTC_VERSION`, `LLVM_OVERRIDE_PRODUCER`,
 `RUST_TARGET_PATH`) and those the C driver and the linker read (`LIBRARY_PATH`, `LD_RUN_PATH`,
-`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`), but for a library, which links nothing,
-neither those nor `SDKROOT` (rustc reads the SDK only to link; a library's bytes are the same
-under two SDKs). *Rests on:* rustc writing a library's `.rlib` and `.rmeta` itself, running no C
+`DEVELOPER_DIR`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`, and for a linked output every variable whose
+name starts with `LD_`, `RC_` or `COLLECT_`, and `LDEMULATION` and `GNUTARGET`), but for a library,
+which links nothing, neither those nor `SDKROOT` (rustc reads the SDK only to link; a library's
+bytes are the same under two SDKs). The prefixes are what the linkers read from their own
+environment without a word on the link line: Apple's `ld` (Xcode 27.2, names found in its binary)
+changes every output's UUID with `RC_UUID_SALT` and a dynamic library's header with
+`LD_APPLICATION_EXTENSION_SAFE` and `LD_NO_ENCRYPT`; GNU `ld` reads `LD_RUN_PATH`, `LDEMULATION`
+and `GNUTARGET`, and `collect2` its `COLLECT_` ones. A prefix, not a list, because a linker update
+can add one and nobody reads its binary again; so `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`,
+which change the libraries the linker programs themselves load, are keyed too, with roots
+replaced (on Linux cargo sets `LD_LIBRARY_PATH` for rustc to the target folder's `deps`, and
+rustup adds the toolchain's `lib`: both roots or bases, so the text is the same in every checkout).
+*Rests on:* rustc writing a library's `.rlib` and `.rmeta` itself, running no C
 driver or linker for it, and taking from the SDK nothing but what links (1.94.0 on macOS: the
 same bytes with `SDKROOT` unset, set to two SDK versions, and `DEVELOPER_DIR` naming either;
-`MACOSX_DEPLOYMENT_TARGET`, which does change a library, stays keyed). *Breaks if:* a rustc
-read the SDK's version or a file under it for a library, or ran a linker to write one.
+`MACOSX_DEPLOYMENT_TARGET`, which does change a library, stays keyed); and the linkers reading
+their own variables under those names (a test links a proc macro with and without
+`LD_APPLICATION_EXTENSION_SAFE` and a program with and without `RC_UUID_SALT` on macOS: other bytes,
+other keys). *Breaks if:* a rustc read the SDK's version or a file under it for a library, or ran
+a linker to write one; or a linker read a variable under another name.
 `SOURCE_DATE_EPOCH`, which compilers and build tools take "now" from when it is set (the
 wrapper never sets it), is keyed for every compile, a library's too: rustc doesn't read it, but
 a proc macro runs inside rustc and may, and a library's command line doesn't show every macro it

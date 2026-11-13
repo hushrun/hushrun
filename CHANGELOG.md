@@ -194,6 +194,12 @@ offline.
 
 ### Fixed
 
+- Build blocks: a program, proc macro or build script linked with a variable the linker reads
+  from its own environment set no longer reuses one linked without it. Apple's `ld` reads
+  `RC_UUID_SALT` (every output's UUID) and `LD_APPLICATION_EXTENSION_SAFE` and `LD_NO_ENCRYPT`
+  (a dynamic library's header), and the key held none of them. Now every variable whose name
+  starts with `LD_`, `RC_` or `COLLECT_`, and `LDEMULATION` and `GNUTARGET`, is keyed for a linked
+  output.
 - Build blocks: a proc macro in a `target/` folder restored from a cache or copied from
   elsewhere no longer gives its dependents the keys of the macro its record names. The record
   beside it was believed whenever its own SHA-256 matched the file, so a doctored macro with a

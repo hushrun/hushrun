@@ -474,3 +474,50 @@ fn target_cpu_native_is_resolved_by_the_real_compiler_and_still_reused() {
     ok(&out);
     assert!(reused(&second), "{second:?}");
 }
+
+/// Links `m` in `ws` as a proc macro (or, with `program`, as a program) through the wrapper,
+/// with `env`, and gives the log entry and the linked file's bytes.
+#[cfg(target_os = "macos")]
+fn linked_with(w: &World, ws: &Path, program: bool, env: &[(&str, &str)]) -> (Entry, Vec<u8>) {
+    let (kind, source, file, args): (_, _, _, &[&str]) = if program {
+        ("bin", "fn main() { println!(\"hi\"); }\n", "out/m-x", &[])
+    } else {
+        (
+            "proc-macro",
+            "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n",
+            "out/libm-x.dylib",
+            &["--extern", "proc_macro"],
+        )
+    };
+    write(&ws.join("m/main.rs"), source);
+    let (out, entry) = w.call_as(ws, "m", "m/main.rs", kind, args, env);
+    ok(&out);
+    (entry, fs::read(ws.join(file)).unwrap())
+}
+
+// covers: B-5
+#[cfg(target_os = "macos")]
+#[test]
+fn a_variable_apples_linker_reads_by_itself_changes_a_linked_outputs_key() {
+    // Apple's `ld` reads `LD_APPLICATION_EXTENSION_SAFE` (a dynamic library's header flag) and
+    // `RC_UUID_SALT` (every output's UUID) from its own environment; nothing on the link line
+    // says so.
+    for (program, name, value) in [
+        (false, "LD_APPLICATION_EXTENSION_SAFE", "1"),
+        (true, "RC_UUID_SALT", "hello"),
+    ] {
+        let w = world();
+        let ws = w.checkout("ws");
+        let (first, plain) = linked_with(&w, &ws, program, &[]);
+        assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+        let (second, with) = linked_with(&w, &ws, program, &[(name, value)]);
+        assert_ne!(plain, with, "{name} changes the linker's output");
+        assert!(!second.found, "{name}: the key must differ: {second:?}");
+        assert_eq!(second.outcome, Outcome::BuiltAndStored, "{second:?}");
+        assert_eq!(blocks(&w), 2, "{name}");
+        // Without it again: the first block.
+        let (third, again) = linked_with(&w, &ws, program, &[]);
+        assert!(reused(&third), "{name}: {third:?}");
+        assert_eq!(again, plain, "{name}");
+    }
+}
