@@ -514,6 +514,65 @@ fn a_job_whose_org_doesnt_share_runs_unwrapped_and_says_nothing() {
     assert!(ci_stores(&a.root.join("runner-temp")).is_empty());
 }
 
+/// `hushrun build status` in a GitHub Actions job, as `change` alters it: its `ci` line.
+fn ci_status(
+    m: &Machine,
+    fake: &FakeBuild,
+    change: impl FnOnce(&mut assert_cmd::Command),
+) -> String {
+    let mut cmd = m.hushrun(fake);
+    in_github_actions(&mut cmd, fake, &m.root.join("runner-temp"));
+    cmd.env_remove("HUSHRUN_BUILD");
+    change(&mut cmd);
+    let output = cmd.args(["build", "status"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{stdout}");
+    stdout
+        .lines()
+        .find(|line| line.starts_with("ci "))
+        .unwrap_or_else(|| panic!("no ci line: {stdout}"))
+        .to_string()
+}
+
+// covers: B-25, B-31
+#[test]
+fn build_status_in_ci_says_what_a_run_does_there_and_why() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    // A job with an ID token.
+    assert_eq!(
+        ci_status(&a, &fake, |_| {}),
+        "ci        this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, and shares as the org's mode says; no person's settings are read"
+    );
+    // A job without one.
+    assert_eq!(
+        ci_status(&a, &fake, |cmd| {
+            cmd.env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+                .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
+        }),
+        "ci        this is CI, where `hushrun run` reuses nothing here: the job can't mint an ID token (give the job `permissions: id-token: write`)"
+    );
+    // Another CI, with an agent token: it reads, and uploads nothing.
+    assert_eq!(
+        ci_status(&a, &fake, |cmd| {
+            cmd.env_remove("GITHUB_ACTIONS")
+                .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+                .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+                .env("GITLAB_CI", "true");
+        }),
+        "ci        this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions); no person's settings are read"
+    );
+    // No backend.
+    assert_eq!(
+        ci_status(&a, &fake, |cmd| {
+            cmd.env_remove("HUSHRUN_BACKEND")
+                .env_remove("HUSHRUN_TOKEN");
+        }),
+        "ci        this is CI, where `hushrun run` reuses nothing here: no backend is signed in to"
+    );
+}
+
 // covers: B-2, B-25
 #[test]
 fn a_job_whose_orgs_plan_sets_storage_by_contract_runs_unwrapped_and_says_so_once() {

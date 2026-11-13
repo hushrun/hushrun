@@ -460,7 +460,10 @@ reused only in the target folder that built it. Any other value makes the file i
 session carries what the file said when `hushrun run` began, so every compile of a run sees one
 value. `hushrun build status` shows the mode, the store's folder, how long blocks are kept,
 `programs`, the share setting and what sharing does here and why (B-33), the store's size and
-its blocks by age and by repository. `hushrun build clean` empties the store. `share` (B-33) is
+its blocks by age and by repository; in CI, one more line of what `hushrun run NAME -- COMMAND`
+does in the job and why, from B-25's one function and no person's settings (reuse in the job's
+own store when the org shares, reading only with an agent token outside GitHub Actions, or
+nothing, with the reason: no backend, no ID token). `hushrun build clean` empties the store. `share` (B-33) is
 `on` (unless set), `observe` or `off`; `hushrun build share on|observe|off` saves it, and
 `HUSHRUN_BUILD_SHARE` sets it for one command.
 

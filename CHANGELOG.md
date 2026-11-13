@@ -191,6 +191,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- `hushrun build status` in CI says what `hushrun run NAME -- COMMAND` does in the job and why,
+  from the same function a run asks: reuse in the job's own store when the org shares (reading
+  only with an agent token outside GitHub Actions), or nothing, because there is no backend or the
+  job can't mint an ID token. Before, it said `this is CI, where hushrun run reuses nothing`,
+  stale since CI reuses when the org shares.
 - Build blocks: an agent's sandbox with the network reuses and shares when its org shares. A run
   under an agent token on a machine with no person's `build.json` now has reuse on, in the store,
   and shares as the org's mode says, as the table of who shares says; `HUSHRUN_BUILD=off` still

@@ -203,18 +203,54 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
     Ok(Exit::Ok)
 }
 
-/// What sharing does here, as far as this machine can tell without asking the backend (B-25):
-/// the word, and why.
-fn sharing_here(effective: &settings::Settings, sandbox: bool) -> (&'static str, String) {
-    use hushrun_build::share::{Org, Sharing, what_a_run_does};
+/// What a `hushrun run NAME -- COMMAND` from this shell does (B-25), as far as this machine can
+/// tell without asking the backend: the one function's answer, the org taken as sharing at the
+/// most it can. A CI job with no backend to ask has nothing to share with.
+fn run_here(effective: &settings::Settings, sandbox: bool) -> hushrun_build::share::Does {
+    use hushrun_build::share::{Does, Off, Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     };
     let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    if in_ci && access.is_none() {
+        return Does {
+            local: Mode::Off,
+            sharing: Sharing::Off(Off::SignedOut),
+            uploads: false,
+        };
+    }
     let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci, sandbox);
-    let does = what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None));
+    what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None))
+}
+
+/// The `ci` line of `hushrun build status` (B-2, B-31): what `hushrun run` does in this CI job,
+/// and why, from [`run_here`].
+fn ci_here(effective: &settings::Settings) -> String {
+    use hushrun_build::share::{Off, Sharing};
+    let does = run_here(effective, false);
+    match (does.local, does.sharing) {
+        (Mode::Off, Sharing::Off(off)) => {
+            let hint = match off {
+                Off::NoIdToken => " (give the job `permissions: id-token: write`)",
+                _ => "",
+            };
+            format!(
+                "this is CI, where `hushrun run` reuses nothing here: {}{hint}",
+                off.reason()
+            )
+        }
+        _ if !does.uploads => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions); no person's settings are read".to_string(),
+        _ => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, and shares as the org's mode says; no person's settings are read".to_string(),
+    }
+}
+
+/// What sharing does here, as far as this machine can tell without asking the backend (B-25):
+/// the word, and why.
+fn sharing_here(effective: &settings::Settings, sandbox: bool) -> (&'static str, String) {
+    use hushrun_build::share::Sharing;
+    let does = run_here(effective, sandbox);
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),
         Sharing::Observe => (
@@ -441,9 +477,11 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
         );
     }
     if in_ci {
+        // No person's settings are read in CI: what applies there is the job's, whatever the
+        // file here says.
         line(
             "ci",
-            "this is CI, where `hushrun run` reuses nothing".to_string(),
+            ci_here(effective.as_ref().unwrap_or(&settings::Settings::default())),
         );
     }
     if let Some(value) = &wrapper {
