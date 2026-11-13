@@ -2605,6 +2605,7 @@ fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
 }
 
 /// What a run says when a second start of the runner in COMMAND wasn't observed.
+#[cfg(unix)]
 const SECOND_START: &str = "no test file or test records a pass: Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
 
 // covers: C-32, C-44

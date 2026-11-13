@@ -178,7 +178,9 @@ impl Lines {
 /// writers flush as they exit comes within milliseconds, so a quarter second is ample.
 pub const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// The longest [`run_copying_stdout`] goes on reading after the program ended, for output that
-/// never goes quiet, before it hands the rest over.
+/// never goes quiet, before it hands the rest over. Only the Unix reader stops early: elsewhere
+/// it reads to the end.
+#[cfg(unix)]
 pub const MOST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 /// \[ADR 0086\] The hidden subcommand of the forwarder [`run_copying_stdout`] hands held output
 /// to: hushrun copying its standard input to its standard output until the end. Never typed.
@@ -761,8 +763,10 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     struct AddsSkip;
 
+    #[cfg(unix)]
     impl Program for AddsSkip {
         fn name(&self) -> &'static str {
             "faketool"
