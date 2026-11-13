@@ -29,7 +29,10 @@
 //! # A note, never an authority
 //!
 //! A record saves a read; it never decides a key on its own. Its SHA-256 answers while the stat
-//! holds, as a remembered digest of the file. What it says of the block the file came from
+//! holds, as a remembered digest of the file, and only when the record is sealed with the run's
+//! store's secret ([`Seal`]): a wrapper of that store wrote it after hashing the file or putting
+//! the block's bytes in place. Any other record, as one that came back with a restored `target/`
+//! whose stat was foreseen, has the file hashed before anything it says counts. What it says of the block the file came from
 //! (`produced_by`, `portable`, `step`) is believed only when the run's own store confirms it
 //! ([`vouched`]): the store holds the block the record names, and that block's `block.json` holds
 //! a file of this name, size and SHA-256. A `target/` folder can come from anywhere (a CI cache,
@@ -130,6 +133,9 @@ struct Stored {
     portable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     block: Option<Digest>,
+    /// [`Seal::over`] the record written without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seal: Option<Digest>,
 }
 
 impl From<&Record> for Stored {
@@ -148,6 +154,7 @@ impl From<&Record> for Stored {
             reused: record.reused,
             portable: record.portable,
             block: record.block,
+            seal: None,
         }
     }
 }
@@ -172,6 +179,38 @@ impl Stored {
         })
     }
 }
+
+/// A store's secret (B-6). A record sealed with it was written by a wrapper of that store, which
+/// hashed the file or put the block's bytes in place itself, so its stat may answer for the
+/// file's bytes without a read. It never leaves the store: a record holds only a digest of it
+/// with the record's own fields.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Seal([u8; 32]);
+
+impl std::fmt::Debug for Seal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seal(..)")
+    }
+}
+
+impl Seal {
+    /// A seal of these bytes.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Seal {
+        Seal(bytes)
+    }
+
+    /// The seal of a record's text without its seal.
+    fn over(&self, text: &[u8]) -> Digest {
+        let mut input = Vec::with_capacity(SEAL_LABEL.len() + 32 + text.len());
+        input.extend_from_slice(SEAL_LABEL);
+        input.extend_from_slice(&self.0);
+        input.extend_from_slice(text);
+        Digest::of(&input)
+    }
+}
+
+/// What a record's seal is taken over first, so it is never another digest of the same bytes.
+const SEAL_LABEL: &[u8] = b"hushrun.build.sidecar.seal/1\0";
 
 /// Whether two stats describe the same file for a record: size, modification time, inode and
 /// device. Not the change time and not the mode.
@@ -212,12 +251,14 @@ pub fn record(
     sha256: Digest,
     produced_by: Option<Digest>,
     reused: bool,
+    seal: Option<&Seal>,
 ) -> io::Result<()> {
-    record_from(file, sha256, produced_by, None, reused, false, None)
+    record_from(file, sha256, produced_by, None, reused, false, None, seal)
 }
 
 /// [`record`] for a file a compile wrote: the first key it was compiled for, whether another
 /// machine names it the same way, and the block it was stored as, if it was (B-6).
+#[allow(clippy::too_many_arguments)]
 pub fn record_built(
     file: &Path,
     sha256: Digest,
@@ -225,6 +266,7 @@ pub fn record_built(
     step: Digest,
     portable: bool,
     block: Option<Digest>,
+    seal: Option<&Seal>,
 ) -> io::Result<()> {
     record_from(
         file,
@@ -234,10 +276,12 @@ pub fn record_built(
         false,
         portable,
         block,
+        seal,
     )
 }
 
 /// [`record_block`] for a file a reuse put in place from the block `block` (B-12, B-32).
+#[allow(clippy::too_many_arguments)]
 pub fn record_reused(
     file: &Path,
     sha256: Digest,
@@ -245,6 +289,7 @@ pub fn record_reused(
     step: Digest,
     block: Digest,
     portable: bool,
+    seal: Option<&Seal>,
 ) -> io::Result<()> {
     record_from(
         file,
@@ -254,9 +299,11 @@ pub fn record_reused(
         true,
         portable,
         Some(block),
+        seal,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_from(
     file: &Path,
     sha256: Digest,
@@ -265,6 +312,7 @@ fn record_from(
     reused: bool,
     portable: bool,
     block: Option<Digest>,
+    seal: Option<&Seal>,
 ) -> io::Result<()> {
     let stat = Stat::of(&fs::metadata(file)?);
     write(
@@ -278,20 +326,22 @@ fn record_from(
             portable,
             block,
         },
+        seal,
     )
 }
 
-/// The SHA-256 of `file` as it is now, and the block it came from. A record whose stat still
-/// holds answers without reading the file. Otherwise the file is hashed and the record kept
-/// (same bytes, new stat) or replaced by one that names no block (other bytes, or no record).
+/// The SHA-256 of `file` as it is now, and the block it came from. A record sealed with
+/// `seal` whose stat still holds answers without reading the file. Otherwise the file is hashed
+/// and the record kept (same bytes, new stat, sealed with `seal`) or replaced by one that names
+/// no block (other bytes, or no record). With no seal every lookup hashes.
 ///
 /// A record that can't be written is not an error: the answer is right either way and the
 /// next lookup hashes again. A file that changes while it is hashed is an error, since its
 /// hash describes no version of it.
-pub fn lookup(file: &Path) -> io::Result<Known> {
+pub fn lookup(file: &Path, seal: Option<&Seal>) -> io::Result<Known> {
     let now = Stat::of(&fs::metadata(file)?);
-    let old = load(file);
-    if let Some(old) = old
+    let old = load(file, seal);
+    if let Some((old, true)) = old
         && same_file(&old.stat, &now)
     {
         return Ok(Known {
@@ -307,7 +357,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
     }
     let (sha256, stat) = hash(file)?;
     let fresh = match old {
-        Some(old) if old.sha256 == sha256 => Record { stat, ..old },
+        Some((old, _)) if old.sha256 == sha256 => Record { stat, ..old },
         _ => Record {
             stat,
             sha256,
@@ -319,7 +369,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
         },
     };
     // Best effort: a record is a saving, never the answer's source of truth here.
-    let _ = write(file, &fresh);
+    let _ = write(file, &fresh, seal);
     Ok(Known {
         sha256: fresh.sha256,
         size: fresh.stat.size,
@@ -386,7 +436,7 @@ pub fn vouched(store: &Store, file: &Path, known: &Known) -> Option<Vouched> {
 /// (B-15). Never reads the file itself, and stats it only when its record says reused: a
 /// file with no record costs one failed open.
 pub fn reused(file: &Path) -> bool {
-    let Some(record) = load(file).filter(|record| record.reused) else {
+    let Some((record, _)) = load(file, None).filter(|(record, _)| record.reused) else {
         return false;
     };
     fs::metadata(file).is_ok_and(|meta| same_file(&record.stat, &Stat::of(&meta)))
@@ -459,7 +509,9 @@ pub fn reused_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
             continue;
         };
         let file = dir.join(name);
-        if parse(&path).is_some_and(|record| record.reused) && fs::symlink_metadata(&file).is_ok() {
+        if parse(&path, None).is_some_and(|(record, _)| record.reused)
+            && fs::symlink_metadata(&file).is_ok()
+        {
             files.push(file);
         }
     }
@@ -467,24 +519,39 @@ pub fn reused_in(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// The record of `file`, or `None` when it is missing, unreadable or not a record.
-fn load(file: &Path) -> Option<Record> {
-    parse(&record_path(file)?)
+/// The record of `file`, and whether it is sealed with `seal`; `None` when it is missing,
+/// unreadable or not a record.
+fn load(file: &Path, seal: Option<&Seal>) -> Option<(Record, bool)> {
+    parse(&record_path(file)?, seal)
 }
 
-fn parse(path: &Path) -> Option<Record> {
+fn parse(path: &Path, seal: Option<&Seal>) -> Option<(Record, bool)> {
     let bytes = fs::read(path).ok()?;
-    serde_json::from_slice::<Stored>(&bytes).ok()?.into_record()
+    let mut stored = serde_json::from_slice::<Stored>(&bytes).ok()?;
+    let claimed = stored.seal.take();
+    // The record as it was written without its seal: the same struct gives the same text.
+    let sealed = match (seal, claimed) {
+        (Some(seal), Some(claimed)) => serde_json::to_vec(&stored)
+            .ok()
+            .is_some_and(|text| seal.over(&text) == claimed),
+        _ => false,
+    };
+    Some((stored.into_record()?, sealed))
 }
 
 /// Writes the record of `file` whole: a temporary file in `.hushrun/`, then a rename. The
 /// temporary name begins with a dot, never with `lib`, and is unique to this process and
 /// attempt, so writers in other processes and threads never share one.
-fn write(file: &Path, record: &Record) -> io::Result<()> {
+fn write(file: &Path, record: &Record, seal: Option<&Seal>) -> io::Result<()> {
     let path = record_path(file).ok_or_else(|| no_name(file))?;
     let dir = path.parent().unwrap_or(Path::new(""));
     fs::create_dir_all(dir)?;
-    let bytes = serde_json::to_vec(&Stored::from(record)).map_err(io::Error::other)?;
+    let mut stored = Stored::from(record);
+    if let Some(seal) = seal {
+        let text = serde_json::to_vec(&stored).map_err(io::Error::other)?;
+        stored.seal = Some(seal.over(&text));
+    }
+    let bytes = serde_json::to_vec(&stored).map_err(io::Error::other)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let pid = std::process::id();
     let mut attempt = 0u32;
@@ -543,6 +610,8 @@ mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
 
+    const SEAL: Seal = Seal::from_bytes([7; 32]);
+
     fn key(n: u8) -> Digest {
         Digest::from_bytes([n; 32])
     }
@@ -569,7 +638,14 @@ mod tests {
             record_path(&file).unwrap(),
             dir.path().join(".hushrun").join("libfoo-0123.rmeta.json")
         );
-        record(&file, Digest::of(b"rmeta"), Some(key(1)), false).unwrap();
+        record(
+            &file,
+            Digest::of(b"rmeta"),
+            Some(key(1)),
+            false,
+            Some(&SEAL),
+        )
+        .unwrap();
         // Only the output and the hidden folder: nothing new for rustc's `lib` scan.
         let mut top: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
@@ -596,8 +672,8 @@ mod tests {
         fs::write(&file, b"rlib bytes").unwrap();
         // A hash that is not the file's: only an answer from the record can give it back.
         let recorded = key(9);
-        record(&file, recorded, Some(key(1)), true).unwrap();
-        let known = lookup(&file).unwrap();
+        record(&file, recorded, Some(key(1)), true, Some(&SEAL)).unwrap();
+        let known = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(
             known,
             Known {
@@ -615,20 +691,50 @@ mod tests {
 
     // covers: B-6
     #[test]
+    fn a_record_another_store_sealed_or_none_sealed_answers_only_after_a_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("libfoo-0123.rlib");
+        fs::write(&file, b"rlib bytes").unwrap();
+        // Its stat holds, and its SHA-256 is not the file's: only a read gives the right one.
+        let other = Seal::from_bytes([8; 32]);
+        for seal in [Some(&other), None] {
+            record(&file, key(9), Some(key(1)), true, seal).unwrap();
+            let known = lookup(&file, Some(&SEAL)).unwrap();
+            assert!(known.read);
+            assert_eq!(known.sha256, Digest::of(b"rlib bytes"));
+            assert_eq!(known.produced_by, None, "other bytes than its record's");
+            // Hashed once, it is sealed with this store's seal and answers from then on.
+            assert!(!lookup(&file, Some(&SEAL)).unwrap().read);
+            assert!(lookup(&file, Some(&other)).unwrap().read);
+        }
+        // With no seal at all, every lookup reads.
+        assert!(lookup(&file, None).unwrap().read);
+        assert!(lookup(&file, None).unwrap().read);
+    }
+
+    // covers: B-6
+    #[test]
     fn a_moved_modification_time_over_the_same_bytes_keeps_the_block() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rmeta");
         fs::write(&file, b"metadata").unwrap();
-        record(&file, Digest::of(b"metadata"), Some(key(2)), false).unwrap();
+        record(
+            &file,
+            Digest::of(b"metadata"),
+            Some(key(2)),
+            false,
+            Some(&SEAL),
+        )
+        .unwrap();
         // What cargo does to a check output after rustc exits.
         set_mtime(&file, mtime(&file) + Duration::from_secs(3));
 
-        let known = lookup(&file).unwrap();
+        let known = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(known.sha256, Digest::of(b"metadata"));
         assert_eq!(known.produced_by, Some(key(2)));
         assert!(known.read);
 
-        let again = lookup(&file).unwrap();
+        let again = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(again.produced_by, Some(key(2)));
         assert!(!again.read, "the new stat was written");
     }
@@ -639,7 +745,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rlib");
         fs::write(&file, b"version one").unwrap();
-        record(&file, Digest::of(b"version one"), Some(key(3)), true).unwrap();
+        record(
+            &file,
+            Digest::of(b"version one"),
+            Some(key(3)),
+            true,
+            Some(&SEAL),
+        )
+        .unwrap();
         let old = fs::metadata(&file).unwrap();
 
         // Written beside it while it exists, so it has another inode, then renamed over it.
@@ -651,7 +764,7 @@ mod tests {
         assert_eq!(new.len(), old.len());
         assert_eq!(new.modified().unwrap(), old.modified().unwrap());
 
-        let known = lookup(&file).unwrap();
+        let known = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(
             known,
             Known {
@@ -665,10 +778,10 @@ mod tests {
                 read: true,
             }
         );
-        let stored = load(&file).unwrap();
+        let stored = load(&file, Some(&SEAL)).map(|(r, _)| r).unwrap();
         assert_eq!((stored.produced_by, stored.reused), (None, false));
         assert_eq!(stored.sha256, Digest::of(b"version two"));
-        assert!(!lookup(&file).unwrap().read);
+        assert!(!lookup(&file, Some(&SEAL)).unwrap().read);
     }
 
     /// The one change a stat can't see, kept here so it stays a known limit, not a surprise.
@@ -677,11 +790,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rlib");
         fs::write(&file, b"version one").unwrap();
-        record(&file, Digest::of(b"version one"), Some(key(4)), false).unwrap();
+        record(
+            &file,
+            Digest::of(b"version one"),
+            Some(key(4)),
+            false,
+            Some(&SEAL),
+        )
+        .unwrap();
         let old = mtime(&file);
         fs::write(&file, b"version two").unwrap();
         set_mtime(&file, old);
-        let known = lookup(&file).unwrap();
+        let known = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(known.sha256, Digest::of(b"version one"));
         assert!(!known.read);
     }
@@ -692,11 +812,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rmeta");
         fs::write(&file, b"metadata").unwrap();
-        record(&file, key(7), Some(key(5)), true).unwrap();
+        record(&file, key(7), Some(key(5)), true, Some(&SEAL)).unwrap();
         let path = record_path(&file).unwrap();
         for corrupt in [&b"{\"schema\": \"hushrun.build.sid"[..], b"", b"[]"] {
             fs::write(&path, corrupt).unwrap();
-            let known = lookup(&file).unwrap();
+            let known = lookup(&file, Some(&SEAL)).unwrap();
             assert_eq!(
                 known,
                 Known {
@@ -711,7 +831,7 @@ mod tests {
                 }
             );
             // Replaced by a whole record.
-            assert!(!lookup(&file).unwrap().read);
+            assert!(!lookup(&file, Some(&SEAL)).unwrap().read);
         }
     }
 
@@ -720,14 +840,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rmeta");
         fs::write(&file, b"metadata").unwrap();
-        record(&file, key(7), Some(key(5)), true).unwrap();
+        record(&file, key(7), Some(key(5)), true, Some(&SEAL)).unwrap();
         let path = record_path(&file).unwrap();
         let text = fs::read_to_string(&path)
             .unwrap()
             .replace(SCHEMA, "hushrun.build.sidecar/1");
         fs::write(&path, text).unwrap();
-        assert!(load(&file).is_none());
-        assert_eq!(lookup(&file).unwrap().produced_by, None);
+        assert!(load(&file, Some(&SEAL)).map(|(r, _)| r).is_none());
+        assert_eq!(lookup(&file, Some(&SEAL)).unwrap().produced_by, None);
     }
 
     // covers: B-6
@@ -736,7 +856,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libbar-4567.rlib");
         fs::write(&file, b"no record yet").unwrap();
-        let known = lookup(&file).unwrap();
+        let known = lookup(&file, Some(&SEAL)).unwrap();
         assert_eq!(
             known,
             Known {
@@ -750,14 +870,14 @@ mod tests {
                 read: true,
             }
         );
-        assert!(!lookup(&file).unwrap().read);
+        assert!(!lookup(&file, Some(&SEAL)).unwrap().read);
     }
 
     #[test]
     fn a_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(lookup(&dir.path().join("gone")).is_err());
-        assert!(record(&dir.path().join("gone"), key(1), None, false).is_err());
+        assert!(lookup(&dir.path().join("gone"), Some(&SEAL)).is_err());
+        assert!(record(&dir.path().join("gone"), key(1), None, false, Some(&SEAL)).is_err());
     }
 
     #[test]
@@ -765,9 +885,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("libfoo-0123.rmeta");
         fs::write(&file, b"metadata").unwrap();
-        record(&file, key(7), Some(key(5)), true).unwrap();
+        record(&file, key(7), Some(key(5)), true, Some(&SEAL)).unwrap();
         forget(&file).unwrap();
-        assert!(load(&file).is_none());
+        assert!(load(&file, Some(&SEAL)).map(|(r, _)| r).is_none());
         forget(&file).unwrap();
         forget(&dir.path().join("never-recorded")).unwrap();
     }
@@ -789,13 +909,13 @@ mod tests {
         let plain = write_file("libd-0004.rlib");
         let gone = write_file("libe-0005.rlib");
         let corrupt = write_file("libf-0006.rlib");
-        record(&a, key(1), Some(key(1)), true).unwrap();
-        record(&b, key(2), Some(key(2)), true).unwrap();
-        record(&built, key(3), Some(key(3)), false).unwrap();
-        lookup(&plain).unwrap();
-        record(&gone, key(5), Some(key(5)), true).unwrap();
+        record(&a, key(1), Some(key(1)), true, Some(&SEAL)).unwrap();
+        record(&b, key(2), Some(key(2)), true, Some(&SEAL)).unwrap();
+        record(&built, key(3), Some(key(3)), false, Some(&SEAL)).unwrap();
+        lookup(&plain, Some(&SEAL)).unwrap();
+        record(&gone, key(5), Some(key(5)), true, Some(&SEAL)).unwrap();
         fs::remove_file(&gone).unwrap();
-        record(&corrupt, key(6), Some(key(6)), true).unwrap();
+        record(&corrupt, key(6), Some(key(6)), true, Some(&SEAL)).unwrap();
         fs::write(record_path(&corrupt).unwrap(), b"{").unwrap();
         // A stray temporary file is not a record.
         fs::write(out.join(DIR).join(".liba-0001.rmeta.json.1.0.tmp"), b"{}").unwrap();
@@ -813,12 +933,12 @@ mod tests {
                 let file = &file;
                 scope.spawn(move || {
                     for _ in 0..50 {
-                        record(file, key(t), Some(key(t)), t % 2 == 0).unwrap();
+                        record(file, key(t), Some(key(t)), t % 2 == 0, Some(&SEAL)).unwrap();
                     }
                 });
             }
         });
-        let last = load(&file).unwrap();
+        let last = load(&file, Some(&SEAL)).map(|(r, _)| r).unwrap();
         assert_eq!(Some(last.sha256), last.produced_by);
         let inside = fs::read_dir(dir.path().join(DIR)).unwrap().count();
         assert_eq!(inside, 1, "no temporary file left");
@@ -833,12 +953,12 @@ mod tests {
                 scope.spawn(move || {
                     let file = dir.join(format!("lib{t}-0000.rlib"));
                     fs::write(&file, [t]).unwrap();
-                    record(&file, Digest::of(&[t]), Some(key(t)), true).unwrap();
+                    record(&file, Digest::of(&[t]), Some(key(t)), true, Some(&SEAL)).unwrap();
                 });
             }
         });
         for t in 0..16u8 {
-            let known = lookup(&dir.path().join(format!("lib{t}-0000.rlib"))).unwrap();
+            let known = lookup(&dir.path().join(format!("lib{t}-0000.rlib")), Some(&SEAL)).unwrap();
             assert_eq!((known.produced_by, known.read), (Some(key(t)), false));
         }
         assert_eq!(reused_in(dir.path()).unwrap().len(), 16);

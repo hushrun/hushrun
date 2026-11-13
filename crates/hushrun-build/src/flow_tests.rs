@@ -957,7 +957,7 @@ fn a_block_built_in_one_checkout_is_reused_in_another() {
     let entry = second.entry.unwrap();
     assert!(entry.found);
     // The record beside it says a reuse put it there.
-    let known = crate::sidecar::lookup(&w.rlib(&two, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&two, "a"), None).unwrap();
     assert!(known.reused && known.step.is_some());
 }
 
@@ -1224,6 +1224,7 @@ fn a_kill_between_the_copy_and_the_rename_leaves_nothing_taken_for_a_block() {
         roots: &roots,
         start: SystemTime::now(),
         pid: 7,
+        seal: None,
     }
     .prepare()
     .unwrap();
@@ -2106,13 +2107,13 @@ fn only_a_block_that_may_move_names_its_origin_to_dependents() {
     let ws = w.checkout("ws");
     settle();
     assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
-    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a"), None).unwrap();
     assert_eq!(known.produced_by, None, "a tied block named by its origin");
     assert!(known.step.is_some());
     // Reused in place: still not named by its origin.
     fs::remove_file(w.rlib(&ws, "a")).unwrap();
     assert_eq!(w.call(&ws, "a", &[]).outcome(), REUSED);
-    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a"), None).unwrap();
     assert_eq!(known.produced_by, None, "a tied block named by its origin");
     assert!(known.reused);
 
@@ -2123,14 +2124,14 @@ fn only_a_block_that_may_move_names_its_origin_to_dependents() {
     settle();
     assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
     assert!(
-        crate::sidecar::lookup(&w.rlib(&one, "a"))
+        crate::sidecar::lookup(&w.rlib(&one, "a"), None)
             .unwrap()
             .produced_by
             .is_some()
     );
     assert_eq!(w.call(&two, "a", &[]).outcome(), REUSED);
     assert!(
-        crate::sidecar::lookup(&w.rlib(&two, "a"))
+        crate::sidecar::lookup(&w.rlib(&two, "a"), None)
             .unwrap()
             .produced_by
             .is_some()
@@ -2593,6 +2594,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             script: None,
             run_memo: None,
             store: None,
+            seal: None,
         };
         let common = cx.common().unwrap();
         hints
@@ -3401,6 +3403,7 @@ fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whol
             roots: &roots,
             start: SystemTime::now(),
             pid: 7,
+            seal: None,
         }
         .prepare()
         .unwrap();
@@ -5190,4 +5193,44 @@ fn a_record_the_store_cant_confirm_suspends_and_reports_nothing_when_a_dependent
     // The file is still removed, so cargo builds `a` there.
     assert!(!rmeta.exists());
     assert!(r.entry.unwrap().note.is_some());
+}
+
+// covers: B-6
+#[test]
+fn a_restored_record_with_the_files_own_stat_does_not_answer_for_its_bytes() {
+    // A target folder from elsewhere, whose record for a library holds the stat the restored
+    // file has here and the SHA-256 of other bytes: as a cache restore whose inode was foreseen.
+    let m = a_machine("runner", "stable-aarch64-apple-darwin");
+    m.w.plan("b", Plan::default());
+    let ws = m.w.checkout("ws");
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    fs::write(&rmeta, b"doctored").unwrap();
+    let stat = hushrun_digest::cache::Stat::of(&fs::metadata(&rmeta).unwrap());
+    let record = crate::sidecar::record_path(&rmeta).unwrap();
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let text = serde_json::json!({
+        "schema": "hushrun.build.sidecar/3",
+        "size": stat.size,
+        "mtime_ns": stat.mtime_ns,
+        "ctime_ns": stat.ctime_ns,
+        "inode": stat.inode,
+        "device": stat.device,
+        "mode": stat.mode,
+        "sha256": Digest::of(b"honest"),
+        "produced_by": null,
+        "reused": false,
+        "portable": false,
+    });
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    settle();
+    let ext = format!("a={}", rmeta.display());
+    let r =
+        m.w.call_with(&ws, "b", &["--extern", &ext], |fake| m.toolchain_vars(fake));
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert_eq!(
+        m.keys()["b"]["keys"]["externs"][0]["by"]["content"],
+        serde_json::to_value(Digest::of(b"doctored")).unwrap()
+    );
 }

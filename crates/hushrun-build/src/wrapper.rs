@@ -907,6 +907,7 @@ impl Call<'_> {
             script: script.as_ref(),
             run_memo: Some(&self.current.folder),
             store: Some(&store),
+            seal: store.seal(),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -1236,6 +1237,7 @@ impl Call<'_> {
             roots,
             start: self.start,
             pid: self.ports.pid(),
+            seal: cx.seal,
         }
         .run();
         let restored = restored.ok()?;
@@ -1454,6 +1456,7 @@ impl Call<'_> {
                             cx.step,
                             portable,
                             log.key,
+                            cx.seal.as_ref(),
                         );
                     }
                 }
@@ -2379,6 +2382,7 @@ impl Call<'_> {
         });
         let named = decide::not_loaded(diagnostics)?;
         let now = self.ports.now();
+        let seal = store.seal();
         let mut names = Vec::new();
         for ext in self.invocation.externs() {
             let Some(given) = &ext.path else { continue };
@@ -2393,7 +2397,7 @@ impl Call<'_> {
             if !is_named {
                 continue;
             }
-            let Ok(known) = sidecar::lookup(&path) else {
+            let Ok(known) = sidecar::lookup(&path, seal.as_ref()) else {
                 continue;
             };
             if !known.reused {
@@ -2440,7 +2444,7 @@ impl Call<'_> {
             }
             if let Some(dir) = path.parent() {
                 for file in sidecar::reused_in(dir).unwrap_or_default() {
-                    if sidecar::lookup(&file).is_ok_and(|k| k.step == Some(step)) {
+                    if sidecar::lookup(&file, seal.as_ref()).is_ok_and(|k| k.step == Some(step)) {
                         let _ = std::fs::remove_file(&file);
                         let _ = sidecar::forget(&file);
                     }

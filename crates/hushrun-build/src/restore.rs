@@ -76,6 +76,8 @@ pub struct Restore<'a> {
     pub start: SystemTime,
     /// This process's id, for temporary names no other process uses.
     pub pid: u32,
+    /// The store's seal, which each placed file's record is sealed with (B-6).
+    pub seal: Option<crate::sidecar::Seal>,
 }
 
 /// A block in place.
@@ -101,6 +103,7 @@ pub struct Prepared {
     block: Digest,
     /// Whether another machine names the block's files as this one does.
     portable: bool,
+    seal: Option<crate::sidecar::Seal>,
 }
 
 /// A file, or a program's whole debug bundle, ready to be renamed into place.
@@ -308,6 +311,7 @@ impl Restore<'_> {
             step: description.step,
             block: self.block.key,
             portable: description.portability.named_portably(description.class),
+            seal: self.seal,
         })
     }
 }
@@ -339,6 +343,7 @@ impl Prepared {
             step,
             block,
             portable,
+            seal,
         } = self;
         let mut placed: Vec<PathBuf> = Vec::with_capacity(ready.len());
         let renamed = (|| -> Result<(), RestoreError> {
@@ -352,8 +357,16 @@ impl Prepared {
                 let produced_by = origin.and_then(|known| {
                     crate::metadata::produced_by(known, &file.dest, file.metadata)
                 });
-                sidecar::record_reused(&file.dest, sha256, produced_by, step, block, portable)
-                    .map_err(at(&file.dest))?;
+                sidecar::record_reused(
+                    &file.dest,
+                    sha256,
+                    produced_by,
+                    step,
+                    block,
+                    portable,
+                    seal.as_ref(),
+                )
+                .map_err(at(&file.dest))?;
             }
             Ok(())
         })();

@@ -152,7 +152,11 @@ metadata can't be found, and a tied proc macro,
   (`<out dir>/.hushrun/<file>.json`: its SHA-256, the block it was stored as or reused from,
   what dependents name it by, whether that name is portable) saves dependents a read; its
   SHA-256 answers while the file's size, modification time, inode and device are the recorded
-  ones. What it says of the block is believed only when the run's own store confirms it: the
+  ones, and only when the record is sealed with the store's seal: a digest of the record with
+  32 random bytes the store keeps in `seal` at its root, made once by the first wrapper that
+  finds none and never written anywhere else. Any other record (from another store, from before
+  seals, or one whose stat was foreseen and planted) has its file hashed first, and is then kept
+  and sealed only when the file's bytes are the ones it names. What it says of the block is believed only when the run's own store confirms it: the
   store holds the block the record names, and that block's `block.json` lists a file of this
   name with this size and SHA-256; what dependents name the file by and whether that is portable
   are then taken from the block's description, never from the record. One function decides it
@@ -166,11 +170,10 @@ metadata can't be found, and a tied proc macro,
   compile that stores nothing (low space, a suspended first key, a failed reuse) leaves a record
   naming no block, and its dependents name its proc macros by their bytes too. *Rests on:* the
   store being the run's own (the person's, or the job's in CI), which nobody but the person and
-  the code they run writes, and each stored file's SHA-256 recorded when it was published.
-  *Breaks if:* a record and its file came back with the recorded stat, so that the record's
-  SHA-256 answers without a read: then the store compares the record's SHA-256, not the file's.
-  A restored file is a new file with its own inode, so this needs the restored inode and device
-  predicted;
+  the code they run writes, and each stored file's SHA-256 recorded when it was published; and
+  the seal being secret from whoever wrote the `target/` folder (in CI it is made with the job's
+  store). *Breaks if:* someone who can read the store's `seal` writes records into a
+  `target/` folder this store's runs read, which is someone who could write the store itself;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
   `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A
@@ -356,7 +359,8 @@ this machine's folders and every dependent would get a key no other machine comp
 a block whose compile wrote only notices serves every form, and otherwise a missing form is a
 build.
 
-**B-13 The store.** `<cache directory>/build`, or `HUSHRUN_BUILD_DIR`. A block is written under
+**B-13 The store.** `<cache directory>/build`, or `HUSHRUN_BUILD_DIR`. Its root holds `seal`, the
+secret that seals the records beside outputs (B-6); `hushrun build clean` keeps it. A block is written under
 `tmp/`, synced, and published by renaming its folder to `blocks/<two hex digits>/<key>`: the first
 writer wins and
 a second, identical block is dropped. Nothing rewrites a published block. Each block records the

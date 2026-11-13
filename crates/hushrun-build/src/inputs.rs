@@ -50,6 +50,9 @@ pub struct Context<'a> {
     /// The run's own store, which confirms what an extern's record says of its block
     /// ([`sidecar::vouched`]); `None` believes no record: every extern is named by its bytes.
     pub store: Option<&'a Store>,
+    /// The store's seal ([`Store::seal`]): only a record sealed with it answers for a file
+    /// without a read; `None` hashes every file in an output folder.
+    pub seal: Option<sidecar::Seal>,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -300,7 +303,8 @@ impl Context<'_> {
                 None => ExternBy::Builtin,
                 Some(path) => {
                     let path = self.absolute(path);
-                    let known = sidecar::lookup(&path).map_err(|_| NotStored::Hash)?;
+                    let known =
+                        sidecar::lookup(&path, self.seal.as_ref()).map_err(|_| NotStored::Hash)?;
                     if is_linked_library(&path) {
                         let claims = known.produced_by.is_some() || known.portable;
                         let vouched = self
@@ -684,7 +688,7 @@ impl Context<'_> {
     /// records in (an output folder), else remembered for the run ([`crate::memo`]).
     pub fn digest(&self, path: &Path) -> io::Result<Digest> {
         if in_record_folder(path) {
-            return sidecar::lookup(path).map(|known| known.sha256);
+            return sidecar::lookup(path, self.seal.as_ref()).map(|known| known.sha256);
         }
         memo::digest(self.run_memo, path).map(|(sha, _)| sha)
     }

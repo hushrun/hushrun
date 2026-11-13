@@ -1149,6 +1149,7 @@ mod tests {
             Digest::of(b"rlib"),
             None,
             false,
+            None,
         )
         .unwrap();
         fs::write(u.src.join("notes.txt"), b"").unwrap();

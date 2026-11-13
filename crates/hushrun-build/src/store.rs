@@ -62,6 +62,8 @@ const ORIGIN_LOCK: &str = "origin.lock";
 const OUT_DIRS: &str = "out-dirs";
 /// The schema name of an entry of that registry.
 const OUT_DIR_SCHEMA: &str = "hushrun.build.out-dir/2";
+/// The store's secret that seals the records the wrapper leaves beside outputs (B-6).
+const SEAL: &str = "seal";
 /// How many times a step is tried when a name is taken or a folder vanished under it.
 const ATTEMPTS: usize = 8;
 
@@ -513,6 +515,47 @@ impl Store {
     pub fn keys(&self) -> Vec<Digest> {
         self.stored().into_iter().map(|(key, _)| key).collect()
     }
+
+    /// The store's seal (B-6): 32 random bytes in `seal` at its root, made by the first caller
+    /// that finds none. A maker writes a temporary file and links it into place, so a reader
+    /// finds the whole seal or none, and of two makers the first link wins and both read it.
+    /// `None` when it can't be read or made: then no record answers for a file without a read.
+    ///
+    /// Cost: one small read.
+    pub fn seal(&self) -> Option<crate::sidecar::Seal> {
+        let path = self.root.join(SEAL);
+        if let Some(seal) = read_seal(&path) {
+            return Some(seal);
+        }
+        let bytes = random_bytes()?;
+        let (temp, mut file) = self.reserve_file(SEAL).ok()?;
+        let written = file
+            .write_all(Digest::from_bytes(bytes).hex().as_bytes())
+            .and_then(|()| sync_file(&file));
+        drop(file);
+        if written.is_ok() {
+            // Already there is fine: the one there is the seal.
+            let _ = fs::hard_link(&temp, &path);
+        }
+        let _ = fs::remove_file(&temp);
+        read_seal(&path)
+    }
+}
+
+/// The seal in `path`, or `None` when it is missing or not 64 hex digits.
+fn read_seal(path: &Path) -> Option<crate::sidecar::Seal> {
+    let text = fs::read_to_string(path).ok()?;
+    let digest = Digest::from_hex(text.trim()).ok()?;
+    Some(crate::sidecar::Seal::from_bytes(*digest.as_bytes()))
+}
+
+/// 32 bytes from the system's random source, or `None` when it can't be read.
+fn random_bytes() -> Option<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .ok()?;
+    Some(bytes)
 }
 
 /// The files of `dir`, the most recently dated first, at most [`MAX_HINTS`].
@@ -1593,6 +1636,31 @@ mod tests {
             sources,
             store,
         }
+    }
+
+    // covers: B-6
+    #[test]
+    fn a_stores_seal_is_made_once_and_every_maker_reads_the_same_one() {
+        let w = world();
+        let barrier = Arc::new(Barrier::new(8));
+        let seals: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (store, barrier) = (&w.store, barrier.clone());
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store.seal()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let first = seals[0].expect("a seal");
+        assert!(seals.iter().all(|seal| *seal == Some(first)));
+        assert_eq!(w.store.seal(), Some(first));
+        // No temporary file is left, and another store has another seal.
+        assert_eq!(fs::read_dir(w.store.root().join(TMP)).unwrap().count(), 0);
+        assert_ne!(world().store.seal(), Some(first));
     }
 
     impl World {

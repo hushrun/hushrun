@@ -202,6 +202,11 @@ offline.
   block it names with the same file; any other proc macro is named by its bytes, and nothing
   built against it leaves the machine. In CI the store starts empty, so a job shares only what it
   compiled itself.
+- Build blocks: a record beside an output answers for the file's bytes without a read only when
+  this store's wrapper wrote it. A record restored with a `target/` folder whose stat matched the
+  restored file (size, modification time, inode, device) answered for any bytes it claimed, so a
+  library or proc macro could be keyed as other bytes than it held. Records are now sealed with a
+  secret the store keeps (`seal` at its root); any other record has its file hashed first, once.
 - Build blocks: a dependent that can't load a crate whose record came with a restored `target/`
   no longer suspends, or reports as `rejected` to the shared store, whatever block that record
   names. The record alone decided which first key was suspended and which download was reported,
