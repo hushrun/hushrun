@@ -646,7 +646,7 @@ fn a_task_gradle_didnt_execute_records_nothing() {
     // \[C-32\] One true line: no test ran, why, and what makes Gradle run them.
     assert_eq!(
         line(&again, "hushrun: unit: Gradle ran no test"),
-        "hushrun: unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, so nothing ran and nothing was learned of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run them"
+        "hushrun: unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, which it does when they passed before on the same inputs, so this run learned nothing new of their test classes; a change to what they read makes Gradle run them"
     );
     assert_eq!(
         r.newest_result()["units"],
@@ -1904,9 +1904,14 @@ fn a_test_task_gradle_restores_from_its_build_cache_records_and_leaves_out_nothi
     let cache = ["clean", "--build-cache"];
     let first = r.run(&command(&gradle, &cache), &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // \[C-46\] The first run's tasks, of which the check knew nothing, executed and weren't cached;
+    // the second's, which it knows, are.
+    r.write("README.md", "A shop, too.\n");
+    let second = r.run(&command(&gradle, &cache), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     let before = r.map();
     // A file of the rest changes: every class runs as far as hushrun goes, the tasks' inputs are
-    // those of the first run, and Gradle takes their outputs from its build cache.
+    // those of the second run, and Gradle takes their outputs from its build cache.
     r.write("README.md", "A shop, again.\n");
     let again = r.run(&command(&gradle, &cache), &[]);
     assert_eq!(again.code, 0, "{}\n{}", again.stdout, again.stderr);
@@ -2158,4 +2163,64 @@ fn a_junit4_task_leaves_out_every_test_the_plan_counts_as_reused() {
         .unwrap_or_else(|| panic!("{said}"));
     assert_eq!(counted, ran.len(), "{said}\n{ran:?}");
     r.clean();
+}
+
+// covers: C-46, C-32
+#[test]
+fn a_test_task_nothing_was_learned_of_under_the_check_executes_in_its_first_run() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    for (mode, extra) in [
+        ("observe", &[][..]),
+        ("reuse", &["--configuration-cache"][..]),
+    ] {
+        let r = Repo::new(&shop(mode));
+        let first = r.run(&command(&gradle, extra), &[]);
+        assert_eq!(first.code, 0, "{mode}: {}\n{}", first.stdout, first.stderr);
+        // The check's store is lost (another machine's build directory, a cache restored without
+        // it): Gradle would find every test task up to date, and the check would learn nothing.
+        for entry in std::fs::read_dir(r.cache.join("units")).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().contains(".sqlite") {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        r.write("README.md", "A shop, again.\n");
+        let again = r.run(&command(&gradle, extra), &[]);
+        assert_eq!(again.code, 0, "{mode}: {}\n{}", again.stdout, again.stderr);
+        for task in [":app:test", ":lib:test", ":other:test"] {
+            assert!(
+                again.stdout.lines().any(|l| l == format!("> Task {task}")),
+                "{mode}: {task} didn't execute:\n{}",
+                again.stdout
+            );
+        }
+        assert!(
+            !again.stderr.contains("Gradle ran no test"),
+            "{mode}: {}",
+            again.stderr
+        );
+        assert_eq!(
+            r.map()["units"].as_object().map_or(0, |u| u.len()),
+            5,
+            "{mode}: {:#}",
+            r.map()
+        );
+        // Now that the check knows them, Gradle's own reuse stands: a run on the same inputs finds
+        // them up to date again (in `reuse`, the plan's list is an input, and changed).
+        if mode == "reuse" {
+            r.clean();
+            continue;
+        }
+        r.write("README.md", "A shop, once more.\n");
+        let third = r.run(&command(&gradle, extra), &[]);
+        assert_eq!(third.code, 0, "{mode}: {}\n{}", third.stdout, third.stderr);
+        assert!(
+            third.stdout.contains("> Task :other:test UP-TO-DATE"),
+            "{mode}: {}",
+            third.stdout
+        );
+        r.clean();
+    }
 }

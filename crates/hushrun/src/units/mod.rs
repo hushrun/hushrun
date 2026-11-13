@@ -800,6 +800,25 @@ impl Session {
         }
     }
 
+    /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
+    /// this machine's store knows for the check, so that a runner that reuses on its own (Gradle's
+    /// up to date) runs a group of which it knows none, and the first run through hushrun always
+    /// learns. A plan in `reuse` writes the file again with its lists, and the same. A store that
+    /// can't be read knows nothing.
+    pub fn learned(&self, base: &KeyBase, repository: Option<&str>) {
+        let check_id = store::check_id(base, repository);
+        let loaded = db::load(&db::path(&self.cache, repository), &check_id);
+        let listed = Listed {
+            unit: self.unit,
+            reads: self.reads,
+            known: Some(loaded.map.units.keys().cloned().collect()),
+            ..Listed::default()
+        };
+        if let Err(err) = write_run_file(&self.run_dir, &self.root, &listed) {
+            tracing::debug!("what the store knows wasn't written for the adapter: {err}");
+        }
+    }
+
     /// \[ADR 0069\] The plan (RFC 0003 §3.5 step 1), for a check in `reuse`, before COMMAND: each
     /// test file's key, from the map for pytest (a hint, never trusted, §3.4) and from the build
     /// for Cargo, which it makes first; one batch lookup of the newest result that counts here for
@@ -970,6 +989,7 @@ impl Session {
                 unit: self.unit,
                 reads: self.reads,
                 reuse_tests: tested.listed(),
+                known: Some(map.units.keys().cloned().collect()),
             },
         ) {
             return Planned::Everything(format!("can't write the plan ({err})"));
@@ -1340,6 +1360,7 @@ impl Session {
             unit: self.unit,
             reads: self.reads,
             reuse_tests,
+            known: None,
         };
         write_run_file(&dir, &self.root, &listed).ok()?;
         let mut variables = self.variables.clone();
@@ -1695,6 +1716,8 @@ struct Listed {
     reads: Reads,
     /// \[ADR 0077\] Tests an adapter may deselect one by one, by unit, each by its id.
     reuse_tests: BTreeMap<String, Vec<String>>,
+    /// \[C-46\] The test files the check's store knows, when the run says.
+    known: Option<Vec<String>>,
 }
 
 /// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root and what `listed`
@@ -1710,6 +1733,7 @@ fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<(
         unit: Some(listed.unit.word().to_string()),
         reads: Some(listed.reads.word().to_string()),
         reuse_tests: listed.reuse_tests.clone(),
+        known: listed.known.clone(),
     };
     let bytes = serde_json::to_vec(&run).map_err(std::io::Error::other)?;
     facts::write_whole(&dir.join(facts::RUN_FILE), &bytes)

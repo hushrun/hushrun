@@ -335,7 +335,8 @@ written within the two seconds of slack the report search allows. The decisions:
   of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run
   them`, and `ranNothing`, the tasks. The run says the note once, as any note. (ADR 0077's
   Amendment 16: the store keeps it, and the next plan goes by it; the snapshot above is taken.)
-- hushrun doesn't force the tasks itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
+- [Replaced by Amendment 16 for a task nothing was learned of.] hushrun doesn't force the tasks
+  itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
   stays as written and the build as it was (ADR 0084's first rule). Gradle's up to date is its own
   reuse, proven on the same inputs; running the tests anyway costs the person the time hushrun is
   there to save, changes what the build cache holds, and would make a hushrun run differ from a
@@ -353,6 +354,26 @@ the task's test classes), and that it attempts the listed tests in the order of 
 a class of the default package or of a package named with a capital, which Gradle's patterns would
 match by simple name. The plan is to keep what the last run here said and list at most `most`
 of a group's tests, in that order, counting the others as run (done: ADR 0077's Amendment 16).
+
+## Amendment 16: a test task nothing was learned of executes (2026-11-13)
+
+A rerun on kotlinpoet showed Amendment 14's advice didn't work: `hushrun run unit -- ./gradlew …
+--rerun-tasks` is another COMMAND, so another check with its own store, and the configured check
+learned nothing and said the line again on every run until an input changed. The path has to
+converge by itself. The decision, which replaces Amendment 14's "doesn't force": before COMMAND, in
+`observe` and in `reuse`, hushrun writes in `hushrun.json` the test classes this machine's store
+knows for the check (`known`); the script makes a test task none of whose test classes is known
+execute in that run: an `upToDateWhen` that says no and a `doNotCacheIf` that says yes, both asked
+when Gradle decides, after the task's classes are built. Only execution is forced, the safe
+direction, and only for a task nothing was learned of; a task with a class the check knows is
+Gradle's to reuse, up to date or from the build cache, as before. The task's inputs don't change,
+so the next run on the same inputs is up to date again; a forced execution's outputs aren't stored
+in the build cache (Gradle's `doNotCacheIf` covers both), so the cache fills from the next run. It
+works under the configuration cache and on Gradle 8.14.5 and 9.3.1. When a run still executes no
+test task (each has a class the check knows, and Gradle found it up to date or in its cache), the
+note says only what holds for the configured check: `Gradle ran no test: … were up to date, which
+it does when they passed before on the same inputs, so this run learned nothing new of their test
+classes; a change to what they read makes Gradle run them`.
 
 ## Measured
 

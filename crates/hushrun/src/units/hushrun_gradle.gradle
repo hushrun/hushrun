@@ -155,6 +155,8 @@ class HushrunPlan {
     String root
     Set<String> reuse = [] as Set
     Map<String, List<String>> reuseTests = [:]
+    // [C-46] The test classes the check's store knows, by their names; null when the run doesn't say.
+    Set<String> known
     String error
 
     private static final Map<String, HushrunPlan> CACHE = new ConcurrentHashMap<>()
@@ -172,6 +174,7 @@ class HushrunPlan {
             plan.root = json.root ? HushrunRun.canonical(json.root as String) : null
             plan.reuse = new HashSet<String>((json.reuse ?: []) as List<String>)
             ((json.reuseTests ?: [:]) as Map).each { k, v -> plan.reuseTests[k as String] = (v as List).collect { it as String } }
+            if (json.known instanceof List) plan.known = new HashSet<String>((json.known as List).collect { it as String })
         } catch (Throwable t) {
             plan = new HushrunPlan(error: HushrunRun.brief(t))
         }
@@ -300,6 +303,17 @@ class HushrunSelection {
     }
 
     boolean leavesOut() { !leftOutClasses.isEmpty() || !leftOutTests.isEmpty() }
+
+    /**
+     * [C-46] The check's store knows none of the task's test classes: nothing was ever learned of
+     * it under this check, so Gradle executes it in this run, never up to date nor from the build
+     * cache, and the first run through hushrun learns. A task with a class it knows is Gradle's to
+     * reuse as before.
+     */
+    boolean forced() {
+        if (plan == null || plan.error != null || plan.known == null || names.isEmpty()) return false
+        return names.values().every { Map n -> !plan.known.contains(n.name as String) }
+    }
 
     /** What it leaves out, as the task's input: another list makes the task run again. */
     String inputText() {
@@ -494,8 +508,22 @@ class HushrunInput implements Serializable {
     static String of(HushrunTaskInfo info) {
         try { return HushrunSelection.get(info)?.inputText() ?: "" } catch (Throwable ignored) { return "" }
     }
+    static boolean forced(HushrunTaskInfo info) {
+        try { return HushrunSelection.get(info)?.forced() ?: false } catch (Throwable ignored) { return false }
+    }
     static boolean failsOnNone(HushrunTaskInfo info) {
         try { return !(HushrunSelection.get(info)?.leavesOut() ?: false) } catch (Throwable ignored) { return true }
+    }
+}
+
+// [C-46] A task with nothing learned under the check: not up to date (`upToDate`), and not taken
+// from the build cache. Asked when Gradle decides, after the task's classes are built.
+class HushrunForce implements Spec<Task>, Serializable {
+    HushrunTaskInfo info
+    boolean upToDate
+    boolean isSatisfiedBy(Task t) {
+        boolean forced = HushrunInput.forced(info)
+        return upToDate ? !forced : forced
     }
 }
 
@@ -779,8 +807,8 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             if (upToDate) parts << (HushrunService.listed(upToDate) + (upToDate.size() == 1 ? " was" : " were") + " up to date")
             if (cached) parts << (HushrunService.listed(cached) + " came from the build cache")
             String note = "Gradle ran no test: " + parts.join(", and ") +
-                    ", so nothing ran and nothing was learned of " + (notExecuted.size() == 1 ? "its" : "their") +
-                    " test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run them"
+                    ", which it does when they passed before on the same inputs, so this run learned nothing new of " +
+                    (notExecuted.size() == 1 ? "its" : "their") + " test classes; a change to what they read makes Gradle run them"
             Map facts = [schema: HushrunRun.FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
                          settings: [note: note, ranNothing: notExecuted.keySet().sort()], errors: [], start: start]
             HushrunRun.writeWhole(HushrunRun.facts(root, ":hushrun-ran-nothing", start), JsonOutput.toJson(facts))
@@ -913,6 +941,8 @@ abstract class HushrunSettingsPlugin implements Plugin<Settings> {
         def unitsVar = p.providers.environmentVariable("HUSHRUN_UNITS")
         t.inputs.property("hushrunLeftOut", unitsVar.map { String ignored -> HushrunInput.of(info) }.orElse(""))
         t.outputs.file(stored).optional().withPropertyName("hushrunReport")
+        t.outputs.upToDateWhen(new HushrunForce(info: info, upToDate: true))
+        t.outputs.doNotCacheIf("hushrun learns this task's test classes under this check for the first time", new HushrunForce(info: info, upToDate: false))
         // Gradle 9 fails a Test task that discovers no test; the property is final once the task
         // runs, so it gets a lazy convention now: false only when this run leaves something out of it.
         if (t.hasProperty("failOnNoDiscoveredTests")) {

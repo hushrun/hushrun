@@ -67,6 +67,12 @@ pub struct RunFile {
     /// audited ones (C-39). A unit `reuse` lists isn't here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reuse_tests: BTreeMap<String, Vec<String>>,
+    /// \[C-46\] The test files this machine's store knows for the check, before COMMAND: an
+    /// adapter whose runner reuses on its own (Gradle's up to date and build cache) makes a group
+    /// of them none of which is known run, so that a first run always learns. `None` when the run
+    /// doesn't say (a second run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known: Option<Vec<String>>,
 }
 
 /// \[ADR 0069\] A test binary the plan reuses.

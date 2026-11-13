@@ -446,6 +446,11 @@ fn skip_or_run(
     // \[ADR 0069\] With `tests: reuse`, the plan: which test files already passed on the files they
     // read, and aren't run again (C-34); or why every test file runs.
     let mut units_anyway: Option<String> = None;
+    // \[C-46\] In every mode, what the check's store knows, for an adapter whose runner reuses on
+    // its own: a plan in `reuse` says it again with its lists.
+    if let (Some(session), Some(code)) = (session.as_deref(), code) {
+        session.learned(&key_base(code, command), code.repository_here().as_deref());
+    }
     if let (Some(session), Some(code), Some(backend)) = (session.as_deref_mut(), code, backend)
         && code.tests.as_ref().is_some_and(|t| t.mode == Mode::Reuse)
     {
