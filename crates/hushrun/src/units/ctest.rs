@@ -121,7 +121,15 @@ fn recognize(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>
 
 /// A wrapper COMMAND that starts `ctest` by name, by the one rule.
 fn wrapped(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>, String>> {
-    command::wrapper_starts(command, cwd, command::Runner::Ctest).then_some(Ok(None))
+    if command::wrapper_starts(command, cwd, command::Runner::Ctest) {
+        return Some(Ok(None));
+    }
+    // \[ADR 0087, amended\] One whose text starts ctest by its path goes round hushrun's ctest.
+    command::wrapper_starts_by_path(command, cwd, command::Runner::Ctest).map(|path| {
+        Err(format!(
+            "COMMAND starts ctest by its path ({path}), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
+        ))
+    })
 }
 
 impl Recognized {
@@ -559,6 +567,16 @@ mod tests {
         ));
         assert!(recognize(&sh("ctest && pytest"), cwd).is_none());
         assert!(recognize(&sh("cmake --build build"), cwd).is_none());
+        // \[ADR 0087, amended\] A shell line that starts ctest by its path goes round hushrun's
+        // ctest, and says so in the words COMMAND would.
+        assert_eq!(
+            recognize(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)
+                .unwrap()
+                .err()
+                .unwrap(),
+            "COMMAND starts ctest by its path (/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
+        );
+        assert!(recognize(&sh("/opt/cmake/bin/ctest && pytest"), cwd).is_none());
         std::fs::write(
             cwd.join("check.sh"),
             "#!/bin/sh\nset -e\nctest --test-dir build\n",

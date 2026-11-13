@@ -428,3 +428,12 @@ unit unkeyed, so a header only stale programs read (and their own files) fell in
 where the map had never held them: "new", and in every key. A stale program's files now keep their
 sets as its graph gives them; only its unit is unkeyed, and runs. The plan's line and `hushrun why`
 go by the same sets.
+
+## Amendment 16: a shell line that starts ctest by its path (2026-11-13)
+
+Every way around hushrun's `ctest` said so, but one: `sh -c "/opt/cmake/bin/ctest …"` said nothing.
+A wrapper whose text starts `ctest` by a path, and never by its name nor another runner, now says
+what a COMMAND that does says: `test files aren't observed: COMMAND starts ctest by its path
+(/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest``.
+`swift` started by its path in a wrapper's text, where a package is, says the same as COMMAND's
+(ADR 0086).

@@ -170,6 +170,14 @@ pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>
         }
         return Some(Ok(Swift::new(real(cwd))));
     }
+    // \[ADR 0086, amended\] One whose text starts swift by its path goes round hushrun's swift.
+    if cwd.join("Package.swift").is_file()
+        && command::wrapper_starts_by_path(command, cwd, command::Runner::SwiftTest).is_some()
+    {
+        return Some(Err(
+            "COMMAND starts swift by its path, and hushrun's swift is on PATH".into(),
+        ));
+    }
     None
 }
 
@@ -2276,6 +2284,16 @@ mod tests {
         assert!(recognize(&words("make test"), cwd).is_none());
         std::fs::write(cwd.join("Package.swift"), "// swift-tools-version: 6.0\n").unwrap();
         assert!(recognize(&words("make test"), cwd).unwrap().is_ok());
+        // \[ADR 0086, amended\] A shell line that starts swift by its path says so, as COMMAND
+        // would.
+        let sh = |line: &str| vec!["sh".to_string(), "-c".to_string(), line.to_string()];
+        assert_eq!(
+            recognize(&sh("/usr/bin/swift test -j 3"), cwd)
+                .unwrap()
+                .err()
+                .unwrap(),
+            "COMMAND starts swift by its path, and hushrun's swift is on PATH"
+        );
         std::fs::write(cwd.join("Makefile"), "test:\n\t./run-tests\n").unwrap();
         assert!(recognize(&words("make test"), cwd).is_none());
         assert!(recognize(&words("python -m pytest"), cwd).is_none());

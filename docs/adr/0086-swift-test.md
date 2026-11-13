@@ -284,3 +284,9 @@ Two limits a third review found are kept, and said here rather than fixed:
   extracted with its times) isn't built again by SwiftPM, whose build goes by times, and the run
   tests what was built before. hushrun keys a target by the files' contents, so the next run's key
   is the new one, but nothing tells it the products are old.
+
+## Amendment 7: swift by its path in a shell line (2026-11-13)
+
+A wrapper COMMAND whose text starts `swift test` by a path (`sh -c "/usr/bin/swift test"`), where
+a package is, says what a COMMAND that starts it by its path says: `COMMAND starts swift by its
+path, and hushrun's swift is on PATH`. It said nothing before.

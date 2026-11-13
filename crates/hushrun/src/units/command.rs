@@ -173,6 +173,34 @@ pub fn wrapper_starts(command: &[String], cwd: &Path, runner: Runner) -> bool {
             .all(|other| !other.started_by(&words))
 }
 
+/// \[ADR 0086, 0087\] The path a wrapper COMMAND's text starts `runner` by, when it starts it by
+/// a path and never by its name, and no other runner: it goes round the program hushrun puts on
+/// `PATH`, as a COMMAND that starts it by its path does.
+pub fn wrapper_starts_by_path(command: &[String], cwd: &Path, runner: Runner) -> Option<String> {
+    let text = wrapper_text(command, cwd)?;
+    let words: Vec<&str> = text
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\'')
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    if runner.started_by(&words) || RUNNERS.iter().any(|other| other.started_by(&words)) {
+        return None;
+    }
+    let by_path = |at: usize| {
+        let word = words[at];
+        word.contains(['/', '\\']).then(|| program_name(word))
+    };
+    (0..words.len())
+        .find(|&at| match (runner, by_path(at).as_deref()) {
+            (Runner::Ctest, Some("ctest")) => true,
+            (Runner::SwiftTest, Some("swift")) => words.get(at + 1) == Some(&"test"),
+            (Runner::SwiftTest, Some("swift-test")) => true,
+            _ => false,
+        })
+        .map(|at| words[at].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

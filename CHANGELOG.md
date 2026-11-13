@@ -357,6 +357,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: on a stale build the run's line no longer calls a file only a stale program reads new
   ("all 22 test files run: include/fmt/args.h is new"): a stale program's files keep their sets,
   so the line and `hushrun why` say the same.
+- CTest and `swift test`: a shell line or script that starts `ctest` or `swift test` by its path
+  (`sh -c "/opt/cmake/bin/ctest …"`) says it isn't observed, in the words a COMMAND that does
+  says, where it said nothing.
 - CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
   no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
   Makefiles the line says which file to touch.
