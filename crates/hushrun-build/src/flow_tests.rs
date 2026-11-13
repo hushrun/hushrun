@@ -880,6 +880,7 @@ fn a_dependent_of_a_crate_compiled_as_asked_stays_on_this_machine() {
     );
     fs::create_dir_all(ws.join("b/src")).unwrap();
     fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    settle();
     let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
     let ext = format!("a={}", rmeta.display());
     let r = w.call(&ws, "b", &["--extern", &ext]);
@@ -890,9 +891,11 @@ fn a_dependent_of_a_crate_compiled_as_asked_stays_on_this_machine() {
     // Once `a` is compiled with the wrapper's changes, its dependents may go again.
     let w2 = world(Mode::On);
     let ws2 = w2.checkout("ws");
+    settle();
     assert_eq!(w2.call(&ws2, "a", &[]).outcome(), STORED);
     fs::create_dir_all(ws2.join("b/src")).unwrap();
     fs::write(ws2.join("b/src/lib.rs"), "").unwrap();
+    settle();
     let rmeta = ws2.join("target/debug/deps/liba-xa.rmeta");
     let ext = format!("a={}", rmeta.display());
     let r = w2.call(&ws2, "b", &["--extern", &ext]);
