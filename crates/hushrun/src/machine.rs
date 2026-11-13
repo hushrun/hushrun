@@ -67,7 +67,7 @@ impl Machine {
 
     /// `Hushrun-Signature` for a result recorded under `key` (64 hex) with `body`:
     /// `<keyid> <base64 signature over hushrun-result/v1\n<key>\n<hex of SHA-256 of body>\n>`.
-    /// `Hushrun-Signature` for a `begin` of build blocks sent to `org` with `body` (build-v0
+    /// `Hushrun-Signature` for a `begin` of build blocks sent to `org` with `body` (the build protocol
     /// §4): this machine's word that it built the blocks it names.
     pub fn begin_signature(&self, org: &str, body: &[u8]) -> String {
         let message = hushrun_core::blocks::begin_message(org, body);

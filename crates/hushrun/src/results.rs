@@ -1206,7 +1206,7 @@ impl Backend {
     }
 }
 
-/// What a run's relay needs to talk to an org's shared store of build blocks (build-v0, B-26):
+/// What a run's relay needs to talk to an org's shared store of build blocks (the build protocol, B-26):
 /// where, as whom, and whether the org said it shares.
 pub struct BuildAccess {
     /// The org's base URL.

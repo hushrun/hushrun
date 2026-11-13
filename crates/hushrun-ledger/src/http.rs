@@ -91,7 +91,7 @@ pub struct HttpLedger {
     /// \[M18\] The transparency log, as this command checks it (L-11).
     log: Mutex<log::State>,
     /// An answer to one of hushrun's other requests carried `Hushrun-Build: on`: the org shares
-    /// build blocks (build-v0 §1).
+    /// build blocks (the build protocol).
     build_sharing: std::sync::atomic::AtomicBool,
 }
 

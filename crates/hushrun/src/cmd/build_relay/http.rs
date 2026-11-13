@@ -1,4 +1,4 @@
-//! B-26: the relay's requests to the org's shared store of build blocks (build-v0), and to the
+//! B-26: the relay's requests to the org's shared store of build blocks (the build protocol), and to the
 //! object store its links point at. Every answer is sorted into what the relay does next by one
 //! function, [`Failure`]'s kind: a server that can't be reached (the run may go on offline), a
 //! refusal of the caller (401, 403 or 404 in the middle of a run stop sharing for the run), or a
