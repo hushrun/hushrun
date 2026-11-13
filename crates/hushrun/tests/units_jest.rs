@@ -2791,3 +2791,101 @@ fn why_says_a_second_start_of_jest_kept_every_pass_of_its_run_out() {
         }
     }
 }
+
+/// Test files that look at what Node's wrapped functions carry, as their callers do: each fails
+/// if a wrapper of the adapter's drops what the function it wraps carries.
+fn carried_files(tests: &str) -> Vec<(String, String)> {
+    let t = |body: &str| {
+        format!(
+            "const {{ promisify }} = require('util');\nconst {{ exec, execFile }} = require('child_process');\nconst fs = require('fs');\nconst node = process.execPath;\nconst script = 'process.stdout.write(\"out\"); process.stderr.write(\"err\")';\n{body}\n"
+        )
+    };
+    vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file("src/data.js", "exports.data = 1;\n"),
+        file(
+            "test/execfile.test.js",
+            &t(
+                "test('execFile', async () => {\n  expect(typeof execFile[promisify.custom]).toBe('function');\n  expect([execFile.name, execFile.length]).toEqual(['execFile', 4]);\n  const run = promisify(execFile);\n  expect(await run(node, ['-e', script])).toEqual({ stdout: 'out', stderr: 'err' });\n  const failed = await run(node, ['-e', script + '; process.exit(3)']).then(() => null, (e) => e);\n  expect([failed.code, failed.stdout, failed.stderr]).toEqual([3, 'out', 'err']);\n});",
+            ),
+        ),
+        file(
+            "test/exec.test.js",
+            &t(
+                "test('exec', async () => {\n  expect(typeof exec[promisify.custom]).toBe('function');\n  const run = promisify(exec);\n  const line = `${JSON.stringify(node)} -e ${JSON.stringify(script)}`;\n  expect(await run(line)).toEqual({ stdout: 'out', stderr: 'err' });\n  const failed = await run(line + ' && exit 3 || exit 3').then(() => null, (e) => e);\n  expect([failed.code, failed.stdout, failed.stderr]).toEqual([3, 'out', 'err']);\n});",
+            ),
+        ),
+        file(
+            "test/fs.test.js",
+            &t(
+                "test('fs', async () => {\n  expect(typeof fs.exists[promisify.custom]).toBe('function');\n  expect(await promisify(fs.exists)('src/data.js')).toBe(true);\n  const fd = fs.openSync('src/data.js', 'r');\n  const got = await promisify(fs.read)(fd, Buffer.alloc(7), 0, 7, 0);\n  fs.closeSync(fd);\n  expect([got.bytesRead, got.buffer.toString()]).toEqual([7, 'exports']);\n  expect([fs.readFile.name, fs.readFile.length]).toEqual(['readFile', 3]);\n  expect(Reflect.ownKeys(fs.readFile).map(String).sort()).toEqual(['length', 'name', 'prototype']);\n  expect(Reflect.ownKeys(fs.promises.readFile).map(String).sort()).toEqual(['length', 'name']);\n  expect(Object.keys(fs.realpathSync)).toEqual(['native']);\n  expect(fs.realpathSync.native('src/data.js')).toBe(fs.realpathSync('src/data.js'));\n  const real = await new Promise((ok, no) => fs.realpath.native('src/data.js', (e, p) => (e ? no(e) : ok(p))));\n  expect(real).toBe(fs.realpathSync('src/data.js'));\n});",
+            ),
+        ),
+        file(
+            "test/shapes.test.js",
+            &t(
+                "const { Worker } = require('worker_threads');\nconst vm = require('vm');\ntest('shapes', () => {\n  expect([Worker.name, Worker.length]).toEqual(['Worker', 1]);\n  expect(Object.getOwnPropertyNames(Worker).sort()).toEqual(['length', 'name', 'prototype']);\n  expect([process.dlopen.name, process.dlopen.length]).toEqual(['dlopen', 0]);\n  expect([vm.Script.name, vm.Script.length]).toEqual(['Script', 1]);\n  expect([vm.compileFunction.name, vm.compileFunction.length]).toEqual(['compileFunction', 2]);\n  expect(Object.getOwnPropertyNames(vm.Script).sort()).toEqual(['length', 'name', 'prototype']);\n});",
+            ),
+        ),
+    ]
+}
+
+// covers: C-44
+#[test]
+fn wrapped_node_functions_keep_what_callers_see_with_jest_and_their_promisified_forms_stay_observed()
+ {
+    for jest in jests() {
+        // Node's `exec` and `execFile` carry `util.promisify.custom`, which resolves to `{ stdout,
+        // stderr }`, `fs.exists` one that resolves to a boolean, `fs.read` the names of what its
+        // promisified form resolves to, and `fs.realpath` and `fs.realpathSync` carry `native`;
+        // `Worker`, `process.dlopen` and `vm`'s have their names and lengths. A child process a
+        // promisified form starts is still one hushrun can't follow, and what it read is read.
+        let r = Repo::new(&jest, &carried_files("observe"));
+        let ran = r.run(JEST_RUN);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        let map = r.map();
+        for unit in ["test/execfile.test.js", "test/exec.test.js"] {
+            assert_eq!(
+                map["units"][unit]["notFollowed"],
+                json!(["subprocess"]),
+                "Jest {}: {unit}: {map:#}",
+                jest.major
+            );
+        }
+        assert!(
+            r.reads("test/fs.test.js")
+                .contains(&"src/data.js".to_string()),
+            "Jest {}: {map:#}",
+            jest.major
+        );
+    }
+}
+
+// covers: C-39, C-44
+#[test]
+fn with_tests_one_by_one_jests_wrappers_keep_what_callers_see_too() {
+    for jest in jests() {
+        // With tests one by one and what each read, the same: Node's functions as callers see
+        // them, and a promisified child process not followed.
+        let r = Repo::new(
+            &jest,
+            &carried_files("{mode: reuse, unit: test, reads: test}"),
+        );
+        let ran = r.run(JEST_RUN);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        let map = r.map();
+        for (unit, test) in [
+            ("test/execfile.test.js", "execFile"),
+            ("test/exec.test.js", "exec"),
+        ] {
+            assert_eq!(
+                map["units"][unit]["tests"][test], "not-observed",
+                "Jest {}: {unit}: {map:#}",
+                jest.major
+            );
+        }
+    }
+}

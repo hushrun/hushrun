@@ -177,13 +177,34 @@ function install(S) {
   S.rel = rel;
   S.note = note;
 
+  // ---------------------------------------------------------------- what a wrapper carries
+  // Every wrapper this file makes, Node's and Jest's alike, so that none is wrapped twice; kept
+  // here rather than on the wrapper, where a caller would see it.
+  const WRAPPED = new WeakSet();
+  // What a wrapper carries of what it wraps, so that callers see what they would without hushrun:
+  // its `name` and `length`, and its own properties (`util.promisify.custom` on `exec`, `native`
+  // on `fs.realpath`, a class's statics). Every wrapper this file makes goes through it. `each`
+  // may change a property's descriptor first.
+  function carry(wrapped, original, each = (key, desc) => desc) {
+    WRAPPED.add(wrapped);
+    if (typeof original !== 'function') return wrapped;
+    for (const key of Reflect.ownKeys(original)) {
+      if (key === 'prototype' || key === 'arguments' || key === 'caller') continue;
+      try {
+        Object.defineProperty(wrapped, key, each(key, Object.getOwnPropertyDescriptor(original, key)));
+      } catch (err) {
+        note(`carry ${String(key)}`, err);
+      }
+    }
+    return wrapped;
+  }
+
   // ---------------------------------------------------------------- fs, processes, addons
   // Wrapped when this file loads: graceful-fs, which Jest uses, copies fs's functions when it
   // loads, and a later wrap would miss what goes through it.
-  function wrap(target, name, record) {
-    const original = target[name];
-    if (typeof original !== 'function' || original.__hushrun) return;
-    const wrapped = function (...args) {
+  const PROMISIFIED = require('util').promisify.custom;
+  function observing(original, name, record) {
+    const call = (self, args) => {
       if (S.session || S.window || S.buffering) {
         try {
           record(args[0], name);
@@ -191,13 +212,27 @@ function install(S) {
           note(`record ${name}`, err);
         }
       }
-      return original.apply(this, args);
+      return original.apply(self, args);
     };
-    Object.defineProperty(wrapped, 'name', { value: original.name });
-    Object.defineProperty(wrapped, 'length', { value: original.length });
-    wrapped.__hushrun = true;
-    for (const k of Object.keys(original)) wrapped[k] = original[k]; // realpathSync.native
-    target[name] = wrapped;
+    // A wrapper has a `prototype` only where what it wraps has one (`fs.promises`' don't).
+    const wrapped = Object.prototype.hasOwnProperty.call(original, 'prototype')
+      ? function (...args) { return call(this, args); }
+      : { w(...args) { return call(this, args); } }.w;
+    // `promisify.custom` calls the original it closed over (`exec`'s): it is wrapped with the same
+    // record, or a child process it starts would go unseen. `native` is carried as it is: Jest's
+    // resolver calls it for every path it resolves, which a test reading isn't. One that is what
+    // it wraps is the wrapper.
+    return carry(wrapped, original, (key, desc) => {
+      if (key === PROMISIFIED && typeof desc.value === 'function') {
+        desc.value = desc.value === original ? wrapped : observing(desc.value, name, record);
+      }
+      return desc;
+    });
+  }
+  function wrap(target, name, record) {
+    const original = target[name];
+    if (typeof original !== 'function' || WRAPPED.has(original)) return;
+    target[name] = observing(original, name, record);
   }
   // Where a read goes: the open test file's session, the main process's globalSetup window, or
   // the next test file this process runs.
@@ -232,26 +267,24 @@ function install(S) {
     wrap(cp, name, (cmd) => unfollowed('subprocess', `${name} ${String(cmd)}`));
   }
   const wt = require('worker_threads');
-  if (typeof wt.Worker === 'function' && !wt.Worker.__hushrun) {
+  if (typeof wt.Worker === 'function' && !WRAPPED.has(wt.Worker)) {
     const OriginalWorker = wt.Worker;
-    const Wrapped = class Worker extends OriginalWorker {
+    wt.Worker = carry(class Worker extends OriginalWorker {
       constructor(...args) {
         unfollowed('worker', String(args[0]));
         super(...args);
       }
-    };
-    Wrapped.__hushrun = true;
-    wt.Worker = Wrapped;
+    }, OriginalWorker);
   }
   const dlopen = process.dlopen;
-  process.dlopen = function (...args) {
+  process.dlopen = carry(function (...args) {
     // Only an addon the repository's code required: Jest loads its own (Jest 30's resolver).
     if (S.window || (S.session && S.userRequire > 0)) unfollowed('native', String(args[1]));
     return dlopen.apply(this, args);
-  };
+  }, dlopen);
   // What Node itself compiles from the repository: code that runs for every later test file.
   const compile = Module.prototype._compile;
-  Module.prototype._compile = function hushrunCompile(content, filename) {
+  Module.prototype._compile = carry(function hushrunCompile(content, filename) {
     guard('compile', () => {
       if (typeof filename !== 'string') return;
       if (/[\\/]ts-jest[\\/]/.test(filename)) S.tsJest = true;
@@ -262,7 +295,7 @@ function install(S) {
       }
     });
     return compile.apply(this, arguments);
-  };
+  }, compile);
   installVmHooks();
   try {
     Module.syncBuiltinESMExports();
@@ -279,31 +312,27 @@ function install(S) {
       const r = rel(filename);
       if (r) S.session.load(r);
     };
-    if (!vm.Script.__hushrun) {
+    if (!WRAPPED.has(vm.Script)) {
       const OriginalScript = vm.Script;
-      const Wrapped = class Script extends OriginalScript {
+      vm.Script = carry(class Script extends OriginalScript {
         constructor(code, options) {
           super(code, options);
           loaded(typeof options === 'string' ? options : options && options.filename);
         }
-      };
-      Wrapped.__hushrun = true;
-      vm.Script = Wrapped;
+      }, OriginalScript);
     }
-    if (!vm.compileFunction.__hushrun) {
+    if (!WRAPPED.has(vm.compileFunction)) {
       const originalCompileFunction = vm.compileFunction;
-      const wrapped = function compileFunction(code, params, options) {
+      vm.compileFunction = carry(function compileFunction(code, params, options) {
         const fn = originalCompileFunction.apply(this, arguments);
         loaded(options && options.filename);
         return fn;
-      };
-      wrapped.__hushrun = true;
-      vm.compileFunction = wrapped;
+      }, originalCompileFunction);
     }
     for (const name of ['SourceTextModule', 'SyntheticModule']) {
       const C = vm[name];
-      if (typeof C !== 'function' || C.__hushrun) continue;
-      const Wrapped = class extends C {
+      if (typeof C !== 'function' || WRAPPED.has(C)) continue;
+      vm[name] = carry(class extends C {
         constructor(...args) {
           super(...args);
           const options = name === 'SourceTextModule' ? args[1] : args[2];
@@ -329,10 +358,7 @@ function install(S) {
             return m;
           });
         }
-      };
-      Object.defineProperty(Wrapped, 'name', { value: name });
-      Wrapped.__hushrun = true;
-      vm[name] = Wrapped;
+      }, C);
     }
   }
 
@@ -981,7 +1007,7 @@ function install(S) {
     proto[ENV_DONE] = true;
     const own = Object.prototype.hasOwnProperty.call(proto, 'handleTestEvent') ? proto.handleTestEvent : null;
     const inherited = own ? null : proto.handleTestEvent;
-    proto.handleTestEvent = function hushrunHandleTestEvent(event, state) {
+    const wrapped = { handleTestEvent(event, state) {
       if (event && typeof event === 'object' && !event[SEEN_EVENT]) {
         try {
           Object.defineProperty(event, SEEN_EVENT, { value: true });
@@ -993,7 +1019,8 @@ function install(S) {
       }
       const next = own || inherited;
       return next ? next.call(this, event, state) : undefined;
-    };
+    } }.handleTestEvent;
+    proto.handleTestEvent = typeof (own || inherited) === 'function' ? carry(wrapped, own || inherited) : wrapped;
   }
   const RT_DONE = Symbol.for('hushrun.jest.runtime');
   function sessionFor(rt) {
@@ -1075,7 +1102,7 @@ function install(S) {
       const original = proto[name];
       if (typeof original !== 'function') continue;
       const user = name === 'requireModuleOrMock' || name === 'unstable_importModule' || name === 'requireMock';
-      proto[name] = function (from, moduleName, ...rest) {
+      proto[name] = carry({ [name](from, moduleName, ...rest) {
         let exported = null;
         if (this._testPath && runOf()) {
           guard('session', () => {
@@ -1121,11 +1148,11 @@ function install(S) {
         }
         S.userRequire -= 1;
         return out;
-      };
+      } }[name], original);
     }
     const teardown = proto.teardown;
     if (typeof teardown === 'function') {
-      proto.teardown = function (...args) {
+      proto.teardown = carry({ teardown(...args) {
         guard('finish', () => {
           const s = this[SESSION_KEY];
           if (s) {
@@ -1134,20 +1161,22 @@ function install(S) {
           }
         });
         return teardown.apply(this, args);
-      };
+      } }.teardown, teardown);
     }
   }
   // [ADR 0082] ts-jest's compiler: a language service means type checking.
+  const TS_DONE = Symbol.for('hushrun.jest.ts-compiler');
   function patchTsCompiler(C) {
     const proto = C.prototype;
-    if (proto.__hushrun) return;
-    proto.__hushrun = true;
+    if (Object.prototype.hasOwnProperty.call(proto, TS_DONE)) return;
+    proto[TS_DONE] = true;
     S.tsCompilerSeen = true;
     const create = proto._createLanguageService;
-    proto._createLanguageService = function (...args) {
+    const wrapped = { _createLanguageService(...args) {
       S.typeAware = true;
       return create.apply(this, args);
-    };
+    } }._createLanguageService;
+    proto._createLanguageService = typeof create === 'function' ? carry(wrapped, create) : wrapped;
   }
 
   // ---------------------------------------------------------------- the main process
@@ -1246,9 +1275,9 @@ function install(S) {
     }
   }
   function patchConfigModule(cfg) {
-    if (cfg.readConfigs.__hushrun) return;
+    if (WRAPPED.has(cfg.readConfigs)) return;
     const readConfigs = cfg.readConfigs;
-    const wrapped = async function readConfigsHushrun(argv) {
+    const wrapped = carry(async function readConfigsHushrun(argv) {
       if (argv && typeof argv.config === 'string') S.argvConfig = argv.config;
       const out = await readConfigs.apply(this, arguments);
       if (!claimMain()) {
@@ -1256,8 +1285,7 @@ function install(S) {
         return out;
       }
       return guard('readConfigs', () => adjustConfigs(out, argv)) || out;
-    };
-    wrapped.__hushrun = true;
+    }, readConfigs);
     try {
       cfg.readConfigs = wrapped;
     } catch (err) {
@@ -1322,7 +1350,7 @@ function install(S) {
     if (Object.prototype.hasOwnProperty.call(proto, SEQ_DONE)) return;
     proto[SEQ_DONE] = true;
     const sortOf = proto.sort;
-    proto.sort = async function (tests) {
+    proto.sort = carry(async function (tests) {
       if (S.restoreFreeze) {
         S.restoreFreeze();
         if (S.lateAssess) guard('late assess', S.lateAssess);
@@ -1337,7 +1365,7 @@ function install(S) {
       // From here until the reporter hears the run start, the main process runs globalSetup.
       S.window = true;
       return kept;
-    };
+    }, sortOf);
   }
   async function guardAsync(what, fn) {
     try {
@@ -1490,25 +1518,26 @@ function install(S) {
       if (hasCore && isClass(exp.SearchSource) && typeof exp.runCLI === 'function') patchCore(exp);
     }
   }
+  const CORE_DONE = Symbol.for('hushrun.jest.core');
   function patchCore(core) {
     S.SearchSource = core.SearchSource;
     if (typeof core.getVersion === 'function') guard('version', () => { S.version = core.getVersion(); });
     const proto = core.SearchSource.prototype;
-    if (proto.__hushrun) return;
-    proto.__hushrun = true;
+    if (Object.prototype.hasOwnProperty.call(proto, CORE_DONE)) return;
+    proto[CORE_DONE] = true;
     S.contexts = S.contexts || new Set();
     const getTestPaths = proto.getTestPaths;
     if (typeof getTestPaths === 'function') {
-      proto.getTestPaths = function (...args) {
+      proto.getTestPaths = carry({ getTestPaths(...args) {
         guard('contexts', () => {
           if (this._context && this._context.hasteFS) S.contexts.add(this._context);
         });
         return getTestPaths.apply(this, args);
-      };
+      } }.getTestPaths, getTestPaths);
     }
   }
   const load = Module._load;
-  Module._load = function hushrunLoad() {
+  Module._load = carry(function hushrunLoad() {
     const exp = load.apply(this, arguments);
     try {
       inspect(exp);
@@ -1516,7 +1545,7 @@ function install(S) {
       note('inspect', err);
     }
     return exp;
-  };
+  }, load);
 
   // The config line's way in: loaded by Jest's config, inside readConfigs, after jest-config and
   // @jest/core loaded. It catches the configurations as Jest freezes them, and passes this file
@@ -1536,7 +1565,7 @@ function install(S) {
     S.restoreFreeze = () => {
       if (Object.freeze !== freeze) Object.freeze = freeze;
     };
-    Object.freeze = function hushrunFreeze(o) {
+    Object.freeze = carry({ freeze(o) {
       if (o && typeof o === 'object' && !Array.isArray(o)) {
         guard('late config', () => {
           if ('testSequencer' in o && 'maxWorkers' in o && 'passWithNoTests' in o && 'reporters' in o) {
@@ -1554,6 +1583,6 @@ function install(S) {
         });
       }
       return freeze.apply(this, arguments);
-    };
+    } }.freeze, freeze);
   }
 }
