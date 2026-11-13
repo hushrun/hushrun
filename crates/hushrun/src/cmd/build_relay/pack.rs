@@ -150,7 +150,7 @@ pub(crate) fn pack_block(store: &Store, key: &Digest, dir: &Path) -> Result<Pack
     pack_block_within(store, key, dir, IN_MEMORY)
 }
 
-/// [`pack_block`], holding at most `limit` bytes of each pass in memory.
+/// `pack_block`, holding at most `limit` bytes of each pass in memory.
 pub(crate) fn pack_block_within(
     store: &Store,
     key: &Digest,

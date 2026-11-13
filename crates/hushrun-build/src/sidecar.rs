@@ -280,7 +280,7 @@ pub fn record_built(
     )
 }
 
-/// [`record_block`] for a file a reuse put in place from the block `block` (B-12, B-32).
+/// `record_block` for a file a reuse put in place from the block `block` (B-12, B-32).
 #[allow(clippy::too_many_arguments)]
 pub fn record_reused(
     file: &Path,

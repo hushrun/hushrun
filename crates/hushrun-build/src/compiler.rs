@@ -570,7 +570,7 @@ pub const VIEW_MARKER: &str = ".hushrun-sysroot";
 /// The sysroot without sources of `sysroot`, or `None` when the toolchain has no sources (B-9,
 /// B-17). It is found in `dir` whole, or made there: a folder whose `lib/rustlib/<target>` is
 /// a link to the toolchain's own for each target folder the toolchain has (each folder of its
-/// `lib/rustlib/` that holds a `lib/`, but [`SOURCES`]), and nothing else. That is all rustc
+/// `lib/rustlib/` that holds a `lib/`, but `SOURCES`), and nothing else. That is all rustc
 /// reads from a sysroot it is given: the standard libraries and `proc_macro`, its own linker
 /// (`lib/rustlib/<host>/bin`), and the sources it maps `/rustc/<commit>/` to, which are left out.
 ///
