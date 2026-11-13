@@ -453,6 +453,52 @@ fn walk_any(dir: &Path, name: &str) -> bool {
         })
 }
 
+// covers: B-31
+#[test]
+fn a_github_job_without_an_id_token_shares_nothing_whatever_agent_token_it_holds() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    // A job without `id-token: write`, with an agent token in HUSHRUN_TOKEN beside it.
+    let (code, stdout, stderr) = ci_build(&a, &fake, |cmd| {
+        cmd.env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(stderr.contains("id-token: write"), "{stderr}");
+    let build: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .map(|s| s.path)
+        .collect();
+    assert!(build.is_empty(), "{build:?}");
+
+    // With an ID token, the results request carries it, and not the agent token beside it:
+    // the answer that turns the wrapper on is one to the job itself.
+    let before = fake.seen().len();
+    let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    let minted = fake.id_tokens();
+    let results: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .skip(before)
+        .filter(|s| s.route == route::RESULTS)
+        .collect();
+    assert!(!results.is_empty(), "{stderr}");
+    for seen in &results {
+        let bearer = seen.authorization.as_deref().unwrap_or_default();
+        assert!(
+            minted.iter().any(|t| bearer == format!("Bearer {t}")),
+            "{} carried {bearer}",
+            seen.path
+        );
+    }
+}
+
 // covers: B-2
 #[test]
 fn a_job_whose_org_doesnt_share_runs_unwrapped_and_says_nothing() {

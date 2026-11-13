@@ -519,6 +519,9 @@ struct Server {
     /// \[ADR 0060\] Whether this is CI, where no login goes, and a person's token signs with the
     /// key the job names only.
     in_ci: bool,
+    /// Whether this is GitHub Actions, where a build credential is the job's ID token or none
+    /// (B-31).
+    in_github: bool,
     /// \[ADR 0052\] With no credential in GitHub Actions, the repository its lookups ask as, and
     /// then it records nothing.
     reads_as: Option<String>,
@@ -819,12 +822,26 @@ impl Backend {
         let agent = given.as_deref().is_some_and(is_agent_token);
         let sends = named_by == NamedBy::Environment
             || (agent && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
-        let withheld = given.is_some() && !sends;
         // \[ADR 0060\] CI takes no person's login, as the repository's ledger doesn't (C-13): on a
         // runner where someone signed in, a job's results aren't that person's.
         let in_ci = hushrun_ci::is_ci(hushrun_ci::detect(&env));
+        let in_github = hushrun_ci::detect(&env) == Provider::Github;
+        // GitHub sets both when the job has `permissions: id-token: write`. The ID token names
+        // this URL as its audience, so no other server can use it.
+        let oidc = match (
+            var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+            var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+        ) {
+            (Some(url), Some(token)) => Some((url, token)),
+            _ => None,
+        };
+        // C-13, B-31: in GitHub Actions the job's ID token, when it has one, comes before any
+        // token the environment holds, as the repository's ledger takes it (L-10): what the
+        // backend answers, `Hushrun-Build` included, is an answer to the job itself.
+        let id_token_first = in_github && oidc.is_some();
+        let withheld = given.is_some() && !sends && !id_token_first;
         let mut signed_in_machine = None;
-        let (token, mut credential) = match given.filter(|_| sends) {
+        let (token, mut credential) = match given.filter(|_| sends && !id_token_first) {
             Some(token) if env.agent().is_some() => (Some(token), Credential::Agent),
             Some(token) => (Some(token), Credential::Token { agent }),
             None if in_ci => (None, Credential::Nothing),
@@ -845,15 +862,6 @@ impl Backend {
                 }
                 None => (None, Credential::Nothing),
             },
-        };
-        // GitHub sets both when the job has `permissions: id-token: write`. The ID token names
-        // this URL as its audience, so no other server can use it.
-        let oidc = match (
-            var("ACTIONS_ID_TOKEN_REQUEST_URL"),
-            var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
-        ) {
-            (Some(url), Some(token)) => Some((url, token)),
-            _ => None,
         };
         let github_oidc = oidc.clone().map(|(url, token)| OidcEndpoint {
             url,
@@ -884,6 +892,7 @@ impl Backend {
                 signed_in_machine,
                 machine: OnceCell::new(),
                 in_ci,
+                in_github,
                 reads_as,
                 answered: Cell::new(false),
                 oidc,
@@ -1252,7 +1261,8 @@ pub enum BuildCredential {
 impl Backend {
     /// What a relay needs (B-26, B-31): for a server, the credential its build requests carry.
     /// In CI that is the job's ID token and nothing else, also beside an agent token (B-31); in
-    /// CI with none, the credential is `None`. Elsewhere a person's or an agent's token; with
+    /// GitHub Actions with none, the credential is `None`, whatever token the job holds; in other
+    /// CI with none, an agent token, which reads only. Elsewhere a person's or an agent's token; with
     /// none, no access. `None` for a directory.
     pub fn build_access(&self) -> Option<BuildAccess> {
         let Store::Server(server) = &self.store else {
@@ -1278,6 +1288,9 @@ impl Backend {
                         false,
                     )
                 }
+                // In GitHub Actions without an ID token, nothing: whatever else the job holds,
+                // sharing is off there (B-31).
+                (None, _) if server.in_github => (None, false),
                 // Anywhere else in CI an agent token reads the org's blocks, and writes none
                 // (`hushrun_build::share::what_a_run_does`).
                 (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),

@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- In GitHub Actions, when the job has an ID token (`permissions: id-token: write`), results
+  requests carry it before an agent token or `HUSHRUN_TOKEN` beside it, as the repository's
+  ledger already did, so the answer that turns build sharing on is one to the job itself. A job
+  without an ID token shares no build blocks, whatever token it holds; before, an agent token
+  there read the org's blocks.
 - Build blocks in CI: a job never reuses or uploads what another job left on a runner that keeps
   its temporary folder. The job's store and its credential's fingerprint are named by the
   repository, run, attempt, job and the job's own request token; another job's store found at

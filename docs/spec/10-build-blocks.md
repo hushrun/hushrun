@@ -766,9 +766,13 @@ was made with. No person's settings file is read, reuse is on unless `HUSHRUN_BU
 otherwise, `HUSHRUN_BUILD_DIR` is not followed, and the free-space floor is 2 GB. In GitHub
 Actions every build request carries the job's ID token, whose audience is the backend's URL, also
 when an agent token is set beside it; one within a minute of its expiry is replaced before the
-next request, and a 401 gets a fresh one and one more try. With no ID token (a pull request from a
-fork, a job without `id-token: write`) sharing is off and the run says why in one line. Anywhere
-else in CI an agent token reads the org's blocks and uploads none, whatever the policy says.
+next request, and a 401 gets a fresh one and one more try. The results lookup whose `Hushrun-Build` answer sets the
+wrapper carries the ID token too, before any token the environment holds (C-13), so the answer is
+one to the job itself. With no ID token (a pull request from a fork, a job without
+`id-token: write`) sharing is off and the run says why in one line, whatever else the
+environment holds: an agent token in `HUSHRUN_TOKEN` or `HUSHRUN_AGENT` reads nothing there, and a
+results answer obtained with it never sets the wrapper. Anywhere else in CI an agent token reads
+the org's blocks and uploads none, whatever the policy says.
 Every request, lookups included, names the workspace's commit when one can be read; a job the
 policy calls untrusted says once, in plain words, why it writes nothing to the repository's
 trusted blocks. The end of the command waits for uploads as one function of its context says
