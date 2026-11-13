@@ -227,5 +227,13 @@ mod tests {
                 .contains("not a folder")
         );
         assert!(check_private_folder(&dir.path().join("none")).is_err());
+        // A folder another user owns, whatever its mode: `/` is root's.
+        if !rustix::process::geteuid().is_root() {
+            assert!(
+                check_private_folder(Path::new("/"))
+                    .unwrap_err()
+                    .contains("belongs to another user")
+            );
+        }
     }
 }

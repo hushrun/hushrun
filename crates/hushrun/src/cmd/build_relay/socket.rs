@@ -147,6 +147,15 @@ mod tests {
                     .contains("open to others")
             );
         }
+        // A session folder another user owns is refused, and nothing is bound in it: `/` is
+        // root's.
+        if !rustix::process::geteuid().is_root() {
+            assert!(
+                bind(Path::new("/"), &none)
+                    .unwrap_err()
+                    .contains("belongs to another user")
+            );
+        }
         // Too long: a private folder under the runtime folder the environment names.
         let long = dir.path().join("x".repeat(120));
         std::fs::create_dir(&long).unwrap();
