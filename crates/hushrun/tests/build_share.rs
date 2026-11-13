@@ -1546,6 +1546,50 @@ fn a_written_build_off_wins_in_a_sandbox_and_no_setting_leaves_reuse_on() {
     );
 }
 
+// covers: B-21, B-25
+#[test]
+fn a_save_of_another_setting_in_a_sandbox_writes_no_mode_and_reuse_stays_on() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    // A sandbox where a setup step saved the share setting: nobody chose a mode, so the file
+    // names none, and reuse stays on, the sandbox's default.
+    let f = Machine::new(dir.path(), "f", Some(&a.repo));
+    let saved = f
+        .hushrun(&fake)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .args(["build", "share", "observe"])
+        .output()
+        .unwrap();
+    assert!(saved.status.success());
+    let file = |m: &Machine| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(m.root.join("build.json")).unwrap()).unwrap()
+    };
+    assert_eq!(file(&f)["share"], "observe");
+    assert!(file(&f).get("mode").is_none(), "{}", file(&f));
+    let said = sandbox_run(&f, &fake, |_| {});
+    assert!(
+        said.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{said}"
+    );
+    // `hushrun build off` is a choice: it is written, and wins. A later save of another
+    // setting keeps it.
+    let off = f.hushrun(&fake).args(["build", "off"]).output().unwrap();
+    assert!(off.status.success());
+    assert_eq!(file(&f)["mode"], "off");
+    let saved = f
+        .hushrun(&fake)
+        .args(["build", "share", "on"])
+        .output()
+        .unwrap();
+    assert!(saved.status.success());
+    assert_eq!(file(&f)["mode"], "off");
+    let said = sandbox_run(&f, &fake, |_| {});
+    assert!(!said.contains("build:"), "{said}");
+}
+
 // covers: B-26, B-36
 #[test]
 fn a_fetch_whose_store_host_cant_be_reached_names_the_host_to_allow() {

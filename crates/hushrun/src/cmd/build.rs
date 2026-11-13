@@ -335,7 +335,7 @@ fn set(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
     let mut before = None;
     let saved = settings::update(&place.settings, |settings| {
         before = Some(settings.mode);
-        settings.mode = mode;
+        settings.choose(mode);
     })
     .map_err(settings_failure)?;
     let changed = before != Some(mode);

@@ -577,7 +577,11 @@ counts nowhere: those are cargo's probes and the ones a build script runs.
 
 **B-21 Settings.** One file per user, `build.json` beside the credentials, written whole under a
 lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable names),
-`min_free_gb` and `programs`. `programs` is `movable` (unless set) or `tied`: a movable program
+`min_free_gb` and `programs`. `mode` is in the file only once someone chose it (`hushrun build
+on|observe|off`, or a file written by hand): a save of another setting keeps the mode the file
+had, and writes none where it had none, so that a file never says `off` where nobody chose it
+(B-25 reads a written `off` in a sandbox). A file with no `mode` is `off` on a person's
+machine. `programs` is `movable` (unless set) or `tied`: a movable program
 gets a debug bundle (B-9), which costs a `dsymutil` run per program and about twice the bytes
 stored on a first build and lets a later checkout reuse it; a tied one is compiled as asked and
 reused only in the target folder that built it. Any other value makes the file invalid. The
@@ -800,7 +804,8 @@ says so within 5 seconds, which the run waits for as a CI job does) begins a ses
 store with reuse on, and its relay shares as the org's mode says. A written `off` wins there as
 it does everywhere: where the machine's settings file says `"mode": "off"`, as `hushrun build
 off` writes it, the run has no session, reuses and shares nothing, and says nothing. Nothing
-else in the file is read for a sandbox: no file, or one that names no mode, leaves reuse on,
+else in the file is read for a sandbox: no file, or one that names no mode (as a save of
+another setting leaves it, B-21), leaves reuse on,
 `observe` or `on` written there change nothing, and a file that can't be read turns reuse off
 and says why in one line, since it can't say whether `off` is written. `HUSHRUN_BUILD` sets
 one command's mode over either (`settings::sandbox_mode` is the one definition, for the run and

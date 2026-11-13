@@ -341,6 +341,11 @@ offline.
   shared. No file, or one that names no mode, leaves reuse on, and `HUSHRUN_BUILD` still sets one
   command's mode over either. A settings file there that can't be read turns reuse off and says
   so. `hushrun build status` says the same.
+- Build blocks: **a save of another build setting writes no mode nobody chose.** `build.json`
+  names `mode` only once someone chose it with `hushrun build on|observe|off`; `hushrun build
+  share …` keeps the mode the file had and writes none where it had none. Before, any save wrote
+  `"mode": "off"`, which in a sandbox would have counted as a written off and turned reuse off.
+  A file with no `mode` is `off` on a person's machine, as before, and 0.14.0 reads it the same.
 - With `tests: observe` or `reuse`, a Vitest test that awaits `promisify(exec)` or
   `promisify(execFile)` gets `{ stdout, stderr }` again, and a rejection carries both, as without
   hushrun: the setup module's wrappers now keep what they wrap carries, `util.promisify.custom`

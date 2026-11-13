@@ -39,6 +39,10 @@ pub struct Settings {
     /// How much of the org's shared store this machine takes part in (B-33): `on`, `observe` or
     /// `off`. It lowers the org's shared mode for this machine and never raises it.
     pub share: Mode,
+    /// Whether someone chose the mode (`hushrun build on|observe|off`), so that the file names
+    /// it. `false` only with the default mode, `off`: nobody chose, and the file names no mode,
+    /// which a sandbox reads as its own default (B-25). Kept by [`load`] and [`update`] alone.
+    pub(crate) mode_chosen: bool,
 }
 
 impl Default for Settings {
@@ -51,6 +55,7 @@ impl Default for Settings {
             min_free_gb: MIN_FREE_GB,
             programs: Programs::default(),
             share: Mode::On,
+            mode_chosen: false,
         }
     }
 }
@@ -120,11 +125,13 @@ struct Stored {
     share: Option<Mode>,
 }
 
-/// The file as written: every field.
+/// The file as written: every field, but for a mode nobody chose (B-25). A file with no `mode`
+/// reads as `off` on a person's machine, here and in every released hushrun.
 #[derive(Serialize)]
 struct Written<'a> {
     version: u64,
-    mode: Mode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<Mode>,
     keep_days: u32,
     never_store: &'a [String],
     env: &'a [String],
@@ -144,6 +151,13 @@ impl Settings {
         }
     }
 
+    /// Sets the mode as someone's choice (`hushrun build on|observe|off`): the file names it
+    /// from then on, `off` too.
+    pub fn choose(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.mode_chosen = true;
+    }
+
     fn check(&self, path: &Path) -> Result<(), SettingsError> {
         if self.keep_days == 0 {
             return Err(SettingsError::Invalid {
@@ -155,7 +169,7 @@ impl Settings {
     }
 }
 
-/// The settings saved at `path`. A missing file is the defaults; a file that can't be read, isn't
+/// The settings saved at `path`. A missing file is the defaults, and so is a missing field; a file that can't be read, isn't
 /// valid or comes from a newer hushrun is an error.
 pub fn load(path: &Path) -> Result<Settings, SettingsError> {
     let Some(stored) = read(path)? else {
@@ -163,6 +177,7 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
     };
     let defaults = Settings::default();
     let settings = Settings {
+        mode_chosen: stored.mode.is_some(),
         mode: stored.mode.unwrap_or(defaults.mode),
         keep_days: stored.keep_days.unwrap_or(defaults.keep_days),
         never_store: stored.never_store.unwrap_or(defaults.never_store),
@@ -245,7 +260,11 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Settings)) -> Result<Setting
     // change goes in unlocked.
     let _ = lock.lock();
     let mut settings = load(path)?;
+    let mode = settings.mode;
     change(&mut settings);
+    // A mode that changed was chosen. One that didn't is written only if it was in the file,
+    // or [`Settings::choose`] says someone chose it: a save of another setting writes no mode.
+    settings.mode_chosen |= settings.mode != mode;
     settings.check(path)?;
     save(path, &settings).map_err(write_error)?;
     drop(lock);
@@ -265,7 +284,7 @@ fn folder(path: &Path) -> &Path {
 fn save(path: &Path, settings: &Settings) -> io::Result<()> {
     let written = Written {
         version: VERSION,
-        mode: settings.mode,
+        mode: settings.mode_chosen.then_some(settings.mode),
         keep_days: settings.keep_days,
         never_store: &settings.never_store,
         env: &settings.env,
@@ -429,6 +448,35 @@ mod tests {
         (dir, path)
     }
 
+    // covers: B-21, B-25
+    #[test]
+    fn a_save_of_another_setting_writes_no_mode_nobody_chose() {
+        use super::sandbox_mode;
+        let (_dir, path) = file();
+        let written = |path: &Path| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        };
+        update(&path, |s| s.share = Mode::Observe).unwrap();
+        assert!(written(&path).get("mode").is_none(), "{}", written(&path));
+        // Absent stays absent, save after save, and reads as before: `off` for a person, the
+        // sandbox's own default in a sandbox.
+        update(&path, |s| s.keep_days = 7).unwrap();
+        assert!(written(&path).get("mode").is_none());
+        assert_eq!(load(&path).unwrap().mode, Mode::Off);
+        assert_eq!(sandbox_mode(&path).unwrap(), Mode::On);
+        // A chosen `off` is written, though the mode's value didn't change, and later saves of
+        // other settings keep it.
+        update(&path, |s| s.choose(Mode::Off)).unwrap();
+        assert_eq!(written(&path)["mode"], "off");
+        update(&path, |s| s.share = Mode::On).unwrap();
+        assert_eq!(written(&path)["mode"], "off");
+        assert_eq!(sandbox_mode(&path).unwrap(), Mode::Off);
+        // A mode in a file someone wrote by hand is kept too.
+        fs::write(&path, br#"{"version": 1, "mode": "observe"}"#).unwrap();
+        update(&path, |s| s.keep_days = 3).unwrap();
+        assert_eq!(written(&path)["mode"], "observe");
+    }
+
     // covers: B-25
     #[test]
     fn in_a_sandbox_only_a_written_off_turns_reuse_off() {
@@ -445,7 +493,7 @@ mod tests {
             assert_eq!(sandbox_mode(&path).unwrap(), mode, "{written}");
         }
         // As `hushrun build off` writes it.
-        update(&path, |s| s.mode = Mode::Off).unwrap();
+        update(&path, |s| s.choose(Mode::Off)).unwrap();
         assert_eq!(sandbox_mode(&path).unwrap(), Mode::Off);
         // A file that can't say whether `off` is written is an error, not a default.
         fs::write(&path, b"{").unwrap();
