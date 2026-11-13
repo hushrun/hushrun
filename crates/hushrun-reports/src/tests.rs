@@ -344,6 +344,61 @@ fn a_report_below_junitreports_is_dropped_only_when_surefires_report_holds_its_c
 
 // covers: C-27
 #[test]
+fn a_case_surefires_report_and_testngs_copy_beside_it_share_counts_once() {
+    let case = |name: &str, failed: bool| {
+        if failed {
+            format!(r#"<testcase classname="p.T" name="{name}"><failure/></testcase>"#)
+        } else {
+            format!(r#"<testcase classname="p.T" name="{name}"/>"#)
+        }
+    };
+    let suite = format!(
+        "<testsuite>{}{}{}</testsuite>",
+        case("a", false),
+        case("b", false),
+        case("c", true)
+    );
+    // An exact copy, a subset, a superset with one case of its own, and a copy with one case
+    // renamed: each case, by class and name, counts once.
+    for (copy, total, failed) in [
+        (
+            vec![case("a", false), case("b", false), case("c", true)],
+            3,
+            1,
+        ),
+        (vec![case("a", false)], 3, 1),
+        (
+            vec![
+                case("a", false),
+                case("b", false),
+                case("c", true),
+                case("d", true),
+            ],
+            4,
+            2,
+        ),
+        (
+            vec![case("a", false), case("b", false), case("x", true)],
+            4,
+            2,
+        ),
+    ] {
+        let copy = format!("<testsuite>{}</testsuite>", copy.concat());
+        let dir = tree(&[
+            ("target/surefire-reports/TEST-TestSuite.xml", &suite),
+            ("target/surefire-reports/junitreports/TEST-p.T.xml", &copy),
+        ]);
+        let found = find(&query(dir.path(), dir.path(), &[])).unwrap().files;
+        let tests = summarize(&found, &Limits::default())
+            .unwrap()
+            .tests
+            .unwrap();
+        assert_eq!((tests.total, tests.failed), (total, failed), "{copy}");
+    }
+}
+
+// covers: C-27
+#[test]
 fn a_report_older_than_the_run_is_not_its() {
     let dir = tree(&[("junit.xml", JUNIT)]);
     let mut q = query(dir.path(), dir.path(), &[]);

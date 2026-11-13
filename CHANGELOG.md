@@ -282,7 +282,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   observed, and `hushrun why` says what to change.
 - A Maven run of TestNG no longer counts each test twice in its summary: a report below
   `junitreports/` is left out when Surefire's `TEST-TestSuite.xml` beside it holds every one of
-  its cases, and only then, so another tool's reports there are still read.
+  its cases, and only then, so another tool's reports there are still read; one that holds more,
+  or a case renamed, counts the cases it shares with Surefire's once.
 - Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
   at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
   names) is now read by that module's tests.
