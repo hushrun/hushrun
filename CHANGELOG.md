@@ -190,6 +190,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: an agent's sandbox with the network reuses and shares when its org shares. A run
+  under an agent token on a machine with no person's `build.json` now has reuse on, in the store,
+  and shares as the org's mode says, as the table of who shares says; `HUSHRUN_BUILD=off` still
+  turns it off. Before, only a run from a saved `hushrun build fetch` counted as a sandbox, so a
+  sandbox with the network reused nothing unless `HUSHRUN_BUILD=on` was set.
 - `hushrun build fetch` with nothing to sign in with says to set `HUSHRUN_AGENT` for the phase,
   the variable the documentation gives an agent's string, and that an agent token in
   `HUSHRUN_TOKEN` works too. Before, it named only `HUSHRUN_TOKEN`.

@@ -646,6 +646,17 @@ the backend's header and `open` saying what the org decided, and the machine's s
 its own. A run never shares more than its local mode allows: with local `observe`, sharing
 observes too.
 
+A **sandbox** is a machine with no person's settings file (B-21), as the one function that maps
+a run's credential to its row says (`build_session::caller`, for the session, the relay and
+`hushrun build status`). An agent token's run there whose org shares (its results lookup said so,
+or, with none made, `open` says so within 5 seconds, which the run waits for as a CI job does)
+begins a session in the store with reuse on unless `HUSHRUN_BUILD` says otherwise, and its relay
+shares as the org's mode says; a run from a saved fetch (B-36) is one too. One whose org doesn't
+share runs as it would without any of this, and says nothing. *Rests on:* `build.json` being
+written only by `hushrun build`, which a person runs and a sandbox's image doesn't. *Breaks if:* a
+person who never ran `hushrun build` runs an agent token on their own machine: it is taken for a
+sandbox, reuses in the store and uploads as one.
+
 When `open` answers that sharing is off although the org shares, it gives one reason
 (`hushrun_core::blocks::OffReason`): `plan`, the org's plan includes no shared store; or
 `contract`, the org's plan sets its shared storage by contract alone and none is set yet. For

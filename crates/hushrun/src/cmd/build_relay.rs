@@ -116,7 +116,7 @@ const UNPACKED_PER_PACKED: u64 = 4;
 
 /// Why sharing is off when `open` answers the reason `contract` (B-25): the org's plan sets its
 /// shared storage by contract alone, and none is set yet. Never "upgrade": no plan gives it.
-const BY_CONTRACT: &str = "the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it";
+pub(crate) const BY_CONTRACT: &str = "the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it";
 
 /// What starts a relay (B-26).
 pub(crate) struct Config {

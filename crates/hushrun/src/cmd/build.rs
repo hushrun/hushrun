@@ -92,7 +92,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
     })?;
     let config = crate::cmd::build_relay::Config {
         store: Store::new(&store),
-        caller: crate::cmd::build_session::caller(Some(&access), in_ci),
+        caller: crate::cmd::build_session::caller(Some(&access), in_ci, !place.settings.exists()),
         access,
         repository,
         commit: None,
@@ -205,7 +205,7 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 
 /// What sharing does here, as far as this machine can tell without asking the backend (B-25):
 /// the word, and why.
-fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
+fn sharing_here(effective: &settings::Settings, sandbox: bool) -> (&'static str, String) {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
@@ -213,7 +213,7 @@ fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
         _ => None,
     };
     let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
-    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
+    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci, sandbox);
     let does = what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None));
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),
@@ -398,7 +398,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "programs": effective.as_ref().map(|s| s.programs.as_str()),
             "share": effective.as_ref().map(|s| s.share.as_str()),
             "sharing": effective.as_ref().map(|s| {
-                let (word, why) = sharing_here(s);
+                let (word, why) = sharing_here(s, !place.settings.exists());
                 json!({"mode": word, "why": why})
             }),
             "in_ci": in_ci,
@@ -492,7 +492,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 )
             ),
         );
-        let (word, why) = sharing_here(effective);
+        let (word, why) = sharing_here(effective, !place.settings.exists());
         line(
             "share",
             format!(

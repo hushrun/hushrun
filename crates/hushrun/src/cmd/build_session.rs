@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use hushrun_build::session::{self, NotBegun, Session};
+use hushrun_build::share::Caller;
 use hushrun_ci::Env;
 use hushrun_core::time::Time;
 
@@ -61,9 +62,20 @@ pub(crate) fn begin(
     if let Some(found) = saved_fetch(&here, place) {
         return begin_from_saved(&here, repository, found, None);
     }
+    let sandbox = !here.settings.exists();
+    // B-25: an agent token on a machine with no person's settings file (a sandbox), whose org
+    // shares: reuse is on here, and sharing is the org's mode.
+    let sandbox_shares = share.as_ref().is_some_and(|start| {
+        caller(Some(&start.access), false, sandbox) == (Caller::Agent { sandbox: true })
+            && (start.access.shares || start.open_decides)
+    });
+    let share = match share {
+        Some(start) if sandbox_shares => return begin_sandbox_sharing(&here, start, repository),
+        other => other,
+    };
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
-        match start_sharing(&mut session, start, repository, &env) {
+        match start_sharing(&mut session, start, repository, &env, sandbox) {
             Ok(_) | Err(None) => {}
             Err(Some(line)) => session.add_line(line),
         }
@@ -94,7 +106,7 @@ fn begin_from_saved(
     (saved, folder): (crate::cmd::build_relay::saved::Saved, PathBuf),
     ci: Option<(&Path, hushrun_build::share::Caller)>,
 ) -> Result<Session, Option<String>> {
-    use hushrun_build::share::{Caller, Sharing, what_a_run_does};
+    use hushrun_build::share::{Sharing, what_a_run_does};
     let sandbox = !here.settings.exists();
     let overrides = hushrun_build::settings::Overrides::from(here.env)
         .map_err(|err| Some(format!("{OFF}: {err}")))?;
@@ -168,6 +180,60 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
         }
     }
     Ok(session)
+}
+
+/// B-25: an agent token's run in a sandbox (no person's settings file) whose org shares: reuse is
+/// on here, in the store, unless `HUSHRUN_BUILD` says otherwise, and the relay shares as the org's
+/// mode says. A run that made no results lookup (`open_decides`) learns whether the org shares
+/// only from `open`, which it waits for as a CI job does: an org that doesn't share then leaves
+/// no session, silently, and one that doesn't answer in time leaves none with one line.
+fn begin_sandbox_sharing(
+    here: &Here<'_>,
+    start: ShareStart,
+    repository: Option<&str>,
+) -> Result<Session, Option<String>> {
+    let overrides = hushrun_build::settings::Overrides::from(here.env)
+        .map_err(|err| Some(format!("{OFF}: {err}")))?;
+    let Some(store) = session::store_dir(here.cache_dir, &overrides) else {
+        return Err(None);
+    };
+    let mut session = begin_sandbox(here, &store)?;
+    let open_decides = start.open_decides;
+    let relay = match start_sharing(&mut session, start, repository, here.env, true) {
+        Ok(relay) => relay,
+        // The org shares, as the results lookup said: reuse here stays on, sharing is off.
+        Err(line) if !open_decides => {
+            if let Some(line) = line {
+                session.add_line(line);
+            }
+            return Ok(session);
+        }
+        Err(line) => {
+            session.finish(here.now);
+            return Err(line);
+        }
+    };
+    if !open_decides {
+        return Ok(session);
+    }
+    let wait = crate::cmd::build_relay::Tuning::default().ci_open;
+    match relay.wait_open(wait) {
+        crate::cmd::build_relay::Opened::Answering => Ok(session),
+        opened => {
+            let said = relay.end_check(&[]);
+            let line = match opened {
+                crate::cmd::build_relay::Opened::Unanswered => Some(NO_ANSWER.to_string()),
+                crate::cmd::build_relay::Opened::Stopped(_) => said.into_iter().next(),
+                // Silent, but for an org whose plan sets its storage by contract.
+                crate::cmd::build_relay::Opened::Off => said
+                    .into_iter()
+                    .find(|line| line.ends_with(crate::cmd::build_relay::BY_CONTRACT)),
+                crate::cmd::build_relay::Opened::Answering => None,
+            };
+            session.finish(here.now);
+            Err(line)
+        }
+    }
 }
 
 /// The line a CI job reads when the backend didn't answer in time, the results lookup or `open`
@@ -308,13 +374,14 @@ pub(crate) fn ci_job_store(env: &dyn Fn(&str) -> Option<OsString>) -> Option<Pat
 
 /// Who the run is, for B-25's table: the one mapping from what the backend gives the relay's
 /// requests to `hushrun_build::share::Caller`, for the session, the relay and `hushrun build
-/// status`.
+/// status`. `sandbox`: this machine has no person's settings file (B-21), so an agent token here
+/// runs in a sandbox, not on a person's machine.
 pub(crate) fn caller(
     access: Option<&crate::results::BuildAccess>,
     in_ci: bool,
-) -> hushrun_build::share::Caller {
+    sandbox: bool,
+) -> Caller {
     use crate::results::BuildCredential;
-    use hushrun_build::share::Caller;
     let credential = access.and_then(|access| access.credential.as_ref());
     let agent = access.is_some_and(|access| access.agent);
     match credential {
@@ -322,7 +389,7 @@ pub(crate) fn caller(
             id_token: matches!(credential, Some(BuildCredential::GithubOidc { .. })),
             agent_token: matches!(credential, Some(BuildCredential::Token(_))) && agent,
         },
-        Some(_) if agent => Caller::Agent { sandbox: false },
+        Some(_) if agent => Caller::Agent { sandbox },
         Some(_) => Caller::Person { signed_in: true },
         None => Caller::Person { signed_in: false },
     }
@@ -359,13 +426,13 @@ fn begin_in_ci(
             .filter(|(saved, _)| saved.serves(place().as_ref(), repository))
         {
             store.prepare().map_err(Some)?;
-            let caller = caller(Some(&start.access), true);
+            let caller = caller(Some(&start.access), true, false);
             return begin_from_saved(here, repository, (saved, folder), Some((path, caller)));
         }
         return Err(Some(NO_ANSWER.to_string()));
     }
     let does = what_a_run_does(
-        caller(Some(&start.access), true),
+        caller(Some(&start.access), true, false),
         hushrun_build::model::Mode::On,
         hushrun_build::model::Mode::On,
         Org::Shares(None),
@@ -397,7 +464,7 @@ fn begin_in_ci(
         }
         Err(line)
     };
-    let relay = match start_sharing(&mut session, start, repository, here.env) {
+    let relay = match start_sharing(&mut session, start, repository, here.env, false) {
         Ok(relay) => relay,
         Err(line) => return abandon(session, line),
     };
@@ -438,13 +505,18 @@ fn start_sharing(
     start: ShareStart,
     repository: Option<&str>,
     env: &dyn Fn(&str) -> Option<OsString>,
+    sandbox: bool,
 ) -> Result<std::sync::Arc<crate::cmd::build_relay::Relay>, Option<String>> {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     if !(start.access.shares || start.open_decides) || cfg!(not(unix)) {
         return Err(None);
     }
     let current = session.current().clone();
-    let caller = caller(Some(&start.access), hushrun_ci::in_ci(&Env::from_process()));
+    let caller = caller(
+        Some(&start.access),
+        hushrun_ci::in_ci(&Env::from_process()),
+        sandbox,
+    );
     let does = what_a_run_does(
         caller,
         current.mode,

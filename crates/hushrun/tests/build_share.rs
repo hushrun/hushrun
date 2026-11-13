@@ -916,6 +916,71 @@ fn a_fetch_asks_for_each_check_it_names_and_gets_only_that_checks_manifest() {
     assert_ne!(named[0], named[1]);
 }
 
+/// `hushrun run build -- cargo build` in a sandbox with the network: an agent token, no person's
+/// settings, and `HUSHRUN_BUILD` only as `change` sets it. Its stderr.
+fn sandbox_run(
+    b: &Machine,
+    fake: &FakeBuild,
+    change: impl FnOnce(&mut assert_cmd::Command),
+) -> String {
+    let mut cmd = b.hushrun(fake);
+    cmd.env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .env_remove("HUSHRUN_BUILD");
+    change(&mut cmd);
+    let output = cmd
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    // The next run builds again.
+    let clean = std::process::Command::new("cargo")
+        .args(["clean", "-q"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&b.repo)
+        .status()
+        .unwrap();
+    assert!(clean.success());
+    stderr
+}
+
+// covers: B-25
+#[test]
+fn an_agents_sandbox_with_the_network_reuses_and_shares_when_the_org_shares() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    // `HUSHRUN_BUILD=off` still turns it off for one command.
+    let off = sandbox_run(&b, &fake, |cmd| {
+        cmd.env("HUSHRUN_BUILD", "off");
+    });
+    assert!(!off.contains("build:"), "{off}");
+    let stderr = sandbox_run(&b, &fake, |_| {});
+    assert!(
+        stderr.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{stderr}"
+    );
+    // Nothing wrote a person's settings: the machine is still a sandbox.
+    assert!(!b.root.join("build.json").exists());
+    // An org that doesn't share: nothing is reused, and nothing said.
+    fake.set_sharing(false);
+    let opens = fake.count(route::OPEN);
+    let stderr = sandbox_run(&b, &fake, |_| {});
+    assert!(!stderr.contains("build:"), "{stderr}");
+    assert_eq!(fake.count(route::OPEN), opens);
+}
+
 // covers: B-36
 #[test]
 fn a_fetch_with_nothing_to_sign_in_with_names_the_agents_variable() {
