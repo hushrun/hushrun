@@ -594,32 +594,69 @@ fn timed_build(m: &Machine, fake: &FakeBuild, share: &str) -> (Duration, String)
     (took, stderr)
 }
 
+/// The lookups the fake was sent after the first `after` requests: whether each fetches, and
+/// how many addresses it names.
+fn lookups_since(fake: &FakeBuild, after: usize) -> Vec<(bool, usize)> {
+    fake.seen()
+        .into_iter()
+        .skip(after)
+        .filter(|s| s.route == route::LOOKUP)
+        .map(|s| {
+            let asked: hushrun_core::blocks::LookupRequest =
+                serde_json::from_slice(&s.body).unwrap();
+            (asked.fetch, asked.addresses.len())
+        })
+        .collect()
+}
+
 // covers: B-26, B-34
 #[test]
-fn a_warm_build_with_stale_vouches_and_a_slow_open_takes_what_it_takes_with_sharing_off() {
+fn a_warm_build_with_stale_vouches_takes_what_one_with_fresh_vouches_takes_and_asks_once() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None);
     let (code, stderr) = a.build(&fake);
     assert_eq!(code, 0, "{stderr}");
+    // Compiles that took 4 seconds where they were built: a question about a vouch of one may
+    // wait 2.
+    fake.set_costs(4_000);
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
     let (code, stderr) = b.build(&fake);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("from the shared store)"), "{stderr}");
-    // What a warm build takes with sharing on and vouches fresh, and what a build with sharing
-    // off takes on a third checkout (it compiles: downloaded hints aren't followed there).
+    assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
+    // A warm build with vouches fresh, and the same a day later, when every vouch B holds is
+    // older than a day and `open` takes 10 seconds: nothing waits for it.
     let (fresh, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
-    let c = Machine::new(dir.path(), "c", Some(&a.repo));
-    let (off, _) = timed_build(&c, &fake, "off");
-    // A day off: every vouch B holds is older than a day, and `open` takes 10 seconds.
     assert!(age_vouches(&b.root.join("cache/build")) > 0);
     fake.delay(route::OPEN, Duration::from_secs(10));
-    let (on, stderr) = timed_build(&b, &fake, "on");
+    let seen = fake.seen().len();
+    let (stale, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
     assert!(
-        on < fresh.max(off) + Duration::from_millis(1_500),
-        "with stale vouches {on:?}, fresh {fresh:?}, sharing off {off:?}: {stderr}"
+        stale < fresh.mul_f64(1.1) + Duration::from_millis(500),
+        "with stale vouches {stale:?}, fresh {fresh:?}: {stderr}"
+    );
+    assert_eq!(lookups_since(&fake, seen), vec![], "{stderr}");
+
+    // In a CI job `open` has answered before cargo starts: the job's blocks downloaded in its
+    // first call, a day old in its second, are asked about in one lookup, and the build takes
+    // what one with fresh vouches takes.
+    fake.delay(route::OPEN, Duration::ZERO);
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    let (_, _, said) = timed_ci_build(&c, &fake);
+    assert!(said.contains("(2 from the shared store)"), "{said}");
+    let stores = ci_stores(&c.root.join("runner-temp"));
+    let (fresh, _, said) = timed_ci_build(&c, &fake);
+    assert!(said.contains("2 of 2 crates reused"), "{said}");
+    assert!(age_vouches(&stores[0]) > 0);
+    let seen = fake.seen().len();
+    let (stale, _, said) = timed_ci_build(&c, &fake);
+    assert!(said.contains("2 of 2 crates reused"), "{said}");
+    assert_eq!(lookups_since(&fake, seen), vec![(false, 2)], "{said}");
+    assert!(
+        stale < fresh.mul_f64(1.1) + Duration::from_millis(500),
+        "with stale vouches {stale:?}, fresh {fresh:?}: {said}"
     );
 }
 
@@ -992,7 +1029,7 @@ fn a_github_job_whose_backend_is_cut_off_reuses_what_its_setup_step_fetched() {
     );
 }
 
-/// A cold `cargo build` through hushrun in a GitHub Actions job, timed by COMMAND's own marks:
+/// `cargo clean` and `cargo build` through hushrun in a GitHub Actions job, timed by COMMAND's own marks:
 /// what cargo took, what the run took after COMMAND ended, and its stdout and stderr.
 fn timed_ci_build(m: &Machine, fake: &FakeBuild) -> (Duration, Duration, String) {
     let marks = m.root.join("marks");
@@ -1008,7 +1045,7 @@ fn timed_ci_build(m: &Machine, fake: &FakeBuild) -> (Duration, Duration, String)
             "--",
             "sh",
             "-c",
-            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; touch \"$MARKS/start\"; cargo build --offline; touch \"$MARKS/end\"",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; cargo clean -q; touch \"$MARKS/start\"; cargo build --offline; touch \"$MARKS/end\"",
         ])
         .output()
         .unwrap();

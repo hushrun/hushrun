@@ -272,6 +272,10 @@ struct State {
     suspended: HashSet<Hex32>,
     /// What the server said this run of a downloaded block's outputs: served or not.
     vouched: HashMap<Hex32, Option<Hex32>>,
+    /// C1, B-34: the run's lookup of stale vouches is in flight (one at a time), and the
+    /// addresses it asks about.
+    vouching: bool,
+    vouch_asked: HashSet<Hex32>,
     /// Sealed hint lists, by hint address, from the prefetch.
     sealed_hints: HashMap<Hex32, Vec<Vec<u8>>>,
     hints_asked: HashSet<Hex32>,
@@ -470,6 +474,8 @@ impl Relay {
                 missing: HashSet::new(),
                 suspended: HashSet::new(),
                 vouched: HashMap::new(),
+                vouching: false,
+                vouch_asked: HashSet::new(),
                 sealed_hints: HashMap::new(),
                 hints_asked: HashSet::new(),
                 fetches: HashMap::new(),
@@ -1439,44 +1445,50 @@ impl Relay {
     /// age counts.
     async fn vouch(self: Arc<Relay>, key: Digest, outputs: Hex32) -> Answer {
         let address = Relay::address(&key);
-        // C1: the question is answered within the block's budget, half what its compile costs,
-        // as a fetch is (B-26): cargo never waits on the network for longer than a compile.
-        let deadline = Instant::now() + self.vouch_budget(&key);
-        loop {
-            let phase = self.state().phase_now(Instant::now()).clone();
-            match phase {
-                Phase::Opening if Instant::now() < deadline => {
-                    tokio::time::sleep(self.config.tuning.tick).await;
-                }
-                // An `open` that hasn't answered within the budget is a server that can't be
-                // reached, for this question: an entry of any age counts (B-34).
-                Phase::Opening => return Answer::Offline,
-                Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
-                Phase::Stopped(_) => return Answer::None,
-                Phase::Resting(_) | Phase::Answering => break,
-            }
+        // C1: until `open` answers, the server can't be reached, for this question: nothing
+        // waits for it.
+        match self.state().phase_now(Instant::now()).clone() {
+            Phase::Opening | Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
+            Phase::Stopped(_) => return Answer::None,
+            Phase::Resting(_) | Phase::Answering => {}
         }
-        let known = self.state().vouched.get(&address).copied();
-        let served = match known {
-            Some(served) => served,
-            None => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let asked = tokio::time::timeout(left, self.lookup(&[address], false)).await;
-                match asked {
-                    // Not within the budget: as unreachable, for this question.
-                    Err(_) => return Answer::Offline,
-                    Ok(Some(found)) => found
-                        .iter()
-                        .find(|f| f.address == address)
-                        .map(|f| f.outputs),
-                    Ok(None) => {
-                        return match self.state().phase.clone() {
-                            Phase::Stopped(Stop::Refused(_)) => Answer::None,
-                            _ => Answer::Offline,
-                        };
-                    }
+        // Then the run's one lookup of stale vouches answers it, waited for within the block's
+        // budget, half what its compile costs, as a fetch is (B-26).
+        let deadline = Instant::now() + self.vouch_budget(&key);
+        // A lookup that asked about it is under way, or was.
+        let mut asked = false;
+        let served = loop {
+            {
+                let mut state = self.state();
+                if let Some(served) = state.vouched.get(&address) {
+                    break *served;
+                }
+                if state.missing.contains(&address) {
+                    break None;
+                }
+                if state.vouch_asked.contains(&address) {
+                    asked = true;
+                } else if asked {
+                    // The lookup that asked about it got no answer: as unreachable, unless the
+                    // server refused the caller.
+                    return match state.phase {
+                        Phase::Stopped(Stop::Refused(_)) => Answer::None,
+                        _ => Answer::Offline,
+                    };
+                } else if !state.vouching {
+                    state.vouching = true;
+                    state.vouch_asked.insert(address);
+                    asked = true;
+                    let relay = self.clone();
+                    self.runtime
+                        .spawn(async move { relay.ask_vouches(address).await });
                 }
             }
+            // Not within the budget: as unreachable, for this question.
+            if Instant::now() >= deadline {
+                return Answer::Offline;
+            }
+            tokio::time::sleep(self.config.tuning.tick).await;
         };
         if served != Some(outputs) {
             return Answer::None;
@@ -1508,6 +1520,70 @@ impl Relay {
         } else {
             Answer::None
         }
+    }
+
+    /// C1, B-34: the run's one lookup of stale vouches: `first`, the block a wrapper asked
+    /// about, and every other block only downloaded whose entry for this run's host, org and
+    /// repository is a day old or more and that this run hasn't asked about yet, up to the
+    /// lookup's limit. What it finds lands where every lookup's does.
+    async fn ask_vouches(self: Arc<Relay>, first: Hex32) {
+        let limit = self
+            .state()
+            .policy
+            .as_ref()
+            .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
+            .max(1);
+        let relay = self.clone();
+        let stale = self
+            .runtime
+            .spawn_blocking(move || relay.stale_downloads(limit))
+            .await
+            .unwrap_or_default();
+        let batch: Vec<Hex32> = {
+            let mut state = self.state();
+            let batch: Vec<Hex32> =
+                dedup(std::iter::once(first).chain(stale.into_iter().filter(|a| {
+                    !state.vouched.contains_key(a)
+                        && !state.missing.contains(a)
+                        && !state.vouch_asked.contains(a)
+                })))
+                .into_iter()
+                .take(limit)
+                .collect();
+            state.vouch_asked.extend(batch.iter().copied());
+            batch
+        };
+        self.lookup(&batch, false).await;
+        let mut state = self.state();
+        for address in &batch {
+            state.vouch_asked.remove(address);
+        }
+        state.vouching = false;
+    }
+
+    /// The addresses of the blocks in the store only downloaded whose entry for this run's
+    /// host, org and repository is a day old or more, at most `limit`.
+    fn stale_downloads(&self, limit: usize) -> Vec<Hex32> {
+        let repository = self.config.repository.clone().unwrap_or_default();
+        let now = now_ms();
+        let mut stale = Vec::new();
+        for key in self.config.store.keys() {
+            if stale.len() >= limit {
+                break;
+            }
+            let Some(origin) = self.config.store.origin(&key) else {
+                continue;
+            };
+            if origin.downloaded_only()
+                && origin
+                    .vouch(&self.by.host, &self.by.org, &repository)
+                    .is_some()
+                && !origin.fresh(&self.by.host, &self.by.org, &repository, now)
+            {
+                stale.push(Relay::address(&key));
+            }
+        }
+        stale
     }
 
     /// How long a question about `key`'s vouch may take (C1): half what its compile took, as

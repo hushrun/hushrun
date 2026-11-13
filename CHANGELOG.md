@@ -183,6 +183,12 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a warm build whose downloaded crates were vouched for more than a day ago takes
+  what one with fresh vouches takes. While `open` hasn't answered, a question about a vouch is
+  answered at once as a server that can't be reached; once it has, every stale vouch is asked in
+  one lookup, which each crate waits for within half its compile. Before, each crate waited up
+  to half its compile for `open`, then asked alone: 6.2 to 6.7 seconds against 1.7 to 2.1 for 83
+  crates.
 - Build blocks: everything after a command, the last uploads and `close`, has one deadline. A
   `begin` or `commit` that doesn't answer is cut off at it, as a PUT was, and counts a cut-off;
   `close` goes within it. In CI that is the end's 20 seconds (2 minutes for a job writing trusted

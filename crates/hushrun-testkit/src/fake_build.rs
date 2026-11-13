@@ -447,6 +447,13 @@ impl FakeBuild {
         }
     }
 
+    /// Says of every block it holds that its compile took `cost_ms` where it was built.
+    pub fn set_costs(&self, cost_ms: u32) {
+        for block in &mut self.state().blocks {
+            block.cost_ms = cost_ms;
+        }
+    }
+
     /// Forgets `address` in every scope, its objects too: evicted.
     pub fn evict(&self, address: Hex32) {
         let mut state = self.state();

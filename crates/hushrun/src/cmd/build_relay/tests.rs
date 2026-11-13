@@ -1691,7 +1691,7 @@ fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_
 
 // covers: B-26, B-34
 #[test]
-fn a_stale_vouch_is_answered_within_the_block_s_budget_while_open_is_slow() {
+fn a_stale_vouch_is_answered_at_once_while_open_has_not_answered() {
     let fake = FakeBuild::start();
     fake.delay(route::OPEN, Duration::from_secs(10));
     let m = machine();
@@ -1730,10 +1730,98 @@ fn a_stale_vouch_is_answered_within_the_block_s_budget_while_open_is_slow() {
         },
     );
     let took = started.elapsed();
-    // `open` hasn't answered within half the compile: as unreachable, the entry counts.
+    // `open` hasn't answered: as unreachable, the entry counts, and nothing waits for it.
     assert_eq!(answer, Answer::Offline);
-    assert!(took < Duration::from_millis(1_500), "{took:?}");
-    assert!(took >= Duration::from_millis(900), "{took:?}");
+    assert!(took < Duration::from_millis(300), "{took:?}");
+    assert_eq!(fake.count(route::LOOKUP), 0);
+}
+
+/// Every vouch `store` holds for `key`, dated at the epoch: two days old and more.
+fn age(store: &Store, key: &Digest) {
+    store
+        .update_origin(key, |origin| {
+            let mut origin = origin?;
+            for vouch in &mut origin.vouched {
+                vouch.date_ms = 0;
+            }
+            Some(origin)
+        })
+        .unwrap();
+}
+
+// covers: B-34
+#[test]
+fn every_stale_vouch_is_asked_in_one_lookup_once_open_has_answered() {
+    // Three libraries this machine downloaded, whose compiles took 4 seconds where they were
+    // built; a day later, and one of them withdrawn.
+    let fake = FakeBuild::start();
+    let crates = served(&fake, 3, 10_000, 4_000);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    for (key, step) in &crates {
+        let answer = ask(
+            &relay,
+            Request::Fetch {
+                step: *step,
+                keys: vec![*key],
+                class: LocalClass::Library,
+                local_ms: None,
+            },
+        );
+        assert_eq!(answer, Answer::Ready { key: *key });
+    }
+    relay.end_check(&[]);
+    for (key, _) in &crates {
+        age(&b.store, key);
+    }
+    fake.withdraw(address(&crates[2].0));
+    let lookups = fake.count(route::LOOKUP);
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    // The first question asks about all three; the others wait for that one answer.
+    let started = Instant::now();
+    for (n, (key, step)) in crates.iter().enumerate() {
+        let outputs = b.store.origin(key).unwrap().vouched[0].outputs;
+        let answer = ask(
+            &relay,
+            Request::Vouch {
+                key: *key,
+                step: *step,
+                outputs,
+            },
+        );
+        let expected = if n < 2 { Answer::Served } else { Answer::None };
+        assert_eq!(answer, expected, "{n}");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::LOOKUP), lookups + 1);
+    let asked: Vec<blocks::LookupRequest> = fake
+        .seen()
+        .iter()
+        .filter(|s| s.route == route::LOOKUP)
+        .map(|s| serde_json::from_slice(&s.body).unwrap())
+        .collect();
+    let last = asked.last().unwrap();
+    assert!(!last.fetch);
+    let mut named = last.addresses.clone();
+    named.sort();
+    let mut all: Vec<Hex32> = crates.iter().map(|(key, _)| address(key)).collect();
+    all.sort();
+    assert_eq!(named, all);
+    // What was served is renewed, and asks nothing the next day.
+    let now = super::now_ms();
+    for (key, _) in &crates[..2] {
+        let origin = b.store.origin(key).unwrap();
+        assert!(origin.fresh(&fake.origin(), "acme", "github.com/acme/shop", now));
+    }
 }
 
 // covers: B-30
