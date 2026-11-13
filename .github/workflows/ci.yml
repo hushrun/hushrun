@@ -105,7 +105,7 @@ jobs:
           node-version: "20.20.2"
       - name: Install Vitest for the test-file tests
         run: |
-          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
       - name: Name CMake for the test-program tests
@@ -245,7 +245,7 @@ jobs:
           node-version: "20.20.2"
       - name: Install Vitest for the test-file tests
         run: |
-          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
       # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
       - name: Name CMake for the test-program tests

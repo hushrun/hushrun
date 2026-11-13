@@ -32,8 +32,11 @@ pub const WORKER: &str = "vitest-worker";
 pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
 /// The variable the config line loads the plugin from.
 pub const VARIABLE: &str = "HUSHRUN_VITEST";
-/// The line a repository's Vitest config needs, in its `plugins`.
-pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]";
+/// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0081, amended\] A
+/// conditional, not `process.env.HUSHRUN_VITEST && …`: that one is `"" | Promise<any> |
+/// undefined`, which a config that type-checks itself refuses as a `PluginOption`. A config with
+/// either form names [`VARIABLE`], which is what the adapter looks for.
+pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]";
 /// The plugin, in Vitest's own process.
 const PLUGIN: &str = include_str!("hushrun_vitest.mjs");
 /// The setup file the plugin puts first, in each worker.

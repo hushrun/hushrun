@@ -6443,20 +6443,23 @@ fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files(
     ]);
     let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    let line = "vitest.config.ts: add `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`, so that hushrun can look at Vitest's test files for test (tests in hushrun.yaml)";
+    let line = "vitest.config.ts: add `plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]`, so that hushrun can look at Vitest's test files for test (tests in hushrun.yaml)";
     assert!(
         out.stdout.contains("Change by hand:") && out.stdout.contains(line),
         "{}",
         out.stdout
     );
     assert_eq!(r.read("vitest.config.ts"), "export default { test: {} }\n");
-    // With the line there, or no check that looks at its test files, it proposes nothing.
-    r.write(
-        "vitest.config.ts",
+    // With the line there, in the form proposed now or in the one proposed before 0.14, or no
+    // check that looks at its test files, it proposes nothing.
+    for there in [
+        "export default { plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined] }\n",
         "export default { plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())] }\n",
-    );
-    let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
-    assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+    ] {
+        r.write("vitest.config.ts", there);
+        let out = ran(r.hushrun(&fake), &["init", "--local", "--dry-run"]);
+        assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
+    }
     r.write("vitest.config.ts", "export default { test: {} }\n");
     r.write(
         "hushrun.yaml",
