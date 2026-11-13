@@ -574,7 +574,9 @@ fn go_reuses_what_already_passed_and_audits_it() {
     // saved instead: either form names the four files.
     assert!(
         second.stderr.contains("; 4 test files reused")
-            || second.stderr.contains("; reusing 4 test files saved about "),
+            || second
+                .stderr
+                .contains("; reusing 4 test files saved about "),
         "{}",
         second.stderr
     );
