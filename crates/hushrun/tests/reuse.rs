@@ -436,6 +436,37 @@ fn tests_always_and_not_observed_test_files_always_run() {
     );
 }
 
+// covers: C-34, C-37
+#[test]
+fn a_file_that_becomes_a_test_file_is_never_said_to_be_gone() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // pytest.ini is ignored, so a change to the rule that names test files moves a file between
+    // the sets and changes nothing else.
+    let mut files = shop("{mode: reuse, ignore: [\"pytest.ini\"]}");
+    files.push((
+        "tests/check_extra.py".into(),
+        "def test_extra():\n    assert True\n".into(),
+    ));
+    let r = repo_of(&files);
+    let python = python();
+    let pytest = || r.run(&pytest_args(&python, &[]), &[]);
+    let first = pytest();
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // tests/check_extra.py was a source; pytest now takes it for a test file. It is on disk.
+    r.write(
+        "pytest.ini",
+        "[pytest]\ntestpaths = tests\npythonpath = .\npython_files = test_*.py check_*.py\n",
+    );
+    let moved = pytest();
+    assert_eq!(moved.code, 0, "{}\n{}", moved.stdout, moved.stderr);
+    assert_eq!(
+        moved.plan_line(),
+        "hushrun: unit: all 9 test files run: tests/check_extra.py is now a test file, which can change what tests load"
+    );
+}
+
 // covers: C-33, C-34
 #[test]
 fn a_failing_run_records_what_ran_whole_and_the_fix_reuses_it() {

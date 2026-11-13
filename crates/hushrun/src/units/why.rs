@@ -26,7 +26,7 @@ use super::adapter::{self, Adapter, Hints, WhyAt};
 use super::db::{self, EdgeKind};
 use super::shared::{self, Asker, Choice, Shared};
 use super::store::{self, Map, UnitResults};
-use super::{Keyer, fetch, rest_of, what_it_reuses, whole_reusable};
+use super::{Keyer, every_changed, fetch, what_it_reuses, whole_reusable};
 use crate::results::RunResult;
 
 /// What `hushrun why` needs.
@@ -766,69 +766,8 @@ fn changes_of(
             out.read = Some((new.clone(), "new"));
         }
     }
-    let rest = rest_of(sets, tree);
-    let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
-    out.every = rest
-        .iter()
-        .find(|(path, entry)| map.rest.get(*path).is_some_and(|before| before != *entry))
-        .map(|(p, _)| {
-            (
-                p.clone(),
-                format!("{p} changed, and any test may read it"),
-                "rest-changed",
-            )
-        })
-        .or_else(|| {
-            rest.keys().find(|p| !map.rest.contains_key(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is new, and any test may read it"),
-                    "rest-changed",
-                )
-            })
-        })
-        // \[C-37\] A file that is on disk is never gone: one of the rest set then that is a test file
-        // or a source now changed what tests load.
-        .or_else(|| {
-            map.rest.keys().find(|p| !rest.contains_key(*p)).map(|p| {
-                if tree.contains(p) {
-                    (
-                        p.clone(),
-                        format!("{p} is now a test file or a source, which can change what tests load"),
-                        "shape",
-                    )
-                } else {
-                    (
-                        p.clone(),
-                        format!("{p} is gone, and any test may have read it"),
-                        "rest-changed",
-                    )
-                }
-            })
-        })
-        .or_else(|| {
-            sources.iter().find(|p| !map.sources.contains(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is new, which can change what tests load"),
-                    "shape",
-                )
-            })
-        })
-        .or_else(|| {
-            map.sources.iter().find(|p| !sources.contains(*p)).map(|p| {
-                let now = if tree.contains(p) {
-                    "is no longer a source"
-                } else {
-                    "is gone"
-                };
-                (
-                    p.clone(),
-                    format!("{p} {now}, which can change what tests load"),
-                    "shape",
-                )
-            })
-        });
+    // \[C-37\] The plan's own function: a file on disk is never gone.
+    out.every = every_changed(map, sets, tree);
     out
 }
 
@@ -1053,8 +992,7 @@ mod tests {
         assert_eq!(
             said.map(|(_, why, reason)| (why, reason)),
             Some((
-                "p/tagged_test.go is now a test file or a source, which can change what tests load"
-                    .to_string(),
+                "p/tagged_test.go is now a test file, which can change what tests load".to_string(),
                 "shape"
             ))
         );

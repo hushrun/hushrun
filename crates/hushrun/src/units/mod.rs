@@ -977,13 +977,10 @@ impl Session {
                 "{check}: all {} run",
                 test_files(total as u64, self.adapter.test_file())
             );
-            let rest = rest_of(&sets, input.tree);
-            let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
             let why = why_every(
                 &map,
                 input.tree,
-                &rest,
-                &sources,
+                &sets,
                 known.iter().map(|(unit, _)| unit),
                 self.adapter.test_file(),
                 None,
@@ -1517,13 +1514,10 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         })
         .flatten();
     let why = (passed.is_empty()).then(|| {
-        let sources: BTreeSet<String> =
-            found.sets.files(Set::Sources).map(str::to_string).collect();
         why_every(
             &map,
             p.tree,
-            &rest_of(&found.sets, p.tree),
-            &sources,
+            &found.sets,
             found.known.iter().map(|(unit, _)| unit),
             adapter.test_file(),
             None,
@@ -2909,15 +2903,7 @@ fn decide(
                 "{check}: with `tests: reuse`, all {} would have run",
                 test_files(counts.total, mode.noun)
             );
-            let why = why_every(
-                map,
-                tree,
-                &out.rest,
-                &out.sources,
-                out.units.keys(),
-                mode.noun,
-                None,
-            );
+            let why = why_every(map, tree, sets, out.units.keys(), mode.noun, None);
             format!("{all}: {why}")
         } else {
             format!(
@@ -3044,13 +3030,12 @@ fn describe(why: &str) -> String {
 fn why_every<'a>(
     map: &store::Map,
     tree: &Tree,
-    rest: &BTreeMap<String, String>,
-    sources: &BTreeSet<String>,
+    sets: &units::Sets,
     units: impl Iterator<Item = &'a String> + Clone,
     noun: &str,
     said: Option<&str>,
 ) -> String {
-    if let Some(why) = why_all(map, rest, sources) {
+    if let Some(why) = why_all(map, sets, tree) {
         return why;
     }
     let changed = why_every_read(map, tree, units.clone(), noun);
@@ -3113,41 +3098,108 @@ fn why_every_read<'a>(
     None
 }
 
-fn why_all(
-    map: &store::Map,
-    rest: &BTreeMap<String, String>,
-    sources: &BTreeSet<String>,
-) -> Option<String> {
+fn why_all(map: &store::Map, sets: &units::Sets, tree: &Tree) -> Option<String> {
     if !map.reported() {
         return None;
     }
-    let changed = rest
-        .iter()
+    every_changed(map, sets, tree).map(|(_, why, _)| why)
+}
+
+/// \[C-34, C-37\] What changed for every test file since the map was written, the one function
+/// the plan's line, `observe`'s, `hushrun ready` and `hushrun why` ask: a file of the rest set that
+/// changed, is new there or left it, then a source new or no longer one. Each with its path, what
+/// people read and `why`'s reason word. A file on disk is never gone: one that left a set says
+/// what it is now.
+pub(crate) fn every_changed(
+    map: &store::Map,
+    sets: &units::Sets,
+    tree: &Tree,
+) -> Option<(String, String, &'static str)> {
+    let rest = rest_of(sets, tree);
+    let sources: BTreeSet<&str> = sets.files(Set::Sources).collect();
+    // What a file that left the set it was in is now, as `sets` put it; `None` when it isn't on
+    // disk.
+    let now = |path: &str| -> Option<&'static str> {
+        if !tree.contains(path) {
+            return None;
+        }
+        Some(match sets.of(path) {
+            Some(Set::Units) => "is now a test file",
+            Some(Set::Sources) => "is now a source",
+            Some(Set::Ignored) => "is now in `tests.ignore`",
+            Some(Set::Rest) | None => "is no longer a source",
+        })
+    };
+    let said = |path: &str, why: String, reason: &'static str| (path.to_string(), why, reason);
+    rest.iter()
         .find(|(path, entry)| map.rest.get(*path).is_some_and(|before| before != *entry))
-        .map(|(path, _)| format!("{path} changed, and any test may read it"))
+        .map(|(path, _)| {
+            said(
+                path,
+                format!("{path} changed, and any test may read it"),
+                "rest-changed",
+            )
+        })
         .or_else(|| {
             rest.keys()
                 .find(|path| !map.rest.contains_key(*path))
-                .map(|path| format!("{path} is new, and any test may read it"))
+                .map(|path| {
+                    if map.sources.contains(path) {
+                        said(
+                            path,
+                            format!("{path} is no longer a source, and any test may read it"),
+                            "shape",
+                        )
+                    } else {
+                        said(
+                            path,
+                            format!("{path} is new, and any test may read it"),
+                            "rest-changed",
+                        )
+                    }
+                })
         })
         .or_else(|| {
             map.rest
                 .keys()
                 .find(|path| !rest.contains_key(*path))
-                .map(|path| format!("{path} is gone, and any test may have read it"))
-        });
-    changed
+                .map(|path| match now(path) {
+                    Some(now) => said(
+                        path,
+                        format!("{path} {now}, which can change what tests load"),
+                        "shape",
+                    ),
+                    None => said(
+                        path,
+                        format!("{path} is gone, and any test may have read it"),
+                        "rest-changed",
+                    ),
+                })
+        })
         .or_else(|| {
             sources
                 .iter()
-                .find(|path| !map.sources.contains(*path))
-                .map(|path| format!("{path} is new, which can change what tests load"))
+                .find(|path| !map.sources.contains(**path))
+                .map(|path| {
+                    said(
+                        path,
+                        format!("{path} is new, which can change what tests load"),
+                        "shape",
+                    )
+                })
         })
         .or_else(|| {
             map.sources
                 .iter()
-                .find(|path| !sources.contains(*path))
-                .map(|path| format!("{path} is gone, which can change what tests load"))
+                .find(|path| !sources.contains(path.as_str()))
+                .map(|path| {
+                    let now = now(path).unwrap_or("is gone");
+                    said(
+                        path,
+                        format!("{path} {now}, which can change what tests load"),
+                        "shape",
+                    )
+                })
         })
 }
 

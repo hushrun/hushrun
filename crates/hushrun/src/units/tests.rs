@@ -1208,3 +1208,74 @@ fn ready_counts_each_adapters_units_in_its_own_word() {
         "unit: CI would run 3 of 10 tests, in 1 of 2 test classes; 7 already passed on the files they read"
     );
 }
+
+// covers: C-34
+#[test]
+fn the_plans_reason_never_calls_a_file_on_disk_gone() {
+    // The sets now: tests/test_*.py are test files, `.py` sources, `vendor/**` ignored.
+    let paths: Vec<String> = [
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "lib.py",
+        "vendor/old.py",
+        "notes.txt",
+    ]
+    .map(String::from)
+    .to_vec();
+    let tree = tree(&paths);
+    let ignore = [hushrun_core::glob::Pattern::new("vendor/**").unwrap()];
+    let sets = units::classify(
+        tree.paths(),
+        &|p| p.starts_with("tests/test_"),
+        units::Sources::Kinds(&[".py"]),
+        &ignore,
+    );
+    let rest = rest_of(&sets, &tree);
+    let said = |map: &store::Map| {
+        why_every(
+            map,
+            &tree,
+            &sets,
+            ["tests/test_a.py".to_string()].iter(),
+            "test file",
+            None,
+        )
+    };
+    let then = |rest_then: &[&str], sources_then: &[&str]| {
+        let mut map = store::Map {
+            reported: true,
+            ..store::Map::default()
+        };
+        for path in rest_then {
+            let entry = rest.get(*path).cloned().unwrap_or_else(|| "f 0".into());
+            map.rest.insert((*path).to_string(), entry);
+        }
+        map.sources = sources_then.iter().map(|p| (*p).to_string()).collect();
+        map
+    };
+    // A file of the rest set then that is a test file now (the rules that name test files
+    // changed, or a build that failed named none): it is there.
+    assert_eq!(
+        said(&then(&["notes.txt", "tests/test_b.py"], &["lib.py"])),
+        "tests/test_b.py is now a test file, which can change what tests load"
+    );
+    // A source then that `tests.ignore` names now.
+    assert_eq!(
+        said(&then(&["notes.txt"], &["lib.py", "vendor/old.py"])),
+        "vendor/old.py is now in `tests.ignore`, which can change what tests load"
+    );
+    // A source then that is in the rest set now isn't new there.
+    assert_eq!(
+        said(&then(&[], &["lib.py", "notes.txt"])),
+        "notes.txt is no longer a source, and any test may read it"
+    );
+    // One that isn't on disk is gone.
+    assert_eq!(
+        said(&then(&["notes.txt", "gone.txt"], &["lib.py"])),
+        "gone.txt is gone, and any test may have read it"
+    );
+    assert_eq!(
+        said(&then(&["notes.txt"], &["lib.py", "gone.py"])),
+        "gone.py is gone, which can change what tests load"
+    );
+}

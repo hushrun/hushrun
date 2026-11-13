@@ -423,3 +423,16 @@ as the unit paid for the audit by test file.
   amendment 14 says.
 - **Unchanged.** With `unit: file`, and in a run past the 50,000 tests a check reuses one by one,
   which reuses by test file, the audit is C-34's, of test files.
+
+## Amendment 16: what the adapters tell, read by the core (2026-11-13)
+
+The JavaScript and JVM fixes made adapters tell more than the core read. Each is now read in one
+place.
+
+- **"Gone" means not on disk.** The plan's line, `observe`'s and `hushrun ready` called a file
+  gone whenever it left the rest set or the sources, as gson's did after a build failed and named
+  no test class, while `hushrun why` had been fixed apart. One function (`every_changed`) now
+  decides what changed for every test file, for all four: a file on disk that left a set says
+  what it is now, by the sets as they are (`is now a test file`, `is now a source`, `is now in
+  `tests.ignore``); a source now in the rest set `is no longer a source`, not new; only a file
+  not on disk is gone.

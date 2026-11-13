@@ -148,6 +148,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Fixed
 
+- The plan's line, `observe`'s and `hushrun ready` no longer call a file gone when it is on disk
+  and only moved between the sets (a source that is a test file now, a file `tests.ignore` names
+  now): they say what it is now, as `hushrun why` does, by the same function.
 - Two starts of a test runner in one command, such as two pytests or `ctest -L a; ctest -L b`,
   no longer add up to a test file that ran whole: a test file's tests are counted within each
   start, and one of whose tests never ran records no pass. An adapter's facts may say `start`;
