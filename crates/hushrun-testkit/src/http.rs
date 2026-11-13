@@ -88,6 +88,9 @@ pub enum Reply {
     /// Answers with the body written through a link, which every connection using it shares:
     /// eight bodies at once each get an eighth of its rate. A client that goes away stops it.
     Slow(Arc<Link>, Response),
+    /// Answers with the status line, the headers and the first half of the body, then closes:
+    /// an answer cut on its way.
+    Cut(Response),
 }
 
 /// A link of one rate, shared by every body that goes through it, in either direction: what a
@@ -216,6 +219,7 @@ fn serve(
             let _ = stream.shutdown(Shutdown::Both);
         }
         Reply::Slow(link, response) => write_slowly(stream, &response, Some(&link)),
+        Reply::Cut(response) => write_cut(stream, &response),
     }
 }
 
@@ -324,6 +328,24 @@ fn write_slowly(mut stream: TcpStream, response: &Response, link: Option<&Link>)
     })();
     let _ = written;
     let _ = stream.shutdown(Shutdown::Write);
+}
+
+/// The head, which promises the whole body, and half of the body.
+fn write_cut(mut stream: TcpStream, response: &Response) {
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+        response.status,
+        reason(response.status),
+        response.body.len()
+    );
+    for (name, value) in &response.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(&response.body[..response.body.len() / 2]);
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn reason(status: u16) -> &'static str {

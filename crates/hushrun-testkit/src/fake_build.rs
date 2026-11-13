@@ -107,7 +107,19 @@ pub struct Block {
 struct Failure {
     route: String,
     status: u16,
+    how: How,
     times: usize,
+}
+
+/// What an injected failure answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum How {
+    /// An error of the status.
+    Status,
+    /// The status, with a body cut halfway.
+    Cut,
+    /// The status, with a body that is no JSON.
+    NotJson,
 }
 
 struct Forced {
@@ -367,9 +379,26 @@ impl FakeBuild {
 
     /// Answers the next `times` requests of `route` with `status` (503 with `Retry-After: 1`).
     pub fn fail(&self, route: &str, status: u16, times: usize) {
+        self.inject(route, status, How::Status, times);
+    }
+
+    /// Answers the next `times` requests of `route` with 200 and a body cut halfway: the
+    /// connection closes before the length its head promised.
+    pub fn cut(&self, route: &str, times: usize) {
+        self.inject(route, 200, How::Cut, times);
+    }
+
+    /// Answers the next `times` requests of `route` with 200 and a page that is no JSON, as a
+    /// proxy or a captive portal answers.
+    pub fn answer_no_json(&self, route: &str, times: usize) {
+        self.inject(route, 200, How::NotJson, times);
+    }
+
+    fn inject(&self, route: &str, status: u16, how: How, times: usize) {
         self.state().failures.push(Failure {
             route: route.to_string(),
             status,
+            how,
             times,
         });
     }
@@ -658,6 +687,19 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         .find(|f| f.route == route && f.times > 0)
     {
         failure.times -= 1;
+        match failure.how {
+            How::Status => {}
+            How::Cut => {
+                let whole = Response::json(200, &json!({"result": null, "pad": "x".repeat(4096)}));
+                return Reply::Cut(whole);
+            }
+            How::NotJson => {
+                return answer(
+                    Response::bytes(failure.status, "<html>sign in to the network</html>"),
+                    pause,
+                );
+            }
+        }
         let mut response = error(failure.status, "injected", "a test asked for this");
         if failure.status == 503 {
             response = error(503, "unavailable", "try again").header("retry-after", "1");

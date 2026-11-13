@@ -1018,6 +1018,39 @@ fn once_the_org_stops_sharing_a_downloaded_block_is_compiled_once_and_one_built_
     a_decision_reuses_no_download(&a, &b, &fake, |_| {});
 }
 
+/// B-34: only a lookup no server answered leaves a run "unreached". After the org stopped
+/// sharing, a results lookup that got any other answer than a well-formed one is no reason to
+/// reuse what B only downloaded.
+fn an_answer_that_is_no_yes_reuses_no_download(fault: fn(&FakeBuild)) {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (_, b) = built_and_downloaded(dir.path(), &fake);
+    fake.set_sharing(false);
+    fault(&fake);
+    let said = rebuilt(&b, &fake, |_| {});
+    assert!(said.contains("2 crates built, none reused"), "{said}");
+}
+
+// covers: B-34
+#[test]
+fn a_redirect_on_the_results_lookup_reuses_no_downloaded_block() {
+    an_answer_that_is_no_yes_reuses_no_download(|fake| fake.fail(route::RESULTS, 302, 1000));
+}
+
+// covers: B-34
+#[test]
+fn a_cut_answer_to_the_results_lookup_reuses_no_downloaded_block() {
+    an_answer_that_is_no_yes_reuses_no_download(|fake| fake.cut(route::RESULTS, 1000));
+}
+
+// covers: B-34
+#[test]
+fn a_page_that_is_no_json_on_the_results_lookup_reuses_no_downloaded_block() {
+    an_answer_that_is_no_yes_reuses_no_download(|fake| {
+        fake.answer_no_json(route::RESULTS, 1000);
+    });
+}
+
 // covers: B-34
 #[test]
 fn with_share_off_here_a_downloaded_block_is_compiled_once_and_one_built_here_is_reused() {

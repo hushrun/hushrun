@@ -1144,7 +1144,14 @@ download only when it would share and **its backend couldn't be reached**: its r
 got no answer of any kind, which the session records before COMMAND starts
 (`session::Shared::Unreached`, the one state every wrapper of the run reads, set by
 `build_session::unreached`); then an entry of any age counts, for the blocks this machine's own
-hints lead to. In a run with a relay, a download
+hints lead to. **No answer of any kind** means no server gave an HTTP response: the connection
+couldn't be made, or timed out or was cut before a status line arrived, or the credential the
+lookup needs couldn't be had because nothing answered the request for it. Every other outcome
+that is not a well-formed answer saying the org shares is a decision that it doesn't, and the
+download is compiled once: a redirect hushrun doesn't follow, any 4xx or 5xx, a body that is
+cut, empty or not the JSON asked for (a proxy's or a captive portal's page), and a credential
+request a server refused. One place says which it was, `HttpLedger::answered_any`, set where a
+response's status line arrives. In a run with a relay, a download
 is reused without asking a server while its entry for this run's host, org and repository is
 under 24 hours old, unless the relay says sharing stopped for the run by a decision (`open`
 said the org doesn't share or that the run's sharing is off, or a request was refused with 401,

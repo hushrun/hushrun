@@ -592,6 +592,67 @@ fn github_id_tokens_are_requested_for_the_ledger_and_cached() {
     assert!(err.to_string().contains("https://"), "{err}");
 }
 
+/// Whether a results lookup of a ledger at a server that answers `reply` was answered.
+fn lookup_answered(reply: impl Fn() -> Reply + Send + Sync + 'static) -> bool {
+    let (_server, ledger) = served_by(move |_| reply());
+    let _ = ledger.json_get_with("v0/results/k", None, None);
+    ledger.answered_any()
+}
+
+// covers: B-34
+#[test]
+fn any_http_response_is_an_answer_and_only_none_at_all_is_not() {
+    // Every status, a redirect among them, followed or not.
+    for status in [301, 302, 307, 308, 401, 403, 404, 429, 500, 503] {
+        assert!(
+            lookup_answered(move || Reply::Send(Response::new(status))),
+            "{status}"
+        );
+    }
+    // A body that is cut, empty, or not the JSON asked for.
+    assert!(
+        lookup_answered(|| Reply::Cut(Response::bytes(200, "x".repeat(4096)))),
+        "cut"
+    );
+    assert!(lookup_answered(|| Reply::Send(Response::new(200))));
+    assert!(lookup_answered(|| Reply::Send(Response::bytes(
+        200, "<html>"
+    ))));
+    // A credential request a server refused, though the lookup itself was never sent.
+    let fake = FakeLedger::start();
+    let endpoint = Server::start(|_| Reply::Send(Response::new(403)));
+    let refused = Options {
+        github_oidc: Some(OidcEndpoint {
+            url: format!("{}/idtoken?api-version=2.0", endpoint.url()),
+            token: Secret::new("request-token"),
+        }),
+        ..Options::default()
+    };
+    let ledger = open(&fake, &refused);
+    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(ledger.answered_any(), "a refused credential");
+
+    // No answer: a server that closes every connection, one that isn't there, and a
+    // credential nothing could be asked for.
+    assert!(!lookup_answered(|| Reply::Close));
+    let nowhere = Server::start(|_| Reply::Close).url();
+    let gone = LedgerUrl::parse(&format!("{nowhere}/l/a/b")).unwrap();
+    let ledger = HttpLedger::open_tuned(&gone, &Options::default(), quick()).unwrap();
+    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(!ledger.answered_any());
+    let unreachable = Options {
+        github_oidc: Some(OidcEndpoint {
+            url: format!("{nowhere}/idtoken?api-version=2.0"),
+            token: Secret::new("request-token"),
+        }),
+        ..Options::default()
+    };
+    let ledger = open(&fake, &unreachable);
+    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(!ledger.answered_any());
+    assert_eq!(fake.requests().len(), 0);
+}
+
 // covers: L-10
 #[test]
 fn tokens_come_from_the_options_in_order() {

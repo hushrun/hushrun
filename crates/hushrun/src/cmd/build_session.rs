@@ -114,8 +114,9 @@ fn begin_here(
 }
 
 /// B-34: whether this run has no relay because its backend couldn't be reached, and for no
-/// other reason: the run's results lookup got no answer of any kind (so nothing said whether
-/// the org shares), and what the run does would share had it said yes. A person who turned
+/// other reason: the run's results lookup got no answer of any kind (no server gave an HTTP
+/// response, as `HttpLedger::answered_any` says it; so nothing said whether the org shares),
+/// and what the run does would share had it said yes. A person who turned
 /// sharing off here, a local mode of `off`, or an answer without `Hushrun-Build: on` is a
 /// decision, and so is every run [`begin`] is handed no backend for.
 fn unreached(session: &Session, start: &ShareStart) -> bool {

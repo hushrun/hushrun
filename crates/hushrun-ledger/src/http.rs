@@ -93,7 +93,10 @@ pub struct HttpLedger {
     /// An answer to one of hushrun's other requests carried `Hushrun-Build: on`: the org shares
     /// build blocks (the build protocol).
     build_sharing: std::sync::atomic::AtomicBool,
-    /// One of hushrun's other requests got an answer, whatever its status.
+    /// A server gave an HTTP response to one of this ledger's requests, whatever its status and
+    /// whatever became of its body, or refused the credential a request needed. Set where a
+    /// response's status line arrives ([`read`]) and where the credential is asked for
+    /// (`auth::Oidc`), nowhere else: the one definition of "a server answered" (B-34).
     answered: std::sync::atomic::AtomicBool,
 }
 
@@ -393,7 +396,11 @@ impl HttpLedger {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Whether one of hushrun's other requests got an answer from the server, of any status.
+    /// Whether a server gave any HTTP response to a request of this ledger: any status, a
+    /// redirect it didn't follow among them, with a body that was cut, empty or not what was
+    /// asked for; or a credential request a server answered with a refusal. False only when no
+    /// response came at all: the connection couldn't be made, or timed out or was cut before a
+    /// status line, or the credential couldn't be had because nothing answered (B-34).
     pub fn answered_any(&self) -> bool {
         self.answered.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -445,8 +452,6 @@ impl HttpLedger {
             if answer.status.is_redirection() {
                 return Err(self.failure(&answer, path));
             }
-            self.answered
-                .store(true, std::sync::atomic::Ordering::Relaxed);
             if answer.build_sharing {
                 self.build_sharing
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -474,7 +479,10 @@ impl HttpLedger {
         let url = self.url(call);
         let mut attempt = 1;
         loop {
-            let token = self.auth.token(&self.client, &self.tuning).await?;
+            let token = self
+                .auth
+                .token(&self.client, &self.tuning, &self.answered)
+                .await?;
             let mut request = self.client.request(call.method.clone(), &url);
             if let Some((body, content_type)) = call.body {
                 request = request
@@ -492,7 +500,7 @@ impl HttpLedger {
                 request = request.bearer_auth(token.expose());
             }
             tracing::debug!("{} {url}", call.method);
-            let wait = match read(request, call.limit).await {
+            let wait = match read(request, call.limit, &self.answered).await {
                 Ok(mut answer) => {
                     answer.authorized = token.is_some();
                     let retryable = answer.status == StatusCode::TOO_MANY_REQUESTS
@@ -1024,8 +1032,16 @@ fn client(tuning: &Tuning) -> Result<reqwest::Client, LedgerError> {
 }
 
 /// Sends `request` and reads at most `limit` bytes of the answer.
-async fn read(request: reqwest::RequestBuilder, limit: usize) -> Result<Answer, reqwest::Error> {
+/// Sends `request` and reads its answer, at most `limit` bytes of body. `answered` is set as
+/// soon as the status line and the headers are here, before the body is read: a body that is
+/// then cut is still a server's answer.
+async fn read(
+    request: reqwest::RequestBuilder,
+    limit: usize,
+    answered: &std::sync::atomic::AtomicBool,
+) -> Result<Answer, reqwest::Error> {
     let mut response = request.send().await?;
+    answered.store(true, std::sync::atomic::Ordering::Relaxed);
     let status = response.status();
     let headers = response.headers().clone();
     let mut body = Vec::new();

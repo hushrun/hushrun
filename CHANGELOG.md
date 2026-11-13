@@ -233,7 +233,9 @@ offline.
   backend couldn't be reached counts a download whatever its age. Where sharing is off by a
   decision (the org's, the person's, nobody signed in, `open` saying no, a refused caller, or
   `hushrun run CHECK…`), the crate is compiled, once, and that block is built here from then on.
-  A block built here is reused as before.
+  A block built here is reused as before. "Couldn't be reached" means no server gave any HTTP
+  response: a redirect, a proxy's or captive portal's page, an answer cut on its way, an error
+  status or a refused credential request is an answer, and downloads are compiled once then.
 - Build blocks: a program, proc macro or build script whose `-l` library is found in a folder
   the C driver or `ld` adds (the system's library folders, `LIBRARY_PATH`'s, on macOS the SDK's)
   no longer reuses one linked against another file there. Such a library was "covered by the SDK
