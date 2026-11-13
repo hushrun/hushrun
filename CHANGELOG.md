@@ -86,6 +86,19 @@ Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check ask
   among it, and `fs.realpath.native` and `fs.realpathSync.native` are there again. A child
   process the promisified form starts is still recorded as one hushrun can't follow, and a path
   `native` resolves as a file the test file read.
+- A blob-less or tree-less partial clone read through the git CLI (`HUSHRUN_GIT_READER=cli`, a
+  SHA-256 repository, or one gix can't open) fails with `E_MISSING_OBJECTS` and its advice on git
+  2.43, as on newer git. git 2.43 dies on the object it can't fetch from the promisor remote
+  instead of saying it is missing, and hushrun said "output ended early". Another early end of
+  `git cat-file --batch` now shows git's own error.
+- A partial clone never fetches what it lacks while hushrun reads it, on any git: resolving a
+  revision no longer reads its tree, `--config-ref` reads its file without fetching, and a git
+  older than the 2024-05 security releases, which ignores `GIT_NO_LAZY_FETCH`, finds no transport
+  to fetch with (`GIT_ALLOW_PROTOCOL`). A missing tree, subtree or blob is `E_MISSING_OBJECTS`
+  naming it on git 2.43 and newer git alike, whichever reader runs, where git 2.54 said "not a
+  tree object", "Could not read" or "bad file". git confirms the object is missing before
+  hushrun says so, so an object of another type stays git's own error. The advice now says a
+  blob-less or tree-less partial clone.
 - With tests as the unit, a Gradle JUnit 4 task's plan counts only the tests the task will leave
   out (250 at most, by id): a class of 300 tests that passed said "7 of 301 tests run" while 51 ran.
 - After a Gradle run whose test tasks were all up to date, the next plan no longer says `all 5
