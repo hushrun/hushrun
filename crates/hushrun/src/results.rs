@@ -1206,6 +1206,48 @@ impl Backend {
     }
 }
 
+/// What a run's relay needs to talk to an org's shared store of build blocks (build-v0, B-26):
+/// where, as whom, and whether the org said it shares.
+pub struct BuildAccess {
+    /// The org's base URL.
+    pub base: String,
+    /// The backend's origin.
+    pub host: String,
+    /// The org, as in the URL.
+    pub org: String,
+    /// The bearer token the requests carry: a person's or an agent's.
+    pub token: String,
+    /// Whether the token is an agent token.
+    pub agent: bool,
+    /// The machine that signs a `begin`, when one is here. It is not registered from here: the
+    /// results a run records do that, and a `begin` before it is refused and waits.
+    pub machine: Option<crate::machine::Machine>,
+    /// Whether an answer of this run carried `Hushrun-Build: on`.
+    pub shares: bool,
+}
+
+impl Backend {
+    /// What a relay needs (B-26), for a server that a person's or an agent's token signs in to.
+    /// `None` for a directory, no token, or CI's ID token (which the relay doesn't use yet).
+    pub fn build_access(&self) -> Option<BuildAccess> {
+        let Store::Server(server) = &self.store else {
+            return None;
+        };
+        let token = server.token.clone()?;
+        let agent = matches!(server.signer(), Signer::Agent);
+        let url = LedgerUrl::parse(&server.base).ok()?;
+        Some(BuildAccess {
+            base: server.base.clone(),
+            host: crate::credentials::origin(&url),
+            org: hosted::org_of(&server.base).unwrap_or_else(|| server.base.clone()),
+            token,
+            agent,
+            machine: server.key().ok().flatten(),
+            shares: server.ledger.build_sharing_seen(),
+        })
+    }
+}
+
 /// \[ADR 0069\] What a server answered one of the requests about a check's test files (results-v0
 /// §3).
 #[derive(Debug)]

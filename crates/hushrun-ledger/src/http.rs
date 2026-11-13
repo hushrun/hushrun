@@ -90,6 +90,9 @@ pub struct HttpLedger {
     tuning: Tuning,
     /// \[M18\] The transparency log, as this command checks it (L-11).
     log: Mutex<log::State>,
+    /// An answer to one of hushrun's other requests carried `Hushrun-Build: on`: the org shares
+    /// build blocks (build-v0 §1).
+    build_sharing: std::sync::atomic::AtomicBool,
 }
 
 impl fmt::Debug for HttpLedger {
@@ -189,6 +192,8 @@ struct Answer {
     authorized: bool,
     /// Why the retries stopped early, such as a `Retry-After` beyond the budget.
     gave_up: Option<String>,
+    /// It carried `Hushrun-Build: on`.
+    build_sharing: bool,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +248,7 @@ impl HttpLedger {
             base,
             tuning,
             log: Mutex::new(log::State::default()),
+            build_sharing: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -366,6 +372,13 @@ impl HttpLedger {
         })
     }
 
+    /// Whether an answer to one of hushrun's other requests (a results lookup) carried
+    /// `Hushrun-Build: on`: the org shares build blocks, so asking `open` is worth a request.
+    pub fn build_sharing_seen(&self) -> bool {
+        self.build_sharing
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Whether `path` is a path under the base, which a request to another endpoint may name.
     fn check_path(&self, path: &str) -> Result<(), LedgerError> {
         if path.contains(['?', '#', '\\'])
@@ -412,6 +425,10 @@ impl HttpLedger {
             let answer = self.call(&call).await?;
             if answer.status.is_redirection() {
                 return Err(self.failure(&answer, path));
+            }
+            if answer.build_sharing {
+                self.build_sharing
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Ok((answer.status.as_u16(), answer.body))
         })
@@ -1009,6 +1026,10 @@ async fn read(request: reqwest::RequestBuilder, limit: usize) -> Result<Answer, 
         date: header_text(&headers, header::DATE),
         authorized: false,
         gave_up: None,
+        build_sharing: headers
+            .get("hushrun-build")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
     })
 }
 
