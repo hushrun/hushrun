@@ -194,6 +194,14 @@ offline.
 
 ### Fixed
 
+- Build blocks: a proc macro in a `target/` folder restored from a cache or copied from
+  elsewhere no longer gives its dependents the keys of the macro its record names. The record
+  beside it was believed whenever its own SHA-256 matched the file, so a doctored macro with a
+  record naming the honest one gave every crate built against it the honest key, and a trusted
+  CI job uploaded those crates. Now a record is believed only when the run's own store holds the
+  block it names with the same file; any other proc macro is named by its bytes, and nothing
+  built against it leaves the machine. In CI the store starts empty, so a job shares only what it
+  compiled itself.
 - Build blocks: an upload that panics in the middle of a run no longer holds up the end of its
   command. The end waited its whole deadline (10 seconds on a person's machine, up to 2 minutes in
   a CI job), then sent no `close`, and no later check in the same process uploaded anything. Now

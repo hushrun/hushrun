@@ -2592,6 +2592,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             step,
             script: None,
             run_memo: None,
+            store: None,
         };
         let common = cx.common().unwrap();
         hints
@@ -4962,4 +4963,172 @@ fn a_dependent_that_cant_load_a_downloaded_block_reports_it_rejected() {
             .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
             .is_none()
     );
+}
+
+/// Machine `m`'s plans for the proc macro `m` and the library `a` that uses it.
+fn macro_plans(m: &Box2) {
+    let line =
+        r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/libm-xm.so""#;
+    m.w.plan(
+        "m",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    m.w.plan("a", Plan::default());
+}
+
+/// A checkout on machine `m` with the proc macro `m` beside the library `a`.
+fn macro_checkout(m: &Box2, name: &str) -> PathBuf {
+    let ws = m.w.checkout(name);
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), "linker").unwrap();
+    fs::create_dir_all(ws.join("m/src")).unwrap();
+    fs::write(ws.join("m/src/lib.rs"), "// the macro\n").unwrap();
+    ws
+}
+
+/// The proc macro's file in `ws`'s output folder.
+fn macro_file(ws: &Path) -> PathBuf {
+    ws.join(format!(
+        "target/debug/deps/libm-xm.{}",
+        std::env::consts::DLL_EXTENSION
+    ))
+}
+
+fn call_macro(m: &Box2, ws: &Path) -> Result {
+    let mut args = m.w.args(ws, "m", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    m.w.call_args(ws, "m", args, |fake| m.toolchain_vars(fake))
+}
+
+/// The library `a`, with the proc macro as its extern, telling `relay` what it built.
+fn call_user(m: &Box2, ws: &Path, relay: &Rc<RefCell<RelayStandIn>>) -> Result {
+    let ext = format!("m={}", macro_file(ws).display());
+    let relay = relay.clone();
+    m.w.call_with(ws, "a", &["--extern", &ext], move |fake| {
+        m.toolchain_vars(fake);
+        fake.relay = Some(relay);
+    })
+}
+
+/// Whether the relay heard that a block it could send was built: the outbox marker's cause.
+fn told_portable(relay: &Rc<RefCell<RelayStandIn>>) -> Option<bool> {
+    relay.borrow().asked.iter().rev().find_map(|r| match r {
+        Request::Built { portable, .. } => Some(*portable),
+        _ => None,
+    })
+}
+
+// covers: B-6, B-24
+#[test]
+fn a_restored_proc_macro_whose_record_the_store_cant_confirm_is_named_by_its_bytes() {
+    let mut m = a_machine("dev", "stable-aarch64-apple-darwin");
+    m.w.share("acme");
+    macro_plans(&m);
+    let honest = macro_checkout(&m, "honest");
+    settle();
+    assert_eq!(call_macro(&m, &honest).outcome(), STORED);
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&m, &honest, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let honest_key = r.entry.unwrap().key.unwrap();
+    assert!(
+        m.keys()["a"]["keys"]["externs"][0]["by"]["produced-by"].is_string(),
+        "{}",
+        m.keys()["a"]
+    );
+    assert_eq!(told_portable(&relay), Some(true));
+
+    // Another checkout whose `target/` came back from a cache: the macro doctored, and its record
+    // rewritten to match the doctored bytes while it names the honest macro.
+    let restored = macro_checkout(&m, "restored");
+    copy_tree(&honest.join("target"), &restored.join("target"));
+    let so = macro_file(&restored);
+    let mut doctored = fs::read(&so).unwrap();
+    doctored.extend_from_slice(b"\ndoctored expansion");
+    fs::write(&so, &doctored).unwrap();
+    let record = crate::sidecar::record_path(&so).unwrap();
+    let mut text: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert!(text["produced_by"].is_string(), "{text}");
+    text["sha256"] = serde_json::to_value(Digest::of(&doctored)).unwrap();
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&m, &restored, &relay);
+    // Built against the doctored macro, under a key of its own, and kept on this machine.
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert_ne!(entry.key, Some(honest_key));
+    assert_eq!(
+        m.keys()["a"]["keys"]["externs"][0]["by"]["content"],
+        serde_json::to_value(Digest::of(&doctored)).unwrap()
+    );
+    let portable = entry.portable.unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert!(portable.reasons.contains(&crate::portable::Reason::Extern));
+    assert_eq!(portable.externs, ["m"]);
+    assert_eq!(told_portable(&relay), Some(false), "no outbox marker");
+    // Still reused here, by its bytes.
+    fs::remove_file(m.w.rlib(&restored, "a")).unwrap();
+    assert_eq!(call_user(&m, &restored, &relay).outcome(), REUSED);
+
+    // A CI job's store is its own and starts empty: even the honest `target/` proves nothing there.
+    let ci = a_machine("runner", "stable-aarch64-apple-darwin");
+    macro_plans(&ci);
+    let job = macro_checkout(&ci, "job");
+    copy_tree(&honest.join("target"), &job.join("target"));
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&ci, &job, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(ci.keys()["a"]["keys"]["externs"][0]["by"]["content"].is_string());
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.reasons.contains(&crate::portable::Reason::Extern));
+}
+
+// covers: B-6, B-12
+#[test]
+fn a_proc_macro_whose_record_the_store_confirms_keeps_its_name_and_reuse_across_checkouts() {
+    let m = a_machine("dev", "stable-aarch64-apple-darwin");
+    macro_plans(&m);
+    let (one, two, three) = (
+        macro_checkout(&m, "one"),
+        macro_checkout(&m, "two-longer"),
+        macro_checkout(&m, "three"),
+    );
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    assert_eq!(call_macro(&m, &one).outcome(), STORED);
+    let r = call_user(&m, &one, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(r.entry_portable());
+    let key = r.entry.unwrap().key.unwrap();
+    let by = m.keys()["a"]["keys"]["externs"][0]["by"].clone();
+    assert!(by["produced-by"].is_string(), "{by}");
+    // Another checkout reuses the macro, then its dependent under the same key.
+    assert_eq!(call_macro(&m, &two).outcome(), REUSED);
+    let r = call_user(&m, &two, &relay);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(r.entry.unwrap().key, Some(key));
+    // A copy of the first checkout's `target/` on this machine: its records name blocks this
+    // store holds, with the same bytes.
+    copy_tree(&one.join("target"), &three.join("target"));
+    fs::remove_file(m.w.rlib(&three, "a")).unwrap();
+    settle();
+    let r = call_user(&m, &three, &relay);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(r.entry.unwrap().key, Some(key));
+}
+
+impl Result {
+    /// Whether the call's block may leave the machine.
+    fn entry_portable(&self) -> bool {
+        self.entry
+            .as_ref()
+            .and_then(|e| e.portable.as_ref())
+            .is_some_and(|p| p.portable)
+    }
 }

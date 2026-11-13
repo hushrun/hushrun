@@ -1585,3 +1585,151 @@ fn clean_build(m: &Machine, fake: &FakeBuild) -> (i32, String) {
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
+
+/// A workspace whose library `app` expands the proc macro `mac`, committed in a repository.
+fn macro_workspace(root: &Path) -> PathBuf {
+    let repo = root.join("repo");
+    let write = |path: &str, text: &str| {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"mac\", \"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        "mac/Cargo.toml",
+        "[package]\nname = \"mac\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    );
+    write("mac/src/lib.rs", &macro_source("42"));
+    write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmac = { path = \"../mac\" }\n",
+    );
+    write(
+        "app/src/lib.rs",
+        "pub fn answer() -> u32 {\n    mac::answer!()\n}\n",
+    );
+    write(".gitignore", "target/\n");
+    git::init(&repo, "sha1");
+    git::commit_all(&repo, "init");
+    repo
+}
+
+/// The proc macro's source: `answer!()` expands to `value`.
+fn macro_source(value: &str) -> String {
+    format!(
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn answer(_: TokenStream) -> TokenStream {{\n    \"{value}\".parse().unwrap()\n}}\n"
+    )
+}
+
+/// The proc macro's file in `repo`'s target folder.
+fn macro_file(repo: &Path) -> PathBuf {
+    std::fs::read_dir(repo.join("target/debug/deps"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with("libmac-") && name.ends_with(std::env::consts::DLL_SUFFIX)
+        })
+        .expect("the proc macro's file")
+}
+
+/// What a CI cache that someone poisoned holds: `repo`'s target folder with the proc macro's
+/// file built from other source (by plain cargo, as an attacker's job would), and the macro's
+/// record rewritten to match the new bytes while it still names the honest macro.
+fn poison_macro(repo: &Path) {
+    let source = repo.join("mac/src/lib.rs");
+    std::fs::write(&source, macro_source("43")).unwrap();
+    let mut plain = std::process::Command::new("cargo");
+    for var in CLEARED {
+        plain.env_remove(var);
+    }
+    let built = plain
+        .args(["build", "-q", "--offline", "-p", "mac"])
+        .env("CARGO_TERM_COLOR", "never")
+        .current_dir(repo)
+        .status()
+        .unwrap();
+    assert!(built.success());
+    std::fs::write(&source, macro_source("42")).unwrap();
+    let so = macro_file(repo);
+    let bytes = std::fs::read(&so).unwrap();
+    let record = so.parent().unwrap().join(".hushrun").join(format!(
+        "{}.json",
+        so.file_name().unwrap().to_string_lossy()
+    ));
+    let mut text: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert!(text["produced_by"].is_string(), "{text}");
+    text["sha256"] = serde_json::to_value(hushrun_core::Digest::of(&bytes)).unwrap();
+    std::fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+}
+
+/// A checkout of `from` on another runner, with `app` changed and committed, as a push of that
+/// change makes it; `target` (when given) restored into it as a cache restores one.
+fn pushed(dir: &Path, name: &str, from: &Path, target: Option<&Path>) -> Machine {
+    let m = Machine::with(dir, name, Some(from), macro_workspace);
+    if let Some(target) = target {
+        let copied = std::process::Command::new("cp")
+            .arg("-R")
+            .arg(target)
+            .arg(m.repo.join("target"))
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+    std::fs::write(
+        m.repo.join("app/src/lib.rs"),
+        "pub fn answer() -> u32 {\n    mac::answer!() + 0\n}\n",
+    )
+    .unwrap();
+    git::commit_all(&m.repo, "app changes");
+    m
+}
+
+// covers: B-6, B-24, B-31
+#[test]
+fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    // As CI sets it: a restored target folder holds the dep-info an incremental rebuild keys on,
+    // and the wrapper passes such a rebuild through (B-9).
+    let job = |m: &Machine, run: &str| {
+        job_run(
+            m,
+            &fake,
+            &m.root.join("runner-temp"),
+            run,
+            "CARGO_INCREMENTAL=0 cargo build --offline && sleep 2",
+        )
+    };
+    let a = Machine::with(dir.path(), "a", None, macro_workspace);
+    let (stderr, close) = job(&a, "300");
+    assert_eq!(close.expect(&stderr).counts.built, 2, "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}");
+
+    // The next push's job restores a target folder whose macro was doctored, and `app` changed,
+    // so it compiles against that macro, in a store of its own.
+    poison_macro(&a.repo);
+    let c = pushed(dir.path(), "c", &a.repo, Some(&a.repo.join("target")));
+    let stored = fake.stored().len();
+    let (stderr, close) = job(&c, "301");
+    assert!(stderr.contains("1 crate built, none reused"), "{stderr}");
+    assert_eq!(close.expect(&stderr).counts.built, 1, "{stderr}");
+    assert_eq!(fake.stored().len(), stored, "it uploaded: {stderr}");
+
+    // A job with an honest checkout of the same push builds `app` itself: nothing compiled
+    // against the doctored macro came down under its key.
+    let b = pushed(dir.path(), "b", &a.repo, None);
+    let (stderr, close) = job(&b, "302");
+    let close = close.expect(&stderr);
+    assert_eq!(close.counts.reused_shared, 0, "{close:?}\n{stderr}");
+    assert_eq!(close.counts.built, 2, "{close:?}\n{stderr}");
+    assert!(
+        fake.stored().len() > stored,
+        "the honest app went up: {stderr}"
+    );
+}

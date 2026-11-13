@@ -25,6 +25,16 @@
 //! is written whole, under a temporary name in `.hushrun/`, and renamed into place, so two
 //! writers of one record leave one whole record. A record that can't be read or parsed is
 //! treated as absent, never as an error.
+//!
+//! # A note, never an authority
+//!
+//! A record saves a read; it never decides a key on its own. Its SHA-256 answers while the stat
+//! holds, as a remembered digest of the file. What it says of the block the file came from
+//! (`produced_by`, `portable`, `step`) is believed only when the run's own store confirms it
+//! ([`vouched`]): the store holds the block the record names, and that block's `block.json` holds
+//! a file of this name, size and SHA-256. A `target/` folder can come from anywhere (a CI cache,
+//! a copy from another machine), records and all; a record the store can't confirm leaves the
+//! file known by its bytes alone.
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -35,6 +45,10 @@ use hushrun_core::Digest;
 use hushrun_digest::cache::Stat;
 use hushrun_digest::hash::Hasher;
 use serde::{Deserialize, Serialize};
+
+use crate::description::Description;
+use crate::key::PlaceKind;
+use crate::store::Store;
 
 /// The hidden folder of an output folder that holds the records.
 pub const DIR: &str = ".hushrun";
@@ -70,8 +84,9 @@ pub struct Record {
     /// it came from is portable, or is a proc macro named by what it was built from
     /// ([`crate::portable::Portability::named_portably`]).
     pub portable: bool,
-    /// The key of the block a reuse put it from: where a dependent that can't load it finds
-    /// the block's record, and whom to tell (B-32).
+    /// The key of the block it was stored as or a reuse put it from: what the store confirms
+    /// the rest of the record by ([`vouched`]), where a dependent that can't load it finds the
+    /// block's record, and whom to tell (B-32).
     pub block: Option<Digest>,
 }
 
@@ -80,6 +95,8 @@ pub struct Record {
 pub struct Known {
     /// The SHA-256 of the file as it is now.
     pub sha256: Digest,
+    /// Its size as it is now.
+    pub size: u64,
     /// The key of the block it came from, if its record still holds.
     pub produced_by: Option<Digest>,
     /// The first key of the block it came from, if its record still holds.
@@ -88,7 +105,7 @@ pub struct Known {
     pub reused: bool,
     /// Whether another machine names the file the same way, if its record still holds.
     pub portable: bool,
-    /// The key of the block a reuse put it from, if its record still holds.
+    /// The key of the block it was stored as or put from, if its record still holds.
     pub block: Option<Digest>,
     /// Whether the file had to be hashed to answer.
     pub read: bool,
@@ -196,20 +213,28 @@ pub fn record(
     produced_by: Option<Digest>,
     reused: bool,
 ) -> io::Result<()> {
-    record_block(file, sha256, produced_by, None, reused, false)
+    record_from(file, sha256, produced_by, None, reused, false, None)
 }
 
-/// [`record`], with the first key of the block the file came from and whether another machine
-/// names it the same way.
-pub fn record_block(
+/// [`record`] for a file a compile wrote: the first key it was compiled for, whether another
+/// machine names it the same way, and the block it was stored as, if it was (B-6).
+pub fn record_built(
     file: &Path,
     sha256: Digest,
     produced_by: Option<Digest>,
-    step: Option<Digest>,
-    reused: bool,
+    step: Digest,
     portable: bool,
+    block: Option<Digest>,
 ) -> io::Result<()> {
-    record_from(file, sha256, produced_by, step, reused, portable, None)
+    record_from(
+        file,
+        sha256,
+        produced_by,
+        Some(step),
+        false,
+        portable,
+        block,
+    )
 }
 
 /// [`record_block`] for a file a reuse put in place from the block `block` (B-12, B-32).
@@ -271,6 +296,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
     {
         return Ok(Known {
             sha256: old.sha256,
+            size: now.size,
             produced_by: old.produced_by,
             step: old.step,
             reused: old.reused,
@@ -296,12 +322,63 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
     let _ = write(file, &fresh);
     Ok(Known {
         sha256: fresh.sha256,
+        size: fresh.stat.size,
         produced_by: fresh.produced_by,
         step: fresh.step,
         reused: fresh.reused,
         portable: fresh.portable,
         block: fresh.block,
         read: true,
+    })
+}
+
+/// What the run's own store says of a file's record (B-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vouched {
+    /// What dependents name the file by, from the block's description
+    /// ([`crate::metadata::produced_by`]): `None` for a tied block's file, and for a linked
+    /// library whose metadata wasn't found.
+    pub produced_by: Option<Digest>,
+    /// Whether a dependent on another machine names the file as one here does
+    /// ([`crate::portable::Portability::named_portably`]).
+    pub portable: bool,
+    /// The block's first key.
+    pub step: Digest,
+    /// The block's key.
+    pub block: Digest,
+}
+
+/// What `file`'s record says of its block, as the run's own store confirms it, or `None`: the
+/// record names no block, the store holds none under that key, or the block's `block.json`
+/// holds no file of this name with the size and SHA-256 `known` gives. The answer comes from
+/// the block's description, never from the record, so a record that names a block holding
+/// these bytes can't name them otherwise. The one place that decides whether a record is
+/// believed (B-6).
+///
+/// Cost: one read of the block's `block.json` and a `stat` of each of its files; no file is
+/// hashed beyond what [`lookup`] did.
+pub fn vouched(store: &Store, file: &Path, known: &Known) -> Option<Vouched> {
+    let key = known.block?;
+    let name = file.file_name()?.to_str()?;
+    let block = store.block(&key).ok()??;
+    let stored = block.files.iter().find(|f| f.name == name)?;
+    if stored.size != known.size || stored.sha256 != known.sha256 {
+        return None;
+    }
+    let description = Description::from_value(&block.description)?;
+    let metadata = description
+        .outputs
+        .iter()
+        .find(|o| o.name == name)
+        .and_then(|o| o.metadata);
+    let produced_by = (description.place == PlaceKind::Anywhere)
+        .then_some(description.origin)
+        .and_then(|origin| crate::metadata::produced_by(origin, file, metadata));
+    Some(Vouched {
+        produced_by,
+        portable: description.portability.named_portably(description.class),
+        step: description.step,
+        block: key,
     })
 }
 
@@ -525,6 +602,7 @@ mod tests {
             known,
             Known {
                 sha256: recorded,
+                size: 10,
                 produced_by: Some(key(1)),
                 step: None,
                 reused: true,
@@ -578,6 +656,7 @@ mod tests {
             known,
             Known {
                 sha256: Digest::of(b"version two"),
+                size: 11,
                 produced_by: None,
                 step: None,
                 reused: false,
@@ -622,6 +701,7 @@ mod tests {
                 known,
                 Known {
                     sha256: Digest::of(b"metadata"),
+                    size: 8,
                     produced_by: None,
                     step: None,
                     reused: false,
@@ -661,6 +741,7 @@ mod tests {
             known,
             Known {
                 sha256: Digest::of(b"no record yet"),
+                size: 13,
                 produced_by: None,
                 step: None,
                 reused: false,

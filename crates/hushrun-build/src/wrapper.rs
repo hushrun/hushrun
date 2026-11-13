@@ -906,6 +906,7 @@ impl Call<'_> {
             step,
             script: script.as_ref(),
             run_memo: Some(&self.current.folder),
+            store: Some(&store),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -1405,27 +1406,6 @@ impl Call<'_> {
                         .map(|o| (o.name.clone(), o.sha256))
                         .collect();
                 }
-                if trusted {
-                    // Dependents may know a block by what it was built from only if it may move:
-                    // a tied one is another file in another checkout, under the same name (B-6).
-                    let produced_by = matches!(produced.observed.place, Place::Anywhere)
-                        .then_some(produced.known_by);
-                    let portable = produced.portability.named_portably(inv.class());
-                    // A bundle's files are a program's debug info: no dependent loads them, and
-                    // no record is written inside the bundle.
-                    for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
-                        let _ = sidecar::record_block(
-                            &output.path,
-                            output.sha256,
-                            produced_by.and_then(|known| {
-                                metadata::produced_by(known, &output.path, output.metadata)
-                            }),
-                            Some(cx.step),
-                            false,
-                            portable,
-                        );
-                    }
-                }
                 // What it read, for the check before a later run (B-23): only when nothing
                 // changed while compiling, or the record would describe other bytes.
                 if !facts.changed {
@@ -1452,6 +1432,29 @@ impl Call<'_> {
                         if matches!(stored, Stored::Took | Stored::AlreadyHad) {
                             log.key = produced.observed.key().ok();
                         }
+                    }
+                }
+                if trusted {
+                    // Dependents may know a block by what it was built from only if it may move:
+                    // a tied one is another file in another checkout, under the same name (B-6).
+                    let produced_by = matches!(produced.observed.place, Place::Anywhere)
+                        .then_some(produced.known_by);
+                    let portable = produced.portability.named_portably(inv.class());
+                    // A bundle's files are a program's debug info: no dependent loads them, and
+                    // no record is written inside the bundle. Each record names the block the
+                    // store now holds, which is what a dependent confirms it by; one not stored
+                    // names none, and its dependents know its files by their bytes.
+                    for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
+                        let _ = sidecar::record_built(
+                            &output.path,
+                            output.sha256,
+                            produced_by.and_then(|known| {
+                                metadata::produced_by(known, &output.path, output.metadata)
+                            }),
+                            cx.step,
+                            portable,
+                            log.key,
+                        );
                     }
                 }
             }

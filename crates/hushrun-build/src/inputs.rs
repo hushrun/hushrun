@@ -24,6 +24,7 @@ use crate::known::{self, Where};
 use crate::model::{Class, Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
+use crate::store::Store;
 use crate::{link, memo, regular, shape, sidecar};
 
 /// Every `--extern` as the key holds it, and each proc macro's crate name with whether another
@@ -46,6 +47,9 @@ pub struct Context<'a> {
     /// The run's session folder, where digests of files in folders the wrapper doesn't own are
     /// remembered for the run ([`crate::memo`]); `None` hashes them each time.
     pub run_memo: Option<&'a Path>,
+    /// The run's own store, which confirms what an extern's record says of its block
+    /// ([`sidecar::vouched`]); `None` believes no record: every extern is named by its bytes.
+    pub store: Option<&'a Store>,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -279,10 +283,15 @@ impl Context<'_> {
     }
 
     /// Every `--extern`, by content, or by what it was built from for a proc macro whose
-    /// record names it (B-6); with, for each proc macro, whether another machine names it the
-    /// same way (its record says so). A proc macro's record is written before cargo starts any
-    /// dependent; a library's may not be yet (cargo starts a dependent once the `.rmeta` is
-    /// written), and it is keyed by its bytes anyway.
+    /// record names it and the run's own store confirms that record (B-6); with, for each proc
+    /// macro, whether another machine names it the same way (the store's block says so). A proc
+    /// macro whose record the store can't confirm (a `target/` restored from a cache, copied
+    /// from elsewhere, or whose block has gone) is named by its bytes and is not named portably,
+    /// so nothing built against it leaves the machine for that reason. A proc macro's record is
+    /// written before cargo starts any dependent; a library's may not be yet (cargo starts a
+    /// dependent once the `.rmeta` is written), and it is keyed by its bytes anyway.
+    ///
+    /// Cost: one store lookup per proc macro whose record claims a name or portability.
     pub fn externs(&self) -> Result<Externs, NotStored> {
         let mut out = Vec::with_capacity(self.invocation.externs().len());
         let mut portable = Vec::with_capacity(self.invocation.externs().len());
@@ -293,16 +302,24 @@ impl Context<'_> {
                     let path = self.absolute(path);
                     let known = sidecar::lookup(&path).map_err(|_| NotStored::Hash)?;
                     if is_linked_library(&path) {
-                        portable.push((ext.name.clone(), known.portable));
-                    } else if sidecar::made_as_asked(&path) {
-                        // A library compiled as asked, without the remaps (B-19): its bytes
-                        // are this machine's alone, so a dependent on another machine names
-                        // it otherwise and this block is no use there (the review's B6).
-                        portable.push((ext.name.clone(), false));
-                    }
-                    match known.produced_by {
-                        Some(origin) if is_linked_library(&path) => ExternBy::ProducedBy(origin),
-                        _ => ExternBy::Content(known.sha256),
+                        let claims = known.produced_by.is_some() || known.portable;
+                        let vouched = self
+                            .store
+                            .filter(|_| claims)
+                            .and_then(|store| sidecar::vouched(store, &path, &known));
+                        portable.push((ext.name.clone(), vouched.is_some_and(|v| v.portable)));
+                        match vouched.and_then(|v| v.produced_by) {
+                            Some(origin) => ExternBy::ProducedBy(origin),
+                            None => ExternBy::Content(known.sha256),
+                        }
+                    } else {
+                        if sidecar::made_as_asked(&path) {
+                            // A library compiled as asked, without the remaps (B-19): its bytes
+                            // are this machine's alone, so a dependent on another machine names
+                            // it otherwise and this block is no use there (the review's B6).
+                            portable.push((ext.name.clone(), false));
+                        }
+                        ExternBy::Content(known.sha256)
                     }
                 }
             };

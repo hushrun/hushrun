@@ -147,7 +147,30 @@ into it, `link`'s libraries) and not from how the linker laid them out. *Breaks 
 changed the code a macro runs, or a macro's expansion depended on something its compile wasn't
 told about (see B-24 on inputs read without telling rustc). A file in which that
 metadata can't be found, and a tied proc macro,
-  which is another file in each checkout, are named by their SHA-256;
+  which is another file in each checkout, are named by their SHA-256. **A record in `target/` is
+  a note for speed, never an authority.** The record the wrapper leaves beside each output
+  (`<out dir>/.hushrun/<file>.json`: its SHA-256, the block it was stored as or reused from,
+  what dependents name it by, whether that name is portable) saves dependents a read; its
+  SHA-256 answers while the file's size, modification time, inode and device are the recorded
+  ones. What it says of the block is believed only when the run's own store confirms it: the
+  store holds the block the record names, and that block's `block.json` lists a file of this
+  name with this size and SHA-256; what dependents name the file by and whether that is portable
+  are then taken from the block's description, never from the record. One function decides it
+  (`sidecar::vouched`), with one store lookup per proc macro among a compile's externs whose
+  record claims a name. Any other proc macro is named by its SHA-256 and is not named portably
+  (B-24 `extern`): it still builds, and a dependent is still stored and reused here, by those
+  bytes. So a `target/` folder restored from a CI cache, copied from another machine, or left
+  by a block since expired gives its dependents keys of their own and nothing built against it
+  leaves the machine for that reason; in CI the store starts empty with the job (B-31), so a
+  restored `target/` proves nothing there and a job shares only what it compiled itself. A
+  compile that stores nothing (low space, a suspended first key, a failed reuse) leaves a record
+  naming no block, and its dependents name its proc macros by their bytes too. *Rests on:* the
+  store being the run's own (the person's, or the job's in CI), which nobody but the person and
+  the code they run writes, and each stored file's SHA-256 recorded when it was published.
+  *Breaks if:* a record and its file came back with the recorded stat, so that the record's
+  SHA-256 answers without a read: then the store compares the record's SHA-256, not the file's.
+  A restored file is a new file with its own inode, so this needs the restored inode and device
+  predicted;
 - `native`: for each `-l`, every name its file may have (`lib<name>.a`, `.dylib`, `.so`, `.tbd`,
   `.rlib`, `<name>.lib`; `<name>.framework`) in every folder rustc searches for it (`-L native=`,
   `all=` and bare ones; `framework=` ones for a framework), in order, by SHA-256 or as absent. A
@@ -570,7 +593,8 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 - `variable-names-base`: a variable the compile read names a base, and a second compile with it
   naming another folder didn't give the same bytes, or couldn't be made.
 - `extern`: a proc macro among its externs is one a dependent on another machine would name
-  differently (B-6): it is tied, or what names it holds this machine; or a library among its
+  differently (B-6): it is tied, what names it holds this machine, or the run's own store
+  doesn't confirm its record, so it is named by its bytes; or a library among its
   externs was compiled as asked (B-19), without the remaps, so its bytes hold this machine's
   folders and a dependent elsewhere names other bytes. Such a block is no use to another
   machine. *Can't see:* a library built by plain cargo outside `hushrun run`, which leaves no
@@ -833,7 +857,9 @@ addresses, so a wrong one wastes downloads and can't cause a wrong reuse; and a 
 holding what its manifest names, so it downloads nothing.
 
 **B-31 CI and sandboxes.** A CI job's store is the job's own, never the cache directory, and
-nothing in it outlives the job. In GitHub Actions it is `hushrun-build-<run>-<attempt>-<digest>`
+nothing in it outlives the job. A `target/` folder the job restores from a cache is no evidence there:
+its records name blocks this store doesn't hold, so its proc macros are named by their bytes and
+nothing built against them goes up (B-6); the job shares what it compiled itself. In GitHub Actions it is `hushrun-build-<run>-<attempt>-<digest>`
 under the job's temporary folder (`RUNNER_TEMP`), the digest one function makes
 (`build_session::github_job`) of the repository (`GITHUB_REPOSITORY_ID`, else
 `GITHUB_REPOSITORY`), the run (`GITHUB_RUN_ID`), its attempt (`GITHUB_RUN_ATTEMPT`), the job
