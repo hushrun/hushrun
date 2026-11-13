@@ -275,11 +275,15 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   test-jar dependency now runs when those test classes change.
 - Maven: a module another module uses only through a plugin's configuration, such as the
   dependency plugin's `copy` of its jar, is now read by that module's tests.
-- Gradle: a test-classpath jar from `mavenLocal()` is no longer dropped silently: where a project
-  of the build published it, the class reads that project; otherwise the class is not observed,
-  and says why.
-- A Maven run of TestNG no longer counts each test twice in its summary: TestNG's own copies of
-  Surefire's report, below `surefire-reports/junitreports/`, aren't read beside it.
+- Gradle: a test-classpath jar from `mavenLocal()`, or from a file repository in the checkout, is
+  no longer dropped silently: one a remote repository supplied is fine, as Gradle's own cache is;
+  one a project of the build published reads that project; any other makes its class not
+  observed, and `hushrun why` says what to change.
+- A Maven run of TestNG no longer counts each test twice in its summary: a report below
+  `junitreports/` is left out when Surefire's `TEST-TestSuite.xml` beside it holds every one of
+  its cases, and only then, so another tool's reports there are still read.
+- Maven: a module named only in an assembly descriptor file that a plugin's configuration points
+  at is now read by that module's tests.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

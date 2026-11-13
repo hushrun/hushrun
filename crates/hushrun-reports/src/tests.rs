@@ -302,6 +302,48 @@ fn testngs_copies_of_surefires_report_are_found_once() {
 
 // covers: C-27
 #[test]
+fn a_report_below_junitreports_is_dropped_only_when_surefires_report_holds_its_cases() {
+    let order = r#"<testsuite name="p.OrderTest"><testcase classname="p.OrderTest" name="a"/><testcase classname="p.OrderTest" name="b"/><testcase classname="p.OrderTest" name="c"><failure/></testcase></testsuite>"#;
+    let suite = r#"<testsuite name="TestSuite"><testcase classname="p.OrderTest" name="a"/><testcase classname="p.OrderTest" name="b"/><testcase classname="p.OrderTest" name="c"><failure/></testcase></testsuite>"#;
+    let partial =
+        r#"<testsuite name="TestSuite"><testcase classname="p.OrderTest" name="a"/></testsuite>"#;
+    // TestNG's standalone layout beside another tool's report: both are results.
+    let dir = tree(&[
+        ("reports/junitreports/TEST-p.OrderTest.xml", order),
+        ("reports/TEST-smoke.xml", JUNIT),
+    ]);
+    assert_eq!(
+        rels(find(&query(dir.path(), dir.path(), &[]))),
+        [
+            "reports/TEST-smoke.xml",
+            "reports/junitreports/TEST-p.OrderTest.xml"
+        ]
+    );
+    // Surefire's TestSuite report that holds every case of the copy: the copy goes.
+    let dir = tree(&[
+        (
+            "target/surefire-reports/junitreports/TEST-p.OrderTest.xml",
+            order,
+        ),
+        ("target/surefire-reports/TEST-TestSuite.xml", suite),
+    ]);
+    assert_eq!(
+        rels(find(&query(dir.path(), dir.path(), &[]))),
+        ["target/surefire-reports/TEST-TestSuite.xml"]
+    );
+    // One that lacks a case of the copy: both stay.
+    let dir = tree(&[
+        (
+            "target/surefire-reports/junitreports/TEST-p.OrderTest.xml",
+            order,
+        ),
+        ("target/surefire-reports/TEST-TestSuite.xml", partial),
+    ]);
+    assert_eq!(rels(find(&query(dir.path(), dir.path(), &[]))).len(), 2);
+}
+
+// covers: C-27
+#[test]
 fn a_report_older_than_the_run_is_not_its() {
     let dir = tree(&[("junit.xml", JUNIT)]);
     let mut q = query(dir.path(), dir.path(), &[]);

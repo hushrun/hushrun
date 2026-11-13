@@ -383,6 +383,7 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
                 for (Plugin pl : c.getBuildPlugins()) {
                     for (Dependency d : pl.getDependencies()) ids.add(d.getGroupId() + ":" + d.getArtifactId());
                     ids.addAll(named(pl, byId));
+                    ids.addAll(described(c, pl, byId));
                 }
             } catch (Throwable e) {
                 // A model without build plugins: its dependencies and parent are all it says.
@@ -393,6 +394,74 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
             }
         }
         return seen;
+    }
+
+    /**
+     * The reactor projects the descriptor files a plugin's configuration names hold (the assembly
+     * plugin's {@code descriptors}, {@code descriptor}, {@code descriptorSourceDirectory}): each
+     * {@code groupId:artifactId} in them; every reactor project when a module or dependency set
+     * has no includes or a wildcard in one, or when a descriptor named can't be read.
+     */
+    static List<String> described(MavenProject p, Plugin pl, Map<String, MavenProject> byId) {
+        List<String> paths = new ArrayList<>();
+        List<Object> confs = new ArrayList<>();
+        confs.add(pl.getConfiguration());
+        for (PluginExecution e : pl.getExecutions()) confs.add(e.getConfiguration());
+        Deque<Xpp3Dom> todo = new ArrayDeque<>();
+        for (Object c : confs) if (c instanceof Xpp3Dom) todo.add((Xpp3Dom) c);
+        while (!todo.isEmpty()) {
+            Xpp3Dom node = todo.poll();
+            String name = node.getName();
+            String v = node.getValue();
+            if (v != null && !v.trim().isEmpty()
+                && ("descriptor".equals(name) || "descriptorSourceDirectory".equals(name))) {
+                paths.add(v.trim());
+            }
+            for (Xpp3Dom child : node.getChildren()) todo.add(child);
+        }
+        List<String> out = new ArrayList<>();
+        for (String path : paths) {
+            File f = new File(path.replace("${project.basedir}", p.getBasedir().getAbsolutePath())
+                .replace("${basedir}", p.getBasedir().getAbsolutePath()));
+            if (!f.isAbsolute()) f = new File(p.getBasedir(), f.getPath());
+            List<File> files = new ArrayList<>();
+            if (f.isDirectory()) {
+                File[] in = f.listFiles();
+                if (in != null) for (File x : in) if (x.getName().endsWith(".xml")) files.add(x);
+            } else {
+                files.add(f);
+            }
+            for (File x : files) {
+                String text;
+                try {
+                    text = new String(Files.readAllBytes(x.toPath()), StandardCharsets.UTF_8);
+                } catch (Throwable e) {
+                    text = null;
+                }
+                if (text == null || path.contains("${") || everyModule(text)) {
+                    for (String id : byId.keySet()) if (!out.contains(id)) out.add(id);
+                    continue;
+                }
+                for (String id : byId.keySet()) {
+                    if (text.contains(id) && !out.contains(id)) out.add(id);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** A descriptor's module or dependency set that has no includes, or a wildcard in one. */
+    static boolean everyModule(String text) {
+        java.util.regex.Matcher sets = java.util.regex.Pattern
+            .compile("<(moduleSet|dependencySet)>(.*?)</\\1>", java.util.regex.Pattern.DOTALL).matcher(text);
+        while (sets.find()) {
+            String set = sets.group(2);
+            if (!set.contains("<includes>")) return true;
+            java.util.regex.Matcher inc = java.util.regex.Pattern
+                .compile("<include>([^<]*)</include>").matcher(set);
+            while (inc.find()) if (inc.group(1).contains("*")) return true;
+        }
+        return false;
     }
 
     /** The reactor projects, {@code groupId:artifactId}, a plugin's configuration names anywhere. */

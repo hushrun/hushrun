@@ -1777,3 +1777,125 @@ fn the_maven_opts_a_person_set_reach_maven_beside_hushruns() {
     assert!(ran.ran().is_empty(), "{:?}\n{}", ran.ran(), ran.stdout);
     assert!(ran.stdout.contains("Tests are skipped"), "{}", ran.stdout);
 }
+
+// covers: C-47
+#[test]
+fn a_module_an_assembly_descriptor_names_is_read_by_that_modules_tests() {
+    let Some(maven) = maven() else { return };
+    // `it` assembles cli's jar with a descriptor file the assembly plugin's configuration names,
+    // and its test runs it: no dependency, and no configuration of the POM, names cli.
+    let jar = "<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version></plugin></plugins>";
+    let mut files = vec![
+        file("hushrun.yaml", &yaml("reuse")),
+        file(
+            "pom.xml",
+            &parent(&["cli", "it"], "5", "3.5.4").replace("</plugins>", jar),
+        ),
+        file("cli/pom.xml", &reactor_module("cli", "")),
+        file(
+            "cli/src/main/java/cli/Cli.java",
+            "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(1); }\n}\n",
+        ),
+        file(
+            "it/pom.xml",
+            &reactor_module(
+                "it",
+                "<build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-assembly-plugin</artifactId><version>3.7.1</version><executions><execution><id>d</id><phase>process-test-resources</phase><goals><goal>single</goal></goals><configuration><descriptors><descriptor>src/assembly/dist.xml</descriptor></descriptors></configuration></execution></executions></plugin></plugins></build>",
+            ),
+        ),
+        file(
+            "it/src/assembly/dist.xml",
+            "<assembly><id>dist</id><formats><format>dir</format></formats><includeBaseDirectory>false</includeBaseDirectory>\n<moduleSets><moduleSet><useAllReactorProjects>true</useAllReactorProjects><includes><include>shop:cli</include></includes><binaries><outputDirectory>lib</outputDirectory><unpack>false</unpack></binaries></moduleSet></moduleSets></assembly>\n",
+        ),
+        file(
+            "it/src/test/java/it/CliRunTest.java",
+            "package it;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass CliRunTest {\n  @Test void prints1() throws Exception {\n    Process p = new ProcessBuilder(System.getProperty(\"java.home\") + \"/bin/java\", \"-cp\", \"target/it-1.0-dist/lib/cli-1.0.jar\", \"cli.Cli\").start();\n    assertEquals(\"1\", new String(p.getInputStream().readAllBytes()));\n  }\n}\n",
+        ),
+    ];
+    files.extend(greens("it/src/test/java", "it", 9));
+    let r = Repo::new(&files, maven);
+    let first = r.run(&[], &["package"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    let map = r.map();
+    assert!(
+        map["units"]["it/src/test/java/it/CliRunTest.java"]["reads"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("cli/src/main/java/cli/Cli.java")),
+        "{map:#}"
+    );
+    r.write(
+        "cli/src/main/java/cli/Cli.java",
+        "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(2); }\n}\n",
+    );
+    let second = r.run(&[], &["package"], &[]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stderr, second.stdout);
+}
+
+// covers: C-47
+#[test]
+fn a_module_unpacked_as_a_dependency_or_copied_in_an_active_profile_is_read() {
+    let Some(maven) = maven() else { return };
+    let jar = "<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version></plugin></plugins>";
+    let item = "<artifactItems><artifactItem><groupId>shop</groupId><artifactId>cli</artifactId><version>1.0</version><destFileName>cli.jar</destFileName></artifactItem></artifactItems><outputDirectory>${project.build.directory}/deps</outputDirectory>";
+    // unpack-dependencies of a dependency on cli; the dependency plugin's copy only in a profile
+    // the command line turns on.
+    let unpack = "<dependencies><dependency><groupId>shop</groupId><artifactId>cli</artifactId><version>1.0</version><scope>provided</scope></dependency></dependencies><build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId><version>3.7.0</version><executions><execution><id>u</id><phase>process-test-resources</phase><goals><goal>unpack-dependencies</goal></goals><configuration><includeArtifactIds>cli</includeArtifactIds><outputDirectory>${project.build.directory}/unpacked</outputDirectory></configuration></execution></executions></plugin></plugins></build>".to_string();
+    let profile = format!(
+        "<profiles><profile><id>copy</id><activation><property><name>with.copy</name></property></activation><build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId><version>3.7.0</version><executions><execution><id>c</id><phase>process-test-resources</phase><goals><goal>copy</goal></goals><configuration>{item}</configuration></execution></executions></plugin></plugins></build></profile></profiles>"
+    );
+    for (body, classpath, args) in [
+        (unpack, "target/unpacked", vec!["package"]),
+        (
+            profile,
+            "target/deps/cli.jar",
+            vec!["package", "-Dwith.copy"],
+        ),
+    ] {
+        let mut files = vec![
+            file("hushrun.yaml", &yaml("reuse")),
+            file(
+                "pom.xml",
+                &parent(&["cli", "it"], "5", "3.5.4").replace("</plugins>", jar),
+            ),
+            file("cli/pom.xml", &reactor_module("cli", "")),
+            file(
+                "cli/src/main/java/cli/Cli.java",
+                "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(1); }\n}\n",
+            ),
+            file("it/pom.xml", &reactor_module("it", &body)),
+            file(
+                "it/src/test/java/it/CliRunTest.java",
+                &format!(
+                    "package it;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass CliRunTest {{\n  @Test void prints1() throws Exception {{\n    Process p = new ProcessBuilder(System.getProperty(\"java.home\") + \"/bin/java\", \"-cp\", \"{classpath}\", \"cli.Cli\").start();\n    assertEquals(\"1\", new String(p.getInputStream().readAllBytes()));\n  }}\n}}\n"
+                ),
+            ),
+        ];
+        files.extend(greens("it/src/test/java", "it", 9));
+        let r = Repo::new(&files, maven.clone());
+        let first = r.run(&[], &args, &[]);
+        assert_eq!(
+            first.code, 0,
+            "{classpath}: {}\n{}",
+            first.stderr, first.stdout
+        );
+        let map = r.map();
+        assert!(
+            map["units"]["it/src/test/java/it/CliRunTest.java"]["reads"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("cli/src/main/java/cli/Cli.java")),
+            "{classpath}: {map:#}"
+        );
+        r.write(
+            "cli/src/main/java/cli/Cli.java",
+            "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(2); }\n}\n",
+        );
+        let second = r.run(&[], &args, &[]);
+        assert_eq!(
+            second.code, 1,
+            "{classpath}: {}\n{}",
+            second.stderr, second.stdout
+        );
+    }
+}
