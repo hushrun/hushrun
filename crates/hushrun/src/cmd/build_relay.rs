@@ -715,7 +715,11 @@ impl Relay {
                 keys,
                 class,
                 local_ms,
-            } => self.fetch(step, keys, class, local_ms).await,
+            } => {
+                #[cfg(test)]
+                fault::fetch();
+                self.fetch(step, keys, class, local_ms).await
+            }
             Request::Vouch { key, outputs, .. } => self.vouch(key, outputs).await,
             Request::Built { .. } => {
                 self.built(request);
@@ -2331,6 +2335,33 @@ fn random(out: &mut [u8; 32]) {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     *out = *Digest::of(seed.as_bytes()).as_bytes();
+}
+
+/// Test only, never compiled into hushrun itself: where the relay panics, so that what a panic
+/// leaves is tested. Armed only by a test that runs in a process of its own.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The thread answering a wrapper's fetch panics.
+    pub(crate) static FETCH: AtomicBool = AtomicBool::new(false);
+    /// The upload loop panics once `begin` answered, its claims held.
+    pub(crate) static UPLOAD: AtomicBool = AtomicBool::new(false);
+    /// Set just before the upload loop's panic.
+    pub(crate) static UPLOAD_PANICKED: AtomicBool = AtomicBool::new(false);
+
+    pub(crate) fn fetch() {
+        if FETCH.load(Ordering::Relaxed) {
+            panic!("the test's panic: a fetch");
+        }
+    }
+
+    pub(crate) fn upload() {
+        if UPLOAD.load(Ordering::Relaxed) {
+            UPLOAD_PANICKED.store(true, Ordering::Relaxed);
+            panic!("the test's panic: an upload");
+        }
+    }
 }
 
 #[cfg(test)]

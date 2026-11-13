@@ -802,6 +802,13 @@ within it. Uploads (the drain in CI, the PUTs, and the `begin` and `commit` requ
 are cut off when `close`'s 5 seconds, or half the deadline if that is less, are all that is
 left, and `close` goes within what is left; a request still waited on at the deadline, whatever
 its own timeout, is abandoned. The rest waits for the next run, and the run says how many wait.
+An upload loop that panics is over when it panics, as one that returned is (`upload::uploads`
+marks it so however it ends): the end of its command waits for it no longer and sends `close`
+within what is left, and a later check of the same process starts its own loop. The claims it
+held stay claimed until its run is dead, then go back at the next relay's start or in the sweep
+(B-14), as a crash's do; its packs under `outbox/tmp/<run>/` go with the dead run's folders. A
+wrapper whose answering thread panics gets no answer, which is a miss; every later reader of the
+relay's state takes a lock a panic poisoned as it is.
 `commit` answering `differs` means the object store holds a size or SHA-256 other than the one
 `begin` named: the upload arrived broken, and the block here stays and goes again later. Only
 `begin` refusing `differs` says a trusted copy with other bytes exists, and only then is a local

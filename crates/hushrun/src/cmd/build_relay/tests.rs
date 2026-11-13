@@ -60,9 +60,14 @@ fn tuning() -> Tuning {
 }
 
 fn access(fake: &FakeBuild, token: &str) -> crate::results::BuildAccess {
+    access_at(&fake.url(), &fake.origin(), token)
+}
+
+/// [`access`], to the fake at `base`, whose origin is `host`.
+fn access_at(base: &str, host: &str, token: &str) -> crate::results::BuildAccess {
     crate::results::BuildAccess {
-        base: fake.url(),
-        host: fake.origin(),
+        base: base.into(),
+        host: host.into(),
         org: "acme".into(),
         credential: Some(crate::results::BuildCredential::Token(token.into())),
         agent: token.starts_with("hra_"),
@@ -76,9 +81,17 @@ fn access(fake: &FakeBuild, token: &str) -> crate::results::BuildAccess {
 }
 
 fn start(fake: &FakeBuild, m: &Machine, change: impl FnOnce(&mut Config)) -> Arc<Relay> {
+    start_at(m.store.clone(), access(fake, FakeBuild::TOKEN), change)
+}
+
+fn start_at(
+    store: Store,
+    access: crate::results::BuildAccess,
+    change: impl FnOnce(&mut Config),
+) -> Arc<Relay> {
     let mut config = Config {
-        store: m.store.clone(),
-        access: access(fake, FakeBuild::TOKEN),
+        store,
+        access,
         repository: Some("github.com/acme/shop".into()),
         commit: None,
         platform: "aarch64-apple-darwin".into(),
@@ -624,6 +637,147 @@ fn killing_the_relay_after_begin_and_running_again_ends_with_the_block_stored() 
     });
     until("done", || waiting(&m).is_empty() && no_claims(&m));
     relay.end_check(&[]);
+}
+
+/// Set in the process [`a_relay_that_panics_mid_run_leaves_misses_and_the_next_run_cleans_up`]
+/// starts to be the run that panics: the store, the session folder, the fake's URL and origin,
+/// one a line.
+const PANICKING_RUN: &str = "HUSHRUN_TEST_PANICKING_RUN";
+
+// covers: B-14, B-26, B-29
+#[cfg(unix)]
+#[test]
+fn a_relay_that_panics_mid_run_leaves_misses_and_the_next_run_cleans_up() {
+    if let Ok(world) = std::env::var(PANICKING_RUN) {
+        return panicking_run(&world);
+    }
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, _) = block(&m.store, 13, 50_000, Some(me(&fake)));
+    // The run that panics is a process of its own, which is dead when the next run starts, as
+    // a `hushrun run` is.
+    let world = [
+        m.store.root().display().to_string(),
+        m.session.display().to_string(),
+        fake.url(),
+        fake.origin(),
+    ]
+    .join("\n");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "cmd::build_relay::tests::a_relay_that_panics_mid_run_leaves_misses_and_the_next_run_cleans_up",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(PANICKING_RUN, world)
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(said.contains("1 passed"), "{said}");
+    assert!(said.contains("the test's panic: a fetch"), "{said}");
+    assert!(said.contains("the test's panic: an upload"), "{said}");
+    // Its `begin` was answered, and its end still sent `close`.
+    assert_eq!(fake.count(route::BEGIN), 1);
+    assert_eq!(fake.count(route::STORE_PUT), 0);
+    assert_eq!(fake.count(route::CLOSE), 1, "{said}");
+    // What the dead run left: its claim, its packs and its folder.
+    let claimed = m.store.root().join("outbox/claimed");
+    let runs: Vec<String> = std::fs::read_dir(&claimed)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let dead = &runs[0];
+    assert!(
+        claimed
+            .join(dead)
+            .join(format!("{}.json", key.hex()))
+            .is_file()
+    );
+    assert!(!walk(&m.store.root().join("outbox/tmp").join(dead)).is_empty());
+    assert!(m.store.root().join("relays").join(dead).is_dir());
+    assert!(waiting(&m).is_empty());
+
+    // The next run: the claim waits again and the dead run's folders are gone as it starts,
+    // then the block goes up.
+    let relay = start(&fake, &m, |_| {});
+    assert_eq!(waiting(&m).len(), 1);
+    assert!(no_claims(&m));
+    for top in ["relays", "incoming", "outbox/tmp"] {
+        assert!(!m.store.root().join(top).join(dead).exists(), "{top}");
+    }
+    begin(&relay, &m);
+    until("stored", || {
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    until("done", || waiting(&m).is_empty() && no_claims(&m));
+    relay.end_check(&[]);
+}
+
+/// The run that panics, in a process of its own: a wrapper's fetch panics the thread answering
+/// it, and the upload loop panics once `begin` answered. The wrappers get misses, and the end
+/// of the command takes no longer than one with nothing to wait for.
+#[cfg(unix)]
+fn panicking_run(world: &str) {
+    use std::sync::atomic::Ordering;
+    let lines: Vec<&str> = world.lines().collect();
+    let [store, session, base, host] = lines[..] else {
+        panic!("{world}")
+    };
+    let store = Store::new(Path::new(store));
+    let session = Path::new(session);
+    super::fault::FETCH.store(true, Ordering::Relaxed);
+    super::fault::UPLOAD.store(true, Ordering::Relaxed);
+    let relay = start_at(
+        store.clone(),
+        access_at(base, host, FakeBuild::TOKEN),
+        |c| {
+            // Packs go to a file in the run's folder, where a panic leaves them.
+            c.tuning.spill = 1 << 10;
+            c.tuning.end_wait = Duration::from_secs(3);
+            c.tuning.close = Duration::from_secs(3);
+        },
+    );
+    let share = relay.begin_check(session, None, &|_| None).unwrap();
+    until("open", || answering(&relay));
+    let wait = hushrun_build::relay::WAIT;
+    let (key, step) = (Digest::of(&[13, 1]), Digest::of(&[13, 2]));
+    // A wrapper's fetch: the thread answering it panics, and the wrapper has a miss at once.
+    let asked = Instant::now();
+    let fetch = Request::Fetch {
+        step,
+        keys: vec![key],
+        class: LocalClass::Library,
+        local_ms: None,
+    };
+    assert_eq!(hushrun_build::relay::ask(&share.socket, &fetch, wait), None);
+    assert!(asked.elapsed() < Duration::from_secs(2));
+    // What a compile built: taken, claimed, begun, and then the upload loop panics.
+    assert_eq!(
+        hushrun_build::relay::ask(&share.socket, &built(key, step), wait),
+        Some(Answer::Ok)
+    );
+    until("the upload loop's panic", || {
+        super::fault::UPLOAD_PANICKED.load(Ordering::Relaxed)
+    });
+    // The relay still answers the next wrapper.
+    assert!(hushrun_build::relay::ask(&share.socket, &Request::Hints { step }, wait).is_some());
+    // The end doesn't wait for a loop that is gone: well within its 6 seconds, `close` sent.
+    let ended = Instant::now();
+    relay.end_check(&[]);
+    assert!(
+        ended.elapsed() < Duration::from_secs(2),
+        "the end took {:?}",
+        ended.elapsed()
+    );
 }
 
 // covers: B-29, B-32

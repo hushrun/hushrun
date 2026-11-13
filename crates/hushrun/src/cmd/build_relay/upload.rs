@@ -161,8 +161,17 @@ impl Relay {
             }
             state.uploading = true;
         }
+        // However the loop ends, a panic included, it is over: the end of the command waits
+        // for it no longer, and a later check starts its own. A panic's claims wait for the
+        // run's death, as a crash's do (B-14, B-29).
+        struct Over<'a>(&'a Relay);
+        impl Drop for Over<'_> {
+            fn drop(&mut self) {
+                self.0.state().uploading = false;
+            }
+        }
+        let _over = Over(&self);
         self.clone().upload_loop().await;
-        self.state().uploading = false;
     }
 
     async fn upload_loop(self: Arc<Relay>) {
@@ -345,6 +354,8 @@ impl Relay {
                 return;
             }
         };
+        #[cfg(test)]
+        super::fault::upload();
         // PUTs, each a task the end of the command may cut off.
         let mut puts = Vec::new();
         for (marker, p) in packed {

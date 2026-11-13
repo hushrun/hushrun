@@ -194,6 +194,11 @@ offline.
 
 ### Fixed
 
+- Build blocks: an upload that panics in the middle of a run no longer holds up the end of its
+  command. The end waited its whole deadline (10 seconds on a person's machine, up to 2 minutes in
+  a CI job), then sent no `close`, and no later check in the same process uploaded anything. Now
+  the end goes on at once and sends `close`; what the upload held goes back at the next run's
+  start, as after a crash.
 - Build blocks: when the shared store's host can't be reached while the backend can (a sandbox
   behind an allow-list), the run says once which host to allow, by its name alone, and so does
   `hushrun build fetch`. Before, downloads failed silently, and a line about the backend could
