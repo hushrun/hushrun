@@ -137,6 +137,10 @@ pub(crate) struct Config {
     pub(crate) tuning: Tuning,
     /// B-36: a fresh fetch and its folder, for a run that reads only it and sends nothing.
     pub(crate) saved: Option<(saved::Saved, PathBuf)>,
+    /// B-25: no results lookup said the org shares (a run that can't tell which code it is):
+    /// `open` is what asks, and its "doesn't share" is silent, as an org that doesn't share is
+    /// to every run.
+    pub(crate) open_decides: bool,
 }
 
 /// How a check's `open` stood after [`Relay::wait_open`].
@@ -339,6 +343,14 @@ impl State {
 
     fn succeeded(&mut self) {
         self.failures = 0;
+    }
+
+    /// Stops sharing for the rest of the run, saying nothing: the org doesn't share, and no
+    /// results lookup had said otherwise (B-25).
+    fn stop_silently(&mut self, stop: Stop) {
+        if !matches!(self.phase, Phase::Stopped(_)) {
+            self.phase = Phase::Stopped(stop);
+        }
     }
 
     /// Stops sharing for the rest of the run, saying why once.
@@ -719,7 +731,12 @@ impl Relay {
             let mut state = self.state();
             match answer {
                 Err(Failure::Refused(404 | 405, _)) => {
-                    state.stop(Stop::Off("the backend doesn't share build blocks".into()));
+                    let off = Stop::Off("the backend doesn't share build blocks".into());
+                    if self.config.open_decides {
+                        state.stop_silently(off);
+                    } else {
+                        state.stop(off);
+                    }
                     return;
                 }
                 Err(Failure::Refused(status, code)) => {
@@ -733,6 +750,7 @@ impl Relay {
                 }
                 Ok(answered) => {
                     let policy = answered.body;
+                    let policy_shares = policy.sharing;
                     let org = if policy.sharing {
                         Org::Shares(Some(match policy.mode {
                             Some(blocks::Mode::On) => Mode::On,
@@ -756,7 +774,12 @@ impl Relay {
                     state.policy = Some(policy);
                     match does.sharing {
                         Sharing::Off(off) => {
-                            state.stop(Stop::Off(off.reason().to_string()));
+                            let off = Stop::Off(off.reason().to_string());
+                            if self.config.open_decides && !policy_shares {
+                                state.stop_silently(off);
+                            } else {
+                                state.stop(off);
+                            }
                             return;
                         }
                         Sharing::Observe | Sharing::On => {

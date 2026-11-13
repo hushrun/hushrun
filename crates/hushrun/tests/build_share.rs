@@ -715,6 +715,46 @@ fn a_withdrawn_download_is_not_reused_once_its_entry_is_a_day_old_and_the_no_is_
     assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
 }
 
+/// The workspace, with a `hushrun.yaml` of two scopes, one for each library.
+fn scoped_workspace(root: &Path) -> PathBuf {
+    let repo = workspace(root);
+    std::fs::write(
+        repo.join("hushrun.yaml"),
+        "version: 1\nrepository: example.com/acme/shop\nscopes:\n  app:\n    include: [\"app/**\"]\n  dep:\n    include: [\"dep/**\"]\n",
+    )
+    .unwrap();
+    git::commit_all(&repo, "two scopes");
+    repo
+}
+
+// covers: B-25
+#[test]
+fn a_repository_of_several_scopes_shares_without_a_scope_and_an_org_that_doesnt_share_says_nothing()
+{
+    // `hushrun run build -- …` names no scope: it can't tell which code this is, so it runs
+    // without skipping, and its build blocks, which belong to the repository, are shared.
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::with(dir.path(), "a", None, scoped_workspace);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("can't tell which code this is"), "{stderr}");
+    assert_eq!(fake.stored().len(), 2, "{stderr}");
+    assert_eq!(fake.count(route::RESULTS), 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (code, stderr) = b.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
+    // An org that doesn't share: its `open` says so, and the run says nothing of sharing.
+    let fake = FakeBuild::start();
+    fake.set_sharing(false);
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    let (code, stderr) = c.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("sharing"), "{stderr}");
+    assert_eq!(fake.count(route::OPEN), 1, "{stderr}");
+}
+
 /// A workspace whose proc macro reads `GREETING` while it expands, without telling rustc: the
 /// library `app` holds the value in its bytes, and the program `show` prints it.
 fn greeting_workspace(root: &Path) -> PathBuf {

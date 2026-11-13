@@ -629,7 +629,13 @@ caller asks it again from the same facts and nobody stores the answer:
 | An agent token otherwise | the machine's local mode, or off in a sandbox | off |
 
 "The org shares" is read from the run's results lookup, whose answer carries `Hushrun-Build:
-on`; only then is `open` asked, so an org that doesn't share pays no request. In this version a
+on`; only then is `open` asked, so an org that doesn't share pays no request. Build blocks belong
+to the repository, not to a scope: a run that can't tell which code it is (several scopes in
+`hushrun.yaml` and no `--scope`) makes no results lookup, and still shares, reading the
+repository with no scope chosen; its `open` is the one request that asks whether the org shares,
+and an org that doesn't share says nothing there either. Only a run that can't read the
+repository at all doesn't share, and says so in one line when it has a credential to share
+with. In this version a
 CI job still passes through (B-2), and only `hushrun run NAME -- COMMAND` shares. *Rests on:*
 the backend's header and `open` saying what the org decided, and the machine's settings being
 its own. A run never shares more than its local mode allows: with local `observe`, sharing

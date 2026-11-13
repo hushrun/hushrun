@@ -90,6 +90,7 @@ fn start(fake: &FakeBuild, m: &Machine, change: impl FnOnce(&mut Config)) -> Arc
         keep_days: 15,
         tuning: tuning(),
         saved: None,
+        open_decides: false,
     };
     change(&mut config);
     Arc::new(Relay::start(config).unwrap())

@@ -103,6 +103,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
         keep_days: hushrun_build::KEEP_DAYS,
         tuning: crate::cmd::build_relay::Tuning::default(),
         saved: None,
+        open_decides: false,
     };
     let checks: Vec<Option<hushrun_core::blocks::Hex32>> = if checks.is_empty() {
         vec![None]

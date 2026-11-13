@@ -82,7 +82,14 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
             None
         }
     };
-    let backend = match Backend::select(code.as_ref().map(|code| code.root.as_path())) {
+    // B-25: build blocks belong to the repository, not to a scope, so a run that can't tell
+    // which code it is (several scopes and no `--scope`) still shares them when the repository
+    // can be read.
+    let build_repo = match &code {
+        Some(code) => Some(BuildRepo::of(code)),
+        None => BuildRepo::read(global, args).ok(),
+    };
+    let backend = match Backend::select(build_repo.as_ref().map(|repo| repo.root.as_path())) {
         Ok(Selection::On(backend)) => Some(backend),
         // \[ADR 0067\] Said once: a CI job that shares nothing would otherwise look as if it did.
         Ok(Selection::Off(off @ Off::InCi)) => {
@@ -152,6 +159,7 @@ pub fn run(global: &GlobalOpts, args: &RunArgs) -> ExitCode {
         command,
         &dir,
         code.as_ref(),
+        build_repo.as_ref(),
         backend.as_ref(),
         no_pass_skips.as_ref(),
         reports_read.as_ref(),
@@ -269,6 +277,7 @@ fn skip_or_run(
     command: &[String],
     dir: &Path,
     code: Option<&Code>,
+    build_repo: Option<&BuildRepo>,
     backend: Option<&Backend>,
     no_pass_skips: Option<&variants::NoSkip>,
     reports_read: Option<&variants::ReportsRead>,
@@ -438,7 +447,7 @@ fn skip_or_run(
     // B-2: with reuse on, cargo in COMMAND compiles through the wrapper: one session for every
     // start of COMMAND in this run, begun before the first and finished after the last. It
     // begins before the plan, whose build is COMMAND's made first, and compiles through it too.
-    let mut build = BuildRun::begin(global, say, code, backend);
+    let mut build = BuildRun::begin(global, say, check, build_repo, backend);
     if let Some(session) = session.as_deref_mut() {
         session.compile_with(build.env());
     }
@@ -872,12 +881,67 @@ fn skip_or_run(
 /// none when the files git tracks differ from it here (a version bump, a nightly `cargo
 /// update`), since the code built isn't that commit's, and the backend counts a request that
 /// names none as one whose commit isn't the token's. None either when git can't tell.
-fn build_commit(code: &Code, in_ci: bool) -> Option<String> {
-    let revision = code.revision.clone()?;
-    if !in_ci || tracked_files_are(&code.root, &revision) {
+fn build_commit(repo: &BuildRepo, in_ci: bool) -> Option<String> {
+    let revision = repo.revision.clone()?;
+    if !in_ci || tracked_files_are(&repo.root, &revision) {
         Some(revision)
     } else {
         None
+    }
+}
+
+/// B-25: what sharing build blocks needs of the repository, which they belong to whatever the
+/// scope: read with the run's [`Code`], or, for a run that can't tell which code it is (several
+/// scopes and no `--scope`), from the repository alone.
+struct BuildRepo {
+    root: PathBuf,
+    revision: Option<String>,
+    /// `host/owner/name`, when hushrun.yaml or the `origin` remote says.
+    repository: Option<String>,
+    /// The repository's `build: env:` (B-35).
+    build_env: Vec<String>,
+    /// No results lookup asks the backend whether the org shares (the run can't tell which code
+    /// it is): `open` does, and an org that doesn't share is as silent as ever.
+    open_decides: bool,
+}
+
+impl BuildRepo {
+    fn of(code: &Code) -> BuildRepo {
+        BuildRepo {
+            root: code.root.clone(),
+            revision: code.revision.clone(),
+            repository: code.repository.clone(),
+            build_env: code.build_env.clone(),
+            open_decides: false,
+        }
+    }
+
+    /// The repository at or above the start directory, at `--rev` or as the worktree is, with
+    /// no scope chosen.
+    fn read(global: &GlobalOpts, args: &RunArgs) -> anyhow::Result<BuildRepo> {
+        let snapshot = match &args.content.rev {
+            Some(rev) => Snapshot::Rev(rev.clone()),
+            None => Snapshot::Worktree,
+        };
+        let content = Content::open(global, Source::Repo(snapshot)).map_err(|f| f.error)?;
+        Ok(BuildRepo {
+            root: content.vcs.root().to_path_buf(),
+            revision: content.source_info().revision,
+            repository: repository_of(&content),
+            build_env: content
+                .policy
+                .as_ref()
+                .map(|policy| policy.build_env.clone())
+                .unwrap_or_default(),
+            open_decides: true,
+        })
+    }
+
+    /// The repository a run's blocks are shared for, as [`Code::repository_here`] says it.
+    fn repository_here(&self) -> Option<String> {
+        hushrun_ci::context(&Env::from_process())
+            .repository
+            .or_else(|| self.repository.clone())
     }
 }
 
@@ -919,26 +983,40 @@ impl<'a> BuildRun<'a> {
     fn begin(
         global: &'a GlobalOpts,
         say: &'a Say,
-        code: Option<&Code>,
+        check: &CheckName,
+        repo: Option<&BuildRepo>,
         backend: Option<&Backend>,
     ) -> BuildRun<'a> {
-        // B-26: the run's results lookup told whether the org shares build blocks.
-        let share = match (code, backend.and_then(Backend::build_access)) {
-            (Some(code), Some(access)) => Some(build_session::ShareStart {
+        // B-26: the run's results lookup told whether the org shares build blocks; a run that
+        // made none lets `open` tell.
+        let access = backend.and_then(Backend::build_access);
+        let unread = repo.is_none() && access.as_ref().is_some_and(|a| a.credential.is_some());
+        let share = match (repo, access) {
+            (Some(repo), Some(access)) => Some(build_session::ShareStart {
                 access,
-                commit: build_commit(code, hushrun_ci::in_ci(&Env::from_process())),
-                check: code.check.as_str().to_string(),
+                commit: build_commit(repo, hushrun_ci::in_ci(&Env::from_process())),
+                check: check.as_str().to_string(),
+                open_decides: repo.open_decides,
             }),
             _ => None,
         };
         let session = match build_session::begin(
             system_time(now(global)),
-            code.and_then(Code::repository_here).as_deref(),
-            code.map_or(&[][..], |code| &code.build_env),
+            repo.and_then(BuildRepo::repository_here).as_deref(),
+            repo.map_or(&[][..], |repo| &repo.build_env),
             share,
             &|| backend.and_then(Backend::build_place),
         ) {
-            Ok(session) => Some(session),
+            Ok(mut session) => {
+                // The one case it can't share: no repository to share for.
+                if unread {
+                    session.add_line(
+                        "build: sharing is off for this run: it can't read the repository"
+                            .to_string(),
+                    );
+                }
+                Some(session)
+            }
             Err(why) => {
                 if let Some(why) = why {
                     say.line(format_args!("{why}"));

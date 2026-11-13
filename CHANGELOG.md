@@ -183,6 +183,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: in a repository with several scopes in its `hushrun.yaml`, `hushrun run NAME --
+  COMMAND` without `--scope` shares build blocks, which belong to the repository, not to a scope.
+  It makes no results lookup, so its `open` asks whether the org shares, and an org that doesn't
+  says nothing. Before, it never shared and said nothing.
 - Build blocks in CI: only a job whose policy says it writes the repository's trusted scope
   (`protected/…`) gets the trusted job's 2 minutes at its end; a pull request's job gets 20
   seconds. Before, any job that wrote with no reason it wasn't trusted counted as trusted, and a

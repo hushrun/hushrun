@@ -138,6 +138,7 @@ fn begin_from_saved(
             keep_days: current.keep_days,
             tuning: crate::cmd::build_relay::Tuning::default(),
             saved: Some((saved, folder)),
+            open_decides: false,
         })
     };
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
@@ -342,7 +343,9 @@ fn begin_in_ci(
     let Some(start) = share else {
         return Err(None);
     };
-    if !start.access.shares {
+    // B-25: a run that made no results lookup lets `open` say whether the org shares, waited for
+    // below as any job's.
+    if !start.access.shares && !start.open_decides {
         if start.access.answered {
             return Err(None);
         }
@@ -421,6 +424,10 @@ pub(crate) struct ShareStart {
     pub(crate) commit: Option<String>,
     /// The check, by name: its id is a digest of the repository and the name.
     pub(crate) check: String,
+    /// B-25: no results lookup asked the backend whether the org shares (the run can't tell
+    /// which code it is, as with several scopes and no `--scope`): `open` does, and an org that
+    /// doesn't share says nothing.
+    pub(crate) open_decides: bool,
 }
 
 /// B-25, B-26: when the run's results lookup said the org shares and what the run does allows
@@ -433,7 +440,7 @@ fn start_sharing(
     env: &dyn Fn(&str) -> Option<OsString>,
 ) -> Result<std::sync::Arc<crate::cmd::build_relay::Relay>, Option<String>> {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
-    if !start.access.shares || cfg!(not(unix)) {
+    if !(start.access.shares || start.open_decides) || cfg!(not(unix)) {
         return Err(None);
     }
     let current = session.current().clone();
@@ -469,6 +476,7 @@ fn start_sharing(
             keep_days: current.keep_days,
             tuning: crate::cmd::build_relay::Tuning::default(),
             saved: None,
+            open_decides: start.open_decides,
         })
     };
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
