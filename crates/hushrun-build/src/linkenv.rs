@@ -375,12 +375,21 @@ impl Gathered<'_, '_> {
     /// A program that runs on the way, and every shared library it loads.
     fn program(&mut self, role: &str, name: &str, path: &Path) -> Result<(), Why> {
         self.file(role, name, path)?;
-        self.loads(path, path)
+        self.loads(path, path, true)
+    }
+
+    /// A file of the toolchain's `bin/`, and what it loads where that is found: one that doesn't
+    /// run for this link may need a library only rustc's own variables lead to (Linux's
+    /// `rust-objcopy` takes `libLLVM` from rustup's `LD_LIBRARY_PATH`), and is listed as absent.
+    fn tool(&mut self, name: &str, path: &Path) -> Result<(), Why> {
+        self.file("toolchain", name, path)?;
+        self.loads(path, path, false)
     }
 
     /// The libraries `path` loads, and theirs, each once, where the loader finds them. `main` is
-    /// the program they are loaded for (`@executable_path`).
-    fn loads(&mut self, path: &Path, main: &Path) -> Result<(), Why> {
+    /// the program they are loaded for (`@executable_path`). `strict`: one found nowhere makes
+    /// E unknown; else it is listed as absent.
+    fn loads(&mut self, path: &Path, main: &Path, strict: bool) -> Result<(), Why> {
         let mut queue = vec![path.to_path_buf()];
         while let Some(object) = queue.pop() {
             let resolved = std::fs::canonicalize(&object).unwrap_or_else(|_| object.clone());
@@ -408,14 +417,19 @@ impl Gathered<'_, '_> {
                         }
                     }
                     for needed in &elf.needed {
-                        let place = self.elf_library(&object, &elf, needed)?.ok_or_else(|| {
-                            format!(
-                                "{needed}, which {} loads, is found nowhere",
-                                object.display()
-                            )
-                        })?;
-                        self.file("loads", needed, &place)?;
-                        next.push(place);
+                        match self.elf_library(&object, &elf, needed)? {
+                            Some(place) => {
+                                self.file("loads", needed, &place)?;
+                                next.push(place);
+                            }
+                            None if !strict => self.text("loads", needed, "absent"),
+                            None => {
+                                return Err(format!(
+                                    "{needed}, which {} loads, is found nowhere",
+                                    object.display()
+                                ));
+                            }
+                        }
                     }
                 }
                 binary::Binary::MachO(macho) => {
@@ -426,6 +440,7 @@ impl Gathered<'_, '_> {
                                 next.push(place);
                             }
                             MachOPlace::System => self.text("loads", dylib, "system shared cache"),
+                            MachOPlace::Nowhere if !strict => self.text("loads", dylib, "absent"),
                             MachOPlace::Nowhere => {
                                 return Err(format!(
                                     "{dylib}, which {} loads, is found nowhere",
@@ -793,7 +808,7 @@ fn items(q: &Question<'_>, ask: &Ask<'_>) -> Result<Vec<Item>, Why> {
         let mut files = Vec::new();
         tree(&bin, &bin, &mut files);
         for (path, rest) in files {
-            g.program("toolchain", &rest, &path)?;
+            g.tool(&rest, &path)?;
         }
     }
     if let Some(dsymutil) = q.dsymutil {

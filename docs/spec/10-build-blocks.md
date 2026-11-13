@@ -610,7 +610,10 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    what a dependent names a proc macro by;
 5. every file under the toolchain's `<sysroot>/lib/rustlib/<host>/bin/` (`rust-lld`,
    `gcc-ld/*`, `rust-objcopy`), which B-17 doesn't hash and rustc runs (`rust-lld` is the default
-   linker on x86-64 Linux, `rust-objcopy` strips on macOS), with what each loads; and the
+   linker on x86-64 Linux, `rust-objcopy` strips on macOS), with what each loads where that is
+   found (a tool that doesn't run for this link may need a library only rustc's own variables
+   lead to, as Linux's `rust-objcopy` takes `libLLVM` from rustup's `LD_LIBRARY_PATH`: such a
+   library is listed as absent, not a reason E is unknown); and the
    `dsymutil` rustc runs when a program gets a debug bundle, first on `PATH`, and on Apple's
    targets, when that is the `/usr/bin` shim, the selected Xcode's beside its `ld`;
 6. on Apple's targets the SDK the dry run names (`-syslibroot`): its `SDKSettings.json` and
