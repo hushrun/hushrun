@@ -706,8 +706,10 @@ every try (B-27), so a retry after a crash finds its upload under way.
 
 **B-30 Prefetch.** `close` sends the run's **manifest**: the ordered pairs of first-key address
 and block address of every compile, reused, downloaded or built. `open` returns the newest one
-for the repository, the check and the platform. The relay drops every pair whose block or first
-key the store holds, asks for the rest's hints in one request and looks up the rest's blocks in
+for the repository, the check and the platform. The prefetch starts when the first wrapper of
+the run asks the relay anything: a run whose compiles all find their blocks here (a warm target
+with an empty store, or no compile at all) downloads nothing. The relay then drops every pair
+whose block or first key the store holds, asks for the rest's hints in one request and looks up the rest's blocks in
 one, and downloads the libraries, 8 at a time and in order, before cargo asks; programs are
 fetched only when asked for. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
 key that opens it, and is deleted once opened and published, or when the run ends. A hint is

@@ -730,6 +730,15 @@ fn a_cold_machine_prefetches_the_manifest_s_libraries_and_opens_them_when_asked(
     let b = machine();
     let relay = start(&fake, &b, |_| {});
     begin(&relay, &b);
+    until("open", || answering(&relay));
+    // C4: nothing is fetched until a wrapper misses.
+    assert_eq!(fake.count(route::HINTS_LOOKUP), 0);
+    assert_eq!(fake.count(route::LOOKUP), 0);
+    // The first wrapper that misses starts it, and its answer comes from the prefetch's.
+    assert_eq!(
+        ask(&relay, Request::Hints { step }),
+        Answer::Hints { count: 1 }
+    );
     until("prefetched", || {
         relay
             .state()
@@ -740,10 +749,6 @@ fn a_cold_machine_prefetches_the_manifest_s_libraries_and_opens_them_when_asked(
     assert_eq!(fake.count(route::HINTS_LOOKUP), 1);
     // Nothing is in the store until a wrapper brings the key.
     assert!(b.store.block(&key).unwrap().is_none());
-    assert_eq!(
-        ask(&relay, Request::Hints { step }),
-        Answer::Hints { count: 1 }
-    );
     assert_eq!(
         b.store.shared_hints(&step),
         vec![b"{\"a hint\":1}".to_vec()]
@@ -1572,4 +1577,25 @@ fn a_stale_vouch_is_answered_within_the_block_s_budget_while_open_is_slow() {
     assert_eq!(answer, Answer::Offline);
     assert!(took < Duration::from_millis(1_500), "{took:?}");
     assert!(took >= Duration::from_millis(900), "{took:?}");
+}
+
+// covers: B-30
+#[test]
+fn a_warm_target_with_an_empty_store_downloads_nothing() {
+    // The manifest's blocks are served and this store has none of them; cargo compiles nothing,
+    // so no wrapper asks.
+    let fake = FakeBuild::start();
+    let pairs: Vec<Pair> = served(&fake, 5, 50_000, 1_000)
+        .iter()
+        .map(|(key, step)| Pair(address(step), address(key)))
+        .collect();
+    fake.set_manifest(pairs);
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::LOOKUP), 0);
+    assert_eq!(fake.count(route::HINTS_LOOKUP), 0);
+    assert_eq!(fake.served_bytes(), 0);
 }

@@ -257,6 +257,8 @@ struct State {
     phase: Phase,
     policy: Option<Policy>,
     sharing: Sharing,
+    /// The manifest `open` returned, until the first wrapper that misses starts its prefetch.
+    manifest: Option<Vec<Pair>>,
     /// Whether the run may upload, as [`what_a_run_does`] says; the policy decides the rest.
     uploads: bool,
     /// Lines for the person, each once.
@@ -444,6 +446,7 @@ impl Relay {
                 phase: Phase::Opening,
                 policy: None,
                 sharing: does.sharing,
+                manifest: None,
                 uploads: does.uploads,
                 lines: Vec::new(),
                 found: HashMap::new(),
@@ -718,7 +721,18 @@ impl Relay {
                 }
             }
         };
-        self.clone().prefetch(manifest).await;
+        // C4: kept for the first wrapper that misses; a run that compiles nothing fetches
+        // nothing.
+        self.state().manifest = Some(manifest);
+    }
+
+    /// C4, B-30: the prefetch starts at the first wrapper that asks the relay, once: a run whose
+    /// compiles all find their blocks here asks nothing and downloads nothing.
+    async fn prefetch_at_first_miss(self: Arc<Relay>) {
+        let manifest = self.state().manifest.take();
+        if let Some(manifest) = manifest {
+            self.prefetch(manifest).await;
+        }
     }
 
     /// B-30: from the manifest `open` returned, drop every pair the store already holds the
@@ -885,6 +899,7 @@ impl Relay {
     /// B-30: the shared store's hints of a first key, opened with it and written where
     /// downloaded hints live.
     async fn hints(self: Arc<Relay>, step: Digest) -> Answer {
+        self.clone().prefetch_at_first_miss().await;
         let address = Relay::address(&step);
         let known = {
             let mut state = self.state();
@@ -940,6 +955,7 @@ impl Relay {
                 return Answer::None;
             }
         }
+        self.clone().prefetch_at_first_miss().await;
         let addresses: Vec<(Digest, Hex32)> =
             keys.iter().map(|key| (*key, Relay::address(key))).collect();
         // What the run knows already, else one lookup for all of them.
