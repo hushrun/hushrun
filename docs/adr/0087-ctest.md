@@ -437,3 +437,19 @@ what a COMMAND that does says: `test files aren't observed: COMMAND starts ctest
 (/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest``.
 `swift` started by its path in a wrapper's text, where a package is, says the same as COMMAND's
 (ADR 0086).
+
+## Amendment 17: what the first real runs measured (2026-11-13)
+
+The first runs on real repositories (fmt on Ninja and on Makefiles with shared libraries, and FTXUI,
+whose 412 tests are discovered with `gtest_discover_tests` in one program; replayed commits and
+mutations some test notices) found one wrong result (Amendment 14) and no wrong reuse besides.
+What they measured:
+
+- **Cost.** CTest's listing, the walk and the record add about half a second to a run on fmt
+  (`ctest` alone 0.08 s, through hushrun 0.53 s), whatever is reused; on FTXUI about 0.8 s on a
+  1.9 s run.
+- **A file outside the sources runs everything.** A change to `README.md` runs every program,
+  since a test may read any file of the repository that isn't one of the build's sources (the
+  rest set, C-30). A person says a tree isn't read with `tests.ignore`.
+- A program that discovers its tests (FTXUI's one program) is one unit: any change to what it is
+  built from runs all of its tests.

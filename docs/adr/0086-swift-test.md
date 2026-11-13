@@ -302,3 +302,18 @@ among the tests running then): the shares add up to the run's time at most, and 
 alone keeps its whole time. XCTest's durations were checked the same way and kept: the console's
 `(… seconds)` and the xunit file's `time` are measured in the process that ran the test, one test
 at a time (a `--parallel` worker runs one at a time too).
+
+## Amendment 9: what the first real runs measured (2026-11-13)
+
+The first runs on real packages (swift-argument-parser, Swift Testing, 7 test targets and 569
+tests; swift-numerics, XCTest, 3 targets and 70 tests; replayed commits and mutations some test
+notices) found no wrong reuse. What they measured:
+
+- **Cost.** One more `swift package describe`, one `swift package dump-package` and one `swift test
+  list --skip-build` a run, and the event stream: on swift-argument-parser 4.49 s against 3.01 s of
+  wall time (+49%, +24% of CPU time), over ten pairs; on swift-numerics about 18%.
+- **A file outside the sources runs everything.** A change to `README.md`, a snapshot or
+  `Package.swift` runs every test target, since a test may read any file of the package that no
+  target compiles (the rest set, C-30). A person says a tree isn't read with `tests.ignore`.
+- On Linux, an XCTest class whose name is in two targets is never reused, as C-48 says: the
+  console doesn't name the target.
