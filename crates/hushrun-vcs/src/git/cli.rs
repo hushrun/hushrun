@@ -961,7 +961,9 @@ exit 128
                 git::text(&self.clone.with_file_name("origin"), &["rev-parse", rev])
             }
 
-            /// Whether the clone has `object`, asked so that no git fetches it.
+            /// Whether the clone has `object`, asked so that no git fetches it. Only the Unix
+            /// tests, which can run a git that ignores `GIT_NO_LAZY_FETCH`, ask.
+            #[cfg(unix)]
             fn has(&self, object: &str) -> bool {
                 Command::new("git")
                     .arg("-C")
@@ -976,6 +978,7 @@ exit 128
             }
         }
 
+        #[cfg(unix)]
         #[track_caller]
         fn assert_missing(err: &Error, object: &str) {
             assert_eq!(err.code(), Some("E_MISSING_OBJECTS"), "{err}");
