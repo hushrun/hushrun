@@ -237,9 +237,10 @@ fn hints() {
             kind: "rustc/1".into(),
             addresses: vec![hex(4)],
             repository: Some("github.com/acme/shop".into()),
+            commit: Some("a".repeat(40)),
         },
         json!({"kind": "rustc/1", "addresses": ["04".repeat(32)],
-               "repository": "github.com/acme/shop"}),
+               "repository": "github.com/acme/shop", "commit": "a".repeat(40)}),
     );
     round_trip(
         &HintsLookupResponse {
@@ -273,10 +274,15 @@ fn lookup() {
             fetch: true,
             repository: None,
             machine: Some("sha256:ab".into()),
+            commit: Some("b".repeat(40)),
         },
         json!({"kind": "rustc/1", "addresses": ["06".repeat(32)], "fetch": true,
-               "machine": "sha256:ab"}),
+               "machine": "sha256:ab", "commit": "b".repeat(40)}),
     );
+    // A lookup from a version before the commit reads with none.
+    let older: LookupRequest =
+        serde_json::from_value(json!({"kind": "rustc/1", "addresses": [], "fetch": true})).unwrap();
+    assert_eq!(older.commit, None);
     // `fetch` is false unless said.
     let quiet: LookupRequest =
         serde_json::from_value(json!({"kind": "rustc/1", "addresses": []})).unwrap();

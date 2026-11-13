@@ -468,6 +468,10 @@ pub struct HintsLookupRequest {
     /// The run's repository, as in [`OpenRequest::repository`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The workspace's commit, as in [`OpenRequest::commit`]: what a CI job reads is decided
+    /// again for every request. A server that doesn't read it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,6 +534,10 @@ pub struct LookupRequest {
     /// wrote ([`Found::mine`]). Only the caller's own machines count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// The workspace's commit, as in [`OpenRequest::commit`]: what a CI job reads is decided
+    /// again for every request. A server that doesn't read it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

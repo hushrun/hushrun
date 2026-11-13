@@ -1177,3 +1177,64 @@ fn open_names_the_platform_of_the_compiler_s_host() {
     relay.end_check(&[]);
     assert_eq!(fake.opens()[0].platform, "aarch64-apple-darwin");
 }
+
+// covers: B-26, B-31
+#[test]
+fn every_request_carries_the_workspace_s_commit_and_an_untrusted_job_says_why_once() {
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| {
+        p.untrusted = Some(blocks::Untrusted::Environment);
+        p.writes = false;
+        p.write = None;
+    });
+    let crates = served(&fake, 1, 10_000, 1000);
+    let (key, step) = crates[0];
+    let m = machine();
+    let commit = "c".repeat(40);
+    let relay = start(&fake, &m, |c| c.commit = Some(commit.clone()));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(&relay, Request::Hints { step });
+    ask(
+        &relay,
+        Request::Fetch {
+            step,
+            keys: vec![key],
+            class: LocalClass::Library,
+            local_ms: None,
+        },
+    );
+    let lines = relay.end_check(&[]);
+    let says: Vec<&String> = lines.iter().filter(|l| l.contains("writes none")).collect();
+    assert_eq!(says.len(), 1, "{lines:?}");
+    assert!(
+        says[0].contains("it names a deployment environment"),
+        "{lines:?}"
+    );
+    let mut routes = Vec::new();
+    for seen in fake.seen() {
+        if [
+            route::OPEN,
+            route::HINTS_LOOKUP,
+            route::LOOKUP,
+            route::CLOSE,
+        ]
+        .contains(&seen.route.as_str())
+        {
+            let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+            assert_eq!(body["commit"], commit, "{}", seen.route);
+            routes.push(seen.route.clone());
+        }
+    }
+    for route in [
+        route::OPEN,
+        route::HINTS_LOOKUP,
+        route::LOOKUP,
+        route::CLOSE,
+    ] {
+        assert!(
+            routes.iter().any(|r| r == route),
+            "no {route} in {routes:?}"
+        );
+    }
+}

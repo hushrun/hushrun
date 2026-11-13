@@ -635,6 +635,13 @@ impl Relay {
                         what_a_run_does(self.caller(), self.config.local, self.config.own, org);
                     state.sharing = does.sharing;
                     let manifest = policy.manifest.clone();
+                    // A CI job on a branch its repository lists that isn't trusted: why, once.
+                    if let Some(untrusted) = policy.untrusted {
+                        state.say(format!(
+                            "build: this job reads the repository's trusted blocks and writes none: {}",
+                            untrusted_words(untrusted)
+                        ));
+                    }
                     state.policy = Some(policy);
                     match does.sharing {
                         Sharing::Off(off) => {
@@ -732,6 +739,7 @@ impl Relay {
             kind: KIND.to_string(),
             addresses: addresses.to_vec(),
             repository: self.config.repository.clone(),
+            commit: self.config.commit.clone(),
         };
         let answer = self
             .client
@@ -768,6 +776,7 @@ impl Relay {
             fetch,
             repository: self.config.repository.clone(),
             machine: self.machine.as_ref().map(crate::machine::Machine::keyid),
+            commit: self.config.commit.clone(),
         };
         let answer = self
             .client
@@ -1721,6 +1730,29 @@ impl Relay {
             manifest,
             counts,
         }
+    }
+}
+
+/// Why a CI job on a listed branch isn't trusted, in plain words (the policy's reason word).
+pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
+    match why {
+        blocks::Untrusted::Repository => {
+            "the repository's owner isn't the one an admin confirmed (transferred, or made again)"
+        }
+        blocks::Untrusted::Event => {
+            "its event isn't a push or a schedule, nor a dispatch the repository allows"
+        }
+        blocks::Untrusted::Environment => "it names a deployment environment",
+        blocks::Untrusted::Commit => {
+            "the commit it builds isn't the one its token names (or couldn't be read)"
+        }
+        blocks::Untrusted::Runner => {
+            "it runs on a self-hosted runner the repository hasn't opted in"
+        }
+        blocks::Untrusted::Run => {
+            "its run started before the branch was listed, or an admin withdrew it"
+        }
+        blocks::Untrusted::Unknown => "the backend says it isn't trusted",
     }
 }
 
