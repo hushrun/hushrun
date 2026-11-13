@@ -1424,10 +1424,56 @@ fn a_fetch_with_nothing_to_sign_in_with_names_the_agents_variable() {
         stderr.contains("set HUSHRUN_AGENT for this phase"),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("an agent token in HUSHRUN_TOKEN works too"),
-        "{stderr}"
-    );
+    // Every credential it takes is named.
+    for accepted in [
+        "an agent token in HUSHRUN_AGENT",
+        "an agent or a personal token in HUSHRUN_TOKEN",
+        "a person's sign-in (`hushrun login`)",
+    ] {
+        assert!(stderr.contains(accepted), "no {accepted:?}: {stderr}");
+    }
+    // The help says the same.
+    let help = b
+        .hushrun(&fake)
+        .args(["build", "fetch", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for accepted in [
+        "an agent token in HUSHRUN_AGENT",
+        "an agent or a personal token in HUSHRUN_TOKEN",
+        "a person's sign-in (`hushrun login`)",
+    ] {
+        assert!(help.contains(accepted), "no {accepted:?}: {help}");
+    }
+}
+
+// covers: B-36
+#[test]
+fn a_fetch_works_with_a_persons_sign_in() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    set_origin(&a, "https://github.com/acme/shop.git");
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    set_origin(&b, "https://github.com/acme/shop.git");
+    sign_in(&b, &fake);
+    let output = b
+        .hushrun(&fake)
+        .env_remove("HUSHRUN_TOKEN")
+        .env_remove("HUSHRUN_BUILD")
+        .args(["build", "fetch"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{said}{stderr}");
+    assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
 }
 
 fn set_origin(m: &Machine, url: &str) {

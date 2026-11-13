@@ -778,10 +778,16 @@ The table is `hushrun run NAME -- COMMAND`'s, on a person's machine, in a sandbo
 relay, so it neither downloads from nor uploads to the shared store, and asks the backend nothing
 about blocks. Outside CI it reuses this machine's own store as B-1's mode says (and so nothing in
 a sandbox, where nobody chose a mode), and reads a saved fetch that serves it (B-36) as any run
-does; in CI it sets no wrapper at all. *Rests on:* the backend's header and `open` saying what the
+does; in CI it sets no wrapper at all. So that this is not silent: when a check of such a run
+compiled through the wrapper, the run asks the backend once, with one results lookup (the
+check's own key, B-26's header on its answer), whether the org shares, and where it does says
+one line a run, ``build: only `hushrun run NAME -- COMMAND` uses the org's shared store: this
+run's crates were neither downloaded from it nor uploaded to it``. A run whose checks compile
+nothing asks nothing, and in CI, or with reuse off here, no wrapper sees a compile, so nothing
+is asked or said. *Rests on:* the backend's header and `open` saying what the
 org decided, and the machine's settings being its own; `hushrun run CHECK…` handing its session
 no backend to share through (`cmd::run` begins each check's session with none, ADR 0078), so it
-never learns that the org shares. *Breaks if:* a project's CI runs its builds as checks of `hushrun.yaml`: it reuses
+never asks the backend about blocks. *Breaks if:* a project's CI runs its builds as checks of `hushrun.yaml`: it reuses
 nothing there, and its sandboxes reuse only what a fetch saved. A run never shares more than its local mode allows: with local `observe`, sharing
 observes too.
 
@@ -1047,8 +1053,9 @@ and uploads what an earlier leg of the same run built, in the same scope); or an
 read a job's environment, which holds the request token.
 
 **B-36 A sandbox's fetch.** `hushrun build fetch [CHECK]...`, run in a sandbox's setup phase with
-the network and a token (an agent's: `HUSHRUN_AGENT`, or an `hra_` token in `HUSHRUN_TOKEN`; with
-none it exits naming `HUSHRUN_AGENT`), sends `open` for the repository and platform once for each check named,
+the network and a credential (an agent token in `HUSHRUN_AGENT`, an agent or a personal token in
+`HUSHRUN_TOKEN`, a person's sign-in, or in GitHub Actions the job's ID token; its help names
+them, and with none it exits naming them all, `HUSHRUN_AGENT` first), sends `open` for the repository and platform once for each check named,
 by its id as `hushrun run` names it (B-26: a digest of the repository and the check's name), or
 once naming no check, which the backend answers with the repository's newest manifest for the
 platform, whatever its check (`OpenRequest::check`); an `open` naming a check gets that check's

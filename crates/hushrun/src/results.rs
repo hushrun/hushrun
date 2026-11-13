@@ -1321,6 +1321,23 @@ impl Backend {
         }
     }
 
+    /// B-25: whether the org shares build blocks, asked with one results lookup of `key` (whose
+    /// answer carries `Hushrun-Build: on` then, and is otherwise not read): for a command that
+    /// doesn't share and only has a line to say where the org does. `false` for a directory,
+    /// with nothing to send, and when the backend didn't answer.
+    pub fn org_shares_blocks(&self, key: &Digest) -> bool {
+        let Store::Server(server) = &self.store else {
+            return false;
+        };
+        let sends = self
+            .build_access()
+            .is_some_and(|access| access.credential.is_some());
+        if sends {
+            let _ = self.latest(key);
+        }
+        sends && server.ledger.build_sharing_seen()
+    }
+
     /// What a relay needs (B-26, B-31): for a server, the credential its build requests carry.
     /// In CI that is the job's ID token and nothing else, also beside an agent token (B-31); in
     /// GitHub Actions with none, the credential is `None`, whatever token the job holds; in other

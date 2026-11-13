@@ -346,9 +346,13 @@ pub enum BuildCommand {
     /// How much this machine takes part in the org's shared store of compiled crates: on,
     /// observe or off. It can lower the org's shared mode here, never raise it.
     Share(BuildShareArgs),
-    /// For a sandbox's setup, with the network and a token: fetch the crates the org's newest
-    /// build of each check named used (of this repository, with none named), so later runs reuse
-    /// them with neither. Good for 24 hours; no token is kept.
+    /// Fetch the crates the org's newest build of each check named used (of this repository,
+    /// with none named), so later runs reuse them with no network and no token.
+    ///
+    /// For a sandbox's setup phase, which has the network and a credential. It takes an agent
+    /// token in HUSHRUN_AGENT, an agent or a personal token in HUSHRUN_TOKEN, a person's sign-in
+    /// (`hushrun login`), or in GitHub Actions the job's ID token. Good for 24 hours; no token is
+    /// kept.
     Fetch(BuildFetchArgs),
 }
 

@@ -194,6 +194,15 @@ offline.
 
 ### Fixed
 
+- `hushrun run CHECK…` in an org that shares build blocks says once, when a check compiled Rust,
+  that it didn't use the shared store: ``build: only `hushrun run NAME -- COMMAND` uses the org's
+  shared store: this run's crates were neither downloaded from it nor uploaded to it``. It still
+  shares nothing; it asks the backend whether the org shares with one results lookup, and only
+  after a check compiled. In CI, where that form sets no wrapper, it says nothing.
+- `hushrun build fetch` says which credentials it takes, in its help and when it finds none: an
+  agent token in `HUSHRUN_AGENT`, an agent or a personal token in `HUSHRUN_TOKEN`, a person's
+  sign-in, or in GitHub Actions the job's ID token. It already worked with a person's sign-in;
+  the error named only `HUSHRUN_AGENT`.
 - `hushrun repository usage`: an org whose shared store has no allowance no longer reads
   `0 bytes held, of 0 bytes`. The line says why there is none, from the usage answer's `reason`
   when the backend sends one: `nothing held: the plan sets its storage by contract, and none is

@@ -86,7 +86,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
     // prints, which the docs name) and, as an `hra_` token, from `HUSHRUN_TOKEN`.
     .ok_or_else(|| {
         failed(
-            "no backend is signed in to: set HUSHRUN_AGENT for this phase to the string `hushrun token create --agent` printed (an agent token in HUSHRUN_TOKEN works too)"
+            "no backend is signed in to. `hushrun build fetch` takes an agent token in HUSHRUN_AGENT (in a sandbox, set HUSHRUN_AGENT for this phase to the string `hushrun token create --agent` printed), an agent or a personal token in HUSHRUN_TOKEN, a person's sign-in (`hushrun login`), or in GitHub Actions the job's ID token"
                 .into(),
         )
     })?;
