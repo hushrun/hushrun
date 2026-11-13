@@ -37,7 +37,10 @@ one session serves every start of COMMAND in the run (a test file that runs once
 it again) and the build `tests: reuse` makes before COMMAND, which is COMMAND's build made first;
 it ends after the last start. It MUST NOT set it for an isolated check: that check runs in a
 container, where the link and the store don't exist. It MUST NOT set it either when `RUSTC_WRAPPER`
-is set already, or on Windows. In CI (C-14's detection) it sets it only when the run's results
+is set already (sccache, for one), or on Windows: the other wrapper stays, COMMAND runs as it
+would without hushrun's reuse, and where the run's results lookup said the org shares
+(`Hushrun-Build: on`) the run says one line, `build reuse is off for this run: another compiler
+wrapper is set (RUSTC_WRAPPER)`; elsewhere it says nothing. In CI (C-14's detection) it sets it only when the run's results
 lookup carried `Hushrun-Build: on`, the job can be asked as itself (B-31), and the relay's `open`
 answers within 5 seconds of its start: then in the job's own store (B-31), and only then does
 cargo start. In CI only `NAME -- COMMAND` sets it (B-25); `CHECK…` never does there. With no

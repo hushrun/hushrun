@@ -194,6 +194,10 @@ offline.
 
 ### Fixed
 
+- Build blocks: a run that passes through because `RUSTC_WRAPPER` is set already (sccache, for
+  one) says so where its org shares build blocks: `build reuse is off for this run: another
+  compiler wrapper is set (RUSTC_WRAPPER)`. Before, it said nothing, and the shared store was
+  silently unused. Where the org doesn't share, or reuse is off here, it still says nothing.
 - Build blocks: **an agent's run on a person's machine no longer turns build reuse on by
   itself.** A machine with an agent token and no `build.json` was taken for a sandbox, so on a
   laptop where an agent ran with a token, crates were reused and shared without anyone choosing

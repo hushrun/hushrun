@@ -40,6 +40,26 @@ pub(crate) fn begin(
     share: Option<ShareStart>,
     place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
+    // B-2: a compiler wrapper set already passes through. That is worth its line only where the
+    // run's results lookup said the org shares: there the person may expect the shared store.
+    let org_shares = share.as_ref().is_some_and(|start| start.access.shares);
+    begin_here(now, repository, repository_env, share, place)
+        .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))
+}
+
+/// The line of a run that begins no session because `RUSTC_WRAPPER` is set already (B-2), which
+/// [`begin`] says only in an org that shares.
+const WRAPPER_SET: &str =
+    "build reuse is off for this run: another compiler wrapper is set (RUSTC_WRAPPER)";
+
+/// [`begin`], with the wrapper's line whatever the org said.
+fn begin_here(
+    now: SystemTime,
+    repository: Option<&str>,
+    repository_env: &[String],
+    share: Option<ShareStart>,
+    place: &dyn Fn() -> Option<crate::results::BuildPlace>,
+) -> Result<Session, Option<String>> {
     let Some(settings) = Credentials::build_settings_path() else {
         return Err(None);
     };
@@ -787,16 +807,14 @@ fn begin_with(
     Ok(session)
 }
 
-/// What the person reads of a run with no session: only settings or a variable that can't be
-/// used is worth a line.
+/// What the person reads of a run with no session: settings or a variable that can't be used
+/// is worth a line, and so is another compiler wrapper, which [`begin`] says only in an org
+/// that shares.
 fn said(not: NotBegun) -> Result<Session, Option<String>> {
     match not {
         NotBegun::Unusable(why) => Err(Some(format!("{OFF}: {why}"))),
-        NotBegun::Off
-        | NotBegun::Ci
-        | NotBegun::Windows
-        | NotBegun::WrapperSet
-        | NotBegun::NoCache => Err(None),
+        NotBegun::WrapperSet => Err(Some(WRAPPER_SET.to_string())),
+        NotBegun::Off | NotBegun::Ci | NotBegun::Windows | NotBegun::NoCache => Err(None),
     }
 }
 
@@ -874,11 +892,12 @@ mod tests {
         assert!(!store.exists());
         assert!(!elsewhere.exists());
 
-        // A wrapper the person set, or CI: silent, as when the binary is found.
+        // A wrapper the person set: its own line, which `begin` says only where the org
+        // shares. CI: silent, as when the binary is found.
         let set = |name: &str| (name == "RUSTC_WRAPPER").then(|| OsString::from("sccache"));
         assert_eq!(
             begin_with(&here(dir.path(), &settings, &set), lost(), None).err(),
-            Some(None)
+            Some(Some(WRAPPER_SET.to_string()))
         );
         let mut ci = here(dir.path(), &settings, &none);
         ci.in_ci = true;

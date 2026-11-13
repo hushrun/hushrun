@@ -235,6 +235,59 @@ fn an_org_that_doesnt_share_pays_no_request_and_sharing_off_here_asks_nothing() 
     assert_eq!(fake.count(route::OPEN), 0);
 }
 
+/// `hushrun run build -- COMMAND` with `RUSTC_WRAPPER=sccache` set: COMMAND prints the wrapper
+/// it was given. Its stdout and stderr.
+fn with_another_wrapper(m: &Machine, fake: &FakeBuild) -> (String, String) {
+    let output = m
+        .hushrun(fake)
+        .env("RUSTC_WRAPPER", "sccache")
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// covers: B-2
+#[test]
+fn another_compiler_wrapper_passes_through_and_is_said_once_where_the_org_shares() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let line = "build reuse is off for this run: another compiler wrapper is set (RUSTC_WRAPPER)";
+    let (stdout, stderr) = with_another_wrapper(&a, &fake);
+    assert!(stdout.contains("wrapper=sccache"), "{stdout}");
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+    assert_eq!(fake.count(route::OPEN), 0);
+    // An org that doesn't share: as designed, nothing is said.
+    fake.set_sharing(false);
+    let (stdout, stderr) = with_another_wrapper(&a, &fake);
+    assert!(stdout.contains("wrapper=sccache"), "{stdout}");
+    assert!(!stderr.contains("wrapper"), "{stderr}");
+    // Nor where reuse is off here anyway.
+    fake.set_sharing(true);
+    let output = a
+        .hushrun(&fake)
+        .env("RUSTC_WRAPPER", "sccache")
+        .env("HUSHRUN_BUILD", "off")
+        .args(["run", "build", "--force", "--", "true"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("wrapper"), "{stderr}");
+}
+
 /// The results lookups the fake saw: each one's `Hushrun-Ci` header and `repository` parameter.
 fn results_lookups(fake: &FakeBuild) -> Vec<(Option<String>, Option<String>)> {
     fake.seen()
