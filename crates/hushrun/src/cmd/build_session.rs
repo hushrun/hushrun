@@ -164,23 +164,75 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
 /// (B-2): COMMAND runs as it would without hushrun.
 const NO_ANSWER: &str = "build reuse is off for this run: the backend didn't answer in time";
 
+/// What every CI store's folder is named with.
+const CI_STORE: &str = "hushrun-build";
+
+/// B-31: the GitHub Actions job this process runs in, as a digest nobody else can make: of the
+/// repository, the run, its attempt and the job (`GITHUB_REPOSITORY_ID` or `GITHUB_REPOSITORY`,
+/// `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_JOB`), and of the job's own request token
+/// (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`), which is the same in every step of one job and which no
+/// other job has. `None` without that token: then nothing names the job that another couldn't.
+/// The one definition the job's store and its credential's fingerprint are named by.
+pub(crate) fn github_job(env: &dyn Fn(&str) -> Option<OsString>) -> Option<GithubJob> {
+    let var = |name: &str| {
+        env(name)
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let request = var("ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let repository = var("GITHUB_REPOSITORY_ID")
+        .or_else(|| var("GITHUB_REPOSITORY"))
+        .unwrap_or_default();
+    let run = var("GITHUB_RUN_ID").unwrap_or_default();
+    let attempt = var("GITHUB_RUN_ATTEMPT").unwrap_or_default();
+    let job = var("GITHUB_JOB").unwrap_or_default();
+    let digest = hushrun_build::origin::fingerprint(&format!(
+        "hushrun.ci-job/v1\n{repository}\n{run}\n{attempt}\n{job}\n{request}"
+    ));
+    let plain = |text: &str| -> String {
+        text.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(20)
+            .collect()
+    };
+    Some(GithubJob {
+        folder: format!(
+            "{CI_STORE}-{}-{}-{}",
+            plain(&run),
+            plain(&attempt),
+            &digest[..16]
+        ),
+        digest,
+    })
+}
+
+/// A GitHub Actions job (B-31): see [`github_job`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubJob {
+    /// What tells this job from every other, in hex.
+    pub(crate) digest: String,
+    /// Its store's folder name: `hushrun-build-<run>-<attempt>-<digest>`.
+    pub(crate) folder: String,
+}
+
 /// Where a CI job's store is (B-31), and who removes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CiStore {
-    /// Under the job's own temporary folder (`RUNNER_TEMP`), which the runner empties when the
-    /// job ends.
+    /// Under the job's own temporary folder (`RUNNER_TEMP`), named by the job ([`github_job`]):
+    /// the runner empties the folder when the job ends, and a folder it kept is another job's,
+    /// whose name this job can't have.
     Job(PathBuf),
-    /// No such folder: a folder of this process's under the system's temporary folder, removed
-    /// when the run's session ends.
+    /// No such folder, or no job to name it by: a folder of this process's under the system's
+    /// temporary folder, made by this run and removed when its session ends.
     Run(PathBuf),
 }
 
 impl CiStore {
     fn of(env: &dyn Fn(&str) -> Option<OsString>) -> CiStore {
-        match env("RUNNER_TEMP").map(PathBuf::from) {
-            Some(temp) if temp.is_absolute() => CiStore::Job(temp.join("hushrun-build")),
+        match (env("RUNNER_TEMP").map(PathBuf::from), github_job(env)) {
+            (Some(temp), Some(job)) if temp.is_absolute() => CiStore::Job(temp.join(job.folder)),
             _ => CiStore::Run(
-                std::env::temp_dir().join(format!("hushrun-build-{}", std::process::id())),
+                std::env::temp_dir().join(format!("{CI_STORE}-{}", std::process::id())),
             ),
         }
     }
@@ -188,6 +240,45 @@ impl CiStore {
     fn path(&self) -> &Path {
         match self {
             CiStore::Job(path) | CiStore::Run(path) => path,
+        }
+    }
+
+    /// B-31: makes sure the store is this job's before anything in it is read. Beside a job's
+    /// store, every other store folder in the job's temporary folder is another job's (a
+    /// runner that kept it): it is removed, and never read. A run's store found at the start is
+    /// another process's that died with the same id: it is removed, and the store is made anew
+    /// by this run; where it can't be, there is no store. `Err` is the line to say.
+    fn prepare(&self) -> Result<(), String> {
+        match self {
+            CiStore::Job(path) => {
+                let (Some(parent), Some(own)) = (path.parent(), path.file_name()) else {
+                    return Ok(());
+                };
+                for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+                    let name = entry.file_name();
+                    if name != own && name.to_string_lossy().starts_with(CI_STORE) {
+                        let other = entry.path();
+                        let _ = if other.is_dir() && !other.is_symlink() {
+                            std::fs::remove_dir_all(&other)
+                        } else {
+                            std::fs::remove_file(&other)
+                        };
+                    }
+                }
+                Ok(())
+            }
+            CiStore::Run(path) => {
+                if std::fs::symlink_metadata(path).is_ok() {
+                    let _ = std::fs::remove_dir_all(path).or_else(|_| std::fs::remove_file(path));
+                }
+                // The guard is in the write: only a folder this call creates is the run's.
+                std::fs::create_dir(path).map_err(|err| {
+                    format!(
+                        "{OFF}: another run's store at {} can't be removed: {err}",
+                        path.display()
+                    )
+                })
+            }
         }
     }
 }
@@ -247,7 +338,16 @@ fn begin_in_ci(
         return Err(Some(format!("{OFF}: {}{hint}", off.reason())));
     }
     let store = CiStore::of(here.env);
-    let mut session = begin_with(here, std::env::current_exe(), Some(store.path()))?;
+    store.prepare().map_err(Some)?;
+    let mut session = match begin_with(here, std::env::current_exe(), Some(store.path())) {
+        Ok(session) => session,
+        Err(line) => {
+            if let CiStore::Run(path) = &store {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            return Err(line);
+        }
+    };
     let abandon = |session: Session, line: Option<String>| {
         session.finish(here.now);
         if let CiStore::Run(path) = &store {
@@ -638,6 +738,102 @@ mod tests {
         let session = begin_with(&here(dir.path(), &settings, &none), Ok(exe), None).unwrap();
         assert!(store.join("sessions").is_dir());
         session.finish(SystemTime::UNIX_EPOCH);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + use<> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    // covers: B-31
+    #[test]
+    fn a_github_job_is_named_by_its_repository_run_attempt_job_and_request_token() {
+        let job = |run: &str, attempt: &str, request: &str| {
+            github_job(&vars(&[
+                ("GITHUB_REPOSITORY_ID", "4242"),
+                ("GITHUB_RUN_ID", run),
+                ("GITHUB_RUN_ATTEMPT", attempt),
+                ("GITHUB_JOB", "build"),
+                ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", request),
+            ]))
+        };
+        let one = job("100", "1", "request-one").unwrap();
+        assert!(one.folder.starts_with("hushrun-build-100-1-"), "{one:?}");
+        assert!(!one.folder.contains("request"));
+        assert_eq!(job("100", "1", "request-one"), Some(one.clone()));
+        for other in [
+            job("101", "1", "request-one"),
+            job("100", "2", "request-one"),
+            job("100", "1", "request-two"),
+        ] {
+            let other = other.unwrap();
+            assert_ne!(other.digest, one.digest);
+            assert_ne!(other.folder, one.folder);
+        }
+        // Without the job's own request token, nothing names it that another job couldn't.
+        assert_eq!(github_job(&vars(&[("GITHUB_RUN_ID", "100")])), None);
+        // And without one, there is no job store: the run makes its own.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        assert!(matches!(
+            CiStore::of(&vars(&[("RUNNER_TEMP", &path)])),
+            CiStore::Run(_)
+        ));
+        assert!(matches!(
+            CiStore::of(&vars(&[
+                ("RUNNER_TEMP", &path),
+                ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "r")
+            ])),
+            CiStore::Job(_)
+        ));
+    }
+
+    // covers: B-31
+    #[test]
+    fn a_job_reads_no_store_it_did_not_make() {
+        let temp = tempfile::tempdir().unwrap();
+        // Another job's store, and the store from before stores were named by their job.
+        let other = temp.path().join("hushrun-build-99-1-0123456789abcdef");
+        let legacy = temp.path().join("hushrun-build");
+        let unrelated = temp.path().join("cache");
+        for dir in [&other, &legacy, &unrelated] {
+            std::fs::create_dir_all(dir.join("blocks")).unwrap();
+        }
+        let own = temp.path().join("hushrun-build-100-1-fedcba9876543210");
+        std::fs::create_dir_all(own.join("blocks")).unwrap();
+        CiStore::Job(own.clone()).prepare().unwrap();
+        assert!(own.join("blocks").is_dir(), "the job's own store stays");
+        assert!(!other.exists() && !legacy.exists());
+        assert!(unrelated.exists());
+
+        // A run's store found at the start died with another process of the same id.
+        let run = temp.path().join("hushrun-build-12345");
+        std::fs::create_dir_all(run.join("blocks/x")).unwrap();
+        CiStore::Run(run.clone()).prepare().unwrap();
+        assert!(run.is_dir());
+        assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0);
+        // One that can't be removed means no store.
+        let stuck = temp.path().join("stuck");
+        std::fs::create_dir_all(&stuck).unwrap();
+        let run = stuck.join("hushrun-build-12346");
+        std::fs::create_dir_all(run.join("blocks")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let said = CiStore::Run(run.clone()).prepare();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = said.unwrap_err();
+        assert!(
+            said.starts_with("build reuse is off for this run: another run's store"),
+            "{said}"
+        );
     }
 
     // covers: B-23

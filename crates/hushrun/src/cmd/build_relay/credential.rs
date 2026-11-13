@@ -23,6 +23,8 @@ pub(crate) enum Credential {
         request_token: String,
         /// The backend's URL: the token's audience, as the results client asks it.
         audience: String,
+        /// The job's digest (B-31), which no other job has.
+        job: String,
         held: tokio::sync::Mutex<Option<(String, Option<SystemTime>)>>,
     },
 }
@@ -31,25 +33,29 @@ impl Credential {
     pub(crate) fn of(access: &crate::results::BuildCredential, audience: &str) -> Credential {
         match access {
             crate::results::BuildCredential::Token(token) => Credential::Token(token.clone()),
-            crate::results::BuildCredential::GithubOidc { url, request_token } => {
-                Credential::GithubOidc {
-                    url: url.clone(),
-                    request_token: request_token.clone(),
-                    audience: audience.to_string(),
-                    held: tokio::sync::Mutex::new(None),
-                }
-            }
+            crate::results::BuildCredential::GithubOidc {
+                url,
+                request_token,
+                job,
+            } => Credential::GithubOidc {
+                url: url.clone(),
+                request_token: request_token.clone(),
+                audience: audience.to_string(),
+                job: job.clone(),
+                held: tokio::sync::Mutex::new(None),
+            },
         }
     }
 
     /// What tells two credentials apart in a block's record and a marker (B-32), never the
-    /// secret: a token's fingerprint, or one word for a CI job, whose store dies with it.
+    /// secret: a token's fingerprint, or a GitHub Actions job's own (B-31), of its repository,
+    /// run, attempt, job and request token, so that no other job's markers are ever its.
     pub(crate) fn fingerprint(&self) -> String {
         match self {
             Credential::Nothing => hushrun_build::origin::fingerprint("no credential"),
             Credential::Token(token) => hushrun_build::origin::fingerprint(token),
-            Credential::GithubOidc { .. } => {
-                hushrun_build::origin::fingerprint("github-actions-id-token")
+            Credential::GithubOidc { job, .. } => {
+                hushrun_build::origin::fingerprint(&format!("github-actions-id-token\n{job}"))
             }
         }
     }
@@ -77,6 +83,7 @@ impl Credential {
                 request_token,
                 audience,
                 held,
+                ..
             } => (url, request_token, audience, held),
         };
         let mut held = held.lock().await;

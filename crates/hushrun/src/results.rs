@@ -1240,8 +1240,13 @@ pub struct BuildAccess {
 pub enum BuildCredential {
     /// A person's or an agent's token.
     Token(String),
-    /// GitHub Actions: where the job mints ID tokens, and the request token that asks.
-    GithubOidc { url: String, request_token: String },
+    /// GitHub Actions: where the job mints ID tokens, the request token that asks, and the
+    /// job's digest (`cmd::build_session::github_job`), which its fingerprint is made of.
+    GithubOidc {
+        url: String,
+        request_token: String,
+        job: String,
+    },
 }
 
 impl Backend {
@@ -1257,10 +1262,22 @@ impl Backend {
         let agent_token = matches!(server.signer(), Signer::Agent);
         let (credential, agent) = if server.in_ci {
             match (server.oidc.clone(), server.token.clone()) {
-                (Some((url, request_token)), _) => (
-                    Some(BuildCredential::GithubOidc { url, request_token }),
-                    false,
-                ),
+                (Some((url, request_token)), _) => {
+                    let job =
+                        crate::cmd::build_session::github_job(&|name| hushrun_ci::var_os(name))
+                            .map_or_else(
+                                || hushrun_build::origin::fingerprint(&request_token),
+                                |job| job.digest,
+                            );
+                    (
+                        Some(BuildCredential::GithubOidc {
+                            url,
+                            request_token,
+                            job,
+                        }),
+                        false,
+                    )
+                }
                 // Anywhere else in CI an agent token reads the org's blocks, and writes none
                 // (`hushrun_build::share::what_a_run_does`).
                 (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),

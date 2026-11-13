@@ -747,10 +747,22 @@ first key name (64 MiB when it has none) is not followed. *Rests on:* a manifest
 addresses, so a wrong one wastes downloads and can't cause a wrong reuse; and a warm machine
 holding what its manifest names, so it downloads nothing.
 
-**B-31 CI and sandboxes.** A CI job's store is `hushrun-build` under the job's own temporary
-folder (`RUNNER_TEMP` in GitHub Actions; elsewhere a folder of the run's under the system's
-temporary folder, removed when the run's session ends), never the cache directory, and nothing in
-it outlives the job: no person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says
+**B-31 CI and sandboxes.** A CI job's store is the job's own, never the cache directory, and
+nothing in it outlives the job. In GitHub Actions it is `hushrun-build-<run>-<attempt>-<digest>`
+under the job's temporary folder (`RUNNER_TEMP`), the digest one function makes
+(`build_session::github_job`) of the repository (`GITHUB_REPOSITORY_ID`, else
+`GITHUB_REPOSITORY`), the run (`GITHUB_RUN_ID`), its attempt (`GITHUB_RUN_ATTEMPT`), the job
+(`GITHUB_JOB`) and the job's own request token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`), which every
+step of one job shares and no other job has: so every call of one job finds the same store, and
+no other job can make or name it. At its start a job removes every other `hushrun-build*` entry
+in its temporary folder, unread. Elsewhere (or with no request token) the store is
+`hushrun-build-<process id>` under the system's temporary folder, made by the run itself: one
+found there at the start, left by a process that died with the same id, is removed first, and
+when it can't be, the run has no store and says so in one line; it is removed when the run's
+session ends. In CI who built a block, and so whose markers go up (B-29, B-32), is the job and its
+store: the credential's fingerprint (for an ID token, the job's digest) joined with the store's
+folder, so that a marker or a block another run left is never this run's, whatever credential it
+was made with. No person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says
 otherwise, `HUSHRUN_BUILD_DIR` is not followed, and the free-space floor is 2 GB. In GitHub
 Actions every build request carries the job's ID token, whose audience is the backend's URL, also
 when an agent token is set beside it; one within a minute of its expiry is replaced before the
@@ -767,8 +779,13 @@ the runner emptying its temporary folder when the job ends; the ID token's claim
 backend trusts a job by, so a token copied out of one job can do no more than that job could, for
 minutes; the commit being what the backend checks a trusted job's token against; and a quarter of
 a block's compile being worth waiting for once, since the next job of the repository then
-downloads it rather than compiling. *Breaks if:* a self-hosted runner keeps `RUNNER_TEMP` between
-jobs (then one job's store is the next one's, still never uploaded under another job's token).
+downloads it rather than compiling; and the request token being the job's alone. *Breaks if:*
+a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
+one left there (a file it lacks permission to delete): that store is never read or uploaded, but
+it takes disk; the legs of one matrix job, which share the run, attempt and job name, run one
+after another on one runner and the runner gives them the same request token (then a leg reuses
+and uploads what an earlier leg of the same run built, in the same scope); or another process can
+read a job's environment, which holds the request token.
 
 **B-36 A sandbox's fetch.** `hushrun build fetch`, run in a sandbox's setup phase with the network
 and a token, sends `open` for the repository and platform, downloads what the manifest names that

@@ -1338,6 +1338,7 @@ fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {
         c.access.credential = Some(crate::results::BuildCredential::GithubOidc {
             url: fake.id_token_url(),
             request_token: FakeBuild::ID_TOKEN_REQUEST.into(),
+            job: "job-one".into(),
         });
         c.access.agent = false;
         c.access.machine = None;

@@ -23,8 +23,8 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 - Contract: **in CI, `hushrun run` sets `RUSTC_WRAPPER` when the org shares build blocks**: the
   results lookup carried `Hushrun-Build: on`, the job can be asked as itself, and `open` answered
-  within 5 seconds. The store is `hushrun-build` under `RUNNER_TEMP` (elsewhere a folder of the
-  run's, removed with it), with a 2 GB floor. A backend that didn't answer in time is one line,
+  within 5 seconds. The store is `hushrun-build-<run>-<attempt>-<digest>` under `RUNNER_TEMP`,
+  named by the job (elsewhere a folder of the run's, removed with it), with a 2 GB floor. A backend that didn't answer in time is one line,
   `build reuse is off for this run: the backend didn't answer in time`; an org that doesn't share
   changes nothing.
 - Contract: **in GitHub Actions every build request carries the job's ID token**, also beside an
@@ -183,6 +183,12 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks in CI: a job never reuses or uploads what another job left on a runner that keeps
+  its temporary folder. The job's store and its credential's fingerprint are named by the
+  repository, run, attempt, job and the job's own request token; another job's store found at
+  the start is removed unread, and only markers of this job and its store go up. Before, every
+  GitHub Actions job had the same fingerprint, and a main branch's job uploaded, as trusted, 29
+  blocks a pull request's job had built.
 - Build blocks: a variable whose name merely starts like a CI system's (`BUILD_ENV`,
   `CI_REGION`, `AGENT_POOL`) is searched for in a block's outputs like any other, so a block
   holding its value stays on the machine. Only the exact names a CI system documents as its own

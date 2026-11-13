@@ -428,10 +428,20 @@ impl Relay {
         std::fs::create_dir_all(outbox::run_folder(&config.store, outbox::RELAYS, &run))
             .map_err(|err| format!("{}: {err}", config.store.root().display()))?;
         outbox::remove_dead_runs(&config.store);
+        // B-31: in CI, who built a block is this job and its own store, whatever its
+        // credential: a marker or a block another run left is never this run's to send.
+        let credential = match config.caller {
+            Caller::Ci { .. } => hushrun_build::origin::fingerprint(&format!(
+                "ci\n{}\n{}",
+                client.fingerprint(),
+                config.store.root().display()
+            )),
+            _ => client.fingerprint(),
+        };
         let by = Identity {
             host: config.access.host.clone(),
             org: config.access.org.clone(),
-            credential: client.fingerprint(),
+            credential,
         };
         let machine = config.access.machine.take();
         let does = what_a_run_does(config.caller, config.local, config.own, Org::Shares(None));

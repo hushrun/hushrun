@@ -20,8 +20,10 @@ again: its setup phase has the network and a token, and its later phases may hav
   lookup carried `Hushrun-Build: on`, the job can be asked as itself, and `open` answers within
   5 seconds; cargo starts after. Without an answer, one line; an org that doesn't share costs
   nothing and says nothing (B-2).
-- **The job's own store.** Under `RUNNER_TEMP`, with a 2 GB floor and no person's settings;
-  nothing outlives the job (B-31).
+- **The job's own store.** Under `RUNNER_TEMP`, named by the repository, run, attempt, job and
+  the job's request token, with a 2 GB floor and no person's settings; nothing outlives the job,
+  another job's store found there is removed unread, and only markers of this job and store go
+  up (B-31).
 - **The job's ID token, always, in GitHub Actions.** Beside an agent token too: what the
   backend trusts a job by are the token's claims. Minted again within a minute of its expiry
   and after a 401. Anywhere else in CI an agent token reads and never uploads (B-31).

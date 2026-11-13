@@ -318,14 +318,128 @@ fn a_github_actions_job_shares_with_its_id_token_from_a_store_that_goes_with_the
     // What it built went up from the job's own store, under its temporary folder, and nothing
     // went into the cache, which outlives the job.
     assert!(!fake.stored().is_empty(), "{stderr}");
-    let store = a.root.join("runner-temp/hushrun-build");
-    assert!(store.join("blocks").is_dir() || store.is_dir(), "{stderr}");
+    let stores = ci_stores(&a.root.join("runner-temp"));
+    assert_eq!(stores.len(), 1, "{stderr}");
+    assert!(stores[0].is_dir(), "{stderr}");
     assert!(!a.root.join("cache/build").exists());
     // The runner empties the folder when the job ends: the store goes with it.
     std::fs::remove_dir_all(a.root.join("runner-temp")).unwrap();
     assert!(!walk_any(&a.root, "hushrun-build"));
 }
 
+/// `hushrun run build -- sh -c SCRIPT` as the GitHub Actions job `job` of run `run`, on the
+/// runner's temporary folder `runner_temp`. Its stderr, and the close it sent last.
+fn job_run(
+    m: &Machine,
+    fake: &FakeBuild,
+    runner_temp: &Path,
+    run: &str,
+    script: &str,
+) -> (String, Option<hushrun_core::blocks::CloseRequest>) {
+    let closes = fake.closes().len();
+    let mut cmd = m.hushrun(fake);
+    in_github_actions(&mut cmd, fake, runner_temp);
+    let output = cmd
+        .env("GITHUB_REPOSITORY_ID", "4242")
+        .env("GITHUB_RUN_ID", run)
+        .env("GITHUB_RUN_ATTEMPT", "1")
+        .env("GITHUB_JOB", "build")
+        .args(["run", "build", "--force", "--", "sh", "-c", script])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    (stderr, fake.closes().get(closes).cloned())
+}
+
+// covers: B-31
+#[test]
+fn a_job_never_uploads_or_reuses_what_another_job_left_in_a_kept_temporary_folder() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    // One runner, whose temporary folder survives between its jobs.
+    let runner_temp = a.root.join("runner-temp");
+    // A pull request's job, which writes its own scope, on a store too slow to finish: its
+    // blocks wait in its outbox when it ends.
+    fake.set_scopes(Some("ci/1/pr7"), &["ci/1/pr7", "protected/1"]);
+    fake.throttle_store(1);
+    let (stderr, close) = job_run(
+        &a,
+        &fake,
+        &runner_temp,
+        "100",
+        "cargo build --offline && sleep 2",
+    );
+    let close = close.expect(&stderr);
+    assert_eq!(close.counts.built, 2, "{stderr}");
+    assert!(fake.stored().is_empty(), "{stderr}");
+
+    // The main branch's job, trusted, on the same folder, with a fast store.
+    fake.throttle_store(0);
+    fake.set_scopes(Some("protected/1"), &["protected/1"]);
+    let (stderr, close) = job_run(
+        &a,
+        &fake,
+        &runner_temp,
+        "101",
+        "cargo clean -q && cargo build --offline && sleep 3",
+    );
+    let close = close.expect(&stderr);
+    // Nothing the pull request's job left was reused: the main job compiled both crates
+    // itself, so what it uploads into the trusted scope is its own.
+    assert_eq!(close.counts.reused_local, 0, "{close:?}\n{stderr}");
+    assert_eq!(close.counts.built, 2, "{close:?}\n{stderr}");
+    // The other job's store is gone, and the main job's next call finds its own.
+    assert_eq!(ci_stores(&runner_temp).len(), 1);
+    let (stderr, close) = job_run(
+        &a,
+        &fake,
+        &runner_temp,
+        "101",
+        "cargo clean -q && cargo build --offline",
+    );
+    let close = close.expect(&stderr);
+    assert_eq!(close.counts.reused_local, 2, "{close:?}\n{stderr}");
+}
+
+// covers: B-31
+#[test]
+fn a_job_with_nothing_to_build_sends_no_begin_for_another_jobs_markers() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let runner_temp = a.root.join("runner-temp");
+    fake.set_scopes(Some("ci/1/pr7"), &["ci/1/pr7", "protected/1"]);
+    fake.throttle_store(1);
+    let (stderr, _) = job_run(
+        &a,
+        &fake,
+        &runner_temp,
+        "200",
+        "cargo build --offline && sleep 2",
+    );
+    assert!(fake.stored().is_empty(), "{stderr}");
+    let begun = fake.begins().len();
+    fake.throttle_store(0);
+    fake.set_scopes(Some("protected/1"), &["protected/1"]);
+    let (stderr, _) = job_run(&a, &fake, &runner_temp, "201", "sleep 4");
+    assert_eq!(fake.begins().len(), begun, "{stderr}");
+    assert!(fake.stored().is_empty(), "{stderr}");
+}
+
+/// The CI stores in a job's temporary folder.
+fn ci_stores(runner_temp: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(runner_temp)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hushrun-build"))
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Whether anything under `dir` has a name that starts with `name`.
 fn walk_any(dir: &Path, name: &str) -> bool {
     std::fs::read_dir(dir)
         .into_iter()
@@ -333,7 +447,8 @@ fn walk_any(dir: &Path, name: &str) -> bool {
         .flatten()
         .any(|entry| {
             let path = entry.path();
-            path.file_name().is_some_and(|n| n == name)
+            path.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(name))
                 || (path.is_dir() && !path.is_symlink() && walk_any(&path, name))
         })
 }
@@ -351,7 +466,7 @@ fn a_job_whose_org_doesnt_share_runs_unwrapped_and_says_nothing() {
     assert!(!stderr.contains("hushrun: build reuse"), "{stderr}");
     assert!(!stderr.contains("hushrun: build:"), "{stderr}");
     assert_eq!(fake.count(route::OPEN), 0);
-    assert!(!a.root.join("runner-temp/hushrun-build").exists());
+    assert!(ci_stores(&a.root.join("runner-temp")).is_empty());
 }
 
 // covers: B-2
