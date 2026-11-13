@@ -1998,32 +1998,39 @@ fn macro_source(value: &str) -> String {
     )
 }
 
-/// The proc macro's file in `repo`'s target folder.
+/// The proc macro's file in `repo`'s target folder: the only one there.
 fn macro_file(repo: &Path) -> PathBuf {
-    std::fs::read_dir(repo.join("target/debug/deps"))
+    let mut files: Vec<PathBuf> = std::fs::read_dir(repo.join("target/debug/deps"))
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .find(|p| {
+        .filter(|p| {
             let name = p.file_name().unwrap().to_string_lossy();
             name.starts_with("libmac-") && name.ends_with(std::env::consts::DLL_SUFFIX)
         })
-        .expect("the proc macro's file")
+        .collect();
+    assert_eq!(files.len(), 1, "one proc macro's file: {files:?}");
+    files.remove(0)
 }
 
 /// What a CI cache that someone poisoned holds: `repo`'s target folder with the proc macro's
 /// file built from other source (by plain cargo, as an attacker's job would), and the macro's
 /// record rewritten to match the new bytes while it still names the honest macro.
 fn poison_macro(repo: &Path) {
+    let honest = std::fs::read(macro_file(repo)).unwrap();
     let source = repo.join("mac/src/lib.rs");
     std::fs::write(&source, macro_source("43")).unwrap();
     let mut plain = std::process::Command::new("cargo");
     for var in CLEARED {
         plain.env_remove(var);
     }
+    // With the job's own CARGO_INCREMENTAL: cargo names a crate's files by its profile, which
+    // that variable is part of, so a build without it writes a second file beside the job's
+    // and doctors nothing.
     let built = plain
         .args(["build", "-q", "--offline", "-p", "mac"])
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_INCREMENTAL", "0")
         .current_dir(repo)
         .status()
         .unwrap();
@@ -2031,6 +2038,7 @@ fn poison_macro(repo: &Path) {
     std::fs::write(&source, macro_source("42")).unwrap();
     let so = macro_file(repo);
     let bytes = std::fs::read(&so).unwrap();
+    assert_ne!(bytes, honest, "the job's own macro file was replaced");
     let record = so.parent().unwrap().join(".hushrun").join(format!(
         "{}.json",
         so.file_name().unwrap().to_string_lossy()
