@@ -846,3 +846,76 @@ fn a_library_found_in_a_folder_the_driver_hands_ld_is_keyed_by_its_bytes() {
         "{other:?}"
     );
 }
+
+/// The stored description of the block a log entry names.
+fn description_of(w: &World, entry: &Entry) -> serde_json::Value {
+    let store = hushrun_build::store::Store::new(&w.session.current().store);
+    store
+        .block(&entry.key.expect("a block"))
+        .unwrap()
+        .expect("stored")
+        .description
+}
+
+/// The roles of a known link environment's list, in order, each once.
+fn link_roles(description: &serde_json::Value) -> Vec<String> {
+    let items = description["link_environment"]["known"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("E unknown: {}", description["link_environment"]));
+    let mut roles: Vec<String> = Vec::new();
+    for item in items {
+        let role = item["role"].as_str().unwrap().to_owned();
+        if !roles.contains(&role) {
+            roles.push(role);
+        }
+    }
+    roles
+}
+
+// covers: B-37
+#[test]
+fn a_real_links_environment_is_known_and_lists_what_answered() {
+    // The system's own C driver: gcc on Linux, Apple's clang on macOS.
+    let w = world();
+    let ws = w.checkout("ws");
+    let entry = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+    let description = description_of(&w, &entry);
+    let roles = link_roles(&description);
+    eprintln!("{}", description["link_environment"]);
+    let want: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "dry-run",
+            "program",
+            "loads",
+            "library",
+            "toolchain",
+            "sdk",
+            "platform-version",
+        ]
+    } else {
+        &[
+            "dry-run",
+            "driver",
+            "program",
+            "ld",
+            "plugin",
+            "file",
+            "library",
+            "script",
+            "toolchain",
+        ]
+    };
+    for role in want {
+        assert!(roles.iter().any(|r| r == role), "{role} in {roles:?}");
+    }
+    // A loader variable set for the link: unknown, and why.
+    let entry = proc_macro_with(&w, &ws, &[], &[("LD_PRELOAD", "/nonexistent/libhook.so")]);
+    let description = description_of(&w, &entry);
+    assert!(
+        description["link_environment"]["unknown"]["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("LD_PRELOAD")),
+        "{description}"
+    );
+}

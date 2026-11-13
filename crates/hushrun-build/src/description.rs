@@ -151,6 +151,11 @@ pub struct Description {
     pub rustc_ms: u64,
     /// When the block was built, in milliseconds since the epoch.
     pub built_ms: u64,
+    /// For a linked output, its link environment (B-37): which file answered which request,
+    /// each with its digest, so that two blocks that disagree can be compared; or why it is
+    /// unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_environment: Option<crate::linkenv::LinkEnv>,
 }
 
 impl Description {
@@ -218,6 +223,7 @@ mod tests {
                 .store(|p| p.replace("/w/out", "{hushrun:out-dir}")),
             rustc_ms: 12,
             built_ms: 1_800_000_000_000,
+            link_environment: None,
         }
     }
 

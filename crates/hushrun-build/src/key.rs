@@ -24,8 +24,9 @@ pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 /// crate's own objects count as rustc's (a v7 hint judged by a member's suffix). v9: a block
 /// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]). v10: a
 /// library bundled nothing only when no member of its `.rlib` is a native library's member too.
-/// v11: an archive in a native folder counts whatever its name.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v11";
+/// v11: an archive in a native folder counts whatever its name. v12: a linked output's link
+/// environment by content (B-37) in place of the linker's and the SDK's size and date.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v12";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -223,10 +224,19 @@ pub struct Link {
     /// The linker's identity: where it lies (B-8) and, for one under a root, its SHA-256, else
     /// its size and modification time, as one text; with the same for the linker `-fuse-ld`
     /// names, when there is one, and for the `dsymutil` that writes a program's debug bundle
-    /// (B-9), when the compile runs one.
+    /// (B-9), when the compile runs one. Empty when the link environment is known
+    /// (`environment`), which holds all of them by content (B-37).
     pub linker: String,
-    /// The SDK, as one text.
+    /// The SDK, as one text. Empty when the link environment is known.
     pub sdk: String,
+    /// The link environment's identity, E, when it is known (B-37): in the key in place of
+    /// `linker` and `sdk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Digest>,
+    /// E's list, or why it is unknown: stored with the block (its description), never in a key
+    /// but by `environment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_list: Option<crate::linkenv::LinkEnv>,
     /// Where the linker is. Kept for the hint; the key holds only `linker`.
     pub linker_path: Located,
     /// Where the linker `-fuse-ld` names is. Kept for the hint; the key holds only `linker`.
@@ -270,6 +280,18 @@ pub struct LinkQuery {
     /// The sysroot the line gives `ld`, roots replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ld_sysroot: Option<String>,
+    /// The driver as rustc named it, roots replaced: what E names it by (B-37).
+    #[serde(default)]
+    pub name: String,
+    /// The line without its inputs and its output, roots replaced: the driver's dry run that E
+    /// is computed from ([`crate::link::LinkArgs::dry_args`]). A hint without it is not
+    /// followed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_args: Option<Vec<String>>,
+    /// The variables the line set or removed, `PATH` excepted, roots replaced: the dry run
+    /// runs with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, Option<String>)>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -368,7 +390,8 @@ impl Observed {
     }
 
     /// What a dependent names this block's linked library by when it may move (B-6): the key
-    /// without its place and without the link environment (the linker, the SDK and `dsymutil`),
+    /// without its place and without the link environment (E, or the linker, the SDK and
+    /// `dsymutil`),
     /// which differs between machines and doesn't change how a proc macro expands. The same as
     /// the key without its place for a block with no link part.
     pub fn known_by(&self) -> Result<Digest, KeyError> {
@@ -378,6 +401,7 @@ impl Observed {
         if let Some(link) = body.link.as_mut() {
             link.linker = String::new();
             link.sdk = String::new();
+            link.environment = None;
             link.folders = Vec::new();
             link.system = Vec::new();
         }
@@ -464,6 +488,7 @@ impl Observed {
                         files: normalize(&link.files, "link files", |r| r.at.clone())?,
                         linker: link.linker.clone(),
                         sdk: link.sdk.clone(),
+                        environment: link.environment,
                         folders: link.folders.clone(),
                         system: normalize(&link.system, "link system", |r| r.at.clone())?,
                     })
@@ -586,6 +611,8 @@ struct LinkBody {
     files: Vec<Read>,
     linker: String,
     sdk: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment: Option<Digest>,
     /// In order: the order is the search's.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     folders: Vec<Located>,
@@ -923,7 +950,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "a958233576b000bbbb7492a4e01829434d45ef952e9b21be2fcf713e96433073"
+            "c6d7792401d67c93fd3d51db8448371ba0c6d918db3e9d1899ed96c4ddab609f"
         );
     }
 
@@ -1044,6 +1071,8 @@ mod tests {
                     folders: Vec::new(),
                     system: Vec::new(),
                     query: None,
+                    environment: None,
+                    environment_list: None,
                 })
             }),
             ("a file the linker reads", |o| {
@@ -1062,6 +1091,8 @@ mod tests {
                     folders: Vec::new(),
                     system: Vec::new(),
                     query: None,
+                    environment: None,
+                    environment_list: None,
                 })
             }),
             ("place", |o| {
@@ -1095,6 +1126,8 @@ mod tests {
                 folders: Vec::new(),
                 system: Vec::new(),
                 query: None,
+                environment: None,
+                environment_list: None,
             });
             o.key().unwrap()
         };
@@ -1169,6 +1202,8 @@ mod tests {
             folders: Vec::new(),
             system: Vec::new(),
             query: None,
+            environment: None,
+            environment_list: None,
         });
         o
     }
@@ -1205,6 +1240,16 @@ mod tests {
             // A dependent names the macro the same: like the linker and the SDK.
             assert_eq!(base.known_by().unwrap(), other.known_by().unwrap());
         }
+        // covers: B-37
+        // E, in the key in place of the linker's text, is left out of the name as that was.
+        let mut known = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 1);
+        known.link.as_mut().unwrap().environment = Some(d(7));
+        let mut other_e = known.clone();
+        other_e.link.as_mut().unwrap().environment = Some(d(8));
+        assert_ne!(known.key().unwrap(), other_e.key().unwrap());
+        assert_ne!(known.key().unwrap(), base.key().unwrap());
+        assert_eq!(known.known_by().unwrap(), other_e.known_by().unwrap());
+        assert_eq!(known.known_by().unwrap(), base.known_by().unwrap());
         // A library a crate asked for is in the name too.
         let asked = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 2);
         assert_ne!(base.key().unwrap(), asked.key().unwrap());
@@ -1413,6 +1458,8 @@ mod tests {
             folders: Vec::new(),
             system: Vec::new(),
             query: None,
+            environment: None,
+            environment_list: None,
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);

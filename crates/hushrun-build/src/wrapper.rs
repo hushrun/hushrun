@@ -362,6 +362,9 @@ struct KeyLine {
     /// Each `--extern` as the second key holds it: by the SHA-256 of its file, or a proc macro
     /// by what it was built from. With `outputs`, what joins a crate to its dependencies.
     externs: Vec<crate::key::ExternInput>,
+    /// How long computing a link's environment took at the link, in milliseconds (B-37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_environment_ms: Option<f64>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -954,6 +957,10 @@ impl Call<'_> {
             seal: store.seal(),
             ask: Some(self.asker),
             apple: self.apple,
+            toolchain: identity
+                .sysroot
+                .clone()
+                .map(|sysroot| (sysroot, identity.host.clone())),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -2039,6 +2046,14 @@ impl Call<'_> {
         let environment =
             link::environment(&query, self.asker).map_err(|_| NotStored::LinkInputs)?;
         let ld = Some(environment.ld.clone());
+        // The line as its dry run asks it, and the variables it set but `PATH` (B-37).
+        let dry_args = args.dry_args();
+        let set: Vec<(String, Option<String>)> = args
+            .env
+            .iter()
+            .filter(|(name, _)| name != "PATH")
+            .cloned()
+            .collect();
         let placeholders = |text: &str| cx.roots.to_placeholders(text);
         let kept = crate::key::LinkQuery {
             program: (!args.linker.contains('/')).then(|| args.linker.clone()),
@@ -2054,6 +2069,12 @@ impl Call<'_> {
                 .map(|flag| link::flag_with_paths(flag, placeholders))
                 .collect(),
             ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
+            name: placeholders(&args.linker),
+            dry_args: Some(dry_args.iter().map(|arg| placeholders(arg)).collect()),
+            env: set
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_deref().map(placeholders)))
+                .collect(),
         };
         let mut outside = false;
         let mut changed = false;
@@ -2234,16 +2255,42 @@ impl Call<'_> {
             changed |= moved(library, Some(&stat));
             libraries.push(LinkLibrary { at, sha256 });
         }
+        // E, the link environment by content (B-37): known, it stands for the driver, the `ld`,
+        // `dsymutil` and the SDK, whose size-and-date texts then leave the key; unknown, they
+        // stay, and the block is reused here as before and never leaves the machine (B-24).
+        let started = std::time::Instant::now();
+        let env = cx.link_env(
+            &linker.path,
+            &args.linker,
+            &dry_args,
+            &set,
+            path_var.as_deref().unwrap_or_default(),
+            &cwd,
+            dsymutil.as_deref(),
+        );
+        if self.current.key_log.is_some() {
+            self.keys.borrow_mut().link_environment_ms =
+                Some(started.elapsed().as_secs_f64() * 1e3);
+        }
+        let (linker_text, sdk_text) = match env.digest() {
+            Some(_) => (String::new(), String::new()),
+            None => (
+                inputs::linkers_text(
+                    (&linker_at, &linker.path),
+                    ld_at.as_ref().zip(ld.as_deref()),
+                    dsymutil_at.as_ref().zip(dsymutil.as_deref()),
+                )
+                .ok_or(NotStored::LinkInputs)?,
+                inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
+            ),
+        };
         let link = Link {
             libraries,
             files,
-            linker: inputs::linkers_text(
-                (&linker_at, &linker.path),
-                ld_at.as_ref().zip(ld.as_deref()),
-                dsymutil_at.as_ref().zip(dsymutil.as_deref()),
-            )
-            .ok_or(NotStored::LinkInputs)?,
-            sdk: inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
+            linker: linker_text,
+            sdk: sdk_text,
+            environment: env.digest(),
+            environment_list: Some(env),
             linker_path: linker_at,
             ld_path: ld_at,
             sdk_path: sdk_at,
@@ -2369,6 +2416,11 @@ impl Call<'_> {
             messages: recorded.store(placeholders),
             rustc_ms,
             built_ms: epoch_ms(self.start),
+            link_environment: produced
+                .observed
+                .link
+                .as_ref()
+                .and_then(|link| link.environment_list.clone()),
         };
         let Ok(value) = description.to_value() else {
             return (Stored::Refused, 0, Compared::NotTried);

@@ -149,8 +149,8 @@ arguments (a target specification file is already passed through, B-4).
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
 - `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose block
   may move (`anywhere`) is named by two things together: what it was built from, the key of the
-  block that produced it without its place and without the linker, the SDK, `dsymutil` and the C
-  runtime's places (`link`); and what a dependent's compiler reads from it, the SHA-256 of the crate
+  block that produced it without its place and without E (B-37), the linker, the SDK, `dsymutil`
+  and the C runtime's places (`link`); and what a dependent's compiler reads from it, the SHA-256 of the crate
   metadata rustc put in the linked file (its header, length and the metadata, found as the one place
   in the file where they are), which holds the crate hash a dependent is compiled against and which
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
@@ -251,11 +251,12 @@ metadata can't be found, and a tied proc macro,
   linker may take a library named with `-l` from, in its `-L` and `-F` folders and then in the
   folders the C driver hands `ld` and those `ld` searches by itself (B-18), with each file a
   linker script found there names, and every file an option names for it (a linker script, a
-  symbol list), by SHA-256 or as absent; those folders of the driver's and `ld`'s, in order; the
-  C driver, the `ld` it runs and the SDK (B-18). The places in the driver's and `ld`'s folders of
+  symbol list), by SHA-256 or as absent; those folders of the driver's and `ld`'s, in order; and
+  the link environment's identity E when it is known (B-37), else the C driver, the `ld` it runs
+  and the SDK by where they lie and their dates (B-18). The places in the driver's and `ld`'s folders of
   the C runtime the standard library asks for (`-lc`, `-lm`, `-lrt`, `-lpthread`, `-ldl`,
   `-lutil`, `-lgcc_s`, `-lgcc`, `-lgcc_eh`, `-lSystem`), with what their scripts name, and the
-  folders themselves are, like the linker and the SDK, left out of what a dependent names a
+  folders themselves are, like E, the linker and the SDK, left out of what a dependent names a
   movable proc macro by; any other library found there, which a crate asked for, is in it. *Rests
   on:* the standard library calling the C runtime for services whose answer, for one input,
   doesn't follow its version. *Breaks if:* a macro's expansion depended on the C library's version
@@ -480,7 +481,14 @@ modification time; the `ld` that driver runs, the same way and, outside the root
 change time and inode, so that a file put in its place with the same size and date (a package
 that keeps dates, a link retargeted by `update-alternatives`) is another `ld`; and the SDK, by
 where it lies and the date of its settings file. A driver, `ld` or SDK outside every root ties
-the block.
+the block. When the link's environment is known (B-37), E takes the place of those texts of the
+driver, the `ld`, `dsymutil` and the SDK: it holds each of them by content, with what they load,
+the start files, the C runtime and the toolchain's own linker tools, so a driver whose date
+changed and whose bytes didn't is the same link, and one rebuilt with the same date is another.
+Where E is unknown the texts stay, the block is stored and reused on this machine as before, and
+it never leaves it (B-24). The hint keeps E's question (the driver as rustc named it, the line
+without its inputs and output, the variables the line set, roots replaced) beside the one below;
+a hint without it is not followed.
 
 *Which `ld` runs* is asked of the driver at every link, and again before every lookup: never
 remembered, never taken from a hint. When rustc runs `rust-lld` itself (`-flavor` first, as for

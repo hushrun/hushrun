@@ -25,7 +25,7 @@ use crate::model::{Class, Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
 use crate::store::Store;
-use crate::{link, memo, regular, shape, sidecar};
+use crate::{link, linkenv, memo, regular, shape, sidecar};
 
 /// Every `--extern` as the key holds it, and each proc macro's crate name with whether another
 /// machine names it the same way.
@@ -58,6 +58,9 @@ pub struct Context<'a> {
     pub ask: Option<&'a link::Ask<'a>>,
     /// The call's target is Apple's ([`link::Query::apple`]).
     pub apple: bool,
+    /// The compiler's sysroot and host (B-17): the toolchain's `lib/rustlib/<host>/bin/` is in
+    /// a link's environment (B-37).
+    pub toolchain: Option<(PathBuf, String)>,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -339,6 +342,72 @@ impl Context<'_> {
             });
         }
         Ok((out, portable))
+    }
+
+    /// E for one link (B-37), from its question: the driver as found and as rustc named it,
+    /// the line without its inputs and output, the variables the line set or removed (`PATH`
+    /// excepted, which is `path`), and the `dsymutil` a bundle runs. The same at the link and at
+    /// a lookup, which asks it from a hint's question.
+    #[allow(clippy::too_many_arguments)]
+    pub fn link_env(
+        &self,
+        driver: &Path,
+        driver_name: &str,
+        dry_args: &[String],
+        set: &[(String, Option<String>)],
+        path: &std::ffi::OsStr,
+        cwd: &Path,
+        dsymutil: Option<&Path>,
+    ) -> linkenv::LinkEnv {
+        let Some(ask) = self.ask else {
+            return linkenv::LinkEnv::Unknown {
+                reason: "nothing may ask the C driver".into(),
+            };
+        };
+        // The variables the loader reads, as the link has them: the wrapper's, then the line's.
+        let mut loader: Vec<(String, String)> = Vec::new();
+        for name in self.env.names() {
+            if (name.starts_with("LD_") || name.starts_with("DYLD_"))
+                && let Some(value) = self.env.get(name)
+            {
+                loader.push((name.to_owned(), value.to_string_lossy().into_owned()));
+            }
+        }
+        for (name, value) in set {
+            if !(name.starts_with("LD_") || name.starts_with("DYLD_")) {
+                continue;
+            }
+            loader.retain(|(n, _)| n != name);
+            if let Some(value) = value {
+                loader.push((name.clone(), value.clone()));
+            }
+        }
+        let rooted = |dir: &Path| matches!(self.located(dir), Ok(Located::Rooted(_)));
+        let placeholders = |text: &str| self.roots.to_placeholders(text);
+        let digest = |file: &Path| memo::digest(self.run_memo, file).map(|(sha, _)| sha);
+        let toolchain = self
+            .toolchain
+            .as_ref()
+            .map(|(sysroot, host)| (sysroot.as_path(), host.as_str()));
+        linkenv::identity(
+            &linkenv::Question {
+                driver,
+                driver_name,
+                args: dry_args,
+                env: set,
+                path,
+                cwd,
+                apple: self.apple,
+                toolchain,
+                dsymutil,
+                lto: self.invocation.link_lto(),
+                loader_env: &loader,
+                rooted: &rooted,
+                placeholders: &placeholders,
+                digest: &digest,
+            },
+            ask,
+        )
     }
 
     /// The parts that don't depend on the dep-info. Hashed now, checked again after the compile.
@@ -920,15 +989,52 @@ impl Context<'_> {
             .iter()
             .map(|dir| self.located(dir).ok())
             .collect::<Option<Vec<_>>>()?;
+        // E, asked again from the hint's question (B-37): never the answer it kept.
+        let dry_args = query
+            .dry_args
+            .as_ref()?
+            .iter()
+            .map(|arg| from(arg))
+            .collect::<Option<Vec<_>>>()?;
+        let set = query
+            .env
+            .iter()
+            .map(|(name, value)| match value {
+                Some(value) => from(value).map(|value| (name.clone(), Some(value))),
+                None => Some((name.clone(), None)),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let found_dsymutil = match &list.dsymutil {
+            Some(_) => Some(link::linker("dsymutil", self.env.get("PATH"), &asked.cwd)?.path),
+            None => None,
+        };
+        let env = self.link_env(
+            &asked.driver,
+            &from(&query.name)?,
+            &dry_args,
+            &set,
+            &asked.path,
+            &asked.cwd,
+            found_dsymutil.as_deref(),
+        );
+        let (linker_text, sdk) = match env.digest() {
+            Some(_) => (String::new(), String::new()),
+            None => (
+                linkers_text(
+                    (&linker_at, &linker),
+                    Some((&ld_at, &environment.ld)),
+                    dsymutil.as_ref().map(|(at, p)| (*at, p.as_path())),
+                )?,
+                sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
+            ),
+        };
         Some(Link {
             libraries,
             files,
-            linker: linkers_text(
-                (&linker_at, &linker),
-                Some((&ld_at, &environment.ld)),
-                dsymutil.as_ref().map(|(at, p)| (*at, p.as_path())),
-            )?,
-            sdk: sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
+            linker: linker_text,
+            sdk,
+            environment: env.digest(),
+            environment_list: Some(env),
             linker_path: linker_at,
             ld_path: Some(ld_at),
             sdk_path: list.sdk.clone(),

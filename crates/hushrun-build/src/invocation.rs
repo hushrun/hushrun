@@ -228,6 +228,7 @@ pub struct Invocation {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    link_lto: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -420,6 +421,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
+        link_lto: seen.link_lto,
         native_cpu: seen.native_cpu,
         native_in_llvm_args: seen.native_in_llvm_args,
         debug: seen.debug,
@@ -529,6 +531,12 @@ impl Invocation {
     /// `-C linker-plugin-lto`, `-C embed-bitcode=yes` or compressed debug sections.
     pub fn searchable(&self) -> bool {
         self.searchable
+    }
+
+    /// Whether the link itself does link-time optimization: `-C lto` or `-C linker-plugin-lto`
+    /// not switched off. Its link environment can't be told (B-37).
+    pub fn link_lto(&self) -> bool {
+        self.link_lto
     }
 
     /// Whether the CPU the call compiles for is this machine's: its last `-C target-cpu` is
@@ -829,6 +837,7 @@ struct Seen {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    link_lto: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -855,6 +864,7 @@ impl Default for Seen {
             incremental: None,
             target: None,
             searchable: true,
+            link_lto: false,
             native_cpu: false,
             native_in_llvm_args: false,
             debug: DebugFlags::default(),
@@ -978,7 +988,11 @@ impl Seen {
                             setting.ok_or(PassedThrough::Malformed)?,
                         )?;
                     }
-                    "lto" | "linker-plugin-lto" | "embed-bitcode" if !switched_off(setting) => {
+                    "lto" | "linker-plugin-lto" if !switched_off(setting) => {
+                        self.searchable = false;
+                        self.link_lto = true;
+                    }
+                    "embed-bitcode" if !switched_off(setting) => {
                         self.searchable = false;
                     }
                     "link-arg" | "link-args" => {
@@ -1959,6 +1973,12 @@ pub(crate) mod tests {
         for extra in unsearchable {
             let inv = handled(&argv(&minimal(extra)), &Env::default());
             assert!(!inv.searchable(), "{extra}");
+            // covers: B-37
+            assert_eq!(
+                inv.link_lto(),
+                extra.contains("lto"),
+                "only link-time optimization is: {extra}"
+            );
         }
         let searchable = [
             "",
@@ -1971,6 +1991,7 @@ pub(crate) mod tests {
         for extra in searchable {
             let inv = handled(&argv(&minimal(extra)), &Env::default());
             assert!(inv.searchable(), "{extra}");
+            assert!(!inv.link_lto(), "{extra}");
         }
     }
 

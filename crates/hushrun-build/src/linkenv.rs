@@ -955,6 +955,13 @@ fn libraries(
                     wanted.push((name.clone(), static_mode));
                 }
             }
+            // Apple's `ld` options that start like a library and aren't one.
+            "-lto_library" | "-lazy_library" | "-lazy_framework" => {
+                words.next();
+            }
+            _ if word.starts_with("-lazy-l") => {
+                wanted.push((word["-lazy-l".len()..].to_owned(), static_mode));
+            }
             _ => {
                 if let Some(dir) = word.strip_prefix("-L") {
                     dirs.push(q.cwd.join(dir));

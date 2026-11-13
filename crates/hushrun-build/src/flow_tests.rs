@@ -545,14 +545,23 @@ impl Ports for Fake {
     }
 
     /// A C driver that says its `ld` is `FAKE_LD` (a path, or a name looked up as `collect2`
-    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders; an `ld` with no
-    /// such options as `--verbose`.
+    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders, and whose dry run
+    /// (`-###`) prints `FAKE_DRY_RUN` on stderr; an `ld` with no such options as `--verbose`.
     fn asker(&self) -> Box<crate::link::Ask<'static>> {
         let ld = self.vars.get("FAKE_LD").cloned();
         let libraries = self.vars.get("FAKE_LIBRARIES").cloned().unwrap_or_default();
+        let dry_run = self.vars.get("FAKE_DRY_RUN").cloned();
         Box::new(
             move |program: &Path, args: &[String], _path: &OsStr, _env: &[_]| {
                 let last = args.last().map(String::as_str).unwrap_or_default();
+                // The C driver's dry run (B-37), when the test gives one.
+                if last == "-###" {
+                    return dry_run.as_ref().map(|text| crate::link::Answer {
+                        success: true,
+                        stderr: text.clone(),
+                        ..Default::default()
+                    });
+                }
                 if last.starts_with("-print-prog-name=") {
                     let said = ld.clone().unwrap_or_else(|| program.display().to_string());
                     return Some(crate::link::Answer {
@@ -1923,6 +1932,131 @@ fn another_ld_earlier_on_path_is_another_link() {
     );
 }
 
+/// A gcc-like setup for E (B-37): a driver `cc` and an executable `ld` in `bin` (outside the
+/// checkout, as a system's are), `tools/collect2`, a start file and `-lc` in `lib`; and a dry
+/// run naming them.
+#[cfg(unix)]
+fn gcc_setup(ws: &Path, bin: &Path) -> String {
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(bin.join("cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/collect2"), b"collect2").unwrap();
+    executable(&bin.join("ld"), "ld one");
+    fs::create_dir_all(ws.join("lib")).unwrap();
+    fs::write(ws.join("lib/crt1.o"), b"crt one").unwrap();
+    fs::write(ws.join("lib/libc.a"), b"!<arch>\nc one").unwrap();
+    let w = ws.display();
+    format!(
+        "Using built-in specs.\ngcc version 99.1.0 (fixture)\nCOMPILER_PATH={w}/tools/\n {w}/tools/collect2 \"-plugin-opt=-fresolution=/tmp/ccAb12Cd.res\" {w}/lib/crt1.o -L{w}/lib -lc\n"
+    )
+}
+
+/// The block the last call of the run stored or reused, by the key its log line names.
+fn last_block(w: &World) -> crate::store::Block {
+    let key = w.session.current().entries().last().unwrap().key.unwrap();
+    w.store().block(&key).unwrap().unwrap()
+}
+
+// covers: B-37, B-6, B-18
+#[cfg(unix)]
+#[test]
+fn a_known_link_environment_takes_the_place_of_the_linkers_size_and_date() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let early = w.dir.path().join("early");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&early).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    let path = std::env::join_paths([&early, &bin]).unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    // The toolchain's own linker tools (B-37), which the compiler's identity doesn't hash.
+    let tools = w
+        .dir
+        .path()
+        .join("toolchain/lib/rustlib/aarch64-apple-darwin/bin");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("rust-objcopy"), b"objcopy one").unwrap();
+    let target = ["--target", "x86_64-unknown-linux-gnu"];
+    let line = format!(
+        r#""{}/cc" "{{ws}}/target/debug/deps/x.o" "-lc" "-o" "{{ws}}/target/debug/deps/liba-xa.so""#,
+        bin.display()
+    );
+    let line = line.as_str();
+    let known = [
+        ("PATH", path.as_str()),
+        ("FAKE_LD", "ld"),
+        ("FAKE_DRY_RUN", dry_run.as_str()),
+    ];
+    let link = || link_proc_macro(&w, &ws, line, &known, &target);
+    assert_eq!(link(), STORED);
+    let description = last_block(&w).description;
+    let items = &description["link_environment"]["known"]["items"];
+    let roles: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "dry-run",
+            "driver",
+            "program",
+            "ld",
+            "file",
+            "library",
+            "toolchain"
+        ],
+        "{description}"
+    );
+    assert_eq!(link(), REUSED, "the lookup asks the hint's question again");
+    // The driver's date changed, its bytes didn't: its size and date are no longer keyed.
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(bin.join("cc"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(link(), REUSED, "the driver by its bytes");
+    fs::write(ws.join("lib/crt1.o"), b"crt two").unwrap();
+    assert_eq!(link(), STORED, "a start file changed");
+    assert_eq!(link(), REUSED);
+    fs::write(ws.join("lib/libc.a"), b"!<arch>\nc two").unwrap();
+    assert_eq!(link(), STORED, "the C library changed");
+    fs::write(tools.join("rust-objcopy"), b"objcopy two").unwrap();
+    assert_eq!(link(), STORED, "the toolchain's rust-objcopy changed");
+    assert_eq!(link(), REUSED);
+    // Another `ld` earlier on `PATH`, which `collect2` runs: found at the lookup, never
+    // remembered (the review's r-memo).
+    executable(&early.join("ld"), "ld two");
+    assert_eq!(link(), STORED, "another ld runs now");
+    assert_eq!(link(), REUSED);
+
+    // E unknown (the driver gives no dry run): today's identification stays in the key.
+    let unknown = [("PATH", path.as_str()), ("FAKE_LD", "ld")];
+    let link = || link_proc_macro(&w, &ws, line, &unknown, &target);
+    assert_eq!(link(), STORED);
+    let description = last_block(&w).description;
+    assert!(
+        description["link_environment"]["unknown"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("dry run"),
+        "{description}"
+    );
+    assert_eq!(link(), REUSED);
+    let older = SystemTime::now() - Duration::from_secs(7200);
+    fs::File::options()
+        .write(true)
+        .open(bin.join("cc"))
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    assert_eq!(link(), STORED, "the driver by its size and date");
+}
+
 // covers: B-18
 #[cfg(unix)]
 #[test]
@@ -2800,6 +2934,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             seal: None,
             ask: None,
             apple: true,
+            toolchain: None,
         };
         let common = cx.common().unwrap();
         hints

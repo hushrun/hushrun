@@ -6,6 +6,17 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Changed
+
+- **A program, a proc macro or a build-script binary is keyed by its link environment by
+  content** (B-37): the C driver's dry run of the link, the programs it runs and what they load,
+  the start files, the C runtime as `ld` finds it, the toolchain's own linker tools and, on macOS,
+  the SDK, computed again at every link and lookup. It takes the place of the driver's, `ld`'s,
+  `dsymutil`'s and the SDK's size and date in the key; where it can't be told (another driver
+  than gcc or clang, a loader variable, link-time optimization in the link, a sysroot other than
+  `/`), those stay and the block is reused only on this machine. The list of which file answered
+  which request is kept in the block's description. Every linked output's key changes once.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a
