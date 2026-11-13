@@ -279,8 +279,11 @@ const SET_BY_TOOLS: &[&str] = &[
 /// The least bytes a value of a variable that looks like a secret must have to be searched
 /// for: a shorter one turns up in outputs by chance.
 pub const SECRET_MIN_BYTES: usize = 8;
-/// The least bytes a value of any other variable must have to be searched for.
-pub const OTHER_MIN_BYTES: usize = 16;
+/// The least bytes a value of any other variable must have to be searched for (C3): the same
+/// 8, since short config values (a region, an environment's name, a version) are what a build
+/// script or a proc macro reads without saying. A shorter value is the documented limit that
+/// only the audit and `observe` catch (B-24).
+pub const OTHER_MIN_BYTES: usize = 8;
 
 /// Whether an output holding the value `value` of the variable `name`, which is not in the
 /// compile's key, keeps its block on this machine (B-24): a name that looks like a secret (E-12)
@@ -594,11 +597,12 @@ mod tests {
         assert!(!unkeyed_candidate("GITHUB_REF", b"refs/heads/main"));
         assert!(unkeyed_candidate("GITHUB_TOKEN", b"ghs_0123456789"));
         assert!(unkeyed_candidate("CI_JOB_TOKEN", b"glcbt-0123456789"));
-        // A secret's name searches from 8 bytes; any other name from 16.
+        // Any name no CI system or build tool set searches from 8 bytes, a secret's too.
         assert!(unkeyed_candidate("FOO_TOKEN", b"12345678"));
         assert!(!unkeyed_candidate("FOO_TOKEN", b"1234567"));
-        assert!(unkeyed_candidate("LICENSE_SERVER", b"0123456789abcdef"));
-        assert!(!unkeyed_candidate("LICENSE_SERVER", b"0123456789abcde"));
+        assert!(unkeyed_candidate("LICENSE_SERVER", b"01234567"));
+        assert!(!unkeyed_candidate("LICENSE_SERVER", b"0123456"));
+        assert!(unkeyed_candidate("GREETING", b"prod-eu-west-1"));
         // The build tools' own, and hushrun's, stay out unless they look like a secret.
         assert!(!unkeyed_candidate(
             "CARGO_TARGET_DIR",

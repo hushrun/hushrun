@@ -56,8 +56,8 @@ input the compiler isn't told about is in a block's bytes and not in its key.
 - **Prefetch from the last manifest** (B-30), skipping what the store holds, so a fresh machine
   downloads before cargo asks and a warm one downloads nothing.
 - **An input the compiler isn't told about**: a repository names such variables under `build:
-  env:` (B-35); a block whose output holds the value of a secret-looking variable outside its key
-  stays here (B-24 `unkeyed-value`); a block compiled for `target-cpu=native` stays here (B-24
+  env:` (B-35); a block whose output holds the value, 8 bytes or more, of a variable outside its key that
+  no CI system set stays here (B-24 `unkeyed-value`); a block compiled for `target-cpu=native` stays here (B-24
   `native-cpu`), since rustc gives the code generator more of the CPU than any key can say.
 - **`zstd`**, a C library built with `cc` as `ring` and `mimalloc` are, compresses packs, in the
   binary and in `hushrun-core`'s `pack` feature only, never in the wrapper's crate.

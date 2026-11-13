@@ -80,10 +80,14 @@ struct Machine {
 
 impl Machine {
     fn new(dir: &Path, name: &str, from: Option<&Path>) -> Machine {
+        Machine::with(dir, name, from, workspace)
+    }
+
+    fn with(dir: &Path, name: &str, from: Option<&Path>, make: fn(&Path) -> PathBuf) -> Machine {
         let root = dir.join(name);
         std::fs::create_dir_all(&root).unwrap();
         let repo = match from {
-            None => workspace(&root),
+            None => make(&root),
             Some(from) => {
                 let repo = root.join("checkout");
                 git::run(
@@ -454,5 +458,93 @@ fn a_warm_build_with_stale_vouches_and_a_slow_open_takes_what_it_takes_with_shar
     assert!(
         on < fresh.max(off) + Duration::from_millis(1_500),
         "with stale vouches {on:?}, fresh {fresh:?}, sharing off {off:?}: {stderr}"
+    );
+}
+
+/// A workspace whose proc macro reads `GREETING` while it expands, without telling rustc: the
+/// library `app` holds the value in its bytes, and the program `show` prints it.
+fn greeting_workspace(root: &Path) -> PathBuf {
+    let repo = root.join("repo");
+    let write = |path: &str, text: &str| {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"greet\", \"app\", \"show\"]\nresolver = \"2\"\n",
+    );
+    write(
+        "greet/Cargo.toml",
+        "[package]\nname = \"greet\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+    );
+    write(
+        "greet/src/lib.rs",
+        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn greeting(_: TokenStream) -> TokenStream {\n    let value = std::env::var(\"GREETING\").unwrap_or_default();\n    format!(\"{value:?}\").parse().unwrap()\n}\n",
+    );
+    write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ngreet = { path = \"../greet\" }\n",
+    );
+    write(
+        "app/src/lib.rs",
+        "pub const GREETING: &str = greet::greeting!();\n\npub fn greeting() -> &'static str {\n    GREETING\n}\n",
+    );
+    write(
+        "show/Cargo.toml",
+        "[package]\nname = \"show\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\napp = { path = \"../app\" }\n",
+    );
+    write(
+        "show/src/main.rs",
+        "fn main() {\n    println!(\"greeting={}\", app::greeting());\n}\n",
+    );
+    write(".gitignore", "target/\n");
+    git::init(&repo, "sha1");
+    git::commit_all(&repo, "init");
+    repo
+}
+
+/// `cargo run -p show` through hushrun with `GREETING` set: what the program printed.
+fn greet(m: &Machine, fake: &FakeBuild, greeting: &str) -> (String, String) {
+    let output = m
+        .hushrun(fake)
+        .env("GREETING", greeting)
+        .args([
+            "run",
+            "show",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "cargo run -q --offline -p show && sleep 2",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    (String::from_utf8_lossy(&output.stdout).into_owned(), stderr)
+}
+
+// covers: B-24
+#[test]
+fn a_short_value_a_proc_macro_read_without_saying_never_reaches_another_machine() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    // Two values of 14 bytes, under the line that was 16.
+    let a = Machine::with(dir.path(), "a", None, greeting_workspace);
+    let (printed, stderr) = greet(&a, &fake, "prod-eu-west-1");
+    assert!(
+        printed.contains("greeting=prod-eu-west-1"),
+        "{printed}\n{stderr}"
+    );
+    // Held back, the variable named and its value nowhere.
+    assert!(stderr.contains("stay on this machine"), "{stderr}");
+    assert!(stderr.contains("GREETING"), "{stderr}");
+    assert!(!stderr.contains("hold the value of prod"), "{stderr}");
+    let b = Machine::with(dir.path(), "b", Some(&a.repo), greeting_workspace);
+    let (printed, stderr) = greet(&b, &fake, "staging-us-e-1");
+    assert!(
+        printed.contains("greeting=staging-us-e-1"),
+        "the other machine's value: {printed}\n{stderr}"
     );
 }

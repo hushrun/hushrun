@@ -547,9 +547,9 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 - `extern`: a proc macro among its externs is one a dependent on another machine would name
   differently (B-6): it is tied, or what names it holds this machine.
 - `unkeyed-value`: an output holds, as it is, the value of an environment variable that is in
-  neither key (not among the first key's variables, and not named by the dep-info) and that
-  looks like a secret: a name that reads like one (E-12's one definition) with a value of 8
-  bytes or more, or any name with a value of 16 bytes or more that no CI system set itself
+  neither key (not among the first key's variables, and not named by the dep-info), with a
+  value of 8 bytes or more: a name that reads like a secret (E-12's one definition), or any name
+  that no CI system set itself
   (`GITHUB_`, `RUNNER_`, `ACTIONS_`, `CI_`, `GITLAB_` and the other systems' documented prefixes)
   and no build tool did (`CARGO`, `RUSTC`, `RUSTUP_`, `RUST_`, `OUT_DIR`, `HUSHRUN_`). A
   variable among those whose name reads like a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is
@@ -560,8 +560,10 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   a compile reads without telling rustc (a proc macro calling `std::env::var`) reaching the
   bytes as it is: then anyone who could open the block could read it, and another machine with
   another value would reuse this one's bytes. *Breaks if:* the value is transformed on the way
-  (hashed, encoded, split), or is shorter than the thresholds; the audit (B-16) is what catches
-  a block built with another value. CI's own variables are left out because their values are
+  (hashed, encoded, split), or is shorter than 8 bytes: a value under 8 bytes (a short region
+  or environment name, `prod`, `eu-1`) turns up in outputs by chance too often to be searched,
+  is the documented limit of this rule, and only the audit (B-16) and shared `observe` (B-33)
+  catch a block built with another such value. CI's own variables are left out because their values are
   the same for every job of a repository and turn up by chance (`https://github.com` is in the
   doc comments of nearly half of the libraries on crates.io); a project whose build reads one
   without telling names it in `build: env:` (B-35).
