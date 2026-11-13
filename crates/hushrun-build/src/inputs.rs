@@ -347,7 +347,8 @@ impl Context<'_> {
     /// E for one link (B-37), from its question: the driver as found and as rustc named it,
     /// the line without its inputs and output, the variables the line set or removed (`PATH`
     /// excepted, which is `path`), and the `dsymutil` a bundle runs. The same at the link and at
-    /// a lookup, which asks it from a hint's question.
+    /// a lookup, which asks it from a hint's question. With each file it hashed and the stat it
+    /// was hashed at, which B-11 judges like every other file a link read.
     #[allow(clippy::too_many_arguments)]
     pub fn link_env(
         &self,
@@ -358,11 +359,12 @@ impl Context<'_> {
         path: &std::ffi::OsStr,
         cwd: &Path,
         dsymutil: Option<&Path>,
-    ) -> linkenv::LinkEnv {
+    ) -> (linkenv::LinkEnv, Vec<Watched>) {
         let Some(ask) = self.ask else {
-            return linkenv::LinkEnv::Unknown {
+            let unknown = linkenv::LinkEnv::Unknown {
                 reason: "nothing may ask the C driver".into(),
             };
+            return (unknown, Vec::new());
         };
         // The variables the loader reads, as the link has them: the wrapper's, then the line's.
         let mut loader: Vec<(String, String)> = Vec::new();
@@ -384,12 +386,21 @@ impl Context<'_> {
         }
         let rooted = |dir: &Path| matches!(self.located(dir), Ok(Located::Rooted(_)));
         let placeholders = |text: &str| self.roots.to_placeholders(text);
-        let digest = |file: &Path| memo::digest(self.run_memo, file).map(|(sha, _)| sha);
+        let read = std::cell::RefCell::new(Vec::new());
+        let digest = |file: &Path| {
+            let (sha, stat) = memo::digest(self.run_memo, file)?;
+            read.borrow_mut().push(Watched {
+                path: file.to_path_buf(),
+                stat: Some(stat),
+                follow: true,
+            });
+            Ok(sha)
+        };
         let toolchain = self
             .toolchain
             .as_ref()
             .map(|(sysroot, host)| (sysroot.as_path(), host.as_str()));
-        linkenv::identity(
+        let env = linkenv::identity(
             &linkenv::Question {
                 driver,
                 driver_name,
@@ -407,7 +418,8 @@ impl Context<'_> {
                 digest: &digest,
             },
             ask,
-        )
+        );
+        (env, read.into_inner())
     }
 
     /// The parts that don't depend on the dep-info. Hashed now, checked again after the compile.
@@ -1008,7 +1020,7 @@ impl Context<'_> {
             Some(_) => Some(link::linker("dsymutil", self.env.get("PATH"), &asked.cwd)?.path),
             None => None,
         };
-        let env = self.link_env(
+        let (env, read) = self.link_env(
             &asked.driver,
             &from(&query.name)?,
             &dry_args,
@@ -1017,6 +1029,7 @@ impl Context<'_> {
             &asked.cwd,
             found_dsymutil.as_deref(),
         );
+        watched.extend(read);
         let (linker_text, sdk) = match env.digest() {
             Some(_) => (String::new(), String::new()),
             None => (

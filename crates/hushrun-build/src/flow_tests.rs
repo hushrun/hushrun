@@ -2201,6 +2201,44 @@ fn a_linked_output_with_a_known_environment_may_leave_unless_it_holds_the_toolch
     }
 }
 
+// covers: B-11, B-37
+#[cfg(unix)]
+#[test]
+fn a_file_the_link_environment_reads_that_changes_while_compiling_stores_nothing() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    let path = bin.to_str().unwrap().to_owned();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &["--target", "x86_64-unknown-linux-gnu"]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let crt = ws.join("lib/crt1.o");
+    let r = w.call_args(&ws, "a", args, move |fake| {
+        for (name, value) in [
+            ("PATH", path.as_str()),
+            ("FAKE_LD", "ld"),
+            ("FAKE_DRY_RUN", dry_run.as_str()),
+        ] {
+            fake.vars.insert(name.into(), value.into());
+        }
+        // A start file rewritten while rustc runs: which one the link read can't be told.
+        fake.during = Some(Box::new(move || fs::write(&crt, b"crt during").unwrap()));
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed), "{}", r.stderr);
+}
+
 // covers: B-18
 #[cfg(unix)]
 #[test]

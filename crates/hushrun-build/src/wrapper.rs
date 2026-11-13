@@ -2281,7 +2281,7 @@ impl Call<'_> {
         // `dsymutil` and the SDK, whose size-and-date texts then leave the key; unknown, they
         // stay, and the block is reused here as before and never leaves the machine (B-24).
         let started = std::time::Instant::now();
-        let env = cx.link_env(
+        let (env, read) = cx.link_env(
             &linker.path,
             &args.linker,
             &dry_args,
@@ -2290,6 +2290,11 @@ impl Call<'_> {
             &cwd,
             dsymutil.as_deref(),
         );
+        // A file E read that is dated during the compile, or a link on the way to it that is,
+        // may not be the one the link read (B-11).
+        for file in &read {
+            changed |= moved(&file.path, file.stat.as_ref());
+        }
         if self.current.key_log.is_some() {
             self.keys.borrow_mut().link_environment_ms =
                 Some(started.elapsed().as_secs_f64() * 1e3);
