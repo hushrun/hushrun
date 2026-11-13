@@ -10,6 +10,11 @@ Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktr
 the compiler already built from the same inputs is reused, in this worktree or another on the same
 machine, through a rustc wrapper that `hushrun run` sets. New, and off until a person turns it on.
 
+Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):
+when an org's backend keeps a shared store of compiled crates and the person lets this machine
+take part, `hushrun run NAME -- COMMAND` uploads what it builds, sealed with each block's own key,
+and reuses what another machine built. Off unless the org shares; CI is unchanged.
+
 ### Added
 
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
@@ -102,6 +107,41 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   those compiles, an error that points into the standard library shows `/rustc/<commit>/…` and
   no source line, and debug info names the standard library's files that way. The view is a
   folder of links in the store, made as `hushrun run` begins and swept like unused blocks.
+- Contract: **`hushrun build share on|observe|off`**, saved as `share` in `build.json` (`on`
+  unless set), and **`HUSHRUN_BUILD_SHARE`** for one command. It lowers the org's shared mode on
+  this machine and never raises it. `hushrun build status` shows it, and what sharing does here
+  and why (`share` and `sharing` in `--format json`).
+- Contract: a top-level **`build: env:`** list in `hushrun.yaml`: every compile of the repository
+  is keyed by those variables, on every machine and in both forms of `hushrun run`. It changes no
+  check's definition.
+- Contract: the run's line says how many reuses came from the shared store (`331 of 372 crates
+  reused (212 from the shared store)`), and one more line only when something needs saying: why
+  sharing is off or stopped for the run, how many blocks wait to upload, or which variables held
+  blocks back.
+- Contract: `close`'s counts carry **`comparedDiffered`**, how many of the comparisons differed;
+  a server that doesn't know it ignores it.
+- The relay: the part of `hushrun run` that talks to the backend for the wrappers over a Unix
+  socket in the session's private folder. Cargo never waits for it; a fetch is started only when
+  it should arrive within half the crate's compile time, and given up as soon as it can't; three
+  failures rest it for 30 seconds; a refusal mid-run stops sharing for the run and keeps what
+  waits to upload.
+- The store keeps a record beside each block of where it came from: built here (and by which
+  host, org and credential), or downloaded (and who vouches for it). Only a block built here goes
+  up, in the org that built it; a downloaded block is reused only while a server the run belongs
+  to vouched for it within a day, or when no server can be reached.
+- The outbox, `incoming/` and the run folders in the store, swept with dead runs; uploads end with
+  the command, those in flight getting 5 seconds.
+- `zstd` (C, built with `cc`) compresses packs; it is in the binary and in `hushrun-core`'s `pack`
+  feature, and listed in the notices.
+
+### Changed
+
+- A block whose output holds the value of an environment variable that looks like a secret and
+  isn't in its key, or that was compiled for `target-cpu=native`, never leaves the machine. On the
+  machine, `target-cpu=native` is keyed by what the compiler reports for this host, asked once per
+  compiler.
+- A key suspended because a downloaded block differed or couldn't be loaded comes back after the
+  store's kept days.
 
 ## [0.13.0] - 2026-11-12
 
