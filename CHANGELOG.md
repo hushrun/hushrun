@@ -183,6 +183,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a backend that stops answering in the middle of a run is said in one line, once,
+  and uploads rest as downloads do: a `begin`, PUT or `commit` that errors or times out counts
+  toward the three failures that rest the relay, and while it rests no new `begin` goes. Before,
+  nothing was said and `begin`s kept going: 138 were dropped in one run.
 - Build blocks: a `TMPDIR` too long for a socket's path falls through to `/tmp` for the relay's
   socket, as an unset one does. Before, it turned sharing off for the run.
 - Build blocks: in a repository with several scopes in its `hushrun.yaml`, `hushrun run NAME --

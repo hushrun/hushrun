@@ -332,8 +332,11 @@ impl Relay {
                 return;
             }
             Some(Err(failure)) => {
-                if let Failure::Refused(..) = failure {
-                    self.state().stop(Stop::Refused(failure.line()));
+                // Uploads rest as downloads do: a refusal stops sharing, and a server that
+                // can't be reached or fails counts toward the rest (B-26).
+                {
+                    let mut state = self.state();
+                    self.request_failed(&mut state, failure);
                 }
                 for (marker, p) in packed {
                     p.pack.remove();
@@ -383,6 +386,15 @@ impl Relay {
         for (marker, size, handle) in puts {
             let status = handle.await;
             self.state().puts.remove(&marker.key);
+            // A PUT the object store never answered, or answered with a 5xx, is a failure.
+            if let Ok(None | Some(500..=599)) = &status {
+                let why = match &status {
+                    Ok(Some(code)) => format!("the store answered {code}"),
+                    _ => "the store couldn't be reached".to_string(),
+                };
+                let mut state = self.state();
+                self.request_failed(&mut state, Failure::Unreachable(why));
+            }
             match status {
                 Err(err) if err.is_cancelled() => release(&marker, Back::CutOff),
                 Err(_) => finish(&marker, Move::Later),
@@ -437,8 +449,9 @@ impl Relay {
                 self.send_hints(&stored).await;
             }
             Some(Err(failure)) => {
-                if let Failure::Refused(..) = failure {
-                    self.state().stop(Stop::Refused(failure.line()));
+                {
+                    let mut state = self.state();
+                    self.request_failed(&mut state, failure);
                 }
                 for marker in sent {
                     finish(&marker, Move::Later);

@@ -2227,3 +2227,42 @@ fn a_give_up_is_no_failure_and_a_rest_still_serves_what_arrived() {
     assert_eq!(fake.count(route::HINTS_LOOKUP), hint_lookups);
     relay.end_check(&[]);
 }
+
+// covers: B-26, B-29
+#[test]
+fn a_backend_gone_mid_run_is_said_once_and_uploads_rest_as_downloads_do() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    // The backend goes away; the run then builds sixteen blocks that may go up, four to a
+    // `begin`.
+    fake.set_unreachable(true);
+    for n in 0..16u8 {
+        let (key, step) = block(&m.store, 120 + n, 2_000, Some(me(&fake)));
+        assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+    }
+    until("resting", || {
+        matches!(relay.state().phase, super::Phase::Resting(_))
+    });
+    let lines = relay.end_check(&[]);
+    // Three `begin`s that got no answer rest the relay: no fourth goes.
+    let begins = fake
+        .dropped()
+        .iter()
+        .filter(|path| path.contains("/blocks/begin"))
+        .count();
+    assert_eq!(begins, 3, "{:?}", fake.dropped());
+    let said: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("stopped answering"))
+        .collect();
+    assert_eq!(said.len(), 1, "{lines:?}");
+    assert!(
+        said[0].starts_with("build: the backend stopped answering mid-run ("),
+        "{lines:?}"
+    );
+    // Nothing was lost: every block waits for the next run.
+    assert_eq!(waiting(&m).len(), 16);
+}

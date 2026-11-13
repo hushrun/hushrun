@@ -304,6 +304,8 @@ struct State {
     puts: HashMap<Digest, tokio::task::AbortHandle>,
     /// The upload loop of the check is running.
     uploading: bool,
+    /// The relay rested once this run: said once (B-26).
+    rested: bool,
     /// The run's platform, once asked.
     platform: Option<String>,
 }
@@ -332,12 +334,20 @@ impl State {
         matches!(self.phase_now(now), Phase::Answering | Phase::Resting(_))
     }
 
-    /// One more failure (a request that errored or timed out, never a give-up); the third in a
-    /// row rests the relay.
-    fn failed(&mut self, now: Instant, rest: Duration) {
+    /// One more failure (a request that errored or timed out, never a give-up), `why` it failed;
+    /// the third in a row rests the relay, and the first rest of the run says so in one line
+    /// (B-26).
+    fn failed(&mut self, now: Instant, rest: Duration, why: &str) {
         self.failures += 1;
         if self.failures >= FAILURES_TO_REST && self.phase == Phase::Answering {
             self.phase = Phase::Resting(now + rest);
+            if !self.rested {
+                self.rested = true;
+                self.say(format!(
+                    "build: the backend stopped answering mid-run ({why}); the run goes on without it, asking again every {}s",
+                    rest.as_secs()
+                ));
+            }
         }
     }
 
@@ -528,6 +538,7 @@ impl Relay {
                 server_date_ms: None,
                 puts: HashMap::new(),
                 uploading: false,
+                rested: false,
                 platform: None,
             }),
             config,
@@ -984,13 +995,13 @@ impl Relay {
         }
     }
 
-    /// What a failed request does to the run (B-26): a refusal stops sharing; a server that
-    /// can't be reached, or fails, counts as a failure.
+    /// What a failed request does to the run (B-26), a download's, a lookup's or an upload's: a
+    /// refusal stops sharing; a server that can't be reached, or fails, counts as a failure.
     fn request_failed(&self, state: &mut State, failure: Failure) {
         match failure {
             Failure::Refused(_, _) => state.stop(Stop::Refused(failure.line())),
-            Failure::Unreachable(_) | Failure::Failed(_) => {
-                state.failed(Instant::now(), self.config.tuning.rest);
+            Failure::Unreachable(why) | Failure::Failed(why) => {
+                state.failed(Instant::now(), self.config.tuning.rest, &why);
             }
         }
     }
@@ -1400,8 +1411,8 @@ impl Relay {
                     if let Some(fetch) = state.fetches.get_mut(&address) {
                         fetch.state = Download::Dropped;
                     }
-                    if !cancelled {
-                        state.failed(now, self.config.tuning.rest);
+                    if !cancelled && let Err(failure) = &outcome {
+                        state.failed(now, self.config.tuning.rest, &failure.line());
                     }
                 }
             }

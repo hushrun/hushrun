@@ -670,8 +670,11 @@ and not waited for; one that is goes to the front of the queue, and it is given 
 elapsed time and the estimate pass half the cost. A miss and a give-up are no failure: nothing
 errored, and a parallel build's first small crates give up by the dozen. A **failure** is a
 request that errored or timed out: a network error, a 5xx, a lookup or a download that failed
-(a download that fails its checks included). Three in a row **rest** the relay for 30 seconds:
-no new request goes to the network (no lookup, hint lookup, download, `begin`, report), and
+(a download that fails its checks included), and an upload's `begin`, PUT or `commit` that
+errored or timed out; a download that arrives ends the row. Three in a row **rest** the relay for
+30 seconds, and the run's first rest says so in one line, once: the backend stopped answering
+mid-run, and why. While it rests no new request goes to the network (no lookup, hint lookup,
+download, `begin`, report; the upload loop claims nothing new), and
 every wrapper is answered from what the relay holds: hints the prefetch downloaded, packs
 already in `incoming/`, downloads already under way, vouches already known. A 401, 403 or 404 in
 the middle of a run stops every request for the rest of the run, keeps the markers (B-29) and
