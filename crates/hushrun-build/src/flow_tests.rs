@@ -4123,6 +4123,56 @@ fn a_proc_macro_linked_through_the_sysroot_without_sources_names_the_toolchain_a
     assert_eq!(call(&two).outcome(), REUSED);
 }
 
+// covers: B-6, B-8, B-18
+#[test]
+fn a_proc_macro_linked_by_the_compilers_own_lld_is_named_as_on_any_machine() {
+    // On x86-64 Linux rustc links with its own lld: it hands the C driver the toolchain's
+    // `gcc-ld` folder as one argument, `-B<folder>`. What the hint keeps of that names the
+    // toolchain, not where this machine has it, so a dependent on another machine names the
+    // macro the same way and its block may leave this one.
+    let m = a_machine("runner", "1.94.0-x86_64-unknown-linux-gnu");
+    let sysroot = m.rustup_home.join("toolchains").join(&m.toolchain);
+    fs::create_dir_all(sysroot.join("lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld")).unwrap();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-B{sysroot}/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let ws = m.w.checkout("ws");
+    with_tools(&ws);
+    settle();
+    let mut args = m.w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let built = m.w.call_args(&ws, "a", args, |fake| m.toolchain_vars(fake));
+    assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+    let portable = built.entry.unwrap().portable.unwrap();
+    assert!(
+        portable.named_portably(crate::model::Class::ProcMacro),
+        "{portable:?}"
+    );
+    // The hint keeps the flag to ask the driver again, with the root it names.
+    let flag = "-B{hushrun:toolchain}/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld";
+    let hints: Vec<String> = walk(&m.w.session.current().store.join("steps"))
+        .iter()
+        .map(|file| String::from_utf8_lossy(&fs::read(file).unwrap()).into_owned())
+        .collect();
+    assert!(hints.iter().any(|hint| hint.contains(flag)), "{hints:?}");
+    // And follows it: another checkout's compile reuses the block.
+    let two = m.w.checkout("two-longer");
+    with_tools(&two);
+    settle();
+    let mut args = m.w.args(&two, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let again =
+        m.w.call_args(&two, "a", args, |fake| m.toolchain_vars(fake));
+    assert_eq!(again.outcome(), REUSED, "{}", again.stderr);
+}
+
 // covers: B-6, B-15
 #[test]
 fn a_dependent_of_a_proc_macro_whose_metadata_differs_elsewhere_is_built_not_reused() {

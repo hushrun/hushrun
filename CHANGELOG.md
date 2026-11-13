@@ -142,6 +142,12 @@ offline.
   when the backend sends one: `nothing held: the plan sets its storage by contract, and none is
   set yet`, or `the plan includes no shared storage`; with no reason, `no storage is set for it`.
   Contract: `usage.shared_store` in `hushrun.repository.usage/v1` may carry `reason`.
+- Build blocks: **on x86-64 Linux, a crate that uses a proc macro is shared like any other.**
+  rustc links there with its own lld and hands the C driver the toolchain's folder as
+  `-B<folder>`; what a proc macro's block kept of that named the folder as this machine has it,
+  so the macro counted as one another machine would name differently, and every crate compiled
+  against it stayed on the machine, with no line that said so. The kept flag now names the
+  toolchain, as the rest of the block does.
 - Build blocks: a run that passes through because `RUSTC_WRAPPER` is set already (sccache, for
   one) says so where its org shares build blocks: `build reuse is off for this run: another
   compiler wrapper is set (RUSTC_WRAPPER)`. Before, it said nothing, and the shared store was

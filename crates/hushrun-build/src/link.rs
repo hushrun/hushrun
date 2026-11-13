@@ -528,14 +528,9 @@ impl LinkArgs {
                 }
                 continue;
             }
-            let b_folder = arg.strip_prefix("-B").is_some_and(|rest| {
-                !rest.starts_with("static")
-                    && !rest.starts_with("dynamic")
-                    && !rest.starts_with("symbolic")
-            });
             if ALONE.contains(&arg.as_str())
                 || JOINED.iter().any(|flag| arg.starts_with(flag))
-                || b_folder
+                || joined_prefix(arg).is_some()
                 || (arg.starts_with("-m") && arg.len() > 2)
             {
                 out.push(arg.clone());
@@ -563,21 +558,35 @@ impl LinkArgs {
     }
 }
 
+/// What follows `-B` in a C driver's `-B<folder>`: the folder, or nothing when it is the next
+/// argument. `None` for any other argument, the linker's `-Bstatic`, `-Bdynamic` and
+/// `-Bsymbolic` among them.
+fn joined_prefix(arg: &str) -> Option<&str> {
+    arg.strip_prefix("-B").filter(|rest| {
+        !rest.starts_with("static") && !rest.starts_with("dynamic") && !rest.starts_with("symbolic")
+    })
+}
+
+/// A driver flag ([`LinkArgs::driver_flags`]) with the paths it holds rewritten by `path`, which
+/// replaces a root where one starts a path (B-8). The folder of a joined `-B<folder>` is handed
+/// over alone: after the letter it would not start a path, and rustc names its own linker that
+/// way (`-B<sysroot>/lib/rustlib/<target>/bin/gcc-ld`), so the toolchain's folder would stay in
+/// what a hint keeps as this machine wrote it.
+pub fn flag_with_paths(flag: &str, path: impl Fn(&str) -> String) -> String {
+    match joined_prefix(flag) {
+        Some(folder) if !folder.is_empty() => format!("-B{}", path(folder)),
+        _ => path(flag),
+    }
+}
+
 /// The C driver's `-B` folders among `args`, joined to `cwd`, each once.
 fn prefixes(args: &[String], cwd: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        let value = match arg.strip_prefix("-B") {
+        let value = match joined_prefix(arg) {
             Some("") => iter.next().map(String::as_str),
-            Some(rest)
-                if !rest.starts_with("static")
-                    && !rest.starts_with("dynamic")
-                    && !rest.starts_with("symbolic") =>
-            {
-                Some(rest)
-            }
-            _ => None,
+            joined => joined,
         };
         if let Some(value) = value {
             push_once(&mut out, cwd.join(value));
@@ -2049,6 +2058,14 @@ mod tests {
         );
         assert_eq!(args.ld_sysroot().as_deref(), Some("/later"));
         assert!(!args.driver_reads_options());
+        // B-8: each flag's path is handed to what replaces roots as a path of its own, the
+        // folder of a joined `-B` too.
+        let seen = |flag: &str| flag_with_paths(flag, |path| format!("<{path}>"));
+        assert_eq!(seen("-B/t/two"), "-B</t/two>");
+        assert_eq!(seen("-B"), "<-B>");
+        assert_eq!(seen("/t/gcc-ld"), "</t/gcc-ld>");
+        assert_eq!(seen("--sysroot=/s"), "<--sysroot=/s>");
+        assert_eq!(seen("-Bstatic"), "<-Bstatic>");
         for option in [
             r#""-specs=lld.specs""#,
             r#""--specs=x""#,

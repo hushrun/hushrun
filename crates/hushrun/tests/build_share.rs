@@ -132,8 +132,20 @@ impl Machine {
             .env("HUSHRUN_BUILD_AUDIT", "none")
             .env("CARGO_TERM_COLOR", "never")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"));
+            .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"))
+            .env("HUSHRUN_BUILD_KEY_LOG", self.root.join("keys.jsonl"));
         cmd
+    }
+
+    /// Each crate this machine compiled and whether its block may leave it, with every reason
+    /// it may not, from the runs' key log: what a failed "it uploaded" says beside the run's
+    /// own lines, which name only some of the reasons.
+    fn may_leave(&self) -> String {
+        let log = std::fs::read_to_string(self.root.join("keys.jsonl")).unwrap_or_default();
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .map(|line| format!("{}: {}\n", line["crate_name"], line["portable"]))
+            .collect()
     }
 
     /// `cargo build`, in a command that goes on a moment after it: what a build longer than
@@ -2314,7 +2326,7 @@ fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() 
     let a = Machine::with(dir.path(), "a", None, macro_workspace);
     let (stderr, close) = job(&a, "300");
     assert_eq!(close.expect(&stderr).counts.built, 2, "{stderr}");
-    assert!(!fake.stored().is_empty(), "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}\n{}", a.may_leave());
 
     // The next push's job restores a target folder whose macro was doctored, and `app` changed,
     // so it compiles against that macro, in a store of its own.
@@ -2335,6 +2347,7 @@ fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() 
     assert_eq!(close.counts.built, 2, "{close:?}\n{stderr}");
     assert!(
         fake.stored().len() > stored,
-        "the honest app went up: {stderr}"
+        "the honest app went up: {stderr}\n{}",
+        b.may_leave()
     );
 }

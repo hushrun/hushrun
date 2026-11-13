@@ -2035,7 +2035,11 @@ impl Call<'_> {
                 .collect::<Option<Vec<_>>>()
                 .ok_or(NotStored::LinkInputs)?,
             path_inherits,
-            flags: query.flags.iter().map(|flag| placeholders(flag)).collect(),
+            flags: query
+                .flags
+                .iter()
+                .map(|flag| link::flag_with_paths(flag, placeholders))
+                .collect(),
             ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
         };
         let mut outside = false;
