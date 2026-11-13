@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hushrun_core::Digest;
+
+use crate::origin::Origin;
 use serde::{Deserialize, Serialize};
 
 /// The schema name in every `block.json`.
@@ -48,6 +50,14 @@ const USED: &str = "used";
 const FILES: &str = "files";
 const HINTS: &str = "hints";
 const SUSPENDED: &str = "suspended";
+/// Hints downloaded from a shared store, kept apart from the ones compiles here wrote (B-30).
+const SHARED_HINTS: &str = "shared-hints";
+/// What the last compile here of a first key took, in milliseconds (B-26).
+const COST: &str = "cost";
+/// A block's record of where it came from (B-32).
+pub(crate) const ORIGIN: &str = "origin.json";
+/// The lock its rewrites take.
+const ORIGIN_LOCK: &str = "origin.lock";
 /// The registry of output folders the wrapper wrote unit records in (B-23): one file each.
 const OUT_DIRS: &str = "out-dirs";
 /// The schema name of an entry of that registry.
@@ -241,7 +251,20 @@ impl Store {
         files: &[NewFile],
         now: SystemTime,
     ) -> Result<Published, StoreError> {
-        self.publish_inner(key, description, files, now, true)
+        self.publish_inner(key, description, files, None, now, true)
+    }
+
+    /// [`Store::publish`], with the block's record of where it came from (B-32) written into its
+    /// folder before the rename that publishes it, so no reader ever sees the block without it.
+    pub fn publish_with_origin(
+        &self,
+        key: &Digest,
+        description: &serde_json::Value,
+        files: &[NewFile],
+        origin: &Origin,
+        now: SystemTime,
+    ) -> Result<Published, StoreError> {
+        self.publish_inner(key, description, files, Some(origin), now, true)
     }
 
     fn publish_inner(
@@ -249,6 +272,7 @@ impl Store {
         key: &Digest,
         description: &serde_json::Value,
         files: &[NewFile],
+        origin: Option<&Origin>,
         now: SystemTime,
         look_first: bool,
     ) -> Result<Published, StoreError> {
@@ -259,7 +283,7 @@ impl Store {
             return Ok(Published::AlreadyThere);
         }
         let temp = self.reserve_dir(&key.hex())?;
-        let result = write_block(&temp, key, description, files, now)
+        let result = write_block(&temp, key, description, files, origin, now)
             .and_then(|()| place(&temp, &dest).map_err(at(&dest)));
         if !matches!(result, Ok(Published::Stored)) {
             let _ = remove_tree(&temp);
@@ -339,6 +363,84 @@ impl Store {
         }
     }
 
+    /// The record of where the block under `key` came from (B-32), or `None`: no block, a block
+    /// from before the record existed, or a record that can't be read. A block with none is
+    /// reused here as before and never goes up.
+    pub fn origin(&self, key: &Digest) -> Option<Origin> {
+        read_origin(&self.block_dir(key).join(ORIGIN))
+    }
+
+    /// Changes the record of where the block under `key` came from, under the block's lock:
+    /// `change` gets the record as it is now and returns the one to write, or `None` to leave it.
+    /// The record is written whole (a temporary file, then a rename). Whether a record was
+    /// written; an error when there is no block.
+    pub fn update_origin(
+        &self,
+        key: &Digest,
+        change: impl FnOnce(Option<Origin>) -> Option<Origin>,
+    ) -> Result<bool, StoreError> {
+        let dir = self.block_dir(key);
+        let _lock = lock_block(&dir).map_err(at(&dir))?;
+        let path = dir.join(ORIGIN);
+        let Some(next) = change(read_origin(&path)) else {
+            return Ok(false);
+        };
+        let bytes = serde_json::to_vec(&next).map_err(|source| StoreError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        self.write_whole(&path, &bytes, None, true)
+            .map_err(at(&path))?;
+        Ok(true)
+    }
+
+    /// Puts a new block under `key` in place of the one there, when `may` says the one there may
+    /// be replaced (B-32: a block that was only downloaded may give way to this run's download
+    /// or compile; a block built here never does). Decided under the block's lock, with the
+    /// record read under it. With no block there it is a plain publish.
+    pub fn replace(
+        &self,
+        key: &Digest,
+        description: &serde_json::Value,
+        files: &[NewFile],
+        origin: &Origin,
+        now: SystemTime,
+        may: impl FnOnce(Option<&Origin>) -> bool,
+    ) -> Result<Replaced, StoreError> {
+        check_names(files)?;
+        let dest = self.block_dir(key);
+        if !dest.join(BLOCK_JSON).exists() {
+            return match self.publish_inner(key, description, files, Some(origin), now, false)? {
+                Published::Stored => Ok(Replaced::Stored),
+                Published::AlreadyThere => Ok(Replaced::Kept),
+            };
+        }
+        let lock = lock_block(&dest).map_err(at(&dest))?;
+        if !may(read_origin(&dest.join(ORIGIN)).as_ref()) {
+            return Ok(Replaced::Kept);
+        }
+        let temp = self.reserve_dir(&key.hex())?;
+        if let Err(err) = write_block(&temp, key, description, files, Some(origin), now) {
+            let _ = remove_tree(&temp);
+            return Err(err);
+        }
+        // The one there goes to the trash, still under its lock, and ours takes its place. A
+        // block another process publishes in between wins, as any first writer does.
+        let trashed = self.to_trash(&dest).map_err(at(&dest))?;
+        drop(lock);
+        let placed = place(&temp, &dest).map_err(at(&dest));
+        if !matches!(placed, Ok(Published::Stored)) {
+            let _ = remove_tree(&temp);
+        }
+        if let Some(trashed) = trashed {
+            let _ = remove_tree(&trashed);
+        }
+        match placed? {
+            Published::Stored => Ok(Replaced::Stored),
+            Published::AlreadyThere => Ok(Replaced::Kept),
+        }
+    }
+
     /// Sets the last use of the block under `key` to `now` (B-14). An error when there is no
     /// such block.
     pub fn used(&self, key: &Digest, now: SystemTime) -> Result<(), StoreError> {
@@ -361,7 +463,36 @@ impl Store {
     /// The hints recorded for the first key `step` (B-7), the most recently refreshed first, at
     /// most [`MAX_HINTS`]. A hint is never trusted: it only says what to hash.
     pub fn hints(&self, step: &Digest) -> Vec<Vec<u8>> {
-        let Ok(entries) = fs::read_dir(self.step_dir(step).join(HINTS)) else {
+        newest_files(&self.step_dir(step).join(HINTS))
+    }
+
+    /// Every first key the store holds hints, a cost or a suspension for (B-30).
+    pub fn steps(&self) -> Vec<Digest> {
+        let mut found = Vec::new();
+        for shard in subfolders(&self.root.join(STEPS)) {
+            for dir in subfolders(&shard) {
+                if let Some(step) = dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| Digest::from_hex(name).ok())
+                {
+                    found.push(step);
+                }
+            }
+        }
+        found
+    }
+
+    /// Every stored block's key (B-30).
+    pub fn keys(&self) -> Vec<Digest> {
+        self.stored().into_iter().map(|(key, _)| key).collect()
+    }
+}
+
+/// The files of `dir`, the most recently dated first, at most [`MAX_HINTS`].
+fn newest_files(dir: &Path) -> Vec<Vec<u8>> {
+    {
+        let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
         let mut found: Vec<(SystemTime, PathBuf)> = entries
@@ -380,7 +511,9 @@ impl Store {
             .take(MAX_HINTS)
             .collect()
     }
+}
 
+impl Store {
     /// Records `hint` for the first key `step`, dated `now`. A hint recorded already keeps its
     /// bytes and takes the new date.
     pub fn add_hint(&self, step: &Digest, hint: &[u8], now: SystemTime) -> Result<(), StoreError> {
@@ -395,6 +528,45 @@ impl Store {
             .map_err(at(&path))
     }
 
+    /// The hints downloaded from a shared store for the first key `step` (B-30), the most
+    /// recently written first, at most [`MAX_HINTS`]. They are kept apart from the hints compiles
+    /// here wrote, which are tried first and which these never push out.
+    pub fn shared_hints(&self, step: &Digest) -> Vec<Vec<u8>> {
+        newest_files(&self.step_dir(step).join(SHARED_HINTS))
+    }
+
+    /// Records a hint downloaded from a shared store for the first key `step`.
+    pub fn add_shared_hint(
+        &self,
+        step: &Digest,
+        hint: &[u8],
+        now: SystemTime,
+    ) -> Result<(), StoreError> {
+        let path = self
+            .step_dir(step)
+            .join(SHARED_HINTS)
+            .join(Digest::of(hint).hex());
+        self.write_whole(&path, hint, Some(now), false)
+            .map_err(at(&path))
+    }
+
+    /// What the last compile here of the first key `step` took, in milliseconds (B-26), when one
+    /// was recorded.
+    pub fn step_cost(&self, step: &Digest) -> Option<u64> {
+        fs::read_to_string(self.step_dir(step).join(COST))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Records what a compile here of the first key `step` took.
+    pub fn set_step_cost(&self, step: &Digest, ms: u64, now: SystemTime) -> Result<(), StoreError> {
+        let path = self.step_dir(step).join(COST);
+        self.write_whole(&path, ms.to_string().as_bytes(), Some(now), false)
+            .map_err(at(&path))
+    }
+
     /// Suspends the first key `step` (B-15): no block of it is reused until
     /// [`Store::clean`]. `reason` says why.
     pub fn suspend(&self, step: &Digest, reason: &str, now: SystemTime) -> Result<(), StoreError> {
@@ -403,11 +575,46 @@ impl Store {
             .map_err(at(&path))
     }
 
+    /// Suspends the first key `step` until `until` (B-15, B-34): what a downloaded block's
+    /// difference or rejection causes, which lasts the store's kept days and not until
+    /// `hushrun build clean`.
+    pub fn suspend_until(
+        &self,
+        step: &Digest,
+        reason: &str,
+        until: SystemTime,
+        now: SystemTime,
+    ) -> Result<(), StoreError> {
+        let path = self.step_dir(step).join(SUSPENDED);
+        let text = format!("{UNTIL}{}\n{reason}", epoch_ms(until));
+        self.write_whole(&path, text.as_bytes(), Some(now), true)
+            .map_err(at(&path))
+    }
+
     /// Why the first key `step` is suspended, or `None` when it is not. A suspension that
     /// can't be read counts as one: the caller compiles.
     pub fn suspended(&self, step: &Digest) -> Option<String> {
+        self.suspended_at(step, SystemTime::now())
+    }
+
+    /// [`Store::suspended`] at `now`: a suspension with an end ([`Store::suspend_until`]) is over
+    /// once `now` reaches it.
+    pub fn suspended_at(&self, step: &Digest, now: SystemTime) -> Option<String> {
         match fs::read(self.step_dir(step).join(SUSPENDED)) {
-            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                if let Some(rest) = text.strip_prefix(UNTIL) {
+                    let (until, reason) = rest.split_once('\n').unwrap_or((rest, ""));
+                    if until
+                        .parse::<u64>()
+                        .is_ok_and(|until| epoch_ms(now) >= until)
+                    {
+                        return None;
+                    }
+                    return Some(reason.to_string());
+                }
+                Some(text)
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => Some(format!("its suspension can't be read: {err}")),
         }
@@ -811,21 +1018,40 @@ impl Store {
         let mut tally = Tally::default();
         for shard in subfolders(&self.root.join(STEPS)) {
             for step in subfolders(&shard) {
-                let hints = step.join(HINTS);
-                if let Ok(entries) = fs::read_dir(&hints) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        let stale = entry
-                            .metadata()
-                            .and_then(|meta| meta.modified())
-                            .is_ok_and(|refreshed| refreshed < before);
-                        if stale {
-                            count(&mut tally, fs::remove_file(&path).map(|()| true));
+                for folder in [HINTS, SHARED_HINTS] {
+                    let hints = step.join(folder);
+                    if let Ok(entries) = fs::read_dir(&hints) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            let stale = entry
+                                .metadata()
+                                .and_then(|meta| meta.modified())
+                                .is_ok_and(|refreshed| refreshed < before);
+                            if stale {
+                                count(&mut tally, fs::remove_file(&path).map(|()| true));
+                            }
                         }
                     }
+                    // Only empty ones go: a hint written meanwhile keeps them.
+                    let _ = fs::remove_dir(&hints);
                 }
-                // Only empty ones go: a hint or a suspension written meanwhile keeps them.
-                let _ = fs::remove_dir(&hints);
+                // A cost and an ended suspension go with their age as hints do.
+                for name in [COST, SUSPENDED] {
+                    let path = step.join(name);
+                    let stale = fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .is_ok_and(|changed| changed < before);
+                    let ended = name == COST
+                        || fs::read(&path).is_ok_and(|bytes| {
+                            String::from_utf8_lossy(&bytes)
+                                .strip_prefix(UNTIL)
+                                .and_then(|rest| rest.split('\n').next()?.parse::<u64>().ok())
+                                .is_some_and(|until| until < epoch_ms(before))
+                        });
+                    if stale && ended {
+                        count(&mut tally, fs::remove_file(&path).map(|()| true));
+                    }
+                }
                 let _ = fs::remove_dir(&step);
             }
             let _ = fs::remove_dir(&shard);
@@ -915,6 +1141,7 @@ fn write_block(
     key: &Digest,
     description: &serde_json::Value,
     files: &[NewFile],
+    origin: Option<&Origin>,
     now: SystemTime,
 ) -> Result<(), StoreError> {
     let folder = dir.join(FILES);
@@ -965,6 +1192,22 @@ fn write_block(
         seal(&json)
     })()
     .map_err(at(&json))?;
+    if let Some(origin) = origin {
+        let path = dir.join(ORIGIN);
+        let bytes = serde_json::to_vec(origin).map_err(|source| StoreError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            file.write_all(&bytes)?;
+            sync_file(&file)
+        })()
+        .map_err(at(&path))?;
+    }
     let used = dir.join(USED);
     (|| {
         let file = OpenOptions::new()
@@ -981,6 +1224,56 @@ fn write_block(
         flush_drive(&folder)
     })()
     .map_err(at(dir))
+}
+
+/// What [`Store::replace`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// The new block is in place.
+    Stored,
+    /// The block there stays: it may not be replaced, or another process published first.
+    Kept,
+}
+
+/// A suspension with an end starts with this, then the end in milliseconds since the epoch.
+const UNTIL: &str = "until ";
+
+fn epoch_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+    })
+}
+
+/// A block's record of where it came from, or `None`.
+fn read_origin(path: &Path) -> Option<Origin> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice::<Origin>(&bytes)
+        .ok()
+        .filter(|origin| origin.schema == crate::origin::ORIGIN_SCHEMA)
+}
+
+/// Takes the lock of the block folder `dir`, which every rewrite of its record and every
+/// replacement takes. The lock file lives in the folder, so a block moved to the trash takes its
+/// lock along: after taking it, the lock is checked to still be the folder's, else taken again.
+fn lock_block(dir: &Path) -> io::Result<File> {
+    let path = dir.join(ORIGIN_LOCK);
+    for _ in 0..ATTEMPTS {
+        if !dir.join(BLOCK_JSON).exists() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no block"));
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        file.lock()?;
+        let held = file.metadata()?;
+        let there = fs::metadata(&path);
+        if there.is_ok_and(|there| file_id(&there) == file_id(&held)) {
+            return Ok(file);
+        }
+    }
+    Err(gave_up())
 }
 
 /// Renames the finished folder `temp` to `dest`. The first writer wins: a block there already
@@ -1286,6 +1579,148 @@ mod tests {
         serde_json::json!({ "repository": repository, "crate": "demo" })
     }
 
+    fn vouch(date_ms: u64) -> crate::origin::Vouch {
+        crate::origin::Vouch {
+            host: "https://api.example.com".into(),
+            org: "acme".into(),
+            repository: String::new(),
+            scope: "person/1".into(),
+            outputs: hushrun_core::blocks::Hex32([1; 32]),
+            date_ms,
+        }
+    }
+
+    // covers: B-32
+    #[test]
+    fn a_block_s_origin_is_there_from_its_publish_and_rewritten_whole() {
+        let w = world();
+        let files = [w.file("liba.rlib", b"one")];
+        let origin = Origin::built_here("1-2", None);
+        assert_eq!(
+            w.store
+                .publish_with_origin(&key(1), &description("r"), &files, &origin, day(1))
+                .unwrap(),
+            Published::Stored
+        );
+        assert_eq!(w.store.origin(&key(1)), Some(origin.clone()));
+        // A block from before the record: none, and nothing to update it with.
+        w.store
+            .publish(&key(2), &description("r"), &files, day(1))
+            .unwrap();
+        assert_eq!(w.store.origin(&key(2)), None);
+        assert!(w.store.update_origin(&key(3), |o| o).is_err());
+        let wrote = w
+            .store
+            .update_origin(&key(1), |o| {
+                let mut o = o?;
+                o.reused = true;
+                Some(o)
+            })
+            .unwrap();
+        assert!(wrote);
+        assert!(w.store.origin(&key(1)).unwrap().reused);
+        assert!(!w.store.update_origin(&key(1), |_| None).unwrap());
+        // Nothing left half written: the temporary files went by rename.
+        assert_eq!(w.entries(TMP), 0);
+        // The block itself still reads.
+        assert!(w.store.block(&key(1)).unwrap().is_some());
+    }
+
+    // covers: B-32
+    #[test]
+    fn only_a_block_that_was_only_downloaded_gives_way() {
+        let w = world();
+        let downloaded = [w.file("liba.rlib", b"from a pack")];
+        let compiled = [w.file("liba.rlib", b"compiled here")];
+        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        w.store
+            .publish_with_origin(
+                &key(1),
+                &description("r"),
+                &downloaded,
+                &Origin::downloaded(vouch(0)),
+                day(1),
+            )
+            .unwrap();
+        let built = Origin::built_here("1-2", None);
+        assert_eq!(
+            w.store
+                .replace(&key(1), &description("r"), &compiled, &built, day(1), only_downloaded)
+                .unwrap(),
+            Replaced::Stored
+        );
+        let block = w.store.block(&key(1)).unwrap().unwrap();
+        assert_eq!(fs::read(&block.files[0].path).unwrap(), b"compiled here");
+        assert_eq!(w.store.origin(&key(1)), Some(built.clone()));
+        // A block built here never gives way, to a download or a compile.
+        assert_eq!(
+            w.store
+                .replace(
+                    &key(1),
+                    &description("r"),
+                    &downloaded,
+                    &Origin::downloaded(vouch(0)),
+                    day(1),
+                    only_downloaded
+                )
+                .unwrap(),
+            Replaced::Kept
+        );
+        let block = w.store.block(&key(1)).unwrap().unwrap();
+        assert_eq!(fs::read(&block.files[0].path).unwrap(), b"compiled here");
+        // Nor does one from before the record.
+        w.store
+            .publish(&key(2), &description("r"), &compiled, day(1))
+            .unwrap();
+        assert_eq!(
+            w.store
+                .replace(&key(2), &description("r"), &downloaded, &built, day(1), only_downloaded)
+                .unwrap(),
+            Replaced::Kept
+        );
+        // With nothing there it is a publish.
+        assert_eq!(
+            w.store
+                .replace(&key(3), &description("r"), &downloaded, &built, day(1), only_downloaded)
+                .unwrap(),
+            Replaced::Stored
+        );
+        assert_eq!(w.entries(TMP), 0);
+    }
+
+    // covers: B-15, B-34
+    #[test]
+    fn a_suspension_with_an_end_is_over_at_its_end() {
+        let w = world();
+        w.store
+            .suspend_until(&key(1), "a downloaded block differed", day(16), day(1))
+            .unwrap();
+        assert_eq!(
+            w.store.suspended_at(&key(1), day(15)).as_deref(),
+            Some("a downloaded block differed")
+        );
+        assert_eq!(w.store.suspended_at(&key(1), day(16)), None);
+        w.store.suspend(&key(2), "for good", day(1)).unwrap();
+        assert_eq!(w.store.suspended_at(&key(2), day(400)).as_deref(), Some("for good"));
+    }
+
+    // covers: B-30
+    #[test]
+    fn downloaded_hints_are_kept_apart_and_a_cost_is_remembered() {
+        let w = world();
+        w.store.add_hint(&key(1), b"local", day(1)).unwrap();
+        w.store.add_shared_hint(&key(1), b"downloaded", day(2)).unwrap();
+        assert_eq!(w.store.hints(&key(1)), vec![b"local".to_vec()]);
+        assert_eq!(w.store.shared_hints(&key(1)), vec![b"downloaded".to_vec()]);
+        assert_eq!(w.store.step_cost(&key(1)), None);
+        w.store.set_step_cost(&key(1), 1234, day(1)).unwrap();
+        assert_eq!(w.store.step_cost(&key(1)), Some(1234));
+        assert_eq!(w.store.steps(), vec![key(1)]);
+        // All of it goes with its age.
+        w.store.remove_stale_hints(day(5));
+        assert_eq!(w.store.steps(), Vec::<Digest>::new());
+    }
+
     // covers: B-13
     #[test]
     fn a_published_block_is_complete_read_only_and_used_at_its_creation() {
@@ -1332,7 +1767,14 @@ mod tests {
                             barrier.wait();
                             // Half skip the early look, so the rename itself decides.
                             store
-                                .publish_inner(&k, &description("r"), files, day(1), i % 2 == 0)
+                                .publish_inner(
+                                    &k,
+                                    &description("r"),
+                                    files,
+                                    None,
+                                    day(1),
+                                    i % 2 == 0,
+                                )
                                 .unwrap()
                         })
                     })
@@ -1358,7 +1800,7 @@ mod tests {
         // Past the early look, the rename decides.
         let again = w
             .store
-            .publish_inner(&key(1), &description("b"), &second, day(2), false)
+            .publish_inner(&key(1), &description("b"), &second, None, day(2), false)
             .unwrap();
         assert_eq!(again, Published::AlreadyThere);
         let block = w.store.block(&key(1)).unwrap().unwrap();
@@ -1480,7 +1922,14 @@ mod tests {
                         scope.spawn(move || {
                             barrier.wait();
                             store
-                                .publish_inner(&k, &description("r"), files, day(1), i % 2 == 0)
+                                .publish_inner(
+                                    &k,
+                                    &description("r"),
+                                    files,
+                                    None,
+                                    day(1),
+                                    i % 2 == 0,
+                                )
                                 .unwrap()
                         })
                     })
@@ -1610,7 +2059,7 @@ mod tests {
         let w = world();
         let files = [w.file("lib.rlib", b"bytes")];
         let temp = w.store.reserve_dir(&key(1).hex()).unwrap();
-        write_block(&temp, &key(1), &description("r"), &files, day(1)).unwrap();
+        write_block(&temp, &key(1), &description("r"), &files, None, day(1)).unwrap();
         assert_eq!(w.store.block(&key(1)).unwrap(), None);
         assert_eq!(w.store.status(day(1)).blocks, 0);
     }
