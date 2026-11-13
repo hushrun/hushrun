@@ -86,6 +86,9 @@ CREATE TABLE checks (
     -- new schema.
     adapter    TEXT NOT NULL CHECK (length(adapter) BETWEEN 1 AND 32
                                     AND adapter NOT GLOB '*[^a-z0-9-]*'),
+    -- [C-32] Passing runs in a row, since the last that wrote the check, in which the adapter
+    -- the word kept (pytest's) reported nothing: at 2 the check is forgotten.
+    silent_runs INTEGER NOT NULL DEFAULT 0 CHECK (silent_runs BETWEEN 0 AND 1),
     -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
     written_at INTEGER NOT NULL
 ) STRICT;
@@ -1097,11 +1100,11 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     let pruned = tx.execute("DELETE FROM checks WHERE written_at < ?1", [cutoff])?;
     let command = serde_json::to_string(&w.base.command).unwrap_or_else(|_| "[]".into());
     let check: i64 = tx.query_row(
-        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at, silent_runs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
          ON CONFLICT (check_id) DO UPDATE SET name = excluded.name, command = excluded.command,
              cwd = excluded.cwd, scope = excluded.scope, adapter = excluded.adapter,
-             written_at = excluded.written_at
+             written_at = excluded.written_at, silent_runs = 0
          RETURNING id",
         params![
             w.check_id.hex(),
@@ -1319,19 +1322,51 @@ fn note_in(
     Ok(())
 }
 
-/// \[C-32\] Forgets the check `check_id`: its row, with the adapter word it names, and its map,
-/// in one transaction. Nothing when the store doesn't hold it.
-pub fn forget_check(path: &Path, check_id: &Digest) -> Result<(), Unread> {
+/// \[C-32\] How many passing runs in a row of the check `check_id` its stored adapter (pytest's,
+/// kept by its word) reported nothing in, since the last run that wrote the check: 0 when the
+/// store doesn't hold it.
+pub fn silent_runs(path: &Path, check_id: &Digest) -> u32 {
+    let Ok(Some(conn)) = open_to_read(path) else {
+        return 0;
+    };
+    conn.query_row(
+        "SELECT silent_runs FROM checks WHERE check_id = ?1",
+        [check_id.hex()],
+        |row| row.get::<_, u32>(0),
+    )
+    .unwrap_or(0)
+}
+
+/// \[C-32\] One more passing run of the check `check_id` in which its stored adapter reported
+/// nothing: the second in a row forgets the check, word and map, so the next run chooses afresh;
+/// the first is counted, in the statement that reads the count. `Ok(true)` when it was forgotten.
+pub fn note_silent(path: &Path, check_id: &Digest) -> Result<bool, Unread> {
     if !path.is_file() {
-        return Ok(());
+        return Ok(false);
     }
     writing(path, |conn| {
         conn.execute("PRAGMA foreign_keys = ON", [])
             .map_err(|e| unread(&e))?;
-        conn.execute("DELETE FROM checks WHERE check_id = ?1", [check_id.hex()])
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| unread(&e))?;
+        let forgot = tx
+            .execute(
+                "DELETE FROM checks WHERE check_id = ?1 AND silent_runs >= 1",
+                [check_id.hex()],
+            )
+            .map_err(|e| unread(&e))?
+            > 0;
+        if !forgot {
+            tx.execute(
+                "UPDATE checks SET silent_runs = silent_runs + 1 WHERE check_id = ?1",
+                [check_id.hex()],
+            )
+            .map_err(|e| unread(&e))?;
+        }
+        tx.commit().map_err(|e| unread(&e))?;
         checkpoint(conn);
-        Ok(())
+        Ok(forgot)
     })
 }
 

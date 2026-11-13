@@ -341,3 +341,9 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   finished, or one was skipped in a run that failed, now says it through the first such test and
   that test's own reason; with no test told, it says not every test of it finished, without a
   start.
+- **A word lost to one silent run.** A `ctest --test-dir build` whose tests run pytest, with an
+  empty build directory, found no test and exited 0: pytest reported nothing, the word went, and
+  CTest kept the check for good. A passing run in which pytest stays silent is now counted with
+  the word (`silent_runs`, set back to 0 by every run that writes the check, in the statement
+  that writes the word); only the second in a row forgets the word, and the first says pytest
+  reported none this time, promising nothing.

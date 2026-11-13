@@ -1018,17 +1018,75 @@ fn a_command_pytest_no_longer_reports_for_is_chosen_afresh_next_time() {
             .unwrap()
     };
     assert_eq!(checks(), 1);
+    let silent_runs = || -> i64 {
+        let store = store::stores(&r.cache());
+        rusqlite::Connection::open(&store[0])
+            .unwrap()
+            .query_row("SELECT silent_runs FROM checks", [], |row| row.get(0))
+            .unwrap()
+    };
     // A run that fails before pytest starts (no build directory) proves nothing of who reports:
     // the word stays.
     r.write("Makefile", "test:\n\tctest --test-dir build\n");
     let failed = r.run(&["run", "unit", "--", "make", "test"], &[]);
     assert_ne!(failed.code, 0, "{}\n{}", failed.stdout, failed.stderr);
     assert_eq!(checks(), 1, "{}", failed.stderr);
-    // One that passes with pytest silent: the word goes.
-    r.write("Makefile", "test:\n\tctest --test-dir build || true\n");
-    let second = r.run(&["run", "unit", "--", "make", "test"], &[]);
-    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
-    assert_eq!(checks(), 0, "{}", second.stderr);
+    // A ctest whose build directory is empty finds no test and exits 0: pytest said nothing this
+    // time, and the word stays; the next run that reaches pytest is pytest's, as before.
+    let tools = r.root.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let fake = tools.join("ctest");
+    std::fs::write(&fake, "#!/bin/sh\necho 'No tests were found!!!'\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let empty = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(empty.code, 0, "{}\n{}", empty.stdout, empty.stderr);
+    assert_eq!(checks(), 1, "{}", empty.stderr);
+    assert!(
+        empty
+            .stderr
+            .contains("hushrun: unit: test files weren't observed: pytest reported none this time"),
+        "{}",
+        empty.stderr
+    );
+    assert!(!empty.stderr.contains("afresh"), "{}", empty.stderr);
+    r.write(
+        "Makefile",
+        &format!("test:\n\tctest --test-dir build || {python} -m pytest -q -p no:cacheprovider\n"),
+    );
+    let pytest = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_eq!(pytest.code, 0, "{}\n{}", pytest.stdout, pytest.stderr);
+    assert_eq!((checks(), silent_runs()), (1, 0), "{}", pytest.stderr);
+    // The Makefile now runs ctest, and passes, with pytest silent: twice in a row, and the word
+    // goes on the second.
+    r.write(
+        "Makefile",
+        "test:\n\tctest --test-dir build\n# now ctest's\n",
+    );
+    let once = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(once.code, 0, "{}\n{}", once.stdout, once.stderr);
+    assert_eq!((checks(), silent_runs()), (1, 1), "{}", once.stderr);
+    r.write(
+        "Makefile",
+        "test:\n\tctest --test-dir build\n# now ctest's, again\n",
+    );
+    let twice = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(twice.code, 0, "{}\n{}", twice.stdout, twice.stderr);
+    assert_eq!(checks(), 0, "{}", twice.stderr);
+    assert!(
+        twice
+            .stderr
+            .contains("so the next run chooses how to observe them afresh"),
+        "{}",
+        twice.stderr
+    );
 }
 
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a

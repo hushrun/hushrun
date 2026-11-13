@@ -961,15 +961,20 @@ impl Session {
             hints: self.adapter.hints(),
         };
         // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
-        // the word goes, in the write that follows the run's record, so the next run chooses
-        // afresh. A run that failed proves nothing of who reports: it may have failed before
-        // pytest started.
+        // counted, in the write that follows the run's record, and the second such run in a row
+        // forgets the word, so the next run chooses afresh. One silent run proves nothing (a ctest
+        // whose build directory is empty finds no test and passes), nor does a run that failed.
         if self.kept && end.command_passed && !files.iter().any(|f| f.adapter == pytest::WORD) {
+            let line = if db::silent_runs(&at.path, &at.check_id) >= 1 {
+                "pytest reported none, so the next run chooses how to observe them afresh"
+            } else {
+                "pytest reported none this time"
+            };
             return Some(Observed {
                 store: Some(at),
-                forget: true,
+                silent: true,
                 lines: vec![format!(
-                    "{}: test files weren't observed: pytest reported none, so the next run chooses how to observe them afresh",
+                    "{}: test files weren't observed: {line}",
                     end.base.check
                 )],
                 ..Observed::default()
@@ -1621,9 +1626,9 @@ pub struct Observed {
     pub left_out: Option<String>,
     /// \[C-32\] The runner ran on a stale build, and why: a run that passed records nothing.
     pub stale_build: Option<String>,
-    /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing: the check
-    /// goes from the store, word and map, so the next run chooses afresh.
-    forget: bool,
+    /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing in a run that
+    /// passed: counted, and the second such run in a row forgets the check, word and map.
+    silent: bool,
     /// \[C-39\] Whether tests were decided one by one in this run, and \[C-40\] what each was
     /// taken to have read: what its hint holds of them (C-41).
     by_test: bool,
@@ -1660,9 +1665,9 @@ impl Observed {
         let Some(at) = &self.store else {
             return;
         };
-        if self.forget {
-            if let Err(err) = db::forget_check(&at.path, &at.check_id) {
-                tracing::debug!("the check's adapter wasn't forgotten: {}", err.why());
+        if self.silent {
+            if let Err(err) = db::note_silent(&at.path, &at.check_id) {
+                tracing::debug!("the check's silent run wasn't noted: {}", err.why());
             }
             return;
         }

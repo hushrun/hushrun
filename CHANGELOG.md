@@ -211,8 +211,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   which pytest's adapter took before, stays pytest's where this machine's store says pytest
   reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the
   check, CTest or `swift test` observes it, and what pytest ran under it is no longer observed.
-  A run so kept forgets pytest only when its command passed while pytest reported nothing: one that
-  failed before pytest started, such as `ctest` without its build directory, keeps it.
+  A run so kept forgets pytest only after two passing runs in a row in which pytest reported
+  nothing: one that failed before pytest started, such as `ctest` without its build directory, or
+  a single one that found no test, such as `ctest` with an empty build directory, keeps it.
 - Jest's adapter fails every test under a failing `afterAll`, which jest-circus doesn't, so a file
   with another failing test no longer keeps those tests' passes and leaves them out next time,
   their `afterAll` with them. After an uncaught exception or an unhandled rejection, which Jest 29
