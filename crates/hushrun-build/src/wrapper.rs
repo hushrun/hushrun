@@ -442,6 +442,8 @@ struct Searched {
     machine: BTreeSet<Folder>,
     /// The variables whose value the output holds, by name.
     values: BTreeSet<String>,
+    /// It holds the toolchain's own folder (B-10).
+    toolchain: bool,
 }
 
 /// What a text an output is searched for stands for.
@@ -454,6 +456,8 @@ enum Hit {
     /// The value of a variable that is not in the key and looks like a secret (B-24), by the
     /// variable's name.
     Value(String),
+    /// The toolchain's own folder, searched for in linked outputs (B-10).
+    Toolchain,
 }
 
 /// What outputs are searched for: the roots (B-10), the folders that name the machine and the
@@ -465,8 +469,9 @@ struct Search {
 }
 
 impl Search {
-    /// `values` are the variables to look for by name and value.
-    fn new(roots: &Roots, values: &[(String, Vec<u8>)]) -> Search {
+    /// `values` are the variables to look for by name and value; `toolchain` the forms of the
+    /// toolchain's own folder, for a linked output (B-10).
+    fn new(roots: &Roots, values: &[(String, Vec<u8>)], toolchain: &[String]) -> Search {
         let mut texts: Vec<(Vec<u8>, Vec<Hit>)> = Vec::new();
         let mut add = |bytes: Vec<u8>, kind: Hit| {
             if bytes.is_empty() {
@@ -485,6 +490,9 @@ impl Search {
         }
         for (name, value) in values {
             add(value.clone(), Hit::Value(name.clone()));
+        }
+        for form in toolchain {
+            add(form.as_bytes().to_vec(), Hit::Toolchain);
         }
         let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
         Search {
@@ -516,6 +524,7 @@ impl Search {
         let mut tied = false;
         let mut machine = BTreeSet::new();
         let mut values = BTreeSet::new();
+        let mut toolchain = false;
         for (hit, kinds) in found.iter().zip(&self.kinds) {
             if !hit {
                 continue;
@@ -529,6 +538,7 @@ impl Search {
                     Hit::Value(name) => {
                         values.insert(name.clone());
                     }
+                    Hit::Toolchain => toolchain = true,
                 }
             }
         }
@@ -544,6 +554,7 @@ impl Search {
             tied,
             machine,
             values,
+            toolchain,
         })
     }
 }
@@ -1632,7 +1643,15 @@ impl Call<'_> {
             );
         }
         let tracked: Vec<&str> = info.env.iter().map(|dep| dep.name.as_str()).collect();
-        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked));
+        // A linked output is also searched for the toolchain's own folder, which a link can
+        // write (macOS's debug map names the standard library's objects by it) and which names
+        // no checkout but the machine's install (B-10).
+        let toolchain = if inv.class() == Class::Library {
+            Vec::new()
+        } else {
+            roots.toolchain_needles()
+        };
+        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked), &toolchain);
         let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
@@ -1663,6 +1682,7 @@ impl Call<'_> {
         }
 
         let tied_by_bytes = outputs.iter().any(|o| o.tied);
+        let toolchain_in_output = outputs.iter().any(|o| o.toolchain);
         let unkeyed: Vec<String> = outputs
             .iter()
             .flat_map(|o| o.values.iter().cloned())
@@ -1735,6 +1755,7 @@ impl Call<'_> {
             externs: &common.externs_portable,
             unkeyed: &unkeyed,
             native_cpu: self.native_cpu,
+            toolchain_in_output,
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:
@@ -1750,6 +1771,7 @@ impl Call<'_> {
                     bound.push(Bound::RustupHome);
                 }
                 Reason::HomeInOutput | Reason::HomeInRecord => bound.push(Bound::Home),
+                Reason::ToolchainInOutput => bound.push(Bound::Toolchain),
                 Reason::VariableNamesBase => {
                     for (_, value) in &through_bases {
                         for name in roots.named(value) {
@@ -3038,7 +3060,7 @@ mod tests {
             home: Some("/home/dev".into()),
         };
         let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
-        let search = Search::new(&roots, &[]);
+        let search = Search::new(&roots, &[], &[]);
         let path = dir.path().join("out.rlib");
         std::fs::write(&path, b"\0/opt/tools/cargo_cache\0").unwrap();
         let found = search

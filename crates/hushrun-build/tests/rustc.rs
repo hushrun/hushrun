@@ -919,3 +919,28 @@ fn a_real_links_environment_is_known_and_lists_what_answered() {
         "{description}"
     );
 }
+
+// covers: B-24, B-10, B-37
+#[test]
+fn a_real_proc_macro_leaves_the_machine_where_its_environment_is_known_and_its_bytes_name_none() {
+    // Linux: the system's gcc and a toolchain whose path no output holds, so the proc macro may
+    // leave. macOS: its debug map names the standard library's objects by the toolchain's path
+    // until the link drops it (`-Wl,-S`), so it stays, for that reason alone.
+    let w = world();
+    let ws = w.checkout("ws");
+    let entry = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+    let portable = entry.portable.clone().unwrap();
+    assert!(
+        !portable.reasons.contains(&Reason::LinkEnvironmentUnknown),
+        "{portable:?}"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            portable.reasons.contains(&Reason::ToolchainInOutput),
+            "{portable:?}"
+        );
+    } else {
+        assert!(portable.portable, "{portable:?}");
+    }
+}

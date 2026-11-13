@@ -2057,6 +2057,100 @@ fn a_known_link_environment_takes_the_place_of_the_linkers_size_and_date() {
     assert_eq!(link(), STORED, "the driver by its size and date");
 }
 
+// covers: B-24, B-10, B-37
+#[cfg(unix)]
+#[test]
+fn a_linked_output_with_a_known_environment_may_leave_unless_it_holds_the_toolchain() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    // The driver and `ld` are the repository's own here, so that nothing the link reads lies
+    // outside the roots and the bases (that ties a block, B-8).
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    executable(&ws.join("tools/ld"), "ld one");
+    let path = ws.join("tools").to_str().unwrap().to_owned();
+    let bin = ws.join("tools");
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    let run = |salt: Option<String>, vars: &[(&str, &str)]| -> Entry {
+        // Another crate for each output asked for: a source of its own.
+        fs::write(
+            ws.join("a/src/lib.rs"),
+            format!("// {}\nmod foo;\n", salt.as_deref().unwrap_or_default()),
+        )
+        .unwrap();
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                link_salt: salt,
+                ..Plan::default()
+            },
+        );
+        settle();
+        let mut args = w.args(&ws, "a", &["--target", "x86_64-unknown-linux-gnu"]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        let r = w.call_args(&ws, "a", args, |fake| {
+            for (name, value) in vars {
+                fake.vars.insert((*name).to_string(), (*value).to_string());
+            }
+        });
+        r.entry.unwrap()
+    };
+    let ld = format!("{}/ld", bin.display());
+    let known = [
+        ("PATH", path.as_str()),
+        ("FAKE_LD", ld.as_str()),
+        ("FAKE_DRY_RUN", dry_run.as_str()),
+    ];
+    let entry = run(None, &known);
+    assert_eq!(entry.outcome, STORED);
+    let portable = entry.portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // Unknown: the reason says why.
+    let unknown = [("PATH", path.as_str()), ("FAKE_LD", ld.as_str())];
+    let portable = run(None, &unknown).portable.unwrap();
+    assert_eq!(
+        portable.reasons,
+        [crate::portable::Reason::LinkEnvironmentUnknown]
+    );
+    assert!(
+        portable
+            .link_environment
+            .as_deref()
+            .is_some_and(|why| why.contains("dry run")),
+        "{portable:?}"
+    );
+    // The toolchain's own folder in the output, given or resolved: not portable, and keyed by
+    // the toolchain's place, which another install has not.
+    // The fake compiler's sysroot is its resolved folder; the toolchain's given form is
+    // searched for too (`roots::toolchain_needles`).
+    let toolchain = w.dir.path().join("toolchain");
+    {
+        let form = crate::roots::resolve_on_disk(toolchain.to_str().unwrap()).unwrap();
+        let salt = format!("N_OSO {form}/lib/rustlib/x/lib/libstd.rlib");
+        let entry = run(Some(salt), &known);
+        assert_eq!(entry.outcome, STORED);
+        let portable = entry.portable.unwrap();
+        assert!(
+            portable
+                .reasons
+                .contains(&crate::portable::Reason::ToolchainInOutput),
+            "{form}: {portable:?}"
+        );
+        let block = last_block(&w);
+        assert!(
+            block.description["portability"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "toolchain-in-output")
+        );
+    }
+}
+
 // covers: B-18
 #[cfg(unix)]
 #[test]

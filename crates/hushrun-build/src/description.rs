@@ -197,6 +197,7 @@ mod tests {
                 reasons: vec![crate::portable::Reason::Tied],
                 externs: Vec::new(),
                 variables: Vec::new(),
+                link_environment: None,
             },
             outputs: vec![
                 Output {

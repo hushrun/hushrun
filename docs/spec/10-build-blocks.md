@@ -349,7 +349,13 @@ compile that read a root through a variable (an `env-dep` whose value holds a ro
 only if a second compile, with that variable naming a link to the same folder, gives the same
 bytes. In the same pass every output is searched for the folders that name the machine: the cargo
 home, the rustup home and the home folder, each in its given and resolved forms, as raw bytes
-wherever they lie: whatever comes before or after a hit, it counts. A short folder is therefore
+wherever they lie: whatever comes before or after a hit, it counts. A linked output is also
+searched for the toolchain's own folder, `<sysroot>/lib/rustlib`, in the toolchain's given and
+resolved forms and through its view without sources (B-9): a toolchain outside the rustup home
+and the home folder (a distribution's `/usr`, a Nix store path, `/opt`) names the machine's
+install as well, and a link can write it (macOS's debug map names the standard library's objects
+by it); `toolchain-in-output` (B-24). A library is not searched for it: rustc remaps the
+standard library's paths to `/rustc/<commit>/` in what it writes itself. A short folder is therefore
 also found in other text (a home `/root` in `/rootfs`, `/roots.rs` or `keyRings/root/`), and
 such a library stays on its machine: lost reuse elsewhere, never a block that prints another
 machine's folder (`$CARGO_HOME` followed by `_cache` is that folder too). Those don't change the
@@ -788,8 +794,16 @@ by another person on a shared store with the first one's value. This is the limi
 input a compile isn't told about, not of portability alone; the audit (B-16) is the only thing
 that catches it, by compiling a reused block again and comparing. The reasons:
 
-- `linked`: a program, a proc macro or a build-script binary. Its linker, C runtime and SDK have
-  no content identity yet.
+- `link-environment-unknown`: a program, a proc macro or a build-script binary whose link
+  environment can't be told by content (B-37): the description and the log say why. A linked
+  output whose E is known is portable on the same terms as a library: its key holds E, which two
+  machines compute alike only where the files that decide the link's bytes are alike. *Rests
+  on:* B-37's list being all that decides those bytes. *Breaks if:* it isn't (B-37's *breaks
+  if*); the audit (B-16), which compares every class, is the check on it.
+- `toolchain-in-output`: a linked output holds the toolchain's own folder (B-10). Such a block is
+  keyed by the toolchain's place (`bound`), as by any machine folder it holds. On macOS this is
+  every proc macro and build script until their link drops its debug map, and every program
+  whose link names the standard library by the toolchain's path.
 - `tied`: its place is its roots (B-10).
 - `read-outside`: a read lies outside every root, base and shared folder.
 - `read-in-shared-folder`: a read lies in a shared folder that is not a base (a system folder,
@@ -844,7 +858,10 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
-block is not portable only because it is `linked` is still named alike on two machines (B-6).
+block is not portable only because of its link environment, or because its bytes hold a machine
+folder or the toolchain's, is still named alike on two machines (B-6): neither is in that name.
+A program that bakes its checkout (`env!("CARGO_MANIFEST_DIR")`, `CARGO_BIN_EXE_<name>`) is
+`tied` and stays on its machine, like any block that holds one of its roots.
 
 ## Sharing through a backend
 

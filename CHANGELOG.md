@@ -17,6 +17,12 @@ codes, environment variables, event formats, the ledger layout) are listed first
   `/`), those stay and the block is reused only on this machine. The list of which file answered
   which request is kept in the block's description. Every linked output's key changes once.
 
+- **A program, a proc macro or a build-script binary may leave the machine** when its link
+  environment is known and none of its outputs holds a machine's folder (B-24): the reason
+  `linked` is gone, replaced by `link-environment-unknown` (with why) and `toolchain-in-output`,
+  for a linked output that holds the toolchain's own folder (B-10). A program that bakes its
+  checkout stays `tied`. On macOS proc macros and build scripts still hold the toolchain's path.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

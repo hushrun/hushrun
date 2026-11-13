@@ -527,6 +527,22 @@ impl Roots {
         &self.machine
     }
 
+    /// What linked outputs are also searched for (B-10): the toolchain's own folder,
+    /// `<sysroot>/lib/rustlib`, in each form of the toolchain (given and resolved, and its view
+    /// without sources), each once.
+    pub fn toolchain_needles(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for base in self.bases.iter().filter(|b| b.name == RootName::Toolchain) {
+            for form in [&base.given, &base.resolved] {
+                let needle = format!("{}/lib/rustlib", form.trim_end_matches('/'));
+                if !out.contains(&needle) {
+                    out.push(needle);
+                }
+            }
+        }
+        out
+    }
+
     /// Each of these folders of the machine with its forms here, sorted; no form when this
     /// machine doesn't have it. What a block that holds them is keyed by (B-10).
     pub fn bound(&self, names: &[crate::key::Bound]) -> Vec<(crate::key::Bound, Vec<String>)> {
@@ -1280,6 +1296,35 @@ mod tests {
             rustup_home: Some(format!("{home}/.rustup")),
             home: Some(home.to_string()),
         }
+    }
+
+    // covers: B-10
+    #[test]
+    fn linked_outputs_are_searched_for_the_toolchains_own_folder_in_every_form() {
+        let roots = Roots::new(
+            &paths("/w/ws"),
+            &[],
+            &Machine {
+                toolchain_view: Some("/cache/build/compilers/sysroots/v1".into()),
+                ..machine("/home/dev", "stable-x")
+            },
+            |path| {
+                path.strip_prefix("/home/dev")
+                    .map(|rest| format!("/Users/dev{rest}"))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            roots.toolchain_needles(),
+            [
+                "/home/dev/.rustup/toolchains/stable-x/lib/rustlib",
+                "/Users/dev/.rustup/toolchains/stable-x/lib/rustlib",
+                "/cache/build/compilers/sysroots/v1/lib/rustlib",
+            ]
+        );
+        // No toolchain known: nothing to search for.
+        let none = Roots::new(&paths("/w/ws"), &[], &Machine::default(), |_| None).unwrap();
+        assert!(none.toolchain_needles().is_empty());
     }
 
     /// A registry crate's call on a machine: its sources under the cargo home, the workspace
