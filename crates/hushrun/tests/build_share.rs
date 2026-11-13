@@ -939,6 +939,64 @@ fn a_withdrawn_download_is_not_reused_once_its_entry_is_a_day_old_and_the_no_is_
     assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
 }
 
+/// [`Machine::build`], with cargo held back until the run's `open` has been answered. A run
+/// outside CI never waits for `open` (B-26), and a wrapper that asks before its answer gets a
+/// miss, which is what a loaded machine gives a test that needs the downloads.
+fn build_once_open_answered(m: &Machine, fake: &FakeBuild) -> (i32, String) {
+    let go = m.root.join("go");
+    let _ = std::fs::remove_file(&go);
+    let opens = fake.count(route::OPEN);
+    std::thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            let output = m
+                .hushrun(fake)
+                .env("GO", &go)
+                .args([
+                    "run",
+                    "build",
+                    "--force",
+                    "--",
+                    "sh",
+                    "-c",
+                    "while [ ! -e \"$GO\" ]; do sleep 0.05; done; cargo build --offline && sleep 2",
+                ])
+                .output()
+                .unwrap();
+            (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        });
+        // The fake counts `open` when it arrives and answers at once; the relay then takes
+        // the answer in, for which it gets a moment.
+        while fake.count(route::OPEN) == opens && !run.is_finished() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(&go, "").unwrap();
+        run.join().unwrap()
+    })
+}
+
+/// Rewrites what every compile recorded in the store under `dir` took, to `ms`: the files
+/// named `cost` (B-26). Panics when there is none.
+fn slow_compiles_recorded(dir: &Path, ms: u64) {
+    fn walk(dir: &Path, ms: u64, found: &mut usize) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, ms, found);
+            } else if path.file_name().is_some_and(|name| name == "cost") {
+                std::fs::write(&path, ms.to_string()).unwrap();
+                *found += 1;
+            }
+        }
+    }
+    let mut found = 0;
+    walk(dir, ms, &mut found);
+    assert!(found > 0, "no compile's cost under {}", dir.display());
+}
+
 /// Two machines whose libraries are at their second version. A built and uploaded it. B compiled
 /// the first version itself, so its own hints lead to each library's key, then downloaded the
 /// second from the shared store: blocks it only downloaded, which a run with no relay finds.
@@ -957,7 +1015,22 @@ fn built_and_downloaded(dir: &Path, fake: &FakeBuild) -> (Machine, Machine) {
     }
     let (code, stderr) = a.build(fake);
     assert_eq!(code, 0, "{stderr}");
-    let (code, stderr) = b.build(fake);
+    // A block A's run had no time to send waits in its outbox for A's next run (B-29), which
+    // a loaded machine makes likelier: A runs until both are in the store, before B asks.
+    for _ in 0..5 {
+        if fake.stored().len() >= 2 {
+            break;
+        }
+        let (code, stderr) = a.build(fake);
+        assert_eq!(code, 0, "{stderr}");
+    }
+    assert_eq!(fake.stored().len(), 2, "A's two blocks are stored");
+    // A wrapper waits for a download half of what the crate's compile took, there and here
+    // (B-26): a few milliseconds for these crates, which a loaded machine's download misses.
+    // Both sides say a minute, so B waits for its downloads however long they take.
+    fake.set_costs(60_000);
+    slow_compiles_recorded(&b.root.join("cache/build"), 60_000);
+    let (code, stderr) = build_once_open_answered(&b, fake);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
     (a, b)
@@ -2101,11 +2174,24 @@ fn pushed(dir: &Path, name: &str, from: &Path, target: Option<&Path>) -> Machine
             .unwrap();
         assert!(copied.success());
     }
-    std::fs::write(
-        m.repo.join("app/src/lib.rs"),
-        "pub fn answer() -> u32 {\n    mac::answer!() + 0\n}\n",
-    )
-    .unwrap();
+    // The change is written until its file is newer than everything restored: cargo takes a
+    // source no newer than its last build's record for unchanged, and a restore and a write a
+    // few milliseconds apart can carry one time on Linux.
+    let restored = m.root.join("restored");
+    std::fs::write(&restored, "").unwrap();
+    let time = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let source = m.repo.join("app/src/lib.rs");
+    loop {
+        std::fs::write(
+            &source,
+            "pub fn answer() -> u32 {\n    mac::answer!() + 0\n}\n",
+        )
+        .unwrap();
+        if time(&source) > time(&restored) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     git::commit_all(&m.repo, "app changes");
     m
 }
