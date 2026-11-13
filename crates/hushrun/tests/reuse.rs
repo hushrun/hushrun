@@ -1543,6 +1543,10 @@ fn rust_steps(r: &Repo, env: &[(&str, &str)]) -> Vec<Step> {
     let mut env: Vec<(&str, &str)> = env.to_vec();
     env.push(("PATH", shimmed));
 
+    // `--no-fail-fast`: when the audited test file fails, nextest would otherwise cancel the tests
+    // it hasn't started, and how many those are depends on how many threads it has and how fast
+    // the others finish. A test binary cancelled before it started didn't run whole, so the run's
+    // `ran` came to 4 or 5 of 5 by timing alone (on a 3-core macOS runner, not on 4-core Linux).
     let nextest = [
         "run",
         "test",
@@ -1552,6 +1556,7 @@ fn rust_steps(r: &Repo, env: &[(&str, &str)]) -> Vec<Step> {
         "run",
         "--workspace",
         "--locked",
+        "--no-fail-fast",
     ];
     let mut steps = Vec::new();
     let mut step = |r: &Repo| {
@@ -1665,6 +1670,8 @@ fn build_reuse_and_test_reuse_work_in_the_same_run() {
     );
     assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
     assert_ne!(tests[2].0, 0, "{tests:?}");
+    // Every test binary ran whole, the audited one too, which failed.
+    assert_eq!(tests[2].2, json!({"total": 5, "ran": 5, "reused": 0}));
     assert!(tests[2].3, "{tests:?}");
 
     for (n, (step, plain)) in with.iter().zip(&without).enumerate() {
