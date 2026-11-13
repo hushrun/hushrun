@@ -316,6 +316,30 @@ own, runs every time, and no plan counts it as reused; its failures are its own,
 classes of a failed run keep their passes. Gradle doesn't run a class that only has a static
 `suite()`, without `@RunWith(AllTests.class)` or `TestCase` as its superclass.
 
+## Amendment 14: test tasks Gradle didn't execute (2026-11-13)
+
+Runs on kotlinpoet showed that with every test task up to date (the person ran the tests before
+adopting hushrun, the usual case) each run said "all 41 test files run: none had passed here yet"
+and "passed in 0.8s", ran nothing, recorded nothing, and did so again until an input changed; once
+it said "passed in 0.7s: 158 tests, 27 skipped", counts read from an earlier run's report files
+written within the two seconds of slack the report search allows. The decisions:
+
+- A report counts as the run's only when the run wrote it: `hushrun_reports::before` takes what
+  the search finds before COMMAND starts, and `find_changed` drops a file that is the same as
+  then, whatever its time. The run's report search is to take that snapshot before COMMAND and
+  search with it after.
+- When Gradle executed no test task of a start, each being up to date or from the build cache, the
+  script's build service writes, at the end of the build, one facts file with no task and a note:
+  `Gradle ran no test: :a:test and :b:test were up to date, so nothing ran and nothing was learned
+  of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run
+  them`, and `ranNothing`, the tasks. The run says the note once, as any note.
+- hushrun doesn't force the tasks itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
+  stays as written and the build as it was (ADR 0084's first rule). Gradle's up to date is its own
+  reuse, proven on the same inputs; running the tests anyway costs the person the time hushrun is
+  there to save, changes what the build cache holds, and would make a hushrun run differ from a
+  plain one in what it executes. Saying it once, with the way to make Gradle run them, leaves the
+  choice where it was.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's

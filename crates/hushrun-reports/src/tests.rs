@@ -851,3 +851,38 @@ fn a_search_says_when_it_stopped_short_of_a_readers_files() {
     assert!(!reports.files_complete);
     assert_eq!(reports.tests.unwrap().total, 2);
 }
+
+// covers: C-27
+#[test]
+fn a_report_the_run_didnt_change_is_never_its_own_however_new() {
+    // A report an earlier run wrote a moment before this one started (a test task Gradle then
+    // found up to date): its time is within the clock's slack of the start.
+    let dir = tree(&[
+        ("build/test-results/test/TEST-a.xml", JUNIT),
+        ("build/test-results/test/TEST-b.xml", JUNIT),
+    ]);
+    let q = Query {
+        started: SystemTime::now(),
+        ..query(dir.path(), dir.path(), &[])
+    };
+    let before = before(&q);
+    assert_eq!(
+        rels(find(&q)),
+        [
+            "build/test-results/test/TEST-a.xml",
+            "build/test-results/test/TEST-b.xml"
+        ]
+    );
+    assert_eq!(rels(find_changed(&q, &before)), Vec::<String>::new());
+    // One the run wrote again counts, as does one it wrote anew.
+    let a = dir.path().join("build/test-results/test/TEST-a.xml");
+    std::fs::write(&a, format!("{JUNIT}\n")).unwrap();
+    std::fs::write(dir.path().join("build/test-results/test/TEST-c.xml"), JUNIT).unwrap();
+    assert_eq!(
+        rels(find_changed(&q, &before)),
+        [
+            "build/test-results/test/TEST-a.xml",
+            "build/test-results/test/TEST-c.xml"
+        ]
+    );
+}

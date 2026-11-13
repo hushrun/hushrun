@@ -700,8 +700,11 @@ class HushrunAfter implements Action<Task>, Serializable {
 // Hears how every task ended: a Test task that was up to date, came from the build cache, had no
 // source or failed before its tests, and test tasks this script can't follow.
 // One instance a build, so one start of Gradle: its id names the facts files it keeps.
-abstract class HushrunService implements BuildService<Params>, OperationCompletionListener {
+abstract class HushrunService implements BuildService<Params>, OperationCompletionListener, AutoCloseable {
     final String start = UUID.randomUUID().toString()
+    // [C-32] Whether Gradle executed a test task of this start, and those it didn't, each with why.
+    volatile boolean executedTests = false
+    final Map<String, String> notExecuted = new ConcurrentHashMap<>()
 
     interface Params extends BuildServiceParameters {
         MapProperty<String, String> getStored()          // task path -> its stored report
@@ -723,6 +726,8 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
                     res instanceof TaskFailureResult ? "executed" :
                     res instanceof TaskSkippedResult ? (res.skipMessage == "NO-SOURCE" ? "no-source" : "skipped") : "unknown"
             boolean failed = res instanceof TaskFailureResult
+            if (outcome == "executed") executedTests = true
+            else if (outcome == "up-to-date" || outcome == "from-cache") notExecuted[path] = outcome
             Map report
             List<String> errors = []
             if (target.isFile()) {
@@ -752,6 +757,36 @@ abstract class HushrunService implements BuildService<Params>, OperationCompleti
             target.delete()
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * [C-32] At the end of the build: when Gradle executed no test task, because each was up to
+     * date or came from the build cache, one facts file says so in a note, with what makes Gradle
+     * run them. Nothing ran, so nothing was learned of their classes.
+     */
+    @Override
+    void close() {
+        try {
+            if (executedTests || notExecuted.isEmpty() || HushrunRun.units() == null) return
+            String root = parameters.root.get()["root"]
+            List<String> upToDate = notExecuted.findAll { it.value == "up-to-date" }.keySet().sort()
+            List<String> cached = notExecuted.findAll { it.value == "from-cache" }.keySet().sort()
+            List<String> parts = []
+            if (upToDate) parts << (HushrunService.listed(upToDate) + (upToDate.size() == 1 ? " was" : " were") + " up to date")
+            if (cached) parts << (HushrunService.listed(cached) + " came from the build cache")
+            String note = "Gradle ran no test: " + parts.join(", and ") +
+                    ", so nothing ran and nothing was learned of " + (notExecuted.size() == 1 ? "its" : "their") +
+                    " test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run them"
+            Map facts = [schema: HushrunRun.FACTS_SCHEMA, adapter: "gradle", failuresByUnit: true, units: [],
+                         settings: [note: note, ranNothing: notExecuted.keySet().sort()], errors: [], start: start]
+            HushrunRun.writeWhole(HushrunRun.facts(root, ":hushrun-ran-nothing", start), JsonOutput.toJson(facts))
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** `a`, `a and b`, `a, b and c`. */
+    static String listed(List<String> items) {
+        items.size() <= 1 ? items.join("") : items.subList(0, items.size() - 1).join(", ") + " and " + items.last()
     }
 
     /**

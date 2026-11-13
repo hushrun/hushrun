@@ -18,7 +18,7 @@ mod lines;
 mod text;
 mod xml;
 
-pub use find::{Query, Search, find};
+pub use find::{Before, Query, Search, before, find, find_changed};
 pub use lines::{count, percent};
 
 /// A report file a run may have written: its path, and its path from the repository root,

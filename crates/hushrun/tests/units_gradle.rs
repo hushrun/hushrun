@@ -639,6 +639,11 @@ fn a_task_gradle_didnt_execute_records_nothing() {
         "{}",
         again.stdout
     );
+    // \[C-32\] One true line: no test ran, why, and what makes Gradle run them.
+    assert_eq!(
+        line(&again, "hushrun: unit: Gradle ran no test"),
+        "hushrun: unit: Gradle ran no test: :app:test, :lib:test and :other:test were up to date, so nothing ran and nothing was learned of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run them"
+    );
     assert_eq!(
         r.newest_result()["units"],
         json!({"total": 5, "ran": 0, "reused": 0})
@@ -2025,3 +2030,4 @@ fn a_junit4_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_cou
     );
     r.clean();
 }
+

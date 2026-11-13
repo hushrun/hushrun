@@ -766,7 +766,15 @@ fn units_of(
 /// Reads what the Gradle adapter wrote in a run's directory, for the repository whose files are
 /// `tree`. `Ok(None)` when it wrote nothing; `Err` says why nothing can be told.
 pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, String> {
-    let mine: Vec<&FactsFile> = files.iter().filter(|f| f.adapter == ADAPTER).collect();
+    // \[C-32\] A file of no task but the build's note that Gradle ran no test (`ranNothing`),
+    // which the run says as it says any note: the tasks' own files say what they were.
+    let mine: Vec<&FactsFile> = files
+        .iter()
+        .filter(|f| {
+            f.adapter == ADAPTER
+                && (f.settings.contains_key(ADAPTER) || !f.settings.contains_key("ranNothing"))
+        })
+        .collect();
     if mine.is_empty() {
         return Ok(None);
     }

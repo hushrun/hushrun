@@ -298,6 +298,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   told as never left out, and a failure of one no longer costs every other class of a failed run
   its pass. Under Gradle such a class (with `@RunWith(AllTests.class)`) was no test class at all,
   and its cases were dropped from the counts: now they are its own, in the same way.
+- Gradle: a run in which every test task was up to date, or came from the build cache, now says
+  so in one line, with what makes Gradle run them, instead of a line that read as if tests ran.
+  The report search can tell a report the run didn't write from one it did, however new its
+  time (`hushrun_reports::before` and `find_changed`).
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
