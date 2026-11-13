@@ -178,6 +178,8 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   that download the same block leave its folder where it is. Before, a reuse could copy from a
   block another run's download was replacing, compile as asked, and give a dozen dependents keys
   no other machine computes.
+- Shared `observe` downloads each block it compares once (it fetched each twice, the prefetch's
+  copy unused), and its summary says how many blocks it compared and how many differed.
 
 ## [0.13.0] - 2026-11-12
 

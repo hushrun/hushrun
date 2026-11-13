@@ -846,6 +846,9 @@ fn in_observe_nothing_is_published_and_a_difference_is_counted_reported_and_susp
     );
     // It writes nowhere: what is under test is the comparison, not an upload.
     fake.set_scopes(None, &["person/1", "person/9"]);
+    // The manifest names the block: a prefetch would download it once before the comparison
+    // downloads it again.
+    fake.set_manifest(vec![Pair(address(&step), address(&key))]);
     // This machine built the same key with other bytes.
     let m = machine();
     let (key_here, _) = {
@@ -872,7 +875,8 @@ fn in_observe_nothing_is_published_and_a_difference_is_counted_reported_and_susp
     let relay = start(&fake, &m, |_| {});
     begin(&relay, &m);
     until("open", || answering(&relay));
-    // A wrapper never waits for a download in observe.
+    // A wrapper never waits for a download in observe, and asking for hints starts no prefetch.
+    assert_eq!(ask(&relay, Request::Hints { step }), Answer::None);
     let answer = ask(
         &relay,
         Request::Fetch {
@@ -897,7 +901,14 @@ fn in_observe_nothing_is_published_and_a_difference_is_counted_reported_and_susp
     // No file in the store came from the pack.
     let here = m.store.block(&key).unwrap().unwrap();
     assert_ne!(*here.files[0].sha256.as_bytes(), theirs.outputs.0);
-    relay.end_check(&[]);
+    // One download for one comparison.
+    assert_eq!(fake.count(route::STORE_GET), 1);
+    let lines = relay.end_check(&[]);
+    assert!(
+        lines.iter().any(|line| line
+            == "build: sharing observed: 1 block compared with the shared store, 1 differed; it is reported and not reused here for 15 days"),
+        "{lines:?}"
+    );
     let closes = fake.closes();
     assert_eq!(closes.len(), 1);
     assert_eq!(

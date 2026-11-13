@@ -438,7 +438,8 @@ one is `built, not stored`, and a hint that names one is skipped.
 **B-20 What a run says.** Each compile appends one line to the run's log with its outcome, its
 crate and its package. After COMMAND exits, `hushrun run` writes one line: how many crates were
 reused and built, and the time reuse saved; in `observe`, how many would have been reused and
-how many differed. A call passed through for no `--crate-name`, a probe, no `-C extra-filename`,
+how many differed, and in shared `observe` (B-33) how many blocks were compared with the shared
+store's copies and how many of those differed. A call passed through for no `--crate-name`, a probe, no `-C extra-filename`,
 no `--out-dir`, an `-o` or no `--json` with `artifacts` is not one of the build's crates and
 counts nowhere: those are cargo's probes and the ones a build script runs.
 
@@ -809,7 +810,10 @@ library, the relay downloads the shared store's copy in the background, opens it
 its files with the local block's. A difference suspends the first key here for `keep_days` and is
 reported `differs` to the scope the copy came from. `close` counts the comparisons, those of
 blocks another machine wrote, and those that differed; comparisons not finished when the command
-ends are dropped. In `on` a download is reused. *Rests on:* one week of observing being free of
+ends are dropped. Each compared block is downloaded once, by its comparison: there is no
+prefetch (B-30) and no downloaded hint in shared `observe`, since neither leads anywhere but to a
+download no wrapper may reuse. The run's summary says how many blocks were compared and how many
+differed (B-20). In `on` a download is reused. *Rests on:* one week of observing being free of
 cost to local reuse, and a comparison being of another machine's bytes, which only `close`'s
 counts can show.
 

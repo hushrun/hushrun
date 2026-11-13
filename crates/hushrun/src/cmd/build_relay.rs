@@ -736,7 +736,15 @@ impl Relay {
     /// C4, B-30: the prefetch starts at the first wrapper that asks the relay, once: a run whose
     /// compiles all find their blocks here asks nothing and downloads nothing.
     async fn prefetch_at_first_miss(self: Arc<Relay>) {
-        let manifest = self.state().manifest.take();
+        // Shared `observe` never reuses a download (B-33): its comparisons download what they
+        // compare, once each, and a prefetch would only download those blocks a second time.
+        let manifest = {
+            let mut state = self.state();
+            if state.sharing != Sharing::On {
+                return;
+            }
+            state.manifest.take()
+        };
         if let Some(manifest) = manifest {
             self.prefetch(manifest).await;
         }
@@ -916,7 +924,8 @@ impl Relay {
         let address = Relay::address(&step);
         let known = {
             let mut state = self.state();
-            if !state.answering(Instant::now()) {
+            // A downloaded hint only leads to a fetch, which shared `observe` never makes.
+            if !state.answering(Instant::now()) || state.sharing != Sharing::On {
                 return Answer::None;
             }
             if state.hints_asked.contains(&address) {
@@ -1799,6 +1808,14 @@ impl Relay {
             .filter(|m| m.by == self.by)
             .count();
         let mut lines = std::mem::take(&mut state.lines);
+        // B-20, B-33: shared `observe` says what it compared and how many differed.
+        if state.sharing == Sharing::Observe && state.tally.compared > 0 {
+            lines.push(observed_line(
+                state.tally.compared,
+                state.tally.compared_differed,
+                self.config.keep_days,
+            ));
+        }
         if waiting > 0 && end.in_ci && state.uploads {
             // B-31: the job's store goes with the job.
             lines.push(format!(
@@ -1900,6 +1917,22 @@ impl Relay {
 }
 
 /// Why a CI job on a listed branch isn't trusted, in plain words (the policy's reason word).
+/// The summary's line for shared `observe` (B-20, B-33): how many blocks built here were compared
+/// with the shared store's copy, and how many differed, which are reported and not reused here
+/// for `keep_days`.
+fn observed_line(compared: u64, differed: u64, keep_days: u32) -> String {
+    let blocks = if compared == 1 { "block" } else { "blocks" };
+    if differed == 0 {
+        return format!(
+            "build: sharing observed: {compared} {blocks} compared with the shared store, none differed"
+        );
+    }
+    format!(
+        "build: sharing observed: {compared} {blocks} compared with the shared store, {differed} differed; {} reported and not reused here for {keep_days} days",
+        if differed == 1 { "it is" } else { "they are" }
+    )
+}
+
 pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
     match why {
         blocks::Untrusted::Repository => {
