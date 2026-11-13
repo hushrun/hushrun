@@ -477,7 +477,7 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
     assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
     assert_eq!(
         line(&changed, "hushrun: unit: "),
-        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     let result = r.newest_result();
     let saved = result["units"]["savedMs"].clone();
@@ -549,7 +549,7 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
     );
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and so did 2 tests of the others, and 2 more that did run as a check"
+        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and so did 2 tests of the others, and 2 more that already passed run anyway, as a check"
     );
     // \[C-39\] Tests are counted where Gradle named them, and a class reused whole, which Gradle
     // named none of, by the tests this machine knows of it: every one reused.
@@ -603,7 +603,7 @@ fn junit4_tests_are_reused_one_by_one_through_gradles_filter() {
     // the one test file audited.
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 5 tests run, in 3 of 3 test classes; 1 already passed on the files it read, and 2 more that did run as a check"
+        "hushrun: unit: 4 of 5 tests run, in 3 of 3 test classes; 1 already passed on the files it read, and 2 more that already passed run anyway, as a check"
     );
     // Gradle's patterns left out either `total`, or every invocation of `small`.
     let total = r.xml_cases("app", "shop.app.CartTest");
@@ -706,7 +706,7 @@ fn an_audited_test_runs_again_alone_under_a_warm_daemon_and_the_configuration_ca
     assert_eq!(caught.code, 1, "{}\n{}", caught.stdout, caught.stderr);
     assert_eq!(
         line(&caught, "hushrun: unit: all"),
-        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
     );
     let name = "app/src/test/java/shop/app/TwoTest.java::shop.app.TwoTest.ok";
     assert!(
@@ -858,7 +858,7 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 2 of 3 tests run, in 1 of 1 test class; 1 already passed on the files it read, and 1 more that did runs as a check"
+        "hushrun: unit: 2 of 3 tests run, in 1 of 1 test class; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
 }
 

@@ -537,25 +537,15 @@ fn tests_line(
         }
         let total: usize = known.iter().map(|(unit, _)| tests_of(unit)).sum();
         return Some(format!(
-            "{check}: all {} run; {} that already passed on the files {} read {} as a check",
+            "{check}: all {} run; {}",
             count_tests(total as u64),
-            usage::thousands(checked as u64),
-            if checked == 1 { "it" } else { "they" },
-            if checked == 1 { "runs" } else { "run" },
+            checked_only(checked)
         ));
     }
     let counted = tests_counted(known.iter().map(|(unit, _)| unit), reuse, tested);
     let files_total = counted.files_total as u64;
     let files_run = counted.files_run as u64;
-    let more = |line: &mut String, n: usize| {
-        if n > 0 {
-            line.push_str(&format!(
-                ", and {} more that did {} as a check",
-                usage::thousands(n as u64),
-                if n == 1 { "runs" } else { "run" },
-            ));
-        }
-    };
+    let more = |line: &mut String, n: usize| line.push_str(&checked_too(n));
     if let Some((total, reused)) = counted.tests {
         let checked: usize =
             audited.iter().map(|unit| tests_of(unit)).sum::<usize>() + tested.audited.len();
@@ -899,11 +889,9 @@ impl Session {
             }
         } else if reused == 0 {
             format!(
-                "{check}: all {} run; {} that already passed on the files {} read {} as a check",
+                "{check}: all {} run; {}",
                 test_files(total as u64, self.adapter.test_file()),
-                audited.len(),
-                if audited.len() == 1 { "it" } else { "they" },
-                if audited.len() == 1 { "runs" } else { "run" },
+                checked_only(audited.len())
             )
         } else {
             let mut line = format!(
@@ -912,13 +900,7 @@ impl Session {
                 test_files(total as u64, self.adapter.test_file()),
                 if reused == 1 { "it" } else { "they" },
             );
-            if !audited.is_empty() {
-                line.push_str(&format!(
-                    ", and {} more that did {} as a check",
-                    audited.len(),
-                    if audited.len() == 1 { "runs" } else { "run" },
-                ));
-            }
+            line.push_str(&checked_too(audited.len()));
             line
         };
         self.plan = Some(Plan {
@@ -1930,6 +1912,33 @@ fn test_files_grouped(n: u64, noun: &str) -> String {
     match n {
         1 => format!("1 {noun}"),
         n => format!("{} {}", usage::thousands(n), plural(noun)),
+    }
+}
+
+/// \[C-34\] The clause a plan's line ends with when an audit runs `n` of what already passed,
+/// beside those reused: `, and 1 more that already passed runs anyway, as a check`; nothing for 0.
+fn checked_too(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => ", and 1 more that already passed runs anyway, as a check".into(),
+        n => format!(
+            ", and {} more that already passed run anyway, as a check",
+            usage::thousands(n as u64)
+        ),
+    }
+}
+
+/// \[C-34\] What a plan's line says after `all <N> run; ` when nothing is reused and an audit
+/// runs `n` that already passed: `1 that already passed on the files it read runs anyway, as a
+/// check`.
+fn checked_only(n: usize) -> String {
+    if n == 1 {
+        "1 that already passed on the files it read runs anyway, as a check".into()
+    } else {
+        format!(
+            "{} that already passed on the files they read run anyway, as a check",
+            usage::thousands(n as u64)
+        )
     }
 }
 

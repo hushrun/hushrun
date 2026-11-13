@@ -410,7 +410,7 @@ fn jest_reuses_test_files_that_already_passed() {
         assert_eq!(second.code, 0, "{}", second.out());
         assert_eq!(
             second.line("hushrun: unit: 3"),
-            "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that did runs as a check",
+            "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "Jest {}",
             jest.major
         );
@@ -494,7 +494,7 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
         assert_eq!(second.code, 0, "{}", second.out());
         assert_eq!(
             second.line("hushrun: unit: "),
-            "hushrun: unit: 4 of 8 tests run, in 2 of 2 test files; 4 already passed on the files they read, and 1 more that did runs as a check",
+            "hushrun: unit: 4 of 8 tests run, in 2 of 2 test files; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
             "Jest {}",
             jest.major
         );
@@ -754,7 +754,7 @@ fn an_audited_test_that_fails_again_alone_suspends_the_checks_reuse() {
         assert_eq!(caught.code, 1, "{}", caught.out());
         assert_eq!(
             caught.line("hushrun: unit: all"),
-            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
         );
         assert!(
             caught.stderr.contains(
@@ -2514,7 +2514,7 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
         assert_eq!(second.code, 0, "{}", second.out());
         assert!(
             second.stderr.contains(
-                "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that did run as a check"
+                "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
             ),
             "Jest {}: {}",
             jest.major,

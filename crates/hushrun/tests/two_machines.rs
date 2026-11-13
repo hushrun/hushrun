@@ -723,7 +723,7 @@ fn pytest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() 
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // No map: no pytest has reported this check's test files on this machine (ADR 0074).
@@ -883,7 +883,7 @@ fn vitest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() 
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 2 of 7 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 7 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // Vitest's list of test files is the map's (ADR 0071).
@@ -1059,7 +1059,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 2 of 5 packages run; 3 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 5 packages run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // `go list` says what each test binary is built from. What a test opened comes from the map:
@@ -1074,7 +1074,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }
@@ -1255,7 +1255,7 @@ fn cargo_on_a_fresh_machine_with_a_server_without_hints_reuses_all_it_could() {
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }
@@ -1561,7 +1561,7 @@ fn a_server_from_before_hints_changes_nothing_and_is_said_once() {
         assert_eq!(
             ran.plan_line().as_deref(),
             Some(
-                "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that did runs as a check"
+                "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
             ),
             "{status}: {}",
             ran.stderr
@@ -1771,7 +1771,7 @@ fn with_reads_file_a_fresh_machine_reuses_the_passing_tests_of_a_test_file_that_
     assert_eq!(
         copied_line.as_deref(),
         Some(
-            "hushrun: unit: 2 of 13 tests run, in 1 of 1 test file; 11 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 13 tests run, in 1 of 1 test file; 11 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }
@@ -1812,7 +1812,7 @@ fn with_reads_test_a_fresh_machine_reuses_each_test_on_the_list_another_machine_
     assert_eq!(
         copied_line.as_deref(),
         Some(
-            "hushrun: unit: 3 of 12 tests run, in 1 of 1 test file; 9 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 12 tests run, in 1 of 1 test file; 9 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }

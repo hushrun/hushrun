@@ -171,6 +171,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   Jest, a failed Vitest run with an error no test owns, a stale build, what was left out twice):
   every one the run decided keeps a row with why. Contract: an adapter's facts file may say
   `notKept`, why no pass of a failed run whose failures aren't told by unit is kept.
+- The plan's line says an audit's runs plainly: `…, and 1 more that already passed runs anyway, as
+  a check`, where it said `and 1 more that did runs as a check`.
 - `hushrun why` of a test file kept out by one of its tests says which test and why, such as the
   wider fixture whose end failed, rather than pointing at a start of the runner.
 - `hushrun why` of a test its test file doesn't have says this machine doesn't know it, rather than

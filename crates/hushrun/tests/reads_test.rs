@@ -788,7 +788,7 @@ fn with_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_te
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert!(
         second.stderr.contains(
-            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that did run as a check"
+            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
         ),
         "{}",
         second.stderr

@@ -395,7 +395,7 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         second.line("hushrun: unit: "),
-        "hushrun: unit: 2 of 3 test targets run; 1 already passed on the files it read, and 1 more that did runs as a check"
+        "hushrun: unit: 2 of 3 test targets run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(second.xctest_ran("GreetTests", "GreetTests", "testHello"));
     let cart = second.xctest_ran("CartTests", "CartTests", "testTotal");
@@ -427,7 +427,7 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
     assert_eq!(
         third.line("hushrun: unit: "),
-        "hushrun: unit: all 3 test targets run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 3 test targets run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(third.xctest_ran("CartTests", "CartTests", "testTotal"));
     assert!(third.swift_testing_ran("price()"));
@@ -438,7 +438,7 @@ fn test_targets_are_observed_then_reused_and_a_library_change_runs_those_that_re
     assert_eq!(fourth.code, 0, "{}\n{}", fourth.stdout, fourth.stderr);
     assert_eq!(
         fourth.line("hushrun: unit: "),
-        "hushrun: unit: 1 of 3 test targets run; 2 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 1 of 3 test targets run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 
     // A wrapper that says swift test but starts swift by its path goes round hushrun's swift:
@@ -588,7 +588,7 @@ fn with_tests_as_the_unit_only_the_tests_that_failed_run_again_and_a_crash_recor
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         second.line("hushrun: unit: "),
-        "hushrun: unit: 4 of 7 tests run, in 3 of 3 test targets; 3 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 4 of 7 tests run, in 3 of 3 test targets; 3 already passed on the files they read, and 2 more that already passed run anyway, as a check"
     );
     assert!(second.xctest_ran("CartTests", "CartTests", "testFlips"));
     assert!(second.swift_testing_ran("flips()"));
@@ -678,7 +678,7 @@ final class TwoTests: XCTestCase {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.line("hushrun: unit: all"),
-        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains(
@@ -1104,7 +1104,7 @@ fn the_tools_hushrun_starts_for_swift_get_commands_own_env_assignments() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         second.line("hushrun: unit: "),
-        "hushrun: unit: all 2 test targets run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 test targets run; 1 that already passed on the files it read runs anyway, as a check"
     );
 }
 

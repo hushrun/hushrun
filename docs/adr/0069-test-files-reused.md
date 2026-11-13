@@ -70,7 +70,7 @@ of the machinery ends in "every test file runs".
    reused: a reused one writes none. A summary of a run with reused test files leaves coverage out,
    since a partial figure would read as a drop; its tests count what ran.
 10. **What people see.** Before COMMAND, `hushrun: unit: 12 of 340 test files run; 328 already
-    passed on the files they read, and 7 more that did run as a check`; `all 340 test files run:
+    passed on the files they read, and 7 more that already passed run anyway, as a check`; `all 340 test files run:
     uv.lock changed, and any test may read it`; or `every test file runs: <why>`. The last line
     adds `; reusing 328 test files saved about 3m 05s`, from the reused test files' recorded
     durations.

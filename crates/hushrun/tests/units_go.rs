@@ -609,7 +609,7 @@ fn go_reuses_what_already_passed_and_audits_it() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: unit: 3 of 7 packages run; 4 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 7 packages run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     let ran = packages(&second.stdout);
     assert!(ran[&format!("{MODULE}/pricing")].ran && ran[&format!("{MODULE}/cart")].ran);
@@ -696,7 +696,7 @@ fn an_injected_missed_dependency_in_go_is_caught_by_an_audit() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.plan_line(),
-        "hushrun: unit: all 2 packages run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 packages run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains("unit: a failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"),
@@ -1197,7 +1197,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 2 of 6 tests run, in 1 of 1 package; 4 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 2 of 6 tests run, in 1 of 1 package; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert_eq!(ran.len(), 2, "{ran:?}");
     assert!(ran.contains(&"TestFlip".to_string()), "{ran:?}");
@@ -1229,7 +1229,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     assert_eq!(again.code, 0, "{}", again.stderr);
     assert_eq!(
         line(&again, "hushrun: unit: "),
-        "hushrun: unit: 1 of 6 tests run, in 1 of 1 package; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 1 of 6 tests run, in 1 of 1 package; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert_eq!(ran.len(), 1, "{ran:?}");
     assert_eq!(
@@ -1857,7 +1857,7 @@ fn an_audited_go_test_that_fails_again_alone_suspends_the_checks_reuse() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         line(&caught, "hushrun: unit: all"),
-        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains(

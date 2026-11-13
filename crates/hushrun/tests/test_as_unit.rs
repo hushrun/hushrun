@@ -348,7 +348,7 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that already passed run anyway, as a check"
     );
     // pytest ran what the plan left: test_flips, test_spawns, the audited test and the audited
     // greet file's.
@@ -926,7 +926,7 @@ fn with_tests_as_the_unit_a_file_that_changed_runs_every_test_it_has() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         line(&changed, "hushrun: unit: "),
-        "hushrun: unit: 11 of 13 tests run, in 3 of 5 test files; 2 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 11 of 13 tests run, in 3 of 5 test files; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 }
 
@@ -960,7 +960,7 @@ fn an_audited_test_that_fails_again_alone_suspends_the_checks_reuse() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         line(&caught, "hushrun: unit: all"),
-        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains(
@@ -2011,7 +2011,7 @@ fn with_xdist_each_worker_leaves_out_the_tests_the_plan_lists() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that already passed run anyway, as a check"
     );
     assert!(second.stdout.contains("4 passed"), "{}", second.stdout);
     let result = r.newest_result();
@@ -2040,7 +2040,7 @@ fn a_plan_that_doesnt_know_every_test_files_tests_counts_test_files() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 7 tests of the others, and 2 more that did run as a check"
+        "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 7 tests of the others, and 2 more that already passed run anyway, as a check"
     );
 }
 

@@ -483,7 +483,7 @@ fn vitest_reuses_what_already_passed() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         plain(&second.stdout).contains("Test Files  3 passed (3)"),
@@ -548,7 +548,7 @@ fn an_injected_missed_dependency_in_vitest_is_caught_by_an_audit() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.plan_line(),
-        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains("unit: test/hidden.test.ts failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"),
@@ -1536,7 +1536,7 @@ fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
             .lines()
             .find(|l| l.contains(" tests run, in "))
             .unwrap_or_else(|| panic!("{}", second.stderr)),
-        "hushrun: unit: 3 of 9 tests run, in 2 of 7 test files; 6 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 3 of 9 tests run, in 2 of 7 test files; 6 already passed on the files they read, and 2 more that already passed run anyway, as a check"
     );
     // Vitest ran flips, the audited test and the audited file's, and left out the reused test:
     // skipped, or, when the audit chose `total`, in a suite skipped whole and counted in the total
@@ -1627,7 +1627,7 @@ fn an_audited_vitest_test_that_fails_again_alone_suspends_reuse() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert!(
         caught.stderr.contains(
-            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs as a check"
+            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
         ),
         "{}",
         caught.stderr
@@ -2147,7 +2147,7 @@ fn with_vitest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert!(
         second.stderr.contains(
-            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that did run as a check"
+            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
         ),
         "{}",
         second.stderr

@@ -335,7 +335,7 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         changed.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         changed.stdout.contains("5 deselected"),
@@ -432,7 +432,7 @@ fn tests_always_and_not_observed_test_files_always_run() {
     // the three left: five run.
     assert_eq!(
         changed.plan_line(),
-        "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 }
 
@@ -459,7 +459,7 @@ fn a_failing_run_records_what_ran_whole_and_the_fix_reuses_it() {
     assert_eq!(fixed.code, 0, "{}", fixed.stderr);
     assert_eq!(
         fixed.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 }
 
@@ -503,7 +503,7 @@ fn an_injected_missed_dependency_is_caught_by_an_audit_and_suspends_reuse() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.plan_line(),
-        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains("unit: test_hidden.py failed, though it passed before on the same files it read: running it once more"),
@@ -843,7 +843,7 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
     assert_eq!(reused.code, 0, "{}", reused.stderr);
     assert_eq!(
         reused.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         results
@@ -1150,7 +1150,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         changed.plan_line(),
-        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     let units = r.newest_result()["units"].clone();
     assert!(units["savedMs"].is_u64(), "{units}");
@@ -1195,7 +1195,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 
     // The flag: what the flagged test reads and no dep-info names. Every other binary changes, so
@@ -1630,7 +1630,7 @@ fn build_reuse_and_test_reuse_work_in_the_same_run() {
     assert_eq!(tests[0].0, 0, "{tests:?}");
     assert_eq!(
         tests[1].1,
-        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
     assert_ne!(tests[2].0, 0, "{tests:?}");

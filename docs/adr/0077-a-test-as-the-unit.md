@@ -357,3 +357,12 @@ tests. The run's lines that count units (the plan's line, `observe`'s line and t
 (pytest, Vitest, Jest), `test binary` (Cargo), `package` (Go), `test class` (Gradle, Maven), `test
 target` (`swift test`), `test program` (CTest), made plural by English's rule (`test binaries`,
 `test classes`). Lines that name the kind in general (`test files aren't observed`) are unchanged.
+
+## Amendment 14: what the first real runs said (2026-11-13)
+
+The feature ran on real repositories (click, httpx, werkzeug, yaml, svgo, luxon, jest-extended,
+fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said something untrue.
+
+- **"and 1 more that did runs as a check"** read as a mistake. The audit's clause is now `, and 1
+  more that already passed runs anyway, as a check` (`run anyway` for more), and `all <N> run; 1
+  that already passed on the files it read runs anyway, as a check`; the counts are as before.

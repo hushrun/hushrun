@@ -535,7 +535,7 @@ fn a_change_runs_the_classes_of_its_module_and_of_the_modules_that_depend_on_it_
     assert_eq!(other.code, 0, "{}\n{}", other.stderr, other.stdout);
     assert_eq!(
         other.line("hushrun: unit: "),
-        "hushrun: unit: 4 of 6 test classes run; 2 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 4 of 6 test classes run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     at_most_the_audit(
         &other.ran(),
