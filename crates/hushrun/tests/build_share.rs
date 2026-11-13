@@ -404,8 +404,11 @@ fn age_vouches(dir: &Path) -> usize {
 
 /// `cargo clean`, then a timed `cargo build` through hushrun, with `share` as the share setting.
 fn timed_build(m: &Machine, fake: &FakeBuild, share: &str) -> (Duration, String) {
+    // The workspace's own target folder: never one CARGO_TARGET_DIR names, which may be the
+    // target folder of the tests themselves.
     let clean = std::process::Command::new("cargo")
         .args(["clean", "-q"])
+        .env_remove("CARGO_TARGET_DIR")
         .current_dir(&m.repo)
         .status()
         .unwrap();
