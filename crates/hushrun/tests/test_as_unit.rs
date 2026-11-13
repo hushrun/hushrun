@@ -366,8 +366,7 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
                "tests": {"total": 13, "ran": 4, "reused": 9}})
     );
     assert!(
-        line(&second, "hushrun: unit passed in").contains("; 9 tests reused")
-            || line(&second, "hushrun: unit passed in").contains("reusing 9 tests saved about"),
+        hushrun_testkit::lines::says_reused(line(&second, "hushrun: unit passed in"), 9, "tests"),
         "{}",
         second.stderr
     );
@@ -1004,9 +1003,10 @@ fn observe_says_what_reusing_tests_would_have_done_and_test_files_stay_as_they_w
     // Everything ran: observe changes nothing.
     assert!(second.stdout.contains("13 passed"), "{}", second.stdout);
     assert!(
-        line(&second, "hushrun: unit: with `tests: reuse`").starts_with(
-            "hushrun: unit: with `tests: reuse`, 2 of 13 tests would have run, in 2 of 5 test files; 11 already passed on the files they read"
-        ),
+        hushrun_testkit::lines::without_saving(line(&second, "hushrun: unit: with `tests: reuse`"))
+            .starts_with(
+                "hushrun: unit: with `tests: reuse`, 2 of 13 tests would have run, in 2 of 5 test files; 11 already passed on the files they read"
+            ),
         "{}",
         second.stderr
     );

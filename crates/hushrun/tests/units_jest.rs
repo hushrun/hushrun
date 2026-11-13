@@ -384,7 +384,7 @@ fn jest_test_files_are_observed_from_what_jest_compiled_and_opened() {
         let changed = r.run(JEST_RUN);
         assert_eq!(changed.code, 0, "{}", changed.out());
         assert!(
-            changed.line("hushrun: unit: with").starts_with(
+            hushrun_testkit::lines::without_saving(changed.line("hushrun: unit: with")).starts_with(
                 "hushrun: unit: with `tests: reuse`, 2 of 8 test files would have run; 6 already passed on the files they read"
             ),
             "Jest {}: {}",
@@ -422,8 +422,7 @@ fn jest_reuses_test_files_that_already_passed() {
         );
         // Its saving, or under a second, the count.
         assert!(
-            second.stderr.contains("reusing 4 test files saved about")
-                || second.stderr.contains("; 4 test files reused"),
+            hushrun_testkit::lines::says_reused(&second.stderr, 4, "test files"),
             "{}",
             second.stderr
         );

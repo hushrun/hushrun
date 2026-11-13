@@ -761,7 +761,7 @@ fn a_store_an_older_hushrun_kept_is_imported_once_and_left_as_it_was() {
     let second = r.run(&args, &[]);
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
-        second.observe_line(),
+        hushrun_testkit::lines::without_saving(second.observe_line()),
         "hushrun: unit: with `tests: reuse`, 0 of 2 test files would have run; 2 already passed on the files they read"
     );
     // The older file stays as it was, for an older hushrun; this one's store is of schema 2.

@@ -409,7 +409,7 @@ fn vitest_test_files_are_observed_from_what_their_workers_ran_and_opened() {
     let changed = r.run(VITEST_RUN);
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
-        changed.observe_line(),
+        hushrun_testkit::lines::without_saving(changed.observe_line()),
         "hushrun: unit: with `tests: reuse`, 2 of 8 test files would have run; 6 already passed on the files they read"
     );
 }
@@ -476,7 +476,7 @@ fn vitest_reuses_what_already_passed() {
         second.stdout
     );
     assert!(
-        second.stderr.contains("4 test files reused"),
+        hushrun_testkit::lines::says_reused(&second.stderr, 4, "test files"),
         "{}",
         second.stderr
     );

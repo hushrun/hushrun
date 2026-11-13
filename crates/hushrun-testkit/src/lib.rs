@@ -11,6 +11,7 @@ pub mod fake_ledger;
 pub mod fake_results;
 pub mod git;
 pub mod http;
+pub mod lines;
 pub mod scenario;
 pub mod schema;
 pub mod sigstore;

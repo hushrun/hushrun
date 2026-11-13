@@ -442,7 +442,7 @@ fn go_packages_are_observed_from_go_list_and_their_test_log() {
     let changed = r.run(GO_TEST, &[]);
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
-        changed.observe_line(),
+        hushrun_testkit::lines::without_saving(changed.observe_line()),
         "hushrun: unit: with `tests: reuse`, 1 of 3 test files would have run; 2 already passed on the files they read"
     );
 }
@@ -608,8 +608,7 @@ fn go_reuses_what_already_passed_and_audits_it() {
     // What reuse saved, from the reused packages' recorded times: below a second it says only how
     // many, from a second on how long too, which a loaded machine reaches.
     assert!(
-        second.stderr.contains("; 4 test files reused")
-            || second.stderr.contains("reusing 4 test files saved about"),
+        hushrun_testkit::lines::says_reused(&second.stderr, 4, "test files"),
         "{}",
         second.stderr
     );
