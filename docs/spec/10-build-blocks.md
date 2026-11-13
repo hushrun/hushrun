@@ -723,14 +723,19 @@ move is a file written whole or a rename:
 | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope` or `suspended`; the block is gone, or no longer matches its record |
 | claimed, sent | done, the local block discarded | `begin` or `commit` answered `differs` |
 | claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing` or `gone`, any word this version doesn't know |
-| claimed, sent | waiting, one more cut-off | the command ended while its PUT was in flight |
+| claimed, sent | waiting, one more cut-off | the end of the command cut off its `begin`, PUT or `commit` in flight |
 | waiting | done | three cut-offs |
 | any | done | the block is gone, or the marker is older than `keep_days` (B-14) |
 
 `begin` is sent a few blocks at a time, just before their PUTs, signed by the machine; PUTs run 4
 at a time, 2 while downloads are in flight; a stored block's newest hints go up with it, sealed
-with its first key. When the command ends on a person's machine, no new PUT starts and those in
-flight get 5 seconds; the rest waits for the next run, and the run says how many wait.
+with its first key. When the command ends, no new PUT starts, and everything after the command
+has one deadline (`upload::wait_at_end`, the one place that says): on a person's machine 5
+seconds for the uploads in flight and 5 for `close`, 10 in all; in CI what B-31 says, `close`
+within it. Uploads (the drain in CI, the PUTs, and the `begin` and `commit` requests in flight)
+are cut off when `close`'s 5 seconds, or half the deadline if that is less, are all that is
+left, and `close` goes within what is left; a request still waited on at the deadline, whatever
+its own timeout, is abandoned. The rest waits for the next run, and the run says how many wait.
 *Rests on:* the record of where a block came from (B-32), which keeps a block from going up under
 another name or into another org, and undoing a withdrawal; and packs being the same bytes on
 every try (B-27), so a retry after a crash finds its upload under way.
@@ -788,7 +793,9 @@ policy calls untrusted says once, in plain words, why it writes nothing to the r
 trusted blocks. The end of the command waits for uploads as one function of its context says
 (`upload::wait_at_end`): a job writing trusted blocks up to 2 minutes, any other up to 20 seconds,
 never longer than a quarter of what the compiles of the blocks still to go took, and both for the
-whole `hushrun run` call; meanwhile uploads go on, since the store goes with the job. *Rests on:*
+whole `hushrun run` call; meanwhile uploads go on, since the store goes with the job. That is one
+deadline for everything after the command, `close` included, which keeps its 5 seconds (B-29):
+never less than those, so a job with nothing to upload still sends its manifest. *Rests on:*
 the runner emptying its temporary folder when the job ends; the ID token's claims being what the
 backend trusts a job by, so a token copied out of one job can do no more than that job could, for
 minutes; the commit being what the backend checks a trusted job's token against; and a quarter of

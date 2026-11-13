@@ -391,6 +391,9 @@ pub(crate) struct Relay {
     waited: Mutex<Duration>,
     /// A marker was written: the upload loop looks now rather than at its next turn.
     wake: tokio::sync::Notify,
+    /// The end of the command cut uploads off: the upload loop's requests in flight are given up
+    /// (B-29). Set at the end's cut, cleared when the check is over.
+    cut: tokio::sync::watch::Sender<bool>,
 }
 
 static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
@@ -455,6 +458,7 @@ impl Relay {
             saved: config.saved.is_some(),
             waited: Mutex::new(Duration::ZERO),
             wake: tokio::sync::Notify::new(),
+            cut: tokio::sync::watch::Sender::new(false),
             state: Mutex::new(State {
                 phase: Phase::Opening,
                 policy: None,
@@ -1760,30 +1764,21 @@ impl Relay {
         // B-31: no ID token is minted once the end has begun.
         self.client.ending(true);
         let end = self.end();
+        // One deadline for everything after the command (B-29, B-31): uploads are cut off at
+        // `cut`, and `close` goes within what is left before `deadline`.
         let wait = upload::wait_at_end(&self.config.tuning, &end);
+        let started = Instant::now();
+        let cut = started + wait.uploads;
+        let deadline = started + wait.total;
         let relay = self.clone();
-        let waited = self.runtime.block_on(async move {
-            let started = Instant::now();
+        self.runtime.block_on(async move {
             // CI: the loop goes on claiming what waits, since the store goes with the job.
             if end.in_ci {
-                upload::drain(&relay, wait).await;
+                upload::drain(&relay, cut).await;
             }
             relay.ending.store(true, Ordering::Relaxed);
-            let left = if end.in_ci {
-                wait.saturating_sub(started.elapsed())
-            } else {
-                wait
-            };
-            upload::settle(&relay, left).await;
-            started.elapsed()
+            upload::settle(&relay, cut, deadline).await;
         });
-        if end.in_ci {
-            let mut spent = self
-                .waited
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *spent += waited;
-        }
         let check = self.state().check.take();
         if let Some(check) = &check {
             check.stop_serving.store(true, Ordering::Relaxed);
@@ -1797,20 +1792,25 @@ impl Relay {
             let state = self.state();
             !matches!(state.phase, Phase::Stopped(_) | Phase::Opening) && state.policy.is_some()
         };
-        if let (true, false, Some(check)) = (shares, self.saved, &check) {
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .min(self.config.tuning.close);
+        if let (true, false, Some(check), false) = (shares, self.saved, &check, left.is_zero()) {
             let close = self.close_request(check, entries);
             let relay = self.clone();
             self.runtime.block_on(async move {
                 let _ = relay
                     .client
-                    .post::<_, serde_json::Value>(
-                        blocks::CLOSE_PATH,
-                        &close,
-                        relay.config.tuning.close,
-                        None,
-                    )
+                    .post::<_, serde_json::Value>(blocks::CLOSE_PATH, &close, left, None)
                     .await;
             });
+        }
+        if end.in_ci {
+            let mut spent = self
+                .waited
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *spent += started.elapsed();
         }
         // Downloads nobody opened are dropped and counted; the run's folder goes.
         let mut state = self.state();
@@ -1864,6 +1864,7 @@ impl Relay {
         state.tally = Tally::default();
         drop(state);
         self.ending.store(false, Ordering::Relaxed);
+        self.cut.send_replace(false);
         self.client.ending(false);
         lines
     }

@@ -10,7 +10,7 @@
 //! | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope`, `suspended`; or the block is gone here, or can't be packed as recorded |
 //! | claimed, sent | done, the local block discarded | `begin` or `commit` answered `differs` |
 //! | claimed, sent | waiting, with a date | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing` or `gone`, any word this version doesn't know |
-//! | claimed, sent | waiting, one more cut-off | the command ended while its PUT was in flight |
+//! | claimed, sent | waiting, one more cut-off | the command's end cut off its `begin`, PUT or `commit` in flight |
 //! | waiting | done | three cut-offs |
 //!
 //! `begin` goes a few blocks at a time, just before their PUTs: links live 15 minutes. PUTs run
@@ -97,21 +97,39 @@ pub(crate) struct End {
     pub(crate) waited: Duration,
 }
 
-/// How long the end of a command waits for uploads (B-29, B-31), the one place that says: on a
-/// person's machine the tuning's 5 seconds for those in flight. In CI, for every block still to
-/// go: a job that writes trusted blocks up to 2 minutes, any other up to 20 seconds, never more
-/// than a quarter of what the waiting blocks' compiles took, and both for the whole `hushrun run`
-/// call, less what its earlier checks waited.
-pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> Duration {
-    if !end.in_ci {
-        return tuning.end_wait;
-    }
-    let most = if end.trusted {
-        tuning.ci_trusted_wait
+/// The end of a command's one deadline (B-29, B-31), from the moment the command ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EndWait {
+    /// Uploads (the drain, PUTs, and `begin` and `commit` in flight) are cut off then.
+    pub(crate) uploads: Duration,
+    /// Everything after the command, `close` included, is over then.
+    pub(crate) total: Duration,
+}
+
+/// How long the end of a command waits (B-29, B-31), the one place that says. Uploads may take,
+/// on a person's machine, the tuning's 5 seconds for those in flight; in CI, for every block
+/// still to go, up to 2 minutes for a job that writes trusted blocks and 20 seconds for any
+/// other, never more than a quarter of what the waiting blocks' compiles took, and both for the
+/// whole `hushrun run` call, less what its earlier checks waited. The whole end is that and
+/// `close`'s 5 seconds on a person's machine; in CI that, and never less than `close`'s time.
+/// Uploads stop when `close`'s time (or half the whole, if less) is all that is left.
+pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> EndWait {
+    let (uploads, total) = if end.in_ci {
+        let most = if end.trusted {
+            tuning.ci_trusted_wait
+        } else {
+            tuning.ci_wait
+        };
+        let uploads = most.saturating_sub(end.waited).min(end.waiting_cost / 4);
+        (uploads, uploads.max(tuning.close))
     } else {
-        tuning.ci_wait
+        (tuning.end_wait, tuning.end_wait + tuning.close)
     };
-    most.saturating_sub(end.waited).min(end.waiting_cost / 4)
+    let for_close = tuning.close.min(total / 2);
+    EndWait {
+        uploads: uploads.min(total - for_close),
+        total,
+    }
 }
 
 fn class_of(class: hushrun_build::model::Class) -> Class {
@@ -152,6 +170,10 @@ impl Relay {
             }
             let (go, running) = {
                 let mut state = self.state();
+                // The check it was started for is over: a later check starts its own.
+                if state.check.is_none() {
+                    return;
+                }
                 let phase = state.phase_now(Instant::now()).clone();
                 let writes = state.uploads && state.policy.as_ref().is_some_and(|p| p.writes);
                 let running = state
@@ -288,17 +310,23 @@ impl Relay {
             .as_ref()
             .map(|machine| machine.begin_signature(&self.by.org, &body));
         let begun = self
-            .client
-            .post_bytes::<BeginResponse>(
+            .until_cut(self.client.post_bytes::<BeginResponse>(
                 blocks::BEGIN_PATH,
                 body,
                 self.config.tuning.lookup,
                 signature,
-            )
+            ))
             .await;
         let answers = match begun {
-            Ok(answered) => answered.body.blocks,
-            Err(failure) => {
+            Some(Ok(answered)) => answered.body.blocks,
+            None => {
+                for (marker, p) in packed {
+                    p.pack.remove();
+                    release(&marker, Back::CutOff);
+                }
+                return;
+            }
+            Some(Err(failure)) => {
                 if let Failure::Refused(..) = failure {
                     self.state().stop(Stop::Refused(failure.line()));
                 }
@@ -371,16 +399,20 @@ impl Relay {
             commit: self.config.commit.clone(),
         };
         let committed = self
-            .client
-            .post::<_, CommitResponse>(
+            .until_cut(self.client.post::<_, CommitResponse>(
                 blocks::COMMIT_PATH,
                 &request,
                 self.config.tuning.lookup,
                 None,
-            )
+            ))
             .await;
         match committed {
-            Ok(answered) => {
+            None => {
+                for marker in sent {
+                    release(&marker, Back::CutOff);
+                }
+            }
+            Some(Ok(answered)) => {
                 let mut stored = Vec::new();
                 for marker in sent {
                     let address: Hex32 = Relay::address(&marker.key);
@@ -399,7 +431,7 @@ impl Relay {
                 }
                 self.send_hints(&stored).await;
             }
-            Err(failure) => {
+            Some(Err(failure)) => {
                 if let Failure::Refused(..) = failure {
                     self.state().stop(Stop::Refused(failure.line()));
                 }
@@ -412,6 +444,21 @@ impl Relay {
 }
 
 impl Relay {
+    /// A request of the upload loop, given up (`None`) when the end of the command cuts uploads
+    /// off (B-29): it is waited for no longer than the end's one deadline.
+    async fn until_cut<T>(&self, request: impl std::future::Future<Output = T>) -> Option<T> {
+        let mut cut = self.cut.subscribe();
+        let cut = async move {
+            let _ = cut.wait_for(|cut| *cut).await;
+        };
+        let request = std::pin::pin!(request);
+        let cut = std::pin::pin!(cut);
+        match futures_util::future::select(request, cut).await {
+            futures_util::future::Either::Left((answer, _)) => Some(answer),
+            futures_util::future::Either::Right(_) => None,
+        }
+    }
+
     /// B-30: the hints of the first keys of blocks just stored, sealed with each first key, so
     /// another machine can find the second key. The newest few of each, within the protocol's
     /// limits; a hint is never trusted, so one that fails to go costs only a reuse elsewhere.
@@ -457,15 +504,14 @@ impl Relay {
             commit: self.config.commit.clone(),
         };
         let sent = self
-            .client
-            .post::<_, blocks::HintsResponse>(
+            .until_cut(self.client.post::<_, blocks::HintsResponse>(
                 blocks::HINTS_PATH,
                 &request,
                 self.config.tuning.lookup,
                 None,
-            )
+            ))
             .await;
-        if let Err(failure @ Failure::Refused(..)) = sent {
+        if let Some(Err(failure @ Failure::Refused(..))) = sent {
             self.state().stop(Stop::Refused(failure.line()));
         }
     }
@@ -474,11 +520,11 @@ impl Relay {
 /// How many of a first key's newest hints go up with its block.
 const HINTS_PER_BLOCK: usize = 2;
 
-/// B-31: at the end of a CI job's command, the upload loop goes on, up to `wait`, while a block
+/// B-31: at the end of a CI job's command, the upload loop goes on, up to `until`, while a block
 /// of this run's is still to go: one waiting that may go now, or one this run holds. It stops
 /// early once none is, or the loop stopped.
-pub(crate) async fn drain(relay: &Arc<Relay>, wait: Duration) {
-    let deadline = Instant::now() + wait;
+pub(crate) async fn drain(relay: &Arc<Relay>, until: Instant) {
+    let deadline = until;
     let outbox = Outbox::new(&relay.config.store);
     while Instant::now() < deadline {
         relay.wake.notify_one();
@@ -495,22 +541,23 @@ pub(crate) async fn drain(relay: &Arc<Relay>, wait: Duration) {
     }
 }
 
-/// When the command ends (B-29): no new PUT starts; those in flight get `wait`, then are cut off
-/// (their markers count a cut-off). Returns once the check's upload loop has stopped.
-pub(crate) async fn settle(relay: &Arc<Relay>, wait: Duration) {
-    let deadline = Instant::now() + wait;
+/// When the command ends (B-29): no new PUT starts; the PUTs, `begin`s and `commit`s in flight
+/// get until `cut`, then are cut off (their markers count a cut-off). Returns once the check's
+/// upload loop has stopped, or at `deadline`, the end's own, whatever it is doing.
+pub(crate) async fn settle(relay: &Arc<Relay>, cut: Instant, deadline: Instant) {
     loop {
-        let (uploading, puts) = {
-            let state = relay.state();
-            (state.uploading, state.puts.len())
-        };
-        if !uploading {
+        if !relay.state().uploading {
             return;
         }
-        if Instant::now() >= deadline && puts > 0 {
+        let now = Instant::now();
+        if now >= cut {
+            relay.cut.send_replace(true);
             for handle in relay.state().puts.values() {
                 handle.abort();
             }
+        }
+        if now >= deadline {
+            return;
         }
         tokio::time::sleep(relay.config.tuning.tick).await;
     }
@@ -525,7 +572,7 @@ mod tests {
     fn the_end_of_a_command_waits_as_long_as_its_context_says_and_no_longer() {
         let tuning = Tuning::default();
         let end = |in_ci, trusted, cost_s: u64, waited_s: u64| {
-            wait_at_end(
+            let wait = wait_at_end(
                 &tuning,
                 &End {
                     in_ci,
@@ -533,22 +580,24 @@ mod tests {
                     waiting_cost: Duration::from_secs(cost_s),
                     waited: Duration::from_secs(waited_s),
                 },
-            )
+            );
+            (wait.uploads.as_millis(), wait.total.as_millis())
         };
-        let s = Duration::from_secs;
-        // A person's machine: the 5 seconds for those in flight, whatever waits.
-        assert_eq!(end(false, true, 10_000, 0), s(5));
-        assert_eq!(end(false, false, 0, 0), s(5));
-        // CI: up to 2 minutes for a trusted job, 20 seconds for any other.
-        assert_eq!(end(true, true, 10_000, 0), s(120));
-        assert_eq!(end(true, false, 10_000, 0), s(20));
-        // Never more than a quarter of what the waiting blocks' compiles took.
-        assert_eq!(end(true, true, 40, 0), s(10));
-        assert_eq!(end(true, false, 40, 0), s(10));
-        assert_eq!(end(true, true, 0, 0), s(0));
+        // A person's machine: the 5 seconds for those in flight, whatever waits, then `close`'s 5.
+        assert_eq!(end(false, true, 10_000, 0), (5_000, 10_000));
+        assert_eq!(end(false, false, 0, 0), (5_000, 10_000));
+        // CI: up to 2 minutes for a trusted job, 20 seconds for any other, `close` within them.
+        assert_eq!(end(true, true, 10_000, 0), (115_000, 120_000));
+        assert_eq!(end(true, false, 10_000, 0), (15_000, 20_000));
+        // Never more than a quarter of what the waiting blocks' compiles took; `close` keeps its
+        // 5 seconds, or half the whole when that is less.
+        assert_eq!(end(true, true, 40, 0), (5_000, 10_000));
+        assert_eq!(end(true, false, 32, 0), (4_000, 8_000));
+        assert_eq!(end(true, false, 4, 0), (1_000, 5_000));
+        assert_eq!(end(true, true, 0, 0), (0, 5_000));
         // For the whole call: what earlier checks waited is spent.
-        assert_eq!(end(true, false, 10_000, 15), s(5));
-        assert_eq!(end(true, true, 10_000, 200), s(0));
+        assert_eq!(end(true, false, 10_000, 15), (2_500, 5_000));
+        assert_eq!(end(true, true, 10_000, 200), (0, 5_000));
     }
 
     // covers: B-29

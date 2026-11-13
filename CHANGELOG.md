@@ -183,6 +183,12 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: everything after a command, the last uploads and `close`, has one deadline. A
+  `begin` or `commit` that doesn't answer is cut off at it, as a PUT was, and counts a cut-off;
+  `close` goes within it. In CI that is the end's 20 seconds (2 minutes for a job writing trusted
+  blocks), never less than `close`'s 5; on a person's machine 5 seconds for uploads and 5 for
+  `close`. Before, a stalled `begin` ran out its own 10 seconds and `close` added 5: a job stayed
+  29.3 seconds after its command on a 20-second limit.
 - Build blocks in GitHub Actions: a slow ID token endpoint no longer slows cargo or holds the job
   after its command. A token near its expiry is renewed in the background and still sent until it
   expires, also when the renewal fails; a request with no token waits for the one mint in flight

@@ -1848,3 +1848,53 @@ fn a_slow_id_token_endpoint_holds_no_request_past_its_deadline_nor_the_end_past_
         "{lines:?}"
     );
 }
+
+// covers: B-29, B-31
+#[test]
+fn a_stalled_begin_or_commit_is_cut_off_at_the_end_s_one_deadline() {
+    // A CI job whose uploads may take 3 seconds: a `begin`, then a `commit`, that never answer,
+    // each of which would otherwise run out its own 10 seconds.
+    for stalled in [route::BEGIN, route::COMMIT] {
+        let fake = FakeBuild::start();
+        fake.delay(stalled, Duration::from_secs(30));
+        let m = machine();
+        let relay = start(&fake, &m, |c| {
+            with_id_token(&fake)(c);
+            c.tuning.lookup = Duration::from_secs(10);
+            c.tuning.ci_wait = Duration::from_secs(3);
+            c.tuning.ci_trusted_wait = Duration::from_secs(3);
+        });
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        let by = job_identity(&fake, &relay);
+        let (key, step) = block(&m.store, 64, 5_000, Some(by));
+        assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
+        until("the stalled request was sent", || fake.count(stalled) > 0);
+        let started = Instant::now();
+        relay.end_check(&[]);
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(4), "{stalled}: {took:?}");
+        // `close` went within it, and the block waits, claimed by nobody, with a cut-off.
+        assert_eq!(fake.count(route::CLOSE), 1, "{stalled}");
+        assert!(no_claims(&m), "{stalled}");
+        let left = waiting(&m);
+        assert_eq!(left.len(), 1, "{stalled}");
+        assert_eq!(left[0].cutoffs, 1, "{stalled}");
+    }
+    // On a person's machine: 2 seconds for uploads in flight and 2 for `close`, 4 in all.
+    let fake = FakeBuild::start();
+    fake.delay(route::BEGIN, Duration::from_secs(30));
+    let m = machine();
+    let relay = start(&fake, &m, |c| c.tuning.lookup = Duration::from_secs(10));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let (key, step) = block(&m.store, 65, 5_000, Some(me(&fake)));
+    ask(&relay, built(key, step));
+    until("begin was sent", || fake.count(route::BEGIN) > 0);
+    let started = Instant::now();
+    relay.end_check(&[]);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    assert_eq!(fake.count(route::CLOSE), 1);
+    assert!(no_claims(&m));
+}
