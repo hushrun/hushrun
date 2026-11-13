@@ -1437,7 +1437,7 @@ fn a_source_saved_in_the_second_its_object_was_made_says_what_cures_it() {
             p.build();
             let built = p.run(CTEST, &[]);
             assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
-        } else {
+        } else if make_whole_seconds() {
             assert!(
                 said[0].ends_with(
                     "in the same second: make compares whole seconds, and won't make it again; touch tests/t_misc.c, then build before ctest"
@@ -1445,8 +1445,28 @@ fn a_source_saved_in_the_second_its_object_was_made_says_what_cures_it() {
                 "{at}: {}",
                 said[0]
             );
+        } else {
+            // GNU Make 4 compares the times whole too: a build cures it.
+            assert!(
+                said[0].ends_with("; build before ctest") && !said[0].contains("touch"),
+                "{at}: {}",
+                said[0]
+            );
+            p.build();
+            let built = p.run(CTEST, &[]);
+            assert!(not_recorded(&built).is_empty(), "{at}: {}", built.stderr);
         }
     }
+}
+
+/// Whether the `make` the Makefiles build runs compares times by the second, as GNU Make before 4
+/// (macOS's 3.81) does, which is what hushrun asks it.
+fn make_whole_seconds() -> bool {
+    let version = which("make")
+        .and_then(|make| Command::new(make).arg("--version").output().ok())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    !version.contains("GNU Make ") || version.contains("GNU Make 3.")
 }
 
 // covers: C-49, C-30
