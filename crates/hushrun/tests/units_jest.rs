@@ -2539,7 +2539,13 @@ fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
                 file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
                 file(".gitignore", "node_modules\n"),
                 file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
-                file("jest.config.js", CONFIG),
+                // A cache of its own, beside the repository: `--clearCache` empties Jest's cache
+                // directory, which by default every Jest of this machine shares in the system's
+                // temporary directory, other tests' and the person's included.
+                file(
+                    "jest.config.js",
+                    "module.exports = { testEnvironment: 'node', transform: {}, cacheDirectory: '<rootDir>/../jest-cache' };\n",
+                ),
                 file("test/a.test.js", "test('a1', () => {});\n"),
             ],
         );
