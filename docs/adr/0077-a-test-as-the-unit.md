@@ -388,3 +388,11 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
   The one function that words the saving now bounds it by the longest a run of the check that
   reused nothing took here, which the store keeps with the check (`whole_ms`); with none kept, the
   count is said without a time.
+- **Counts in the unit their sentence uses.** `observe` on testify said "17 of 473 tests would
+  have run …; hushrun couldn't follow all that 0 of them read": the package not followed had
+  17 tests, each kept from a pass by something else first (not finished), so none was counted.
+  Where the line counts tests, its tail now counts every test of a test file with something not
+  followed outside its tests' windows, and each test with something inside its own. The reason
+  for every test file running (`why_every`) takes an adapter's word for the whole last run, after
+  what changed and before what the rows say, for the adapters that will send one (a runner that
+  executed nothing); units an adapter never leaves out have no key and count as running.

@@ -2003,6 +2003,51 @@ fn what_reuse_saved_is_never_more_than_the_check_took_running_everything() {
     assert!(saved.is_some_and(|s| s < 5.0), "{line}");
 }
 
+// covers: C-33, C-39
+#[test]
+fn observe_counts_what_it_couldnt_follow_in_the_unit_its_line_counts() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_a.py started a process outside its tests (a package's TestMain, a module that runs
+    // one at import), and its runner couldn't tell its tests' ends: its two tests would always
+    // run, whatever else kept each from a pass. The line counts tests, so does its tail.
+    let python = python();
+    let names = ["test_a.py", "test_b.py", "test_c.py"];
+    let mut files = vec![
+        (
+            "hushrun.yaml".to_string(),
+            yaml("{mode: observe, unit: test}"),
+        ),
+        (".gitignore".to_string(), "__pycache__/\n".to_string()),
+        ("fake.py".to_string(), RULES_RUNNER.to_string()),
+    ];
+    for name in names {
+        files.push((name.to_string(), "def t1():\n    pass\n".to_string()));
+    }
+    let r = repo_of(&files);
+    let units = json!([
+        {"unit": "test_a.py", "selected": 2, "finished": 2, "reads": ["test_a.py"],
+         "notFollowed": [{"why": "subprocess", "detail": "git"}],
+         "tests": [{"id": "t1"}, {"id": "t2"}]},
+        {"unit": "test_b.py", "selected": 1, "finished": 1, "reads": ["test_b.py"],
+         "tests": [{"id": "t1", "finished": true}]},
+        {"unit": "test_c.py", "selected": 1, "finished": 1, "reads": ["test_c.py"],
+         "tests": [{"id": "t1", "finished": true}]}
+    ])
+    .to_string();
+    let env = [("FAKE_UNITS", units.as_str())];
+    let first = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    r.write("test_c.py", "def t1():\n    pass\n# changed\n");
+    let second = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
+    let line = line(&second, "hushrun: unit: with");
+    assert!(
+        line.contains("hushrun couldn't follow all that 2 of them read (a process it started), so they would always run"),
+        "{line}"
+    );
+}
+
 /// `hushrun why unit <asked> --format json`, read.
 fn why_json(r: &Repo, asked: &str) -> Value {
     let ran = r.run(&["why", "unit", asked, "--format", "json"], &[]);

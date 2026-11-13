@@ -887,6 +887,7 @@ impl Session {
                 &sources,
                 known.iter().map(|(unit, _)| unit),
                 self.adapter.test_file(),
+                None,
             );
             format!("{all}: {why}")
         } else if reused == 0 {
@@ -1425,6 +1426,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             &sources,
             found.known.iter().map(|(unit, _)| unit),
             adapter.test_file(),
+            None,
         )
     });
     Some(Previewed::Plan {
@@ -2340,6 +2342,9 @@ fn decide(
     let mut told_tests = false;
     let mut saved_ms = 0u64;
     let mut not_observed: BTreeMap<String, u64> = BTreeMap::new();
+    // \[C-39\] The tests that always run as not followed: every test of a test file with what
+    // wasn't followed outside every test's window, and each test with something inside its own.
+    let mut tests_not_followed: usize = 0;
     for (unit, seen) in &seen {
         counts.total += 1;
         let mut facts = seen.facts.clone();
@@ -2423,6 +2428,16 @@ fn decide(
             for why in whole.not_followed.iter().map(|n| n.why.clone()) {
                 *not_observed.entry(why).or_default() += 1;
             }
+        }
+        if let Some(states) = &test_states {
+            tests_not_followed += if state == State::NotObserved && !facts.not_followed.is_empty() {
+                states.len()
+            } else {
+                states
+                    .values()
+                    .filter(|(test, _)| *test == State::NotObserved)
+                    .count()
+            };
         }
         if let Some(states) = &test_states {
             for (test, _) in states.values() {
@@ -2770,6 +2785,7 @@ fn decide(
                 &out.sources,
                 out.units.keys(),
                 mode.noun,
+                None,
             );
             format!("{all}: {why}")
         } else {
@@ -2780,13 +2796,11 @@ fn decide(
             )
         };
         if !not_observed.is_empty() {
-            // \[C-39\] Counted as the line counts: tests, where it counts tests.
+            // \[C-39\] Counted as the line counts: tests, where it counts tests: every test of a test
+            // file not followed, whatever else kept each from a pass, and each test not followed in
+            // the others.
             let n = if told_tests && tests_reused > 0 {
-                out.tests
-                    .values()
-                    .flat_map(BTreeMap::values)
-                    .filter(|s| **s == State::NotObserved)
-                    .count()
+                tests_not_followed
             } else {
                 out.units
                     .values()
@@ -2891,7 +2905,11 @@ fn describe(why: &str) -> String {
 /// order of truth. A file of the rest set changed, or a source is new or gone ([`why_all`]); a file
 /// every one of them read the last time changed or is gone; none was followed the last time (and
 /// why, from their rows); none kept a pass the last time (and why, from their rows); else none had
-/// passed here yet on the files it read. `noun` is the adapter's word for them.
+/// passed here yet on the files it read. `noun` is the adapter's word for them. `said` is what an
+/// adapter said of the whole of the last run, such as a runner that executed nothing (tasks up
+/// to date): it comes after what changed and before what the rows say. Units an adapter never
+/// leaves out have no key, so a plan counts them as running already.
+#[allow(clippy::too_many_arguments)]
 fn why_every<'a>(
     map: &store::Map,
     tree: &Tree,
@@ -2899,30 +2917,23 @@ fn why_every<'a>(
     sources: &BTreeSet<String>,
     units: impl Iterator<Item = &'a String> + Clone,
     noun: &str,
+    said: Option<&str>,
 ) -> String {
     if let Some(why) = why_all(map, rest, sources) {
         return why;
+    }
+    let changed = why_every_read(map, tree, units.clone(), noun);
+    if let Some(why) = changed {
+        return why;
+    }
+    if let Some(said) = said.filter(|s| !s.is_empty()) {
+        return said.to_string();
     }
     let none_yet = "none had passed here yet on the files it read".to_string();
     let rows: Option<Vec<&Mapped>> = units.clone().map(|unit| map.units.get(unit)).collect();
     let Some(rows) = rows.filter(|rows| !rows.is_empty()) else {
         return none_yet;
     };
-    let every = format!("every {noun}");
-    // A file every one of them read, as it was then, now changed or gone.
-    let (first, others) = rows.split_first().unwrap_or((&rows[0], &[]));
-    for (path, then) in &first.reads {
-        if !others.iter().all(|row| row.reads.get(path) == Some(then)) {
-            continue;
-        }
-        match tree.entry(path) {
-            None => return format!("{path} is gone, and {every} read it"),
-            Some((kind, hash)) if format!("{kind} {hash}") != *then => {
-                return format!("{path} changed, and {every} reads it");
-            }
-            Some(_) => {}
-        }
-    }
     // None of them followed the last time: what wasn't, as their rows say.
     if rows.iter().all(|row| !row.not_followed.is_empty()) {
         let whys: BTreeSet<String> = rows
@@ -2943,6 +2954,32 @@ fn why_every<'a>(
         return format!("none kept a pass the last time they ran here: {why}");
     }
     none_yet
+}
+
+/// \[C-34\] A file every one of `units` read the last time, as it was then, now changed or gone.
+fn why_every_read<'a>(
+    map: &store::Map,
+    tree: &Tree,
+    units: impl Iterator<Item = &'a String>,
+    noun: &str,
+) -> Option<String> {
+    let rows: Vec<&Mapped> = units
+        .map(|unit| map.units.get(unit))
+        .collect::<Option<_>>()?;
+    let (first, others) = rows.split_first()?;
+    for (path, then) in &first.reads {
+        if !others.iter().all(|row| row.reads.get(path) == Some(then)) {
+            continue;
+        }
+        match tree.entry(path) {
+            None => return Some(format!("{path} is gone, and every {noun} read it")),
+            Some((kind, hash)) if format!("{kind} {hash}") != *then => {
+                return Some(format!("{path} changed, and every {noun} reads it"));
+            }
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 fn why_all(

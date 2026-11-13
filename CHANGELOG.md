@@ -171,6 +171,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   Jest, a failed Vitest run with an error no test owns, a stale build, what was left out twice):
   every one the run decided keeps a row with why. Contract: an adapter's facts file may say
   `notKept`, why no pass of a failed run whose failures aren't told by unit is kept.
+- `observe`'s count of tests it couldn't follow counts every test of a test file not followed, no
+  longer 0 when each was kept from a pass for another reason first.
 - What reuse saved is never said to be more than the check took here when it ran everything: a
   runner with workers no longer saves many times the suite's own time.
 - `observe` and a plan count the same test files: a data file pytest's doctest plugin collects
