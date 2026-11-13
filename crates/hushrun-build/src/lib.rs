@@ -72,6 +72,7 @@ pub mod script;
 pub mod session;
 pub mod settings;
 pub mod shape;
+pub mod share;
 pub mod sidecar;
 pub mod store;
 pub mod sweep;

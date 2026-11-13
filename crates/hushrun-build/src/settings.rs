@@ -36,6 +36,9 @@ pub struct Settings {
     pub min_free_gb: u32,
     /// What the wrapper does with a program on an Apple target (B-9).
     pub programs: Programs,
+    /// How much of the org's shared store this machine takes part in (B-33): `on`, `observe` or
+    /// `off`. It lowers the org's shared mode for this machine and never raises it.
+    pub share: Mode,
 }
 
 impl Default for Settings {
@@ -47,6 +50,7 @@ impl Default for Settings {
             env: Vec::new(),
             min_free_gb: MIN_FREE_GB,
             programs: Programs::default(),
+            share: Mode::On,
         }
     }
 }
@@ -113,6 +117,7 @@ struct Stored {
     env: Option<Vec<String>>,
     min_free_gb: Option<u32>,
     programs: Option<Programs>,
+    share: Option<Mode>,
 }
 
 /// The file as written: every field.
@@ -125,6 +130,7 @@ struct Written<'a> {
     env: &'a [String],
     min_free_gb: u32,
     programs: Programs,
+    share: Mode,
 }
 
 impl Settings {
@@ -133,6 +139,7 @@ impl Settings {
         Settings {
             mode: overrides.mode.unwrap_or(self.mode),
             keep_days: overrides.keep_days.unwrap_or(self.keep_days),
+            share: overrides.share.unwrap_or(self.share),
             ..self.clone()
         }
     }
@@ -187,6 +194,7 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         env: stored.env.unwrap_or(defaults.env),
         min_free_gb: stored.min_free_gb.unwrap_or(defaults.min_free_gb),
         programs: stored.programs.unwrap_or(defaults.programs),
+        share: stored.share.unwrap_or(defaults.share),
     };
     settings.check(path)?;
     Ok(settings)
@@ -242,6 +250,7 @@ fn save(path: &Path, settings: &Settings) -> io::Result<()> {
         env: &settings.env,
         min_free_gb: settings.min_free_gb,
         programs: settings.programs,
+        share: settings.share,
     };
     let mut bytes = serde_json::to_vec_pretty(&written)?;
     bytes.push(b'\n');
@@ -284,6 +293,8 @@ pub struct Overrides {
     /// `HUSHRUN_BUILD_DIR`: the store's folder instead of `<cache directory>/build`. The settings
     /// file doesn't hold it, so whoever opens the store reads it from here.
     pub dir: Option<PathBuf>,
+    /// `HUSHRUN_BUILD_SHARE`: the share setting for this command (B-33).
+    pub share: Option<Mode>,
 }
 
 impl Overrides {
@@ -332,10 +343,19 @@ impl Overrides {
             }
             None => None,
         };
+        let share = match text(env, "HUSHRUN_BUILD_SHARE", "off, observe or on")? {
+            None => None,
+            Some(value) => Some(Mode::parse(&value).ok_or(SettingsError::Variable {
+                name: "HUSHRUN_BUILD_SHARE",
+                value,
+                expected: "off, observe or on",
+            })?),
+        };
         Ok(Overrides {
             mode,
             keep_days,
             dir,
+            share,
         })
     }
 }
@@ -444,11 +464,11 @@ mod tests {
     fn an_unknown_field_is_refused() {
         let (_dir, path) = file();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"version": 1, "mode": "on", "share": true}"#).unwrap();
+        fs::write(&path, r#"{"version": 1, "mode": "on", "upload": true}"#).unwrap();
         let err = load(&path).unwrap_err();
         assert!(matches!(err, SettingsError::Invalid { .. }), "{err}");
         assert!(err.to_string().contains("build.json"), "{err}");
-        assert!(err.to_string().contains("share"), "{err}");
+        assert!(err.to_string().contains("upload"), "{err}");
     }
 
     // covers: B-21
@@ -576,6 +596,21 @@ mod tests {
         let settings = Settings::default().with(&overrides);
         assert_eq!(settings.keep_days, 3);
         assert_eq!(settings.mode, Mode::Off);
+    }
+
+    // covers: B-33
+    #[test]
+    fn the_share_setting_is_saved_and_hushrun_build_share_sets_it_for_one_command() {
+        let (_dir, path) = file();
+        assert_eq!(load(&path).unwrap().share, Mode::On);
+        update(&path, |settings| settings.share = Mode::Observe).unwrap();
+        let settings = load(&path).unwrap();
+        assert_eq!(settings.share, Mode::Observe);
+        let overrides = Overrides::from(&env(&[("HUSHRUN_BUILD_SHARE", "off")])).unwrap();
+        assert_eq!(settings.with(&overrides).share, Mode::Off);
+        assert_eq!(load(&path).unwrap().share, Mode::Observe);
+        let wrong = Overrides::from(&env(&[("HUSHRUN_BUILD_SHARE", "yes")])).unwrap_err();
+        assert!(wrong.to_string().contains("HUSHRUN_BUILD_SHARE"), "{wrong}");
     }
 
     // covers: B-13
