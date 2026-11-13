@@ -183,6 +183,8 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: a `TMPDIR` too long for a socket's path falls through to `/tmp` for the relay's
+  socket, as an unset one does. Before, it turned sharing off for the run.
 - Build blocks: in a repository with several scopes in its `hushrun.yaml`, `hushrun run NAME --
   COMMAND` without `--scope` shares build blocks, which belong to the repository, not to a scope.
   It makes no results lookup, so its `open` asks whether the org shares, and an org that doesn't

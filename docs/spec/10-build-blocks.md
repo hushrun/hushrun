@@ -647,7 +647,8 @@ once for each check, since a manifest belongs to a check. The wrappers reach it 
 socket whose path the session names, one request per connection, one line of JSON each way; the
 wrapper has no network code. The socket lives in the session's folder, made mode 0700; when that
 path is longer than 100 bytes (macOS refuses one over 103), in a new folder of a random name,
-mode 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`. Before binding, the folder MUST
+mode 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`, each tried when the one before
+isn't set, isn't a folder, or would give a path too long, so that a long `$TMPDIR` costs nothing. Before binding, the folder MUST
 be a real folder, not a link, owned by this user, with mode 0700; before sending a key, a
 wrapper MUST find the socket owned by its own user. A check that fails turns sharing off for the
 run with one line. A wrapper waits at most 30 seconds; no socket, no answer, an answer it can't

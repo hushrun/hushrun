@@ -1,6 +1,7 @@
 //! B-26: where the relay listens. A Unix socket in the session's folder (made 0700 by the
 //! session), or, when that path is too long for a socket, in a folder `mkdtemp` makes, mode
-//! 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`. Before it binds, the folder is
+//! 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`: each tried when the one before
+//! isn't set, isn't a folder, or would give a path too long. Before it binds, the folder is
 //! checked: a real folder, not a link, owned by this user, mode 0700. A check that fails turns
 //! sharing off for the run, and the caller says so in one line.
 
@@ -40,11 +41,21 @@ pub(crate) fn bind(
     let (folder, own_folder) = if wanted.as_os_str().len() <= MOST_SOCKET_PATH {
         (session_folder.to_path_buf(), None)
     } else {
+        // The first place, in order, whose socket's path would be short enough.
+        let fits = |parent: &Path| {
+            parent
+                .join(format!("{FOLDER_PREFIX}{}", "x".repeat(FOLDER_RANDOM)))
+                .join(SOCKET)
+                .as_os_str()
+                .len()
+                <= MOST_SOCKET_PATH
+        };
         let parent = ["XDG_RUNTIME_DIR", "TMPDIR"]
             .iter()
             .filter_map(|name| env(name).filter(|value| !value.is_empty()))
             .map(PathBuf::from)
-            .find(|path| path.is_absolute() && path.is_dir())
+            .chain(std::iter::once(PathBuf::from("/tmp")))
+            .find(|path| path.is_absolute() && path.is_dir() && fits(path))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let made = mkdtemp(&parent)?;
         (made.clone(), Some(made))
@@ -85,6 +96,10 @@ pub(crate) fn bind(
     ))
 }
 
+/// The start of the name of a folder [`mkdtemp`] makes, and how many random characters follow.
+const FOLDER_PREFIX: &str = "hushrun-";
+const FOLDER_RANDOM: usize = 6;
+
 /// A new folder under `parent` that this call alone made, mode 0700, with a name nobody can
 /// guess (`tempfile`'s, which makes it with `mkdir` and fails on a name taken by anyone, so a
 /// folder another user made first is never used).
@@ -92,7 +107,8 @@ pub(crate) fn bind(
 fn mkdtemp(parent: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt as _;
     let made = tempfile::Builder::new()
-        .prefix("hushrun-")
+        .prefix(FOLDER_PREFIX)
+        .rand_bytes(FOLDER_RANDOM)
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(parent)
         .map(tempfile::TempDir::keep)
@@ -147,6 +163,17 @@ mod tests {
             std::fs::metadata(&own).unwrap().permissions().mode() & 0o777,
             0o700
         );
+        bound.remove();
+        assert!(!own.exists());
+        // A `TMPDIR` too long for a socket: the next place, `/tmp`, rather than no sharing.
+        let deep = dir.path().join("t".repeat(110));
+        std::fs::create_dir(&deep).unwrap();
+        let tmpdir = deep.as_os_str().to_owned();
+        let env = move |name: &str| (name == "TMPDIR").then(|| tmpdir.clone());
+        let bound = bind(&long, &env).unwrap();
+        let own = bound.own_folder.clone().unwrap();
+        assert!(own.starts_with("/tmp"), "{}", own.display());
+        assert!(bound.path.as_os_str().len() <= MOST_SOCKET_PATH);
         bound.remove();
         assert!(!own.exists());
     }
