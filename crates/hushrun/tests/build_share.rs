@@ -877,3 +877,70 @@ fn a_fetch_serves_only_its_own_repository_and_org_and_only_while_the_backend_can
         "{stderr}"
     );
 }
+
+// covers: B-36, B-31
+#[test]
+fn a_github_job_whose_backend_is_cut_off_reuses_what_its_setup_step_fetched() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
+
+    // A coding agent's job: its setup step fetches with the job's ID token.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let runner_temp = b.root.join("runner-temp");
+    let mut cmd = b.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &runner_temp);
+    let output = cmd
+        .env("GITHUB_REPOSITORY_ID", "4242")
+        .env("GITHUB_RUN_ID", "300")
+        .env("GITHUB_RUN_ATTEMPT", "1")
+        .env("GITHUB_JOB", "copilot")
+        .args(["build", "fetch"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}{stderr}");
+    assert!(said.contains("Fetched 2 compiled crates"), "{said}{stderr}");
+    // Into the job's own store, never the cache, which outlives the job.
+    assert!(!b.root.join("cache/build").exists());
+    assert_eq!(ci_stores(&runner_temp).len(), 1);
+
+    // A later step of the same job, behind a firewall that cuts the backend off.
+    fake.set_unreachable(true);
+    let mut cmd = b.hushrun(&fake);
+    in_github_actions(&mut cmd, &fake, &runner_temp);
+    let output = cmd
+        .env("GITHUB_REPOSITORY_ID", "4242")
+        .env("GITHUB_RUN_ID", "300")
+        .env("GITHUB_RUN_ATTEMPT", "1")
+        .env("GITHUB_JOB", "copilot")
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "echo \"wrapper=${RUSTC_WRAPPER:-none}\"; cargo build --offline",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{stderr}"
+    );
+    // Read only: no build request left the job.
+    let dropped = fake.dropped();
+    assert!(
+        dropped.iter().all(|path| !path.contains("/v0/build/")),
+        "{dropped:?}"
+    );
+}

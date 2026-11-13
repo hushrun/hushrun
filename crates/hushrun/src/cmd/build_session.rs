@@ -54,12 +54,12 @@ pub(crate) fn begin(
         sysroot: &|folder| rustc_sysroot(folder, &env),
     };
     if here.in_ci {
-        return begin_in_ci(&here, share, repository);
+        return begin_in_ci(&here, share, repository, place);
     }
     // B-36: the run's backend answered nothing, and the store holds a fresh fetch from it, of
     // this repository.
     if let Some(found) = saved_fetch(&here, place) {
-        return begin_from_saved(&here, repository, found);
+        return begin_from_saved(&here, repository, found, None);
     }
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
@@ -83,28 +83,31 @@ fn saved_fetch(
         .filter(|(saved, _)| saved.serves(place().as_ref(), here.repository))
 }
 
-/// B-36: a run whose store holds a fresh fetch and whose backend gave nothing to share with: a
-/// relay that reads only the fetch, opens its packs as wrappers bring their keys, and sends
-/// nothing. A machine with no person's settings file is a sandbox: reuse is on there; else the
-/// person's mode and share setting decide, as for any run.
+/// B-36: a run whose store holds a fresh fetch that serves it: a relay that reads only the
+/// fetch, opens its packs as wrappers bring their keys, and sends nothing. A machine with no
+/// person's settings file is a sandbox: reuse is on there; else the person's mode and share
+/// setting decide, as for any run. In CI (`ci`: the job's store and who the job is) the session
+/// is the job's, in its own store, as B-31 makes any.
 fn begin_from_saved(
     here: &Here<'_>,
     repository: Option<&str>,
     (saved, folder): (crate::cmd::build_relay::saved::Saved, PathBuf),
+    ci: Option<(&Path, hushrun_build::share::Caller)>,
 ) -> Result<Session, Option<String>> {
     use hushrun_build::share::{Caller, Sharing, what_a_run_does};
     let sandbox = !here.settings.exists();
     let overrides = hushrun_build::settings::Overrides::from(here.env)
         .map_err(|err| Some(format!("{OFF}: {err}")))?;
-    let mut session = match session::store_dir(here.cache_dir, &overrides) {
-        Some(store) if sandbox => begin_sandbox(here, &store)?,
-        _ => begin_with(here, std::env::current_exe(), None)?,
+    let mut session = match (ci, session::store_dir(here.cache_dir, &overrides)) {
+        (Some((store, _)), _) => begin_with(here, std::env::current_exe(), Some(store))?,
+        (None, Some(store)) if sandbox => begin_sandbox(here, &store)?,
+        (None, _) => begin_with(here, std::env::current_exe(), None)?,
     };
     let current = session.current().clone();
-    let caller = if sandbox {
-        Caller::Agent { sandbox: true }
-    } else {
-        Caller::Person { signed_in: true }
+    let caller = match ci {
+        Some((_, caller)) => caller,
+        None if sandbox => Caller::Agent { sandbox: true },
+        None => Caller::Person { signed_in: true },
     };
     let does = what_a_run_does(caller, current.mode, current.share_setting, saved.org());
     if matches!(does.sharing, Sharing::Off(_)) || cfg!(not(unix)) {
@@ -115,7 +118,7 @@ fn begin_from_saved(
         host: saved.host.clone(),
         org: saved.org.clone(),
         credential: None,
-        agent: sandbox,
+        agent: sandbox && ci.is_none(),
         machine: None,
         shares: true,
         answered: false,
@@ -289,6 +292,19 @@ impl CiStore {
     }
 }
 
+/// B-31, B-36: a CI job's own store, made ready as a run's is, when the job has one that a
+/// later step finds again (GitHub Actions with a request token): where `hushrun build fetch`
+/// saves in CI. `None` elsewhere in CI, where each run's store is its own.
+pub(crate) fn ci_job_store(env: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    match CiStore::of(env) {
+        CiStore::Job(path) => {
+            CiStore::Job(path.clone()).prepare().ok()?;
+            Some(path)
+        }
+        CiStore::Run(_) => None,
+    }
+}
+
 /// Who the run is, for B-25's table: the one mapping from what the backend gives the relay's
 /// requests to `hushrun_build::share::Caller`, for the session, the relay and `hushrun build
 /// status`.
@@ -320,13 +336,30 @@ fn begin_in_ci(
     here: &Here<'_>,
     share: Option<ShareStart>,
     repository: Option<&str>,
+    place: &dyn Fn() -> Option<crate::results::BuildPlace>,
 ) -> Result<Session, Option<String>> {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     let Some(start) = share else {
         return Err(None);
     };
     if !start.access.shares {
-        return Err((!start.access.answered).then(|| NO_ANSWER.to_string()));
+        if start.access.answered {
+            return Err(None);
+        }
+        // B-36: the backend didn't answer, and an earlier step of this job fetched from it.
+        let store = CiStore::of(here.env);
+        if let CiStore::Job(path) = &store
+            && let Some((saved, folder)) = crate::cmd::build_relay::saved::Saved::load(
+                &hushrun_build::store::Store::new(path),
+                here.now,
+            )
+            .filter(|(saved, _)| saved.serves(place().as_ref(), repository))
+        {
+            store.prepare().map_err(Some)?;
+            let caller = caller(Some(&start.access), true);
+            return begin_from_saved(here, repository, (saved, folder), Some((path, caller)));
+        }
+        return Err(Some(NO_ANSWER.to_string()));
     }
     let does = what_a_run_does(
         caller(Some(&start.access), true),

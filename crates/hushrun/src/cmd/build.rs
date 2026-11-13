@@ -50,10 +50,24 @@ pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
 fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
     use crate::context::{Content, Source};
     let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build fetch: {why}"));
-    let store = place
-        .store
-        .clone()
-        .ok_or_else(|| failed("hushrun has no cache directory to keep crates in".into()))?;
+    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    // B-31: in CI the fetch goes into the job's own store, which a later step of the job reads,
+    // never the cache directory, which outlives the job.
+    let store = if in_ci {
+        crate::cmd::build_session::ci_job_store(&|name| hushrun_ci::var_os(name)).ok_or_else(
+            || {
+                failed(
+                    "in CI a fetch is kept in the job's own store, under RUNNER_TEMP, which a GitHub Actions job with an ID token has (`permissions: id-token: write`)"
+                        .into(),
+                )
+            },
+        )?
+    } else {
+        place
+            .store
+            .clone()
+            .ok_or_else(|| failed("hushrun has no cache directory to keep crates in".into()))?
+    };
     let content = Content::open(global, Source::Repo(hushrun_vcs::Snapshot::Worktree))
         .map_err(|f| f.error)
         .map_err(|err| failed(format!("{err:#}")))?;
@@ -67,7 +81,6 @@ fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
     }
     .filter(|access| access.credential.is_some())
     .ok_or_else(|| failed("no backend is signed in to: set HUSHRUN_TOKEN for this phase".into()))?;
-    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
     let config = crate::cmd::build_relay::Config {
         store: Store::new(&store),
         caller: crate::cmd::build_session::caller(Some(&access), in_ci),
@@ -80,7 +93,11 @@ fn fetch(global: &GlobalOpts, place: &Place) -> CmdResult {
             .map(|folder| (std::ffi::OsString::from("rustc"), folder)),
         local: Mode::On,
         own: Mode::On,
-        min_free_gb: settings::MIN_FREE_GB,
+        min_free_gb: if in_ci {
+            session::CI_MIN_FREE_GB
+        } else {
+            settings::MIN_FREE_GB
+        },
         keep_days: hushrun_build::KEEP_DAYS,
         tuning: crate::cmd::build_relay::Tuning::default(),
         saved: None,

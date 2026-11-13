@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- In GitHub Actions, `hushrun build fetch` saves into the job's own store, and a later step of
+  the same job whose backend can't be reached reuses what it fetched, read only, as a sandbox's
+  later phase does: a coding agent on a GitHub Actions runner behind a firewall is served. Before,
+  a CI run never read a fetch, and the fetch went into the cache directory. Elsewhere in CI,
+  `hushrun build fetch` now says it has no store that lasts to the next step.
 - `hushrun build fetch`: a saved fetch serves only a run of the same backend host, org and
   repository, and only while that backend answers nothing in the run; an answer always wins,
   that the org doesn't share, a 401 or a 403 included. Before, a fetch served another repository,

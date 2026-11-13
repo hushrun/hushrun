@@ -35,8 +35,10 @@ container, where the link and the store don't exist. It MUST NOT set it either w
 is set already, or on Windows. In CI (C-14's detection) it sets it only when the run's results
 lookup carried `Hushrun-Build: on`, the job can be asked as itself (B-31), and the relay's `open`
 answers within 5 seconds of its start: then in the job's own store (B-31), and only then does
-cargo start. With no answer to the results lookup or to `open` in time, COMMAND runs unwrapped and
-the run says one line, `build reuse is off for this run: the backend didn't answer in time`; a job
+cargo start. With no answer to the results lookup and a fetch an earlier step of the job saved
+that serves the run (B-36), it sets it too, and the run reads that fetch only. With no answer to
+the results lookup or to `open` in time otherwise, COMMAND runs unwrapped and the run says one
+line, `build reuse is off for this run: the backend didn't answer in time`; a job
 whose org doesn't share runs exactly as it would without any of this, and says nothing. A binary called by that name is the
 wrapper and does nothing else; it MUST decide that from its own name, before reading any setting. A
 build outside `hushrun run` neither reads nor fills the store. Cargo's own fingerprints don't count
@@ -803,7 +805,13 @@ over a fetch, that the org doesn't share, a 401 or a 403 included, and a run tha
 or no repository, or a fetch that names none, is no match (`saved::Saved::serves`, the one
 definition). Such a run whose store holds a fresh fetch runs a relay from it: the policy as
 saved, each pack linked into the run's `incoming/` and opened when a wrapper brings its key,
-the hints as saved; it uploads nothing, reports nothing and sends no request. No run deletes the fetch. A machine with no person's
+the hints as saved; it uploads nothing, reports nothing and sends no request. In CI the fetch is
+saved in the job's own store (B-31), which only a GitHub Actions job with an ID token has, so that
+a later step of the same job finds it; elsewhere in CI `hushrun build fetch` refuses, since each
+run's store there is its own. A step of that job whose backend answered nothing, and whose fetch
+serves it as above, gets the wrapper and reads the fetch only, in place of the one line B-2 says;
+this is where a coding agent that runs on a GitHub Actions runner behind a firewall is served. No
+run deletes the fetch. A machine with no person's
 settings file is a sandbox: reuse is on there, and sharing is the org's mode as saved. *Rests on:*
 a sandbox's later phases running the same repository and toolchain as its setup, so the keys
 they compute are the ones the fetch's manifest names; and the packs staying sealed with each
