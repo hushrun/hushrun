@@ -67,6 +67,10 @@ pub(crate) struct Tuning {
     pub(crate) close: Duration,
     /// How long a CI job waits for `open` before cargo starts (B-2).
     pub(crate) ci_open: Duration,
+    /// The most the end of a CI job's `hushrun run` call waits for uploads, writing trusted
+    /// blocks or not (B-31).
+    pub(crate) ci_trusted_wait: Duration,
+    pub(crate) ci_wait: Duration,
     /// Downloads at once.
     pub(crate) downloads: usize,
     /// How often a waiting fetch looks at its progress.
@@ -85,6 +89,8 @@ impl Default for Tuning {
             end_wait: Duration::from_secs(5),
             close: Duration::from_secs(5),
             ci_open: Duration::from_secs(5),
+            ci_trusted_wait: Duration::from_secs(120),
+            ci_wait: Duration::from_secs(20),
             downloads: 8,
             tick: Duration::from_millis(20),
             spill: pack::IN_MEMORY,
@@ -373,6 +379,9 @@ pub(crate) struct Relay {
     machine: Option<crate::machine::Machine>,
     /// The command ended: no new PUT starts.
     ending: AtomicBool,
+    /// What the ends of this process's checks waited in CI, which the next one's wait is less
+    /// (B-31).
+    waited: Mutex<Duration>,
     /// A marker was written: the upload loop looks now rather than at its next turn.
     wake: tokio::sync::Notify,
 }
@@ -429,6 +438,7 @@ impl Relay {
             run,
             machine,
             ending: AtomicBool::new(false),
+            waited: Mutex::new(Duration::ZERO),
             wake: tokio::sync::Notify::new(),
             state: Mutex::new(State {
                 phase: Phase::Opening,
@@ -1655,12 +1665,31 @@ impl Relay {
     /// rest stays in the outbox; `close` goes once with the manifest and the counts; the socket
     /// goes. The lines for the person.
     pub(crate) fn end_check(self: &Arc<Relay>, entries: &[Entry]) -> Vec<String> {
-        self.ending.store(true, Ordering::Relaxed);
-        let wait = upload::wait_at_end(&self.config.tuning, false);
+        let end = self.end();
+        let wait = upload::wait_at_end(&self.config.tuning, &end);
         let relay = self.clone();
-        self.runtime.block_on(async move {
-            upload::settle(&relay, wait).await;
+        let waited = self.runtime.block_on(async move {
+            let started = Instant::now();
+            // CI: the loop goes on claiming what waits, since the store goes with the job.
+            if end.in_ci {
+                upload::drain(&relay, wait).await;
+            }
+            relay.ending.store(true, Ordering::Relaxed);
+            let left = if end.in_ci {
+                wait.saturating_sub(started.elapsed())
+            } else {
+                wait
+            };
+            upload::settle(&relay, left).await;
+            started.elapsed()
         });
+        if end.in_ci {
+            let mut spent = self
+                .waited
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *spent += waited;
+        }
         let check = self.state().check.take();
         if let Some(check) = &check {
             check.stop_serving.store(true, Ordering::Relaxed);
@@ -1713,7 +1742,14 @@ impl Relay {
             .filter(|m| m.by == self.by)
             .count();
         let mut lines = std::mem::take(&mut state.lines);
-        if waiting > 0 && !matches!(state.phase, Phase::Stopped(Stop::Off(_))) {
+        if waiting > 0 && end.in_ci && state.uploads {
+            // B-31: the job's store goes with the job.
+            lines.push(format!(
+                "build: {waiting} {} weren't uploaded before the job's command ended",
+                if waiting == 1 { "block" } else { "blocks" },
+            ));
+        } else if waiting > 0 && !end.in_ci && !matches!(state.phase, Phase::Stopped(Stop::Off(_)))
+        {
             lines.push(format!(
                 "build: {waiting} {} to upload {} for the next run",
                 if waiting == 1 { "block" } else { "blocks" },
@@ -1724,6 +1760,34 @@ impl Relay {
         drop(state);
         self.ending.store(false, Ordering::Relaxed);
         lines
+    }
+
+    /// What the end of this check's command waits by (B-31).
+    fn end(&self) -> upload::End {
+        let in_ci = matches!(self.config.caller, Caller::Ci { .. });
+        let trusted = in_ci
+            && self
+                .state()
+                .policy
+                .as_ref()
+                .is_some_and(|p| p.writes && p.untrusted.is_none());
+        let outbox = Outbox::new(&self.config.store);
+        let cost_ms: u64 = outbox
+            .waiting()
+            .iter()
+            .filter(|m| m.by == self.by)
+            .chain(outbox.claimed(&self.run).iter())
+            .map(|m| m.cost_ms)
+            .sum();
+        upload::End {
+            in_ci,
+            trusted,
+            waiting_cost: Duration::from_millis(cost_ms),
+            waited: *self
+                .waited
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
     }
 
     fn close_request(&self, check: &Check, entries: &[Entry]) -> CloseRequest {

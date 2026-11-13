@@ -174,6 +174,18 @@ impl Outbox {
         out
     }
 
+    /// The markers `run` holds claimed. One that can't be read is left out.
+    pub fn claimed(&self, run: &str) -> Vec<Marker> {
+        let Ok(entries) = fs::read_dir(self.dir().join(CLAIMED).join(run)) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .filter_map(|entry| read_marker(&entry.path()))
+            .collect()
+    }
+
     /// waiting → claimed, by `run`: a rename into the run's claims. `None` when another relay
     /// took it first, or it is gone.
     pub fn claim(&self, run: &str, key: &Digest) -> io::Result<Option<Marker>> {

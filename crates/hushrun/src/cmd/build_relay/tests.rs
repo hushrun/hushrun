@@ -51,6 +51,8 @@ fn tuning() -> Tuning {
         end_wait: Duration::from_secs(2),
         close: Duration::from_secs(2),
         ci_open: Duration::from_secs(2),
+        ci_trusted_wait: Duration::from_secs(120),
+        ci_wait: Duration::from_secs(20),
         downloads: 8,
         tick: Duration::from_millis(5),
         spill: super::pack::IN_MEMORY,
@@ -1428,4 +1430,99 @@ fn a_ci_job_waits_for_open_at_most_its_wait_and_never_holds_the_relay_meanwhile(
     begin(&relay, &m);
     assert_eq!(relay.wait_open(Duration::from_secs(5)), super::Opened::Off);
     relay.end_check(&[]);
+}
+
+fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
+    Request::Built {
+        key,
+        step,
+        class: LocalClass::Library,
+        portable: true,
+        cost_ms,
+    }
+}
+
+fn job_identity(fake: &FakeBuild, relay: &Arc<Relay>) -> Identity {
+    let _ = fake;
+    relay.by.clone()
+}
+
+// covers: B-31
+#[test]
+fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_allows() {
+    // What the job built just before its command ended still goes up: its store goes with it.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 61, 5_000, Some(by.clone()));
+    assert_eq!(ask(&relay, built_costing(key, step, 40_000)), Answer::Ok);
+    let lines = relay.end_check(&[]);
+    assert!(
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored),
+        "{lines:?}"
+    );
+    assert!(waiting(&m).is_empty(), "{lines:?}");
+
+    // A stalled upload: the wait is a quarter of what the block's compile took (4 s here), and
+    // the job's own most (20 s, or a trusted job's 2 minutes) never comes into it.
+    for trusted in [false, true] {
+        let fake = FakeBuild::start();
+        if !trusted {
+            fake.set_policy(|p| p.untrusted = Some(blocks::Untrusted::Event));
+        }
+        fake.delay(route::STORE_PUT, Duration::from_secs(10));
+        let m = machine();
+        let relay = start(&fake, &m, with_id_token(&fake));
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        let by = job_identity(&fake, &relay);
+        let (key, step) = block(&m.store, 62, 5_000, Some(by));
+        assert_eq!(ask(&relay, built_costing(key, step, 4_000)), Answer::Ok);
+        until("its PUT started", || fake.count(route::STORE_PUT) > 0);
+        let started = Instant::now();
+        relay.end_check(&[]);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(900),
+            "trusted {trusted}: {took:?}"
+        );
+        assert!(took < Duration::from_secs(3), "trusted {trusted}: {took:?}");
+    }
+
+    // A job that isn't trusted waits at most its 20 seconds (shortened to 1 here) whatever the
+    // blocks cost; and for the whole `hushrun run` call, so a second check waits what is left.
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| p.untrusted = Some(blocks::Untrusted::Event));
+    fake.delay(route::STORE_PUT, Duration::from_secs(10));
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        with_id_token(&fake)(c);
+        c.tuning.ci_wait = Duration::from_secs(1);
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 63, 5_000, Some(by));
+    assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
+    until("its PUT started", || fake.count(route::STORE_PUT) > 0);
+    let started = Instant::now();
+    relay.end_check(&[]);
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(900) && took < Duration::from_secs(3),
+        "{took:?}"
+    );
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let started = Instant::now();
+    relay.end_check(&[]);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
 }

@@ -83,11 +83,35 @@ pub(crate) fn after_commit(state: CommitState) -> Move {
     }
 }
 
-/// How long uploads in flight get when a command ends (B-29): on a person's machine the
-/// tuning's 5 seconds. CI's waits are another phase's, and go here.
-pub(crate) fn wait_at_end(tuning: &Tuning, in_ci: bool) -> Duration {
-    let _ = in_ci;
-    tuning.end_wait
+/// What decides how long the end of a command waits for uploads (B-29, B-31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct End {
+    /// A CI job: its store goes with the job, so what it built goes up now or never.
+    pub(crate) in_ci: bool,
+    /// The job writes the repository's trusted blocks: the policy gives it a scope to write and
+    /// no reason it isn't trusted.
+    pub(crate) trusted: bool,
+    /// What the compiles of the blocks still to go up took, together.
+    pub(crate) waiting_cost: Duration,
+    /// What this `hushrun run` call already waited at the end of its earlier checks.
+    pub(crate) waited: Duration,
+}
+
+/// How long the end of a command waits for uploads (B-29, B-31), the one place that says: on a
+/// person's machine the tuning's 5 seconds for those in flight. In CI, for every block still to
+/// go: a job that writes trusted blocks up to 2 minutes, any other up to 20 seconds, never more
+/// than a quarter of what the waiting blocks' compiles took, and both for the whole `hushrun run`
+/// call, less what its earlier checks waited.
+pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> Duration {
+    if !end.in_ci {
+        return tuning.end_wait;
+    }
+    let most = if end.trusted {
+        tuning.ci_trusted_wait
+    } else {
+        tuning.ci_wait
+    };
+    most.saturating_sub(end.waited).min(end.waiting_cost / 4)
 }
 
 fn class_of(class: hushrun_build::model::Class) -> Class {
@@ -450,6 +474,27 @@ impl Relay {
 /// How many of a first key's newest hints go up with its block.
 const HINTS_PER_BLOCK: usize = 2;
 
+/// B-31: at the end of a CI job's command, the upload loop goes on, up to `wait`, while a block
+/// of this run's is still to go: one waiting that may go now, or one this run holds. It stops
+/// early once none is, or the loop stopped.
+pub(crate) async fn drain(relay: &Arc<Relay>, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    let outbox = Outbox::new(&relay.config.store);
+    while Instant::now() < deadline {
+        relay.wake.notify_one();
+        let now = now_ms();
+        let left = outbox
+            .waiting()
+            .iter()
+            .any(|m| m.by == relay.by && m.not_before_ms <= now)
+            || !outbox.claimed(&relay.run).is_empty();
+        if !left || !relay.state().uploading {
+            return;
+        }
+        tokio::time::sleep(relay.config.tuning.tick.max(Duration::from_millis(10))).await;
+    }
+}
+
 /// When the command ends (B-29): no new PUT starts; those in flight get `wait`, then are cut off
 /// (their markers count a cut-off). Returns once the check's upload loop has stopped.
 pub(crate) async fn settle(relay: &Arc<Relay>, wait: Duration) {
@@ -474,6 +519,37 @@ pub(crate) async fn settle(relay: &Arc<Relay>, wait: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: B-31
+    #[test]
+    fn the_end_of_a_command_waits_as_long_as_its_context_says_and_no_longer() {
+        let tuning = Tuning::default();
+        let end = |in_ci, trusted, cost_s: u64, waited_s: u64| {
+            wait_at_end(
+                &tuning,
+                &End {
+                    in_ci,
+                    trusted,
+                    waiting_cost: Duration::from_secs(cost_s),
+                    waited: Duration::from_secs(waited_s),
+                },
+            )
+        };
+        let s = Duration::from_secs;
+        // A person's machine: the 5 seconds for those in flight, whatever waits.
+        assert_eq!(end(false, true, 10_000, 0), s(5));
+        assert_eq!(end(false, false, 0, 0), s(5));
+        // CI: up to 2 minutes for a trusted job, 20 seconds for any other.
+        assert_eq!(end(true, true, 10_000, 0), s(120));
+        assert_eq!(end(true, false, 10_000, 0), s(20));
+        // Never more than a quarter of what the waiting blocks' compiles took.
+        assert_eq!(end(true, true, 40, 0), s(10));
+        assert_eq!(end(true, false, 40, 0), s(10));
+        assert_eq!(end(true, true, 0, 0), s(0));
+        // For the whole call: what earlier checks waited is spent.
+        assert_eq!(end(true, false, 10_000, 15), s(5));
+        assert_eq!(end(true, true, 10_000, 200), s(0));
+    }
 
     // covers: B-29
     #[test]
