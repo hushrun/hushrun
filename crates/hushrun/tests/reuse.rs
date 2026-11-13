@@ -1451,6 +1451,7 @@ fn ready_asks_the_server_as_ci_counts_and_says_a_suspension() {
 /// What a step of [`rust_steps`] came to: test reuse's outcome, which build reuse must leave as
 /// it is, and what build reuse did.
 #[derive(Debug)]
+#[cfg(unix)]
 struct Step {
     /// Test reuse's own outcome: the exit code, the plan's line, the recorded units without the
     /// time they saved (a time, never the same twice), and whether an audit suspended reuse.
@@ -1570,6 +1571,7 @@ fn rust_steps(r: &Repo, env: &[(&str, &str)]) -> Vec<Step> {
 }
 
 /// The Rust fixture, with its lockfile committed.
+#[cfg(unix)]
 fn rust_repo() -> Repo {
     let r = Repo::new(&rust_files());
     let lock = Command::new("cargo")

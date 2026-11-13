@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 const TOKEN: &str = "hru_0123456789abcdefghijABCDEFGHIJ0123456789";
 /// This hushrun's version, which init pins in `package.json` as `^<version>`.
+#[cfg(unix)]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Environment variables a test must never inherit.
@@ -100,6 +101,7 @@ impl Fake {
     }
 
     /// ana belongs to acme and initech, and `GET /cli/orgs` says so.
+    #[cfg(unix)]
     fn in_two_orgs(&self) {
         *self.initech.lock().unwrap() = Some(Initech {
             member: true,
@@ -301,6 +303,7 @@ impl Fake {
     }
 
     /// What `POST /o/initech/v0/access-requests` was sent.
+    #[cfg(unix)]
     fn asked_to_join(&self) -> Vec<Value> {
         self.initech
             .lock()
@@ -316,6 +319,7 @@ impl Fake {
 }
 
 /// What `POST /o/acme/v0/ledgers` was sent, dry runs left out.
+#[cfg(unix)]
 fn made(fake: &Fake) -> Vec<Value> {
     fake.ledgers
         .lock()
@@ -2923,6 +2927,7 @@ fn without_a_terminal_init_asks_no_one_to_let_the_person_in() {
 // --- ADR 0037: any language --------------------------------------------------------------------
 
 /// A workflow that runs `command` at the root.
+#[cfg(unix)]
 fn one_step(command: &str) -> String {
     format!(
         "name: CI\non: [push, pull_request]\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: {command}\n"
@@ -3205,6 +3210,7 @@ fn bun_repo(package: &str, workflows: &[(&str, &str)]) -> Repo {
 }
 
 /// `bun test` in a job `test`, as a repository's staging and production workflows have it.
+#[cfg(unix)]
 const BUN_WORKFLOW: &str = "name: CI\non: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: bun install --frozen-lockfile\n      - name: Run tests\n        run: bun test\n";
 
 // covers: C-15
@@ -4352,11 +4358,14 @@ fn a_repository_set_up_already_gets_it_from_the_same_plan() {
 // --- ADR 0045: the rule init writes for Apple's tools -------------------------------------------
 
 /// What the plan says of a repository of one scope.
+#[cfg(unix)]
 const RULE_LINE: &str = "    counts_from: {os: macos}: every check hushrun runs here is on macOS in CI, with Xcode or Swift, so a pass on another system won't count\n";
 /// What it says of the scope `ios`.
+#[cfg(unix)]
 const IOS_RULE_LINE: &str = "    counts_from: {os: macos} in scope ios: every check hushrun runs there is on macOS in CI, with Xcode or Swift, so a pass on another system won't count\n";
 
 /// A job `id`, on `runs_on`, whose steps run `commands`.
+#[cfg(unix)]
 fn job(id: &str, runs_on: &str, commands: &[&str]) -> String {
     let mut text =
         format!("  {id}:\n    runs-on: {runs_on}\n    steps:\n      - uses: actions/checkout@v5\n");
@@ -4367,6 +4376,7 @@ fn job(id: &str, runs_on: &str, commands: &[&str]) -> String {
 }
 
 /// A workflow of `jobs`.
+#[cfg(unix)]
 fn workflow(jobs: &[String]) -> String {
     format!(
         "name: CI\non: [push, pull_request]\njobs:\n{}",
@@ -4375,6 +4385,7 @@ fn workflow(jobs: &[String]) -> String {
 }
 
 /// The workflow of an iOS app: `swiftlint` and `xcodebuild test`, on macOS.
+#[cfg(unix)]
 fn ios_workflow() -> String {
     workflow(&[
         job("lint", "macos-15", &["swiftlint --strict"]),
@@ -4383,6 +4394,7 @@ fn ios_workflow() -> String {
 }
 
 /// `hushrun.yaml`'s rules at each level, as the file reads.
+#[cfg(unix)]
 fn rules(r: &Repo) -> hushrun_core::counts_from::Rules {
     let text = r.read("hushrun.yaml");
     hushrun_core::policy::Policy::parse("hushrun.yaml", text.as_bytes())
@@ -4391,6 +4403,7 @@ fn rules(r: &Repo) -> hushrun_core::counts_from::Rules {
 }
 
 /// `{os: macos}`.
+#[cfg(unix)]
 fn macos() -> hushrun_core::counts_from::Level {
     hushrun_core::counts_from::Level::Rule(hushrun_core::counts_from::Rule {
         os: vec!["macos".to_string()],
@@ -4399,6 +4412,7 @@ fn macos() -> hushrun_core::counts_from::Level {
 }
 
 /// The rule of the scope `name`.
+#[cfg(unix)]
 fn scope_rule(r: &Repo, name: &str) -> Option<hushrun_core::counts_from::Level> {
     let scope = hushrun_core::names::ScopeName::new(name).expect("a name");
     rules(r).scopes.get(&scope).cloned()
@@ -4736,11 +4750,13 @@ fn a_repository_set_up_keeps_what_it_has() {
 }
 
 /// A monorepo's workflow: an iOS project and a Go backend.
+#[cfg(unix)]
 fn monorepo_workflow() -> String {
     monorepo_with("go test ./...")
 }
 
 /// The same, with `api` for what the backend's job runs.
+#[cfg(unix)]
 fn monorepo_with(api: &str) -> String {
     format!(
         "name: CI\non: [push, pull_request]\njobs:\n  ios:\n    runs-on: macos-15\n    defaults:\n      run:\n        working-directory: ios\n    steps:\n      - uses: actions/checkout@v5\n      - run: swiftlint --strict\n      - run: xcodebuild test -scheme App\n  api:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: api\n    steps:\n      - uses: actions/checkout@v5\n      - run: {api}\n"
@@ -5048,11 +5064,13 @@ fn planned_for(step: &str) -> (Repo, Ran) {
 }
 
 /// A step of one line.
+#[cfg(unix)]
 fn one_line(command: &str) -> String {
     format!("      - run: {command}\n")
 }
 
 /// The ways an iOS project's CI runs its tests.
+#[cfg(unix)]
 const IOS_FORMS: &[&str] = &[
     "xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 16' test",
     "xcodebuild -workspace App.xcworkspace -scheme App test",
@@ -5488,6 +5506,7 @@ fn a_step_over_several_lines_and_a_pipe_has_one_key() {
 /// The repository the plan's tests read: package.json's scripts, wrapped, through hushrun already
 /// and left; a job init wraps a command in and leaves another; a job with variants that runs a
 /// wrapped script; and a job that runs hushrun itself.
+#[cfg(unix)]
 const PLAN_PACKAGE: &str = r#"{
   "name": "shop",
   "scripts": {
@@ -5498,6 +5517,7 @@ const PLAN_PACKAGE: &str = r#"{
 }
 "#;
 
+#[cfg(unix)]
 const PLAN_WORKFLOW: &str = "on: push
 jobs:
   back:
@@ -5547,6 +5567,7 @@ fn json_plan(cmd: Command) -> Value {
 }
 
 /// The job `id` of the plan.
+#[cfg(unix)]
 fn plan_job<'p>(plan: &'p Value, id: &str) -> &'p Value {
     plan["jobs"]
         .as_array()
@@ -6185,6 +6206,7 @@ fn the_plans_notes_say_what_the_org_and_hushrun_yaml_get_once_signed_in() {
 // --- ADR 0050: what init could also wrap -------------------------------------------------------
 
 /// Test jobs that run a check init knows, and test scripts it doesn't.
+#[cfg(unix)]
 const TEST_SCRIPTS: &str = "name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: cargo test --locked\n      - run: ./scripts/test.sh\n  unit:\n    name: Unit tests\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - run: bash scripts/ci/test.sh\n";
 
 // covers: C-15
@@ -6275,9 +6297,11 @@ fn a_test_script_is_suggested_with_its_line_and_never_applied() {
 // --- ADR 0050: what a tool's own remote cache keeps --------------------------------------------
 
 /// Why init leaves what runs through Turborepo, once its remote cache is set up.
+#[cfg(unix)]
 const TURBO_WHY: &str = "Turborepo reuses its own results across machines (remote cache), so init leaves it to Turborepo";
 
 /// A Rust repository whose job `test` runs Turborepo and `cargo test`, with `env` for the job's.
+#[cfg(unix)]
 fn turbo_repo(env: &str) -> Repo {
     let workflow = format!(
         "name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n{env}    steps:\n      - uses: actions/checkout@v5\n      - run: npx turbo run test\n      - run: cargo test --locked\n"
@@ -6492,9 +6516,11 @@ fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {
 }
 
 /// \[C-38\] What init says a GitHub job needs, for a backend that keeps no hints.
+#[cfg(unix)]
 const CACHE_STEP_GITHUB: &str = "GitHub Actions: in each job that runs a check with `tests` on, add a step `uses: actions/cache@v4` before hushrun's, with `path: ~/.cache/hushrun/units/*.sqlite`";
 
 /// A shop whose `test` check reuses test files.
+#[cfg(unix)]
 fn shop_with_tests() -> Repo {
     Repo::new(&[
         ("package.json", PACKAGE),
@@ -6507,6 +6533,7 @@ fn shop_with_tests() -> Repo {
     ])
 }
 
+#[cfg(unix)]
 fn asked_for_hints(fake: &Fake) -> usize {
     fake.requests()
         .iter()
@@ -6515,6 +6542,7 @@ fn asked_for_hints(fake: &Fake) -> usize {
 }
 
 // covers: C-15, C-38 (ADR 0075: CI's cache step, for a backend that keeps no hints)
+#[cfg(unix)]
 #[test]
 fn init_says_the_cache_step_ci_needs_when_the_backend_keeps_no_hints() {
     let (_server, fake) = Fake::start(true);
@@ -6545,6 +6573,7 @@ fn init_says_the_cache_step_ci_needs_when_the_backend_keeps_no_hints() {
 }
 
 // covers: C-15, C-38
+#[cfg(unix)]
 #[test]
 fn init_says_no_cache_step_where_the_backend_keeps_hints_nor_with_local_or_a_dry_run() {
     // The backend keeps hints: the step would carry what it gives already.

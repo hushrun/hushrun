@@ -6,11 +6,14 @@
 //! every character but letters, digits, `.`, `_` and `-` made `_`. A call without a response
 //! answers 404, as the hosts do. Unix only: the fakes are shell scripts.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+#[cfg(unix)]
 const SCRIPT: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 [ "$1" = api ] || { echo "fake $(basename "$0"): unexpected $*" >&2; exit 1; }

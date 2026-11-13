@@ -1,7 +1,9 @@
 //! Build blocks from the command line (B-1, B-2, B-19, B-20, B-21): `hushrun build`, the wrapper
 //! `hushrun run` sets for COMMAND, and the binary called by the wrapper's name.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use hushrun_testkit::world::World;
 use serde_json::Value;
@@ -10,6 +12,7 @@ use serde_json::Value;
 const NO_HOST: &str = "http://127.0.0.1:9";
 
 /// Prints the wrapper COMMAND gets, and nothing else.
+#[cfg(unix)]
 const PRINT_WRAPPER: &str = r#"printf %s "$RUSTC_WRAPPER""#;
 
 struct Ran {
@@ -29,6 +32,7 @@ impl Ran {
     }
 
     /// hushrun's lines on stderr that hold `text`.
+    #[cfg(unix)]
     fn lines_with(&self, text: &str) -> usize {
         self.stderr.lines().filter(|l| l.contains(text)).count()
     }
@@ -46,6 +50,7 @@ fn build(w: &World, args: &[&str]) -> Ran {
 }
 
 /// `hushrun run NAME --force -- sh -c SCRIPT`: COMMAND runs whatever passed before.
+#[cfg(unix)]
 fn run_sh(cmd: &mut assert_cmd::Command, name: &str, script: &str) -> Ran {
     Ran::of(cmd.args(["run", name, "--force", "--", "sh", "-c", script]))
 }
@@ -454,11 +459,13 @@ fn cargo_builds_through_the_wrapper() {
 
 /// A check that says the wrapper it gets, as `wrapper=[…]` on a line of its own, then exits
 /// with `code`.
+#[cfg(unix)]
 fn wrapper_check(code: i32) -> String {
     format!("{{run: 'echo \"wrapper=[$RUSTC_WRAPPER]\"; exit {code}'}}")
 }
 
 /// A world whose hushrun.yaml has `checks`, each `name: definition`.
+#[cfg(unix)]
 fn with_checks(checks: &[(&str, String)]) -> World {
     let w = World::new("acme-api.yaml");
     let listed: String = checks
@@ -479,6 +486,7 @@ fn with_checks(checks: &[(&str, String)]) -> World {
 
 /// `hushrun run CHECK… --force --format json`, signing as a member's machine: hushrun.yaml's
 /// checks, whatever evidence exists.
+#[cfg(unix)]
 fn run_checks(cmd: &mut assert_cmd::Command, checks: &[&str]) -> (Ran, Value) {
     let ran = Ran::of(
         cmd.arg("run")
@@ -489,6 +497,7 @@ fn run_checks(cmd: &mut assert_cmd::Command, checks: &[&str]) -> (Ran, Value) {
     (ran, value)
 }
 
+#[cfg(unix)]
 fn member(w: &World) -> assert_cmd::Command {
     let mut cmd = w.hushrun_as(1);
     cmd.env("HUSHRUN_HOST", NO_HOST);
@@ -496,6 +505,7 @@ fn member(w: &World) -> assert_cmd::Command {
 }
 
 /// What each `wrapper_check` that ran said it got, in order.
+#[cfg(unix)]
 fn wrappers(ran: &Ran) -> Vec<String> {
     ran.stderr
         .lines()
@@ -505,6 +515,7 @@ fn wrappers(ran: &Ran) -> Vec<String> {
 }
 
 /// The session folders left in the world's store.
+#[cfg(unix)]
 fn sessions_left(w: &World) -> usize {
     std::fs::read_dir(w.cache.join("build/sessions")).map_or(0, Iterator::count)
 }
