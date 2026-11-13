@@ -95,8 +95,8 @@ pub struct Search {
 
 /// \[C-27\] The report files a run's search reaches, as they were before its command started:
 /// each one's modification time and length, by path from the root. A file the same after the run
-/// wasn't written by it, though its time is within [`CLOCK`] of the start (a run that ended just
-/// before, or a task Gradle found up to date).
+/// wasn't written by it, though its time is within the two seconds before the start (a run that
+/// ended just before, or a task Gradle found up to date).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Before {
     files: std::collections::BTreeMap<String, (SystemTime, u64)>,
