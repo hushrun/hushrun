@@ -183,6 +183,9 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Nothing from the HTTP client's internals reaches a person's terminal without `-v` or
+  `HUSHRUN_LOG`: a `WARN tcp set_nodelay error` line from hyper was printed in the middle of a
+  build.
 - Build blocks: a backend that stops answering in the middle of a run is said in one line, once,
   and uploads rest as downloads do: a `begin`, PUT or `commit` that errors or times out counts
   toward the three failures that rest the relay, and while it rests no new `begin` goes. Before,
