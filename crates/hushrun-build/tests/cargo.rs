@@ -218,8 +218,8 @@ fn rlib(ws: &Path, name: &str) -> Vec<u8> {
     fs::read(file).unwrap()
 }
 
-/// Reused, or picked by the audit (B-16: one library compile in fifty that could be reused runs
-/// anyway, chosen by a hash of the key and the run's start) and found the same.
+/// Reused, or picked by the audit (B-16: one compile in fifty that could be reused runs anyway,
+/// whatever its class, chosen by a hash of the key and the run's start) and found the same.
 fn reused(entry: &Entry) -> bool {
     entry.outcome == Outcome::Reused
         || (entry.outcome == Outcome::BuiltAndStored && entry.found && !entry.differed)
@@ -255,14 +255,9 @@ fn a_second_checkout_reuses_what_the_first_built() {
     assert!(reused(&last(&second, "b", Class::Library)), "{second:#?}");
     // The proc macro and the build script, linked with the Apple fixes, move too; the program
     // names its own target folder in its debug map and is tied (macOS).
-    assert_eq!(
-        last(&second, "m", Class::ProcMacro).outcome,
-        Outcome::Reused,
-        "{second:#?}"
-    );
-    assert_eq!(
-        last(&second, "build_script_build", Class::BuildScript).outcome,
-        Outcome::Reused,
+    assert!(reused(&last(&second, "m", Class::ProcMacro)), "{second:#?}");
+    assert!(
+        reused(&last(&second, "build_script_build", Class::BuildScript)),
         "{second:#?}"
     );
     eprintln!(
@@ -312,11 +307,7 @@ fn a_second_checkout_reuses_what_the_first_built() {
     build(&two, &session);
     let back = entries(&session)[before..].to_vec();
     assert!(reused(&last(&back, "a", Class::Library)), "{back:#?}");
-    assert_eq!(
-        last(&back, "c", Class::Program).outcome,
-        Outcome::Reused,
-        "{back:#?}"
-    );
+    assert!(reused(&last(&back, "c", Class::Program)), "{back:#?}");
     assert!(run_c(&two).starts_with("first text|"));
 
     // (6) A damaged block still gives a green build.
@@ -1005,11 +996,7 @@ fn a_static_library_that_changes_rebuilds_only_what_links_or_bundles_it() {
     let after = entries(&session)[n..].to_vec();
     // A program that links nothing from the folder is reused: its link line doesn't name the
     // library, and the folder is not its input.
-    assert_eq!(
-        last(&after, "plain", Class::Program).outcome,
-        Outcome::Reused,
-        "{after:#?}"
-    );
+    assert!(reused(&last(&after, "plain", Class::Program)), "{after:#?}");
     // One that links it through the rlib that bundles it, or by `-l`, is built again.
     for name in ["uses", "linked"] {
         let entry = last(&after, name, Class::Program);
@@ -1410,9 +1397,8 @@ fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Pat
     );
     let second = entries(&session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
-        assert_eq!(
-            last(&second, name, Class::Program).outcome,
-            Outcome::Reused,
+        assert!(
+            reused(&last(&second, name, Class::Program)),
             "{name}: {second:#?}"
         );
         let places = places(&session.current().store, name, "program");
@@ -1513,9 +1499,8 @@ fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
     cargo_ok(&one, &["test", "--no-run"], &env);
     let back = entries(&session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
-        assert_eq!(
-            last(&back, name, Class::Program).outcome,
-            Outcome::Reused,
+        assert!(
+            reused(&last(&back, name, Class::Program)),
             "{name}: {back:#?}"
         );
         no_bundle(name);
