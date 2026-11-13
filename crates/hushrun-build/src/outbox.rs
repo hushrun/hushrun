@@ -311,14 +311,12 @@ pub fn alive(store: &Store, run: &str) -> bool {
     process_alive(pid)
 }
 
-/// Whether the process `pid` is running.
+/// Whether the process `pid` is running as this user. A relay and a fetch are always this
+/// user's, so a process id now held by another user's process (`EPERM`) is a dead run's (C7).
 #[cfg(unix)]
 pub(crate) fn process_alive(pid: i32) -> bool {
     match rustix::process::Pid::from_raw(pid) {
-        Some(pid) => match rustix::process::test_kill_process(pid) {
-            Ok(()) => true,
-            Err(err) => err == rustix::io::Errno::PERM,
-        },
+        Some(pid) => rustix::process::test_kill_process(pid).is_ok(),
         None => false,
     }
 }
@@ -403,6 +401,16 @@ mod tests {
     use super::*;
     use crate::store::NewFile;
     use std::time::Duration;
+
+    // covers: B-26
+    #[test]
+    fn a_process_id_held_by_another_user_s_process_is_a_dead_run() {
+        assert!(process_alive(std::process::id() as i32));
+        // Process 1 is root's: unless these tests run as root, it isn't this user's.
+        if !rustix::process::geteuid().is_root() {
+            assert!(!process_alive(1));
+        }
+    }
 
     fn world() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
