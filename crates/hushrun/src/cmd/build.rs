@@ -92,7 +92,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
     })?;
     let config = crate::cmd::build_relay::Config {
         store: Store::new(&store),
-        caller: crate::cmd::build_session::caller(Some(&access), in_ci, !place.settings.exists()),
+        caller: crate::cmd::build_session::caller(Some(&access), in_ci),
         access,
         repository,
         commit: None,
@@ -213,7 +213,7 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 /// What a `hushrun run NAME -- COMMAND` from this shell does (B-25), as far as this machine can
 /// tell without asking the backend: the one function's answer, the org taken as sharing at the
 /// most it can. A CI job with no backend to ask has nothing to share with.
-fn run_here(effective: &settings::Settings, sandbox: bool) -> hushrun_build::share::Does {
+fn run_here(effective: &settings::Settings) -> hushrun_build::share::Does {
     use hushrun_build::share::{Does, Off, Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
@@ -228,7 +228,7 @@ fn run_here(effective: &settings::Settings, sandbox: bool) -> hushrun_build::sha
             uploads: false,
         };
     }
-    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci, sandbox);
+    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
     what_a_run_does(caller, effective.mode, effective.share, Org::Shares(None))
 }
 
@@ -236,7 +236,7 @@ fn run_here(effective: &settings::Settings, sandbox: bool) -> hushrun_build::sha
 /// and why, from [`run_here`].
 fn ci_here(effective: &settings::Settings) -> String {
     use hushrun_build::share::{Off, Sharing};
-    let does = run_here(effective, false);
+    let does = run_here(effective);
     match (does.local, does.sharing) {
         (Mode::Off, Sharing::Off(off)) => {
             let hint = match off {
@@ -255,9 +255,9 @@ fn ci_here(effective: &settings::Settings) -> String {
 
 /// What sharing does here, as far as this machine can tell without asking the backend (B-25):
 /// the word, and why.
-fn sharing_here(effective: &settings::Settings, sandbox: bool) -> (&'static str, String) {
+fn sharing_here(effective: &settings::Settings) -> (&'static str, String) {
     use hushrun_build::share::Sharing;
-    let does = run_here(effective, sandbox);
+    let does = run_here(effective);
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),
         Sharing::Observe => (
@@ -441,7 +441,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "programs": effective.as_ref().map(|s| s.programs.as_str()),
             "share": effective.as_ref().map(|s| s.share.as_str()),
             "sharing": effective.as_ref().map(|s| {
-                let (word, why) = sharing_here(s, !place.settings.exists());
+                let (word, why) = sharing_here(s);
                 json!({"mode": word, "why": why})
             }),
             "in_ci": in_ci,
@@ -537,7 +537,7 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 )
             ),
         );
-        let (word, why) = sharing_here(effective, !place.settings.exists());
+        let (word, why) = sharing_here(effective);
         line(
             "share",
             format!(

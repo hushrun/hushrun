@@ -1268,6 +1268,65 @@ fn an_agents_sandbox_with_the_network_reuses_and_shares_when_the_org_shares() {
     assert_eq!(fake.count(route::OPEN), opens);
 }
 
+/// Signs a person in on `m` for the fake's host, as `hushrun login` leaves the machine.
+fn sign_in(m: &Machine, fake: &FakeBuild) {
+    let mut hosts = serde_json::Map::new();
+    hosts.insert(
+        fake.origin(),
+        serde_json::json!({"token": FakeBuild::TOKEN, "email": "dev@example.com"}),
+    );
+    std::fs::write(
+        m.root.join("credentials.json"),
+        serde_json::to_vec(&serde_json::json!({"hosts": hosts})).unwrap(),
+    )
+    .unwrap();
+}
+
+// covers: B-25
+#[test]
+fn an_agents_run_where_a_person_is_signed_in_follows_that_persons_settings_off_by_default() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    // A person's laptop: signed in, and nobody ever chose build reuse here. An agent's run
+    // with a token is no sandbox's: nothing is reused, asked or said.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    sign_in(&b, &fake);
+    let opens = fake.count(route::OPEN);
+    let said = sandbox_run(&b, &fake, |_| {});
+    assert!(!said.contains("build:"), "{said}");
+    assert_eq!(fake.count(route::OPEN), opens);
+    assert!(!b.root.join("cache/build").exists());
+    // The person turns it on: the agent's run follows.
+    let on = b.hushrun(&fake).args(["build", "on"]).output().unwrap();
+    assert!(on.status.success());
+    let said = sandbox_run(&b, &fake, |_| {});
+    assert!(
+        said.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{said}"
+    );
+    // And off again.
+    let off = b.hushrun(&fake).args(["build", "off"]).output().unwrap();
+    assert!(off.status.success());
+    let said = sandbox_run(&b, &fake, |_| {});
+    assert!(!said.contains("build:"), "{said}");
+
+    // No person signed in, and an agent token: a sandbox, whatever settings file lies there.
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    std::fs::write(
+        c.root.join("build.json"),
+        br#"{"version": 1, "mode": "off"}"#,
+    )
+    .unwrap();
+    let said = sandbox_run(&c, &fake, |_| {});
+    assert!(
+        said.contains("2 of 2 crates reused (2 from the shared store)"),
+        "{said}"
+    );
+}
+
 // covers: B-26, B-36
 #[test]
 fn a_fetch_whose_store_host_cant_be_reached_names_the_host_to_allow() {

@@ -64,11 +64,10 @@ pub(crate) fn begin(
     if let Some(found) = saved_fetch(&here, place) {
         return begin_from_saved(&here, repository, found, None);
     }
-    let sandbox = !here.settings.exists();
-    // B-25: an agent token on a machine with no person's settings file (a sandbox), whose org
+    // B-25: an agent token on a machine where no person is signed in (a sandbox), whose org
     // shares: reuse is on here, and sharing is the org's mode.
     let sandbox_shares = share.as_ref().is_some_and(|start| {
-        caller(Some(&start.access), false, sandbox) == (Caller::Agent { sandbox: true })
+        caller(Some(&start.access), false) == (Caller::Agent { sandbox: true })
             && (start.access.shares || start.open_decides)
     });
     let share = match share {
@@ -78,8 +77,8 @@ pub(crate) fn begin(
     let mut session = begin_with(&here, std::env::current_exe(), None)?;
     if let Some(start) = share {
         // B-34: the run would share, and its backend answered nothing it was asked.
-        let unreached = unreached(&session, &start, sandbox);
-        match start_sharing(&mut session, start, repository, &env, sandbox) {
+        let unreached = unreached(&session, &start);
+        match start_sharing(&mut session, start, repository, &env) {
             Ok(_) => {}
             Err(line) => {
                 if let Some(line) = line {
@@ -99,13 +98,13 @@ pub(crate) fn begin(
 /// the org shares), and what the run does would share had it said yes. A person who turned
 /// sharing off here, a local mode of `off`, or an answer without `Hushrun-Build: on` is a
 /// decision, and so is every run [`begin`] is handed no backend for.
-fn unreached(session: &Session, start: &ShareStart, sandbox: bool) -> bool {
+fn unreached(session: &Session, start: &ShareStart) -> bool {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     if start.access.answered || start.access.shares || start.open_decides || cfg!(not(unix)) {
         return false;
     }
     let current = session.current();
-    let caller = caller(Some(&start.access), false, sandbox);
+    let caller = caller(Some(&start.access), false);
     let does = what_a_run_does(
         caller,
         current.mode,
@@ -128,9 +127,10 @@ fn saved_fetch(
 }
 
 /// B-36: a run whose store holds a fresh fetch that serves it: a relay that reads only the
-/// fetch, opens its packs as wrappers bring their keys, and sends nothing. A machine with no
-/// person's settings file is a sandbox: reuse is on there; else the person's mode and share
-/// setting decide, as for any run. In CI (`ci`: the job's store and who the job is) the session
+/// fetch, opens its packs as wrappers bring their keys, and sends nothing. A machine where no
+/// person is signed in to the fetch's backend is a sandbox ([`signed_in_here`]; the fetch stands
+/// for the agent token that made it, which a later phase no longer holds): reuse is on there;
+/// else the person's mode and share setting decide, as for any run. In CI (`ci`: the job's store and who the job is) the session
 /// is the job's, in its own store, as B-31 makes any.
 fn begin_from_saved(
     here: &Here<'_>,
@@ -139,7 +139,7 @@ fn begin_from_saved(
     ci: Option<(&Path, hushrun_build::share::Caller)>,
 ) -> Result<Session, Option<String>> {
     use hushrun_build::share::{Sharing, what_a_run_does};
-    let sandbox = !here.settings.exists();
+    let sandbox = !signed_in_here(&saved.host);
     let overrides = hushrun_build::settings::Overrides::from(here.env)
         .map_err(|err| Some(format!("{OFF}: {err}")))?;
     let mut session = match (ci, session::store_dir(here.cache_dir, &overrides)) {
@@ -214,7 +214,7 @@ fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String
     Ok(session)
 }
 
-/// B-25: an agent token's run in a sandbox (no person's settings file) whose org shares: reuse is
+/// B-25: an agent token's run in a sandbox (no person signed in here) whose org shares: reuse is
 /// on here, in the store, unless `HUSHRUN_BUILD` says otherwise, and the relay shares as the org's
 /// mode says. A run that made no results lookup (`open_decides`) learns whether the org shares
 /// only from `open`, which it waits for as a CI job does: an org that doesn't share then leaves
@@ -231,7 +231,7 @@ fn begin_sandbox_sharing(
     };
     let mut session = begin_sandbox(here, &store)?;
     let open_decides = start.open_decides;
-    let relay = match start_sharing(&mut session, start, repository, here.env, true) {
+    let relay = match start_sharing(&mut session, start, repository, here.env) {
         Ok(relay) => relay,
         // The org shares, as the results lookup said: reuse here stays on, sharing is off.
         Err(line) if !open_decides => {
@@ -404,26 +404,32 @@ pub(crate) fn ci_job_store(env: &dyn Fn(&str) -> Option<OsString>) -> Option<Pat
     }
 }
 
+/// B-25: whether a person is signed in on this machine to the backend at `host` (its origin):
+/// the credentials file holds a login for it, whatever credential this command carries. The one
+/// definition of what tells a person's machine from a sandbox.
+pub(crate) fn signed_in_here(host: &str) -> bool {
+    Credentials::load().is_ok_and(|credentials| credentials.person_at(host))
+}
+
 /// Who the run is, for B-25's table: the one mapping from what the backend gives the relay's
 /// requests to `hushrun_build::share::Caller`, for the session, the relay and `hushrun build
-/// status`. `sandbox`: this machine has no person's settings file (B-21), so an agent token here
-/// runs in a sandbox, not on a person's machine.
-pub(crate) fn caller(
-    access: Option<&crate::results::BuildAccess>,
-    in_ci: bool,
-    sandbox: bool,
-) -> Caller {
+/// status`. An agent token's run is in a sandbox only when no person is signed in on this machine
+/// to that backend ([`signed_in_here`]); where one is, it is an agent on a person's machine, and
+/// follows that person's settings. A settings file, or none, says nothing about it.
+pub(crate) fn caller(access: Option<&crate::results::BuildAccess>, in_ci: bool) -> Caller {
     use crate::results::BuildCredential;
     let credential = access.and_then(|access| access.credential.as_ref());
     let agent = access.is_some_and(|access| access.agent);
-    match credential {
+    match (credential, access) {
         _ if in_ci => Caller::Ci {
             id_token: matches!(credential, Some(BuildCredential::GithubOidc { .. })),
             agent_token: matches!(credential, Some(BuildCredential::Token(_))) && agent,
         },
-        Some(_) if agent => Caller::Agent { sandbox },
-        Some(_) => Caller::Person { signed_in: true },
-        None => Caller::Person { signed_in: false },
+        (Some(_), Some(access)) if agent => Caller::Agent {
+            sandbox: !signed_in_here(&access.host),
+        },
+        (Some(_), _) => Caller::Person { signed_in: true },
+        (None, _) => Caller::Person { signed_in: false },
     }
 }
 
@@ -458,13 +464,13 @@ fn begin_in_ci(
             .filter(|(saved, _)| saved.serves(place().as_ref(), repository))
         {
             store.prepare().map_err(Some)?;
-            let caller = caller(Some(&start.access), true, false);
+            let caller = caller(Some(&start.access), true);
             return begin_from_saved(here, repository, (saved, folder), Some((path, caller)));
         }
         return Err(Some(NO_ANSWER.to_string()));
     }
     let does = what_a_run_does(
-        caller(Some(&start.access), true, false),
+        caller(Some(&start.access), true),
         hushrun_build::model::Mode::On,
         hushrun_build::model::Mode::On,
         Org::Shares(None),
@@ -496,7 +502,7 @@ fn begin_in_ci(
         }
         Err(line)
     };
-    let relay = match start_sharing(&mut session, start, repository, here.env, false) {
+    let relay = match start_sharing(&mut session, start, repository, here.env) {
         Ok(relay) => relay,
         Err(line) => return abandon(session, line),
     };
@@ -541,18 +547,13 @@ fn start_sharing(
     start: ShareStart,
     repository: Option<&str>,
     env: &dyn Fn(&str) -> Option<OsString>,
-    sandbox: bool,
 ) -> Result<std::sync::Arc<crate::cmd::build_relay::Relay>, Option<String>> {
     use hushrun_build::share::{Org, Sharing, what_a_run_does};
     if !(start.access.shares || start.open_decides) || cfg!(not(unix)) {
         return Err(None);
     }
     let current = session.current().clone();
-    let caller = caller(
-        Some(&start.access),
-        hushrun_ci::in_ci(&Env::from_process()),
-        sandbox,
-    );
+    let caller = caller(Some(&start.access), hushrun_ci::in_ci(&Env::from_process()));
     let does = what_a_run_does(
         caller,
         current.mode,

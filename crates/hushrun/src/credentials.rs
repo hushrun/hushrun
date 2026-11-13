@@ -127,6 +127,14 @@ impl Credentials {
         self.login_at(&origin(url))
     }
 
+    /// \[B-25\] Whether a person is signed in on this machine for `origin`, whatever credential
+    /// the command itself carries: what tells a person's machine, whose build settings an
+    /// agent's run follows, from a sandbox. It gives no token: a login is read through
+    /// [`Credentials::login_at`].
+    pub fn person_at(&self, origin: &str) -> bool {
+        self.hosts.contains_key(origin)
+    }
+
     /// The login for `origin`. \[ADR 0046\] With an agent set there is none, as if signed out,
     /// whatever the file holds: no person's login speaks for an agent, and every reader of a
     /// login comes through here.

@@ -23,8 +23,8 @@ pub enum Caller {
     /// `agent_token`: an agent token is the job's credential, as in CI outside GitHub Actions,
     /// where it reads the org's blocks and uploads none (B-31).
     Ci { id_token: bool, agent_token: bool },
-    /// An agent token. `sandbox`: a machine with no person's settings (a cloud sandbox); else a
-    /// person's machine where the agent runs, whose local mode applies.
+    /// An agent token. `sandbox`: a machine where no person is signed in to the run's backend (a
+    /// cloud sandbox); else a person's machine where the agent runs, whose settings apply.
     Agent { sandbox: bool },
 }
 
@@ -129,8 +129,10 @@ fn sharing_of(mode: Mode, why_off: Off) -> Sharing {
 /// | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
 /// | CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
 /// | CI otherwise | off | off |
-/// | An agent token, the org shares | the machine's local mode, or on in a sandbox | the org's mode, lowered on a person's machine as for the person |
-/// | An agent token otherwise | the machine's local mode, or off in a sandbox | off |
+/// | An agent token where a person is signed in, the org shares | that person's local mode | the org's mode, lowered as for the person |
+/// | An agent token where a person is signed in, otherwise | that person's local mode | off |
+/// | An agent token in a sandbox, the org shares | on | the org's mode |
+/// | An agent token in a sandbox, otherwise | off | off |
 ///
 /// `own` is the person's share setting (B-33), `local` B-1's mode, both for this command.
 pub fn what_a_run_does(caller: Caller, local: Mode, own: Mode, org: Org) -> Does {

@@ -194,6 +194,12 @@ offline.
 
 ### Fixed
 
+- Build blocks: **an agent's run on a person's machine no longer turns build reuse on by
+  itself.** A machine with an agent token and no `build.json` was taken for a sandbox, so on a
+  laptop where an agent ran with a token, crates were reused and shared without anyone choosing
+  it. A machine is a sandbox for this only when no person is signed in to the backend there and
+  the run carries an agent token; where a person is signed in, an agent's run follows that
+  person's `hushrun build` settings, off by default.
 - Contract: **a person's or an agent's token used in CI says so.** Every build request of such a
   run and its results lookup carry `Hushrun-Ci: 1`, and the lookup names the run's repository
   (`?repository=`). The backend then lets the token read that repository's trusted blocks alone
@@ -270,7 +276,7 @@ offline.
   job can't mint an ID token. Before, it said `this is CI, where hushrun run reuses nothing`,
   stale since CI reuses when the org shares.
 - Build blocks: an agent's sandbox with the network reuses and shares when its org shares. A run
-  under an agent token on a machine with no person's `build.json` now has reuse on, in the store,
+  under an agent token on a machine where no person is signed in now has reuse on, in the store,
   and shares as the org's mode says, as the table of who shares says; `HUSHRUN_BUILD=off` still
   turns it off. Before, only a run from a saved `hushrun build fetch` counted as a sandbox, so a
   sandbox with the network reused nothing unless `HUSHRUN_BUILD=on` was set.

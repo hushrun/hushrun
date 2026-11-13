@@ -593,7 +593,7 @@ pub fn begin_in_ci(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun>
     begin_without_settings(start, store, CI_MIN_FREE_GB)
 }
 
-/// B-25, B-36: starts a session on a machine with no person's settings file (a sandbox) whose
+/// B-25, B-36: starts a session on a machine where no person is signed in (a sandbox) whose
 /// store holds a fresh fetch: reuse is on unless `HUSHRUN_BUILD` says otherwise, in `store`.
 pub fn begin_in_sandbox(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
     begin_without_settings(start, store, crate::settings::MIN_FREE_GB)

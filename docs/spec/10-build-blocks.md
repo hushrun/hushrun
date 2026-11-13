@@ -756,8 +756,10 @@ caller asks it again from the same facts and nobody stores the answer:
 | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
 | CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
 | CI otherwise | off | off |
-| An agent token, the org shares | the machine's local mode, or on in a sandbox | the org's mode, lowered on a person's machine as for the person |
-| An agent token otherwise | the machine's local mode, or off in a sandbox | off |
+| An agent token where a person is signed in, the org shares | that person's local mode, `off` until the person chose one | the org's mode, lowered as for the person, by the person's settings |
+| An agent token where a person is signed in, otherwise | that person's local mode | off |
+| An agent token in a sandbox (no person signed in), the org shares | on | the org's mode |
+| An agent token in a sandbox, otherwise | off | off |
 
 "The org shares" is read from the run's results lookup, whose answer carries `Hushrun-Build:
 on`; only then is `open` asked, so an org that doesn't share pays no request. Build blocks belong
@@ -772,7 +774,7 @@ The table is `hushrun run NAME -- COMMAND`'s, on a person's machine, in a sandbo
 (B-2, B-31): that form alone shares. `hushrun run CHECK…` shares nothing, in any row: it starts no
 relay, so it neither downloads from nor uploads to the shared store, and asks the backend nothing
 about blocks. Outside CI it reuses this machine's own store as B-1's mode says (and so nothing in
-a sandbox, which has no settings file), and reads a saved fetch that serves it (B-36) as any run
+a sandbox, where nobody chose a mode), and reads a saved fetch that serves it (B-36) as any run
 does; in CI it sets no wrapper at all. *Rests on:* the backend's header and `open` saying what the
 org decided, and the machine's settings being its own; `hushrun run CHECK…` handing its session
 no backend to share through (`cmd::run` begins each check's session with none, ADR 0078), so it
@@ -780,16 +782,24 @@ never learns that the org shares. *Breaks if:* a project's CI runs its builds as
 nothing there, and its sandboxes reuse only what a fetch saved. A run never shares more than its local mode allows: with local `observe`, sharing
 observes too.
 
-A **sandbox** is a machine with no person's settings file (B-21), as the one function that maps
-a run's credential to its row says (`build_session::caller`, for the session, the relay and
-`hushrun build status`). An agent token's run there whose org shares (its results lookup said so,
-or, with none made, `open` says so within 5 seconds, which the run waits for as a CI job does)
-begins a session in the store with reuse on unless `HUSHRUN_BUILD` says otherwise, and its relay
-shares as the org's mode says; a run from a saved fetch (B-36) is one too. One whose org doesn't
-share runs as it would without any of this, and says nothing. *Rests on:* `build.json` being
-written only by `hushrun build`, which a person runs and a sandbox's image doesn't. *Breaks if:* a
-person who never ran `hushrun build` runs an agent token on their own machine: it is taken for a
-sandbox, reuses in the store and uploads as one.
+A **sandbox**, for this purpose, is a machine where no person is signed in to the run's backend
+(the credentials file holds no login for its host) and whose run carries an agent token: both,
+as the one function that maps a run's credential to its row says (`build_session::caller`, with
+`build_session::signed_in_here`, for the session, the relay and `hushrun build status`). An
+agent token's run there whose org shares (its results lookup said so, or, with none made, `open`
+says so within 5 seconds, which the run waits for as a CI job does) begins a session in the
+store with reuse on unless `HUSHRUN_BUILD` says otherwise, and its relay shares as the org's mode
+says; a run from a saved fetch (B-36) on a machine where no person is signed in to the fetch's
+backend is one too, the fetch standing for the token that made it. One whose org doesn't share
+runs as it would without any of this, and says nothing. Where a person is signed in, an agent's
+run with a token is that person's machine's: it follows the person's build settings, `off` until
+the person turns reuse on (B-1), so build reuse never turns on there without someone choosing
+it. A settings file, or none, says nothing about what the machine is. *Rests on:* a person's
+sign-in being on the machines people work at and not in a sandbox's image. *Breaks if:* a
+sandbox's image carries a person's saved sign-in for the backend: its agent runs follow that
+person's settings, off by default, and reuse nothing until `HUSHRUN_BUILD=on`; or a person who
+never signed in to the backend runs an agent token on their own machine: it is taken for a
+sandbox, reuses in the store and shares as one.
 
 When `open` answers that sharing is off although the org shares, it gives one reason
 (`hushrun_core::blocks::OffReason`): `plan`, the org's plan includes no shared store; or
@@ -1057,8 +1067,9 @@ a later step of the same job finds it; elsewhere in CI `hushrun build fetch` ref
 run's store there is its own. A step of that job whose backend answered nothing, and whose fetch
 serves it as above, gets the wrapper and reads the fetch only, in place of the one line B-2 says;
 this is where a coding agent that runs on a GitHub Actions runner behind a firewall is served. No
-run deletes the fetch. A machine with no person's
-settings file is a sandbox: reuse is on there, and sharing is the org's mode as saved. *Rests on:*
+run deletes the fetch. A machine where no person is signed in to the fetch's backend is a
+sandbox (B-25): reuse is on there, and sharing is the org's mode as saved; where one is, that
+person's settings decide. *Rests on:*
 a sandbox's later phases running the same repository and toolchain as its setup, so the keys
 they compute are the ones the fetch's manifest names; and the packs staying sealed with each
 block's key, so the fetch holds nothing a compile here couldn't make. *Breaks if:* a block the
