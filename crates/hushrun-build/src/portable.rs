@@ -60,6 +60,9 @@ pub enum Reason {
     /// block's key ([`unkeyed_candidate`]): anyone who can open the block could read it, and
     /// another machine with another value would reuse this one's bytes.
     UnkeyedValue,
+    /// It was compiled for `-C target-cpu=native` and the compiler couldn't say what that is
+    /// here: the key holds the flag's text, which means another CPU on another machine (B-5).
+    NativeCpu,
 }
 
 impl Reason {
@@ -79,6 +82,7 @@ impl Reason {
             Reason::VariableNamesBase => "variable-names-base",
             Reason::Extern => "extern",
             Reason::UnkeyedValue => "unkeyed-value",
+            Reason::NativeCpu => "native-cpu",
         }
     }
 
@@ -162,6 +166,8 @@ pub struct Facts<'a> {
     /// The variables whose value an output holds, of those [`unkeyed_candidate`] chose: by
     /// name.
     pub unkeyed: &'a [String],
+    /// It is compiled for `-C target-cpu=native`, and the compiler couldn't say what that is.
+    pub native_unresolved: bool,
 }
 
 /// Whether the block may leave the machine, and every reason it may not.
@@ -210,6 +216,9 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
     externs.dedup();
     if !externs.is_empty() {
         reasons.insert(Reason::Extern);
+    }
+    if facts.native_unresolved {
+        reasons.insert(Reason::NativeCpu);
     }
     let mut variables: Vec<String> = facts.unkeyed.to_vec();
     variables.sort();
@@ -389,6 +398,7 @@ mod tests {
             variable_names_base: false,
             externs,
             unkeyed: &[],
+            native_unresolved: false,
         })
     }
 
@@ -489,6 +499,7 @@ mod tests {
             variable_names_base: true,
             externs: &[],
             unkeyed: &[],
+            native_unresolved: false,
         });
         assert_eq!(reasons(p), "variable-names-base");
     }
@@ -511,6 +522,7 @@ mod tests {
                 variable_names_base: false,
                 externs: &[],
                 unkeyed: &[],
+                native_unresolved: false,
             })
         };
         // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
@@ -538,6 +550,7 @@ mod tests {
             variable_names_base: false,
             externs: &[],
             unkeyed: &[],
+            native_unresolved: false,
         });
         assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
@@ -558,6 +571,7 @@ mod tests {
             Reason::VariableNamesBase,
             Reason::Extern,
             Reason::UnkeyedValue,
+            Reason::NativeCpu,
         ] {
             assert_eq!(
                 serde_json::to_value(reason).unwrap(),
@@ -609,6 +623,7 @@ mod tests {
             variable_names_base: false,
             externs: &[],
             unkeyed: &unkeyed,
+            native_unresolved: false,
         });
         assert!(!p.portable);
         assert_eq!(p.reasons, vec![Reason::UnkeyedValue]);

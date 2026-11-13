@@ -80,6 +80,37 @@ struct Fake {
     audit: bool,
     /// Runs when the lookup found a block: between the lookup and the compile.
     on_found: RefCell<Option<During>>,
+    /// What the compiler says `native` is (B-5), shared between calls to count the asks; none:
+    /// it can't be asked.
+    native: Option<Rc<RefCell<NativeStandIn>>>,
+}
+
+/// A compiler's answer to what `-C target-cpu=native` is, and how often it was asked.
+#[derive(Default)]
+struct NativeStandIn {
+    /// What `--print target-cpus` and `--print cfg -C target-cpu=native` print; none: they fail.
+    answer: Option<(String, String)>,
+    asked: usize,
+}
+
+/// A stand-in whose `native` is `cpu`, with `features`.
+fn native_answer(cpu: &str, features: &[&str]) -> Rc<RefCell<NativeStandIn>> {
+    let cfg: String = std::iter::once("target_arch=\"aarch64\"\n".to_string())
+        .chain(
+            features
+                .iter()
+                .map(|feature| format!("target_feature=\"{feature}\"\n")),
+        )
+        .collect();
+    Rc::new(RefCell::new(NativeStandIn {
+        answer: Some((
+            format!(
+                "Available CPUs for this target:\n    native - Select the CPU of the current host (currently {cpu}).\n    generic\n"
+            ),
+            cfg,
+        )),
+        asked: 0,
+    }))
 }
 
 /// Applies `--remap-path-prefix` pairs as rustc does: the last one that holds the path wins.
@@ -423,6 +454,18 @@ impl Ports for Fake {
         Ok("aarch64-apple-darwin\naarch64-apple-ios\nx86_64-unknown-linux-gnu\n".into())
     }
 
+    fn rustc_native(&self, _rustc: &Path, _target: Option<&str>) -> io::Result<(String, String)> {
+        let Some(native) = &self.native else {
+            return Err(io::Error::other("no such print request"));
+        };
+        let mut native = native.borrow_mut();
+        native.asked += 1;
+        native
+            .answer
+            .clone()
+            .ok_or_else(|| io::Error::other("no such print request"))
+    }
+
     fn stdout(&mut self, bytes: &[u8]) {
         self.seen.borrow_mut().stdout.extend_from_slice(bytes);
     }
@@ -626,6 +669,7 @@ impl World {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
         };
         change(&mut fake);
         let before = self.session.current().entries().len();
@@ -708,6 +752,7 @@ fn probes_pass_through_before_anything_and_are_not_logged() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
     };
     // The session's file is gone: a probe must not need it.
     fs::remove_file(w.session.current().folder.join("session.json")).unwrap();
@@ -1554,6 +1599,7 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
     };
     let code = call(&mut fake, &mut Vec::new(), &args);
     assert_eq!(code, 0);
@@ -1613,6 +1659,7 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
         };
         call(&mut fake, &mut Vec::new(), &as_proc_macro(&w, ws));
         w.session.current().entries().last().unwrap().outcome
@@ -1695,6 +1742,7 @@ fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
     };
     assert_eq!(call(&mut fake, &mut Vec::new(), &args), 0);
     assert_eq!(
@@ -2464,6 +2512,7 @@ fn linked_in(w: &World, ws: &Path) -> Outcome {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -2609,6 +2658,7 @@ fn a_link_input_replaced_during_the_compile_is_not_stored() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         let outcome = w.session.current().entries().last().unwrap().outcome;
@@ -2648,6 +2698,7 @@ fn a_linker_outside_every_root_ties_the_block() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         w.session.current().entries().last().unwrap().outcome
@@ -2890,6 +2941,7 @@ fn linked_with(w: &World, ws: &Path, line: &str) -> Outcome {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -4209,4 +4261,97 @@ fn a_variable_the_repository_names_in_build_env_is_in_every_key() {
     assert!(!other.entry.unwrap().found);
     let again = w.call_with(&ws, "a", &[], with("one-flavour-of-it"));
     assert_eq!(again.outcome(), REUSED, "{}", again.stderr);
+}
+
+/// Library `a` compiled for `-C target-cpu=native` in a fresh world, with `native` as the
+/// compiler's answer.
+fn native_compile(native: &Rc<RefCell<NativeStandIn>>) -> (World, Result) {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    let native = native.clone();
+    let r = w.call_with(&ws, "a", &["-C", "target-cpu=native"], move |fake| {
+        from_a_registry(fake);
+        fake.native = Some(native);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    (w, r)
+}
+
+// covers: B-5, B-24
+#[test]
+fn target_cpu_native_is_keyed_by_what_it_means_on_the_machine() {
+    let (m4, _) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
+    let (m4_again, r) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+    let (m1, _) = native_compile(&native_answer("apple-m1", &["neon"]));
+    let (same_name, _) = native_compile(&native_answer("apple-m4", &["neon"]));
+    // Two machines with one CPU share a key; another CPU, or the same name with other
+    // features, is another key: the flag's text alone would give one.
+    assert_eq!(only_step(&m4), only_step(&m4_again));
+    assert_ne!(only_step(&m4), only_step(&m1));
+    assert_ne!(only_step(&m4), only_step(&same_name));
+}
+
+// covers: B-5
+#[test]
+fn what_native_means_is_asked_once_per_compiler_not_once_per_compile() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    for name in ["b", "c"] {
+        fs::create_dir_all(ws.join(format!("{name}/src"))).unwrap();
+        fs::write(ws.join(format!("{name}/src/lib.rs")), "pub fn f() {}\n").unwrap();
+    }
+    settle();
+    let native = native_answer("apple-m4", &["neon"]);
+    for name in ["a", "b", "c", "a"] {
+        let native = native.clone();
+        let r = w.call_with(&ws, name, &["-C", "target-cpu=native"], move |fake| {
+            from_a_registry(fake);
+            fake.native = Some(native);
+        });
+        assert!(matches!(r.outcome(), STORED | REUSED), "{}", r.stderr);
+    }
+    assert_eq!(native.borrow().asked, 1);
+    // A call without the flag never asks.
+    let r = w.call_with(&ws, "b", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED);
+    assert_eq!(native.borrow().asked, 1);
+}
+
+// covers: B-5, B-24
+#[test]
+fn a_compiler_that_cant_say_what_native_is_keeps_its_block_here_keyed_by_the_text() {
+    let unanswered = Rc::new(RefCell::new(NativeStandIn::default()));
+    let (w, r) = native_compile(&unanswered);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::NativeCpu)
+    );
+    assert_eq!(unanswered.borrow().asked, 1);
+    // Keyed by the text: the same in every such world, and other than any answer's key.
+    let (again, _) = native_compile(&Rc::new(RefCell::new(NativeStandIn::default())));
+    assert_eq!(only_step(&w), only_step(&again));
+    let (answered, _) = native_compile(&native_answer("apple-m4", &["neon"]));
+    assert_ne!(only_step(&w), only_step(&answered));
+    // A later `-C target-cpu` wins, as in rustc: nothing is asked.
+    let unasked = Rc::new(RefCell::new(NativeStandIn::default()));
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    let stand_in = unasked.clone();
+    let r = w.call_with(
+        &ws,
+        "a",
+        &["-C", "target-cpu=native", "-C", "target-cpu=apple-m1"],
+        move |fake| {
+            from_a_registry(fake);
+            fake.native = Some(stand_in);
+        },
+    );
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+    assert_eq!(unasked.borrow().asked, 0);
 }

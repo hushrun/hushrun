@@ -436,3 +436,37 @@ fn a_proc_macros_metadata_is_found_and_is_the_same_whichever_way_it_was_linked()
     let other = compile("other", &MACRO.replace("never", "not ever"), None);
     assert_ne!(hushrun_build::metadata::of(&other), Some(meta));
 }
+
+// covers: B-5
+#[test]
+fn target_cpu_native_is_resolved_by_the_real_compiler_and_still_reused() {
+    let w = world();
+    let call = |ws: &Path| {
+        write(&ws.join("n.rs"), "pub fn n() -> u32 { 7 }\n");
+        w.call(ws, "n", "n.rs", &["-C", "target-cpu=native"], &[])
+    };
+    let one = w.checkout("one");
+    let (out, first) = call(&one);
+    ok(&out);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let portable = first.portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // What `native` is here was asked once and kept, with a CPU's name in it.
+    let memos = w.session.current().store.join("compilers");
+    let native: Vec<String> = fs::read_dir(&memos)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("native-"))
+        .map(|e| fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(native.len(), 1, "{native:?}");
+    let memo: serde_json::Value = serde_json::from_str(&native[0]).unwrap();
+    assert!(
+        !memo["native"]["cpu"].as_str().unwrap().is_empty(),
+        "{memo}"
+    );
+    let two = w.checkout("two-longer");
+    let (out, second) = call(&two);
+    ok(&out);
+    assert!(reused(&second), "{second:?}");
+}

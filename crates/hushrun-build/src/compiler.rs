@@ -430,6 +430,132 @@ pub fn identity(
     })
 }
 
+/// Names the form of a memo of what `-C target-cpu=native` means (B-5).
+const NATIVE_SCHEMA: &str = "hushrun.build.native-cpu/1";
+
+/// What `-C target-cpu=native` means for one compiler and target on this machine (B-5): the
+/// CPU rustc picks for `native` and the target features that follow from it, as rustc prints
+/// them. The key holds this in place of the flag's text, so two machines with other CPUs never
+/// share a key for code built for either.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NativeCpu {
+    /// The CPU's name, as `rustc --print target-cpus` says `native` is now (`apple-m4`).
+    pub cpu: String,
+    /// The target features `rustc --print cfg -C target-cpu=native` lists, sorted.
+    pub features: Vec<String>,
+}
+
+impl NativeCpu {
+    /// The flag as the first key holds it: `-Ctarget-cpu=native` with what it means here.
+    pub fn key_arg(&self) -> String {
+        format!(
+            "-Ctarget-cpu=native({};{})",
+            self.cpu,
+            self.features.join(",")
+        )
+    }
+}
+
+/// What asking the compiler what `native` is returns: what `--print target-cpus` and `--print
+/// cfg -C target-cpu=native` printed, for a target.
+pub type AskNative<'a> = dyn Fn(Option<&str>) -> io::Result<(String, String)> + 'a;
+
+/// What `-C target-cpu=native` means for the compiler `identity` at `rustc` and the call's
+/// `target`, asked once per compiler and target and kept in `memo_dir` beside the compiler's
+/// memo (B-5). `ask` runs `<rustc> --print target-cpus` and `<rustc> --print cfg -C
+/// target-cpu=native`, each with `--target` when there is one, and returns what they printed.
+/// `None` when the compiler can't be asked, or its answer can't be read: the flag is then keyed
+/// by its text and the block doesn't leave the machine. A memo that can't be written only means
+/// the next call asks again.
+pub fn native_cpu(
+    identity: &Identity,
+    target: Option<&str>,
+    memo_dir: &Path,
+    ask: &AskNative<'_>,
+) -> Option<NativeCpu> {
+    let key = jcs::digest(&json!({
+        "schema": NATIVE_SCHEMA,
+        "compiler": identity.digest.to_string(),
+        "target": target,
+    }))
+    .ok()?;
+    let memo = memo_dir.join(format!("native-{}.json", key.hex()));
+    let read = || -> Option<NativeCpu> {
+        let value: Value = serde_json::from_slice(&fs::read(&memo).ok()?).ok()?;
+        (value.get("key")?.as_str()? == key.to_string())
+            .then(|| serde_json::from_value(value.get("native")?.clone()).ok())
+            .flatten()
+    };
+    if let Some(found) = read() {
+        return Some(found);
+    }
+    // Compiles that start at once ask once: the others wait and read what it wrote.
+    let _lock = MemoLock::take(memo_dir, &key);
+    if let Some(found) = read() {
+        return Some(found);
+    }
+    let (cpus, cfg) = ask(target).ok()?;
+    let found = parse_native(&cpus, &cfg)?;
+    let bytes = serde_json::to_vec(&json!({
+        "key": key.to_string(),
+        "native": found,
+    }))
+    .ok()?;
+    let _ = write_whole_in(memo_dir, &memo, &bytes);
+    Some(found)
+}
+
+/// What `native` is in `rustc --print target-cpus` (its line says `(currently <cpu>)`) and the
+/// target features `rustc --print cfg -C target-cpu=native` lists. `None` when either is missing.
+fn parse_native(cpus: &str, cfg: &str) -> Option<NativeCpu> {
+    let line = cpus
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some("native"))?;
+    let (_, rest) = line.split_once("(currently ")?;
+    let cpu = rest.split(')').next()?.trim().trim_end_matches('.');
+    if cpu.is_empty() || cpu.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut features: Vec<String> = cfg
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("target_feature=\""))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .map(str::to_string)
+        .collect();
+    if !cfg.lines().any(|line| line.starts_with("target_arch=")) {
+        return None;
+    }
+    features.sort();
+    features.dedup();
+    Some(NativeCpu {
+        cpu: cpu.to_string(),
+        features,
+    })
+}
+
+/// Writes `bytes` to `dest` in `dir` whole: a new temporary file there, then a rename.
+fn write_whole_in(dir: &Path, dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    for n in 0..64 {
+        let temp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        };
+        let written = file.write_all(bytes).and_then(|()| fs::rename(&temp, dest));
+        if written.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        return written;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temporary name for the memo",
+    ))
+}
+
 /// The folder of the store that holds the compiler memos, under which the sysroots without
 /// sources are made ([`SYSROOTS`]).
 pub const MEMOS: &str = "compilers";
@@ -1907,5 +2033,30 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // The lock is gone once the memo is written: one memo file, nothing else.
         assert_eq!(fs::read_dir(&setup.memo).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::{NativeCpu, parse_native};
+
+    // covers: B-5
+    #[test]
+    fn what_native_is_read_from_the_compiler_s_own_words() {
+        let cpus = "Available CPUs for this target:\n    native - Select the CPU of the current host (currently apple-m4).\n    alder-lake\n";
+        let cfg = "debug_assertions\ntarget_arch=\"aarch64\"\ntarget_feature=\"sme\"\ntarget_feature=\"neon\"\n";
+        let found = parse_native(cpus, cfg).unwrap();
+        assert_eq!(
+            found,
+            NativeCpu {
+                cpu: "apple-m4".into(),
+                features: vec!["neon".into(), "sme".into()],
+            }
+        );
+        assert_eq!(found.key_arg(), "-Ctarget-cpu=native(apple-m4;neon,sme)");
+        // An answer that doesn't say what `native` is now, or no cfg at all: not known.
+        assert_eq!(parse_native("    native\n", cfg), None);
+        assert_eq!(parse_native(cpus, ""), None);
+        assert_eq!(parse_native("", cfg), None);
     }
 }

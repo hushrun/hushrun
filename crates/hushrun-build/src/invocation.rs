@@ -228,6 +228,8 @@ pub struct Invocation {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    native_cpu: bool,
+    native_in_llvm_args: bool,
     debug: DebugFlags,
     message_form: String,
     form: crate::messages::Form,
@@ -398,6 +400,8 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
+        native_cpu: seen.native_cpu,
+        native_in_llvm_args: seen.native_in_llvm_args,
         debug: seen.debug,
         message_form,
         form,
@@ -505,6 +509,18 @@ impl Invocation {
     /// `-C linker-plugin-lto`, `-C embed-bitcode=yes` or compressed debug sections.
     pub fn searchable(&self) -> bool {
         self.searchable
+    }
+
+    /// Whether the CPU the call compiles for is this machine's: its last `-C target-cpu` is
+    /// `native` (B-5).
+    pub fn native_cpu(&self) -> bool {
+        self.native_cpu
+    }
+
+    /// Whether a `-C llvm-args` names `native` as a value (`-mcpu=native`, `-mattr=native`): a
+    /// choice of this machine's CPU that the compiler can't be asked to resolve (B-5).
+    pub fn native_in_llvm_args(&self) -> bool {
+        self.native_in_llvm_args
     }
 
     /// What the call says about debug info (B-9).
@@ -793,6 +809,8 @@ struct Seen {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    native_cpu: bool,
+    native_in_llvm_args: bool,
     debug: DebugFlags,
     error_format: Option<String>,
     json: Vec<String>,
@@ -817,6 +835,8 @@ impl Default for Seen {
             incremental: None,
             target: None,
             searchable: true,
+            native_cpu: false,
+            native_in_llvm_args: false,
             debug: DebugFlags::default(),
             error_format: None,
             json: Vec::new(),
@@ -945,6 +965,15 @@ impl Seen {
                         if compresses_debug(setting.unwrap_or_default(), name == "link-args") {
                             self.searchable = false;
                         }
+                    }
+                    // The last one wins, as in rustc.
+                    "target-cpu" => self.native_cpu = setting == Some("native"),
+                    "llvm-args" => {
+                        self.native_in_llvm_args |= setting.is_some_and(|words| {
+                            words
+                                .split_whitespace()
+                                .any(|word| word.ends_with("=native"))
+                        });
                     }
                     "debuginfo" => self.debug.debuginfo = setting.map(str::to_string),
                     "split-debuginfo" => self.debug.split = setting.map(str::to_string),
@@ -1483,6 +1512,37 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(with.get("MY_FLAG").map(String::as_str), Some("on"));
         assert!(!with.contains_key("UNSET_ONE"));
+    }
+
+    // covers: B-5
+    #[test]
+    fn target_cpu_native_is_seen_in_every_spelling_and_the_last_one_wins() {
+        for given in [
+            "-C target-cpu=native",
+            "-Ctarget-cpu=native",
+            "--codegen target-cpu=native",
+            "--codegen=target-cpu=native",
+            "-C target-cpu=apple-m1 -C target-cpu=native",
+        ] {
+            let inv = handled(&argv(&minimal(given)), &Env::default());
+            assert!(inv.native_cpu(), "{given}");
+            assert!(
+                inv.key_args()
+                    .iter()
+                    .any(|arg| arg == "-Ctarget-cpu=native")
+            );
+        }
+        for given in [
+            "",
+            "-C target-cpu=apple-m1",
+            "-C target-cpu=native -C target-cpu=apple-m1",
+            "-C target-feature=+neon",
+        ] {
+            assert!(
+                !handled(&argv(&minimal(given)), &Env::default()).native_cpu(),
+                "{given}"
+            );
+        }
     }
 
     // covers: B-5
