@@ -5132,3 +5132,62 @@ impl Result {
             .is_some_and(|p| p.portable)
     }
 }
+
+// covers: B-15, B-34
+#[test]
+fn a_record_the_store_cant_confirm_suspends_and_reports_nothing_when_a_dependent_cant_load_it() {
+    // This store holds a downloaded block of `a`. Another checkout's `target/` came from
+    // elsewhere with other bytes for `a` and a record that claims they are that block, reused.
+    let (other, _) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let step = only_step(&other);
+    let restored = w.checkout("restored");
+    let rmeta = restored.join("target/debug/deps/liba-xa.rmeta");
+    fs::write(&rmeta, b"other bytes").unwrap();
+    let honest = crate::sidecar::record_path(&ws.join("target/debug/deps/liba-xa.rmeta")).unwrap();
+    let mut text: serde_json::Value = serde_json::from_slice(&fs::read(honest).unwrap()).unwrap();
+    assert_eq!(text["reused"], true, "{text}");
+    text["sha256"] = serde_json::to_value(Digest::of(b"other bytes")).unwrap();
+    let record = crate::sidecar::record_path(&rmeta).unwrap();
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `core` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    fs::create_dir_all(restored.join("b/src")).unwrap();
+    fs::write(restored.join("b/src/lib.rs"), "").unwrap();
+    let ext = format!("a={}", rmeta.display());
+    let asked = relay.borrow().asked.len();
+    let stand_in = relay.clone();
+    let r = w.call_with(&restored, "b", &["--extern", &ext], move |fake| {
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.code, 1);
+    // The download is not reported, and its first key is not suspended.
+    assert!(
+        !relay.borrow().asked[asked..]
+            .iter()
+            .any(|r| matches!(r, Request::Report { .. })),
+        "{:?}",
+        relay.borrow().asked
+    );
+    assert!(w.store().suspended_at(&step, SystemTime::now()).is_none());
+    // The file is still removed, so cargo builds `a` there.
+    assert!(!rmeta.exists());
+    assert!(r.entry.unwrap().note.is_some());
+}

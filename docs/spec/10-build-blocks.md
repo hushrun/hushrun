@@ -383,7 +383,14 @@ E0463, E0464, E0514 and E0786, never an error in the dependent's own code); in t
 the reused files are removed from the output folder so that cargo builds them, and one line says
 so. Only the externs the error names are acted on: by their name, their crate's name or their
 file (E0463's "can't find crate for `x` which `y` depends on" names `x` and `y`); a crate that is
-not one of the call's `--extern`s, or one no reuse put in place, changes nothing. Every call that
+not one of the call's `--extern`s, or one no reuse put in place, changes nothing. Which block an
+extern came from, and so which first key is suspended and which download is reported `rejected`
+(B-34), is what the run's own store confirms of its record (B-6), never the record alone: a
+record that came with a restored `target/` could name any block in the store. An extern whose
+record says reused but which the store doesn't confirm suspends and reports nothing; its file
+and record are removed, so cargo builds it, and the line names it. *Rests on:* the store's
+`block.json` listing the SHA-256 of each file it gave out, which a reused file still has.
+*Breaks if:* a record came back with the file's stat recorded (B-6). Every call that
 runs rustc as asked after its arguments were read (`passed through` for a reason found after
 reading them, such as the never-store list, a compiler of unknown identity or an incremental rebuild
 (B-9), or `built, not stored` because a key, the store or a reuse failed) runs rustc as a child

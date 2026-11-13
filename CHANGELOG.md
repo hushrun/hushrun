@@ -202,6 +202,11 @@ offline.
   block it names with the same file; any other proc macro is named by its bytes, and nothing
   built against it leaves the machine. In CI the store starts empty, so a job shares only what it
   compiled itself.
+- Build blocks: a dependent that can't load a crate whose record came with a restored `target/`
+  no longer suspends, or reports as `rejected` to the shared store, whatever block that record
+  names. The record alone decided which first key was suspended and which download was reported,
+  so a planted record could get a good shared block reported. Now only a block the run's own
+  store confirms is acted on; any other such crate is removed so cargo builds it.
 - Build blocks: an upload that panics in the middle of a run no longer holds up the end of its
   command. The end waited its whole deadline (10 seconds on a person's machine, up to 2 minutes in
   a CI job), then sent no `close`, and no later check in the same process uploaded anything. Now

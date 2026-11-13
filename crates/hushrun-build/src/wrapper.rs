@@ -2396,13 +2396,22 @@ impl Call<'_> {
             let Ok(known) = sidecar::lookup(&path) else {
                 continue;
             };
-            let (true, Some(step)) = (known.reused, known.step) else {
+            if !known.reused {
+                continue;
+            }
+            // Which block it is, the store says, never the record alone (B-6): a record that
+            // came with a restored `target/` could name any block. One the store can't confirm
+            // suspends and reports nothing; the file is removed, so cargo builds it.
+            let Some(vouched) = sidecar::vouched(store, &path, &known) else {
+                let _ = std::fs::remove_file(&path);
+                let _ = sidecar::forget(&path);
+                names.push(ext.name.clone());
                 continue;
             };
+            let step = vouched.step;
             // B-34: a block that was only downloaded is reported to the scope it came from, and
             // its first key is suspended for the store's kept days, not until a clean.
-            let downloaded = known
-                .block
+            let downloaded = Some(vouched.block)
                 .filter(|block| store.origin(block).is_some_and(|o| o.downloaded_only()));
             match downloaded {
                 Some(block) => {
