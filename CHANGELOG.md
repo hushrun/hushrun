@@ -235,6 +235,15 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   no longer keep the first start's passes when the second fails: the second start leaves a
   `.started` file, no test file or test of that run records a pass, and the run says why once. A
   `.started` file whose content is a JSON object with a `why` gives the reason the run says.
+- The line `hushrun init` proposes for Vitest's config is now `plugins:
+  [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) :
+  undefined]`: the `&&` form it proposed before failed a config that type-checks itself
+  (`typecheck.enabled`), with every test passed. For Jest's config it is now `if
+  (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`, or a `createRequire` form for a
+  TypeScript config that compiles to CommonJS, which a lint's `no-unused-expressions` and
+  `no-require-imports` accept. A config with the line in its old form still loads the adapter.
+- Where a Vitest config turns on `typecheck`, sets `isolate: false` or runs in a browser, `hushrun
+  init` proposes no line for it and says that hushrun can't look at its test files there.
 - A script that starts Jest or Vitest for something that runs no test file and then for the tests
   (`jest --clearCache && jest`, `vitest list && vitest run`) is one start again, and keeps its
   passes: a start that ran no test file gives up its claim on the run as it ends, and a start only

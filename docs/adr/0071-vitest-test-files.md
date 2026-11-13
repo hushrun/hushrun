@@ -16,7 +16,8 @@ Vitest's own source.
 
 1. **Loading needs one line in the repository's Vitest config**, which `hushrun init` proposes in
    its "Change by hand" list and never writes:
-   `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`.
+   `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`
+   (ADR 0081 Amendment 5: now a conditional, which a config that type-checks itself accepts).
    Vitest takes no plugin, reporter or setup file from the environment (none of the variables it
    reads does that), and a preload through `NODE_OPTIONS` would have to patch Vitest's internals.
    Without `HUSHRUN_VITEST`, which hushrun sets only for a check whose `tests` aren't off, the line
