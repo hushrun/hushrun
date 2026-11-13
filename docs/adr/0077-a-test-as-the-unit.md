@@ -366,3 +366,6 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
 - **"and 1 more that did runs as a check"** read as a mistake. The audit's clause is now `, and 1
   more that already passed runs anyway, as a check` (`run anyway` for more), and `all <N> run; 1
   that already passed on the files it read runs anyway, as a check`; the counts are as before.
+- **`ready` in each adapter's word.** `hushrun ready` said "test files" for every adapter while a
+  run's lines said "test programs" or "test classes". Its line is now worded by the one function
+  beside the run's (`previewed_line`), with the adapter's word.

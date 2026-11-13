@@ -1308,6 +1308,8 @@ pub enum Previewed {
         audited: usize,
         /// \[C-39\] With tests as the unit, what the plan would reuse counted with them.
         tests: Option<TestsCounted>,
+        /// \[C-39\] The adapter's word for its test files ([`Adapter::test_file`]).
+        noun: &'static str,
     },
     /// The check's reuse is suspended: why, as a run says it.
     Suspended(String),
@@ -1415,7 +1417,77 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
         reused,
         audited,
         tests,
+        noun: adapter.test_file(),
     })
+}
+
+/// \[C-22\] `hushrun ready`'s line for a check whose plan `previewed` says, after `label`: what CI
+/// would run, or with results here (`here`) what a run here would, counted as a run's line counts
+/// (C-39), each adapter's units in its own word.
+pub fn previewed_line(previewed: &Previewed, label: &str, here: bool) -> String {
+    let who = if here { "a run here would" } else { "CI would" };
+    let passed = if here { "passed here" } else { "passed" };
+    let n = |n: usize| usage::thousands(n as u64);
+    match previewed {
+        Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
+        Previewed::Plan {
+            total,
+            tests: Some(counted),
+            noun,
+            ..
+        } if counted.one_by_one > 0 || counted.tests.is_some_and(|(_, r)| r > 0) => {
+            // \[C-39\] With tests as the unit: tests, where every test file's are known here.
+            match counted.tests {
+                Some((all, reused_tests)) => {
+                    let they = if reused_tests == 1 { "it" } else { "they" };
+                    format!(
+                        "{label}: {who} run {} of {}, in {} of {}; {} already {passed} on the files {they} read",
+                        n(all - reused_tests),
+                        count_tests(all as u64),
+                        n(counted.files_run),
+                        test_files_grouped(counted.files_total as u64, noun),
+                        n(reused_tests),
+                    )
+                }
+                None => {
+                    let they = if counted.files_reused == 1 {
+                        "it"
+                    } else {
+                        "they"
+                    };
+                    format!(
+                        "{label}: {who} run {} of {}; {} already {passed} on the files {they} read, and so did {} of the others",
+                        n(counted.files_run),
+                        test_files_grouped(*total as u64, noun),
+                        n(counted.files_reused),
+                        count_tests(counted.one_by_one as u64),
+                    )
+                }
+            }
+        }
+        Previewed::Plan {
+            total,
+            run,
+            reused,
+            noun,
+            ..
+        } => {
+            if *reused == 0 {
+                format!(
+                    "{label}: {who} run all {}",
+                    test_files_grouped(*total as u64, noun)
+                )
+            } else {
+                let they = if *reused == 1 { "it" } else { "they" };
+                format!(
+                    "{label}: {who} run {} of {}; {} already {passed} on the files {they} read",
+                    n(*run),
+                    test_files_grouped(*total as u64, noun),
+                    n(*reused),
+                )
+            }
+        }
+    }
 }
 
 /// Each test file's lists with the key of each for the files on disk now (C-31): those

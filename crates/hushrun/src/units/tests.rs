@@ -1162,3 +1162,42 @@ fn each_adapter_counts_its_test_files_in_its_own_word() {
         "2,140 test targets"
     );
 }
+
+// covers: C-22, C-39
+#[test]
+fn ready_counts_each_adapters_units_in_its_own_word() {
+    let plan = |run, reused| Previewed::Plan {
+        total: 5,
+        run,
+        reused,
+        audited: 0,
+        tests: None,
+        noun: "test program",
+    };
+    assert_eq!(
+        previewed_line(&plan(5, 0), "unit", false),
+        "unit: CI would run all 5 test programs"
+    );
+    assert_eq!(
+        previewed_line(&plan(2, 3), "unit", true),
+        "unit: a run here would run 2 of 5 test programs; 3 already passed here on the files they read"
+    );
+    let tests = Previewed::Plan {
+        total: 2,
+        run: 2,
+        reused: 0,
+        audited: 0,
+        tests: Some(TestsCounted {
+            tests: Some((10, 7)),
+            files_total: 2,
+            files_run: 1,
+            files_reused: 1,
+            one_by_one: 2,
+        }),
+        noun: "test class",
+    };
+    assert_eq!(
+        previewed_line(&tests, "unit", false),
+        "unit: CI would run 3 of 10 tests, in 1 of 2 test classes; 7 already passed on the files they read"
+    );
+}
