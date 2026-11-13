@@ -1310,7 +1310,7 @@ mod tests {
             },
             |path| {
                 path.strip_prefix("/home/dev")
-                    .map(|rest| format!("/Users/dev{rest}"))
+                    .map(|rest| format!("/srv/dev{rest}"))
             },
         )
         .unwrap();
@@ -1318,7 +1318,7 @@ mod tests {
             roots.toolchain_needles(),
             [
                 "/home/dev/.rustup/toolchains/stable-x/lib/rustlib",
-                "/Users/dev/.rustup/toolchains/stable-x/lib/rustlib",
+                "/srv/dev/.rustup/toolchains/stable-x/lib/rustlib",
                 "/cache/build/compilers/sysroots/v1/lib/rustlib",
             ]
         );
