@@ -242,6 +242,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`, or a `createRequire` form for a
   TypeScript config that compiles to CommonJS, which a lint's `no-unused-expressions` and
   `no-require-imports` accept. A config with the line in its old form still loads the adapter.
+- `hushrun why` for a Go check decides from the same files the run does: a `_test.go` file the
+  build tags leave out of every package (testify's `dumpcgo_test.go`, `cgo && testcgo`) is no
+  longer called gone, nor does it make every test file run where the run reused them. `why` never
+  calls a file on disk gone.
 - Where a Vitest config turns on `typecheck`, sets `isolate: false` or runs in a browser, `hushrun
   init` proposes no line for it and says that hushrun can't look at its test files there.
 - A script that starts Jest or Vitest for something that runs no test file and then for the tests

@@ -787,13 +787,23 @@ fn changes_of(
                 )
             })
         })
+        // \[C-37\] A file that is on disk is never gone: one of the rest set then that is a test file
+        // or a source now changed what tests load.
         .or_else(|| {
             map.rest.keys().find(|p| !rest.contains_key(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is gone, and any test may have read it"),
-                    "rest-changed",
-                )
+                if tree.contains(p) {
+                    (
+                        p.clone(),
+                        format!("{p} is now a test file or a source, which can change what tests load"),
+                        "shape",
+                    )
+                } else {
+                    (
+                        p.clone(),
+                        format!("{p} is gone, and any test may have read it"),
+                        "rest-changed",
+                    )
+                }
             })
         })
         .or_else(|| {
@@ -807,9 +817,14 @@ fn changes_of(
         })
         .or_else(|| {
             map.sources.iter().find(|p| !sources.contains(*p)).map(|p| {
+                let now = if tree.contains(p) {
+                    "is no longer a source"
+                } else {
+                    "is gone"
+                };
                 (
                     p.clone(),
-                    format!("{p} is gone, which can change what tests load"),
+                    format!("{p} {now}, which can change what tests load"),
                     "shape",
                 )
             })
@@ -1016,5 +1031,45 @@ mod tests {
         // Nothing known: at the first `::`, as before.
         assert_eq!(split("gone.py::t"), ("gone.py", Some("t".to_string())));
         assert_eq!(split("gone.py"), ("gone.py", None));
+    }
+
+    // covers: C-37
+    #[test]
+    fn a_file_on_disk_is_never_said_to_be_gone() {
+        // The rest set then held p/tagged_test.go; the sets now take it for a test file. It is on
+        // disk: what changed is what tests load, not a file gone.
+        let t = tree(&["p/p_test.go", "p/tagged_test.go", "p/p.go"]);
+        let sets = units::classify(
+            t.paths(),
+            &|p| p.ends_with("_test.go"),
+            units::Sources::Kinds(&[".go"]),
+            &[],
+        );
+        let mut map = Map::default();
+        map.rest
+            .insert("p/tagged_test.go".into(), "f 0".to_string());
+        map.sources.insert("p/p.go".into());
+        let said = changes_of(None, &map, &sets, &t, &BTreeSet::new()).every;
+        assert_eq!(
+            said.map(|(_, why, reason)| (why, reason)),
+            Some((
+                "p/tagged_test.go is now a test file or a source, which can change what tests load"
+                    .to_string(),
+                "shape"
+            ))
+        );
+        // One that isn't on disk is gone.
+        let t = tree(&["p/p_test.go", "p/p.go"]);
+        let sets = units::classify(
+            t.paths(),
+            &|p| p.ends_with("_test.go"),
+            units::Sources::Kinds(&[".go"]),
+            &[],
+        );
+        let said = changes_of(None, &map, &sets, &t, &BTreeSet::new()).every;
+        assert_eq!(
+            said.map(|(_, why, _)| why),
+            Some("p/tagged_test.go is gone, and any test may have read it".to_string())
+        );
     }
 }
