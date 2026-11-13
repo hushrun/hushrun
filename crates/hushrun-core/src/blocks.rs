@@ -96,6 +96,23 @@ pub fn is_kind(text: &str) -> bool {
     name_ok && version_ok
 }
 
+/// The schema line an address is taken under.
+pub const ADDRESS_SCHEMA: &str = "hushrun.block-address/v1";
+
+/// The address of a key of kind `kind`: what the backend knows a block (or, for a first key, its
+/// hints) by, since it never sees the key itself. The SHA-256 of
+/// `hushrun.block-address/v1\n<kind>\n` followed by the key's 32 bytes. A hint's address is the
+/// address of the block's first key, with the same kind.
+pub fn address(kind: &str, key: &[u8; 32]) -> Hex32 {
+    let mut hasher = Sha256::new();
+    hasher.update(ADDRESS_SCHEMA.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(key);
+    Hex32(hasher.finalize().into())
+}
+
 /// Whether `text` is a platform: a target triple, 1 to 64 characters of `a`-`z`, `0`-`9`, `_`,
 /// `.` and `-`.
 pub fn is_platform(text: &str) -> bool {
@@ -691,6 +708,9 @@ pub struct Counts {
     pub compared: u64,
     /// Of those, the comparisons of blocks another machine built.
     pub compared_others: u64,
+    /// Of `compared`, how many differed. A server from before it ignores it, and a close from a
+    /// client from before it reads as 0.
+    pub compared_differed: u64,
 }
 
 /// `POST v0/build/close`: once per run, at its end. Sent again with the same `run`, it counts

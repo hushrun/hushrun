@@ -473,6 +473,7 @@ fn close_and_report() {
                 unused_downloads: 8,
                 compared: 9,
                 compared_others: 10,
+                compared_differed: 11,
             },
         },
         json!({
@@ -482,7 +483,7 @@ fn close_and_report() {
             "counts": {
                 "reusedLocal": 1, "reusedShared": 2, "built": 3, "uploaded": 4, "bytesDown": 5,
                 "bytesUp": 6, "savedMs": 7, "unusedDownloads": 8, "compared": 9,
-                "comparedOthers": 10,
+                "comparedOthers": 10, "comparedDiffered": 11,
             },
         }),
     );
@@ -494,6 +495,8 @@ fn close_and_report() {
     .unwrap();
     assert_eq!(sparse.counts.built, 2);
     assert_eq!(sparse.counts.reused_shared, 0);
+    // A close from a client from before `comparedDiffered` reads it as 0.
+    assert_eq!(sparse.counts.compared_differed, 0);
     assert!(sparse.manifest.is_empty());
     round_trip(
         &ReportRequest {
@@ -559,4 +562,17 @@ fn commits() {
     assert!(!is_commit(&"a".repeat(39)));
     assert!(!is_commit(&"A".repeat(40)));
     assert!(!is_commit(""));
+}
+
+#[test]
+fn an_address_is_the_kind_and_the_key_under_its_schema() {
+    let key = [7u8; 32];
+    let mut expected = Vec::new();
+    expected.extend_from_slice(b"hushrun.block-address/v1\nrustc/1\n");
+    expected.extend_from_slice(&key);
+    assert_eq!(address("rustc/1", &key), Hex32::sha256(&expected));
+    assert_ne!(address("rustc/1", &key), address("rustc/2", &key));
+    assert_ne!(address("rustc/1", &key), address("rustc/1", &[8u8; 32]));
+    // The key's own SHA-256 is not its address: the address is taken under its schema.
+    assert_ne!(address("rustc/1", &key), Hex32::sha256(&key));
 }
