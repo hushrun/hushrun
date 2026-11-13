@@ -283,8 +283,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - A Maven run of TestNG no longer counts each test twice in its summary: a report below
   `junitreports/` is left out when Surefire's `TEST-TestSuite.xml` beside it holds every one of
   its cases, and only then, so another tool's reports there are still read.
-- Maven: a module named only in an assembly descriptor file that a plugin's configuration points
-  at is now read by that module's tests.
+- Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
+  at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
+  names) is now read by that module's tests.
 - A `gradlew` script that starts Gradle again after a failure no longer has its second start's
   pass replace the first start's failure: each start keeps its own facts.
 - `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose

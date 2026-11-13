@@ -1899,3 +1899,113 @@ fn a_module_unpacked_as_a_dependency_or_copied_in_an_active_profile_is_read() {
         );
     }
 }
+
+// covers: C-47
+#[test]
+fn a_module_an_inline_or_shared_assembly_descriptor_takes_is_read_by_that_modules_tests() {
+    let Some(maven) = maven() else { return };
+    let jar = "<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version></plugin></plugins>";
+    let assembly = |inside: &str| {
+        format!(
+            "<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-assembly-plugin</artifactId><version>3.7.1</version>{inside}</plugin>"
+        )
+    };
+    let execution = |config: &str| {
+        format!(
+            "<executions><execution><id>d</id><phase>process-test-classes</phase><goals><goal>single</goal></goals><configuration><appendAssemblyId>false</appendAssemblyId><finalName>bundle</finalName>{config}</configuration></execution></executions>"
+        )
+    };
+    let set = |rule: &str| {
+        format!(
+            "<id>bin</id><formats><format>dir</format></formats><includeBaseDirectory>false</includeBaseDirectory><moduleSets><moduleSet><useAllReactorProjects>true</useAllReactorProjects>{rule}<binaries><unpack>false</unpack><includeDependencies>false</includeDependencies></binaries></moduleSet></moduleSets>"
+        )
+    };
+    let inline = |rule: &str| {
+        assembly(&execution(&format!(
+            "<inlineDescriptors><inlineDescriptor>{}</inlineDescriptor></inlineDescriptors>",
+            set(rule)
+        )))
+    };
+    // Inline, with no includes but an exclude; inline, with a wildcard include; and a shared
+    // descriptor of the reactor's `asm` module, which only holds descriptors, that the plugin
+    // takes as its dependency and names by `descriptorRefs`.
+    let shared = assembly(&format!(
+        "{}<dependencies><dependency><groupId>shop</groupId><artifactId>asm</artifactId><version>1.0</version></dependency></dependencies>",
+        execution("<descriptorRefs><descriptorRef>cli</descriptorRef></descriptorRefs>")
+    ));
+    let cases = [
+        (
+            "no-includes",
+            inline("<excludes><exclude>shop:dist</exclude></excludes>"),
+            false,
+        ),
+        (
+            "wildcard",
+            inline("<includes><include>shop:c*</include></includes>"),
+            false,
+        ),
+        ("shared", shared, true),
+    ];
+    for (case, plugin, with_asm) in cases {
+        let modules: &[&str] = if with_asm {
+            &["cli", "asm", "dist"]
+        } else {
+            &["cli", "dist"]
+        };
+        let mut files = vec![
+            file("hushrun.yaml", &yaml("reuse")),
+            file(
+                "pom.xml",
+                &parent(modules, "5", "3.5.4").replace("</plugins>", jar),
+            ),
+            file("cli/pom.xml", &reactor_module("cli", "")),
+            file(
+                "cli/src/main/java/cli/Cli.java",
+                "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(1); }\n}\n",
+            ),
+            file(
+                "dist/pom.xml",
+                &reactor_module(
+                    "dist",
+                    &format!("<build><plugins>{plugin}</plugins></build>"),
+                ),
+            ),
+            file(
+                "dist/src/test/java/dist/BundleTest.java",
+                "package dist;\n\nimport org.junit.jupiter.api.Test;\nimport java.nio.file.*;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass BundleTest {\n  @Test void prints1() throws Exception {\n    Path jar;\n    try (var s = Files.walk(Paths.get(\"target/bundle\"))) { jar = s.filter(p -> p.getFileName().toString().startsWith(\"cli-\")).findFirst().orElseThrow(); }\n    Process p = new ProcessBuilder(System.getProperty(\"java.home\") + \"/bin/java\", \"-cp\", jar.toString(), \"cli.Cli\").start();\n    assertEquals(\"1\", new String(p.getInputStream().readAllBytes()));\n  }\n}\n",
+            ),
+        ];
+        if with_asm {
+            files.push(file("asm/pom.xml", &reactor_module("asm", "")));
+            files.push(file(
+                "asm/src/main/resources/assemblies/cli.xml",
+                &format!(
+                    "<assembly>{}</assembly>\n",
+                    set("<includes><include>shop:cli</include></includes>")
+                ),
+            ));
+        }
+        files.extend(greens("dist/src/test/java", "dist", 9));
+        let r = Repo::new(&files, maven.clone());
+        let first = r.run(&[], &["package"], &[]);
+        assert_eq!(first.code, 0, "{case}: {}\n{}", first.stderr, first.stdout);
+        let map = r.map();
+        assert!(
+            map["units"]["dist/src/test/java/dist/BundleTest.java"]["reads"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("cli/src/main/java/cli/Cli.java")),
+            "{case}: {map:#}"
+        );
+        r.write(
+            "cli/src/main/java/cli/Cli.java",
+            "package cli;\n\npublic class Cli {\n  public static void main(String[] a) { System.out.print(2); }\n}\n",
+        );
+        let second = r.run(&[], &["package"], &[]);
+        assert_eq!(
+            second.code, 1,
+            "{case}: {}\n{}",
+            second.stderr, second.stdout
+        );
+    }
+}

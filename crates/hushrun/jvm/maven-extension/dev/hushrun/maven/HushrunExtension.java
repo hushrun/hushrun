@@ -397,12 +397,16 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
     }
 
     /**
-     * The reactor projects the descriptor files a plugin's configuration names hold (the assembly
-     * plugin's {@code descriptors}, {@code descriptor}, {@code descriptorSourceDirectory}): each
+     * The reactor projects the assembly descriptors a plugin uses hold: the files its
+     * configuration names ({@code descriptors}, {@code descriptor}, {@code descriptorSourceDirectory}),
+     * its {@code inlineDescriptors}, and, when it names {@code descriptorRefs}, every descriptor in
+     * the resources of a reactor project it depends on (a module that shares descriptors). Each
      * {@code groupId:artifactId} in them; every reactor project when a module or dependency set
      * has no includes or a wildcard in one, or when a descriptor named can't be read.
      */
     static List<String> described(MavenProject p, Plugin pl, Map<String, MavenProject> byId) {
+        List<String> out = new ArrayList<>();
+        boolean refs = false;
         List<String> paths = new ArrayList<>();
         List<Object> confs = new ArrayList<>();
         confs.add(pl.getConfiguration());
@@ -417,9 +421,44 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
                 && ("descriptor".equals(name) || "descriptorSourceDirectory".equals(name))) {
                 paths.add(v.trim());
             }
+            if ("inlineDescriptors".equals(name)) {
+                // Read as a descriptor file is, not as configuration.
+                fromDescriptor(node.toString(), byId, out);
+                continue;
+            }
+            if ("descriptorRefs".equals(name)) refs = true;
             for (Xpp3Dom child : node.getChildren()) todo.add(child);
         }
-        List<String> out = new ArrayList<>();
+        if (refs) {
+            for (Dependency d : pl.getDependencies()) {
+                MavenProject shared = byId.get(d.getGroupId() + ":" + d.getArtifactId());
+                if (shared == null) continue;
+                for (org.apache.maven.model.Resource r : shared.getResources()) {
+                    File dir = new File(r.getDirectory());
+                    if (!dir.isAbsolute()) dir = new File(shared.getBasedir(), r.getDirectory());
+                    Deque<File> walk = new ArrayDeque<>();
+                    walk.add(dir);
+                    while (!walk.isEmpty()) {
+                        File f = walk.poll();
+                        File[] in = f.listFiles();
+                        if (in == null) continue;
+                        for (File x : in) {
+                            if (x.isDirectory()) walk.add(x);
+                            else if (x.getName().endsWith(".xml")) {
+                                String text;
+                                try {
+                                    text = new String(Files.readAllBytes(x.toPath()), StandardCharsets.UTF_8);
+                                } catch (Throwable e) {
+                                    text = null;
+                                }
+                                if (text == null) everyId(byId, out);
+                                else if (text.contains("<assembly")) fromDescriptor(text, byId, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for (String path : paths) {
             File f = new File(path.replace("${project.basedir}", p.getBasedir().getAbsolutePath())
                 .replace("${basedir}", p.getBasedir().getAbsolutePath()));
@@ -438,16 +477,27 @@ public class HushrunExtension extends AbstractMavenLifecycleParticipant {
                 } catch (Throwable e) {
                     text = null;
                 }
-                if (text == null || path.contains("${") || everyModule(text)) {
-                    for (String id : byId.keySet()) if (!out.contains(id)) out.add(id);
-                    continue;
-                }
-                for (String id : byId.keySet()) {
-                    if (text.contains(id) && !out.contains(id)) out.add(id);
-                }
+                if (text == null || path.contains("${")) everyId(byId, out);
+                else fromDescriptor(text, byId, out);
             }
         }
         return out;
+    }
+
+    /** Every reactor project, into {@code out}. */
+    static void everyId(Map<String, MavenProject> byId, List<String> out) {
+        for (String id : byId.keySet()) if (!out.contains(id)) out.add(id);
+    }
+
+    /** What one descriptor's text names, into {@code out}: see {@link #described}. */
+    static void fromDescriptor(String text, Map<String, MavenProject> byId, List<String> out) {
+        if (everyModule(text)) {
+            everyId(byId, out);
+            return;
+        }
+        for (String id : byId.keySet()) {
+            if (text.contains(id) && !out.contains(id)) out.add(id);
+        }
     }
 
     /** A descriptor's module or dependency set that has no includes, or a wildcard in one. */
