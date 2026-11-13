@@ -347,3 +347,13 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   the word (`silent_runs`, set back to 0 by every run that writes the check, in the statement
   that writes the word); only the second in a row forgets the word, and the first says pytest
   reported none this time, promising nothing.
+
+## Amendment 13: each adapter's word in the run's counts (2026-11-13)
+
+The first runs on real repositories read `2 of 22 tests run, in 2 of 22 test files` on fmt, whose
+units are test programs, and `all 1 test file would have run` of FTXUI's one program and its 412
+tests. The run's lines that count units (the plan's line, `observe`'s line and the last line's
+`; <n> … reused`) now say them in the adapter's word, the one C-39 already gives it: `test file`
+(pytest, Vitest, Jest), `test binary` (Cargo), `package` (Go), `test class` (Gradle, Maven), `test
+target` (`swift test`), `test program` (CTest), made plural by English's rule (`test binaries`,
+`test classes`). Lines that name the kind in general (`test files aren't observed`) are unchanged.

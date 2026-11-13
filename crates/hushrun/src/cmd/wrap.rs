@@ -641,9 +641,15 @@ fn skip_or_run(
             .as_ref()
             .and_then(|(o, _)| o.counts.as_ref()?.saved_ms)
             .unwrap_or(0);
+        // \[C-39\] In the adapter's word: `test programs`, `test targets`, `packages`.
+        let noun = observed
+            .as_ref()
+            .map(|(o, _)| o.noun)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("test file");
         let files = match (reused_tests, reused) {
-            (0, 1) => "1 test file".to_string(),
-            (0, reused) => format!("{reused} test files"),
+            (0, 1) => format!("1 {noun}"),
+            (0, reused) => format!("{reused} {}", crate::units::plural(noun)),
             (1, _) => "1 test".to_string(),
             (tests, _) => format!("{} tests", crate::cmd::usage::thousands(tests)),
         };

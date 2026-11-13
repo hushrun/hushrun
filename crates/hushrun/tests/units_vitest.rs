@@ -271,8 +271,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))

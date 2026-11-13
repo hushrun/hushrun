@@ -237,8 +237,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .map(str::to_string)
@@ -1044,7 +1059,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 5 packages run; 3 already passed on the files they read, and 1 more that did runs as a check"
         )
     );
     // `go list` says what each test binary is built from. What a test opened comes from the map:
@@ -1059,7 +1074,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that did runs as a check"
         )
     );
 }
@@ -1111,7 +1126,7 @@ fn go_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
     assert!(
         copied
             .as_deref()
-            .is_some_and(|l| l.contains("1 of 5 test files would have run")),
+            .is_some_and(|l| l.contains("1 of 5 packages would have run")),
         "{}",
         m.copied.stderr
     );
@@ -1240,7 +1255,7 @@ fn cargo_on_a_fresh_machine_with_a_server_without_hints_reuses_all_it_could() {
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: test: 2 of 4 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that did runs as a check"
         )
     );
 }
@@ -1546,7 +1561,7 @@ fn a_server_from_before_hints_changes_nothing_and_is_said_once() {
         assert_eq!(
             ran.plan_line().as_deref(),
             Some(
-                "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+                "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that did runs as a check"
             ),
             "{status}: {}",
             ran.stderr

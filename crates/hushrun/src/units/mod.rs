@@ -524,6 +524,7 @@ fn tests_line(
     reuse: &BTreeSet<String>,
     audited: &BTreeSet<String>,
     tested: &PlannedTests,
+    noun: &str,
 ) -> Option<String> {
     let listed = tested.listed();
     let one_by_one: usize = listed.values().map(Vec::len).sum();
@@ -563,7 +564,7 @@ fn tests_line(
             usage::thousands((total - reused) as u64),
             count_tests(total as u64),
             usage::thousands(files_run),
-            test_files_grouped(files_total),
+            test_files_grouped(files_total, noun),
             usage::thousands(reused as u64),
             if reused == 1 { "it" } else { "they" },
         );
@@ -573,7 +574,7 @@ fn tests_line(
     let mut line = format!(
         "{check}: {} of {} run; {} already passed on the files {} read",
         usage::thousands(files_run),
-        test_files_grouped(files_total),
+        test_files_grouped(files_total, noun),
         usage::thousands((reuse.len() + one_by_one) as u64),
         if reuse.len() + one_by_one == 1 {
             "it"
@@ -585,7 +586,7 @@ fn tests_line(
         line = format!(
             "{check}: {} of {} run; {} already passed on the files {} read, and so did {} of the others",
             usage::thousands(files_run),
-            test_files_grouped(files_total),
+            test_files_grouped(files_total, noun),
             usage::thousands(reuse.len() as u64),
             if reuse.len() == 1 { "it" } else { "they" },
             count_tests(one_by_one as u64),
@@ -869,12 +870,24 @@ impl Session {
         // The line before COMMAND (RFC 0003 §1.2, RFC 0004 §1.2), in the words people read.
         let reused = reuse.len();
         let tests_line = (self.unit == Unit::Test)
-            .then(|| tests_line(check, &known, &reuse, &audited, &tested))
+            .then(|| {
+                tests_line(
+                    check,
+                    &known,
+                    &reuse,
+                    &audited,
+                    &tested,
+                    self.adapter.test_file(),
+                )
+            })
             .flatten();
         let line = if let Some(line) = tests_line {
             line
         } else if reused == 0 && audited.is_empty() {
-            let all = format!("{check}: all {} run", test_files(total as u64));
+            let all = format!(
+                "{check}: all {} run",
+                test_files(total as u64, self.adapter.test_file())
+            );
             let rest = rest_of(&sets, input.tree);
             let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
             match why_all(&map, &rest, &sources) {
@@ -887,7 +900,7 @@ impl Session {
         } else if reused == 0 {
             format!(
                 "{check}: all {} run; {} that already passed on the files {} read {} as a check",
-                test_files(total as u64),
+                test_files(total as u64, self.adapter.test_file()),
                 audited.len(),
                 if audited.len() == 1 { "it" } else { "they" },
                 if audited.len() == 1 { "runs" } else { "run" },
@@ -896,7 +909,7 @@ impl Session {
             let mut line = format!(
                 "{check}: {} of {} run; {reused} already passed on the files {} read",
                 total - reused,
-                test_files(total as u64),
+                test_files(total as u64, self.adapter.test_file()),
                 if reused == 1 { "it" } else { "they" },
             );
             if !audited.is_empty() {
@@ -1049,6 +1062,7 @@ impl Session {
             .map(|asker| asker.fetched.borrow().clone())
             .unwrap_or_default();
         let mode = Modes {
+            noun: self.adapter.test_file(),
             unit: self.unit,
             reads: self.reads,
             watches: &watches,
@@ -1585,6 +1599,9 @@ enum How<'a> {
 /// What a run observed, decided.
 #[derive(Debug, Default)]
 pub struct Observed {
+    /// \[C-39\] The adapter's word for its test files (`test program`), for the run's last line;
+    /// empty for a run whose units weren't read.
+    pub noun: &'static str,
     /// Each unit's state, and the key it records under, when it records.
     pub units: BTreeMap<String, (State, Option<Digest>)>,
     /// The units the plan would have reused.
@@ -1875,11 +1892,24 @@ impl Observed {
     }
 }
 
-/// One test file, or several, for people.
-fn test_files(n: u64) -> String {
+/// One test file, or several, for people, in the adapter's word (`noun`, C-39): `1 test program`,
+/// `22 test programs`, `3 test classes`.
+fn test_files(n: u64, noun: &str) -> String {
     match n {
-        1 => "1 test file".into(),
-        n => format!("{n} test files"),
+        1 => format!("1 {noun}"),
+        n => format!("{n} {}", plural(noun)),
+    }
+}
+
+/// \[C-39\] An adapter's word for its test files, made plural: `test binaries`, `test classes`,
+/// `packages`.
+pub fn plural(noun: &str) -> String {
+    if let Some(stem) = noun.strip_suffix('y') {
+        format!("{stem}ies")
+    } else if noun.ends_with('s') {
+        format!("{noun}es")
+    } else {
+        format!("{noun}s")
     }
 }
 
@@ -1894,11 +1924,12 @@ fn whole_reusable(map: &store::Map, test_file: &str) -> bool {
         .is_some_and(|m| m.tests.values().any(|t| t.state == State::NotObserved))
 }
 
-/// \[C-39\] One test file, or `2,140 test files`, for the lines that count tests.
-fn test_files_grouped(n: u64) -> String {
+/// \[C-39\] One test file, or `2,140 test files`, for the lines that count tests, in the adapter's
+/// word (`noun`).
+fn test_files_grouped(n: u64, noun: &str) -> String {
     match n {
-        1 => "1 test file".into(),
-        n => format!("{} test files", usage::thousands(n)),
+        1 => format!("1 {noun}"),
+        n => format!("{} {}", usage::thousands(n), plural(noun)),
     }
 }
 
@@ -2010,6 +2041,8 @@ struct Modes<'a> {
     shared: &'a Shared,
     /// \[C-37\] What the run's adapters said of why no pass of it is kept.
     words: RunWords,
+    /// \[C-39\] The adapter's word for its test files, for the run's lines.
+    noun: &'static str,
 }
 
 fn decide(
@@ -2086,6 +2119,7 @@ fn decide(
         How::Observe | How::Quiet => received,
     };
     let mut out = Observed {
+        noun: mode.noun,
         store: Some(at),
         reads: mode.reads,
         edges,
@@ -2601,7 +2635,7 @@ fn decide(
                 usage::thousands(test_counts.total - tests_reused),
                 count_tests(test_counts.total),
                 usage::thousands(files_run),
-                test_files_grouped(counts.total),
+                test_files_grouped(counts.total, mode.noun),
                 usage::thousands(tests_reused),
                 if tests_reused == 1 {
                     "it read"
@@ -2612,7 +2646,7 @@ fn decide(
         } else if reused == 0 {
             let all = format!(
                 "{check}: with `tests: reuse`, all {} would have run",
-                test_files(counts.total)
+                test_files(counts.total, mode.noun)
             );
             match why_all(map, &out.rest, &out.sources) {
                 Some(why) => format!("{all}: {why}"),
@@ -2624,7 +2658,7 @@ fn decide(
         } else {
             format!(
                 "{check}: with `tests: reuse`, {would_run} of {} would have run; {reused} already passed on the files {}{saving}",
-                test_files(counts.total),
+                test_files(counts.total, mode.noun),
                 if reused == 1 { "it read" } else { "they read" },
             )
         };

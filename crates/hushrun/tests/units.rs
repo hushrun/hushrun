@@ -1177,7 +1177,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         first
             .observe_line()
-            .contains("all 5 test files would have run: none had passed here yet"),
+            .contains("all 5 test binaries would have run: none had passed here yet"),
         "{}",
         first.stderr
     );
@@ -1217,7 +1217,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         other
             .observe_line()
-            .contains("2 of 5 test files would have run; 3 already passed"),
+            .contains("2 of 5 test binaries would have run; 3 already passed"),
         "{}",
         other.stderr
     );
@@ -1231,7 +1231,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         example
             .observe_line()
-            .contains("1 of 5 test files would have run; 4 already passed"),
+            .contains("1 of 5 test binaries would have run; 4 already passed"),
         "{}",
         example.stderr
     );
@@ -1253,7 +1253,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         failing
             .observe_line()
-            .contains("5 test files would have run"),
+            .contains("5 test binaries would have run"),
         "{}",
         failing.stderr
     );
@@ -1264,7 +1264,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         fixed
             .observe_line()
-            .contains("0 of 5 test files would have run; 5 already passed"),
+            .contains("0 of 5 test binaries would have run; 5 already passed"),
         "{}",
         fixed.stderr
     );
@@ -1274,7 +1274,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     let data = r.run(&nextest, &[]);
     assert!(
         data.observe_line().contains(
-            "all 5 test files would have run: crates/other/testdata/fixture.rs changed, and any test may read it"
+            "all 5 test binaries would have run: crates/other/testdata/fixture.rs changed, and any test may read it"
         ),
         "{}",
         data.stderr
@@ -1296,14 +1296,14 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         first_plain
             .observe_line()
-            .contains("all 5 test files would have run")
+            .contains("all 5 test binaries would have run")
     );
     r.write("crates/other/src/lib.rs", "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n");
     let second_plain = r.run(&plain, &[]);
     assert!(
         second_plain
             .observe_line()
-            .contains("2 of 5 test files would have run; 3 already passed"),
+            .contains("2 of 5 test binaries would have run; 3 already passed"),
         "{}",
         second_plain.stderr
     );

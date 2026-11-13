@@ -363,6 +363,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest and `swift test`: a shell line or script that starts `ctest` or `swift test` by its path
   (`sh -c "/opt/cmake/bin/ctest …"`) says it isn't observed, in the words a COMMAND that does
   says, where it said nothing.
+- The run's lines count each adapter's units in its own word: `22 test programs` (CTest),
+  `7 test targets` (`swift test`), `test binaries` (Cargo), `packages` (Go), `test classes`
+  (Gradle, Maven), where they all said `test files`.
 - CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
   no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
   Makefiles the line says which file to touch.

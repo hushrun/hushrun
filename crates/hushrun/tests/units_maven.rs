@@ -453,7 +453,7 @@ fn maven_test_classes_read_their_modules_and_the_modules_they_depend_on() {
     assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
     assert_eq!(
         first.line("hushrun: unit: with `tests: reuse`"),
-        "hushrun: unit: with `tests: reuse`, all 6 test files would have run: none had passed here yet on the files it read"
+        "hushrun: unit: with `tests: reuse`, all 6 test classes would have run: none had passed here yet on the files it read"
     );
     let map = r.map();
     let reads = |unit: &str| -> Vec<String> {
@@ -535,7 +535,7 @@ fn a_change_runs_the_classes_of_its_module_and_of_the_modules_that_depend_on_it_
     assert_eq!(other.code, 0, "{}\n{}", other.stderr, other.stdout);
     assert_eq!(
         other.line("hushrun: unit: "),
-        "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 4 of 6 test classes run; 2 already passed on the files they read, and 1 more that did runs as a check"
     );
     at_most_the_audit(
         &other.ran(),

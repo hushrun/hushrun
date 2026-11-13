@@ -612,7 +612,7 @@ fn programs_are_observed_then_reused_and_a_header_runs_only_the_programs_that_in
             assert_eq!(second.code, 0, "{at}\n{}\n{}", second.stdout, second.stderr);
             assert_eq!(
                 second.line("hushrun: unit: "),
-                "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check",
+                "hushrun: unit: 3 of 5 test programs run; 2 already passed on the files they read, and 1 more that did runs as a check",
                 "{at}"
             );
             let ran = second.ran();
@@ -1790,9 +1790,9 @@ fn on_a_stale_build_the_runs_line_and_why_say_the_same_of_each_program() {
         // One of the two already passed on the files it read (it may run as a check), as `why`
         // says below; nothing is new.
         assert!(
-            (line.starts_with("hushrun: unit: 1 of 2 test files run; 1 already passed")
+            (line.starts_with("hushrun: unit: 1 of 2 test programs run; 1 already passed")
                 || line.starts_with(
-                    "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+                    "hushrun: unit: all 2 test programs run; 1 that already passed on the files it read runs as a check"
                 ))
                 && !line.contains(" is new"),
             "{at}: {}",
@@ -1897,7 +1897,7 @@ fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {
         let changed = p.run(CTEST, &[]);
         assert_eq!(
             changed.line("hushrun: unit: "),
-            "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that did runs as a check",
+            "hushrun: unit: 5 of 8 test programs run; 3 already passed on the files they read, and 1 more that did runs as a check",
             "{at}"
         );
         let ran = changed.ran();
@@ -2422,7 +2422,7 @@ fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         second.line("hushrun: unit: "),
-        "hushrun: unit: 3 of 7 tests run, in 2 of 5 test files; 4 already passed on the files they read, and 2 more that did run as a check"
+        "hushrun: unit: 3 of 7 tests run, in 2 of 5 test programs; 4 already passed on the files they read, and 2 more that did run as a check"
     );
     assert!(second.ran().contains(&"cart_total".to_string()));
     let units = &p.newest_result()["units"];
@@ -2807,7 +2807,7 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
     assert_eq!(line.code, 0, "{}", line.stderr);
     assert_eq!(
         line.line("hushrun: unit: with `tests: reuse`"),
-        "hushrun: unit: with `tests: reuse`, all 5 test files would have run: none had passed here yet on the files it read"
+        "hushrun: unit: with `tests: reuse`, all 5 test programs would have run: none had passed here yet on the files it read"
     );
     // A stale program is observed as one: it ran old code.
     let p = Project::new(&cmake, generator, &shop("observe"));
