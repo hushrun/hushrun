@@ -1382,6 +1382,122 @@ fn a_pack_larger_than_memory_holds_goes_up_streamed_from_its_file() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// A library block in `store` of `size` bytes that no compressor shrinks, built here by `by`.
+fn noise_block(store: &Store, seed: u8, size: usize, by: Option<Identity>) -> (Digest, Digest) {
+    let key = Digest::of(&[seed, 1]);
+    let step = Digest::of(&[seed, 2]);
+    let dir = store.root().with_file_name(format!("src-{seed}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("liba.rlib");
+    // xorshift64*: a byte stream with no repeat a compressor's window could find.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ u64::from(seed);
+    let mut bytes = Vec::with_capacity(size + 8);
+    while bytes.len() < size {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        bytes.extend_from_slice(&state.wrapping_mul(0x2545_f491_4f6c_dd1d).to_le_bytes());
+    }
+    bytes.truncate(size);
+    std::fs::write(&file, &bytes).unwrap();
+    let description = json!({"step": step, "class": "library", "repository": "github.com/acme/shop", "rustc_ms": 60000, "built_ms": 1});
+    store
+        .publish_with_origin(
+            &key,
+            &description,
+            &[NewFile {
+                name: "liba.rlib".into(),
+                source: file,
+            }],
+            &Origin::built_here("1-1", by),
+            SystemTime::now(),
+        )
+        .unwrap();
+    (key, step)
+}
+
+// covers: B-28, B-29
+#[test]
+fn a_pack_over_64_mib_goes_up_from_its_file_and_another_machine_opens_it_byte_for_byte() {
+    use super::pack::IN_MEMORY;
+    let fake = FakeBuild::start();
+    let a = machine();
+    // 70 MiB that don't compress, with the relay's own limit: the pack is over 64 MiB.
+    let (key, step) = noise_block(&a.store, 82, IN_MEMORY + (6 << 20), Some(me(&fake)));
+    // `begin` answers a second late, so the packed block is seen where it waits for its PUT.
+    fake.delay(route::BEGIN, Duration::from_secs(1));
+    let relay = start(&fake, &a, |_| {});
+    assert_eq!(relay.config.tuning.spill, IN_MEMORY);
+    begin(&relay, &a);
+    until("open", || answering(&relay));
+    ask(&relay, built_costing(key, step, 60_000));
+    let packs = a.store.root().join("outbox/tmp");
+    until("a pack over 64 MiB in the run's folder", || {
+        walk(&packs)
+            .iter()
+            .any(|f| f.metadata().is_ok_and(|m| m.len() > IN_MEMORY as u64))
+    });
+    until("stored", || {
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    until("done", || waiting(&a).is_empty() && no_claims(&a));
+    relay.end_check(&[]);
+    assert!(walk(&packs).is_empty(), "{:?}", walk(&packs));
+    let object = fake.object(address(&key)).unwrap();
+    assert!(object.len() > IN_MEMORY, "{}", object.len());
+    assert_eq!(
+        fake.block(address(&key)).unwrap().bytes,
+        object.len() as u64
+    );
+
+    // Another machine downloads it, opens it with the key and puts it in its store: the same
+    // bytes, recorded as a download.
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let answer = ask(
+        &relay,
+        Request::Fetch {
+            step,
+            keys: vec![key],
+            class: LocalClass::Library,
+            local_ms: None,
+        },
+    );
+    assert_eq!(answer, Answer::Ready { key });
+    let theirs = b.store.block(&key).unwrap().unwrap();
+    let ours = a.store.block(&key).unwrap().unwrap();
+    assert_eq!(theirs.files.len(), 1);
+    assert_eq!(theirs.files[0].sha256, ours.files[0].sha256);
+    assert!(
+        std::fs::read(&theirs.files[0].path).unwrap()
+            == std::fs::read(&ours.files[0].path).unwrap(),
+        "the downloaded file differs"
+    );
+    assert!(b.store.origin(&key).unwrap().downloaded_only());
+    // Reused as a download: the server vouches for it, with its outputs.
+    let outputs = blocks::outputs_digest(
+        &theirs
+            .files
+            .iter()
+            .map(|f| blocks::OutputFile {
+                name: &f.name,
+                size: f.size,
+                sha256: Hex32(*f.sha256.as_bytes()),
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        ask(&relay, Request::Vouch { key, step, outputs }),
+        Answer::Served
+    );
+    relay.end_check(&[]);
+    // Nothing of the download is left in the run's folder.
+    assert!(walk(&b.store.root().join("incoming")).is_empty());
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
