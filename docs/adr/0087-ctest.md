@@ -377,3 +377,21 @@ record says so, and nothing else is asked of it:
 The line says `t_a ran old code: the command that makes CMakeFiles/t_a.dir/tests/t_a.c.o changed
 after it was made (ninja says so); build before ctest`, with the file on Makefiles. The target that
 runs on every build, a FAT build directory and a comment configured again stay up to date.
+
+## Amendment 13: a rule that leaves its output as it was (2026-11-12)
+
+Amendment 8 named, as the case its rule gets wrong, a rule that leaves its output untouched when
+it would write the same bytes (`copy_if_different`). The confirmation pass showed what it costs:
+an edit to `VERSION` that leaves `ver.h`'s bytes the same, or a `git checkout` that rewrites
+`VERSION`, left `t_ver` old on every `cmake --build && ctest`, and building didn't cure it. A branch
+switch that touches only a generator's input does that to ordinary projects.
+
+Where the build tool records the fact, it decides. Ninja's log says when the rule that writes a
+file last ran: for a rule with `restat` (CMake's custom commands) that left its output as it was,
+it logs the newest input's time then. A file a rule writes whose logged time is no earlier than
+every file it was made from is current, whatever its own time, and nothing it was made from makes
+an object old on its account; otherwise (no entry, or an input newer than the entry) the rule
+hasn't run since and the object is old, as before. Makefiles record nothing of it, so the object
+stays old there, and the line names the cure: `VERSION changed after
+CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest; if the build
+leaves build/ver.h as it was, touch build/ver.h, then build before ctest`.

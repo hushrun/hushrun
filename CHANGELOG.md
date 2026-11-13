@@ -337,6 +337,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - CTest: a flag or a link option configured and not built makes the program old, as the build
   sees it: on Makefiles by `flags.make` and `link.txt`, on Ninja by what its log records of each
   command. Before, the old program's pass was recorded.
+- CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
+  no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
+  Makefiles the line says which file to touch.
 - CTest: a fixture or a test depended on whose program isn't built here (`cmake -E
   make_directory`, `sh -c`) no longer makes every test that needs it read every source: it adds
   only what its command names, a script of the repository included; and a test no longer reads
