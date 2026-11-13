@@ -139,6 +139,12 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   list, `hushrun run` says so in one line and runs the command once more with nothing left out,
   going by that run alone; if that can't be done, or it happens again, nothing is recorded and the
   run fails, saying why. An adapter's facts may say `leftOutUnlisted`.
+- With `tests.unit: test`, the audit runs tests, not test files: 2% of every test the plan could
+  leave out, at least one, drawn across test files reused whole and tests reused one by one. A
+  test file reused whole that holds an audited test runs that test alone, its other tests left
+  out; one whose tests this machine doesn't know is still audited whole. One audited test file
+  could be most of a run (67% of gin's tests; 717 of the 802 tests click ran after a one-line
+  change). With `unit: file`, and past 50,000 tests, the audit still runs test files.
 
 ### Fixed
 

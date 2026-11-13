@@ -347,32 +347,35 @@ fn a_test_that_failed_runs_alone_and_its_files_others_are_reused_one_by_one() {
     let second = r.run(&pytest_args(&python, &[]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 3 of 13 tests run, in 3 of 5 test files; 10 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
-    // pytest ran what the plan left: test_flips, test_spawns, the audited test and the audited
-    // greet file's.
+    // pytest ran what the plan left: test_flips, test_spawns and the audited test, wherever the
+    // draw found it.
     assert!(
-        second.stdout.contains("4 passed, 9 deselected"),
+        second.stdout.contains("3 passed, 10 deselected"),
         "{}",
         second.stdout
     );
     let result = r.newest_result();
     assert_eq!(result["result"], "pass");
-    let saved = result["units"]["savedMs"].as_u64().expect("savedMs");
+    assert!(result["units"]["savedMs"].is_u64(), "{result:#}");
+    assert_eq!(result["units"]["total"], 5, "{result:#}");
     assert_eq!(
-        result["units"],
-        json!({"total": 5, "ran": 3, "reused": 2, "savedMs": saved,
-               "tests": {"total": 13, "ran": 4, "reused": 9}})
+        result["units"]["tests"],
+        json!({"total": 13, "ran": 3, "reused": 10})
     );
     assert!(
-        hushrun_testkit::lines::says_reused(line(&second, "hushrun: unit passed in"), 9, "tests"),
+        hushrun_testkit::lines::says_reused(line(&second, "hushrun: unit passed in"), 10, "tests"),
         "{}",
         second.stderr
     );
     // Reuse never chains: a test file that didn't run whole records no pass of its own, and
-    // a reused test nothing; the tests that ran record theirs, and the audited greet file its pass.
-    assert_eq!(r.unit_results(), 13 + 2 + 1, "{}", second.stderr);
+    // a reused test nothing; the two tests that ran record theirs (test_spawns, not followed,
+    // nothing), wherever the audited one sits: a greet file it sits in didn't run whole either.
+    assert_eq!(r.unit_results(), 13 + 2, "{}", second.stderr);
     // A reused test keeps the row it stands on.
     let map = store::map(&r.cache);
     assert_eq!(
@@ -1460,9 +1463,14 @@ fn an_older_server_keeps_the_first_5000_results_failures_first_and_a_saving_with
     assert_eq!(results.unit_results(), 5_000);
     assert_eq!(results.unit_results_that("fail"), 2);
     assert_eq!(results.recorded().len(), 1);
-    // The flip fixed: test_many.py's other tests, whose passes the server kept, are reused one by
-    // one and no test file whole. The server refuses `savedMs` then, and the result goes again
-    // without it: it is recorded, with its tests' counts.
+    // The flip fixed, and test_other.py changed, so that it runs: test_many.py's other tests,
+    // whose passes the server kept, are reused one by one and no test file whole, whatever the
+    // audit draws. The server refuses `savedMs` then, and the result goes again without it: it is
+    // recorded, with its tests' counts.
+    r.write(
+        "tests/test_other.py",
+        "def test_other():\n    pass\n# changed\n",
+    );
     let second = r.run(&pytest_args(&python, &[]), &envs(&server));
     assert_eq!(second.code, 0, "{}", second.stderr);
     let recorded = results.recorded();
@@ -2048,6 +2056,99 @@ fn observe_counts_what_it_couldnt_follow_in_the_unit_its_line_counts() {
     );
 }
 
+// covers: C-34, C-39
+#[test]
+fn with_tests_as_the_unit_an_audit_runs_two_percent_of_the_tests_whatever_a_files_size() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // tests/test_big.py holds 100 tests, tests/test_small.py one. test_small.py changes: of what
+    // could be left out, 100 tests, an audit runs 2, not the whole of test_big.py, which is then
+    // left out test by test.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\n".into()),
+        (
+            "tests/test_big.py".into(),
+            "import pytest\n\n@pytest.mark.parametrize('n', range(100))\ndef test_n(n):\n    assert n >= 0\n".into(),
+        ),
+        ("tests/test_small.py".into(), "def test_s():\n    pass\n".into()),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    r.write(
+        "tests/test_small.py",
+        "def test_s():\n    pass\n# changed\n",
+    );
+    let second = r.run(&pytest_args(&python, &[]), &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        line(&second, "hushrun: unit: "),
+        "hushrun: unit: 3 of 101 tests run, in 2 of 2 test files; 98 already passed on the files they read, and 2 more that already passed run anyway, as a check",
+        "{}",
+        second.stderr
+    );
+    assert!(second.stdout.contains("3 passed"), "{}", second.stdout);
+    // \[C-34\] What the 98 left out took when their file last ran is what reuse saved: the line
+    // counts them as reused tests.
+    assert!(
+        hushrun_testkit::lines::says_reused(&second.stderr, 98, "tests"),
+        "{}",
+        second.stderr
+    );
+}
+
+// covers: C-34, C-39
+#[test]
+fn an_audited_test_of_a_file_reused_whole_that_fails_again_suspends_reuse() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // tests/test_target.py passed whole; it fails while BROKEN is set, which no key holds. With
+    // tests/test_changed.py changed, its one test is all the plan could leave out: the audit runs
+    // it whatever its draw, it fails, runs once more alone, fails again, and reuse is suspended.
+    let files: Vec<(String, String)> = vec![
+        ("hushrun.yaml".into(), yaml("{mode: reuse, unit: test}")),
+        (".gitignore".into(), "__pycache__/\n.pytest_cache/\n".into()),
+        ("pytest.ini".into(), "[pytest]\ntestpaths = tests\n".into()),
+        (
+            "tests/test_target.py".into(),
+            "import os\n\ndef test_target():\n    assert not os.environ.get('BROKEN')\n".into(),
+        ),
+        (
+            "tests/test_changed.py".into(),
+            "def test_c():\n    pass\n".into(),
+        ),
+    ];
+    let r = repo_of(&files);
+    let python = python();
+    let first = r.run(&pytest_args(&python, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    r.write(
+        "tests/test_changed.py",
+        "def test_c():\n    pass\n# changed\n",
+    );
+    let second = r.run(&pytest_args(&python, &[]), &[("BROKEN", "1")]);
+    assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stderr.contains(
+            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
+        ),
+        "{}",
+        second.stderr
+    );
+    assert!(
+        second.stderr.contains(
+            "hushrun: unit: tests/test_target.py failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
+        ),
+        "{}",
+        second.stderr
+    );
+}
+
 /// `hushrun why unit <asked> --format json`, read.
 fn why_json(r: &Repo, asked: &str) -> Value {
     let ran = r.run(&["why", "unit", asked, "--format", "json"], &[]);
@@ -2242,15 +2343,17 @@ fn with_xdist_each_worker_leaves_out_the_tests_the_plan_lists() {
     let second = r.run(&pytest_args(&python, &xdist), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 13 tests run, in 3 of 5 test files; 9 already passed on the files they read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 3 of 13 tests run, in 3 of 5 test files; 10 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
-    assert!(second.stdout.contains("4 passed"), "{}", second.stdout);
+    assert!(second.stdout.contains("3 passed"), "{}", second.stdout);
     let result = r.newest_result();
     assert_eq!(result["result"], "pass");
     assert_eq!(
         result["units"]["tests"],
-        json!({"total": 13, "ran": 4, "reused": 9}),
+        json!({"total": 13, "ran": 3, "reused": 10}),
         "{}",
         second.stderr
     );
@@ -2271,8 +2374,10 @@ fn a_plan_that_doesnt_know_every_test_files_tests_counts_test_files() {
     let second = r.run(&pytest_args(&python, &[]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 7 tests of the others, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 4 of 6 test files run; 2 already passed on the files they read, and so did 8 tests of the others, and 1 more test that already passed runs anyway, as a check"
+        )
     );
 }
 

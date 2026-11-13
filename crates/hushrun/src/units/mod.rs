@@ -199,6 +199,9 @@ struct TestPassed {
 struct PlannedTests {
     passed: BTreeMap<String, TestPassed>,
     audited: BTreeSet<String>,
+    /// \[C-34\] The tests, by name, of each test file the first tier could reuse whole that holds
+    /// a test the audit runs: its other tests are left out one by one instead.
+    whole: BTreeMap<String, (String, String)>,
     /// \[C-41\] How many tests this machine knows of each test file, from its rows and the hints
     /// it read: what the plan's line counts.
     known: BTreeMap<String, usize>,
@@ -209,11 +212,18 @@ impl PlannedTests {
     /// unit.
     fn listed(&self) -> BTreeMap<String, Vec<String>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (name, test) in &self.passed {
+        let tests = self
+            .passed
+            .iter()
+            .map(|(name, test)| (name, (&test.unit, &test.id)))
+            .chain(
+                self.whole
+                    .iter()
+                    .map(|(name, (unit, id))| (name, (unit, id))),
+            );
+        for (name, (unit, id)) in tests {
             if !self.audited.contains(name) {
-                out.entry(test.unit.clone())
-                    .or_default()
-                    .push(test.id.clone());
+                out.entry(unit.clone()).or_default().push(id.clone());
             }
         }
         out
@@ -222,8 +232,36 @@ impl PlannedTests {
     /// Whether `reuseTests` lists the test `id` of `unit`.
     fn lists(&self, unit: &str, id: &str) -> bool {
         let name = units::test_name(unit, id);
-        self.passed.contains_key(&name) && !self.audited.contains(&name)
+        (self.passed.contains_key(&name) || self.whole.contains_key(&name))
+            && !self.audited.contains(&name)
     }
+
+    /// \[C-34\] The test files the first tier could reuse whole of which the audit runs a test.
+    fn audited_whole(&self) -> BTreeSet<String> {
+        self.whole
+            .iter()
+            .filter(|(name, _)| self.audited.contains(*name))
+            .map(|(_, (unit, _))| unit.clone())
+            .collect()
+    }
+}
+
+/// \[C-34\] With `unit: test`, the test files of `passed` whose tests this machine doesn't know
+/// (`tested.known`): they can't be left out test by test, so they are audited whole, 2% of them,
+/// at least one, as C-34 audits test files.
+fn untold_audited(
+    passed: &BTreeMap<String, Found>,
+    keys: &BTreeMap<String, Digest>,
+    tested: &PlannedTests,
+    started: &str,
+) -> BTreeSet<String> {
+    units::audited(
+        passed
+            .keys()
+            .filter(|unit| tested.known.get(*unit).is_none_or(|n| *n == 0))
+            .filter_map(|unit| Some((unit.as_str(), keys.get(unit)?))),
+        started,
+    )
 }
 
 /// What the second tier of a plan goes by.
@@ -238,6 +276,8 @@ struct TestsAt<'a> {
     shared: &'a Shared,
     /// The test files the first tier may reuse whole: their tests aren't asked.
     passed: &'a BTreeMap<String, Found>,
+    /// \[C-34\] Of those, the key whose pass reuses each: what its tests are audited by.
+    keys: &'a BTreeMap<String, Digest>,
     store: &'a dyn UnitResults,
     counts: &'a dyn Fn(&RunResult) -> bool,
     started: &'a str,
@@ -300,6 +340,24 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
         .iter()
         .map(|(unit, tests)| ((*unit).clone(), tests.len()))
         .collect();
+    // \[C-34\] The tests of the test files the first tier may reuse whole, each audited by its
+    // file's key and its id.
+    let whole_keys: BTreeMap<String, (String, String, Digest)> = asked_of
+        .iter()
+        .filter_map(|(unit, tests)| Some((*unit, tests, at.keys.get(*unit)?)))
+        .flat_map(|(unit, tests, key)| {
+            tests.keys().map(move |id| {
+                (
+                    units::test_name(unit, id),
+                    (
+                        unit.clone(),
+                        id.clone(),
+                        Digest::of(format!("{}\n{id}", key.hex()).as_bytes()),
+                    ),
+                )
+            })
+        })
+        .collect();
     let asked = asked_of
         .into_iter()
         .filter(|(unit, _)| !at.passed.contains_key(*unit))
@@ -309,13 +367,34 @@ fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
                 .map(move |(id, lists)| (unit.clone(), id, lists))
         });
     let passed = tests_that_passed(at.keyer, asked, at.store, at.counts).unwrap_or_default();
+    // \[C-34\] 2% of every test the plan could leave out, in test files reused whole or not, at
+    // least one, chosen as C-39 chooses: an audit costs 2% of the tests, whatever a file's size.
     let audited = units::audited(
-        passed.iter().map(|(name, t)| (name.as_str(), &t.key)),
+        passed
+            .iter()
+            .map(|(name, t)| (name.as_str(), &t.key))
+            .chain(
+                whole_keys
+                    .iter()
+                    .map(|(name, (_, _, key))| (name.as_str(), key)),
+            ),
         at.started,
     );
+    // A test file reused whole of which a test is audited is left out test by test instead.
+    let audited_files: BTreeSet<&String> = whole_keys
+        .iter()
+        .filter(|(name, _)| audited.contains(*name))
+        .map(|(_, (unit, _, _))| unit)
+        .collect();
+    let whole = whole_keys
+        .iter()
+        .filter(|(_, (unit, _, _))| audited_files.contains(unit))
+        .map(|(name, (unit, id, _))| (name.clone(), (unit.clone(), id.clone())))
+        .collect();
     Ok(PlannedTests {
         passed,
         audited,
+        whole,
         known,
     })
 }
@@ -582,7 +661,9 @@ fn tests_line(
             count_tests(one_by_one as u64),
         );
     }
-    more(&mut line, audited.len() + tested.audited.len());
+    // \[C-34\] Counted test files and tests apart: the audit's tests, and the test files it
+    // runs whole whose tests this machine doesn't know.
+    line.push_str(&checked_apart(audited.len(), tested.audited.len(), noun));
     Some(line)
 }
 
@@ -777,10 +858,15 @@ impl Session {
                 }
             }
         }
-        let audited = units::audited(
+        // \[C-34\] An audit of test files with `unit: file`; with `unit: test`, of tests, below.
+        let file_audited = units::audited(
             passed.keys().map(|unit| (unit.as_str(), &keys[unit])),
             &started,
         );
+        let mut audited = match self.unit {
+            Unit::File => file_audited.clone(),
+            Unit::Test => BTreeSet::new(),
+        };
         let mut reuse: BTreeSet<String> = passed
             .keys()
             .filter(|unit| !audited.contains(*unit))
@@ -824,14 +910,27 @@ impl Session {
                     map: &map,
                     shared: &fetched,
                     passed: &passed,
+                    keys: &keys,
                     store: input.store,
                     counts: input.counts,
                     started: &started,
                 }) {
-                    Ok(tested) => tested,
+                    Ok(tested) => {
+                        // \[C-34\] A test file one of whose tests the audit runs isn't reused
+                        // whole: its other tests are left out one by one. One whose tests this
+                        // machine doesn't know (told without them, a hint without them) can't
+                        // be: those are audited whole, as test files are.
+                        let partly = tested.audited_whole();
+                        audited = untold_audited(&passed, &keys, &tested, &started);
+                        reuse.retain(|unit| !partly.contains(unit) && !audited.contains(unit));
+                        tested
+                    }
                     Err(TooMany(n)) => {
-                        // \[C-39\] Past the limit, this run reuses by test file, and says so.
+                        // \[C-39\] Past the limit, this run reuses by test file, and says so,
+                        // with the test files' audit.
                         self.unit = Unit::File;
+                        reuse.retain(|unit| !file_audited.contains(unit));
+                        audited = file_audited.clone();
                         notes.push(format!(
                             "{check}: its tests are reused by test file in this run: it has {} tests, more than the {} this version reuses one by one",
                             usage::thousands(n as u64),
@@ -1383,15 +1482,6 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     let tests = (unit == Unit::Test)
         .then(|| {
             let started = Time::from_timestamp(jiff::Timestamp::now()).to_string();
-            let audited_files = units::audited(
-                passed.keys().map(|unit| (unit.as_str(), &keys[unit])),
-                &started,
-            );
-            let reuse: BTreeSet<String> = passed
-                .keys()
-                .filter(|unit| !audited_files.contains(*unit))
-                .cloned()
-                .collect();
             let fetched = asker
                 .as_ref()
                 .map(|asker| asker.fetched.borrow().clone())
@@ -1404,11 +1494,21 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
                 map: &map,
                 shared: &fetched,
                 passed: &passed,
+                keys: &keys,
                 store: p.store,
                 counts: p.counts,
                 started: &started,
             })
             .ok()?;
+            // \[C-34\] As a run's plan: a test file one of whose tests is audited isn't reused
+            // whole.
+            let partly = tested.audited_whole();
+            let untold = untold_audited(&passed, &keys, &tested, &started);
+            let reuse: BTreeSet<String> = passed
+                .keys()
+                .filter(|unit| !partly.contains(*unit) && !untold.contains(*unit))
+                .cloned()
+                .collect();
             Some(tests_counted(
                 found.known.iter().map(|(unit, _)| unit),
                 &reuse,
@@ -2024,6 +2124,29 @@ fn saving(saved_ms: u64, whole_ms: Option<u64>) -> Option<u64> {
     whole_ms.map(|whole| saved_ms.min(whole))
 }
 
+/// \[C-34\] The audit's clause where a line counts test files with the tests reused one by one
+/// beside them: its `files` (run whole, their tests unknown here) and its `tests`, each in its
+/// word: `, and 1 more test that already passed runs anyway, as a check`, `, and 1 more test file
+/// and 2 more tests that already passed run anyway, as a check`.
+fn checked_apart(files: usize, tests: usize, noun: &str) -> String {
+    let files_said = match files {
+        1 => format!("1 more {noun}"),
+        n => format!("{} more {}", usage::thousands(n as u64), plural(noun)),
+    };
+    let tests_said = match tests {
+        1 => "1 more test".to_string(),
+        n => format!("{} more tests", usage::thousands(n as u64)),
+    };
+    let what = match (files, tests) {
+        (0, 0) => return String::new(),
+        (0, _) => tests_said,
+        (_, 0) => files_said,
+        _ => format!("{files_said} and {tests_said}"),
+    };
+    let verb = if files + tests == 1 { "runs" } else { "run" };
+    format!(", and {what} that already passed {verb} anyway, as a check")
+}
+
 /// \[C-34\] The clause a plan's line ends with when an audit runs `n` of what already passed,
 /// beside those reused: `, and 1 more that already passed runs anyway, as a check`; nothing for 0.
 fn checked_too(n: usize) -> String {
@@ -2506,6 +2629,14 @@ fn decide(
                 // \[C-39\] The same for a test, by its name.
                 for (id, (test, _)) in test_states.iter().flatten() {
                     let name = units::test_name(unit, id);
+                    // \[C-34\] A test left out of a test file the audit split: what it took when
+                    // its file last told it, from the store's row.
+                    if *test == State::Reused
+                        && plan.tests.whole.contains_key(&name)
+                        && let Some(row) = map.units.get(unit).and_then(|m| m.tests.get(id))
+                    {
+                        saved_ms = saved_ms.saturating_add(row.duration_ms);
+                    }
                     let Some(passed) = plan.tests.passed.get(&name) else {
                         continue;
                     };

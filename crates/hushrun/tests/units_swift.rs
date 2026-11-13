@@ -582,13 +582,15 @@ fn with_tests_as_the_unit_only_the_tests_that_failed_run_again_and_a_crash_recor
         "{map:#}"
     );
 
-    // The same files, nothing failing: the two that failed run, with the audited test and
-    // Greet's audited target; the other three tests are left out by --skip.
+    // The same files, nothing failing: the two that failed run, with the one test the audit
+    // draws of the five the plan could leave out; the others are left out by --skip.
     let second = r.run(SWIFT_TEST, &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        second.line("hushrun: unit: "),
-        "hushrun: unit: 4 of 7 tests run, in 3 of 3 test targets; 3 already passed on the files they read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(second.line("hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 3 of 7 tests run, in 2 of 3 test targets; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
     assert!(second.xctest_ran("CartTests", "CartTests", "testFlips"));
     assert!(second.swift_testing_ran("flips()"));
@@ -598,8 +600,11 @@ fn with_tests_as_the_unit_only_the_tests_that_failed_run_again_and_a_crash_recor
         second.swift_testing_ran("price()"),
         second.swift_testing_ran("tax()"),
     ];
+    // \[C-34\] One audited, of the four left out one by one and Greet's, reused whole: wherever
+    // the draw found it.
+    let greet = second.xctest_ran("GreetTests", "GreetTests", "testHello");
     assert_eq!(
-        ran_again.iter().filter(|r| **r).count(),
+        ran_again.iter().filter(|r| **r).count() + usize::from(greet),
         1,
         "one audited:\n{}",
         second.stdout
@@ -607,7 +612,7 @@ fn with_tests_as_the_unit_only_the_tests_that_failed_run_again_and_a_crash_recor
     let units = r.newest_result()["units"].clone();
     assert_eq!(
         units["tests"],
-        json!({"total": 7, "ran": 4, "reused": 3}),
+        json!({"total": 7, "ran": 3, "reused": 4}),
         "{units}"
     );
     assert_eq!(

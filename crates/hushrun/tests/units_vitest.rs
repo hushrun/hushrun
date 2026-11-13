@@ -1565,30 +1565,28 @@ fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
     let second = r.run(VITEST_RUN);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        second
-            .stderr
-            .lines()
-            .find(|l| l.contains(" tests run, in "))
-            .unwrap_or_else(|| panic!("{}", second.stderr)),
-        "hushrun: unit: 3 of 9 tests run, in 2 of 7 test files; 6 already passed on the files they read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(
+            second
+                .stderr
+                .lines()
+                .find(|l| l.contains(" tests run, in "))
+                .unwrap_or_else(|| panic!("{}", second.stderr))
+        ),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 2 of 9 tests run, in 1 of 7 test files; 7 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
-    // Vitest ran flips, the audited test and the audited file's, and left out the reused test:
-    // skipped, or, when the audit chose `total`, in a suite skipped whole and counted in the total
-    // only.
+    // Vitest ran flips and the audited test, wherever the draw found it, and left out the reused
+    // tests: skipped in a file it loaded, or never loaded with a file reused whole.
     let stdout = plain(&second.stdout);
-    assert!(
-        stdout.contains("Tests  3 passed | 1 skipped (4)")
-            || stdout.contains("Tests  3 passed (4)"),
-        "{}",
-        second.stdout
-    );
+    assert!(stdout.contains("Tests  2 passed"), "{}", second.stdout);
     let result = r.newest_result();
     assert_eq!(result["result"], "pass");
     // \[C-39\] The tests Vitest told, those of the two files it ran, and those this machine knows
     // of the files reused whole: as the line counts them.
     assert_eq!(
         result["units"]["tests"],
-        json!({"total": 9, "ran": 3, "reused": 6})
+        json!({"total": 9, "ran": 2, "reused": 7})
     );
     // A reused test keeps the row it stands on; flips passed now.
     let map = r.map();
@@ -2180,15 +2178,14 @@ fn with_vitest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_
     let second = r.run(VITEST_RUN);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert!(
-        second.stderr.contains(
-            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
-        ),
+        second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
+            == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
         "{}",
         second.stderr
     );
     assert_eq!(
         r.newest_result()["units"]["tests"],
-        json!({"total": 62, "ran": 4, "reused": 58})
+        json!({"total": 62, "ran": 3, "reused": 59})
     );
 }
 

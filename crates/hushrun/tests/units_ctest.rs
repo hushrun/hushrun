@@ -2416,17 +2416,20 @@ fn a_test_that_failed_runs_alone_and_its_programs_other_tests_are_reused() {
         json!({"cart_empty": "passed", "cart_tax": "passed", "cart_total": "failed"}),
         "{map:#}"
     );
-    // The failure fixed: t_cart's own key failed, so its tests are asked one by one. Of the two
-    // that passed, one runs as a check; of the four programs that passed whole, one too.
+    // The failure fixed: t_cart's own key failed, so its tests are asked one by one. Of the six
+    // tests the plan could leave out, t_cart's two and those of the four programs that passed
+    // whole, the audit runs one, wherever the draw finds it.
     let second = p.run(CTEST, &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
-        second.line("hushrun: unit: "),
-        "hushrun: unit: 3 of 7 tests run, in 2 of 5 test programs; 4 already passed on the files they read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(second.line("hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 2 of 7 tests run, in 2 of 5 test programs; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
     assert!(second.ran().contains(&"cart_total".to_string()));
     let units = &p.newest_result()["units"];
-    assert_eq!(units["tests"], json!({"total": 7, "ran": 3, "reused": 4}));
+    assert_eq!(units["tests"], json!({"total": 7, "ran": 2, "reused": 5}));
 }
 
 // covers: C-49, C-34

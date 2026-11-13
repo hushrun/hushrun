@@ -1057,6 +1057,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
             map,
             shared: &Shared::default(),
             passed: &passed,
+            keys: &BTreeMap::new(),
             store: &results,
             counts: &|_| true,
             started: "2026-11-11T12:00:00Z",

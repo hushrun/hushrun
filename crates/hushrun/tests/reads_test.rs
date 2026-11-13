@@ -719,8 +719,9 @@ fn an_audit_catches_a_known_miss_of_reads_test_and_suspends_reuse() {
     if !can_watch() {
         return;
     }
-    // test_target is the one test that could be reused one by one: it runs as a check, fails,
-    // runs once more alone, fails again, and the check's reuse is suspended.
+    // test_target is the one test the plan could leave out (test_other.py changes too, so it
+    // runs): the audit, 2% of one test and at least one, runs it as a check whatever its draw; it
+    // fails, runs once more alone, fails again, and the check's reuse is suspended.
     let r = repo_of(&a_registry(), "{mode: reuse, unit: test, reads: test}");
     let python = python();
     let first = r.run(&pytest_args(&python), &[]);
@@ -728,6 +729,10 @@ fn an_audit_catches_a_known_miss_of_reads_test_and_suspends_reuse() {
     r.write(
         "app/plugins.py",
         "from app.registry import HANDLERS\nHANDLERS['x'] = 42\n",
+    );
+    r.write(
+        "tests/test_other.py",
+        "def test_other():\n    assert True  # changed\n",
     );
     let caught = r.run(&pytest_args(&python), &[]);
     assert_eq!(caught.code, 1, "{}", caught.stderr);
@@ -787,15 +792,14 @@ fn with_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_te
     let second = r.run(&pytest_args(&python), &[]);
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert!(
-        second.stderr.contains(
-            "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
-        ),
+        second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
+            == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
         "{}",
         second.stderr
     );
     assert_eq!(
         r.newest_result()["units"]["tests"],
-        json!({"total": 62, "ran": 4, "reused": 58})
+        json!({"total": 62, "ran": 3, "reused": 59})
     );
     // With `reads: file` the same change runs every test of the file.
     r.write(

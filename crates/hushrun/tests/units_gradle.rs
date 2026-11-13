@@ -548,15 +548,17 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
         second.stdout
     );
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 3 of 5 test classes run; 2 already passed on the files they read, and so did 2 tests of the others, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 2 of 5 test classes run; 3 already passed on the files they read, and so did 2 tests of the others, and 1 more test that already passed runs anyway, as a check"
+        )
     );
     // \[C-39\] Tests are counted where Gradle named them, and a class reused whole, which Gradle
     // named none of, by the tests this machine knows of it: every one reused.
     let result = r.newest_result();
     assert_eq!(
         result["units"]["tests"],
-        json!({"total": 8, "ran": 4, "reused": 4})
+        json!({"total": 8, "ran": 3, "reused": 5})
     );
     // A nested class's method was left out too (Gradle 9's filter can't do it; the hook can):
     // of Inner's two, at most the audited one ran.
@@ -599,11 +601,13 @@ fn junit4_tests_are_reused_one_by_one_through_gradles_filter() {
     );
     let second = r.run(&command(&gradle, &[]), &[]);
     assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
-    // total and small passed: one runs as a check, one is reused; PlainTest passed whole, and is
-    // the one test file audited.
+    // total and small passed, and PlainTest passed whole: of their three tests, the audit runs one,
+    // wherever the draw finds it.
     assert_eq!(
-        line(&second, "hushrun: unit: "),
-        "hushrun: unit: 4 of 5 tests run, in 3 of 3 test classes; 1 already passed on the files it read, and 2 more that already passed run anyway, as a check"
+        hushrun_testkit::lines::drawn(line(&second, "hushrun: unit: ")),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 3 of 5 tests run, in 2 of 3 test classes; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
     );
     // Gradle's patterns left out either `total`, or every invocation of `small`.
     let total = r.xml_cases("app", "shop.app.CartTest");

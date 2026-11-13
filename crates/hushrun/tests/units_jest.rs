@@ -2513,16 +2513,15 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
         let second = r.run(JEST_RUN);
         assert_eq!(second.code, 0, "{}", second.out());
         assert!(
-            second.stderr.contains(
-                "hushrun: unit: 4 of 62 tests run, in 2 of 2 test files; 58 already passed on the files they read, and 3 more that already passed run anyway, as a check"
-            ),
+            second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
+                == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
             "Jest {}: {}",
             jest.major,
             second.stderr
         );
         assert_eq!(
             store_result(&r)["units"]["tests"],
-            json!({"total": 62, "ran": 4, "reused": 58})
+            json!({"total": 62, "ran": 3, "reused": 59})
         );
     }
 }

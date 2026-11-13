@@ -396,3 +396,30 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
   for every test file running (`why_every`) takes an adapter's word for the whole last run, after
   what changed and before what the rows say, for the adapters that will send one (a runner that
   executed nothing); units an adapter never leaves out have no key and count as running.
+
+## Amendment 15: with tests as the unit, the audit draws tests (2026-11-13)
+
+Decision 6 drew tests only among those reused one by one, and C-34 drew test files among those
+reused whole beside them, so one audited test file ran every test of it. On the real runs that
+file was most of the run: one audited test file held 67% of gin's tests, and click ran 717 of
+802 tests after a one-line change, nearly all of them the audit's. A check that asked for tests
+as the unit paid for the audit by test file.
+
+- **What is drawn.** With `unit: test`, the audit is of tests: 2% of every test the plan could
+  leave out, rounded up and at least one, those whose SHA-256 of `<key hex>\n<the run's start>` is
+  lowest, drawn across the tests of test files reused whole and the tests reused one by one. A
+  test of a file reused whole has no key of its own in the store; for the draw it takes the
+  SHA-256 of `<its file's key hex>\n<its id>`, so the draw is as stable as the file's key.
+- **A file reused whole that holds an audited test** is left out test by test for that run: it
+  runs, with every other test of it in `reuseTests`, so only the audited test runs. Its second
+  run, and the suspension after a second failure, are decision 6's, by the test's name.
+- **A file whose tests this machine doesn't know** (no row of its tests: its pass was told without
+  them, as by a run with `unit: file` or a hint from a run that didn't tell them) can't be left out
+  test by test, so it is drawn whole, as C-34 draws a test file, beside the tests. The line then
+  counts each in its word: `, and 1 more test file and 2 more tests that already passed run
+  anyway, as a check`; where it counts only tests, an audited file counts as its tests.
+- **The saving.** A test left out of a file that would have been reused whole is counted by the
+  duration its row keeps from the run that told it, so the saving still counts it, bounded as
+  amendment 14 says.
+- **Unchanged.** With `unit: file`, and in a run past the 50,000 tests a check reuses one by one,
+  which reuses by test file, the audit is C-34's, of test files.
