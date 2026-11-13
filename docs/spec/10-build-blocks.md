@@ -44,7 +44,8 @@ cargo start. With no answer to the results lookup and a fetch an earlier step of
 that serves the run (B-36), it sets it too, and the run reads that fetch only. With no answer to
 the results lookup or to `open` in time otherwise, COMMAND runs unwrapped and the run says one
 line, `build reuse is off for this run: the backend didn't answer in time`; a job
-whose org doesn't share runs exactly as it would without any of this, and says nothing. A binary called by that name is the
+whose org doesn't share runs exactly as it would without any of this, and says nothing, but for
+`open`'s reason `contract`, which it says in B-25's one line. A binary called by that name is the
 wrapper and does nothing else; it MUST decide that from its own name, before reading any setting. A
 build outside `hushrun run` neither reads nor fills the store. Cargo's own fingerprints don't count
 the wrapper, so changing the mode never forces a rebuild.
@@ -661,7 +662,8 @@ When `open` answers that sharing is off although the org shares, it gives one re
 (`hushrun_core::blocks::OffReason`): `plan`, the org's plan includes no shared store; or
 `contract`, the org's plan sets its shared storage by contract alone and none is set yet. For
 `contract` the run says one line, also where `open` decides whether the org shares (which is
-otherwise silent), since the org did turn sharing on: `build: sharing is off for this run: the
+otherwise silent) and in a CI job that then runs unwrapped (B-2), since the org did turn sharing
+on: `build: sharing is off for this run: the
 org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to
 set it`; it never says to upgrade, since no plan gives that storage. A reason this version doesn't
 know reads as unknown, and the run says what it says for an org that doesn't share. *Rests on:*

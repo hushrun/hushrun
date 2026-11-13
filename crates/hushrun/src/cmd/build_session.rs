@@ -476,7 +476,11 @@ fn begin_in_ci(
             let line = match opened {
                 crate::cmd::build_relay::Opened::Unanswered => Some(NO_ANSWER.to_string()),
                 crate::cmd::build_relay::Opened::Stopped(_) => said.into_iter().next(),
-                _ => None,
+                // Silent, but for an org whose plan sets its storage by contract (B-25).
+                crate::cmd::build_relay::Opened::Off => said
+                    .into_iter()
+                    .find(|line| line.ends_with(crate::cmd::build_relay::BY_CONTRACT)),
+                crate::cmd::build_relay::Opened::Answering => None,
             };
             abandon(session, line)
         }

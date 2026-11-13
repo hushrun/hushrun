@@ -45,7 +45,8 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   `usage.shared_store`, only when the server sent it; an answer without it reads as before.
 - Contract: **`open`'s off reason `contract`** (`OffReason::Contract` in `hushrun_core::blocks`):
   the org's plan sets its shared storage by contract alone, and none is set yet. The run says so
-  in one line and to get in touch with hushrun to set it; an older CLI reads the word as unknown.
+  in one line and to get in touch with hushrun to set it, also in a CI job, which then runs
+  unwrapped; an older CLI reads the word as unknown.
 
 - Contract: **`hushrun build on|observe|off|status|clean`**. `on`, `observe` and `off` save the
   mode for this user: `observe` compiles everything, stores blocks and says what would have been

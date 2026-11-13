@@ -514,6 +514,23 @@ fn a_job_whose_org_doesnt_share_runs_unwrapped_and_says_nothing() {
     assert!(ci_stores(&a.root.join("runner-temp")).is_empty());
 }
 
+// covers: B-2, B-25
+#[test]
+fn a_job_whose_orgs_plan_sets_storage_by_contract_runs_unwrapped_and_says_so_once() {
+    let fake = FakeBuild::start();
+    fake.set_policy(|p| {
+        p.sharing = false;
+        p.reason = Some(hushrun_core::blocks::OffReason::Contract);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stdout, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    let line = "build: sharing is off for this run: the org's plan sets its shared storage by contract, and none is set yet: get in touch with hushrun to set it";
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+}
+
 // covers: B-2
 #[test]
 fn a_job_whose_backend_doesnt_answer_runs_unwrapped_with_one_line() {
