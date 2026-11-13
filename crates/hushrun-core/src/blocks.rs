@@ -338,7 +338,8 @@ pub struct OpenRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     /// The commit the workspace has checked out (`git rev-parse HEAD`), or `None` when the client
-    /// can't read one. In CI, a job whose commit isn't its token's `sha` is not trusted.
+    /// can't read one, or in CI when the files git tracks differ from it. In CI, a job whose
+    /// commit isn't its token's `sha`, or that names none, is not trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// The check's id, as the local store names it: a digest of the repository and the check's

@@ -183,6 +183,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks in CI: a job whose tracked files differ from its commit (a version bump or a
+  nightly `cargo update` before the build) names no commit in its build requests, so the backend
+  doesn't take what it builds for that commit's; it is checked once per run. Before, every job
+  named `HEAD`, whatever it built. A file git doesn't track isn't compared.
 - Build blocks: a warm build whose downloaded crates were vouched for more than a day ago takes
   what one with fresh vouches takes. While `open` hasn't answered, a question about a vouch is
   answered at once as a server that can't be reached; once it has, every stale vouch is asked in

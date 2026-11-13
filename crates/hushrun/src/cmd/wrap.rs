@@ -868,6 +868,41 @@ fn skip_or_run(
     ExitCode::from(exit)
 }
 
+/// B-31: the commit a run's build requests name, decided once per run: the workspace's; in CI
+/// none when the files git tracks differ from it here (a version bump, a nightly `cargo
+/// update`), since the code built isn't that commit's, and the backend counts a request that
+/// names none as one whose commit isn't the token's. None either when git can't tell.
+fn build_commit(code: &Code, in_ci: bool) -> Option<String> {
+    let revision = code.revision.clone()?;
+    if !in_ci || tracked_files_are(&code.root, &revision) {
+        Some(revision)
+    } else {
+        None
+    }
+}
+
+/// Whether every file git tracks in the checkout at `root` is as `commit` has it: changed,
+/// deleted, staged and added ones all differ; a file git doesn't track, and changes inside a
+/// submodule's own checkout, are not compared.
+fn tracked_files_are(root: &Path, commit: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "--ignore-submodules=dirty",
+            commit,
+            "--",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// B-2, B-20: a run's build session, begun once before COMMAND first starts. Every start of
 /// COMMAND gets its environment, and it is finished once, after the last: by [`BuildRun::finish`]
 /// where the run's lines go, else when the run returns before there, whatever COMMAND's exit
@@ -891,7 +926,7 @@ impl<'a> BuildRun<'a> {
         let share = match (code, backend.and_then(Backend::build_access)) {
             (Some(code), Some(access)) => Some(build_session::ShareStart {
                 access,
-                commit: code.revision.clone(),
+                commit: build_commit(code, hushrun_ci::in_ci(&Env::from_process())),
                 check: code.check.as_str().to_string(),
             }),
             _ => None,

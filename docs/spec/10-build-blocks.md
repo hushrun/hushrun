@@ -788,7 +788,12 @@ one to the job itself. With no ID token (a pull request from a fork, a job witho
 environment holds: an agent token in `HUSHRUN_TOKEN` or `HUSHRUN_AGENT` reads nothing there, and a
 results answer obtained with it never sets the wrapper. Anywhere else in CI an agent token reads
 the org's blocks and uploads none, whatever the policy says.
-Every request, lookups included, names the workspace's commit when one can be read; a job the
+Every request, lookups included, names the workspace's commit when one can be read, and in CI
+only while the files git tracks are as that commit has them, checked once per run
+(`wrap::build_commit`, a `git diff` of the worktree against the commit): a job that changed a
+tracked file before building (a version bump, a nightly `cargo update`) names none, which the
+backend counts as a commit other than its token's, so it writes no trusted block. A file git
+doesn't track, and changes inside a submodule's own checkout, are not compared; a job the
 policy calls untrusted says once, in plain words, why it writes nothing to the repository's
 trusted blocks. The end of the command waits for uploads as one function of its context says
 (`upload::wait_at_end`): a job writing trusted blocks up to 2 minutes, any other up to 20 seconds,
@@ -798,10 +803,14 @@ deadline for everything after the command, `close` included, which keeps its 5 s
 never less than those, so a job with nothing to upload still sends its manifest. *Rests on:*
 the runner emptying its temporary folder when the job ends; the ID token's claims being what the
 backend trusts a job by, so a token copied out of one job can do no more than that job could, for
-minutes; the commit being what the backend checks a trusted job's token against; and a quarter of
+minutes; the commit being what the backend checks a trusted job's token against, and the
+tracked files being as it has them; and a quarter of
 a block's compile being worth waiting for once, since the next job of the repository then
 downloads it rather than compiling; and the request token being the job's alone. *Breaks if:*
-the token endpoint fails for longer than a token lives (5 minutes on GitHub): from the held
+a job's build reads a file git doesn't track (one an earlier step generated outside
+`.gitignore`): the job names its commit while building other code, and the commit check, a guard
+against honest mistakes, doesn't see it (keys still commit to every file read, so no wrong bytes
+follow); the token endpoint fails for longer than a token lives (5 minutes on GitHub): from the held
 token's expiry, every request is a miss and the job compiles as it would without a shared store,
 its uploads lost; a self-hosted runner keeps `RUNNER_TEMP` between jobs and the next job can't remove what the last
 one left there (a file it lacks permission to delete): that store is never read or uploaded, but

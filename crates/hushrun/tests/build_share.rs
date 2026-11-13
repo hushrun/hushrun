@@ -1095,3 +1095,57 @@ fn a_slow_id_token_endpoint_slows_neither_cargo_nor_the_end_of_a_job() {
         "the end took {after_slow:?} against {after_prompt:?}: {said}"
     );
 }
+
+/// The build requests the fake was sent after the first `after`, each its route and whether its
+/// body names a commit.
+fn commits_since(fake: &FakeBuild, after: usize) -> Vec<(String, bool)> {
+    fake.seen()
+        .into_iter()
+        .skip(after)
+        .filter(|s| s.path.contains("/v0/build/"))
+        .map(|s| {
+            let body: serde_json::Value = serde_json::from_slice(&s.body).unwrap();
+            (s.route, body.get("commit").is_some())
+        })
+        .collect()
+}
+
+// covers: B-31
+#[test]
+fn a_job_whose_tracked_files_differ_from_its_commit_names_no_commit() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    // A clean checkout names its commit in every request.
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, _, stderr) = ci_build(&a, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    let sent = commits_since(&fake, 0);
+    assert!(sent.iter().all(|(_, named)| *named), "{sent:?}");
+    // A job that changed a tracked file before building, as a version bump or a nightly
+    // `cargo update` does: the code it builds isn't its commit's, so no request names one.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    std::fs::write(
+        b.repo.join("dep/src/lib.rs"),
+        "pub fn two() -> u32 {\n    (0..2).map(|x| x * 1).sum::<u32>() + 1 + 0\n}\n",
+    )
+    .unwrap();
+    let seen = fake.seen().len();
+    let (code, _, stderr) = ci_build(&b, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    let sent = commits_since(&fake, seen);
+    assert!(sent.iter().all(|(_, named)| !named), "{sent:?}");
+    for route in [route::OPEN, route::LOOKUP, route::BEGIN, route::CLOSE] {
+        assert!(sent.iter().any(|(r, _)| r == route), "no {route}: {sent:?}");
+    }
+    // A file git doesn't track isn't compared.
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    std::fs::write(c.repo.join("notes.txt"), "not tracked\n").unwrap();
+    let seen = fake.seen().len();
+    let (code, _, stderr) = ci_build(&c, &fake, |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    let sent = commits_since(&fake, seen);
+    assert!(
+        !sent.is_empty() && sent.iter().all(|(_, named)| *named),
+        "{sent:?}"
+    );
+}
