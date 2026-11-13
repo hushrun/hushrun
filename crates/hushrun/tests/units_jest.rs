@@ -2676,3 +2676,100 @@ fn a_second_start_of_jest_in_one_command_keeps_every_pass_of_the_run_out() {
         );
     }
 }
+
+/// What `hushrun why` says, stdout and stderr, of `unit` after the runs so far.
+fn why_of(r: &Repo, unit: &str) -> String {
+    r.run(&["why", "unit", unit]).out()
+}
+
+// covers: C-37, C-44
+#[test]
+fn why_says_what_an_error_no_jest_test_owns_left_of_its_file_and_of_another() {
+    // A timer `leaks` left throws while `waits` runs: Jest 29 charges it to `waits`, Jest 30 to
+    // `leaks`. leak.test.js failed, and no test of it keeps a result; ok.test.js passed, and
+    // keeps its pass: Jest tells failures by test file.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/leak.test.js",
+            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\n",
+        ),
+        file("test/ok.test.js", "test('ok', () => {});\n"),
+    ];
+    let said = "Jest reported an error it couldn't charge to a test (late timer), so no test of its file keeps a result of that run";
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        let after = why_of(&r, "test/leak.test.js::after");
+        assert!(after.contains(said), "Jest {}: {after}", jest.major);
+        let file = why_of(&r, "test/leak.test.js");
+        assert!(
+            file.contains(
+                "test/leak.test.js runs: its newest result on the files it reads now failed"
+            ),
+            "Jest {}: {file}",
+            jest.major
+        );
+        for unit in ["test/ok.test.js", "test/ok.test.js::ok"] {
+            let why = why_of(&r, unit);
+            assert!(
+                why.contains("would be reused") && !why.contains("couldn't charge"),
+                "Jest {}: {unit}: {why}",
+                jest.major
+            );
+        }
+    }
+}
+
+// covers: C-37, C-44
+#[cfg(unix)]
+#[test]
+fn why_says_a_second_start_of_jest_kept_every_pass_of_its_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let said = "Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told, so no pass of that run is kept";
+    for jest in jests() {
+        let r = Repo::new(
+            &jest,
+            &[
+                file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("test/a.test.js", "test('a1', () => {});\n"),
+                file(
+                    "test/f.test.js",
+                    "test('f1', () => { expect(process.env.FAILNOW).toBeUndefined(); });\n",
+                ),
+            ],
+        );
+        // As a package script does under `pnpm jest`: a stand-in `pnpm` that starts it twice.
+        let bin = r.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("pnpm"),
+            "#!/bin/sh\nnode node_modules/jest/bin/jest.js --ci && FAILNOW=1 node node_modules/jest/bin/jest.js --ci\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(ran.code, 1, "Jest {}: {}", jest.major, ran.out());
+        for unit in [
+            "test/f.test.js::f1",
+            "test/f.test.js",
+            "test/a.test.js::a1",
+            "test/a.test.js",
+        ] {
+            let why = why_of(&r, unit);
+            assert!(why.contains(said), "Jest {}: {unit}: {why}", jest.major);
+        }
+    }
+}

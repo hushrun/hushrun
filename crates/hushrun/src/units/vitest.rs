@@ -280,6 +280,8 @@ pub struct Observed {
     pub refused: Option<String>,
     /// \[ADR 0072\] Which module imports which, from the root, for `hushrun why`.
     pub edges: BTreeSet<super::db::Edge>,
+    /// \[C-37\] Why no pass of the run is kept: an error no test owns, which fails the run whole.
+    pub not_kept: Option<String>,
 }
 
 /// What the workers that ran one test file saw of it.
@@ -512,6 +514,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     // `failuresByUnit`), and each test that didn't fail says why, with the file it came from.
     let unowned = unowned_error(main, &root);
     let mut out = Observed {
+        not_kept: unowned.clone(),
         failures_by_unit: main.failures_by_unit,
         unit_files,
         refused: main
@@ -729,6 +732,7 @@ impl Adapter for Recognized {
             refused: observed.refused,
             edges: observed.edges,
             received: shared.received,
+            not_kept: observed.not_kept,
             ..Read::default()
         }))
     }

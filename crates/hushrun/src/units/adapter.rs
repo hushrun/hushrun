@@ -239,6 +239,10 @@ pub struct Read {
     /// read: a run that passed records nothing, not even the check's pass; a failed one records
     /// its fail. (A facts file can say it too: `staleBuild`.)
     pub stale_build: Option<String>,
+    /// \[C-37\] Why no pass of a run that failed is kept, its failures not told by unit, in words
+    /// people read: what `hushrun why` says of each test file and test of the run. (A facts file
+    /// can say it too: `notKept`.)
+    pub not_kept: Option<String>,
 }
 
 /// What `hushrun why` has to go by: this machine's store and the files now, and no tool.

@@ -2438,3 +2438,105 @@ fn a_second_start_of_vitest_in_one_command_keeps_every_pass_of_the_run_out() {
     assert!(!once.stderr.contains("records a pass"), "{}", once.stderr);
     assert_eq!(r.map()["units"]["test/f.test.ts"]["tests"]["f1"], "passed");
 }
+
+/// What `hushrun why` says, stdout and stderr, of `unit` after the runs so far.
+fn why_of(r: &Repo, unit: &str) -> String {
+    let why = r.run(&["why", "unit", unit]);
+    format!("{}\n{}", why.stdout, why.stderr)
+}
+
+// covers: C-37, C-43
+#[test]
+fn why_says_no_pass_of_a_vitest_run_is_kept_after_an_error_no_test_owns() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A timer `leaks` left throws after it: Vitest reports an error no test owns and fails the
+    // run. No pass of it is kept, a.test.ts's included, and `hushrun why` says so of each test
+    // and test file, in bad.test.ts and in a.test.ts, which passed.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/bad.test.ts",
+            "import { test } from 'vitest'\ntest('leaks', () => { setTimeout(() => { throw new Error('late timer') }, 10) })\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 100)) })\n",
+        ),
+    ]);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let said = "Vitest reported an error no test owns (in test/bad.test.ts: late timer), so no pass of that run is kept";
+    for unit in [
+        "test/bad.test.ts::waits",
+        "test/bad.test.ts",
+        "test/a.test.ts::a1",
+        "test/a.test.ts",
+    ] {
+        let why = why_of(&r, unit);
+        assert!(why.contains(said), "{unit}: {why}");
+    }
+}
+
+// covers: C-37, C-43
+#[cfg(unix)]
+#[test]
+fn why_says_a_second_start_of_vitest_kept_every_pass_of_its_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/f.test.ts",
+            "import { test, expect } from 'vitest'\ntest('f1', () => { expect(process.env.FAILNOW).toBeUndefined() })\n",
+        ),
+    ]);
+    // As a package script does under `pnpm vitest run`: a stand-in `pnpm` that starts it twice.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run && FAILNOW=1 node_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let said = "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told, so no pass of that run is kept";
+    for unit in [
+        "test/f.test.ts::f1",
+        "test/f.test.ts",
+        "test/a.test.ts::a1",
+        "test/a.test.ts",
+    ] {
+        let why = why_of(&r, unit);
+        assert!(why.contains(said), "{unit}: {why}");
+    }
+}

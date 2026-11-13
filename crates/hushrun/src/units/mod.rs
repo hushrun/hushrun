@@ -1027,7 +1027,10 @@ impl Session {
             shared: &fetched,
             words: RunWords {
                 started: unfinished.clone(),
-                failed: facts::run_not_kept(&files),
+                failed: read
+                    .not_kept
+                    .clone()
+                    .or_else(|| facts::run_not_kept(&files)),
             },
         };
         // \[C-32\] What holds for the whole run, in each unit's facts, for the one function: a
@@ -2003,6 +2006,7 @@ fn decide(
         received,
         left_out: _,
         stale_build: _,
+        not_kept: _,
     } = read;
     let mut seen = seen;
     // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the

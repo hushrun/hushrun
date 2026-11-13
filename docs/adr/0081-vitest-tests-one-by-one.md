@@ -201,3 +201,9 @@ then had nothing true to say of the tests. The main process now keeps each such 
 file Vitest says it came from (`settings.unhandled`), and every test of the run that didn't fail is
 told not finished with a `notKept` sentence naming them, which the core keeps with the test's row
 (C-37). A run that records nothing stores its rows only once the core does so.
+
+The same sentence is the run's reason too: the adapter gives it to the core as a facts file's
+top-level `notKept` would, so that `hushrun why` says it of each test file of the run, the files
+that passed included, rather than the core's "its run failed, and its adapter doesn't report each
+failure by test file". Each test that didn't fail keeps it as its own `notKept`.
+
