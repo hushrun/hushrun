@@ -30,6 +30,10 @@ codes, environment variables, event formats, the ledger layout) are listed first
   person's machine is audited one time in ten whatever its class, and a compile that finds its
   block already stored is a second opinion for every class.
 
+- A file of 8 MiB or more that a run hashes for the first time (a linker, the toolchain's
+  `rust-lld`) is hashed by one wrapper while the others that want it at once wait and read its
+  digest, so a cold build pays for it once (B-37).
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

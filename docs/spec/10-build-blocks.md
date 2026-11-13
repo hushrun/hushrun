@@ -671,7 +671,15 @@ loads and that changed what it writes; or the `ld` of a gcc built with a default
 other than `--with-ld=` ran instead. The linker's version text is not asked: the `ld` it would
 describe is in E by content.
 
-Cost, measured per link on rustc 1.94: see B-18.
+Cost, measured on rustc 1.94 (median of 11 links of a proc macro and of a program after the
+first, release build): on macOS (Xcode 27.2 through `/usr/bin/cc`) about 12 to 19 ms at each
+link and the same at each lookup, nearly all of it the dry run through the shim; on Linux arm64
+with gcc 14 (Debian 13 in a container) about 3.5 to 6 ms (three questions, about 105 entries).
+The first link of a run also hashes what no earlier link of the run did, about 210 MB on macOS
+(`rust-lld` 122 MB, `libLTO.dylib` 69 MB) and 330 MB on Linux (`libLLVM` 155 MB, which the
+toolchain's tools load): 0.4 to 0.5 s on Linux and about 0.7 s on this Mac, whose SHA-256 is
+slow under load. A file of 8 MiB or more is hashed under a lock on its run digest's name, so the
+links a cold build starts at once hash it once and the others wait for it and read it.
 
 **B-19 Every failure runs rustc.** An error computing a key or reading the store MUST end in
 rustc running as asked with nothing stored; an error putting a block's files in place ends in a
