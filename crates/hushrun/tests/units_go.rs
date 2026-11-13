@@ -255,7 +255,7 @@ impl Ran {
                 ]
                 .iter()
                 .any(|w| l.contains(&format!("{w} run")))
-                    || l.contains("every test file runs")
+                    || l.contains("every package runs")
             })
             .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))
     }

@@ -760,8 +760,8 @@ fn a_nested_xctest_class_makes_nothing_be_left_out_on_macos() {
     let after = r.run(SWIFT_TEST, &[]);
     assert_eq!(after.code, 0, "{}", after.stderr);
     assert_eq!(
-        after.line("hushrun: unit: every test file runs"),
-        "hushrun: unit: every test file runs: on macOS SwiftPM doesn't run a nested XCTest class (Outer.InnerTests, in Tests/CartTests) once any test is left out, so none is"
+        after.line("hushrun: unit: every test target runs"),
+        "hushrun: unit: every test target runs: on macOS SwiftPM doesn't run a nested XCTest class (Outer.InnerTests, in Tests/CartTests) once any test is left out, so none is"
     );
     assert!(
         after.stdout.contains("InnerTests testInner]' passed"),

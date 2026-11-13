@@ -793,6 +793,12 @@ impl Session {
         &self.notes
     }
 
+    /// \[C-39\] What one of its test files is called, in its adapter's word: `test class`,
+    /// `package`, `test file`.
+    pub fn test_file(&self) -> &'static str {
+        self.adapter.test_file()
+    }
+
     /// Gives COMMAND the variables that load the adapter.
     pub fn apply(&self, command: &mut Command) {
         for (name, value) in &self.variables {

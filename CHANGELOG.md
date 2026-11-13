@@ -305,6 +305,8 @@ Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check ask
   told as never left out, and a failure of one no longer costs every other class of a failed run
   its pass. Under Gradle such a class (with `@RunWith(AllTests.class)`) was no test class at all,
   and its cases were dropped from the counts: now they are its own, in the same way.
+- The line that says why every test file runs uses the adapter's word, as the counts do: `every
+  test class runs: no run here has read Maven's reactor yet`, `every package runs`.
 - Gradle: a test task of which the check's store knows no test class now executes in that run,
   never up to date nor from the build cache, so the first run through hushrun always learns, in
   `observe` and `reuse`; the note for a run that executed no test task no longer advises another

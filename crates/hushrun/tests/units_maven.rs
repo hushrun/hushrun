@@ -663,7 +663,7 @@ fn an_audited_class_that_fails_again_alone_suspends_the_checks_reuse() {
     assert!(
         after
             .stderr
-            .contains("hushrun: unit: every test file runs: reuse of its test files is suspended"),
+            .contains("hushrun: unit: every test class runs: reuse of its test files is suspended"),
         "{}",
         after.stderr
     );

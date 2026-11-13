@@ -407,7 +407,7 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
     assert!(
         first
             .stderr
-            .contains("every test file runs: no run here has listed Gradle's test classes yet"),
+            .contains("every test class runs: no run here has listed Gradle's test classes yet"),
         "{}",
         first.stderr
     );

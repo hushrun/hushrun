@@ -475,7 +475,8 @@ fn skip_or_run(
         };
         match why_not {
             Some((why, word)) => {
-                say.line(format_args!("{check}: every test file runs: {why}"));
+                let noun = session.test_file();
+                say.line(format_args!("{check}: every {noun} runs: {why}"));
                 units_anyway = Some(word.to_string());
             }
             None => match plan_units(
@@ -498,7 +499,8 @@ fn skip_or_run(
                     }
                 }
                 Some(units::Planned::Everything(why)) => {
-                    say.line(format_args!("{check}: every test file runs: {why}"));
+                    let noun = session.test_file();
+                    say.line(format_args!("{check}: every {noun} runs: {why}"));
                     if why.contains("suspended") {
                         units_anyway = Some("suspended".to_string());
                     }
