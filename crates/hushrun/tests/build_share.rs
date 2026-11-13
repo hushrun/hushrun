@@ -211,16 +211,42 @@ fn a_library_one_machine_built_is_reused_on_another_from_the_shared_store() {
 #[test]
 fn a_server_that_sleeps_ten_seconds_on_open_doesnt_delay_cargo() {
     let fake = FakeBuild::start();
-    fake.delay(route::OPEN, Duration::from_secs(10));
+    let delay = Duration::from_secs(10);
+    fake.delay(route::OPEN, delay);
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None);
     let started = Instant::now();
     let (code, stderr) = a.build(&fake);
     let took = started.elapsed();
     assert_eq!(code, 0, "{stderr}");
-    // The command itself takes two seconds more than cargo.
-    assert!(took < Duration::from_secs(9), "{took:?}: {stderr}");
+    // What the run took beyond its command (cargo, by cargo's own count, then the two seconds
+    // the command sleeps) is far from the server's sleep: a run that waited for `open` spends
+    // all of it there. Measured against the command, so a slow machine's compile is not taken
+    // for a wait.
+    let command = cargo_took(&stderr) + Duration::from_secs(2);
+    let beyond = took.saturating_sub(command);
+    assert!(
+        beyond < delay - Duration::from_secs(3),
+        "{beyond:?} beyond the command's {command:?}: {stderr}"
+    );
     assert!(stderr.contains("build: 2 crates built"), "{stderr}");
+}
+
+/// How long cargo says its build took, from its `Finished … in 1.23s` (or `in 1m 02s`) line.
+fn cargo_took(stderr: &str) -> Duration {
+    let line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("Finished"))
+        .unwrap_or_else(|| panic!("cargo's last line: {stderr}"));
+    let said = line.rsplit(" in ").next().unwrap();
+    let seconds: f64 = said
+        .split_whitespace()
+        .map(|part| match part.strip_suffix('m') {
+            Some(minutes) => minutes.parse::<f64>().unwrap() * 60.0,
+            None => part.trim_end_matches('s').parse::<f64>().unwrap(),
+        })
+        .sum();
+    Duration::from_secs_f64(seconds)
 }
 
 // covers: B-25
