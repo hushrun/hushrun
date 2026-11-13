@@ -2258,6 +2258,7 @@ impl Call<'_> {
             Ok(Published::AlreadyThere) => self.already_there(
                 store,
                 &key,
+                &cx.step,
                 produced,
                 &value,
                 &files,
@@ -2285,6 +2286,7 @@ impl Call<'_> {
         &self,
         store: &Store,
         key: &Digest,
+        step: &Digest,
         produced: &Produced,
         description: &serde_json::Value,
         files: &[NewFile],
@@ -2309,6 +2311,16 @@ impl Call<'_> {
             return Stored::AlreadyHad;
         }
         if compared == Compared::Differed {
+            // B-34: a comparison of a downloaded block that differs suspends its first key for
+            // the store's kept days, first, so that whatever the replace below finds, the next
+            // run compiles rather than reuses it.
+            let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+            let _ = store.suspend_until(
+                step,
+                "a compile's outputs differed from a downloaded block's",
+                until,
+                now,
+            );
             let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
             let replaced = store.replace(key, description, files, origin, now, only_downloaded);
             if let Some(share) = &self.current.share {

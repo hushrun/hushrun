@@ -729,7 +729,10 @@ the store's own publish (first writer wins), never in shared `observe`. A block 
 downloaded may give way to this run's download or compile; a block built here never does. A
 compile whose own publish finds a block there compares outputs: a block built here is a second
 opinion for a library, and a difference is treated as B-16 treats one; a block only downloaded
-is replaced where the two differ, and the difference reported. Either way it is from then on also
+is replaced where the two differ, its first key suspended as B-34 says, and the difference
+reported. The replacement is one step under the block's lock (the two folders exchange names), so
+no other publish lands between the old block leaving and the new one arriving; where the
+filesystem can't exchange, the old one stays, and the suspension makes that a compile. Either way it is from then on also
 built here. *Rests on:* one store serving every org, credential and agent of one OS user, so that
 only the record tells a block one run may send from one it may not.
 

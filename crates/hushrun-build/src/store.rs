@@ -409,6 +409,22 @@ impl Store {
         now: SystemTime,
         may: impl FnOnce(Option<&Origin>) -> bool,
     ) -> Result<Replaced, StoreError> {
+        self.replace_inner(key, description, files, origin, now, may, || {})
+    }
+
+    /// [`Store::replace`], with `between` called once ours is written and before it takes the
+    /// old one's place: where another process's publish may land.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_inner(
+        &self,
+        key: &Digest,
+        description: &serde_json::Value,
+        files: &[NewFile],
+        origin: &Origin,
+        now: SystemTime,
+        may: impl FnOnce(Option<&Origin>) -> bool,
+        between: impl FnOnce(),
+    ) -> Result<Replaced, StoreError> {
         check_names(files)?;
         let dest = self.block_dir(key);
         if !dest.join(BLOCK_JSON).exists() {
@@ -426,20 +442,25 @@ impl Store {
             let _ = remove_tree(&temp);
             return Err(err);
         }
-        // The one there goes to the trash, still under its lock, and ours takes its place. A
-        // block another process publishes in between wins, as any first writer does.
-        let trashed = self.to_trash(&dest).map_err(at(&dest))?;
+        // C2: ours and the one there change places in one step, under its lock, so no other
+        // publish can land between taking the old one away and putting ours in. A filesystem
+        // that can't exchange keeps the old one: the caller's suspension makes that a compile.
+        between();
+        let exchanged = exchange(&temp, &dest);
         drop(lock);
-        let placed = place(&temp, &dest).map_err(at(&dest));
-        if !matches!(placed, Ok(Published::Stored)) {
-            let _ = remove_tree(&temp);
-        }
-        if let Some(trashed) = trashed {
-            let _ = remove_tree(&trashed);
-        }
-        match placed? {
-            Published::Stored => Ok(Replaced::Stored),
-            Published::AlreadyThere => Ok(Replaced::Kept),
+        match exchanged {
+            Ok(()) => {
+                // `temp` now holds the old block.
+                if let Ok(Some(trashed)) = self.to_trash(&temp) {
+                    let _ = remove_tree(&trashed);
+                }
+                let _ = remove_tree(&temp);
+                Ok(Replaced::Stored)
+            }
+            Err(_) => {
+                let _ = remove_tree(&temp);
+                Ok(Replaced::Kept)
+            }
         }
     }
 
@@ -1301,6 +1322,20 @@ fn place(temp: &Path, dest: &Path) -> io::Result<Published> {
     Err(gave_up())
 }
 
+/// Exchanges two folders in one step (`renameat2` with `RENAME_EXCHANGE` on Linux,
+/// `renameatx_np` with `RENAME_SWAP` on macOS): each takes the other's name, and nothing ever
+/// sees the name empty.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE).map_err(io::Error::from)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn exchange(_a: &Path, _b: &Path) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 /// Renames `from` to `to`, making `to`'s parent when a sweep removed it meanwhile.
 fn rename_making_parent(from: &Path, to: &Path) -> io::Result<()> {
     let Some(parent) = to.parent() else {
@@ -1590,6 +1625,46 @@ mod tests {
             outputs: hushrun_core::blocks::Hex32([1; 32]),
             date_ms,
         }
+    }
+
+    // covers: B-32, B-34
+    #[test]
+    fn a_publish_landing_while_a_downloaded_block_is_replaced_never_takes_its_place() {
+        let w = world();
+        let theirs = [w.file("liba.rlib", b"downloaded")];
+        let downloaded = Origin::downloaded(vouch(1));
+        w.store
+            .publish_with_origin(&key(9), &description("r"), &theirs, &downloaded, day(1))
+            .unwrap();
+        let ours = [w.file("liba.rlib", b"compiled here")];
+        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        // Another run's relay publishes the same downloaded block, with a fresh vouch, just as
+        // this compile's block is about to take the old one's place.
+        let again = [w.file("liba.rlib", b"downloaded")];
+        let replaced = w
+            .store
+            .replace_inner(
+                &key(9),
+                &description("r"),
+                &ours,
+                &Origin::built_here("1-2", None),
+                day(1),
+                only_downloaded,
+                || {
+                    let _ = w.store.publish_with_origin(
+                        &key(9),
+                        &description("r"),
+                        &again,
+                        &Origin::downloaded(vouch(2)),
+                        day(1),
+                    );
+                },
+            )
+            .unwrap();
+        assert_eq!(replaced, Replaced::Stored);
+        let block = w.store.block(&key(9)).unwrap().unwrap();
+        assert_eq!(fs::read(&block.files[0].path).unwrap(), b"compiled here");
+        assert!(w.store.origin(&key(9)).unwrap().built.is_some());
     }
 
     // covers: B-32

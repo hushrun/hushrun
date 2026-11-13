@@ -4666,7 +4666,8 @@ fn a_compile_whose_publish_finds_a_downloaded_block_with_other_bytes_takes_its_p
     let ws = w.checkout("ws");
     settle();
     let r = w.call_with(&ws, "a", &[], from_a_registry);
-    let key = r.entry.unwrap().key.unwrap();
+    let entry = r.entry.unwrap();
+    let (key, step) = (entry.key.unwrap(), entry.step.unwrap());
     let block = w.store().block(&key).unwrap().unwrap();
     let ours = fs::read(&block.files[0].path).unwrap();
     // Gone from the store; the hint stays, so the next compile asks the relay for that key.
@@ -4709,6 +4710,14 @@ fn a_compile_whose_publish_finds_a_downloaded_block_with_other_bytes_takes_its_p
         ),
         "{:?}",
         relay.borrow().asked
+    );
+    // C2, B-34: the difference suspends the first key for the kept days, as an audit's does.
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
     );
 }
 
