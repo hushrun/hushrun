@@ -77,7 +77,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let out = run(root, args, envs)?;
+    run_text_in(GIT, root, args, envs)
+}
+
+fn run_text_in<I, S>(
+    program: Program,
+    root: &Path,
+    args: I,
+    envs: &[(&str, &OsStr)],
+) -> Result<String, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let out = run_in(program, root, args, envs)?;
     String::from_utf8(out)
         .map(|s| s.trim().to_string())
         .map_err(|_| Error::GitOutput {
@@ -107,6 +120,10 @@ pub(crate) fn object_format(root: &Path) -> Result<String, Error> {
 
 /// The commit and tree of `rev`.
 pub(crate) fn resolve(root: &Path, rev: &str) -> Result<(String, String), Error> {
+    resolve_in(GIT, root, rev)
+}
+
+fn resolve_in(program: Program, root: &Path, rev: &str) -> Result<(String, String), Error> {
     let unknown = |detail: String| Error::UnknownRevision {
         rev: rev.to_string(),
         detail,
@@ -117,7 +134,8 @@ pub(crate) fn resolve(root: &Path, rev: &str) -> Result<(String, String), Error>
             "a revision can't be empty or start with `-`".into(),
         ));
     }
-    let commit = run_text(
+    let commit = run_text_in(
+        program,
         root,
         [
             "rev-parse",
@@ -125,23 +143,30 @@ pub(crate) fn resolve(root: &Path, rev: &str) -> Result<(String, String), Error>
             "--quiet",
             &format!("{rev}^{{commit}}"),
         ],
-        &[],
+        &no_lazy_fetch(),
     )
     .map_err(|err| unknown(err.to_string()))?;
     if commit.is_empty() || commit.contains('\n') {
         return Err(unknown("not a commit".into()));
     }
-    let tree = run_text(
+    // The commit names its tree. Peeling it to `^{tree}` would read the tree, which a tree-less
+    // clone lacks: that is for `ls_tree` to find, and say.
+    let body = run_in(
+        program,
         root,
-        [
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{commit}^{{tree}}"),
-        ],
-        &[],
+        ["cat-file", "commit", &commit],
+        &no_lazy_fetch(),
     )?;
-    Ok((commit, tree))
+    let tree = body
+        .strip_prefix(b"tree ")
+        .and_then(|rest| rest.split(|b| *b == b'\n').next())
+        .and_then(|id| std::str::from_utf8(id).ok())
+        .filter(|id| matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| Error::GitOutput {
+            args: "cat-file commit".into(),
+            detail: format!("commit {commit} names no tree"),
+        })?;
+    Ok((commit, tree.to_string()))
 }
 
 /// The full ref name `rev` refers to, such as `refs/heads/main`, if it is a ref.
@@ -170,20 +195,7 @@ fn ls_tree_in(program: Program, root: &Path, treeish: &str) -> Result<Vec<TreeRe
         ["ls-tree", "-r", "-z", "--full-tree", treeish],
         &no_lazy_fetch(),
     )
-    .map_err(|err| match &err {
-        Error::Git { stderr, .. } => match promisor_fetch_failed(stderr) {
-            Some(object) => Error::MissingObjects {
-                object: object.to_string(),
-            },
-            None if stderr.contains("missing") || stderr.contains("bad tree") => {
-                Error::MissingObjects {
-                    object: treeish.to_string(),
-                }
-            }
-            None => err,
-        },
-        _ => err,
-    })?;
+    .map_err(|err| or_missing(program, root, err, &[treeish]))?;
     let bad = |detail: &str| Error::GitOutput {
         args: "ls-tree -r -z".into(),
         detail: detail.to_string(),
@@ -260,25 +272,94 @@ pub(crate) fn read_blob(root: &Path, oid: &[u8]) -> Result<Vec<u8>, Error> {
 
 fn read_blob_in(program: Program, root: &Path, oid: &[u8]) -> Result<Vec<u8>, Error> {
     let oid = hex::encode(oid);
-    run_in(program, root, ["cat-file", "blob", &oid], &no_lazy_fetch()).map_err(|err| match &err {
-        Error::Git { stderr, .. } => match promisor_fetch_failed(stderr) {
-            Some(object) => Error::MissingObjects {
-                object: object.to_string(),
-            },
-            None => err,
-        },
-        _ => err,
-    })
+    run_in(program, root, ["cat-file", "blob", &oid], &no_lazy_fetch())
+        .map_err(|err| or_missing(program, root, err, &[&oid]))
 }
 
-/// A partial clone must fail with E_MISSING_OBJECTS, not fetch what's left out one object at a
-/// time. `LC_ALL=C` keeps git's messages in English, for `promisor_fetch_failed`; the plumbing
-/// output read here (`cat-file --batch`, `cat-file blob`, `ls-tree -z`) is never translated.
-fn no_lazy_fetch() -> [(&'static str, &'static OsStr); 2] {
+/// The environment of every git command that reads objects. A partial clone must fail with
+/// E_MISSING_OBJECTS, not fetch what's left out one object at a time:
+///
+/// - `GIT_NO_LAZY_FETCH=1` turns lazy fetching off, in git since the 2024-05 security releases.
+/// - An older git ignores it, and `GIT_ALLOW_PROTOCOL` stops it instead: it allows only the
+///   transports it names, over any configuration, and this value names none (a transport's name
+///   can't hold `_`). Its lazy fetch fails at once, with no network, and git dies as it does on a
+///   promisor fetch it can't make.
+/// - `LC_ALL=C` keeps git's messages in English, for `promisor_fetch_failed`. The output read
+///   (`cat-file`, `ls-tree -z`, `rev-parse`) is never translated.
+///
+/// Commands that need a transport, `fetch` and `ls-remote`, never run with it.
+fn no_lazy_fetch() -> [(&'static str, &'static OsStr); 3] {
     [
         ("GIT_NO_LAZY_FETCH", OsStr::new("1")),
+        ("GIT_ALLOW_PROTOCOL", OsStr::new(NO_TRANSPORT)),
         ("LC_ALL", OsStr::new("C")),
     ]
+}
+
+/// A `GIT_ALLOW_PROTOCOL` that allows no transport.
+const NO_TRANSPORT: &str = "hushrun_no_lazy_fetch";
+
+/// `err`, from a git command that read objects under `no_lazy_fetch`, as E_MISSING_OBJECTS when
+/// the repository lacks the object: the one git couldn't fetch from a promisor remote, else the
+/// first that `lacks` finds among the ids git's error names and then `wanted`, in order. git
+/// words a missing object differently from version to version, and some of the same words
+/// ("not a tree object") also mean an object of another type, so the words alone decide nothing.
+fn or_missing(program: Program, root: &Path, err: Error, wanted: &[&str]) -> Error {
+    let Error::Git { stderr, .. } = &err else {
+        return err;
+    };
+    let object = match promisor_fetch_failed(stderr) {
+        Some(object) => Some(object.to_string()),
+        None => object_ids(stderr)
+            .into_iter()
+            .chain(wanted.iter().copied())
+            .find(|object| lacks(program, root, object))
+            .map(str::to_string),
+    };
+    match object {
+        Some(object) => Error::MissingObjects { object },
+        None => err,
+    }
+}
+
+/// The full object ids in `text`.
+fn object_ids(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_ascii_hexdigit())
+        .filter(|word| matches!(word.len(), 40 | 64))
+        .collect()
+}
+
+/// Whether the repository lacks `object`, as `git cat-file --batch-check` says under
+/// `no_lazy_fetch`: newer git prints `<object> missing`; git 2.43, or one that ignores
+/// `GIT_NO_LAZY_FETCH`, dies because it couldn't fetch the object from a promisor remote. An
+/// object of another type is there, and anything git can't answer is not known to be missing.
+fn lacks(program: Program, root: &Path, object: &str) -> bool {
+    if object.is_empty() || object.contains(['\n', '\r']) {
+        return false;
+    }
+    let child = command(program)
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "--batch-check"])
+        .envs(no_lazy_fetch())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    // One line fits in the pipe, so this can't wait on git. git that died first just ends early.
+    let _ = (child.stdin.take().expect("piped stdin")).write_all(format!("{object}\n").as_bytes());
+    let Ok(output) = child.wait_with_output() else {
+        return false;
+    };
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).trim_end() == format!("{object} missing")
+    } else {
+        promisor_fetch_failed(&String::from_utf8_lossy(&output.stderr)).is_some()
+    }
 }
 
 /// The object git died on, when it died because it couldn't fetch the object from a promisor
@@ -515,7 +596,41 @@ fn read_batch(mut out: impl BufRead, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)
 
 /// The bytes of `path` at `rev`.
 pub(crate) fn read_file_at(root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, Error> {
-    run(root, ["cat-file", "blob", &format!("{rev}:{path}")], &[])
+    read_file_at_in(GIT, root, rev, path)
+}
+
+fn read_file_at_in(program: Program, root: &Path, rev: &str, path: &str) -> Result<Vec<u8>, Error> {
+    run_in(
+        program,
+        root,
+        ["cat-file", "blob", &format!("{rev}:{path}")],
+        &no_lazy_fetch(),
+    )
+    .map_err(|err| {
+        let on_the_way = objects_on_the_way(program, root, rev, path);
+        let on_the_way: Vec<&str> = on_the_way.iter().map(String::as_str).collect();
+        or_missing(program, root, err, &on_the_way)
+    })
+}
+
+/// The objects git reads to find `path` at `rev`, as far as they can be named: the commit's
+/// tree, then the tree of each folder on the way, then the file. A name stops where a tree that
+/// should hold it can't be read, and that tree is the last one given.
+fn objects_on_the_way(program: Program, root: &Path, rev: &str, path: &str) -> Vec<String> {
+    let Ok((_, tree)) = resolve_in(program, root, rev) else {
+        return Vec::new();
+    };
+    let mut objects = vec![tree];
+    let ends = path.match_indices('/').map(|(i, _)| i).chain([path.len()]);
+    for end in ends {
+        let spec = format!("{rev}:{}", &path[..end]);
+        let args = ["rev-parse", "--verify", "--quiet", &spec];
+        match run_text_in(program, root, args, &no_lazy_fetch()) {
+            Ok(id) if !id.is_empty() && !id.contains('\n') => objects.push(id),
+            _ => break,
+        }
+    }
+    objects
 }
 
 /// The commit `refs/heads/<branch>` points to on `remote`.
@@ -546,16 +661,7 @@ pub(crate) fn tree(root: &Path, rev: &str) -> Result<String, Error> {
             detail: "not a revision".into(),
         });
     }
-    run_text(
-        root,
-        [
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{rev}^{{tree}}"),
-        ],
-        &[],
-    )
+    resolve(root, rev).map(|(_, tree)| tree)
 }
 
 /// `git fetch --depth=1 <remote> <sha>`: one commit, without prompting for credentials.
@@ -810,6 +916,132 @@ exit 128
             let script = r#"for oid; do :; done; promisor "$oid""#;
             let err = with(script, |git, root| read_blob_in(git, root, &oid)).unwrap_err();
             assert_missing(&err, &oid);
+        }
+    }
+
+    /// The real git, on repositories made here.
+    mod real_git {
+        use super::*;
+        use hushrun_testkit::git;
+
+        /// A repository with `a.txt` and `sub/b.txt`, served over `file://` with filters on, and a
+        /// clone of it with `filter` (none for a full clone).
+        struct Repos {
+            _dir: tempfile::TempDir,
+            clone: std::path::PathBuf,
+        }
+
+        impl Repos {
+            fn new(filter: Option<&str>) -> Repos {
+                let dir = tempfile::tempdir().unwrap();
+                let origin = dir.path().join("origin");
+                std::fs::create_dir_all(origin.join("sub")).unwrap();
+                git::init(&origin, "sha1");
+                git::run(&origin, &["config", "uploadpack.allowFilter", "true"], None);
+                git::run(
+                    &origin,
+                    &["config", "uploadpack.allowAnySHA1InWant", "true"],
+                    None,
+                );
+                std::fs::write(origin.join("a.txt"), b"a\n").unwrap();
+                std::fs::write(origin.join("sub/b.txt"), b"b\n").unwrap();
+                git::commit_all(&origin, "one");
+                let clone = dir.path().join("clone");
+                let url = format!("file://{}", origin.display());
+                let mut args = vec!["clone", "-q", "--no-checkout"];
+                let filter = filter.map(|f| format!("--filter={f}"));
+                args.extend(filter.as_deref());
+                args.extend([url.as_str(), clone.to_str().unwrap()]);
+                git::run(dir.path(), &args, None);
+                Repos { _dir: dir, clone }
+            }
+
+            fn id(&self, rev: &str) -> String {
+                // The origin has every object, and asking it fetches nothing.
+                git::text(&self.clone.with_file_name("origin"), &["rev-parse", rev])
+            }
+
+            /// Whether the clone has `object`, asked so that no git fetches it.
+            fn has(&self, object: &str) -> bool {
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&self.clone)
+                    .args(["cat-file", "-e", object])
+                    .env("GIT_NO_LAZY_FETCH", "1")
+                    .env("GIT_ALLOW_PROTOCOL", NO_TRANSPORT)
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            }
+        }
+
+        #[track_caller]
+        fn assert_missing(err: &Error, object: &str) {
+            assert_eq!(err.code(), Some("E_MISSING_OBJECTS"), "{err}");
+            assert!(err.to_string().contains(object), "{object}: {err}");
+        }
+
+        /// git as it was before `GIT_NO_LAZY_FETCH` (the 2024-05 security releases), which
+        /// fetches what a partial clone lacks from its promisor remote, one object at a time.
+        #[cfg(unix)]
+        const UNPATCHED: Program<'static> = &["env", "-u", "GIT_NO_LAZY_FETCH", "git"];
+
+        // covers: D-9
+        #[cfg(unix)]
+        #[test]
+        fn a_git_that_ignores_no_lazy_fetch_fetches_no_blob() {
+            let repos = Repos::new(Some("blob:none"));
+            let (repo, blob) = (&repos.clone, repos.id("HEAD:a.txt"));
+            let oid = hex::decode(&blob).unwrap();
+            let err = hash_blobs_in(UNPATCHED, repo, &[&oid], 1).unwrap_err();
+            assert_missing(&err, &blob);
+            let err = read_blobs_in(UNPATCHED, repo, &[&oid], &mut |_, _| Ok(())).unwrap_err();
+            assert_missing(&err, &blob);
+            let err = read_blob_in(UNPATCHED, repo, &oid).unwrap_err();
+            assert_missing(&err, &blob);
+            let err = read_file_at_in(UNPATCHED, repo, "HEAD", "a.txt").unwrap_err();
+            assert_missing(&err, &blob);
+            assert!(!repos.has(&blob), "the blob was fetched");
+        }
+
+        // covers: D-9
+        #[cfg(unix)]
+        #[test]
+        fn a_git_that_ignores_no_lazy_fetch_fetches_no_tree() {
+            let repos = Repos::new(Some("tree:0"));
+            let (repo, tree) = (&repos.clone, repos.id("HEAD^{tree}"));
+            let (_, resolved) = resolve_in(UNPATCHED, repo, "HEAD").unwrap();
+            assert_eq!(resolved, tree);
+            let err = ls_tree_in(UNPATCHED, repo, &tree).err().expect("no tree");
+            assert_missing(&err, &tree);
+            assert!(!repos.has(&tree), "the tree was fetched");
+
+            let repos = Repos::new(Some("tree:1"));
+            let (repo, tree, sub) = (&repos.clone, repos.id("HEAD^{tree}"), repos.id("HEAD:sub"));
+            let err = ls_tree_in(UNPATCHED, repo, &tree)
+                .err()
+                .expect("no subtree");
+            assert_missing(&err, &sub);
+            assert!(!repos.has(&sub), "the subtree was fetched");
+        }
+
+        #[test]
+        fn an_object_of_another_type_is_not_missing() {
+            let repos = Repos::new(None);
+            let repo = &repos.clone;
+            let (tree, blob) = (repos.id("HEAD^{tree}"), repos.id("HEAD:a.txt"));
+            let err = ls_tree_in(GIT, repo, &blob)
+                .err()
+                .expect("a blob is no tree");
+            assert_eq!(err.code(), None, "{err}");
+            let err = read_blob_in(GIT, repo, &hex::decode(&tree).unwrap()).unwrap_err();
+            assert_eq!(err.code(), None, "{err}");
+            let err = read_file_at_in(GIT, repo, "HEAD", "sub").unwrap_err();
+            assert_eq!(err.code(), None, "{err}");
+            let tree = hex::decode(&tree).unwrap();
+            let err = hash_blobs_in(GIT, repo, &[&tree], 1).unwrap_err();
+            assert_eq!(err.code(), None, "{err}");
         }
     }
 }

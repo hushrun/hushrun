@@ -8,8 +8,9 @@ pub enum Error {
     Digest(#[from] hushrun_digest::Error),
 
     #[error(
-        "E_MISSING_OBJECTS: the repository lacks object {object}; it looks like a blob-less \
-         partial clone. Use a full or shallow clone instead (with actions/checkout, drop `filter:`)"
+        "E_MISSING_OBJECTS: the repository lacks object {object}; it looks like a partial clone \
+         (blob-less or tree-less). Use a full or shallow clone instead (with actions/checkout, \
+         drop `filter:`)"
     )]
     MissingObjects { object: String },
 
