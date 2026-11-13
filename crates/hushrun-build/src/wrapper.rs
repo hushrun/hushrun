@@ -177,7 +177,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         clear_bundle: false,
         keys: std::cell::RefCell::new(KeyLine::default()),
         asked: None,
-        native_unresolved: false,
+        native_cpu: false,
     }
     .run()
 }
@@ -262,9 +262,9 @@ struct Call<'a> {
     /// The first key's parts, once computed: what decides whether the block may leave the
     /// machine reads them.
     asked: Option<Asked>,
-    /// It compiles for `-C target-cpu=native` and the compiler couldn't say what that is here
-    /// (B-5): its key holds the flag's text, and the block stays on this machine.
-    native_unresolved: bool,
+    /// It compiles for this machine's CPU (`-C target-cpu=native`, B-5): the block stays on this
+    /// machine (B-24).
+    native_cpu: bool,
 }
 
 /// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
@@ -726,9 +726,11 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::TargetFile);
         }
-        // B-5: `-C target-cpu=native` means this machine's CPU. The key holds what it means
-        // here, asked of the compiler once per compiler and target; unanswered, its text, and
-        // the block stays here.
+        // B-5: `-C target-cpu=native` means this machine's CPU. Here the key holds what the
+        // compiler says it is, asked once per compiler and target (unanswered, its text), so a
+        // store carried to another machine isn't reused there. B-24: the block never leaves the
+        // machine, answered or not, since rustc gives the code generator more of the CPU than
+        // it prints.
         let native = inv.native_cpu().then(|| {
             let ports = &*self.ports;
             compiler::native_cpu(
@@ -738,7 +740,7 @@ impl Call<'_> {
                 &|target| ports.rustc_native(Path::new(inv.rustc()), target),
             )
         });
-        self.native_unresolved = matches!(native, Some(None)) || inv.native_in_llvm_args();
+        self.native_cpu = inv.native_cpu() || inv.native_in_llvm_args();
         // The bases (B-8) and what outputs are searched for besides the roots (B-10).
         let machine = Machine {
             cargo_home: self.current.cargo_home.clone(),
@@ -1331,7 +1333,7 @@ impl Call<'_> {
             variable_names_base,
             externs: &common.externs_portable,
             unkeyed: &unkeyed,
-            native_unresolved: self.native_unresolved,
+            native_cpu: self.native_cpu,
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:

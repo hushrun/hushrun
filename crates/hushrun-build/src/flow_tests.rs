@@ -4283,11 +4283,18 @@ fn native_compile(native: &Rc<RefCell<NativeStandIn>>) -> (World, Result) {
 fn target_cpu_native_is_keyed_by_what_it_means_on_the_machine() {
     let (m4, _) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
     let (m4_again, r) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
-    assert!(r.entry.unwrap().portable.unwrap().portable);
+    // Answered or not, it never leaves the machine: the printed features are not all of them.
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::NativeCpu)
+    );
     let (m1, _) = native_compile(&native_answer("apple-m1", &["neon"]));
     let (same_name, _) = native_compile(&native_answer("apple-m4", &["neon"]));
-    // Two machines with one CPU share a key; another CPU, or the same name with other
-    // features, is another key: the flag's text alone would give one.
+    // One CPU gives one local key; another CPU, or the same name with other features (a store
+    // carried to another machine), another: the flag's text alone would give one.
     assert_eq!(only_step(&m4), only_step(&m4_again));
     assert_ne!(only_step(&m4), only_step(&m1));
     assert_ne!(only_step(&m4), only_step(&same_name));

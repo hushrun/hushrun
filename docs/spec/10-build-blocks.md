@@ -87,25 +87,28 @@ searched for it (B-10). `CARGO`, `CARGO_MAKEFLAGS`, `CARGO_PRIMARY_PACKAGE`, `CA
 The repository's `build: env:` (B-35) adds its variables to the person's extra variables, for
 every compile of the repository. `-C target-cpu=native`, in any spelling (`-C`, `-C` joined,
 `--codegen`), whether written on the command line, through `RUSTFLAGS` or cargo's configuration
-(which reach rustc as arguments), means the CPU of the machine that compiles, so where it is the
+(which reach rustc as arguments), means the CPU of the machine that compiles. Where it is the
 last `-C target-cpu` of a call, for every class of block, libraries included, the first key holds
-what it means there in place of its text: the CPU rustc names for `native` (`rustc --print
-target-cpus`: "currently `apple-m4`") and the target features `rustc --print cfg -C
-target-cpu=native` lists, with the call's `--target`. The compiler is asked once per compiler
-identity and target, and the answer kept in a memo beside the compiler's (B-17), not once per
-compile. A compiler that can't be asked, or whose answer can't be read, leaves the flag keyed by
-its text, and the block is not portable (`native-cpu`, B-24). A `-C llvm-args` whose words give
-`native` as a value (`-mcpu=native`) is not resolved and makes the block not portable the same
-way. Nothing else in rustc's flags means "this machine": `-C target-feature` takes named
-features only (`+native` is an unknown feature rustc warns about and passes on); `-Z tune-cpu`
-is a `-Z` flag that passes through (B-4); and `-C link-arg=-march=native` or `-mcpu=native`
-reaches only a linked output, which is never portable (B-24). *Rests on:* rustc deciding
-`native` from the host and nothing else, and printing what it decided: the code it generates
-for `native` is the code for that CPU name with those features. *Breaks if:* rustc resolved
-`native` differently from what it prints (a feature it enables but doesn't list, or a choice
-that also depends on something it doesn't print, such as a tuning model chosen from the cache
-sizes); or the machine's CPU changed under one store (a virtual machine moved to another host)
-while the memo stays, which the memo's name, the compiler's identity, doesn't see.
+what the compiler reports for this host in place of the flag's text: the CPU rustc names for
+`native` (`rustc --print target-cpus`: "currently `apple-m4`") and the target features `rustc
+--print cfg -C target-cpu=native` lists, with the call's `--target`. The compiler is asked once
+per compiler identity and target, and the answer kept in a memo beside the compiler's (B-17),
+not once per compile. A compiler that can't be asked, or whose answer can't be read, leaves the
+flag keyed by its text. Either way the block is never portable (`native-cpu`, B-24): rustc hands
+the code generator every feature of the host CPU, more than `--print cfg` shows, so two machines
+that agree on the CPU's name and every printed feature can still compile different code, and no
+key can say what `native` meant. A `-C llvm-args` whose words give `native` as a value
+(`-mcpu=native`) is keyed by its text and not portable the same way. Nothing else in rustc's
+flags means "this machine": `-C target-feature` takes named features only (`+native` is an
+unknown feature rustc warns about and passes on); `-Z tune-cpu` is a `-Z` flag that passes
+through (B-4); and `-C link-arg=-march=native` or `-mcpu=native` reaches only a linked output,
+which is never portable (B-24). *Rests on:* a machine having one CPU, so that what the compiler
+reports for it tells one machine's `native` from another's within one store, which is all the
+key has to do once such a block can't leave the machine; it keeps a store carried to another
+machine with its disk from being reused there. *Breaks if:* the machine's CPU changed under one
+store (a virtual machine moved to another host) while the memo stays, which the memo's name, the
+compiler's identity, doesn't see; or a compile reached `native` through something else than its
+arguments (a target specification file is already passed through, B-4).
 
 **B-6 What was read.** The second key is the SHA-256 of the JCS form of the first key and:
 
@@ -554,6 +557,12 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   the same for every job of a repository and turn up by chance (`https://github.com` is in the
   doc comments of nearly half of the libraries on crates.io); a project whose build reads one
   without telling names it in `build: env:` (B-35).
+- `native-cpu`: it was compiled for this machine's CPU, `-C target-cpu=native` or `-mcpu=native`
+  in `-C llvm-args` (B-5), whether or not the compiler said what that is here. *Rests on:* rustc
+  handing the code generator every feature of the host CPU, which is more than its printed
+  words (`--print target-cpus`, `--print cfg`) show; so no key can say what `native` meant, and
+  a machine that agrees with them could still be given instructions it can't run. *Breaks if:*
+  a compile reaches the host's CPU through something other than its arguments.
 
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
