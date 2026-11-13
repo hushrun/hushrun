@@ -289,8 +289,9 @@ remote for it, with no `maven-metadata-local.xml` and a version that isn't a `-S
 good as Gradle's own cache, and fine; any other (installed or published here, a snapshot, markers
 missing or unreadable) reads the project with its coordinates where the build has one, and else
 makes its class `not observed`. The reason is one sentence for `hushrun why`: what built the jars
-(at most three named, and how many more) isn't known to hushrun; put `mavenLocal()` after the
-remote repositories, or filter it to the build's own group. The cost: a jar installed by hand, or
+(at most three named, and how many more) isn't known to hushrun; filter `mavenLocal()` to the
+build's own group, or, where a remote repository has the same coordinates, which the person
+checks, put `mavenLocal()` after it (for a jar only ever installed here, only the first helps). The cost: a jar installed by hand, or
 by another build of this machine, still keeps its classes from reuse until the build stops taking
 it from the local repository.
 

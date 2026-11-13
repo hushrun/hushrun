@@ -185,6 +185,20 @@ reactor module join it. Runs also show that `dependency:unpack-dependencies` (a 
 the module) and a plugin that only a profile turned on by a property adds (Maven's model holds it
 then) are followed already.
 
+## Amendment 7: inline and shared assembly descriptors (2026-11-12)
+
+Amendment 6 read descriptor files only. An `inlineDescriptors` descriptor went through the scan of
+the configuration, which takes only modules named by `groupId:artifactId`, so a `moduleSet` with no
+includes (only an exclude) and `useAllReactorProjects` was missed, and a test that runs what it
+assembled was reused after a module changed. The decision: an inline descriptor is read as a
+descriptor file is (named modules join; a set with no includes, or a wildcard include, makes every
+reactor module join). And with `descriptorRefs`, the descriptors in the resources of a reactor
+module the plugin depends on (the "sharing descriptors" pattern: a module that only holds
+descriptors, already in the closure as the plugin's dependency) are read the same way; one that
+can't be read makes every reactor module join. Maven's built-in descriptors (`bin`, `src`,
+`project`, `jar-with-dependencies`) take only the module's own files and its dependencies, which
+the closure holds already.
+
 ## Consequences
 
 - A Maven repository reuses test classes, and with `unit: test` single tests, on Maven 3.8 to 4.0

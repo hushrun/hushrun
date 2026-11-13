@@ -171,31 +171,73 @@ fn seconds(element: &BytesStart<'_>, name: &str) -> Option<u64> {
     (ms.is_finite() && (0.0..=1e11).contains(&ms)).then_some(ms as u64)
 }
 
-/// \[C-27\] Every `<testcase>` of a JUnit document, by its `classname` and `name`; `None` when it
-/// isn't one, or doesn't read to its end.
-pub(crate) fn junit_cases(text: &str) -> Option<std::collections::BTreeSet<(String, String)>> {
+/// How one `<testcase>` ended, as [`junit`] counts it: a failure first, then an error, then a skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Passed,
+    Failed,
+    Error,
+    Skipped,
+}
+
+/// \[C-27\] Every `<testcase>` of a JUnit document, by its `classname` and `name`, with how it
+/// ended; `None` when it isn't one, or doesn't read to its end.
+pub(crate) fn junit_outcomes(
+    text: &str,
+) -> Option<std::collections::BTreeMap<(String, String), Outcome>> {
     let mut walk = Walk::new(text, Deadline::none());
     let (root, empty) = walk.root().ok()?;
     if format_of(&root) != Some(Format::Junit) {
         return None;
     }
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = std::collections::BTreeMap::new();
+    // The case open, its depth and how it ends so far.
+    let mut open: Option<((String, String), u32, Outcome)> = None;
     if !empty {
         walk.each(|tag| {
-            if let Tag::Open(e, _, _) = tag
-                && e.local_name().as_ref() == "testcase"
-            {
-                let class = attr(e, "classname")
-                    .map(|c| c.into_owned())
-                    .unwrap_or_default();
-                let name = attr(e, "name").map(|n| n.into_owned()).unwrap_or_default();
-                out.insert((class, name));
+            match tag {
+                Tag::Open(e, depth, start) => match e.local_name().as_ref() {
+                    "testcase" if open.is_none() => {
+                        let class = attr(e, "classname")
+                            .map(|c| c.into_owned())
+                            .unwrap_or_default();
+                        let name = attr(e, "name").map(|n| n.into_owned()).unwrap_or_default();
+                        if start {
+                            open = Some(((class, name), depth, Outcome::Passed));
+                        } else {
+                            out.insert((class, name), Outcome::Passed);
+                        }
+                    }
+                    outcome @ ("failure" | "error" | "skipped") => {
+                        if let Some((_, _, ended)) = open.as_mut().filter(|o| o.1 + 1 == depth) {
+                            *ended = match (outcome, *ended) {
+                                ("failure", _) | (_, Outcome::Failed) => Outcome::Failed,
+                                ("error", _) | (_, Outcome::Error) => Outcome::Error,
+                                _ => Outcome::Skipped,
+                            };
+                        }
+                    }
+                    _ => {}
+                },
+                Tag::Close(depth) => {
+                    if open.as_ref().is_some_and(|o| o.1 == depth)
+                        && let Some((key, _, ended)) = open.take()
+                    {
+                        out.insert(key, ended);
+                    }
+                }
             }
             Ok(())
         })
         .ok()?;
     }
     Some(out)
+}
+
+/// \[C-27\] Every `<testcase>` of a JUnit document, by its `classname` and `name`; `None` when it
+/// isn't one, or doesn't read to its end.
+pub(crate) fn junit_cases(text: &str) -> Option<std::collections::BTreeSet<(String, String)>> {
+    Some(junit_outcomes(text)?.into_keys().collect())
 }
 
 /// JUnit: every `<testcase>`, at any depth, counts once, by its children `<failure>`,
