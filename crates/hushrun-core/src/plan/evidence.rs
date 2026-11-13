@@ -7,12 +7,11 @@ use crate::policy::{CheckDef, Policy};
 use crate::signers::CiOnly;
 use crate::time::Time;
 
-/// A requirement's status, the event that decided it, and every candidate, oldest first.
+/// A requirement's status, and the event that decided it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Evaluated<'a> {
     pub status: Status,
     pub event: Option<&'a VerifiedEvent>,
-    pub candidates: Vec<&'a VerifiedEvent>,
 }
 
 /// Evaluates one required check (P-1, P-4), from the signers that count (T-16). `events` are in
@@ -28,15 +27,10 @@ pub(crate) fn evaluate<'a>(
         return Evaluated {
             status: Status::Missing,
             event: None,
-            candidates: Vec::new(),
         };
     };
     let candidates = check_candidates(check, def, events, ci_only);
-    let decided = status_of(def, candidates.last().copied(), now);
-    Evaluated {
-        candidates,
-        ..decided
-    }
+    status_of(def, candidates.last().copied(), now)
 }
 
 /// P-1: the source check events that count, from the signers that count (T-16). A source check's
@@ -91,7 +85,6 @@ fn status_of<'a>(def: &CheckDef, newest: Option<&'a VerifiedEvent>, now: Time) -
         return Evaluated {
             status: Status::Missing,
             event: None,
-            candidates: Vec::new(),
         };
     };
     let (passed, measured_from) = match &event.event.check {
@@ -114,6 +107,5 @@ fn status_of<'a>(def: &CheckDef, newest: Option<&'a VerifiedEvent>, now: Time) -
     Evaluated {
         status,
         event: Some(event),
-        candidates: Vec::new(),
     }
 }
