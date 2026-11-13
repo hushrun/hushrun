@@ -232,6 +232,23 @@ whose class is a test file of the module (`@SuiteClasses`) stays that file's. A 
 for which neither says a class still makes the run's passes hold only when COMMAND passed, and the
 adapter says so (`notKept`, for `hushrun why`; ADR 0077's Amendment 16 has the run say it once).
 
+## Amendment 10: what a file is doesn't depend on the executions a run reached (2026-11-13)
+
+A rerun on gson showed a run whose build stopped at Surefire (a test failed in the `gson` module)
+file `OSGiManifestIT.java`, which only Failsafe runs and which that run never reached, as a source
+instead of a test class (sources 122 → 123). The sources are in every key, so the next run at the
+tree that had passed said "all 137 test classes run: none had passed here yet", and `hushrun why`
+gave reasons that weren't so. Amendment 8 covered a module the build didn't reach, not an execution
+it didn't reach in a module that ran. The decision, one rule for which files are test classes, in
+one function every run's sets come from: a file is a test class when the module's test plugins
+declare it (a file of a JVM kind below the module's test source roots whose class, its path there
+without its kind, an include of Surefire's or Failsafe's matches, the POM's or else the plugin's
+defaults, and no exclude does), when it ran in this run, or when an earlier run here learned it was
+one and it is still there. The last stands for what hushrun can't read (an includes file,
+`%regex[…]`, a property) and for a module the build didn't reach. A file is a source only when
+none of these says otherwise, so a run that stops before an execution, or reaches it, files every
+file the same. Nothing of a class is kept from a run that didn't run it: it records no result.
+
 ## Measured on real projects (2026-11-13)
 
 Runs on apache/commons-cli and google/gson (Surefire 3.6.1), with junit-pioneer and kotlinpoet

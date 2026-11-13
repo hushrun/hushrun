@@ -2304,3 +2304,79 @@ fn a_suite_classs_cases_no_test_file_owns_are_its_own_and_it_is_never_counted_as
         "{map:#}"
     );
 }
+
+const PRICE_IT: &str = "lib/src/test/java/shop/lib/PriceIT.java";
+
+// covers: C-30, C-47
+#[test]
+fn a_test_class_of_an_execution_a_run_didnt_reach_stays_a_test_class() {
+    let Some(maven) = maven() else { return };
+    // lib's integration test, which Failsafe runs after Surefire's tests passed.
+    let mut files = shop("{mode: reuse, ignore: ['notes/**']}");
+    for (path, text) in files.iter_mut() {
+        if path == "lib/pom.xml" {
+            *text = text.replace(
+                "<dependencies></dependencies>",
+                "<dependencies></dependencies>\n  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId><version>3.5.4</version><executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions></plugin></plugins></build>",
+            );
+        }
+    }
+    files.push(file(
+        PRICE_IT,
+        "package shop.lib;\n\nimport org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass PriceIT {\n  @Test void doubles() { assertEquals(8, Price.of(4)); }\n}\n",
+    ));
+    files.push(file("notes/n.txt", "0\n"));
+    let r = Repo::new(&files, maven);
+    let why = |unit: &str| -> String {
+        let out = r
+            .hushrun()
+            .args(["why", "unit", unit])
+            .output()
+            .expect("hushrun");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let first = r.run(&[], &["verify"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stderr, first.stdout);
+    assert!(
+        first.ran().contains_key("shop.lib.PriceIT"),
+        "{:?}",
+        first.ran()
+    );
+
+    // lib changes and its PriceTest fails: Surefire stops the build, and Failsafe never runs
+    // PriceIT. It is a test class all the same, and keeps the pass it had.
+    let price_test = files
+        .iter()
+        .find(|(path, _)| path == PRICE_TEST)
+        .map(|(_, text)| text.clone())
+        .unwrap();
+    r.write(PRICE_TEST, &format!("{price_test}// changed\n"));
+    let failed = r.run(&[], &["verify"], &[(FAIL, "1")]);
+    assert_eq!(failed.code, 1, "{}\n{}", failed.stderr, failed.stdout);
+    assert!(
+        !failed.ran().contains_key("shop.lib.PriceIT"),
+        "{:?}",
+        failed.ran()
+    );
+    let map = r.map();
+    let sources: Vec<&str> = map["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(!sources.contains(&PRICE_IT), "{map:#}");
+    // Back at the files that passed, before the run: what passed on them would be reused.
+    r.write(PRICE_TEST, &price_test);
+    r.write("notes/n.txt", "2\n");
+    for unit in [PRICE_IT, ROUND_TEST, CART_TEST] {
+        let said = why(unit);
+        assert!(said.contains("would be reused"), "{unit}: {said}");
+    }
+
+    let back = r.run(&[], &["verify"], &[]);
+    assert_eq!(back.code, 0, "{}\n{}", back.stderr, back.stdout);
+    let line = back.line("hushrun: unit: ");
+    assert!(!line.contains("none had passed"), "{line}");
+    at_most_the_audit(&back.ran(), &[]);
+}

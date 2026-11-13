@@ -555,13 +555,126 @@ pub struct Observed {
     /// of which this run saw a class: the build reached them.
     pub modules: BTreeSet<String>,
     pub reached: BTreeSet<String>,
+    /// \[C-47\] The test classes the modules' test plugins declare, by their files ([`declared`]),
+    /// whether or not this run reached the executions that run them.
+    pub declared: BTreeSet<String>,
+}
+
+/// The includes Surefire and Failsafe take when a POM names none.
+const DEFAULT_INCLUDES: &[(&str, &[&str])] = &[
+    (
+        "surefire",
+        &[
+            "**/Test*.java",
+            "**/*Test.java",
+            "**/*Tests.java",
+            "**/*TestCase.java",
+        ],
+    ),
+    (
+        "failsafe",
+        &["**/IT*.java", "**/*IT.java", "**/*ITCase.java"],
+    ),
+];
+
+/// One include or exclude of Surefire's or Failsafe's as a pattern of a class's path below its
+/// test source root without its kind (`**/*Test`, matched by `pkg/FooTest.kt` as by its class
+/// file): `None` for one hushrun doesn't read (`%regex[…]`, a property, a method after `#`).
+fn class_pattern(value: &str) -> Option<hushrun_core::glob::Pattern> {
+    let value = value.trim();
+    if value.is_empty() || value.contains("%regex") || value.contains("${") || value.contains('#') {
+        return None;
+    }
+    let stem = [".java", ".class"]
+        .iter()
+        .find_map(|kind| value.strip_suffix(kind))
+        .unwrap_or(value);
+    // A class name with its package, `pkg.FooTest`, and a name with no directory, `*Test`, match
+    // in any package.
+    let stem = if stem.contains('/') {
+        stem.trim_start_matches('/').to_string()
+    } else {
+        format!("**/{}", stem.replace('.', "/"))
+    };
+    hushrun_core::glob::Pattern::new(&stem).ok()
+}
+
+/// \[C-47\] The one rule for which files of a module are test classes, whatever executions a run
+/// reached: each file of a JVM kind below its test source roots whose class an include of its
+/// Surefire's or Failsafe's matches (the POM's, else the plugin's defaults) and no exclude does.
+/// A plugin whose includes or excludes hushrun can't read (an includes file, `%regex[…]`, a
+/// property) declares nothing: what earlier runs learned of its classes stands for it.
+fn declared(module: &Module, tree: &Tree) -> BTreeSet<String> {
+    let Some(project) = &module.project else {
+        return BTreeSet::new();
+    };
+    let mut out = BTreeSet::new();
+    for (kind, defaults) in DEFAULT_INCLUDES {
+        let Some(plugin) = project.plugins.get(*kind) else {
+            continue;
+        };
+        if ["includesFile", "excludesFile"]
+            .iter()
+            .any(|name| plugin.configured.contains_key(*name))
+        {
+            continue;
+        }
+        let read = |name: &str, otherwise: &[&str]| -> Option<Vec<hushrun_core::glob::Pattern>> {
+            match plugin.configured.get(name) {
+                Some(values) => values
+                    .split(',')
+                    .filter(|v| !v.trim().is_empty())
+                    .map(class_pattern)
+                    .collect(),
+                None => otherwise.iter().map(|v| class_pattern(v)).collect(),
+            }
+        };
+        let (Some(includes), Some(excludes)) = (read("includes", defaults), read("excludes", &[]))
+        else {
+            continue;
+        };
+        for root in &module.test_roots {
+            for path in tree.paths().filter(|p| of_kind(p) && below(p, root)) {
+                let inside = if root == "." {
+                    path
+                } else {
+                    &path[root.len() + 1..]
+                };
+                let class = SOURCE_KINDS
+                    .iter()
+                    .find_map(|kind| inside.strip_suffix(kind))
+                    .unwrap_or(inside);
+                if includes.iter().any(|p| p.is_match(class))
+                    && !excludes.iter().any(|p| p.is_match(class))
+                {
+                    out.insert(path.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// \[C-47\] The test classes' files of a run, by one rule that no execution a run happened to
+/// reach or not changes: those its test plugins declare ([`declared`]), those that ran, and those
+/// earlier runs learned (`map`) that are still there, which stand for a module the build didn't
+/// reach and for an include hushrun can't read. A file is a source only when none of these says
+/// it is a test class.
+fn test_files(map: &super::store::Map, observed: &Observed, tree: &Tree) -> BTreeSet<String> {
+    observed
+        .unit_files
+        .iter()
+        .chain(&observed.declared)
+        .chain(map.unit_files.iter().filter(|f| tree.contains(f)))
+        .cloned()
+        .collect()
 }
 
 /// \[C-47\] What the last run that reached a module learned, for the modules this run's build
-/// didn't reach (it stopped at a failure before them, or COMMAND didn't select them): the test
-/// files `map` lists below them, and the directories its units of them read. A file of theirs is
-/// then where the plan from files puts it, never the rest, and no file there is gone that isn't.
-fn unreached(map: &super::store::Map, observed: &Observed) -> (BTreeSet<String>, BTreeSet<String>) {
+/// didn't reach (it stopped at a failure before them, or COMMAND didn't select them): the
+/// directories its units of them read, so that a file of theirs is where the plan from files puts
+/// it, never the rest. Their test files stand by [`test_files`].
+fn unreached(map: &super::store::Map, observed: &Observed) -> BTreeSet<String> {
     let module_of = |path: &str| -> Option<String> {
         if let Some((dir, _)) = path.split_once("::") {
             return Some(dir.to_string());
@@ -574,19 +687,11 @@ fn unreached(map: &super::store::Map, observed: &Observed) -> (BTreeSet<String>,
             .cloned()
     };
     let kept = |path: &str| !module_of(path).is_some_and(|dir| observed.reached.contains(&dir));
-    let files = map
-        .unit_files
-        .iter()
-        .filter(|path| kept(path))
-        .cloned()
-        .collect();
-    let dirs = map
-        .units
+    map.units
         .iter()
         .filter(|(unit, _)| !observed.seen.contains_key(*unit) && kept(unit))
         .flat_map(|(_, mapped)| mapped.dirs.iter().cloned())
-        .collect();
-    (files, dirs)
+        .collect()
 }
 
 /// Reads what the extension, the hook and the reports say of a run in the repository at `root`
@@ -712,6 +817,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         }),
         modules: modules.keys().cloned().collect(),
         reached: seen.keys().map(|(dir, _)| dir.clone()).collect(),
+        declared: modules.values().flat_map(|m| declared(m, tree)).collect(),
         ..Observed::default()
     };
     // \[C-32\] Something of this run failed: a failure no class owns, or any class's.
@@ -1099,10 +1205,8 @@ impl Adapter for Recognized {
         let Some(mut observed) = observe(at.files, at.root, at.tree)? else {
             return Ok(None);
         };
-        let (files, mut dirs) = unreached(at.map, &observed);
-        observed
-            .unit_files
-            .extend(files.into_iter().filter(|f| at.tree.contains(f)));
+        let mut dirs = unreached(at.map, &observed);
+        observed.unit_files = test_files(at.map, &observed, at.tree);
         dirs.extend(observed.dirs.values().flatten().cloned());
         let sets = classify(at.tree, &observed.unit_files, &dirs, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);

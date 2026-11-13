@@ -293,6 +293,10 @@ Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check ask
 - Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
   at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
   names) is now read by that module's tests.
+- Maven: a test class that only an execution the run didn't reach would run (Failsafe's, after
+  Surefire failed) is no longer filed as a source, which made the next run at a tree that had
+  passed reuse nothing: which files are test classes is one rule, by the test plugins' includes and
+  what earlier runs learned, whatever a run reached.
 - Maven: after a build that failed and stopped the reactor, the next run no longer says a file of
   a module the build didn't reach "is gone" and runs every test class: such a module keeps what
   the last run that reached it learned.
