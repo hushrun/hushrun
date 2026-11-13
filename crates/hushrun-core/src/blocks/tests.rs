@@ -521,7 +521,7 @@ fn close_and_report() {
     );
 }
 
-// covers: the one definition of a block's digest of outputs: JCS of the files sorted by name
+// covers: B-28. The one definition of a block's digest of outputs: JCS of the files sorted by name
 #[test]
 fn the_digest_of_outputs() {
     let a = OutputFile {
@@ -564,6 +564,7 @@ fn commits() {
     assert!(!is_commit(""));
 }
 
+// covers: B-27
 #[test]
 fn an_address_is_the_kind_and_the_key_under_its_schema() {
     let key = [7u8; 32];

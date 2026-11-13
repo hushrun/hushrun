@@ -78,6 +78,7 @@ const SMALL: &[(&str, &[u8])] = &[
     ("libserde-1.rmeta", b"rust metadata"),
 ];
 
+// covers: B-28
 #[test]
 fn a_block_opens_to_its_files_and_its_record_with_what_differs_per_machine_left_out() {
     let (record, packed) = pack(&KEY, SMALL);
@@ -105,6 +106,7 @@ fn a_block_opens_to_its_files_and_its_record_with_what_differs_per_machine_left_
     assert_eq!(got, want);
 }
 
+// covers: B-27, B-28
 #[test]
 fn the_same_block_packs_to_the_same_bytes_every_time_and_wherever_it_was_built() {
     let (record, first) = pack(&KEY, SMALL);
@@ -119,6 +121,7 @@ fn the_same_block_packs_to_the_same_bytes_every_time_and_wherever_it_was_built()
     assert_eq!(pack_in_memory(&KEY, &elsewhere, &bytes).unwrap(), first);
 }
 
+// covers: B-27
 #[test]
 fn two_contents_under_one_key_never_share_a_salt() {
     let (_, a) = pack(&KEY, SMALL);
@@ -129,6 +132,7 @@ fn two_contents_under_one_key_never_share_a_salt() {
     assert_ne!(a[7..39], c[7..39]);
 }
 
+// covers: B-27, B-28
 #[test]
 fn one_flipped_bit_anywhere_fails_closed() {
     let (record, packed) = pack(&KEY, SMALL);
@@ -154,6 +158,7 @@ fn one_flipped_bit_anywhere_fails_closed() {
     }
 }
 
+// covers: B-27, B-28
 #[test]
 fn a_pack_cut_short_at_any_length_fails() {
     let (record, packed) = pack(&KEY, SMALL);
@@ -174,6 +179,7 @@ fn a_pack_cut_short_at_any_length_fails() {
     }
 }
 
+// covers: B-28
 #[test]
 fn data_after_the_last_chunk_fails() {
     let (record, packed) = pack(&KEY, SMALL);
@@ -193,6 +199,7 @@ fn data_after_the_last_chunk_fails() {
     }
 }
 
+// covers: B-27, B-28
 #[test]
 fn a_pack_opens_only_with_its_key_its_first_key_and_its_outputs() {
     let (record, packed) = pack(&KEY, SMALL);
@@ -255,6 +262,7 @@ fn a_pack_opens_only_with_its_key_its_first_key_and_its_outputs() {
     ));
 }
 
+// covers: B-28, B-29
 #[test]
 fn a_file_that_changed_under_the_writer_is_refused() {
     let record = record_of(&KEY, SMALL);
@@ -276,6 +284,7 @@ fn a_file_that_changed_under_the_writer_is_refused() {
     ));
 }
 
+// covers: B-28
 #[test]
 fn a_record_naming_a_file_outside_the_block_is_neither_written_nor_read() {
     for name in ["", "/etc/passwd", "a/../b", "a//b", "./a", "a\\b", "a\0b"] {
@@ -293,6 +302,7 @@ fn a_record_naming_a_file_outside_the_block_is_neither_written_nor_read() {
     assert!(pack_in_memory(&KEY, &nested, &[b"x", b"y"]).is_ok());
 }
 
+// covers: B-28
 #[test]
 fn a_block_of_several_chunks_round_trips() {
     // Bytes that don't compress, so the stream spans three chunks.
@@ -325,6 +335,7 @@ fn a_block_of_several_chunks_round_trips() {
     ));
 }
 
+// covers: B-28
 #[test]
 fn a_pack_past_the_largest_is_not_written() {
     let mut out = Vec::new();
@@ -340,6 +351,7 @@ fn a_pack_past_the_largest_is_not_written() {
     assert!(matches!(err, Err(PackError::TooLarge)));
 }
 
+// covers: B-27
 #[test]
 fn a_hint_opens_only_with_its_first_key() {
     let hint = br#"{"files":["a","b"]}"#;
@@ -368,6 +380,7 @@ fn a_hint_opens_only_with_its_first_key() {
     assert!(matches!(seal_hint(&KEY, &noise), Err(PackError::TooLarge)));
 }
 
+// covers: B-28
 #[test]
 fn what_a_reader_reports_as_unreadable() {
     assert!(PackError::Seal("x").unreadable());

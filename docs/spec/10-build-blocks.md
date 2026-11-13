@@ -5,7 +5,9 @@
 > hushrun skips a check that already passed (§7.6). Build blocks are a finer level under a check
 > that runs: a crate the compiler already built from the same inputs is not compiled again, in
 > this worktree or in another one on the same machine. Nothing here changes what a check's result
-> is, and nothing leaves the machine.
+> is. Nothing leaves the machine unless the org shares build blocks through its backend and the
+> person lets this machine take part (B-25 to B-35): then a portable block (B-24) goes up sealed
+> with its own key, and another machine reuses it only after the same checks as a block of its own.
 
 A **block** is what one compiler call produced: one crate built one way. The **store** holds
 blocks for every repository on the machine. A **root** is a folder a compile's paths start from:
@@ -330,9 +332,11 @@ written longer ago than `keep_days` (one of an older form is never read again; o
 computed again) and each toolchain's view without sources (B-17) whose marker no run dated for
 as long, by renaming it into `trash/`; a run dates the marker of each view it uses once. A
 view without its marker, and what a maker of one left (a temporary or moved-aside folder, a
-lock), go once they are more than a day old. The stamp of the sweep is written before anything
-is deleted. There is no limit on the
-store's size.
+lock), go once they are more than a day old. It also puts back the outbox's claims of dead runs
+(B-29), removes the folders of dead runs (`incoming/<run>/`, `outbox/tmp/<run>/`,
+`relays/<run>/`, B-26), drops a marker whose block is gone or that is older than `keep_days`,
+and deletes a suspension with an end once its end has passed (B-15). The stamp of the sweep is
+written before anything is deleted. There is no limit on the store's size.
 
 **B-15 Suspension.** A first key is `ok` or `suspended`. It is suspended when an audit disagrees
 (B-16) or when a dependent fails to load a reused block (rustc's errors E0460, E0461, E0462,
@@ -434,12 +438,16 @@ stored on a first build and lets a later checkout reuse it; a tied one is compil
 reused only in the target folder that built it. Any other value makes the file invalid. The
 session carries what the file said when `hushrun run` began, so every compile of a run sees one
 value. `hushrun build status` shows the mode, the store's folder, how long blocks are kept,
-`programs`, the store's size and its blocks by age and by repository. `hushrun build clean`
-empties the store.
+`programs`, the share setting and what sharing does here and why (B-33), the store's size and
+its blocks by age and by repository. `hushrun build clean` empties the store. `share` (B-33) is
+`on` (unless set), `observe` or `off`; `hushrun build share on|observe|off` saves it, and
+`HUSHRUN_BUILD_SHARE` sets it for one command.
 
 **B-22 Free space.** Nothing is stored while the store's volume has less than `min_free_gb` free
 (10 unless set; 0 turns the rule off). The outcome is `built, not stored`, and the run's line
-says so once.
+says so once. The same floor holds for what sharing writes: no download starts while free space,
+less the pack and four times its size for what it unpacks to, would fall below it (B-30), and no
+block is packed for upload below it (B-29).
 
 **B-23 What cargo can't see.** Cargo decides whether to call rustc by dates and by the files
 rustc listed last time, so some changes never reach the wrapper: a file added to a folder a macro
@@ -567,3 +575,197 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
 block is not portable only because it is `linked` is still named alike on two machines (B-6).
+
+## Sharing through a backend
+
+A backend may keep a **shared store** of build blocks for an org, behind every machine's own
+store. The backend never sees a key, a path or a crate name: it sees a block's **address**, its
+**kind** (`rustc/1`), sealed bytes it can't open, and the scope a caller's credential puts it in.
+The protocol is the backend's (`hushrun_core::blocks` holds its types); these rules are the
+machine's side.
+
+**B-25 Where a run's blocks may go.** A run's blocks stay on the machine (`local`), go nowhere
+(`off`), or are also shared (`shared`). One function decides it, from who runs (a person, a CI
+job, an agent token), B-1's mode, the person's share setting (B-33) and what the org said; every
+caller asks it again from the same facts and nobody stores the answer:
+
+| Who | Local reuse | Sharing |
+|---|---|---|
+| A person, local mode `off` | off | off |
+| A person signed in, the org shares, own setting not `off` | the local mode | the lowest of the org's mode, the own setting and the local mode |
+| A person otherwise | the local mode | off |
+| CI with an ID token, the org shares | on, in the job's own store | the org's mode |
+| CI otherwise | off | off |
+| An agent token, the org shares | the machine's local mode, or on in a sandbox | the org's mode, lowered on a person's machine as for the person |
+| An agent token otherwise | the machine's local mode, or off in a sandbox | off |
+
+"The org shares" is read from the run's results lookup, whose answer carries `Hushrun-Build:
+on`; only then is `open` asked, so an org that doesn't share pays no request. In this version a
+CI job still passes through (B-2), and only `hushrun run NAME -- COMMAND` shares. *Rests on:*
+the backend's header and `open` saying what the org decided, and the machine's settings being
+its own. A run never shares more than its local mode allows: with local `observe`, sharing
+observes too.
+
+**B-26 The relay, and its deadlines.** The part of the `hushrun run` process that talks to the
+shared store for the wrappers is the **relay**, one per process; it sends `open` and `close`
+once for each check, since a manifest belongs to a check. The wrappers reach it over a Unix
+socket whose path the session names, one request per connection, one line of JSON each way; the
+wrapper has no network code. The socket lives in the session's folder, made mode 0700; when that
+path is longer than 100 bytes (macOS refuses one over 103), in a new folder of a random name,
+mode 0700, under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`. Before binding, the folder MUST
+be a real folder, not a link, owned by this user, with mode 0700; before sending a key, a
+wrapper MUST find the socket owned by its own user. A check that fails turns sharing off for the
+run with one line. A wrapper waits at most 30 seconds; no socket, no answer, an answer it can't
+read and a late answer are a miss, and the compile goes on as without a shared store (B-19).
+
+Cargo never waits for the network on a person's machine: `open` is sent as the run starts, gets
+10 seconds and one retry, and until it answers every request is a miss. A fetch a wrapper waits
+on has a **cost**: the smallest of what its compile cost on the machine that built it (scaled by
+this machine's speed against the uploaders', learned from this run's own compiles whose cost the
+server also knew, and taken as equal until it has three), what this machine's own last compile of
+the same first key took, and 60 seconds. The **rate** is the link's throughput over all
+downloads together, partial and abandoned ones included; with no rate yet, the first fetch a
+wrapper asks for runs to its end as the measurement, its wrapper waiting no longer than half the
+cost, and every other request is a miss until a rate exists. A fetch is started only when its
+expected finish (the bytes still to come ahead of it and its own, over the rate, and a round
+trip) is under half the cost; it goes to the front of the queue, and it is given up as soon as
+its projected finish passes half the cost. A give-up and a failed download count as failures;
+three in a row answer every waiting wrapper at once and every new one for 30 seconds. A 401, 403
+or 404 in the middle of a run stops every request for the rest of the run, keeps the markers
+(B-29) and says one line; a server that can't be reached says one line too. Every failure ends
+in rustc running as asked. *Rests on:* a wrapper being worth at most half its compile in waiting,
+so that the worst a wrong guess adds to one crate is half its compile time; and the socket being
+no boundary inside one OS user, whose processes can read the machine's key anyway.
+
+**B-27 Addresses and sealing.** A block's **address** is SHA-256 of `hushrun.block-address/v1`,
+a newline, the kind, a newline and the key's 32 bytes; a first key's address is the same of the
+first key. A block is sealed with a secret from its own key: HKDF-SHA-256 of the key with a salt
+and `hushrun.block-pack/v1`, the salt being HMAC-SHA-256, keyed with the key, of
+`hushrun.block-pack-salt/v1` and a newline followed by the SHA-256 of exactly the bytes handed to
+the cipher (the compressed stream). ChaCha20-Poly1305 seals it in chunks of 1 MiB, each chunk's
+nonce a counter and a last-chunk flag, the pack's header bound to every chunk as associated
+data. A hint is sealed the same way with its first key, under `hushrun.block-hint/v1`. *Rests
+on:* whoever can open a block being whoever can compute its key, which takes the same sources,
+flags and compiler; the salt coming from the bytes, so that the same block packs to the same
+pack wherever it is packed and a retry is the same request, and two contents under one key never
+share a secret and a counter. It doesn't cover an input the compiler isn't told about, whose
+value is in the bytes and not in the key (B-24 `unkeyed-value`, B-35); for a registry crate
+anyone can compute the key.
+
+**B-28 The pack.** One block is one object, `hushrun.block-pack/v1`: `HRBP`, the version 1, the
+codec 1 (zstd), the cipher 1 and the 32-byte salt; then chunks, each a 4-byte big-endian length
+and its ciphertext with its tag. Inside is a zstd stream, made on one thread at level 3, of a
+4-byte length, the block's record as canonical JSON, and each file's bytes in the record's order.
+The record names the key, the first key, the description and each file's name, size and
+SHA-256; it leaves out the repository, the date built and the compile time, which the reader
+fills in for its own machine when it publishes. A pack is packed in two passes, held in memory
+under 64 MiB and in a file of the run's `outbox/tmp/<run>/` above. The packer checks each file's
+size and SHA-256 against the store's record while it reads. The reader checks, in this order, the
+pack's size and SHA-256 against the server's row, the cipher's tags (a pack cut short, with no
+last chunk, with data after it, or with a chunk over 1 MiB fails), each file's size and SHA-256
+against the record, that the record names the key and the first key it was asked for, and that
+the **digest of outputs** (SHA-256 of the canonical JSON of the files sorted by name, each its
+name, size and SHA-256, and nothing else) is the row's. A pack that fails any check is dropped
+and reported `unreadable`. A pack over 2 GiB is not shared. *Rests on:* the digest of outputs
+being computed again from what was unpacked, so that no comparison rests on the uploader's word;
+zstd giving the same stream for one version of it, so two versions of hushrun may give two packs
+of one block, which costs a wait and nothing else.
+
+**B-29 Uploads and the outbox.** A block gets a marker in the store's `outbox/` only when it was
+built in this run, it is portable (B-24), the policy `open` returned says the caller writes,
+sharing is `observe` or `on`, and the store's record says this run's host, org and credential
+built it (B-32). A marker an earlier run left goes up only from a run with the same host, org and
+credential. A downloaded block, and one with no record, never goes up. An upload's state is where
+its marker is: `outbox/<key>.json` (waiting), `outbox/claimed/<run>/<key>.json` (claimed, and
+sent once its PUT succeeded, known to the relay that holds the claim), no marker (done). Every
+move is a file written whole or a rename:
+
+| From | To | When |
+|---|---|---|
+| none | waiting | the relay accepts a block (above) |
+| waiting | claimed | a relay takes it: a rename, which only one wins |
+| claimed | waiting | the run that claimed it is dead: at any relay's start and in B-14's sweep |
+| claimed | sent | packed, `begin` answered `put`, and the PUT succeeded or found the object there |
+| sent | done | `commit` answered `stored` |
+| claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope` or `suspended`; the block is gone, or no longer matches its record |
+| claimed, sent | done, the local block discarded | `begin` or `commit` answered `differs` |
+| claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing` or `gone`, any word this version doesn't know |
+| claimed, sent | waiting, one more cut-off | the command ended while its PUT was in flight |
+| waiting | done | three cut-offs |
+| any | done | the block is gone, or the marker is older than `keep_days` (B-14) |
+
+`begin` is sent a few blocks at a time, just before their PUTs, signed by the machine; PUTs run 4
+at a time, 2 while downloads are in flight; a stored block's newest hints go up with it, sealed
+with its first key. When the command ends on a person's machine, no new PUT starts and those in
+flight get 5 seconds; the rest waits for the next run, and the run says how many wait.
+*Rests on:* the record of where a block came from (B-32), which keeps a block from going up under
+another name or into another org, and undoing a withdrawal; and packs being the same bytes on
+every try (B-27), so a retry after a crash finds its upload under way.
+
+**B-30 Prefetch.** `close` sends the run's **manifest**: the ordered pairs of first-key address
+and block address of every compile, reused, downloaded or built. `open` returns the newest one
+for the repository, the check and the platform. The relay drops every pair whose block or first
+key the store holds, asks for the rest's hints in one request and looks up the rest's blocks in
+one, and downloads the libraries, 8 at a time and in order, before cargo asks; programs are
+fetched only when asked for. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
+key that opens it, and is deleted once opened and published, or when the run ends. A hint is
+written where downloaded hints live, apart from the hints compiles here wrote: those are tried
+first, and a downloaded hint naming more bytes than twice what this machine's own hints of the
+first key name (64 MiB when it has none) is not followed. *Rests on:* a manifest being only
+addresses, so a wrong one wastes downloads and can't cause a wrong reuse; and a warm machine
+holding what its manifest names, so it downloads nothing.
+
+The number B-31 is kept for the store in CI, written with sharing in CI.
+
+**B-32 Where a block came from.** Beside each block the store keeps a record, `origin.json`,
+written before the block is published and rewritten whole under the block's lock when it
+changes: **built here** (the run, and with a backend its host, the org and a fingerprint of the
+credential, never the secret); **vouched for** (one entry per host, org and repository whose
+server said it serves the block to this machine, with the scope, the digest of outputs and the
+server's date); and whether it has been reused here yet. A download makes the first entry. A
+block with no record, as every block from before this rule, is reused here as before and never
+goes up. The relay publishes a download only to answer a wrapper still waiting for it, through
+the store's own publish (first writer wins), never in shared `observe`. A block that was only
+downloaded may give way to this run's download or compile; a block built here never does. A
+compile whose own publish finds a block there compares outputs: a block built here is a second
+opinion for a library, and a difference is treated as B-16 treats one; a block only downloaded
+is replaced where the two differ, and the difference reported. Either way it is from then on also
+built here. *Rests on:* one store serving every org, credential and agent of one OS user, so that
+only the record tells a block one run may send from one it may not.
+
+**B-33 The shared mode, apart from the local one.** B-1's mode is reuse on this machine. Sharing
+has its own mode, `observe` or `on`, the org's, set by its admin and returned by `open`; a person
+may lower it for the machine (`hushrun build share on|observe|off`, `HUSHRUN_BUILD_SHARE` for
+one command) and never raise it. In shared `observe` a machine keeps all its local reuse, uploads
+what it builds, never waits for or publishes a download, and compares: after a compile stores a
+library, the relay downloads the shared store's copy in the background, opens it, and compares
+its files with the local block's. A difference suspends the first key here for `keep_days` and is
+reported `differs` to the scope the copy came from. `close` counts the comparisons, those of
+blocks another machine wrote, and those that differed; comparisons not finished when the command
+ends are dropped. In `on` a download is reused. *Rests on:* one week of observing being free of
+cost to local reuse, and a comparison being of another machine's bytes, which only `close`'s
+counts can show.
+
+**B-34 A downloaded block is reused only while a server the run belongs to vouches for it.** A
+block built here is reused as any. A block only downloaded is reused without asking while its
+entry for this run's host, org and repository is under 24 hours old; otherwise the wrapper asks
+the relay, which asks the server without fetching. "Served, with these outputs" renews the entry
+and the block is reused; anything else is a miss, and the compile's block takes its place. When
+no server could be reached in the run, an entry of any age counts; a run with no relay asks
+nothing and reuses it. On a person's machine a downloaded library's first reuse is audited one
+time in ten, which the record notes, then one in fifty as any (B-16). A difference found by an
+audit or a comparison of a downloaded block, and a dependent that can't load one (B-15), suspend
+its first key for `keep_days`, not until `hushrun build clean`, and are reported to the scope the
+record names: `differs`, `rejected`, or `unreadable` for a pack that failed its checks. *Rests
+on:* the server answering a lookup only for blocks it still serves to this caller, so that a
+withdrawn block stops being reused on laptops within a day without a list of withdrawals; and a
+lookup without fetching counting as a use, so blocks in daily use don't expire.
+
+**B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
+`build: env:` list; every compile of that repository is keyed by their values (B-5), on every
+machine and in both forms of `hushrun run`, and the list is part of no check's definition and no
+run's key. It is for a build that reads a variable without telling the compiler (a proc macro
+calling `std::env::var`), whose value would otherwise be in a block's bytes and not in its key.
+*Rests on:* the project knowing which variables its build reads; a variable it reads without
+naming keeps the block on this machine only when it looks like a secret (B-24), and is otherwise
+caught only by the audit (B-16).
