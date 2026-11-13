@@ -1863,13 +1863,19 @@ fn start(
         .args(&added)
         .env_remove(super::runner::UNITS_VAR);
     let at = SystemTime::now();
-    let copied = program::run_copying_stdout(command)?;
+    let copied = program::run_copying_stdout(command, test_case_line)?;
     Ok(Started {
         copied,
         events,
         xunit,
         at,
     })
+}
+
+/// \[C-48\] A line of the console hushrun reads: XCTest's `Test Case '…'` (what [`read_console`]
+/// reads), kept as it goes by, so that a test printing much besides is still read.
+fn test_case_line(line: &[u8]) -> bool {
+    line.windows(11).any(|w| w == b"Test Case '")
 }
 
 /// `swift test list --skip-build` with COMMAND's options, after the run.
@@ -2022,6 +2028,14 @@ fn facts_of(
         .as_ref()
         .and_then(|f| f.read(run.at))
         .map(|bytes| read_xunit(&bytes, listing));
+    // \[C-48\] Past what hushrun keeps of its output, what it printed can't be read whole.
+    let cut = run.copied.cut.then(|| {
+        format!(
+            "swift test printed {:.1} MiB of `Test Case` lines, more than the {} MiB hushrun reads: none of its tests is recorded",
+            run.copied.wanted as f64 / f64::from(1 << 20),
+            program::KEEP_MOST >> 20
+        )
+    });
     let mut file = tested(
         listing,
         &console,
@@ -2031,17 +2045,18 @@ fn facts_of(
         parsed,
         run.copied.exit,
         package,
-        run.copied.held || run.copied.cut,
+        run.copied.held,
+        cut.as_deref(),
     );
-    // \[C-48\] Past what hushrun keeps of its output, what it printed can't be read whole.
-    if run.copied.cut {
-        file.settings.insert(
-            "cut".to_string(),
-            Value::String(format!(
-                "swift test printed more than the {} MiB hushrun reads: no pass of it is recorded",
-                program::KEEP_MOST >> 20
-            )),
-        );
+    if let Some(why) = cut {
+        file.settings.insert("cut".to_string(), Value::String(why));
+    }
+    // \[C-37\] Said once by the run: why no test of it is recorded.
+    if let Some(why) = ["cut", "held"]
+        .iter()
+        .find_map(|key| file.settings.get(*key).cloned())
+    {
+        file.settings.insert("note".to_string(), why);
     }
     file
 }
@@ -2058,7 +2073,14 @@ fn tested(
     exit: Option<i32>,
     package: &Path,
     held: bool,
+    cut: Option<&str>,
 ) -> FactsFile {
+    let held_why = format!(
+        "a program swift test started still held its output {} ms after it ended: what it printed can't be read whole, and no pass of it is recorded; what it printed later was passed on",
+        program::QUIET.as_millis()
+    );
+    // Why a pass seen wasn't kept.
+    let unread = cut.or(held.then_some(held_why.as_str()));
     // On macOS, with any `--skip` or `--filter`, a nested XCTest class doesn't run, and the
     // parallel xunit says it passed: nothing of it counts.
     let trap = cfg!(target_os = "macos") && (parsed.chooses || !left.patterns.is_empty());
@@ -2096,9 +2118,20 @@ fn tested(
             }
             None => (false, false, 0, false),
         };
-        // \[C-48\] Output a program swift test started held past its end: what it printed can't
-        // be read whole, and no pass of it is recorded. A failure seen is a failure.
-        let finished = finished && (failed || !held);
+        // \[C-48\] Output a program swift test started held past its end, or more of it than
+        // hushrun reads: what it printed can't be read whole, and a pass seen isn't followed, so
+        // none is recorded (\[C-37\] `hushrun why` says why of the test). A failure seen is a
+        // failure.
+        // Past what hushrun reads, what a test said may be in what wasn't kept: each test the
+        // run selected that showed no failure ran, and isn't followed.
+        let deselected = left.holds(id) && outcome.is_none();
+        let dropped = !failed
+            && match (cut, held) {
+                (Some(_), _) => !deselected,
+                (None, true) => finished,
+                (None, false) => false,
+            };
+        let finished = finished || dropped;
         any_failed |= failed;
         by_target
             .entry(target.to_string())
@@ -2107,9 +2140,18 @@ fn tested(
                 id: rest.to_string(),
                 finished,
                 failed,
-                deselected: left.holds(id) && outcome.is_none(),
+                deselected,
                 duration_ms,
                 skipped,
+                // \[C-37\] Why, which `hushrun why` says of the test.
+                not_followed: unread
+                    .filter(|_| dropped)
+                    .map(|why| facts::Unfollowed {
+                        why: "output".into(),
+                        detail: why.to_string(),
+                    })
+                    .into_iter()
+                    .collect(),
                 ..TestFacts::default()
             });
     }
@@ -2143,13 +2185,7 @@ fn tested(
         settings.insert("refused".to_string(), Value::String(why.clone()));
     }
     if held {
-        settings.insert(
-            "held".to_string(),
-            Value::String(format!(
-                "a program swift test started still held its output {} ms after it ended: what it printed can't be read whole, and no pass of it is recorded; what it printed later was passed on",
-                program::QUIET.as_millis()
-            )),
-        );
+        settings.insert("held".to_string(), Value::String(held_why));
     }
     FactsFile {
         schema: facts::FACTS_SCHEMA_V1.into(),
@@ -2522,6 +2558,7 @@ mod tests {
             Some(0),
             Path::new("/work/Shop"),
             false,
+            None,
         );
         let cart = file.units.iter().find(|u| u.unit == "CartTests").unwrap();
         let inner = cart
@@ -2554,11 +2591,19 @@ mod tests {
             Some(1),
             Path::new("/p"),
             true,
+            None,
         );
         let tests = file.units[0].tests.as_ref().unwrap();
         let of = |id: &str| tests.iter().find(|t| t.id == id).unwrap().clone();
-        assert!(!of("C/testOk").finished);
+        // Its pass isn't followed, and says why; a failure seen is a failure.
+        assert_eq!(of("C/testOk").not_followed[0].why, "output");
+        assert!(
+            of("C/testOk").not_followed[0]
+                .detail
+                .contains("still held its output")
+        );
         assert!(of("C/testBad").finished && of("C/testBad").failed);
+        assert!(of("C/testBad").not_followed.is_empty());
         assert!(file.settings.contains_key("held"));
     }
 
@@ -2587,6 +2632,7 @@ mod tests {
             Some(1),
             Path::new("/p"),
             false,
+            None,
         );
         let skipped: BTreeMap<String, bool> = file
             .units
@@ -2618,6 +2664,7 @@ mod tests {
                 exit,
                 Path::new("/p"),
                 false,
+                None,
             );
             let ok = file.units[0].tests.as_ref().unwrap();
             let ok = ok.iter().find(|t| t.id == "C/testOk").unwrap();
@@ -2650,6 +2697,7 @@ mod tests {
             Some(1),
             Path::new("/p"),
             false,
+            None,
         );
         let unit = |name: &str| file.units.iter().find(|u| u.unit == name).unwrap();
         let test = |u: &str, id: &str| {
@@ -2682,6 +2730,7 @@ mod tests {
             Some(0),
             Path::new("/p"),
             false,
+            None,
         );
         let crashed = quiet
             .units
@@ -2707,6 +2756,7 @@ mod tests {
             Some(1),
             Path::new("/p"),
             false,
+            None,
         );
         assert!(!none.failures_by_unit);
         assert!(none.units.iter().all(|u| u.finished == 0));

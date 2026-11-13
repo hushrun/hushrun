@@ -275,3 +275,82 @@ has no work, `ninja` not answering, a directory of a build a test names) stays `
 it proves no old code ran, and treating it as stale would keep such a check from ever recording.
 Ninja's `-n` is now asked even when a record wasn't `VALID`, so its answer decides. A stale
 program none of whose tests ran in the start says nothing.
+
+## Amendment 8: one rule for a stale program, by the files' own times (2026-11-12)
+
+A third review found the two ways of deciding Amendment 7 used disagree with the build, both
+ways. `ninja -n` has work whenever a target runs on every build (`add_custom_target(stamp ALL …)`
+writing a header a test includes), so every `cmake --build && ctest` said "build before ctest" and
+recorded nothing; a header such a target wrote in the same second as the object made make 3.81's
+comparison call it old too; and a directory of a build a test names (`t_run ${CMAKE_BINARY_DIR}/bin`,
+starting `bin/helper`) was only "can't be told", so a pass on an old helper was recorded.
+
+One rule now decides for both generators: **a program is old when a file of the repository one of
+its objects was built from is newer than that object, or one of its objects (or a library it
+links) is newer than it.** A file a rule writes is never the newer side itself: it stands for the
+repository's files its rule reads, to the end (a generated header for its script and template, a
+generator's output for the generator's sources). Times compare strictly, at the coarser of the
+two times' own resolutions, read from the times (no fraction and an even second is FAT's two
+seconds, no fraction one second, whole hundredths exFAT's), so a file system that rounds a later
+write down never makes a change. A program reading a file CMake wrote when it configured is also
+old when a file configuring read is newer than `CMakeFiles/cmake.check_cache`, which every
+configure writes again. A program a test program waits for or names is judged by the same rule on
+its own, not by its time against the test program's (it is rebuilt alone when only its sources
+change). For a directory of a build a test names, every program the build makes there is judged.
+`ninja -n` is no longer asked.
+
+The person's line names the file and the object or program: `t_util ran old code: src/util.h
+changed after CMakeFiles/t_util.dir/tests/t_util.c.o was made; build before ctest`. When the
+generator's make compares whole seconds (GNU Make before 4) and the file changed in the second
+its object was made, a build won't help, and the line says so: `…, in the same second: make
+compares whole seconds, and won't make it again; touch tests/t_misc.c, then build before ctest`.
+A program whose build can't be read is old when any source is newer than it, and the line says
+that whether it is built from that source can't be told.
+
+What the rule can't see stays unseen, and the program counts as up to date: a compile command
+changed without a rebuild (a flag in `CMakeLists.txt` the build hasn't configured yet, unless the
+program reads a file configuring wrote); a file changed with its time put back (`touch -r`, a
+checkout tool that keeps times, an archive extracted with its times), which ninja and make miss
+too; and a change in the same tick of a coarse file system's clock. One case it gets wrong the
+other way: a rule that leaves its output untouched when it would write the same bytes (`copy_if_different`,
+Ninja's `restat`) leaves its inputs newer than the object, which the rule takes for old until the
+object is touched. A record that isn't `VALID` still makes the program one whose being up to date
+can't be told (`not observed`), which doesn't keep the run's pass.
+
+## Amendment 9: a fixture not built here adds what its command names (2026-11-12)
+
+Amendment 6 made a test read what its fixtures' and dependencies' programs are built from, and a
+helper whose program isn't built here (`add_test(NAME tmp_setup COMMAND ${CMAKE_COMMAND} -E
+make_directory …)`) read every source, so every test that required `tmp` ran on any change. Such a
+helper now adds only what its command names: its program when that is a file of the repository
+(a script it runs), and what its arguments and environment name, as a test's own command does;
+`cmake -E`, `sh -c` or a tool of the system adds nothing. A script that starts a built program
+without naming it is missed, as a test program's own start of one is.
+
+The same review's project showed a second loss: CTest's listing puts in a cleanup's `DEPENDS`
+every test that requires its fixture (to run the cleanup last), so following the cleanup's
+`DEPENDS` made each such test read the others' programs. Those aren't followed: they run beside
+the test, not for it. In the reviewer's project (21 programs, 5 requiring a `cmake -E` fixture),
+a change to a leaf library ran 6 programs again rather than 10, and a header two include 4 rather
+than 9, as before Amendment 6.
+
+## Amendment 10: the kept listing is taken once, and an unlisted failure (2026-11-12)
+
+Amendment 6 kept the plan's listing for hushrun's `ctest`, but hushrun's `ctest` wrote one too, for
+every start, so a later identical start took the first one's: in `ctest --test-dir build;
+<discovery adds case_bad>; ctest --test-dir build` the second start's listing lacked `case_bad`,
+and the program that failed it kept its pass of the first. Only the plan writes the listing, only
+for COMMAND `ctest …` itself, and hushrun's `ctest` reads it once and removes it: a later start,
+and every start under a wrapper, lists for itself.
+
+A failed case in CTest's JUnit file that names no test of the listing (a discovery script added it
+after the listing ran) is a failure no listed test explains (C-39), of a program that can't be
+told: no unit of that start keeps a pass, said as the adapter's error.
+
+## Amendment 11: a header with its time put back (2026-11-12)
+
+As Amendment 8 says, a header (or any file) changed with its modification time put back is missed:
+ninja and make don't build its objects again either, so the program runs what was built before,
+and Amendment 8's rule, which goes by the same times, can't tell. hushrun keys each program by the
+files' contents, so the key is the new one; only the program's being old goes unseen. This is kept,
+not fixed: telling it would mean hashing every file a program was built from at every run.

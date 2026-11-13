@@ -300,6 +300,10 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - `swift test`: an executable target is read by every test target, which may start it; hushrun's
   `swift` stops waiting a second after swift ends whatever output keeps arriving, and keeps at most
   16 MiB of it.
+- `swift test`: hushrun keeps only XCTest's `Test Case` lines of what swift prints, as they go by,
+  so a suite that prints more than 16 MiB besides is still recorded; past 16 MiB of those lines,
+  or with output still held after swift ended, the run says once why no test is recorded, and
+  `hushrun why` says it of each test.
 - CTest: a header a program of the project writes (a generator built and run by the build) now
   makes each test program that includes it read what the generator is built from, on Ninja and
   Makefiles, so a change to a header the generator includes runs those programs.
@@ -322,6 +326,21 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   changed, nothing built) no longer records the check's pass: it says once that the pass isn't
   recorded, naming the program, what changed, and to build before ctest, and the next run on the
   same code runs again.
+- CTest: whether a test program is older than what it is built from is decided once, the same on
+  Ninja and Makefiles, by the files' own times at their own resolution, and `ninja -n` is no
+  longer asked: a target that writes a header on every build (`add_custom_target(… ALL …)`) no
+  longer keeps every run from recording, a file system with coarse times no longer looks old, and
+  each program the build makes in a directory a test names must be up to date. The line names the
+  file and the object, and when make compares whole seconds and a build can't help, says to touch
+  the file.
+- CTest: a fixture or a test depended on whose program isn't built here (`cmake -E
+  make_directory`, `sh -c`) no longer makes every test that needs it read every source: it adds
+  only what its command names, a script of the repository included; and a test no longer reads
+  the programs of the other tests that require the same fixture. In a project of 21 programs, a
+  change to one library ran 6 again rather than 10.
+- CTest: the plan's listing is taken once, by the `ctest` COMMAND starts, and never by a later
+  start or one under a wrapper, which list for themselves; and a failed test the listing didn't
+  name (one discovery added after it) keeps every pass of its `ctest` out.
 - CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
   program a test program waits for or has compiled in, and a program a test names by a relative
   path are now read; on Makefiles a source newer than its object makes the program stale; an
