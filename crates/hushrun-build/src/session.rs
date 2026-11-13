@@ -74,6 +74,8 @@ pub struct Session {
     link: PathBuf,
     /// What the check before COMMAND removed, as the summary says it (B-23).
     rebuilt: Vec<String>,
+    /// Lines the run adds to its summary: what its relay said (B-26).
+    more: Vec<String>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -130,6 +132,14 @@ pub struct Current {
     /// who the run is. `None`: no relay, and nothing goes to or comes from a shared store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share: Option<Share>,
+    /// The person's share setting for this command (B-33): it lowers the org's shared mode on
+    /// this machine and never raises it.
+    #[serde(default = "share_on")]
+    pub share_setting: Mode,
+}
+
+fn share_on() -> Mode {
+    Mode::On
 }
 
 /// What a wrapper needs of its run's relay (B-26, B-32).
@@ -286,6 +296,8 @@ pub struct Counts {
     pub compiles: u64,
     /// Compiles whose block was put in place, with rustc not started.
     pub reused: u64,
+    /// Of those, the ones whose block was downloaded from the shared store for them (B-26).
+    pub downloaded: u64,
     /// Compiles that ran and were stored.
     pub built_and_stored: u64,
     /// Compiles that ran and were not stored, for any reason.
@@ -324,7 +336,10 @@ impl Counts {
         for entry in entries.iter().filter(|entry| !is_probe(entry.outcome)) {
             counts.compiles += 1;
             match entry.outcome {
-                Outcome::Reused => counts.reused += 1,
+                Outcome::Reused => {
+                    counts.reused += 1;
+                    counts.downloaded += u64::from(entry.downloaded);
+                }
                 Outcome::BuiltAndStored => counts.built_and_stored += 1,
                 Outcome::BuiltNotStored(why) => {
                     counts.built_not_stored += 1;
@@ -446,6 +461,9 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
         }
         Mode::On | Mode::Off => {
             let mut line = format!("build: {} of {all} reused", counts.reused);
+            if counts.downloaded > 0 {
+                line.push_str(&format!(" ({} from the shared store)", counts.downloaded));
+            }
             if counts.built() > 0 {
                 line.push_str(&format!(", {} built", counts.built()));
             }
@@ -570,6 +588,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         ),
         folder,
         share: None,
+        share_setting: settings.share,
     };
     write_current(&current)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", current.folder.display())))?;
@@ -577,6 +596,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         current,
         link,
         rebuilt: Vec::new(),
+        more: Vec::new(),
     })
 }
 
@@ -635,6 +655,13 @@ impl Session {
         ]
     }
 
+    /// Adds a line to the run's summary, once: what its relay said (B-26).
+    pub fn add_line(&mut self, line: String) {
+        if !self.more.contains(&line) {
+            self.more.push(line);
+        }
+    }
+
     /// The mode every compile of this run sees.
     pub fn mode(&self) -> Mode {
         self.current.mode
@@ -672,6 +699,18 @@ impl Session {
         if current.audit == Audit::Never {
             summary.lines.push(AUDIT_OFF.to_string());
         }
+        // B-24: with a shared store, what the search for unkeyed values held back, by name.
+        if current.share.is_some() && summary.counts.unkeyed > 0 {
+            let n = summary.counts.unkeyed;
+            summary.lines.push(format!(
+                "build: {} {} on this machine: {} the value of {}, which no key holds (a project names such a variable under build: env:)",
+                crates(n),
+                if n == 1 { "stays" } else { "stay" },
+                if n == 1 { "its outputs hold" } else { "their outputs hold" },
+                summary.counts.unkeyed_variables.join(", ")
+            ));
+        }
+        summary.lines.extend(self.more.iter().cloned());
         let _ = remove_dir(&current.folder);
         let _ = crate::sweep::sweep(&Store::new(&current.store), now, current.keep_days);
         remove_stale_sessions(&current.store, now);
@@ -964,6 +1003,26 @@ mod tests {
             saved_ms,
             ..entry(Outcome::Reused)
         }
+    }
+
+    // covers: B-20, B-26
+    #[test]
+    fn the_summary_says_how_many_reuses_came_from_the_shared_store() {
+        let downloaded = Entry {
+            downloaded: true,
+            ..reused(500)
+        };
+        let summary = Summary::of(
+            Mode::On,
+            10,
+            &[downloaded.clone(), downloaded, reused(500), built()],
+        );
+        assert_eq!(
+            summary.lines()[0],
+            "build: 3 of 4 crates reused (2 from the shared store), 1 built, saving about 1s"
+        );
+        let summary = Summary::of(Mode::On, 10, &[reused(500), built()]);
+        assert_eq!(summary.lines()[0], "build: 1 of 2 crates reused, 1 built");
     }
 
     fn built() -> Entry {

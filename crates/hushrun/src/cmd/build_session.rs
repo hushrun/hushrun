@@ -33,6 +33,7 @@ pub(crate) fn begin(
     now: SystemTime,
     repository: Option<&str>,
     repository_env: &[String],
+    share: Option<ShareStart>,
 ) -> Result<Session, Option<String>> {
     let Some(settings) = Credentials::build_settings_path() else {
         return Err(None);
@@ -50,7 +51,114 @@ pub(crate) fn begin(
         folder: std::env::current_dir().ok(),
         sysroot: &|folder| rustc_sysroot(folder, &env),
     };
-    begin_with(&here, std::env::current_exe())
+    let mut session = begin_with(&here, std::env::current_exe())?;
+    if let Some(start) = share {
+        start_sharing(&mut session, start, repository, &env);
+    }
+    Ok(session)
+}
+
+/// What sharing through a backend needs from the command that runs (B-26).
+pub(crate) struct ShareStart {
+    /// The backend the run's results went to, and how to reach it.
+    pub(crate) access: crate::results::BuildAccess,
+    /// The workspace's commit, when there is one.
+    pub(crate) commit: Option<String>,
+    /// The check, by name: its id is a digest of the repository and the name.
+    pub(crate) check: String,
+}
+
+/// B-25, B-26: when the run's results lookup said the org shares and what the run does allows
+/// it, the process's relay begins the check, and the session names its socket. Every reason for
+/// no relay but a failure is silent; a failure is one line in the summary.
+fn start_sharing(
+    session: &mut Session,
+    start: ShareStart,
+    repository: Option<&str>,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) {
+    use hushrun_build::share::{Caller, Org, Sharing, what_a_run_does};
+    if !start.access.shares || cfg!(not(unix)) {
+        return;
+    }
+    let current = session.current().clone();
+    let caller = if start.access.agent {
+        Caller::Agent { sandbox: false }
+    } else {
+        Caller::Person { signed_in: true }
+    };
+    let does = what_a_run_does(
+        caller,
+        current.mode,
+        current.share_setting,
+        Org::Shares(None),
+    );
+    if matches!(does.sharing, Sharing::Off(_)) {
+        return;
+    }
+    let check = hushrun_core::blocks::Hex32::sha256(
+        format!(
+            "hushrun.build-check/v1\n{}\n{}",
+            repository.unwrap_or_default(),
+            start.check
+        )
+        .as_bytes(),
+    );
+    let store = hushrun_build::store::Store::new(&current.store);
+    let config = || {
+        Some(crate::cmd::build_relay::Config {
+            store,
+            access: start.access,
+            repository: repository.map(str::to_string),
+            commit: start.commit.filter(|c| hushrun_core::blocks::is_commit(c)),
+            platform: platform(),
+            local: current.mode,
+            own: current.share_setting,
+            min_free_gb: current.min_free_gb,
+            keep_days: current.keep_days,
+            tuning: crate::cmd::build_relay::Tuning::default(),
+        })
+    };
+    let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
+        session.add_line("build: sharing is off for this run: the relay couldn't start".into());
+        return;
+    };
+    match relay.begin_check(&current.folder, Some(check), env) {
+        Ok(share) => {
+            if let Err(err) = session.set_share(share) {
+                session.add_line(format!("build: sharing is off for this run: {err}"));
+            }
+        }
+        Err(line) => session.add_line(line),
+    }
+}
+
+/// The target triple this hushrun was built for: what `open` names as the run's platform. The
+/// wrapper's keys are what tell two platforms' blocks apart; this only chooses the manifest.
+fn platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "linux" if cfg!(target_env = "musl") => "unknown-linux-musl",
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        other => other,
+    };
+    format!("{}-{os}", std::env::consts::ARCH)
+}
+
+/// Ends a run's session (B-20, B-26): the relay ends the check first (uploads in flight get
+/// their wait, `close` goes with the manifest and the counts), then the session's summary,
+/// with what the relay said.
+pub(crate) fn finish(mut session: Session, now: SystemTime) -> hushrun_build::session::Summary {
+    if session.current().share.is_some()
+        && let Some(relay) = crate::cmd::build_relay::Relay::running()
+    {
+        let entries = session.current().entries();
+        for line in relay.end_check(&entries) {
+            session.add_line(line);
+        }
+    }
+    session.finish(now)
 }
 
 /// Whether a toolchain under rustup's home could have sources (`lib/rustlib/src` or

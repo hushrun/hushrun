@@ -325,6 +325,7 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
                 system_time(wrap::now(app.global)),
                 repository.as_deref(),
                 &policy.build_env,
+                None,
             ) {
                 Ok(session) => Some(session),
                 Err(why) => {
@@ -518,7 +519,7 @@ fn say(app: &App<'_>, line: &str) {
 /// Ends a check's build session, if it had one, and says what its compiles came to (B-20).
 fn finish(app: &App<'_>, build: Option<Session>) {
     if let Some(session) = build {
-        for line in session.finish(system_time(wrap::now(app.global))).lines() {
+        for line in build_session::finish(session, system_time(wrap::now(app.global))).lines() {
             say(app, line);
         }
     }

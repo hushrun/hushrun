@@ -438,7 +438,7 @@ fn skip_or_run(
     // B-2: with reuse on, cargo in COMMAND compiles through the wrapper: one session for every
     // start of COMMAND in this run, begun before the first and finished after the last. It
     // begins before the plan, whose build is COMMAND's made first, and compiles through it too.
-    let mut build = BuildRun::begin(global, say, code);
+    let mut build = BuildRun::begin(global, say, code, backend);
     if let Some(session) = session.as_deref_mut() {
         session.compile_with(build.env());
     }
@@ -881,11 +881,26 @@ struct BuildRun<'a> {
 impl<'a> BuildRun<'a> {
     /// Begins the run's session, when reuse is on here. With none, COMMAND runs as usual, and
     /// only a line worth reading is said (B-19).
-    fn begin(global: &'a GlobalOpts, say: &'a Say, code: Option<&Code>) -> BuildRun<'a> {
+    fn begin(
+        global: &'a GlobalOpts,
+        say: &'a Say,
+        code: Option<&Code>,
+        backend: Option<&Backend>,
+    ) -> BuildRun<'a> {
+        // B-26: the run's results lookup told whether the org shares build blocks.
+        let share = match (code, backend.and_then(Backend::build_access)) {
+            (Some(code), Some(access)) => Some(build_session::ShareStart {
+                access,
+                commit: code.revision.clone(),
+                check: code.check.as_str().to_string(),
+            }),
+            _ => None,
+        };
         let session = match build_session::begin(
             system_time(now(global)),
             code.and_then(Code::repository_here).as_deref(),
             code.map_or(&[][..], |code| &code.build_env),
+            share,
         ) {
             Ok(session) => Some(session),
             Err(why) => {
@@ -915,7 +930,7 @@ impl<'a> BuildRun<'a> {
     /// Ends the session, once, and says what its compiles came to.
     fn finish(&mut self) {
         if let Some(session) = self.session.take() {
-            for line in session.finish(system_time(now(self.global))).lines() {
+            for line in build_session::finish(session, system_time(now(self.global))).lines() {
                 self.say.line(format_args!("{line}"));
             }
         }
