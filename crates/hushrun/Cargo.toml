@@ -38,7 +38,8 @@ anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 mimalloc.workspace = true
-hushrun-core.workspace = true
+# \[B-28\] With the pack, which the relay writes and reads.
+hushrun-core = { workspace = true, features = ["pack"] }
 hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true

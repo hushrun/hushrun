@@ -776,5 +776,8 @@ pub struct ReportRequest {
     pub commit: Option<String>,
 }
 
+#[cfg(feature = "pack")]
+pub mod pack;
+
 #[cfg(test)]
 mod tests;
