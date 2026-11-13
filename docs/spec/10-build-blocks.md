@@ -22,7 +22,12 @@ by its place in the order of the variables' names). None of them is derived from
 **B-1 Mode.** Reuse has one mode per user: `off`, `observe` or `on`. It is `off` until the person
 turns it on. In `observe` every compile runs as in `off`, blocks are stored, and a compile whose
 block already exists is compared with it. In `on` a compile whose block exists is not run.
-`hushrun build on|observe|off` sets it; `HUSHRUN_BUILD` overrides it for one command.
+`hushrun build on|observe|off` sets it; `HUSHRUN_BUILD` overrides it for one command. Only `off`,
+`observe` and `on` are a mode there: `true` and `false`, which `hushrun plan --format env` and
+`hushrun artifact resolve` print under the same name for a shell to evaluate, count as unset,
+silently; any other value turns reuse off for the run, in one line. *Rests on:* no mode being
+named `true` or `false`. *Breaks if:* a person means one of those as a mode: nothing says it was
+ignored.
 
 **B-2 The wrapper.** When the mode is not `off`, `hushrun run` sets `RUSTC_WRAPPER` to a link named
 `hushrun-rustc` that points at the hushrun binary, in both its forms: `hushrun run NAME -- COMMAND`

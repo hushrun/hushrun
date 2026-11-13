@@ -283,7 +283,8 @@ fn create_temp(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
     ))
 }
 
-/// What one command's variables change (B-1, B-13, B-14). An empty variable is unset.
+/// What one command's variables change (B-1, B-13, B-14). An empty variable is unset, and so is
+/// `HUSHRUN_BUILD=true` or `false`, which another command prints.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     /// `HUSHRUN_BUILD`: the mode for this command.
@@ -303,6 +304,10 @@ impl Overrides {
     pub fn from(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Overrides, SettingsError> {
         let mode = match text(env, "HUSHRUN_BUILD", "off, observe or on")? {
             None => None,
+            // `hushrun plan --format env` and `hushrun artifact resolve` print `HUSHRUN_BUILD=true`
+            // (or `false`) for a shell to evaluate: that variable is theirs, not a mode, and is
+            // read as unset here, silently.
+            Some(value) if value == "true" || value == "false" => None,
             Some(value) => Some(Mode::parse(&value).ok_or(SettingsError::Variable {
                 name: "HUSHRUN_BUILD",
                 value,
@@ -587,6 +592,19 @@ mod tests {
         assert_eq!(load(&path).unwrap().mode, Mode::On);
         let none = Overrides::from(&env(&[("HUSHRUN_BUILD", "")])).unwrap();
         assert_eq!(settings.with(&none), settings);
+    }
+
+    // covers: B-1
+    #[test]
+    fn hushrun_build_true_or_false_from_a_plan_is_not_a_mode_and_counts_as_unset() {
+        // `hushrun plan --format env` and `hushrun artifact resolve` print `HUSHRUN_BUILD=true`
+        // for a shell to evaluate; the next `hushrun run` must not read it as a bad mode.
+        for value in ["true", "false"] {
+            let overrides = Overrides::from(&env(&[("HUSHRUN_BUILD", value)])).unwrap();
+            assert_eq!(overrides, Overrides::default(), "{value}");
+        }
+        // Anything else that isn't a mode is still an error.
+        assert!(Overrides::from(&env(&[("HUSHRUN_BUILD", "True")])).is_err());
     }
 
     // covers: B-14

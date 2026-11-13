@@ -183,6 +183,11 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks: `HUSHRUN_BUILD=true` or `false`, which `hushrun plan --format env` and `hushrun
+  artifact resolve` print for a shell to evaluate, no longer turns build reuse off. Only `off`,
+  `observe` and `on` set the mode for one command; those two values count as unset, silently.
+  Before, the next `hushrun run` after `eval "$(hushrun plan --format env)"` said
+  `HUSHRUN_BUILD="true" is not valid` and reused nothing, in CI too.
 - Nothing from the HTTP client's internals reaches a person's terminal without `-v` or
   `HUSHRUN_LOG`: a `WARN tcp set_nodelay error` line from hyper was printed in the middle of a
   build.
