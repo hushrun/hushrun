@@ -1772,19 +1772,24 @@ fn a_slow_id_token_endpoint_slows_neither_cargo_nor_the_end_of_a_job() {
     let a = Machine::new(dir.path(), "a", None);
     let (cargo_prompt, after_prompt, said) = timed_ci_build(&a, &prompt);
     assert!(said.contains("2 crates built"), "{said}");
-    // The second's endpoint takes 3 seconds to mint.
+    // The second's endpoint takes 3 seconds to mint: the longest that leaves room under the
+    // 5 seconds a mint gets and a job waits for `open`.
+    let mint = Duration::from_secs(3);
     let slow = FakeBuild::start();
     slow.set_id_token_seconds(61);
-    slow.delay("/id-token", Duration::from_secs(3));
+    slow.delay("/id-token", mint);
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
     let (cargo_slow, after_slow, said) = timed_ci_build(&b, &slow);
     assert!(said.contains("2 crates built"), "{said}");
+    // Requests that waited for a token would cost cargo two mints here and the end one. The
+    // bounds are half of each, taken from the mint and not from what the prompt job took: a
+    // loaded machine has seconds of room in cargo's part before it looks like a wait.
     assert!(
-        cargo_slow < cargo_prompt.mul_f64(1.1) + Duration::from_secs(1),
+        cargo_slow < cargo_prompt + mint,
         "cargo took {cargo_slow:?} against {cargo_prompt:?}: {said}"
     );
     assert!(
-        after_slow < after_prompt + Duration::from_secs(1),
+        after_slow < after_prompt + mint / 2,
         "the end took {after_slow:?} against {after_prompt:?}: {said}"
     );
 }

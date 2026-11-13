@@ -1261,28 +1261,26 @@ fn served(fake: &FakeBuild, n: u8, size: usize, cost_ms: u32) -> Vec<(Digest, Di
 
 // covers: B-26
 #[test]
-fn on_a_slow_link_with_no_manifest_a_build_takes_at_most_a_tenth_longer() {
-    // 5 Mbit/s for the whole link, crates of 300 ms that pack to about 1 MB, as a fast laptop
-    // makes them.
+fn on_a_slow_link_with_no_manifest_a_build_waits_for_no_download() {
+    // 1 Mbit/s for the whole link, crates of 300 ms that pack to about 1 MB: a download takes
+    // about 8 seconds, against a budget of 150 ms, half a crate's compile.
+    const RATE: u64 = 125_000;
+    const SIZE: usize = 1_000_000;
+    let download = Duration::from_secs(SIZE as u64 / RATE);
     let fake = FakeBuild::start();
-    fake.throttle_store(625_000);
-    let crates = served(&fake, 8, 1_000_000, 300);
+    fake.throttle_store(RATE);
+    let crates = served(&fake, 8, SIZE, 300);
     let m = machine();
     let relay = start(&fake, &m, |_| {});
     begin(&relay, &m);
     until("open", || answering(&relay));
     let compile = Duration::from_millis(300);
-    // The same build with sharing off, measured here and now, so that a loaded machine's
-    // slower sleeps count on both sides.
-    let off = {
-        let started = Instant::now();
-        for _ in &crates {
-            std::thread::sleep(compile);
-        }
-        started.elapsed()
-    };
-    let started = Instant::now();
+    // What the build pays for sharing: the time its eight questions take, the compiles left
+    // out. The bound is a quarter of one download, far above what a loaded machine adds to
+    // eight answers on a local socket and far below what waiting for any download costs.
+    let mut waited = Duration::ZERO;
     for (key, step) in &crates {
+        let asked = Instant::now();
         let answer = ask(
             &relay,
             Request::Fetch {
@@ -1292,15 +1290,14 @@ fn on_a_slow_link_with_no_manifest_a_build_takes_at_most_a_tenth_longer() {
                 local_ms: None,
             },
         );
-        if answer == Answer::None {
-            std::thread::sleep(compile);
-        }
+        waited += asked.elapsed();
+        assert_eq!(answer, Answer::None);
+        std::thread::sleep(compile);
     }
-    let took = started.elapsed();
     relay.end_check(&[]);
     assert!(
-        took <= off + off / 10,
-        "{took:?} against {off:?} with sharing off"
+        waited < download / 4,
+        "the questions took {waited:?}, where one download takes {download:?}"
     );
     // A fetch expected to lose is never started: only the first, the measurement, went out.
     assert_eq!(fake.count(route::STORE_GET), 1);
