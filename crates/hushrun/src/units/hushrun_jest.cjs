@@ -61,6 +61,7 @@ function install(S) {
     writeSync: fs.writeSync,
     closeSync: fs.closeSync,
     existsSync: fs.existsSync,
+    unlinkSync: fs.unlinkSync,
     realpathSync: fs.realpathSync.native || fs.realpathSync,
   };
   let run = null;
@@ -472,7 +473,7 @@ function install(S) {
       this.afterAllFailed = [];
       this.hookErrors = new Set();
       this.uncaught = 0;
-      this.rejections = new Set();
+      this.rejections = new Map();
       this.circus = null;
       const run = S.run;
       // Leave out tests only when the main process that claimed the run allowed it.
@@ -700,8 +701,11 @@ function install(S) {
         case 'error':
           // An uncaught exception or unhandled rejection: whose it is can't be told. A
           // rejection handled later (Jest 30's `error_handled`) is no error.
-          if (event.promise) this.rejections.add(event.promise);
-          else this.uncaught += 1;
+          if (event.promise) this.rejections.set(event.promise, errMessage(event.error));
+          else {
+            this.uncaught += 1;
+            this.uncaughtMessage = this.uncaughtMessage || errMessage(event.error);
+          }
           break;
         case 'error_handled':
           this.rejections.delete(event.promise);
@@ -719,8 +723,16 @@ function install(S) {
     // after which no test of the file is told as finished.
     settle() {
       const unhandled = (this.circus && this.circus.unhandledErrors) || [];
-      const unattributed = this.uncaught > 0 || this.rejections.size > 0
-        || unhandled.some((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      const unowned = unhandled.find((e) => !this.hookErrors.has(Array.isArray(e) ? e[0] : e));
+      const unattributed = this.uncaught > 0 || this.rejections.size > 0 || unowned !== undefined;
+      if (unattributed) {
+        // [C-37] Why its tests keep no result, which `hushrun why` says: the error's first line
+        // when it is short.
+        const message = this.uncaughtMessage || [...this.rejections.values()][0]
+          || (unowned !== undefined ? errMessage(unowned) : '');
+        const shown = message && message.length <= 120 ? ` (${message})` : '';
+        this.unsureWhy = `Jest reported an error it couldn't charge to a test${shown}, so no test of its file keeps a result of that run`;
+      }
       for (const [test, r] of this.tests) {
         if (r.status === 'passed') {
           if ((test.errors && test.errors.length) || this.afterAllFailed.some((b) => b && under(test, b))) r.status = 'failed';
@@ -816,6 +828,7 @@ function install(S) {
               finished: rs.every(done),
               failed: rs.some((x) => x.status === 'failed'),
               ...(rs.some((x) => x.status === 'skipped') ? { skipped: true } : {}),
+              ...(rs.some((x) => x.unsure) && this.unsureWhy ? { notKept: this.unsureWhy } : {}),
               deselected: false,
               durationMs: rs.reduce((n, x) => n + (x.durationMs || 0), 0),
               notFollowed: this.concurrent ? [] : dedupe(rs.flatMap((x) => x.b.nf)),
@@ -832,6 +845,7 @@ function install(S) {
           };
           if (r.attempts > 1) out.attempts = r.attempts;
           if (r.status === 'skipped') out.skipped = true;
+          if (r.unsure && this.unsureWhy) out.notKept = this.unsureWhy;
           if (lists && !r.concurrent && (r.status === 'passed' || r.status === 'failed')) {
             const dirs = new Set([...r.b.dirs, ...fileDirs]);
             for (const b of this.hooks) if (under(this.order[position.get(r)], b.describe)) for (const d of b.dirs) dirs.add(d);
@@ -1146,9 +1160,28 @@ function install(S) {
       own.writeSync(fd, String(process.pid));
       own.closeSync(fd);
     } catch {
+      let held = '';
       try {
-        if (own.readFileSync(file, 'utf8').trim() !== String(process.pid)) return false;
+        held = own.readFileSync(file, 'utf8').trim();
       } catch {
+        return false;
+      }
+      if (held.startsWith(RELEASED)) {
+        // [C-32] A start before this one claimed the run and ran no test file (`jest --clearCache
+        // && jest`, `--showConfig`, `--listTests`, a filter that matched none): this start takes
+        // the run, and what that one wrote goes.
+        guard('take over', () => {
+          try {
+            own.unlinkSync(path.join(dir, `jest-main-${held.slice(RELEASED.length)}.json`));
+          } catch {
+            // It wrote nothing.
+          }
+          const temp = path.join(dir, `.jest-claim.${process.pid}.tmp`);
+          own.writeFileSync(temp, String(process.pid));
+          own.renameSync(temp, file);
+        });
+        if (own.readFileSync(file, 'utf8').trim() !== String(process.pid)) return false;
+      } else if (held !== String(process.pid)) {
         return false;
       }
     }
@@ -1174,29 +1207,43 @@ function install(S) {
     process.on('exit', () => guard('exit', () => S.writeMain(null)));
     return true;
   }
-  function notClaimed() {
+  // [C-32] A start that claimed the run and ran no test file gives the claim up as it ends, for a
+  // start after it in COMMAND that runs the tests; with none, what it wrote stands.
+  const RELEASED = 'released:';
+  function release() {
+    const temp = path.join(dir, `.jest-claim.${process.pid}.tmp`);
+    own.writeFileSync(temp, `${RELEASED}${process.pid}`);
+    own.renameSync(temp, path.join(dir, 'jest-claim'));
+  }
+  function notClaimed(g) {
     // [C-32] Another start of Jest beside the one that claimed the run (a script's `jest a && jest
-    // b`): what it runs isn't observed, so it leaves a `.started` file saying why, never removed,
-    // and no pass of the run is kept.
-    if (!inheritedRun && !S.secondStart) {
-      S.secondStart = true;
-      try {
-        own.writeFileSync(
-          path.join(dir, `jest-second-${process.pid}.started`),
-          JSON.stringify({
-            why: "Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
-          }),
-        );
-      } catch (err) {
-        note('second start', err);
-      }
-    }
+    // b`): once it is about to run test files (the sequencer's sort), what it runs isn't observed,
+    // so it leaves a `.started` file saying why. A start that runs none (`--clearCache`,
+    // `--listTests`, a filter that matched nothing) leaves nothing.
+    if (!inheritedRun) S.second = { global: g || {} };
     // A Jest started inside a test file of the run: neither it nor its workers write.
     delete process.env.HUSHRUN_JEST_RUN;
     delete process.env.HUSHRUN_JEST_START;
     delete process.env.HUSHRUN_JEST_EVERY;
     process.env.HUSHRUN_JEST_DESELECT = '0';
     S.buffering = false;
+  }
+  // [C-32] A second start about to run `sorted`: it says so, once, by a `.started` file never
+  // removed, and no pass of the run is kept.
+  function secondStartRuns(sorted) {
+    const second = S.second;
+    if (!second || second.said || !Array.isArray(sorted) || !sorted.length || second.global.listTests) return;
+    second.said = true;
+    try {
+      own.writeFileSync(
+        path.join(dir, `jest-second-${process.pid}.started`),
+        JSON.stringify({
+          why: "Jest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
+        }),
+      );
+    } catch (err) {
+      note('second start', err);
+    }
   }
   function patchConfigModule(cfg) {
     if (cfg.readConfigs.__hushrun) return;
@@ -1205,7 +1252,7 @@ function install(S) {
       if (argv && typeof argv.config === 'string') S.argvConfig = argv.config;
       const out = await readConfigs.apply(this, arguments);
       if (!claimMain()) {
-        notClaimed();
+        notClaimed(out && out.globalConfig);
         return out;
       }
       return guard('readConfigs', () => adjustConfigs(out, argv)) || out;
@@ -1282,9 +1329,11 @@ function install(S) {
         S.lateAssess = null;
       }
       const sorted = await sortOf.call(this, tests);
+      if (!S.main) guard('second start', () => secondStartRuns(sorted));
       if (!S.main || S.main.sorted) return sorted;
       S.main.sorted = true;
       const kept = (await guardAsync('sort', () => deselect(sorted))) || sorted;
+      S.main.toRun = Array.isArray(kept) ? kept.length : 0;
       // From here until the reporter hears the run start, the main process runs globalSetup.
       S.window = true;
       return kept;
@@ -1349,6 +1398,7 @@ function install(S) {
   }
   S.runStarted = function runStarted() {
     S.window = false;
+    S.main.started = true;
     guard('config files', () => {
       S.main.every = configFiles();
       process.env.HUSHRUN_JEST_EVERY = JSON.stringify(S.main.every);
@@ -1404,6 +1454,9 @@ function install(S) {
       removedItems: M.removed.size,
       errors: S.errors.splice(0),
     });
+    // No test file ran, and none was left out for the plan: another start may take the run.
+    const ran = M.started && (M.toRun > 0 || M.removed.size > 0 || M.results.size > 0);
+    if (!ran) guard('release', release);
   };
 
   // Module loading: look at what each CommonJS load returns, by shape.
@@ -1493,7 +1546,7 @@ function install(S) {
               S.lateAssess = () => assess(g, projects);
               addToGlobal(o, g);
             } else {
-              notClaimed();
+              notClaimed(o);
             }
           } else if ('testEnvironment' in o && 'testRunner' in o && 'transform' in o && 'rootDir' in o) {
             projects.push(o);

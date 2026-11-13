@@ -644,6 +644,79 @@ fn a_skip_in_a_jest_run_that_failed_records_nothing() {
     }
 }
 
+// covers: C-37, C-39, C-44
+#[test]
+fn why_says_a_jest_test_kept_nothing_after_an_error_no_test_owns() {
+    // A timer `leaks` left throws while `waits` runs: Jest 29 charges it to `waits`, Jest 30 to
+    // `leaks`; either way no test of the file keeps a result, and `hushrun why` says what happened.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+        file("jest.config.js", CONFIG),
+        file(
+            "test/leak.test.js",
+            "test('leaks', () => { setTimeout(() => { throw new Error('late timer'); }, 20); });\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 150)); });\ntest('after', () => {});\n",
+        ),
+    ];
+    for jest in jests() {
+        let r = Repo::new(&jest, &files);
+        let first = r.run(JEST_RUN);
+        assert_eq!(first.code, 1, "{}", first.out());
+        let why = r.run(&["why", "unit", "test/leak.test.js::after"]);
+        assert!(
+            why.out().contains(
+                "Jest reported an error it couldn't charge to a test (late timer), so no test of its file keeps a result of that run"
+            ),
+            "Jest {}: {}",
+            jest.major,
+            why.out()
+        );
+    }
+}
+
+// covers: C-39, C-44
+#[test]
+fn tests_whose_ids_collide_are_never_left_out_after_a_change() {
+    // `x > y` twice, from two nestings: one id, which no plan lists. The file passes whole and
+    // stores them as passed; a change to what only `z` read then asks the file's tests one by
+    // one, and both still run.
+    for jest in jests() {
+        let r = Repo::new(
+            &jest,
+            &[
+                file(
+                    "hushrun.yaml",
+                    &yaml("{mode: reuse, unit: test, reads: test}"),
+                ),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("fx.js", "module.exports = 1;\n"),
+                file(
+                    "test/c.test.js",
+                    "const fs = require('fs');\nconst log = (n) => fs.appendFileSync(process.env.RAN_LOG, n + '\\n');\ndescribe('x', () => { test('y', () => { log('nested'); }); });\ntest('x > y', () => { log('flat'); });\ntest('z', () => { expect(fs.readFileSync('fx.js', 'utf8')).toContain('1'); });\n",
+                ),
+                file("test/other.test.js", "test('other', () => {});\n"),
+            ],
+        );
+        let log = r.root.join("ran.log");
+        let log_text = log.display().to_string();
+        assert_eq!(r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+        r.write("fx.js", "module.exports = 1; // touched\n");
+        let _ = std::fs::remove_file(&log);
+        let second = r.run_env(JEST_RUN, &[("RAN_LOG", &log_text)]);
+        assert_eq!(second.code, 0, "{}", second.out());
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            ran.contains("nested") && ran.contains("flat"),
+            "Jest {}: {ran:?}\n{}",
+            jest.major,
+            second.stderr
+        );
+    }
+}
+
 /// The newest run result this cache holds.
 fn store_result(r: &Repo) -> Value {
     let mut found = Vec::new();
@@ -2451,6 +2524,77 @@ fn with_jest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_ea
         assert_eq!(
             store_result(&r)["units"]["tests"],
             json!({"total": 62, "ran": 4, "reused": 58})
+        );
+    }
+}
+
+// covers: C-32, C-44
+#[cfg(unix)]
+#[test]
+fn a_start_of_jest_that_runs_no_test_file_is_no_second_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for jest in jests() {
+        let r = Repo::new(
+            &jest,
+            &[
+                file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+                file(".gitignore", "node_modules\n"),
+                file("package.json", "{\"name\": \"shop\", \"private\": true}\n"),
+                file("jest.config.js", CONFIG),
+                file("test/a.test.js", "test('a1', () => {});\n"),
+            ],
+        );
+        // A script that starts Jest for what runs no test file first (`jest --clearCache && jest`),
+        // with the other such forms, and then for the tests: one start ran tests.
+        let bin = r.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let jest_js = "node node_modules/jest/bin/jest.js";
+        std::fs::write(
+            bin.join("pnpm"),
+            format!(
+                "#!/bin/sh\n{jest_js} --clearCache >/dev/null && {jest_js} --showConfig >/dev/null && {jest_js} --listTests >/dev/null && {jest_js} --version >/dev/null && {jest_js} --ci --passWithNoTests no-such-test && {jest_js} --ci\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let ran = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(ran.code, 0, "Jest {}: {}", jest.major, ran.out());
+        assert!(
+            !ran.stderr.contains("records a pass"),
+            "Jest {}: {}",
+            jest.major,
+            ran.stderr
+        );
+        assert_eq!(
+            r.map()["units"]["test/a.test.js"]["tests"]["a1"],
+            "passed",
+            "Jest {}",
+            jest.major
+        );
+        // The other way round: the tests first, then what runs none.
+        r.write(
+            "test/a.test.js",
+            "test('a1', () => { expect(1).toBe(1); });\n",
+        );
+        std::fs::write(
+            bin.join("pnpm"),
+            format!(
+                "#!/bin/sh\n{jest_js} --ci && {jest_js} --clearCache >/dev/null && {jest_js} --listTests >/dev/null\n"
+            ),
+        )
+        .unwrap();
+        let after = r.run_env(&["run", "unit", "--", "pnpm", "jest"], &[("PATH", &path)]);
+        assert_eq!(after.code, 0, "Jest {}: {}", jest.major, after.out());
+        assert!(
+            !after.stderr.contains("records a pass"),
+            "Jest {}: {}",
+            jest.major,
+            after.stderr
         );
     }
 }

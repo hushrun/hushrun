@@ -2206,6 +2206,158 @@ fn what_a_module_opened_is_kept_with_the_module() {
     assert_eq!(opens["src/prices.ts"], ["data/price.txt"]);
 }
 
+// covers: C-32, C-43
+#[cfg(unix)]
+#[test]
+fn a_start_of_vitest_that_runs_no_test_file_is_no_second_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("src/none.ts", "export const none = 1\n"),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+    ]);
+    // A script that starts Vitest for what runs no test file first, then for the tests.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let vitest = "node_modules/.bin/vitest";
+    std::fs::write(
+        bin.join("pnpm"),
+        format!(
+            "#!/bin/sh\n{vitest} --version >/dev/null; {vitest} list >/dev/null; {vitest} related src/none.ts --run >/dev/null 2>&1; {vitest} run no-such-file >/dev/null 2>&1; {vitest} run\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(!ran.stderr.contains("records a pass"), "{}", ran.stderr);
+    assert_eq!(r.map()["units"]["test/a.test.ts"]["tests"]["a1"], "passed");
+    // The other way round: the tests first, then what runs none.
+    r.write(
+        "test/a.test.ts",
+        "import { test, expect } from 'vitest'\ntest('a1', () => { expect(1).toBe(1) })\n",
+    );
+    std::fs::write(
+        bin.join("pnpm"),
+        format!(
+            "#!/bin/sh\n{vitest} run && {vitest} list >/dev/null && {vitest} --version >/dev/null\n"
+        ),
+    )
+    .unwrap();
+    let after = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(after.code, 0, "{}\n{}", after.stdout, after.stderr);
+    assert!(!after.stderr.contains("records a pass"), "{}", after.stderr);
+}
+
+// covers: C-37, C-43
+#[test]
+fn vitests_facts_say_which_file_an_error_no_test_owns_came_from() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A timer one test of bad.test.ts left throws after it: Vitest reports an error no test owns
+    // and fails the run, so no pass of it is kept, a.test.ts's included. The main process's facts
+    // say where it came from, and every test that didn't fail is told why it kept nothing.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/bad.test.ts",
+            "import { test } from 'vitest'\ntest('leaks', () => { setTimeout(() => { throw new Error('late timer') }, 10) })\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 100)) })\n",
+        ),
+    ]);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let (code, main) = plugin_vitest(&r, &[], &[]);
+    assert_eq!(code, 1);
+    assert_eq!(main["failuresByUnit"], false, "{main:#}");
+    let unhandled = &main["settings"]["unhandled"][0];
+    assert!(
+        unhandled["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("test/bad.test.ts")),
+        "{main:#}"
+    );
+    assert_eq!(unhandled["message"], "late timer", "{main:#}");
+}
+
+// covers: C-39, C-43
+#[test]
+fn vitest_tests_whose_ids_collide_are_never_left_out_after_a_change() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // `x > y` twice, from two nestings: one id, which no plan lists. The file passes whole and
+    // stores them as passed; a change to what only `z` read then asks the file's tests one by
+    // one, and both still run.
+    let r = Repo::new(&[
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, reads: test}"),
+        ),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("fx.txt", "1\n"),
+        file(
+            "test/c.test.ts",
+            "import { describe, test, expect } from 'vitest'\nimport fs from 'node:fs'\nconst log = (n: string) => fs.appendFileSync(process.env.RAN_LOG!, n + '\\n')\ndescribe('x', () => { test('y', () => { log('nested') }) })\ntest('x > y', () => { log('flat') })\ntest('z', () => { expect(fs.readFileSync('fx.txt', 'utf8')).toContain('1') })\n",
+        ),
+        file(
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('other', () => {})\n",
+        ),
+    ]);
+    let log = r.root.join("ran.log");
+    let log_text = log.display().to_string();
+    assert_eq!(r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+    r.write("fx.txt", "1 touched\n");
+    let _ = std::fs::remove_file(&log);
+    let second = r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        ran.contains("nested") && ran.contains("flat"),
+        "{ran:?}\n{}",
+        second.stderr
+    );
+}
+
 /// What a run says when a second start of the runner in COMMAND wasn't observed.
 const SECOND_START: &str = "no test file or test records a pass: Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
 
