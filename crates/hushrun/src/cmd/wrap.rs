@@ -582,7 +582,7 @@ fn skip_or_run(
                 // \[C-37\] What the run decided of each test file and test, `not run` with why,
                 // is kept with what each read, so that `hushrun why` says it; no result is.
                 if let Some((o, tree)) = &observed {
-                    o.keep(&code.key, tree, now(global));
+                    o.keep(&code.key, tree, now(global), duration_ms);
                 }
                 format!(
                     "run again with nothing left out, its adapter still left out what the plan didn't list ({why})"
@@ -782,7 +782,7 @@ fn skip_or_run(
         // \[C-37\] What the run decided, `not run` with why, is kept with what each test file
         // read, so that `hushrun why` says it; no result is.
         if let Some((o, tree)) = &observed {
-            o.keep(&code.key, tree, now(global));
+            o.keep(&code.key, tree, now(global), duration_ms);
         }
         return ExitCode::from(exit);
     }
@@ -874,7 +874,7 @@ fn skip_or_run(
         backend.record(&code.key, &result)
     };
     if let Some((o, tree)) = &observed {
-        o.keep(&code.key, tree, now(global));
+        o.keep(&code.key, tree, now(global), duration_ms);
         if recorded.is_ok()
             && !backend.is_server()
             && let Some(store) =

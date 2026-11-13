@@ -91,7 +91,7 @@ fn a_hint_is_sent_once_and_again_after_a_send_that_failed() {
     let dir = tempfile::tempdir().unwrap();
     let (o, tree) = observed(dir.path(), 3);
     let now = Time::parse("2026-11-11T12:00:00Z").unwrap();
-    o.keep(&Digest::of(b"run"), &tree, now);
+    o.keep(&Digest::of(b"run"), &tree, now, 0);
     let results = Hints {
         refuse: Cell::new(true),
         sent: RefCell::new(Vec::new()),
@@ -129,7 +129,7 @@ fn a_hint_too_large_to_send_isnt_sent_and_is_said_once() {
     let dir = tempfile::tempdir().unwrap();
     let (o, tree) = observed(dir.path(), MOST_UNITS + 1);
     let now = Time::parse("2026-11-11T12:00:00Z").unwrap();
-    o.keep(&Digest::of(b"run"), &tree, now);
+    o.keep(&Digest::of(b"run"), &tree, now, 0);
     let results = Hints {
         refuse: Cell::new(false),
         sent: RefCell::new(Vec::new()),
@@ -183,7 +183,7 @@ fn sent_tests(
             .insert("test_skipped".into(), row(State::NotRun));
     }
     let now = Time::parse("2026-11-11T12:00:00Z").unwrap();
-    o.keep(&Digest::of(b"run"), &tree, now);
+    o.keep(&Digest::of(b"run"), &tree, now, 0);
     let results = Hints {
         refuse: Cell::new(false),
         sent: RefCell::new(Vec::new()),
@@ -247,7 +247,7 @@ fn a_test_file_reused_on_another_systems_list_isnt_in_this_machines_hint() {
     o.mapped.get_mut("tests/test_0.py").unwrap().origin = Origin::Shared(other);
     o.mapped.get_mut("tests/test_1.py").unwrap().origin = Origin::Shared(this);
     let now = Time::parse("2026-11-11T12:00:00Z").unwrap();
-    o.keep(&Digest::of(b"run"), &tree, now);
+    o.keep(&Digest::of(b"run"), &tree, now, 0);
     let results = Hints {
         refuse: Cell::new(false),
         sent: RefCell::new(Vec::new()),

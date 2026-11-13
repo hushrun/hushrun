@@ -89,6 +89,9 @@ CREATE TABLE checks (
     -- [C-32] Passing runs in a row, since the last that wrote the check, in which the adapter
     -- the word kept (pytest's) reported nothing: at 2 the check is forgotten.
     silent_runs INTEGER NOT NULL DEFAULT 0 CHECK (silent_runs BETWEEN 0 AND 1),
+    -- [C-33] The longest a run of the check that reused nothing took here, in milliseconds: what
+    -- reuse can save at most. None until one ran.
+    whole_ms   INTEGER CHECK (whole_ms IS NULL OR whole_ms >= 0),
     -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
     written_at INTEGER NOT NULL
 ) STRICT;
@@ -698,11 +701,11 @@ pub fn load(path: &Path, check_id: &Digest) -> Loaded {
 }
 
 fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
-    let Some(check) = conn
+    let Some((check, whole_ms)) = conn
         .query_row(
-            "SELECT id FROM checks WHERE check_id = ?1",
+            "SELECT id, whole_ms FROM checks WHERE check_id = ?1",
             [check_id.hex()],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
         )
         .optional()?
     else {
@@ -710,6 +713,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     };
     let mut map = Map {
         reported: true,
+        whole_ms: whole_ms.and_then(|ms| u64::try_from(ms).ok()),
         ..Map::default()
     };
     let mut names: HashMap<i64, String> = HashMap::new();
@@ -945,6 +949,8 @@ pub struct Write<'a> {
     /// scope names (a CTest program, a Cargo test binary, a class of no file) is still there while
     /// a run knows it.
     pub known: &'a BTreeSet<String>,
+    /// \[C-33\] How long this run took, when it reused nothing: the store keeps the longest.
+    pub whole_ms: Option<u64>,
     /// The edges this run saw.
     pub edges: &'a BTreeSet<Edge>,
     pub disagreements: &'a [Disagreement],
@@ -1100,11 +1106,16 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     let pruned = tx.execute("DELETE FROM checks WHERE written_at < ?1", [cutoff])?;
     let command = serde_json::to_string(&w.base.command).unwrap_or_else(|_| "[]".into());
     let check: i64 = tx.query_row(
-        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at, silent_runs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at, silent_runs,
+                             whole_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
          ON CONFLICT (check_id) DO UPDATE SET name = excluded.name, command = excluded.command,
              cwd = excluded.cwd, scope = excluded.scope, adapter = excluded.adapter,
-             written_at = excluded.written_at, silent_runs = 0
+             written_at = excluded.written_at, silent_runs = 0,
+             whole_ms = CASE
+                 WHEN excluded.whole_ms IS NULL THEN checks.whole_ms
+                 WHEN checks.whole_ms IS NULL THEN excluded.whole_ms
+                 ELSE max(checks.whole_ms, excluded.whole_ms) END
          RETURNING id",
         params![
             w.check_id.hex(),
@@ -1114,6 +1125,7 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             w.base.scope.as_str(),
             w.adapter,
             w.now_ms,
+            w.whole_ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
         ],
         |row| row.get(0),
     )?;

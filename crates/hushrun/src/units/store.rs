@@ -769,6 +769,9 @@ pub struct Map {
     /// \[ADR 0071\] The test files the adapter listed then, for an adapter whose unit rule is its
     /// runner's own list: Vitest's.
     pub unit_files: BTreeSet<String>,
+    /// \[C-33\] The longest a run of the check that reused nothing took here: what reuse can save
+    /// at most. `None` until one ran.
+    pub whole_ms: Option<u64>,
 }
 
 impl Map {

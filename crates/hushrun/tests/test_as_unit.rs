@@ -1568,6 +1568,9 @@ with open(os.path.join(d, "fake-%d.json" % n), "w") as f:
 if os.environ.get("FAKE_STARTED"):
     with open(os.path.join(d, "fake-%d.started" % n), "w") as f:
         f.write(os.environ["FAKE_STARTED"])
+if os.environ.get("FAKE_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_SLEEP"]))
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 "#;
 
@@ -1947,6 +1950,57 @@ fn when_every_test_file_runs_the_plan_ready_and_why_give_the_same_true_reason() 
             second.stderr
         );
     }
+}
+
+// covers: C-33, C-39
+#[test]
+fn what_reuse_saved_is_never_more_than_the_check_took_running_everything() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // Each test file says it took 15s, as workers in parallel each count their own time; the
+    // whole check takes about 1.2s. Reusing two of them saved about what the check took, not 30s.
+    let python = python();
+    let names = ["test_a.py", "test_b.py", "test_c.py", "test_d.py"];
+    let mut files = vec![
+        (
+            "hushrun.yaml".to_string(),
+            yaml("{mode: reuse, unit: test}"),
+        ),
+        (".gitignore".to_string(), "__pycache__/\n".to_string()),
+        ("fake.py".to_string(), RULES_RUNNER.to_string()),
+    ];
+    for name in names {
+        files.push((name.to_string(), "def t1():\n    pass\n".to_string()));
+    }
+    let r = repo_of(&files);
+    let units = json!(names
+        .iter()
+        .map(|u| json!({"unit": u, "selected": 1, "finished": 1, "reads": [u], "durationMs": 15000,
+                        "tests": [{"id": "t1", "finished": true, "durationMs": 15000}]}))
+        .collect::<Vec<_>>())
+    .to_string();
+    let env = [("FAKE_UNITS", units.as_str()), ("FAKE_SLEEP", "1.2")];
+    let first = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    r.write("test_b.py", "def t1():\n    pass\n# changed\n");
+    let second = r.run(&["run", "unit", "--", &python, "fake.py"], &env);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let line = second
+        .stderr
+        .lines()
+        .find(|l| l.contains("unit passed in"))
+        .unwrap_or_else(|| panic!("{}", second.stderr));
+    assert!(
+        hushrun_testkit::lines::says_reused(line, 2, "tests"),
+        "{line}"
+    );
+    let saved = line
+        .split("saved about ")
+        .nth(1)
+        .and_then(|rest| rest.split('s').next())
+        .and_then(|n| n.parse::<f64>().ok());
+    assert!(saved.is_some_and(|s| s < 5.0), "{line}");
 }
 
 /// `hushrun why unit <asked> --format json`, read.

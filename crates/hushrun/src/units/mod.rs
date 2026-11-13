@@ -1754,7 +1754,7 @@ impl Observed {
     /// (ADR 0072): the map, the edges and the audit's disagreements. Only when the files didn't
     /// change while COMMAND ran, which the caller checked. A store that can't be written costs the
     /// next run its reuse, and nothing else.
-    pub fn keep(&self, run_key: &Digest, tree: &Tree, now: Time) {
+    pub fn keep(&self, run_key: &Digest, tree: &Tree, now: Time, duration_ms: u64) {
         let Some(at) = &self.store else {
             return;
         };
@@ -1776,6 +1776,10 @@ impl Observed {
             .collect();
         // \[C-37\] Every unit the run's adapter told, whatever became of it.
         let known: BTreeSet<String> = self.units.keys().cloned().collect();
+        // \[C-33\] A run that reused nothing took what reuse can save at most.
+        let reused_nothing = self.counts.as_ref().is_none_or(|counts| {
+            counts.reused == 0 && counts.tests.as_ref().is_none_or(|tests| tests.reused == 0)
+        });
         let write = db::Write {
             check_id: at.check_id,
             base: &at.base,
@@ -1786,6 +1790,7 @@ impl Observed {
             sources: &self.sources,
             unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
             known: &known,
+            whole_ms: reused_nothing.then_some(duration_ms),
             edges: &self.edges,
             disagreements: &found,
             hints: &self.received,
@@ -2007,6 +2012,14 @@ fn test_files_grouped(n: u64, noun: &str) -> String {
         1 => format!("1 {noun}"),
         n => format!("{} {}", usage::thousands(n), plural(noun)),
     }
+}
+
+/// \[C-33, C-39\] What reuse saved, from the recorded durations of what it reused (`saved_ms`):
+/// never more than `whole_ms`, the longest this check took here when it reused nothing, since a
+/// runner with workers counts each test's own time and a person waits for the whole. `None`
+/// when no such run is kept here: then the count is said without a time.
+fn saving(saved_ms: u64, whole_ms: Option<u64>) -> Option<u64> {
+    whole_ms.map(|whole| saved_ms.min(whole))
 }
 
 /// \[C-34\] The clause a plan's line ends with when an audit runs `n` of what already passed,
@@ -2688,7 +2701,7 @@ fn decide(
         counts.tests = Some(test_counts.clone());
     }
     if matches!(how, How::Plan(_)) && (counts.reused > 0 || test_counts.reused > 0) {
-        counts.saved_ms = Some(saved_ms);
+        counts.saved_ms = saving(saved_ms, map.whole_ms);
     }
     // \[RFC 0004 §3.8\] In the order whatever a server cuts is a pass of: failures, then test
     // files' results, then tests' passes. The backend sends what its server takes.
@@ -2699,10 +2712,9 @@ fn decide(
     let reused = out.would_reuse.len() as u64;
     if counts.total > 0 && matches!(how, How::Observe) {
         let would_run = counts.total - reused;
-        let saving = if saved_ms >= 1000 {
-            format!(", saving about {}", crate::cmd::wrap::took(saved_ms))
-        } else {
-            String::new()
+        let saving = match saving(saved_ms, map.whole_ms) {
+            Some(ms) if ms >= 1000 => format!(", saving about {}", crate::cmd::wrap::took(ms)),
+            _ => String::new(),
         };
         // \[C-39\] Tests that would have been reused: those of the test files reused whole, and
         // those reused one by one.

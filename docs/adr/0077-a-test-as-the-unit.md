@@ -383,3 +383,8 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
   the plan the adapter's unit rule: pytest's doctest plugin collects `tests/res/test.txt`, a data
   file, and Vitest's typecheck runs `*.test-d.ts` outside its list. A run now counts, and keeps,
   only the units the plan would: pytest's of `python_files`, Vitest's of its list.
+- **A saving more than the suite.** "reusing 1,150 tests saved about 1m 5s" was printed for a
+  Jest suite with four workers that takes 6 to 9 seconds: a saving summed each test's own time.
+  The one function that words the saving now bounds it by the longest a run of the check that
+  reused nothing took here, which the store keeps with the check (`whole_ms`); with none kept, the
+  count is said without a time.
