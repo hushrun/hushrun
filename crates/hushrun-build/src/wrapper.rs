@@ -22,7 +22,7 @@ use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Bound, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
 use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs, RootName};
-use crate::origin::Origin;
+use crate::origin::{Origin, Standing};
 use crate::portable::{self, Portability, Reason};
 use crate::relay::{self, Answer, Request};
 use crate::restore::Restore;
@@ -1189,22 +1189,23 @@ impl Call<'_> {
         Some(Lookup::Found { audit, serves_form })
     }
 
-    /// Whether a block may be reused as far as who vouches for it goes (B-34). A block built
-    /// here, or with no record, may. One only downloaded may when its entry for this run's
-    /// host, org and repository is under a day old; else the relay asks the server, and
-    /// "served" or "no server could be reached in this run" lets it. With no relay in the run,
-    /// nothing can be asked, as offline: it may.
+    /// Whether a block may be reused as far as who vouches for it goes (B-34), as
+    /// [`Origin::standing`] says. A block built here, or with no record, may. One only
+    /// downloaded never may once a server said it no longer serves it; it may when its entry for
+    /// this run's host, org and repository is under a day old; else the relay asks the server,
+    /// and "served" or "no server could be reached in this run" lets it. With no relay in the
+    /// run, nothing can be asked, as offline: it may.
     fn vouched(&self, key: &Digest, step: &Digest, block: &Block, origin: Option<&Origin>) -> bool {
-        let Some(origin) = origin.filter(|o| o.downloaded_only()) else {
+        let Some(origin) = origin else {
             return true;
         };
-        let Some(share) = &self.current.share else {
-            return true;
+        let share = self.current.share.as_ref();
+        let run = share.map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
+        let share = match (origin.standing(run, epoch_ms(self.ports.now())), share) {
+            (Standing::Any | Standing::Fresh, _) | (Standing::Stale, None) => return true,
+            (Standing::Withdrawn, _) => return false,
+            (Standing::Stale, Some(share)) => share,
         };
-        let now = epoch_ms(self.ports.now());
-        if origin.fresh(&share.by.host, &share.by.org, &share.repository, now) {
-            return true;
-        }
         let asked = Request::Vouch {
             key: *key,
             step: *step,

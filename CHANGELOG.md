@@ -193,12 +193,18 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   nightly `cargo update` before the build) names no commit in its build requests, so the backend
   doesn't take what it builds for that commit's; it is checked once per run. Before, every job
   named `HEAD`, whatever it built. A file git doesn't track isn't compared.
-- Build blocks: a warm build whose downloaded crates were vouched for more than a day ago takes
-  what one with fresh vouches takes. While `open` hasn't answered, a question about a vouch is
-  answered at once as a server that can't be reached; once it has, every stale vouch is asked in
-  one lookup, which each crate waits for within half its compile. Before, each crate waited up
-  to half its compile for `open`, then asked alone: 6.2 to 6.7 seconds against 1.7 to 2.1 for 83
-  crates.
+- Build blocks: a warm build whose downloaded crates were vouched for more than a day ago asks
+  about them all in one lookup, sent as `open` answers, which each crate waits for within half
+  its compile. Before, each crate waited up to half its compile for `open`, then asked alone:
+  6.2 to 6.7 seconds against 1.7 to 2.1 for 83 crates.
+- Build blocks: a withdrawn download is no longer reused once its entry is a day old. Only an
+  `open` that failed, or didn't answer within half the crate's compile, counts as a server that
+  can't be reached; once `open` has answered, a crate whose answer doesn't come in time compiles.
+  A server's "no" is kept in the block's record (`origin.json`'s entry says `"word":
+  "withdrawn"`), and that block is never reused as a download again, also offline; the downloaded
+  blocks a run reused are asked about again at its end, so a machine in daily use never goes
+  stale. Before, a question not answered within half a small crate's compile counted as a server
+  that can't be reached: 14 of 53 withdrawn blocks two days old were reused.
 - Build blocks: everything after a command, the last uploads and `close`, has one deadline. A
   `begin` or `commit` that doesn't answer is cut off at it, as a PUT was, and counts a cut-off;
   `close` goes within it. In CI that is the end's 20 seconds (2 minutes for a job writing trusted

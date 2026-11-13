@@ -37,8 +37,11 @@ again: its setup phase has the network and a token, and its later phases may hav
   deadline, `close` within it (B-29, B-31).
 - **`hushrun build fetch` for sandboxes.** The setup phase saves sealed packs, hints and the
   policy for 24 hours, no token; later phases run a relay from it that sends nothing (B-36).
-- **From the review of the relay as built:** a question about a stale vouch never waits for
-  `open`, and the run's stale vouches are asked in one lookup (B-34); the prefetch starts at the
+- **From the review of the relay as built, and the first run against the real backend:** a
+  question about a stale vouch waits for `open` at most half its block's compile, the run's stale
+  vouches are asked in one lookup as `open` answers and the reused ones again at the end, and a
+  server's "no" is kept in the block's record (B-34); a give-up is no failure, and a rest still
+  serves what arrived (B-26); the prefetch starts at the
   first wrapper that misses (B-30); a pack can't unpack past 64 times its size or the disk's
   floor (B-28); a downloaded block that differs is suspended and replaced in one step (B-32);
   and every variable no CI system set is searched for from 8 bytes (B-24).

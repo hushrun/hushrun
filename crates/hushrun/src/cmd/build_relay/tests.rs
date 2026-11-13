@@ -631,6 +631,7 @@ fn a_marker_goes_up_only_from_the_host_org_and_credential_that_built_it() {
                     scope: "person/2".into(),
                     outputs: Hex32([0; 32]),
                     date_ms: 0,
+                    word: hushrun_build::origin::Word::Served,
                 }),
                 SystemTime::now(),
             )
@@ -1689,20 +1690,16 @@ fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_
     );
 }
 
-// covers: B-26, B-34
-#[test]
-fn a_stale_vouch_is_answered_at_once_while_open_has_not_answered() {
-    let fake = FakeBuild::start();
-    fake.delay(route::OPEN, Duration::from_secs(10));
-    let m = machine();
-    // A block only downloaded, vouched for two days ago, whose compile took 2 seconds.
+/// A block only downloaded into `m`'s store, vouched for two days ago, whose compile took
+/// `cost_ms`.
+fn stale_download(fake: &FakeBuild, m: &Machine, cost_ms: u64) -> (Digest, Digest) {
     let (key, step) = (Digest::of(b"stale"), Digest::of(b"stale step"));
     let src = m.store.root().with_file_name("stale");
     std::fs::write(&src, b"bytes").unwrap();
     m.store
         .publish_with_origin(
             &key,
-            &json!({"step": step, "class": "library", "rustc_ms": 2000}),
+            &json!({"step": step, "class": "library", "rustc_ms": cost_ms}),
             &[NewFile {
                 name: "liba.rlib".into(),
                 source: src,
@@ -1714,12 +1711,48 @@ fn a_stale_vouch_is_answered_at_once_while_open_has_not_answered() {
                 scope: "person/2".into(),
                 outputs: Hex32([1; 32]),
                 date_ms: 0,
+                word: hushrun_build::origin::Word::Served,
             }),
             SystemTime::now(),
         )
         .unwrap();
+    (key, step)
+}
+
+// covers: B-26, B-34
+#[test]
+fn a_stale_vouch_counts_as_unreachable_only_when_open_failed_or_missed_the_block_s_budget() {
+    // `open` takes 10 seconds, and the block's compile took 400 ms: its question waits 200 ms
+    // for `open`, then the server can't be reached, for it.
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_secs(10));
+    let m = machine();
+    let (key, step) = stale_download(&fake, &m, 400);
     let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(10));
     begin(&relay, &m);
+    let vouch = Request::Vouch {
+        key,
+        step,
+        outputs: Hex32([1; 32]),
+    };
+    let started = Instant::now();
+    let answer = ask(&relay, vouch.clone());
+    let took = started.elapsed();
+    assert_eq!(answer, Answer::Offline);
+    assert!(
+        took >= Duration::from_millis(150) && took < Duration::from_secs(1),
+        "{took:?}"
+    );
+    assert_eq!(fake.count(route::LOOKUP), 0);
+
+    // Once `open` has answered, a lookup slower than the budget is a miss: never a reuse.
+    let fake = FakeBuild::start();
+    fake.delay(route::LOOKUP, Duration::from_secs(3));
+    let m = machine();
+    let (key, step) = stale_download(&fake, &m, 400);
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
     let started = Instant::now();
     let answer = ask(
         &relay,
@@ -1730,10 +1763,8 @@ fn a_stale_vouch_is_answered_at_once_while_open_has_not_answered() {
         },
     );
     let took = started.elapsed();
-    // `open` hasn't answered: as unreachable, the entry counts, and nothing waits for it.
-    assert_eq!(answer, Answer::Offline);
-    assert!(took < Duration::from_millis(300), "{took:?}");
-    assert_eq!(fake.count(route::LOOKUP), 0);
+    assert_eq!(answer, Answer::None);
+    assert!(took < Duration::from_secs(1), "{took:?}");
 }
 
 /// Every vouch `store` holds for `key`, dated at the epoch: two days old and more.
@@ -1816,12 +1847,18 @@ fn every_stale_vouch_is_asked_in_one_lookup_once_open_has_answered() {
     let mut all: Vec<Hex32> = crates.iter().map(|(key, _)| address(key)).collect();
     all.sort();
     assert_eq!(named, all);
-    // What was served is renewed, and asks nothing the next day.
+    // What was served is renewed, and asks nothing the next day; the "no" is kept, so the
+    // withdrawn block is never reused as a download again, whatever the network does.
     let now = super::now_ms();
     for (key, _) in &crates[..2] {
         let origin = b.store.origin(key).unwrap();
         assert!(origin.fresh(&fake.origin(), "acme", "github.com/acme/shop", now));
     }
+    let origin = b.store.origin(&crates[2].0).unwrap();
+    assert_eq!(
+        origin.standing(None, now),
+        hushrun_build::origin::Standing::Withdrawn
+    );
 }
 
 // covers: B-30

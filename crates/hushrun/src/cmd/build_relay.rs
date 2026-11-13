@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use hushrun_build::model::{Class as LocalClass, Mode};
-use hushrun_build::origin::{Identity, Origin, Vouch};
+use hushrun_build::origin::{Identity, Origin, Standing, Vouch, Word};
 use hushrun_build::outbox::{self, Marker, Outbox};
 use hushrun_build::relay::{Answer, Problem, Request};
 use hushrun_build::session::{Entry, Share};
@@ -764,7 +764,15 @@ impl Relay {
                         }
                     }
                     let pending = std::mem::take(&mut state.pending);
+                    // B-34: the run's lookup of stale vouches goes as soon as `open` answers.
+                    let vouches = !state.vouching;
+                    state.vouching = true;
                     drop(state);
+                    if vouches {
+                        let relay = self.clone();
+                        self.runtime
+                            .spawn(async move { relay.ask_vouches(None).await });
+                    }
                     for built in pending {
                         self.built(built);
                     }
@@ -1468,172 +1476,223 @@ impl Relay {
             scope: found.scope.clone(),
             outputs: found.outputs,
             date_ms,
+            word: Word::Served,
         }
     }
 
     // --- vouching ------------------------------------------------------------------------
 
     /// B-34: whether a server the run belongs to still serves the downloaded block `key` with
-    /// `outputs`. Served: its entry is renewed. No server reachable in this run: an entry of any
-    /// age counts.
+    /// `outputs`, for a wrapper whose entry is stale, answered within the block's budget, half
+    /// what its compile took. The server can't be reached (an entry of any age counts) only when
+    /// `open` failed, or hasn't answered within that budget. Once `open` has answered, a stale
+    /// entry is never enough: the run's lookup of stale vouches answers, or it is a miss.
     async fn vouch(self: Arc<Relay>, key: Digest, outputs: Hex32) -> Answer {
-        let address = Relay::address(&key);
-        // C1: until `open` answers, the server can't be reached, for this question: nothing
-        // waits for it.
-        match self.state().phase_now(Instant::now()).clone() {
-            Phase::Opening | Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
-            Phase::Stopped(_) => return Answer::None,
-            // Resting, only what the run knows answers: nothing new is asked.
-            Phase::Resting(_) => {
-                return match self.state().vouched.get(&address) {
-                    Some(served) if *served == Some(outputs) => self.renew(key, address, outputs),
-                    _ => Answer::None,
-                };
-            }
-            Phase::Answering => {}
+        // A run from a saved fetch reaches no server (B-36).
+        if self.saved {
+            return Answer::Offline;
         }
-        // Then the run's one lookup of stale vouches answers it, waited for within the block's
-        // budget, half what its compile costs, as a fetch is (B-26).
+        let address = Relay::address(&key);
         let deadline = Instant::now() + self.vouch_budget(&key);
-        // A lookup that asked about it is under way, or was.
-        let mut asked = false;
-        let served = loop {
+        // A lookup naming it was under way since this question came.
+        let mut named = false;
+        loop {
+            let now = Instant::now();
             {
                 let mut state = self.state();
-                if let Some(served) = state.vouched.get(&address) {
-                    break *served;
+                match state.phase_now(now).clone() {
+                    Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
+                    Phase::Stopped(_) => return Answer::None,
+                    Phase::Opening if now >= deadline => return Answer::Offline,
+                    Phase::Opening => {}
+                    Phase::Resting(_) | Phase::Answering => {
+                        if let Some(served) = state.vouched.get(&address) {
+                            return if *served == Some(outputs) {
+                                Answer::Served
+                            } else {
+                                Answer::None
+                            };
+                        }
+                        if state.vouch_asked.contains(&address) {
+                            named = true;
+                        } else if named {
+                            // The lookup that named it got no answer: a miss.
+                            return Answer::None;
+                        } else if !state.vouching && state.answering(now) {
+                            // A block no lookup of the run named: one more, once none is under
+                            // way.
+                            state.vouching = true;
+                            state.vouch_asked.insert(address);
+                            named = true;
+                            let relay = self.clone();
+                            self.runtime
+                                .spawn(async move { relay.ask_vouches(Some(key)).await });
+                        }
+                        if now >= deadline {
+                            return Answer::None;
+                        }
+                    }
                 }
-                if state.missing.contains(&address) {
-                    break None;
-                }
-                if state.vouch_asked.contains(&address) {
-                    asked = true;
-                } else if asked {
-                    // The lookup that asked about it got no answer: as unreachable, unless the
-                    // server refused the caller.
-                    return match state.phase {
-                        Phase::Stopped(Stop::Refused(_)) => Answer::None,
-                        _ => Answer::Offline,
-                    };
-                } else if !state.vouching {
-                    state.vouching = true;
-                    state.vouch_asked.insert(address);
-                    asked = true;
-                    let relay = self.clone();
-                    self.runtime
-                        .spawn(async move { relay.ask_vouches(address).await });
-                }
-            }
-            // Not within the budget: as unreachable, for this question.
-            if Instant::now() >= deadline {
-                return Answer::Offline;
             }
             tokio::time::sleep(self.config.tuning.tick).await;
-        };
-        if served != Some(outputs) {
-            return Answer::None;
-        }
-        self.renew(key, address, outputs)
-    }
-
-    /// Renews the downloaded block `key`'s entry for this run's host, org and repository, a
-    /// server having said it serves it with `outputs` (B-34).
-    fn renew(&self, key: Digest, address: Hex32, outputs: Hex32) -> Answer {
-        let found = self.state().found.get(&address).map(|f| f.0.clone());
-        let scope = found.map(|f| f.scope);
-        let entry = Vouch {
-            host: self.by.host.clone(),
-            org: self.by.org.clone(),
-            repository: self.config.repository.clone().unwrap_or_default(),
-            scope: scope.unwrap_or_default(),
-            outputs,
-            date_ms: self.state().server_date_ms.unwrap_or_else(now_ms),
-        };
-        let renewed = self.config.store.update_origin(&key, |origin| {
-            let mut origin = origin?;
-            let mut entry = entry;
-            if entry.scope.is_empty() {
-                entry.scope = origin
-                    .report_scope(&self.by.host, &self.by.org, &entry.repository)
-                    .unwrap_or_default()
-                    .to_string();
-            }
-            origin.renew(entry);
-            Some(origin)
-        });
-        if renewed.is_ok() {
-            Answer::Served
-        } else {
-            Answer::None
         }
     }
 
-    /// C1, B-34: the run's one lookup of stale vouches: `first`, the block a wrapper asked
-    /// about, and every other block only downloaded whose entry for this run's host, org and
-    /// repository is a day old or more and that this run hasn't asked about yet, up to the
-    /// lookup's limit. What it finds lands where every lookup's does.
-    async fn ask_vouches(self: Arc<Relay>, first: Hex32) {
+    /// B-34: the run's lookup of stale vouches, as soon as `open` answers (`first` none), and
+    /// again for a block a wrapper asks about that no lookup named: every block in the store only
+    /// downloaded whose entry for this run's host, org and repository is stale, as the store's
+    /// records say, and `first`. One runs at a time (`vouching`, set by the caller).
+    async fn ask_vouches(self: Arc<Relay>, first: Option<Digest>) {
+        let relay = self.clone();
+        let stale = self
+            .runtime
+            .spawn_blocking(move || relay.stale_downloads())
+            .await
+            .unwrap_or_default();
+        let asked: Vec<Digest> = {
+            let state = self.state();
+            let mut seen = HashSet::new();
+            first
+                .into_iter()
+                .chain(stale)
+                .filter(|key| {
+                    let address = Relay::address(key);
+                    seen.insert(address) && !state.vouched.contains_key(&address)
+                })
+                .collect()
+        };
+        self.ask_about(&asked).await;
+        let mut state = self.state();
+        if let Some(first) = first {
+            state.vouch_asked.remove(&Relay::address(&first));
+        }
+        state.vouching = false;
+    }
+
+    /// B-34: asks the server, without fetching, whether it still serves `keys`, downloaded blocks
+    /// in the store, in as few lookups as its limit allows, and records each answer: served with
+    /// the block's outputs renews its entry; anything else is a "no", which the block's record
+    /// keeps (`Word::Withdrawn`), so that it is never reused as a download again. A lookup that
+    /// fails records nothing. What the run learnt answers its wrappers (`vouched`).
+    async fn ask_about(self: &Arc<Relay>, keys: &[Digest]) {
         let limit = self
             .state()
             .policy
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
-        let relay = self.clone();
-        let stale = self
-            .runtime
-            .spawn_blocking(move || relay.stale_downloads(limit))
-            .await
-            .unwrap_or_default();
-        let batch: Vec<Hex32> = {
-            let mut state = self.state();
-            let batch: Vec<Hex32> =
-                dedup(std::iter::once(first).chain(stale.into_iter().filter(|a| {
-                    !state.vouched.contains_key(a)
-                        && !state.missing.contains(a)
-                        && !state.vouch_asked.contains(a)
-                })))
-                .into_iter()
-                .take(limit)
-                .collect();
-            state.vouch_asked.extend(batch.iter().copied());
-            batch
-        };
-        self.lookup(&batch, false).await;
-        let mut state = self.state();
-        for address in &batch {
-            state.vouch_asked.remove(address);
-        }
-        state.vouching = false;
-    }
-
-    /// The addresses of the blocks in the store only downloaded whose entry for this run's
-    /// host, org and repository is a day old or more, at most `limit`.
-    fn stale_downloads(&self, limit: usize) -> Vec<Hex32> {
-        let repository = self.config.repository.clone().unwrap_or_default();
-        let now = now_ms();
-        let mut stale = Vec::new();
-        for key in self.config.store.keys() {
-            if stale.len() >= limit {
-                break;
-            }
-            let Some(origin) = self.config.store.origin(&key) else {
-                continue;
-            };
-            if origin.downloaded_only()
-                && origin
-                    .vouch(&self.by.host, &self.by.org, &repository)
-                    .is_some()
-                && !origin.fresh(&self.by.host, &self.by.org, &repository, now)
+        for batch in keys.chunks(limit) {
+            let addresses: Vec<Hex32> = batch.iter().map(Relay::address).collect();
+            self.state().vouch_asked.extend(addresses.iter().copied());
+            let found = self.lookup(&addresses, false).await;
+            let date_ms = self.state().server_date_ms.unwrap_or_else(now_ms);
+            let answered: Option<HashMap<Hex32, Found>> =
+                found.map(|found| found.into_iter().map(|f| (f.address, f)).collect());
             {
-                stale.push(Relay::address(&key));
+                let mut state = self.state();
+                for address in &addresses {
+                    state.vouch_asked.remove(address);
+                    if let Some(answered) = &answered {
+                        let served = answered.get(address).map(|f| f.outputs);
+                        state.vouched.insert(*address, served);
+                    }
+                }
             }
+            let Some(answered) = answered else { continue };
+            let relay = self.clone();
+            let batch = batch.to_vec();
+            let _ = self
+                .runtime
+                .spawn_blocking(move || relay.record_words(&batch, &answered, date_ms))
+                .await;
         }
-        stale
     }
 
-    /// How long a question about `key`'s vouch may take (C1): half what its compile took, as
-    /// the store's record says, under the ceiling of a fetch's cost.
+    /// Writes what the server said of each of `keys` into its record (B-32, B-34), dated
+    /// `date_ms` by the server's clock.
+    fn record_words(&self, keys: &[Digest], answered: &HashMap<Hex32, Found>, date_ms: u64) {
+        let repository = self.config.repository.clone().unwrap_or_default();
+        for key in keys {
+            let found = answered.get(&Relay::address(key));
+            let _ = self.config.store.update_origin(key, |origin| {
+                let mut origin = origin.filter(Origin::downloaded_only)?;
+                let held = origin
+                    .vouch(&self.by.host, &self.by.org, &repository)
+                    .or_else(|| origin.vouched.first())
+                    .cloned()?;
+                let served = found.filter(|f| f.outputs == held.outputs);
+                origin.renew(Vouch {
+                    host: self.by.host.clone(),
+                    org: self.by.org.clone(),
+                    repository: repository.clone(),
+                    scope: served.map_or(held.scope.clone(), |f| f.scope.clone()),
+                    outputs: held.outputs,
+                    date_ms,
+                    word: if served.is_some() {
+                        Word::Served
+                    } else {
+                        Word::Withdrawn
+                    },
+                });
+                Some(origin)
+            });
+        }
+    }
+
+    /// The blocks in the store only downloaded whose entry for this run's host, org and
+    /// repository is a day old or more ([`Origin::standing`] says stale).
+    fn stale_downloads(&self) -> Vec<Digest> {
+        let repository = self.config.repository.clone().unwrap_or_default();
+        let run = Some((
+            self.by.host.as_str(),
+            self.by.org.as_str(),
+            repository.as_str(),
+        ));
+        let now = now_ms();
+        self.config
+            .store
+            .keys()
+            .into_iter()
+            .filter(|key| {
+                self.config.store.origin(key).is_some_and(|origin| {
+                    origin
+                        .vouch(&self.by.host, &self.by.org, &repository)
+                        .is_some()
+                        && origin.standing(run, now) == Standing::Stale
+                })
+            })
+            .collect()
+    }
+
+    /// B-34: at the end of a check, the downloaded blocks its compiles reused that no lookup of
+    /// the run answered for, asked about once more, so that a machine in daily use never goes
+    /// stale.
+    fn reused_downloads(&self, entries: &[Entry]) -> Vec<Digest> {
+        let state = self.state();
+        let mut seen = HashSet::new();
+        entries
+            .iter()
+            .filter(|e| e.outcome == hushrun_build::model::Outcome::Reused)
+            .filter_map(|e| e.key)
+            .filter(|key| {
+                let address = Relay::address(key);
+                seen.insert(address) && !state.vouched.contains_key(&address)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter(|key| {
+                self.config.store.origin(key).is_some_and(|origin| {
+                    matches!(
+                        origin.standing(None, now_ms()),
+                        Standing::Stale | Standing::Fresh
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// How long a question about `key`'s vouch may take (B-26, B-34): half what its compile
+    /// took, as the store's record says, under the ceiling of a fetch's cost.
     fn vouch_budget(&self, key: &Digest) -> Duration {
         let cost_ms = self
             .config
@@ -1894,12 +1953,30 @@ impl Relay {
         let deadline = started + wait.total;
         let relay = self.clone();
         self.runtime.block_on(async move {
-            // CI: the loop goes on claiming what waits, since the store goes with the job.
-            if end.in_ci {
-                upload::drain(&relay, cut).await;
-            }
-            relay.ending.store(true, Ordering::Relaxed);
-            upload::settle(&relay, cut, deadline).await;
+            // B-34: the lookup of stale vouches still in flight ends, so that what it learnt is
+            // written; then the downloaded blocks this check reused that no lookup answered for
+            // are asked about once more, beside the last uploads and within the same cut.
+            let renewals = async {
+                let ask = async {
+                    while relay.state().vouching {
+                        tokio::time::sleep(relay.config.tuning.tick).await;
+                    }
+                    let reused = relay.reused_downloads(entries);
+                    if !reused.is_empty() {
+                        relay.ask_about(&reused).await;
+                    }
+                };
+                let _ = tokio::time::timeout_at(cut.into(), ask).await;
+            };
+            let uploads = async {
+                // CI: the loop goes on claiming what waits, since the store goes with the job.
+                if end.in_ci {
+                    upload::drain(&relay, cut).await;
+                }
+                relay.ending.store(true, Ordering::Relaxed);
+                upload::settle(&relay, cut, deadline).await;
+            };
+            futures_util::future::join(renewals, uploads).await;
         });
         let check = self.state().check.take();
         if let Some(check) = &check {

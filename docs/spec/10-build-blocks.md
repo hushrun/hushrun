@@ -868,8 +868,10 @@ nothing from its fetch, for the same reason.
 written before the block is published and rewritten whole under the block's lock when it
 changes: **built here** (the run, and with a backend its host, the org and a fingerprint of the
 credential, never the secret); **vouched for** (one entry per host, org and repository whose
-server said it serves the block to this machine, with the scope, the digest of outputs and the
-server's date); and whether it has been reused here yet. A download makes the first entry. A
+server answered for the block, with the scope, the digest of outputs, the server's date and its
+word: `served`, or `withdrawn` once it said it no longer serves it); and whether it has been
+reused here yet. How a block stands for a reuse (any, fresh, stale or withdrawn) is one function
+of that record (`Origin::standing`), which the wrapper and the relay both call. A download makes the first entry. A
 block with no record, as every block from before this rule, is reused here as before and never
 goes up. The relay publishes a download only to answer a wrapper still waiting for it, through
 the store's own publish (first writer wins), never in shared `observe`. A block that was only
@@ -903,34 +905,38 @@ cost to local reuse, and a comparison being of another machine's bytes, which on
 counts can show.
 
 **B-34 A downloaded block is reused only while a server the run belongs to vouches for it.** A
-block built here is reused as any. A block only downloaded is reused without asking while its
-entry for this run's host, org and repository is under 24 hours old; otherwise the wrapper asks
-the relay, which asks the server without fetching. "Served, with these outputs" renews the entry
-and the block is reused. Anything else is a miss: nothing is fetched in its place, rustc runs,
-and the block that compile builds takes the downloaded one's place and is from then on built
-here (B-32). When
-no server could be reached in the run, an entry of any age counts; a run with no relay asks
-nothing and reuses it. While `open` hasn't answered, the question is answered at once as a
-server that can't be reached, for that question: nothing waits for `open`. Once it has, the
-first question about a block no lookup of the run is asking about starts the run's one lookup of
-stale vouches (`Relay::ask_vouches`), without fetching: that block, and every other block only
-downloaded whose entry for this run's host, org and repository is 24 hours old or more and that
-the run hasn't asked about, up to the lookup's limit. One runs at a time; a question about a
-block it doesn't name waits for it to end and then starts the next. Each wrapper waits for its
-answer within its block's budget, half what its compile took (B-26), and a lookup that takes
-longer or fails counts as a server that can't be reached, for that question: cargo never waits
-on the network longer than the compile it may save, and a warm build with stale vouches asks
-once. On a person's machine a downloaded library's first reuse is audited one
-time in ten, which the record notes, then one in fifty as any (B-16). A difference found by an
-audit or a comparison of a downloaded block, and a dependent that can't load one (B-15), suspend
-its first key for `keep_days`, not until `hushrun build clean`, and are reported to the scope the
-record names: `differs`, `rejected`, or `unreadable` for a pack that failed its checks. *Rests
-on:* the server answering a lookup only for blocks it still serves to this caller, so that a
-withdrawn block stops being reused on laptops within a day without a list of withdrawals; and a
-lookup without fetching counting as a use, so blocks in daily use don't expire (a stale block
-the run doesn't reuse, asked about with the rest, counts as used too). *Breaks if:* `open` takes
-longer than a build: no stale vouch is asked in that run, and a withdrawn block is reused once
-more, as on a machine that can't reach the server, until a run whose `open` answers in time.
+block built here is reused as any. A block only downloaded is never reused as a download again
+once any server said it no longer serves it: its record keeps that "no" (B-32), whatever the
+network does afterwards, and a run with no relay, which asks nothing, honours it too. Otherwise
+it is reused without asking while its entry for this run's host, org and repository is under 24
+hours old; else the wrapper asks the relay, which answers within the block's **budget**, half
+what its compile took (B-26). "Served, with these outputs" lets it be reused. **The server can't
+be reached** means `open` failed, or hasn't answered within that budget: only then does an entry
+of any age count, and the block is reused. Once `open` has answered, a stale entry is never
+enough: the wrapper waits for the server's answer within its budget and, without one (a lookup
+slower than that, or one that failed), it is a miss: rustc runs, and the block that compile
+builds takes the downloaded one's place and is from then on built here (B-32). The relay asks
+the server, without fetching, about every block in the store only downloaded whose entry for
+this run's host, org and repository is stale, as the store's records list them, as soon as
+`open` answers (`Relay::ask_vouches`), in as few lookups as the lookup's limit allows; one runs
+at a time, and a question about a block it didn't name waits for it to end and then starts the
+next. At the end of a check it asks again, within the uploads' cut, about every downloaded block
+the check reused that no lookup of the run answered for, so that a machine in daily use never
+goes stale. Every answer is written into the block's record: served with its outputs renews the
+entry, anything else is a "no". On a person's machine a downloaded library's first reuse is
+audited one time in ten, which the record notes, then one in fifty as any (B-16). A difference
+found by an audit or a comparison of a downloaded block, and a dependent that can't load one
+(B-15), suspend its first key for `keep_days`, not until `hushrun build clean`, and are reported
+to the scope the record names: `differs`, `rejected`, or `unreadable` for a pack that failed its
+checks. *Rests on:* the server answering a lookup only for blocks it still serves to this
+caller, so that a withdrawn block stops being reused on laptops within a day without a list of
+withdrawals, and a "no" from it being final for that copy; a lookup without fetching counting as
+a use, so blocks in daily use don't expire (a stale block the run doesn't reuse, asked about with
+the rest, counts as used too); and cargo never waiting on the network longer than the compile it
+may save. *Breaks if:* `open` takes longer than a block's budget: that block is reused as on a
+machine that can't reach the server, until a run whose `open` answers in time; or a server says
+"no" by mistake (a lookup answered for the wrong repository): the block compiles here from then
+on, a cost and never a wrong reuse.
 
 **B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
 `build: env:` list; every compile of that repository is keyed by their values (B-5), on every

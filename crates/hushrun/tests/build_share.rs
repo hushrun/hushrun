@@ -611,21 +611,22 @@ fn lookups_since(fake: &FakeBuild, after: usize) -> Vec<(bool, usize)> {
 
 // covers: B-26, B-34
 #[test]
-fn a_warm_build_with_stale_vouches_takes_what_one_with_fresh_vouches_takes_and_asks_once() {
+fn a_warm_build_with_stale_vouches_waits_for_open_at_most_half_each_compile_and_asks_once() {
     let fake = FakeBuild::start();
     let dir = tempfile::tempdir().unwrap();
     let a = Machine::new(dir.path(), "a", None);
     let (code, stderr) = a.build(&fake);
     assert_eq!(code, 0, "{stderr}");
-    // Compiles that took 4 seconds where they were built: a question about a vouch of one may
-    // wait 2.
-    fake.set_costs(4_000);
+    // Compiles that took 400 ms where they were built: a question about a vouch of one may wait
+    // 200.
+    fake.set_costs(400);
     let b = Machine::new(dir.path(), "b", Some(&a.repo));
     let (code, stderr) = b.build(&fake);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
     // A warm build with vouches fresh, and the same a day later, when every vouch B holds is
-    // older than a day and `open` takes 10 seconds: nothing waits for it.
+    // older than a day and `open` takes 10 seconds: each crate waits for it at most its 200 ms,
+    // then the server can't be reached, for it, and the entry counts.
     let (fresh, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
     assert!(age_vouches(&b.root.join("cache/build")) > 0);
@@ -634,7 +635,7 @@ fn a_warm_build_with_stale_vouches_takes_what_one_with_fresh_vouches_takes_and_a
     let (stale, stderr) = timed_build(&b, &fake, "on");
     assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
     assert!(
-        stale < fresh.mul_f64(1.1) + Duration::from_millis(500),
+        stale < fresh.mul_f64(1.1) + Duration::from_millis(900),
         "with stale vouches {stale:?}, fresh {fresh:?}: {stderr}"
     );
     assert_eq!(lookups_since(&fake, seen), vec![], "{stderr}");
@@ -658,6 +659,60 @@ fn a_warm_build_with_stale_vouches_takes_what_one_with_fresh_vouches_takes_and_a
         stale < fresh.mul_f64(1.1) + Duration::from_millis(500),
         "with stale vouches {stale:?}, fresh {fresh:?}: {said}"
     );
+}
+
+/// `cargo build` through hushrun, the target as the last build left it.
+fn warm_build(m: &Machine, fake: &FakeBuild) -> String {
+    let output = m
+        .hushrun(fake)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    stderr
+}
+
+// covers: B-34
+#[test]
+fn a_withdrawn_download_is_not_reused_once_its_entry_is_a_day_old_and_the_no_is_kept() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    // Two machines download A's blocks; two days later, the server withdraws them.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    for m in [&b, &c] {
+        let (code, stderr) = m.build(&fake);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.contains("(2 from the shared store)"), "{stderr}");
+        assert!(age_vouches(&m.root.join("cache/build")) > 0);
+    }
+    for block in fake.stored() {
+        fake.withdraw(block.address);
+    }
+    // The server up: neither is reused, however short the crates' compiles.
+    let (_, stderr) = timed_build(&c, &fake, "on");
+    assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
+    // A build whose target is warm compiles nothing; its lookup of stale vouches learns "no",
+    // and the blocks' records keep it.
+    let seen = fake.seen().len();
+    let stderr = warm_build(&b, &fake);
+    assert_eq!(lookups_since(&fake, seen), vec![(false, 2)], "{stderr}");
+    // Then the server is down, and the entries would count at any age: not reused.
+    fake.set_unreachable(true);
+    let (_, stderr) = timed_build(&b, &fake, "on");
+    assert!(stderr.contains("2 crates built, none reused"), "{stderr}");
 }
 
 /// A workspace whose proc macro reads `GREETING` while it expands, without telling rustc: the

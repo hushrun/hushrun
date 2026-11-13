@@ -1627,6 +1627,7 @@ mod tests {
             scope: "person/1".into(),
             outputs: hushrun_core::blocks::Hex32([1; 32]),
             date_ms,
+            word: crate::origin::Word::Served,
         }
     }
 

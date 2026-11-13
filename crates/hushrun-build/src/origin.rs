@@ -6,12 +6,14 @@
 //! | Field | Means |
 //! |---|---|
 //! | `built` | A compile here made it: the run, and (when the run had a backend) the backend's host, the org and a fingerprint of the credential. Absent: not built here |
-//! | `vouched` | One entry per host, org and repository whose server said it serves this block to this machine: the scope, the digest of outputs and the server's date of the last time it said so. A download makes the first one |
+//! | `vouched` | One entry per host, org and repository whose server answered for this block: the scope, the digest of outputs, the server's date of the last time it answered, and its word, `served` (absent) or `withdrawn`. A download makes the first one |
 //! | `reused` | Whether it has been reused here yet |
 //!
 //! A block with no record (every block from before this record existed) is reused locally as
 //! before and never goes up. A block that was only downloaded never goes up either, and it is
-//! reused without asking only while a server the run belongs to vouched for it within a day.
+//! reused without asking only while a server the run belongs to vouched for it within a day;
+//! once any server said it no longer serves it, it is never reused as a download again
+//! ([`Origin::standing`], the one definition).
 
 use hushrun_core::blocks::Hex32;
 use serde::{Deserialize, Serialize};
@@ -46,7 +48,41 @@ pub struct Built {
     pub by: Option<Identity>,
 }
 
-/// A server's word that it serves the block to this machine.
+/// What a server last said of a downloaded block (B-34).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Word {
+    /// It serves the block to this machine, with these outputs.
+    #[default]
+    Served,
+    /// It no longer serves it (withdrawn, evicted, or other outputs): the block is never reused
+    /// as a download again, whatever the network does afterwards.
+    Withdrawn,
+}
+
+impl Word {
+    fn is_served(&self) -> bool {
+        *self == Word::Served
+    }
+}
+
+/// How a block in the store stands for a reuse (B-34): [`Origin::standing`], the one function
+/// the wrapper and the relay decide by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// Built here, or with no record: reused as any block.
+    Any,
+    /// Only downloaded, and the run's server said within a day that it serves it: reused without
+    /// asking.
+    Fresh,
+    /// Only downloaded, with no such word: reused on a server's word, or when no server can be
+    /// reached in the run.
+    Stale,
+    /// Only downloaded, and a server said it no longer serves it: never reused as a download.
+    Withdrawn,
+}
+
+/// A server's word about the block, for this machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vouch {
     /// The backend's origin.
@@ -61,6 +97,9 @@ pub struct Vouch {
     pub outputs: Hex32,
     /// When the server last said so, in milliseconds since the epoch, by the server's clock.
     pub date_ms: u64,
+    /// What it said: served, unless it said withdrawn.
+    #[serde(default, skip_serializing_if = "Word::is_served")]
+    pub word: Word,
 }
 
 /// `origin.json`.
@@ -115,15 +154,36 @@ impl Origin {
             .find(|v| v.host == host && v.org == org && v.repository == repository)
     }
 
-    /// Whether a downloaded block may be reused without asking (B-34): its entry for this run's
-    /// host, org and repository is under a day old at `now_ms`. A date ahead of `now_ms` (a
-    /// clock behind the server's) counts as fresh.
-    pub fn fresh(&self, host: &str, org: &str, repository: &str, now_ms: u64) -> bool {
-        self.vouch(host, org, repository)
-            .is_some_and(|v| now_ms.saturating_sub(v.date_ms) < VOUCH_FRESH_MS)
+    /// How the block stands for a reuse at `now_ms` (B-34), for a run whose server is `run`'s
+    /// host, org and repository, or for a run with none. Built here or with no record: any. Only
+    /// downloaded: withdrawn once any server said it no longer serves it; fresh while the run's
+    /// server said within a day that it does (a date ahead of `now_ms`, a clock behind the
+    /// server's, counts as fresh); else stale.
+    pub fn standing(&self, run: Option<(&str, &str, &str)>, now_ms: u64) -> Standing {
+        if !self.downloaded_only() {
+            return Standing::Any;
+        }
+        if self.vouched.iter().any(|v| v.word == Word::Withdrawn) {
+            return Standing::Withdrawn;
+        }
+        let fresh = run
+            .and_then(|(host, org, repository)| self.vouch(host, org, repository))
+            .is_some_and(|v| now_ms.saturating_sub(v.date_ms) < VOUCH_FRESH_MS);
+        if fresh {
+            Standing::Fresh
+        } else {
+            Standing::Stale
+        }
     }
 
-    /// Records `vouch`, replacing the entry of the same host, org and repository.
+    /// Whether a downloaded block may be reused without asking (B-34): [`Origin::standing`] says
+    /// fresh for this run's host, org and repository.
+    pub fn fresh(&self, host: &str, org: &str, repository: &str, now_ms: u64) -> bool {
+        self.standing(Some((host, org, repository)), now_ms) == Standing::Fresh
+    }
+
+    /// Records `vouch`, a server's word, replacing the entry of the same host, org and
+    /// repository.
     pub fn renew(&mut self, vouch: Vouch) {
         self.vouched.retain(|v| {
             !(v.host == vouch.host && v.org == vouch.org && v.repository == vouch.repository)
@@ -172,6 +232,7 @@ mod tests {
             scope: "person/1".into(),
             outputs: Hex32([7; 32]),
             date_ms,
+            word: Word::Served,
         }
     }
 
@@ -225,5 +286,41 @@ mod tests {
             origin.report_scope(host, "acme", "github.com/acme/none"),
             Some("person/1")
         );
+    }
+
+    // covers: B-34
+    #[test]
+    fn a_no_from_any_server_is_kept_and_the_block_is_never_reused_as_a_download_again() {
+        let day = VOUCH_FRESH_MS;
+        let host = "https://api.example.com";
+        let shop = Some((host, "acme", "github.com/acme/shop"));
+        let mut origin = Origin::downloaded(vouch("github.com/acme/shop", 10 * day));
+        assert_eq!(origin.standing(shop, 10 * day), Standing::Fresh);
+        assert_eq!(origin.standing(shop, 12 * day), Standing::Stale);
+        assert_eq!(origin.standing(None, 10 * day), Standing::Stale);
+        // Another repository's server said no: whatever the network does afterwards, and
+        // however fresh the run's own entry.
+        origin.renew(Vouch {
+            word: Word::Withdrawn,
+            ..vouch("github.com/acme/other", 11 * day)
+        });
+        assert_eq!(origin.standing(shop, 10 * day), Standing::Withdrawn);
+        assert_eq!(origin.standing(None, 10 * day), Standing::Withdrawn);
+        assert!(!origin.fresh(host, "acme", "github.com/acme/shop", 10 * day));
+        // Written and read back, the word stays; an entry from before words is served.
+        let read: Origin = serde_json::from_slice(&serde_json::to_vec(&origin).unwrap()).unwrap();
+        assert_eq!(read.standing(shop, 10 * day), Standing::Withdrawn);
+        let before = serde_json::json!({"schema": ORIGIN_SCHEMA, "vouched": [{"host": host,
+            "org": "acme", "repository": "r", "scope": "s", "outputs": Hex32([1; 32]),
+            "date_ms": 1}]});
+        let before: Origin = serde_json::from_value(before).unwrap();
+        assert_eq!(before.vouched[0].word, Word::Served);
+        // A block built here is reused as any, whatever was said of it.
+        let mut built = Origin::built_here("1-2", None);
+        built.renew(Vouch {
+            word: Word::Withdrawn,
+            ..vouch("github.com/acme/shop", day)
+        });
+        assert_eq!(built.standing(shop, day), Standing::Any);
     }
 }

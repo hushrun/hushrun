@@ -4528,6 +4528,7 @@ fn vouch(date_ms: u64) -> Vouch {
         scope: "person/2".into(),
         outputs: hushrun_core::blocks::Hex32([0; 32]),
         date_ms,
+        word: crate::origin::Word::Served,
     }
 }
 
@@ -4681,6 +4682,58 @@ fn a_downloaded_block_is_reused_without_asking_for_a_day_then_only_while_a_serve
     // A block built here is never asked about.
     let (r, asked) = run(Some(Answer::None));
     assert_eq!((r.outcome(), asked), (REUSED, false));
+}
+
+// covers: B-34
+#[test]
+fn a_block_a_server_said_no_to_is_never_reused_as_a_download_whatever_the_network_does() {
+    let (other, key) = built_elsewhere();
+    let withdrawn = |date_ms: u64| Vouch {
+        word: crate::origin::Word::Withdrawn,
+        ..vouch(date_ms)
+    };
+    // The run's server is down (the relay answers that none can be reached), and the entry is
+    // fresh: the "no" a server said once still holds, and nothing is asked.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.renew(withdrawn(now_ms()));
+            Some(o)
+        })
+        .unwrap();
+    let relay = serving(other.store(), w.store(), Some(Answer::Offline));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(
+        !relay
+            .borrow()
+            .asked
+            .iter()
+            .any(|r| matches!(r, Request::Vouch { .. }))
+    );
+    // A run with no relay at all, which asks nothing, doesn't reuse it either.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.vouched = vec![withdrawn(now_ms())];
+            Some(o)
+        })
+        .unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
 }
 
 // covers: B-26, B-29
