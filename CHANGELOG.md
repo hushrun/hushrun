@@ -8,6 +8,12 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ### Fixed
 
+- With `tests: observe` or `reuse`, a Vitest test that awaits `promisify(exec)` or
+  `promisify(execFile)` gets `{ stdout, stderr }` again, and a rejection carries both, as without
+  hushrun: the setup module's wrappers now keep what they wrap carries, `util.promisify.custom`
+  among it, and `fs.realpath.native` and `fs.realpathSync.native` are there again. A child
+  process the promisified form starts is still recorded as one hushrun can't follow, and a path
+  `native` resolves as a file the test file read.
 - A blob-less or tree-less partial clone read through the git CLI (`HUSHRUN_GIT_READER=cli`, a
   SHA-256 repository, or one gix can't open) fails with `E_MISSING_OBJECTS` and its advice on git
   2.43, as on newer git. git 2.43 dies on the object it can't fetch from the promisor remote
