@@ -183,6 +183,9 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- `hushrun build fetch` with nothing to sign in with says to set `HUSHRUN_AGENT` for the phase,
+  the variable the documentation gives an agent's string, and that an agent token in
+  `HUSHRUN_TOKEN` works too. Before, it named only `HUSHRUN_TOKEN`.
 - Build blocks: `HUSHRUN_BUILD=true` or `false`, which `hushrun plan --format env` and `hushrun
   artifact resolve` print for a shell to evaluate, no longer turns build reuse off. Only `off`,
   `observe` and `on` set the mode for one command; those two values count as unset, silently.

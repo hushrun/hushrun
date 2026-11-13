@@ -82,7 +82,14 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
         _ => None,
     }
     .filter(|access| access.credential.is_some())
-    .ok_or_else(|| failed("no backend is signed in to: set HUSHRUN_TOKEN for this phase".into()))?;
+    // An agent's token is read from `HUSHRUN_AGENT` (the string `hushrun token create --agent`
+    // prints, which the docs name) and, as an `hra_` token, from `HUSHRUN_TOKEN`.
+    .ok_or_else(|| {
+        failed(
+            "no backend is signed in to: set HUSHRUN_AGENT for this phase to the string `hushrun token create --agent` printed (an agent token in HUSHRUN_TOKEN works too)"
+                .into(),
+        )
+    })?;
     let config = crate::cmd::build_relay::Config {
         store: Store::new(&store),
         caller: crate::cmd::build_session::caller(Some(&access), in_ci),

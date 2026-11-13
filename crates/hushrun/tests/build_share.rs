@@ -916,6 +916,31 @@ fn a_fetch_asks_for_each_check_it_names_and_gets_only_that_checks_manifest() {
     assert_ne!(named[0], named[1]);
 }
 
+// covers: B-36
+#[test]
+fn a_fetch_with_nothing_to_sign_in_with_names_the_agents_variable() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let b = Machine::new(dir.path(), "b", None);
+    let output = b
+        .hushrun(&fake)
+        .env_remove("HUSHRUN_TOKEN")
+        .env_remove("HUSHRUN_BUILD")
+        .args(["build", "fetch"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("set HUSHRUN_AGENT for this phase"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("an agent token in HUSHRUN_TOKEN works too"),
+        "{stderr}"
+    );
+}
+
 fn set_origin(m: &Machine, url: &str) {
     git::run(&m.repo, &["config", "remote.origin.url", url], None);
 }

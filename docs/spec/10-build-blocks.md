@@ -852,7 +852,8 @@ and uploads what an earlier leg of the same run built, in the same scope); or an
 read a job's environment, which holds the request token.
 
 **B-36 A sandbox's fetch.** `hushrun build fetch [CHECK]...`, run in a sandbox's setup phase with
-the network and a token, sends `open` for the repository and platform once for each check named,
+the network and a token (an agent's: `HUSHRUN_AGENT`, or an `hra_` token in `HUSHRUN_TOKEN`; with
+none it exits naming `HUSHRUN_AGENT`), sends `open` for the repository and platform once for each check named,
 by its id as `hushrun run` names it (B-26: a digest of the repository and the check's name), or
 once naming no check, which the backend answers with the repository's newest manifest for the
 platform, whatever its check (`OpenRequest::check`); an `open` naming a check gets that check's
