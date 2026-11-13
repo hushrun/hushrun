@@ -61,8 +61,9 @@ fn access(fake: &FakeBuild, token: &str) -> crate::results::BuildAccess {
         base: fake.url(),
         host: fake.origin(),
         org: "acme".into(),
-        token: token.into(),
+        credential: Some(crate::results::BuildCredential::Token(token.into())),
         agent: token.starts_with("hra_"),
+        uploads: true,
         machine: Some(crate::machine::Machine {
             key: SigningKey::generate_p256().unwrap(),
             source: "test".into(),
@@ -558,7 +559,11 @@ fn killing_the_relay_after_begin_and_running_again_ends_with_the_block_stored() 
         repository: None,
         commit: None,
     };
-    let client = super::http::Client::new(&fake.url(), FakeBuild::TOKEN).unwrap();
+    let client = super::http::Client::new(
+        &fake.url(),
+        super::credential::Credential::Token(FakeBuild::TOKEN.into()),
+    )
+    .unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1235,6 +1240,133 @@ fn every_request_carries_the_workspace_s_commit_and_an_untrusted_job_says_why_on
         assert!(
             routes.iter().any(|r| r == route),
             "no {route} in {routes:?}"
+        );
+    }
+}
+
+fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {
+    move |c: &mut Config| {
+        c.access.credential = Some(crate::results::BuildCredential::GithubOidc {
+            url: fake.id_token_url(),
+            request_token: FakeBuild::ID_TOKEN_REQUEST.into(),
+        });
+        c.access.agent = false;
+        c.access.machine = None;
+    }
+}
+
+fn bearers(fake: &FakeBuild) -> Vec<String> {
+    fake.seen()
+        .iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .map(|s| s.authorization.clone().unwrap_or_default())
+        .collect()
+}
+
+// covers: B-31
+#[test]
+fn in_ci_every_build_request_carries_the_job_s_id_token_and_it_is_minted_again_before_it_expires() {
+    // A token that lives ten minutes serves every request.
+    let fake = FakeBuild::start();
+    fake.set_id_token_seconds(600);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let (key, step) = block(&m.store, 91, 5_000, None);
+    ask(&relay, Request::Hints { step });
+    let _ = key;
+    relay.end_check(&[]);
+    let tokens = fake.id_tokens();
+    assert_eq!(tokens.len(), 1);
+    let sent = bearers(&fake);
+    assert!(sent.len() >= 3, "{sent:?}");
+    assert!(
+        sent.iter().all(|b| *b == format!("Bearer {}", tokens[0])),
+        "{sent:?}"
+    );
+    // Its audience is the backend's URL.
+    assert!(
+        fake.audiences()[0].contains("127.0.0.1"),
+        "{:?}",
+        fake.audiences()
+    );
+
+    // One within a minute of expiring is replaced before the next request.
+    let fake = FakeBuild::start();
+    fake.set_id_token_seconds(30);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(
+        &relay,
+        Request::Hints {
+            step: Digest::of(b"s"),
+        },
+    );
+    relay.end_check(&[]);
+    let sent = bearers(&fake);
+    let tokens = fake.id_tokens();
+    assert_eq!(tokens.len(), sent.len(), "a fresh one each time: {sent:?}");
+    assert_eq!(sent[0], format!("Bearer {}", tokens[0]));
+    assert_eq!(sent[1], format!("Bearer {}", tokens[1]));
+}
+
+// covers: B-31
+#[test]
+fn a_401_gets_a_fresh_id_token_and_one_more_try() {
+    let fake = FakeBuild::start();
+    fake.set_id_token_seconds(600);
+    fake.fail(route::OPEN, 401, 1);
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    assert_eq!(fake.count(route::OPEN), 2);
+    assert_eq!(fake.id_tokens().len(), 2);
+    relay.end_check(&[]);
+    // A person's token isn't minted: a 401 stops the run's sharing as before.
+    let fake = FakeBuild::start();
+    fake.fail(route::OPEN, 401, 1);
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("stopped", || {
+        matches!(relay.state().phase, super::Phase::Stopped(_))
+    });
+    assert_eq!(fake.count(route::OPEN), 1);
+    relay.end_check(&[]);
+}
+
+// covers: B-31
+#[test]
+fn a_caller_the_policy_lets_write_nothing_or_ci_without_an_id_token_uploads_nothing() {
+    // An agent token the policy gives no scope to write, and an agent token in CI outside
+    // GitHub Actions, which reads only though the policy says it writes.
+    for (agent_writes, uploads) in [(false, true), (true, false)] {
+        let fake = FakeBuild::start();
+        if !agent_writes {
+            fake.set_scopes(None, &["protected/acme/shop"]);
+        }
+        let m = machine();
+        let relay = start(&fake, &m, |c| {
+            c.access.credential = Some(crate::results::BuildCredential::Token(
+                FakeBuild::AGENT_TOKEN.into(),
+            ));
+            c.access.agent = true;
+            c.access.uploads = uploads;
+        });
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        let (key, step) = block(&m.store, 7, 2_000, None);
+        assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+        until("the upload loop ended", || !relay.state().uploading);
+        relay.end_check(&[]);
+        assert_eq!(
+            fake.count(route::BEGIN),
+            0,
+            "writes {agent_writes}, uploads {uploads}"
         );
     }
 }

@@ -524,6 +524,8 @@ struct Server {
     reads_as: Option<String>,
     /// Whether such a lookup was answered.
     answered: Cell<bool>,
+    /// In GitHub Actions: the ID token endpoint and the request token (B-31).
+    oidc: Option<(String, String)>,
     /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
     /// this run asks nothing more of them, and says so once.
     keeps_no_hints: Cell<bool>,
@@ -846,16 +848,17 @@ impl Backend {
         };
         // GitHub sets both when the job has `permissions: id-token: write`. The ID token names
         // this URL as its audience, so no other server can use it.
-        let github_oidc = match (
+        let oidc = match (
             var("ACTIONS_ID_TOKEN_REQUEST_URL"),
             var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
         ) {
-            (Some(url), Some(token)) => Some(OidcEndpoint {
-                url,
-                token: Secret::new(token),
-            }),
+            (Some(url), Some(token)) => Some((url, token)),
             _ => None,
         };
+        let github_oidc = oidc.clone().map(|(url, token)| OidcEndpoint {
+            url,
+            token: Secret::new(token),
+        });
         if credential == Credential::Nothing && github_oidc.is_some() {
             credential = Credential::GithubOidc;
         }
@@ -883,6 +886,7 @@ impl Backend {
                 in_ci,
                 reads_as,
                 answered: Cell::new(false),
+                oidc,
                 keeps_no_hints: Cell::new(false),
             })),
         })
@@ -1215,8 +1219,10 @@ pub struct BuildAccess {
     pub host: String,
     /// The org, as in the URL.
     pub org: String,
-    /// The bearer token the requests carry: a person's or an agent's.
-    pub token: String,
+    /// What the requests carry: a person's or an agent's token, or in GitHub Actions the job's
+    /// ID token, minted for each request as it nears its expiry. `None`: nothing to send (CI
+    /// with no ID token), and the run shares nothing.
+    pub credential: Option<BuildCredential>,
     /// Whether the token is an agent token.
     pub agent: bool,
     /// The machine that signs a `begin`, when one is here. It is not registered from here: the
@@ -1224,26 +1230,61 @@ pub struct BuildAccess {
     pub machine: Option<crate::machine::Machine>,
     /// Whether an answer of this run carried `Hushrun-Build: on`.
     pub shares: bool,
+    /// Whether the run may upload at all (B-31): not in CI outside GitHub Actions, where an
+    /// agent token reads and never writes. Even then the policy decides.
+    pub uploads: bool,
+}
+
+/// What a relay's requests carry (B-26, B-31).
+#[derive(Clone)]
+pub enum BuildCredential {
+    /// A person's or an agent's token.
+    Token(String),
+    /// GitHub Actions: where the job mints ID tokens, and the request token that asks.
+    GithubOidc { url: String, request_token: String },
 }
 
 impl Backend {
-    /// What a relay needs (B-26), for a server that a person's or an agent's token signs in to.
-    /// `None` for a directory, no token, or CI's ID token (which the relay doesn't use yet).
+    /// What a relay needs (B-26, B-31): for a server, the credential its build requests carry.
+    /// In CI that is the job's ID token and nothing else, also beside an agent token (B-31); in
+    /// CI with none, the credential is `None`. Elsewhere a person's or an agent's token; with
+    /// none, no access. `None` for a directory.
     pub fn build_access(&self) -> Option<BuildAccess> {
         let Store::Server(server) = &self.store else {
             return None;
         };
-        let token = server.token.clone()?;
-        let agent = matches!(server.signer(), Signer::Agent);
         let url = LedgerUrl::parse(&server.base).ok()?;
+        let agent_token = matches!(server.signer(), Signer::Agent);
+        let (credential, agent, uploads) = if server.in_ci {
+            match (server.oidc.clone(), server.token.clone()) {
+                (Some((url, request_token)), _) => (
+                    Some(BuildCredential::GithubOidc { url, request_token }),
+                    false,
+                    true,
+                ),
+                // Anywhere else in CI an agent token reads the org's blocks, and writes none.
+                (None, Some(token)) if agent_token => {
+                    (Some(BuildCredential::Token(token)), true, false)
+                }
+                (None, _) => (None, false, false),
+            }
+        } else {
+            let token = server.token.clone()?;
+            (Some(BuildCredential::Token(token)), agent_token, true)
+        };
         Some(BuildAccess {
             base: server.base.clone(),
             host: crate::credentials::origin(&url),
             org: hosted::org_of(&server.base).unwrap_or_else(|| server.base.clone()),
-            token,
+            credential,
             agent,
-            machine: server.key().ok().flatten(),
+            machine: if server.in_ci {
+                None
+            } else {
+                server.key().ok().flatten()
+            },
             shares: server.ledger.build_sharing_seen(),
+            uploads,
         })
     }
 }

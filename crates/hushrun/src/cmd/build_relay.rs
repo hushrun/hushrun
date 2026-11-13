@@ -20,6 +20,7 @@
 //!
 //! Every failure ends in rustc running as asked (B-19): an answer of "none" is a compile.
 
+mod credential;
 mod http;
 mod pack;
 mod socket;
@@ -377,7 +378,15 @@ impl Relay {
     /// Starts a relay: its runtime, its folder in the store, and the outbox's reconciliation
     /// (claims of dead runs back to waiting, dead runs' folders gone).
     pub(crate) fn start(mut config: Config) -> Result<Relay, String> {
-        let client = Client::new(&config.access.base, &config.access.token)?;
+        let credential = config
+            .access
+            .credential
+            .as_ref()
+            .ok_or_else(|| "no credential to send".to_string())?;
+        let client = Client::new(
+            &config.access.base,
+            credential::Credential::of(credential, &config.access.base),
+        )?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -390,7 +399,7 @@ impl Relay {
         let by = Identity {
             host: config.access.host.clone(),
             org: config.access.org.clone(),
-            credential: hushrun_build::origin::fingerprint(&config.access.token),
+            credential: client.fingerprint(),
         };
         let machine = config.access.machine.take();
         let caller = Caller::Person { signed_in: true };

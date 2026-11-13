@@ -93,6 +93,8 @@ pub struct HttpLedger {
     /// An answer to one of hushrun's other requests carried `Hushrun-Build: on`: the org shares
     /// build blocks (the build protocol).
     build_sharing: std::sync::atomic::AtomicBool,
+    /// One of hushrun's other requests got an answer, whatever its status.
+    answered: std::sync::atomic::AtomicBool,
 }
 
 impl fmt::Debug for HttpLedger {
@@ -249,6 +251,7 @@ impl HttpLedger {
             tuning,
             log: Mutex::new(log::State::default()),
             build_sharing: std::sync::atomic::AtomicBool::new(false),
+            answered: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -379,6 +382,11 @@ impl HttpLedger {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Whether one of hushrun's other requests got an answer from the server, of any status.
+    pub fn answered_any(&self) -> bool {
+        self.answered.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Whether `path` is a path under the base, which a request to another endpoint may name.
     fn check_path(&self, path: &str) -> Result<(), LedgerError> {
         if path.contains(['?', '#', '\\'])
@@ -426,6 +434,8 @@ impl HttpLedger {
             if answer.status.is_redirection() {
                 return Err(self.failure(&answer, path));
             }
+            self.answered
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if answer.build_sharing {
                 self.build_sharing
                     .store(true, std::sync::atomic::Ordering::Relaxed);

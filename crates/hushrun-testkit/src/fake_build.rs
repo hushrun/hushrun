@@ -135,6 +135,12 @@ struct State {
     store_rate: Arc<AtomicU64>,
     /// Bytes the object store was asked to send, whole or cut off.
     served_bytes: u64,
+    /// ID tokens the fake's token endpoint issued, each with its expiry in seconds since the
+    /// epoch, and how long a new one lives.
+    id_tokens: Vec<(String, u64)>,
+    id_token_seconds: u64,
+    /// The audiences the token endpoint was asked for.
+    audiences: Vec<String>,
 }
 
 /// A running fake of the build protocol for one org.
@@ -178,6 +184,9 @@ impl FakeBuild {
             seen: Vec::new(),
             store_rate: store_rate.clone(),
             served_bytes: 0,
+            id_tokens: Vec::new(),
+            id_token_seconds: 300,
+            audiences: Vec::new(),
         }));
         let shared = state.clone();
         let rate = store_rate;
@@ -193,6 +202,35 @@ impl FakeBuild {
         );
         state.lock().expect("fake build state").origin = server.url();
         FakeBuild { server, state }
+    }
+
+    /// What `ACTIONS_ID_TOKEN_REQUEST_TOKEN` must be for the fake's ID token endpoint.
+    pub const ID_TOKEN_REQUEST: &'static str = "fake-id-token-request";
+
+    /// The fake's ID token endpoint, as `ACTIONS_ID_TOKEN_REQUEST_URL` names one:
+    /// `GET {origin}/id-token?audience=…`, with `ID_TOKEN_REQUEST` as its bearer. It issues a
+    /// JWT-shaped token with an `exp`, which the org's routes take until it expires.
+    pub fn id_token_url(&self) -> String {
+        format!("{}/id-token", self.origin())
+    }
+
+    /// How long the ID tokens the endpoint issues from now on live, in seconds.
+    pub fn set_id_token_seconds(&self, seconds: u64) {
+        self.state().id_token_seconds = seconds;
+    }
+
+    /// The ID tokens issued so far, oldest first.
+    pub fn id_tokens(&self) -> Vec<String> {
+        self.state()
+            .id_tokens
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+
+    /// The audiences ID tokens were asked for.
+    pub fn audiences(&self) -> Vec<String> {
+        self.state().audiences.clone()
     }
 
     /// The org's URL: `http://127.0.0.1:<port>/o/<org>`.
@@ -544,6 +582,9 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
     if let Some(object) = store_object {
         return store(&mut state, &request, &object, pause);
     }
+    if request.path == "/id-token" {
+        return answer(id_token(&mut state, &request), pause);
+    }
     if request.path.strip_prefix(&prefix).is_none() {
         return answer(error(404, "not_found", "no such endpoint"), pause);
     }
@@ -551,7 +592,16 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
     let token = request
         .header("authorization")
         .and_then(|value| value.strip_prefix("Bearer "));
-    if !matches!(token, Some(FakeBuild::TOKEN | FakeBuild::AGENT_TOKEN)) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let id_token = token.is_some_and(|token| {
+        state
+            .id_tokens
+            .iter()
+            .any(|(issued, expires)| issued == token && *expires > now)
+    });
+    if !id_token && !matches!(token, Some(FakeBuild::TOKEN | FakeBuild::AGENT_TOKEN)) {
         return answer(
             error(401, "unauthorized", "a token this server takes is needed"),
             pause,
@@ -613,6 +663,8 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         route::BEGIN => match serde_json::from_slice::<BeginRequest>(&request.body) {
             Ok(ask) if ask.blocks.len() > blocks::MOST_BEGIN => too_many(),
             Ok(ask) => match request.header("hushrun-signature") {
+                // CI's ID tokens never sign.
+                None if id_token => begin(&mut state, ask, None),
                 None => error(401, "machine_required", "a machine's signature is needed"),
                 Some(signature) => {
                     let machine = signature.split_whitespace().next().map(str::to_string);
@@ -891,6 +943,26 @@ fn commit(state: &mut State, ask: &CommitRequest) -> Response {
         answers.push(json!({"address": address, "state": word}));
     }
     Response::json(200, &json!({"blocks": answers}))
+}
+
+/// `GET /id-token?audience=…`: a JWT-shaped token whose payload holds its `exp`.
+fn id_token(state: &mut State, request: &Request) -> Response {
+    let bearer = format!("Bearer {}", FakeBuild::ID_TOKEN_REQUEST);
+    if request.header("authorization") != Some(bearer.as_str()) {
+        return error(401, "unauthorized", "the request token is needed");
+    }
+    let audience = request.query("audience").unwrap_or_default().to_string();
+    state.audiences.push(audience);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let exp = now + state.id_token_seconds;
+    let n = state.id_tokens.len();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(json!({"exp": exp, "n": n}).to_string());
+    let token = format!("eyJhbGciOiJub25lIn0.{payload}.c2ln");
+    state.id_tokens.push((token.clone(), exp));
+    Response::json(200, &json!({"count": 1, "value": token}))
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ pub(crate) struct Answered<T> {
 pub(crate) struct Client {
     http: reqwest::Client,
     base: String,
-    token: String,
+    credential: super::credential::Credential,
 }
 
 fn install_crypto_provider() {
@@ -53,7 +53,10 @@ fn install_crypto_provider() {
 }
 
 impl Client {
-    pub(crate) fn new(base: &str, token: &str) -> Result<Client, String> {
+    pub(crate) fn new(
+        base: &str,
+        credential: super::credential::Credential,
+    ) -> Result<Client, String> {
         install_crypto_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -64,8 +67,13 @@ impl Client {
         Ok(Client {
             http,
             base: base.trim_end_matches('/').to_string(),
-            token: token.to_string(),
+            credential,
         })
+    }
+
+    /// What tells this client's credential apart, never the secret.
+    pub(crate) fn fingerprint(&self) -> String {
+        self.credential.fingerprint()
     }
 
     /// `POST {base}/{path}` with `body`, within `timeout`; one more try after a 503 or 429 whose
@@ -92,8 +100,10 @@ impl Client {
         let url = format!("{}/{path}", self.base);
         let deadline = tokio::time::Instant::now() + timeout;
         let mut tries = 0;
+        let mut fresh = false;
         loop {
             tries += 1;
+            let token = self.credential.bearer(&self.http, fresh).await?;
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
                 return Err(Failure::Unreachable(format!("{url}: no answer in time")));
@@ -101,7 +111,7 @@ impl Client {
             let mut request = self
                 .http
                 .post(&url)
-                .bearer_auth(&self.token)
+                .bearer_auth(&token)
                 .header("content-type", "application/json")
                 .timeout(left)
                 .body(bytes.clone());
@@ -141,6 +151,11 @@ impl Client {
                         .map_err(|err| {
                             Failure::Failed(format!("{url}: the answer isn't one: {err}"))
                         });
+                }
+                // An ID token the backend no longer takes: mint a fresh one and try once more.
+                401 if !fresh && self.credential.renews() => {
+                    fresh = true;
+                    tries -= 1;
                 }
                 401 | 403 | 404 | 405 => {
                     let code = serde_json::from_slice::<serde_json::Value>(&body)
