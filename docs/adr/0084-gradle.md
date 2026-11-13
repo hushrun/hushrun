@@ -333,7 +333,8 @@ written within the two seconds of slack the report search allows. The decisions:
   script's build service writes, at the end of the build, one facts file with no task and a note:
   `Gradle ran no test: :a:test and :b:test were up to date, so nothing ran and nothing was learned
   of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run
-  them`, and `ranNothing`, the tasks. The run says the note once, as any note.
+  them`, and `ranNothing`, the tasks. The run says the note once, as any note. (ADR 0077's
+  Amendment 16: the store keeps it, and the next plan goes by it; the snapshot above is taken.)
 - hushrun doesn't force the tasks itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
   stays as written and the build as it was (ADR 0084's first rule). Gradle's up to date is its own
   reuse, proven on the same inputs; running the tests anyway costs the person the time hushrun is

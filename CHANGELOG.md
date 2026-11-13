@@ -148,6 +148,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 
 ### Fixed
 
+- After a Gradle run whose test tasks were all up to date, the next plan no longer says `all 5
+  test classes run: none had passed here yet`: it says none of them is left out, and that the last
+  run here executed none of them. Such a run no longer bounds what reuse can save.
 - A report an earlier run wrote in the two seconds before COMMAND started, and COMMAND left as it
   was, no longer gives the run's last line its counts: only a report the run changed is its own.
 - A Maven run that failed with a test or failure no class could be told for says once why it

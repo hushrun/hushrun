@@ -448,3 +448,14 @@ place.
   the report files the search reaches before each start of COMMAND (`hushrun_reports::before`,
   each one's modification time and length) and counts afterwards only those that changed
   (`find_changed`), for every check, whatever its adapter.
+- **A run in which the runner executed nothing.** With every Gradle test task up to date, the
+  run said the adapter's note, and the next plan said `all 5 test classes run: none had passed
+  here yet on the files it read`: false twice, since they had passed, and Gradle may run none of
+  them again. This is its own path beside `why_every`'s `said`, decided by one stored word: the
+  store keeps the note with the check (`ran_nothing`), set by a run whose facts say `ranNothing`
+  and cleared by any other in the same write, and such a run sets no `whole_ms`. The next plan
+  that reuses nothing then starts `none of its 5 test classes is left out`, hushrun's own act, not
+  a claim about Gradle's, and its reason, after what changed (which still comes first), is `its
+  last run here executed none of them, so none kept a pass on the files it read`, through
+  `why_every`'s `said`. The run's last line gives no counts: the reports the tasks left are as
+  the run found them. `hushrun ready` speaks of CI's machine, not this one, and is unchanged.

@@ -973,17 +973,25 @@ impl Session {
         let line = if let Some(line) = tests_line {
             line
         } else if reused == 0 && audited.is_empty() {
-            let all = format!(
-                "{check}: all {} run",
-                test_files(total as u64, self.adapter.test_file())
-            );
+            let noun = self.adapter.test_file();
+            // \[C-32\] The check's last run here executed no test (its runner found every task up
+            // to date): hushrun leaves none out, which is all it can say of what the runner runs,
+            // and the reason, after what changed, is that run.
+            let all = match (&map.ran_nothing, total) {
+                (None, _) => format!("{check}: all {} run", test_files(total as u64, noun)),
+                (Some(_), 1) => format!("{check}: its one {noun} isn't left out"),
+                (Some(_), _) => format!(
+                    "{check}: none of its {} is left out",
+                    test_files(total as u64, noun)
+                ),
+            };
             let why = why_every(
                 &map,
                 input.tree,
                 &sets,
                 known.iter().map(|(unit, _)| unit),
-                self.adapter.test_file(),
-                None,
+                noun,
+                map.ran_nothing.as_ref().map(|_| RAN_NOTHING_LAST_TIME),
             );
             format!("{all}: {why}")
         } else if reused == 0 {
@@ -1185,6 +1193,7 @@ impl Session {
         }
         observed.left_out = left_out;
         observed.stale_build = stale;
+        observed.ran_nothing = facts::ran_nothing(&files);
         // \[C-32\] What an adapter's facts say people should know of this run, each said once.
         let notes: BTreeSet<&str> = files
             .iter()
@@ -1825,6 +1834,9 @@ pub struct Observed {
     pub left_out: Option<String>,
     /// \[C-32\] The runner ran on a stale build, and why: a run that passed records nothing.
     pub stale_build: Option<String>,
+    /// \[C-32\] The runner executed no test (`settings.ranNothing`), with its adapter's note: the
+    /// store keeps it with the check, and the next plan's line goes by it.
+    ran_nothing: Option<String>,
     /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing in a run that
     /// passed: counted, and the second such run in a row forgets the check, word and map.
     silent: bool,
@@ -1896,7 +1908,9 @@ impl Observed {
             sources: &self.sources,
             unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
             known: &known,
-            whole_ms: reused_nothing.then_some(duration_ms),
+            // A run that executed no test took nothing of the tests' time.
+            whole_ms: (reused_nothing && self.ran_nothing.is_none()).then_some(duration_ms),
+            ran_nothing: self.ran_nothing.as_deref(),
             edges: &self.edges,
             disagreements: &found,
             hints: &self.received,
@@ -3024,6 +3038,10 @@ fn describe(why: &str) -> String {
         other => other.to_string(),
     }
 }
+
+/// \[C-32\] Why none of a check's units is reused when its last run here executed no test.
+const RAN_NOTHING_LAST_TIME: &str =
+    "its last run here executed none of them, so none kept a pass on the files it read";
 
 /// Why every test file would have run though some ran here before: the first file of the rest set
 /// that changed since the map was written, or a source that is new or gone (RFC 0003 §1.2).

@@ -754,6 +754,26 @@ pub fn run_not_kept(files: &[FactsFile]) -> Option<String> {
         .map(|why| why.chars().take(300).collect())
 }
 
+/// \[C-32\] What the adapter said when its runner executed no test: the note of a file whose
+/// `settings.ranNothing` says so (Gradle, every test task up to date or from its cache), or a
+/// plain sentence when it has none.
+pub fn ran_nothing(files: &[FactsFile]) -> Option<String> {
+    let file = files
+        .iter()
+        .find(|f| f.settings.contains_key("ranNothing"))?;
+    Some(
+        file.settings
+            .get("note")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .unwrap_or("its runner executed no test")
+            .chars()
+            .take(2000)
+            .collect(),
+    )
+}
+
 /// \[C-32\] Why the first file of `files` that says so left out what the plan didn't list.
 pub fn left_out(files: &[FactsFile]) -> Option<String> {
     files

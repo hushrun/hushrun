@@ -772,6 +772,9 @@ pub struct Map {
     /// \[C-33\] The longest a run of the check that reused nothing took here: what reuse can save
     /// at most. `None` until one ran.
     pub whole_ms: Option<u64>,
+    /// \[C-32\] What the adapter said when the check's last run here executed no test, as it said
+    /// it (Gradle's test tasks up to date); `None` after a run that executed some.
+    pub ran_nothing: Option<String>,
 }
 
 impl Map {

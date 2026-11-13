@@ -655,6 +655,66 @@ fn a_task_gradle_didnt_execute_records_nothing() {
     assert_eq!(r.map()["units"], before["units"]);
 }
 
+// covers: C-32, C-34, C-46
+#[test]
+fn a_run_in_which_gradle_ran_no_test_never_says_tests_ran() {
+    if !tools(NEEDS, has_gradle()) {
+        return;
+    }
+    let gradle = gradle();
+    let r = Repo::new(&shop("reuse"));
+    let first = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // A file no test reads changes: every test class's key with it, and Gradle finds every test
+    // task up to date, so nothing runs.
+    r.write("README.md", "A shop, again.\n");
+    let idle = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(idle.code, 0, "{}\n{}", idle.stdout, idle.stderr);
+    assert!(
+        idle.stdout.contains("> Task :app:test UP-TO-DATE"),
+        "{}",
+        idle.stdout
+    );
+    // The adapter's note, once; the last line says no count of tests, since none ran, and the
+    // reports the tasks left aren't this run's.
+    assert_eq!(
+        idle.stderr
+            .lines()
+            .filter(|l| l.starts_with("hushrun: unit: Gradle ran no test: "))
+            .count(),
+        1,
+        "{}",
+        idle.stderr
+    );
+    let last = line(&idle, "hushrun: unit passed in ");
+    assert!(!last.contains("test"), "{last}");
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 5, "ran": 0, "reused": 0})
+    );
+    // The next plan knows that run executed nothing: it claims no class runs, only that none is
+    // left out, and says why none kept a pass.
+    r.write(
+        "lib/src/main/java/shop/lib/Price.java",
+        "package shop.lib;\npublic class Price { public static int of(int x) { return x + x; } }\n",
+    );
+    let next = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(next.code, 0, "{}\n{}", next.stdout, next.stderr);
+    assert_eq!(
+        line(&next, "hushrun: unit: "),
+        "hushrun: unit: none of its 5 test classes is left out: its last run here executed none of them, so none kept a pass on the files it read"
+    );
+    // Gradle ran lib's and app's tasks: the store forgets that a run executed nothing.
+    r.write("README.md", "A shop, once more.\n");
+    let after = r.run(&command(&gradle, &[]), &[]);
+    assert_eq!(after.code, 0, "{}\n{}", after.stdout, after.stderr);
+    assert!(
+        line(&after, "hushrun: unit: ").starts_with("hushrun: unit: all 5 test classes run: "),
+        "{}",
+        after.stderr
+    );
+}
+
 // covers: C-46
 #[cfg(unix)]
 #[test]
