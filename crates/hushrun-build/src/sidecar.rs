@@ -315,6 +315,44 @@ pub fn reused(file: &Path) -> bool {
     fs::metadata(file).is_ok_and(|meta| same_file(&record.stat, &Stat::of(&meta)))
 }
 
+/// The folder of `.hushrun/` that holds a mark for each unit rustc last ran for as asked.
+const AS_ASKED: &str = "as-asked";
+
+/// Marks the unit `stem` (`<crate name><extra filename>`) of `out_dir` as compiled as asked,
+/// without the wrapper's remaps (B-19, B-24): written before rustc runs, so it is there before
+/// any of the unit's outputs a dependent could start from. A mark that can't be written only
+/// costs a dependent its portability's guard, never a wrong block: its key names the bytes.
+pub fn mark_as_asked(out_dir: &Path, stem: &str) {
+    let dir = out_dir.join(DIR).join(AS_ASKED);
+    let _ = fs::create_dir_all(&dir).and_then(|()| {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(stem))
+    });
+}
+
+/// Removes the mark [`mark_as_asked`] left for the unit `stem` of `out_dir`: before the wrapper
+/// compiles it with its changes or puts a block's files in place.
+pub fn clear_as_asked(out_dir: &Path, stem: &str) {
+    let _ = fs::remove_file(out_dir.join(DIR).join(AS_ASKED).join(stem));
+}
+
+/// Whether the unit whose output `file` is (`lib<stem>.rlib`, `.rmeta`, `.so`, `.dylib`) was
+/// last compiled as asked ([`mark_as_asked`]). One failed `stat` when it wasn't.
+pub fn made_as_asked(file: &Path) -> bool {
+    let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.strip_prefix("lib").unwrap_or(name);
+    let Some((stem, _)) = name.split_once('.') else {
+        return false;
+    };
+    let dir = file.parent().unwrap_or(Path::new(""));
+    fs::symlink_metadata(dir.join(DIR).join(AS_ASKED).join(stem)).is_ok()
+}
+
 /// Removes the record of `file`. A missing record is fine.
 pub fn forget(file: &Path) -> io::Result<()> {
     let path = record_path(file).ok_or_else(|| no_name(file))?;

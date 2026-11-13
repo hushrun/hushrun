@@ -865,6 +865,41 @@ fn a_package_never_stored_runs_as_asked() {
     assert_eq!(w.blocks(), 0);
 }
 
+// covers: B-19, B-24
+#[test]
+fn a_dependent_of_a_crate_compiled_as_asked_stays_on_this_machine() {
+    // `a` runs as asked, without the remaps (here: never stored); its bytes hold this machine's
+    // folders, so a dependent's key names bytes no other machine makes, and uploading it is
+    // waste (the review's B6: 13 such blocks went up).
+    let w = world_with(Mode::On, |s| s.never_store = vec!["a".into()]);
+    let ws = w.checkout("ws");
+    let r = w.call(&ws, "a", &[]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::NeverStore)
+    );
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let r = w.call(&ws, "b", &["--extern", &ext]);
+    assert_eq!(r.outcome(), STORED);
+    let portable = r.entry.as_ref().unwrap().portable.clone().unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert_eq!(portable.externs, ["a"]);
+    // Once `a` is compiled with the wrapper's changes, its dependents may go again.
+    let w2 = world(Mode::On);
+    let ws2 = w2.checkout("ws");
+    assert_eq!(w2.call(&ws2, "a", &[]).outcome(), STORED);
+    fs::create_dir_all(ws2.join("b/src")).unwrap();
+    fs::write(ws2.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws2.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let r = w2.call(&ws2, "b", &["--extern", &ext]);
+    assert_eq!(r.outcome(), STORED);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+}
+
 // covers: B-1, B-8, B-9, B-12, B-13
 #[test]
 fn a_block_built_in_one_checkout_is_reused_in_another() {
@@ -1304,7 +1339,7 @@ fn a_truncated_block_compiles() {
 
 // covers: B-12, B-19
 #[test]
-fn a_block_that_cant_be_put_in_place_runs_rustc_as_asked() {
+fn a_block_that_cant_be_put_in_place_compiles_with_the_remaps_and_stores_nothing() {
     let w = world(Mode::On);
     let one = w.checkout("one");
     let two = w.checkout("two");
@@ -1321,9 +1356,22 @@ fn a_block_that_cant_be_put_in_place_runs_rustc_as_asked() {
     fs::set_permissions(&json, perms).unwrap();
     let text = fs::read_to_string(&json).unwrap();
     fs::write(&json, text.replace("{hushrun:out-dir}", "{hushrun:deps-9}")).unwrap();
+    let blocks = w.blocks();
     let r = w.call(&two, "a", &[]);
     assert_eq!(r.outcome(), not_stored(NotStored::Restore));
-    ran_as_asked(&r);
+    // rustc ran once, with the wrapper's changes: as asked, without the remaps, the outputs
+    // would hold this checkout's folders and every dependent would get a key no other machine
+    // computes (the review's B6).
+    assert!(r.seen.execs.is_empty(), "{:?}", r.seen.execs);
+    assert_eq!(r.seen.compiles.len(), 1, "{:?}", r.seen.compiles);
+    assert!(
+        r.seen.compiles[0]
+            .iter()
+            .any(|a| *a == format!("--remap-path-prefix={}=.", two.display())),
+        "{:?}",
+        r.seen.compiles[0]
+    );
+    assert_eq!(w.blocks(), blocks, "nothing stored");
     assert!(!r.stderr.contains("hushrun:"));
 }
 
@@ -2325,7 +2373,8 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
         assert!(r.entry.unwrap().note.is_some(), "{name}");
     }
 
-    // Built as asked: b's own block can't be put in place.
+    // b's own block can't be put in place: b compiles (with the wrapper's changes, B-19) and
+    // fails to load a, which heals a as any compile does.
     let w = world(Mode::On);
     let (two, a, _) = two_reused(&w);
     let one = two.parent().unwrap().join("one");
@@ -2358,7 +2407,7 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
     let ext_two = externs(&two);
     let ext_two: Vec<&str> = ext_two.iter().map(String::as_str).collect();
     let r = w.call(&two, "b", &ext_two);
-    assert_eq!(r.outcome(), not_stored(NotStored::Restore));
+    assert_eq!(r.outcome(), not_stored(NotStored::RustcFailed));
     assert!(r.seen.execs.is_empty());
     assert_eq!(r.seen.compiles.len(), 1);
     assert!(w.store().suspended(&a).is_some());

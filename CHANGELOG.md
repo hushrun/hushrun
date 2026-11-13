@@ -172,6 +172,12 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
   compiler.
 - A key suspended because a downloaded block differed or couldn't be loaded comes back after the
   store's kept days.
+- Build blocks: a block that can't be put in place now compiles with the wrapper's remaps
+  (storing nothing) rather than as asked, so its dependents keep the keys other machines
+  compute; a dependent of a crate compiled as asked stays on the machine; two runs on one store
+  that download the same block leave its folder where it is. Before, a reuse could copy from a
+  block another run's download was replacing, compile as asked, and give a dozen dependents keys
+  no other machine computes.
 
 ## [0.13.0] - 2026-11-12
 

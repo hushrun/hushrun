@@ -773,6 +773,61 @@ fn a_cold_machine_prefetches_the_manifest_s_libraries_and_opens_them_when_asked(
     relay.end_check(&[]);
 }
 
+// covers: B-32
+#[test]
+fn a_second_run_s_download_of_a_block_already_downloaded_leaves_its_folder_in_place() {
+    // Two runs on one store fetch one block at once: the second publish found the first's
+    // block there and replaced it, moving the folder away while the first run's wrapper copied
+    // from it; that compile then ran as asked, without the remaps (the review's B6). The same
+    // outputs now stay where they are, with the second run's vouch.
+    use std::os::unix::fs::MetadataExt as _;
+    let fake = FakeBuild::start();
+    let a = machine();
+    let (key, step) = block(&a.store, 43, 50_000, Some(me(&fake)));
+    let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+    fake.put_block(
+        address(&key),
+        "person/1",
+        &packed.pack.bytes().unwrap(),
+        packed.outputs,
+        5000,
+        blocks::Class::Library,
+    );
+    let b = machine();
+    let fetch = |relay: &Arc<Relay>| {
+        ask(
+            relay,
+            Request::Fetch {
+                step,
+                keys: vec![key],
+                class: LocalClass::Library,
+                local_ms: None,
+            },
+        )
+    };
+    let first = start(&fake, &b, |_| {});
+    begin(&first, &b);
+    until("open", || answering(&first));
+    assert_eq!(fetch(&first), Answer::Ready { key });
+    let folder = |store: &Store| {
+        let block = store.block(&key).unwrap().unwrap();
+        std::fs::metadata(&block.files[0].path).unwrap().ino()
+    };
+    let before = folder(&b.store);
+    let vouched = b.store.origin(&key).unwrap().vouched[0].date_ms;
+    first.end_check(&[]);
+    // The second run looked the block up before the first published it, as at once.
+    let second = start(&fake, &b, |_| {});
+    begin(&second, &b);
+    until("open", || answering(&second));
+    assert_eq!(fetch(&second), Answer::Ready { key });
+    assert_eq!(folder(&b.store), before, "the block's files were moved");
+    let origin = b.store.origin(&key).unwrap();
+    assert!(origin.downloaded_only());
+    assert!(origin.vouched[0].date_ms >= vouched);
+    second.end_check(&[]);
+}
+
 // covers: B-33
 #[test]
 fn in_observe_nothing_is_published_and_a_difference_is_counted_reported_and_suspends() {

@@ -158,6 +158,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         }
         Parsed::PassedThrough(why) => {
             unit::forget_for_args(args, Some(&cwd));
+            unit::mark_as_asked_for_args(args, &cwd);
             if let Some(current) = session::current(&|name| ports.var(name)) {
                 let var = |name: &str| env.get(name).and_then(OsStr::to_str).map(str::to_string);
                 current.log(&Entry {
@@ -578,6 +579,7 @@ impl Call<'_> {
             return self.watched_as_asked(outcome, record);
         }
         self.forget_unit();
+        sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         self.log(entry(outcome, Some(self.invocation.class())));
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
@@ -693,6 +695,7 @@ impl Call<'_> {
     fn watched_as_asked(&mut self, outcome: Outcome, record: bool) -> i32 {
         let store = Store::new(&self.current.store);
         self.forget_unit();
+        sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         let since = self.ports.now();
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
@@ -930,12 +933,22 @@ impl Call<'_> {
             Plan::PassThrough(why) => self.pass(why),
             Plan::AsAsked(why) => self.as_asked(Outcome::BuiltNotStored(why)),
             Plan::Reuse => {
-                let (Some(found), Some(_)) = (&found, &cx) else {
-                    return self.as_asked(
-                        decide::after(decide::restore_failed(), &Facts::ran(Rustc::NotRun)).outcome,
-                    );
+                let (Some(found), Some(cx)) = (&found, &cx) else {
+                    return self.as_asked(Outcome::BuiltNotStored(NotStored::Restore));
                 };
-                self.reuse(&store, &roots, found, cx.as_ref())
+                if let Some(code) = self.reuse(&store, &roots, found, cx) {
+                    return code;
+                }
+                // B-12, B-19: the block couldn't be put in place (another run's relay moved it,
+                // a file went). The compile runs with the wrapper's changes and stores nothing,
+                // so its outputs are the bytes its key names and its dependents get the keys
+                // every other machine computes; as asked, without the remaps, they would not.
+                let plan = decide::restore_failed();
+                let Plan::Compile { keep, compare } = plan else {
+                    return self.as_asked(Outcome::BuiltNotStored(NotStored::Restore));
+                };
+                let common = common.unwrap_or_else(|| cx.common());
+                self.compile(&store, &roots, cx, common, plan, keep, compare, None)
             }
             Plan::Compile { keep, compare } => {
                 let Some(cx) = &cx else {
@@ -1203,16 +1216,17 @@ impl Call<'_> {
         )
     }
 
-    /// B-12: the block's files in place, then its messages; rustc doesn't start. Any failure
-    /// before the first message runs rustc as asked.
+    /// B-12: the block's files in place, then its messages; rustc doesn't start. `None`: a
+    /// failure before the first message, after which the caller compiles.
     fn reuse(
         &mut self,
         store: &Store,
         roots: &Roots,
         found: &Found,
-        cx: Option<&Context<'_>>,
-    ) -> i32 {
+        cx: &Context<'_>,
+    ) -> Option<i32> {
         self.forget_unit();
+        sidecar::clear_as_asked(&self.out_dir(), &self.invocation.file_stem());
         let restored = Restore {
             block: &found.block,
             description: &found.description,
@@ -1222,15 +1236,8 @@ impl Call<'_> {
             pid: self.ports.pid(),
         }
         .run();
-        let restored = match restored {
-            Ok(restored) => restored,
-            Err(_) => {
-                let outcome =
-                    decide::after(decide::restore_failed(), &Facts::ran(Rustc::NotRun)).outcome;
-                return self.as_asked(outcome);
-            }
-        };
-        if let Some(cx) = cx {
+        let restored = restored.ok()?;
+        {
             let out_dir = self.out_dir();
             let outputs = found
                 .description
@@ -1272,7 +1279,7 @@ impl Call<'_> {
             downloaded: self.downloaded.get(),
             ..entry(verdict.outcome, Some(self.invocation.class()))
         });
-        0
+        Some(0)
     }
 
     /// Steps 8 to 16: compile with the wrapper's changes, gather what it read, store, compare.
@@ -1303,6 +1310,7 @@ impl Call<'_> {
             && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
                 .is_err();
         self.forget_unit();
+        sidecar::clear_as_asked(&self.out_dir(), &inv.file_stem());
         // What the compile reads is dated against this, a date of the file system's (B-11).
         let floor = inputs::floor(self.ports.file_clock(&self.out_dir()), self.ports.now());
         let compile_start = self.ports.now();
@@ -2240,7 +2248,9 @@ impl Call<'_> {
             &run,
             self.current.share.as_ref().map(|share| share.by.clone()),
         );
-        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+            o.is_some_and(Origin::downloaded_only)
+        };
         let published = if self.replace_downloaded.get() {
             // The block there was only downloaded and no server vouches for it now.
             store
@@ -2321,7 +2331,9 @@ impl Call<'_> {
                 until,
                 now,
             );
-            let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+            let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+                o.is_some_and(Origin::downloaded_only)
+            };
             let replaced = store.replace(key, description, files, origin, now, only_downloaded);
             if let Some(share) = &self.current.share {
                 let _ = self.ports.relay(

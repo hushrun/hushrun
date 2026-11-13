@@ -110,9 +110,14 @@ pub fn before(facts: &Before) -> Plan {
 }
 
 /// The plan when putting a block in place failed before any message was written (B-12, B-19):
-/// rustc runs as asked and nothing is stored.
+/// rustc runs with the wrapper's changes and nothing is stored, so the outputs are the bytes the
+/// key names. As asked, without the remaps, every dependent would get a key no other machine
+/// computes.
 pub const fn restore_failed() -> Plan {
-    Plan::AsAsked(NotStored::Restore)
+    Plan::Compile {
+        keep: Keep::Not(NotStored::Restore),
+        compare: false,
+    }
 }
 
 /// rustc's codes for a crate it could not load (B-15): only these, never an error in the

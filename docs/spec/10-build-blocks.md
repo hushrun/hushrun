@@ -318,7 +318,9 @@ renamed into place after a bundle already there is moved aside and removed, so t
 ever there in part. The bundle goes first, then the other files, then the dep-info file, which
 is written with this folder's paths. Then the recorded messages are written to stderr with
 this folder's paths, the notices that an output is ready last. If any step fails before the first
-message is written, rustc runs. Messages are kept per form (`--error-format`, `--json`, colour);
+message is written, the call compiles as any compile the wrapper handles does (B-9's changes,
+the remaps among them) and stores nothing: as asked, without the remaps, its outputs would hold
+this machine's folders and every dependent would get a key no other machine computes. Messages are kept per form (`--error-format`, `--json`, colour);
 a block whose compile wrote only notices serves every form, and otherwise a missing form is a
 build.
 
@@ -421,8 +423,13 @@ output folder; a bundle with no DWARF file, or that holds anything but folders a
 files, is `built, not stored`. A program the wrapper leaves as it is (B-9) is stored with the
 debug objects it names.
 
-**B-19 Every failure runs rustc.** An error computing a key, reading the store, or putting files
-in place MUST end in rustc running as asked with nothing stored. A settings file that can't be
+**B-19 Every failure runs rustc.** An error computing a key or reading the store MUST end in
+rustc running as asked with nothing stored; an error putting a block's files in place ends in a
+compile with the wrapper's changes and nothing stored (B-12). A call that runs rustc as asked
+after its arguments were read first leaves a mark for its unit in its output folder
+(`.hushrun/as-asked/<crate><extra filename>`), before rustc starts and so before any output a
+dependent could start from; a compile or a reuse of the unit removes it first. A dependent of
+a library so marked is not portable (B-24 `extern`). A settings file that can't be
 read, a store that can't be written, CI and Windows are `passed through`. A kill at any point
 leaves nothing that a later build takes for a block. Where a file is expected, the wrapper opens
 only a regular file: a named pipe, a socket or a device is never opened, the compile that reads
@@ -550,7 +557,12 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 - `variable-names-base`: a variable the compile read names a base, and a second compile with it
   naming another folder didn't give the same bytes, or couldn't be made.
 - `extern`: a proc macro among its externs is one a dependent on another machine would name
-  differently (B-6): it is tied, or what names it holds this machine.
+  differently (B-6): it is tied, or what names it holds this machine; or a library among its
+  externs was compiled as asked (B-19), without the remaps, so its bytes hold this machine's
+  folders and a dependent elsewhere names other bytes. Such a block is no use to another
+  machine. *Can't see:* a library built by plain cargo outside `hushrun run`, which leaves no
+  mark; its dependents' keys are this machine's alone and may go up, which costs uploads, never
+  a wrong block.
 - `unkeyed-value`: an output holds, as it is, the value of an environment variable that is in
   neither key (not among the first key's variables, and not named by the dep-info), with a
   value of 8 bytes or more: a name that reads like a secret (E-12's one definition), or any name
@@ -783,7 +795,9 @@ is replaced where the two differ, its first key suspended as B-34 says, and the 
 reported. The replacement is one step under the block's lock (the two folders exchange names), so
 no other publish lands between the old block leaving and the new one arriving; where the
 filesystem can't exchange, the old one stays, and the suspension makes that a compile. Either way it is from then on also
-built here. *Rests on:* one store serving every org, credential and agent of one OS user, so that
+built here. A download of a block already there, only downloaded, with the same outputs (two
+runs on one store that fetched it at once) leaves the block's folder where it is, since a reuse
+may be copying from it, and adds this run's vouch to its record. *Rests on:* one store serving every org, credential and agent of one OS user, so that
 only the record tells a block one run may send from one it may not.
 
 **B-33 The shared mode, apart from the local one.** B-1's mode is reuse on this machine. Sharing

@@ -294,6 +294,11 @@ impl Context<'_> {
                     let known = sidecar::lookup(&path).map_err(|_| NotStored::Hash)?;
                     if is_linked_library(&path) {
                         portable.push((ext.name.clone(), known.portable));
+                    } else if sidecar::made_as_asked(&path) {
+                        // A library compiled as asked, without the remaps (B-19): its bytes
+                        // are this machine's alone, so a dependent on another machine names
+                        // it otherwise and this block is no use there (the review's B6).
+                        portable.push((ext.name.clone(), false));
                     }
                     match known.produced_by {
                         Some(origin) if is_linked_library(&path) => ExternBy::ProducedBy(origin),

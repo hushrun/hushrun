@@ -399,7 +399,9 @@ impl Store {
     /// Puts a new block under `key` in place of the one there, when `may` says the one there may
     /// be replaced (B-32: a block that was only downloaded may give way to this run's download
     /// or compile; a block built here never does). Decided under the block's lock, with the
-    /// record read under it. With no block there it is a plain publish.
+    /// record of where it came from and the block itself read under it: a caller that finds
+    /// the same outputs there leaves the folder alone, since a reuse may be copying from it.
+    /// With no block there it is a plain publish.
     pub fn replace(
         &self,
         key: &Digest,
@@ -407,7 +409,7 @@ impl Store {
         files: &[NewFile],
         origin: &Origin,
         now: SystemTime,
-        may: impl FnOnce(Option<&Origin>) -> bool,
+        may: impl FnOnce(Option<&Origin>, Option<&Block>) -> bool,
     ) -> Result<Replaced, StoreError> {
         self.replace_inner(key, description, files, origin, now, may, || {})
     }
@@ -422,7 +424,7 @@ impl Store {
         files: &[NewFile],
         origin: &Origin,
         now: SystemTime,
-        may: impl FnOnce(Option<&Origin>) -> bool,
+        may: impl FnOnce(Option<&Origin>, Option<&Block>) -> bool,
         between: impl FnOnce(),
     ) -> Result<Replaced, StoreError> {
         check_names(files)?;
@@ -434,7 +436,8 @@ impl Store {
             };
         }
         let lock = lock_block(&dest).map_err(at(&dest))?;
-        if !may(read_origin(&dest.join(ORIGIN)).as_ref()) {
+        let there = self.block(key).ok().flatten();
+        if !may(read_origin(&dest.join(ORIGIN)).as_ref(), there.as_ref()) {
             return Ok(Replaced::Kept);
         }
         let temp = self.reserve_dir(&key.hex())?;
@@ -1637,7 +1640,8 @@ mod tests {
             .publish_with_origin(&key(9), &description("r"), &theirs, &downloaded, day(1))
             .unwrap();
         let ours = [w.file("liba.rlib", b"compiled here")];
-        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        let only_downloaded =
+            |o: Option<&Origin>, _: Option<&Block>| o.is_some_and(Origin::downloaded_only);
         // Another run's relay publishes the same downloaded block, with a fresh vouch, just as
         // this compile's block is about to take the old one's place.
         let again = [w.file("liba.rlib", b"downloaded")];
@@ -1709,7 +1713,8 @@ mod tests {
         let w = world();
         let downloaded = [w.file("liba.rlib", b"from a pack")];
         let compiled = [w.file("liba.rlib", b"compiled here")];
-        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        let only_downloaded =
+            |o: Option<&Origin>, _: Option<&Block>| o.is_some_and(Origin::downloaded_only);
         w.store
             .publish_with_origin(
                 &key(1),

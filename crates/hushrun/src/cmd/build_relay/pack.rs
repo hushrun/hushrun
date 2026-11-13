@@ -335,11 +335,25 @@ pub(crate) fn publish(
             source: path.clone(),
         })
         .collect();
-    store
-        .replace(key, &description, &files, origin, now, |there| {
-            there.is_some_and(Origin::downloaded_only)
+    // B-32: a block only downloaded gives way to this run's download only where the two
+    // differ. The same outputs keep their folder, which another run's reuse may be copying
+    // from (the review's B6: a replace moved it away mid-copy, and that compile ran as asked,
+    // without the remaps), and gain this run's vouch.
+    let mut same = false;
+    let replaced = store
+        .replace(key, &description, &files, origin, now, |there, block| {
+            same = block.is_some_and(|block| same_outputs(&opened.record, block));
+            there.is_some_and(Origin::downloaded_only) && !same
         })
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if same && let Some(vouch) = origin.vouched.first().cloned() {
+        let _ = store.update_origin(key, |there| {
+            let mut there = there.filter(Origin::downloaded_only)?;
+            there.renew(vouch);
+            Some(there)
+        });
+    }
+    Ok(replaced)
 }
 
 /// The SHA-256s of an opened pack's files, by name, against a stored block's: whether they
