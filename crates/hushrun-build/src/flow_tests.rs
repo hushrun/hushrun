@@ -28,6 +28,9 @@ struct Plan {
     env_reads: Vec<String>,
     /// A variable whose raw value is written into the outputs (a path kept for run time).
     embed_var: Option<String>,
+    /// A variable whose raw value is written into the outputs without the dep-info naming it,
+    /// as a proc macro that reads the environment while it expands does.
+    leak_var: Option<String>,
     /// A variable naming a folder and a file in it that is included, as
     /// `include!(concat!(env!("OUT_DIR"), "/gen.rs"))` does.
     include_var: Option<(String, String)>,
@@ -212,6 +215,10 @@ impl Fake {
             let value = self.var(name, env).unwrap_or_default();
             content.push_str(&format!("embedded {value}\n"));
             env_deps.push((name.clone(), Some(value)));
+        }
+        if let Some(name) = &plan.leak_var {
+            let value = self.var(name, env).unwrap_or_default();
+            content.push_str(&format!("leaked {value}\n"));
         }
         if let Some((name, file)) = &plan.include_var {
             let value = self.var(name, env).unwrap_or_default();
@@ -4080,4 +4087,77 @@ fn a_block_that_holds_one_users_cargo_home_is_not_another_users_on_a_shared_stor
     assert_eq!(embedded(&ws1), one.cargo_home.to_str().unwrap());
     assert_eq!(call(&two, &ws2).outcome(), REUSED);
     assert_eq!(embedded(&ws2), two.cargo_home.to_str().unwrap());
+}
+
+/// One compile of library `a` whose output holds `name`'s value, `value`, without the dep-info
+/// naming it (`leak`), or named by it (`env!`, tracked).
+fn with_value_in_output(name: &str, value: &str, tracked: bool) -> (World, Result) {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let plan = if tracked {
+        Plan {
+            env_reads: vec![name.into()],
+            ..Plan::default()
+        }
+    } else {
+        Plan {
+            leak_var: Some(name.into()),
+            ..Plan::default()
+        }
+    };
+    w.plan("a", plan);
+    settle();
+    let r = w.call_with(&ws, "a", &[], |fake| {
+        from_a_registry(fake);
+        fake.vars.insert(name.into(), value.into());
+        fake.vars
+            .insert("GITHUB_SERVER_URL".into(), "https://github.com".into());
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    (w, r)
+}
+
+// covers: B-24
+#[test]
+fn an_output_holding_an_unkeyed_secret_stays_here_and_only_its_name_is_written() {
+    let value = "s3cr3t-value-1234";
+    let (w, r) = with_value_in_output("FOO_TOKEN", value, false);
+    let portable = r.entry.as_ref().unwrap().portable.clone().unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::UnkeyedValue)
+    );
+    assert_eq!(portable.variables, ["FOO_TOKEN"]);
+    // The output holds the value, as the compile wrote it; nothing hushrun writes does.
+    let mut written = fs::read_to_string(w.session.current().folder.join("log.jsonl")).unwrap();
+    for (_, dir) in w.store().stored() {
+        written.push_str(&fs::read_to_string(dir.join("block.json")).unwrap());
+    }
+    assert!(written.contains("FOO_TOKEN"));
+    assert!(!written.contains(value));
+    let counts = session::Counts::of(Mode::On, 0, &w.session.current().entries());
+    assert_eq!(counts.unkeyed, 1);
+    assert_eq!(counts.unkeyed_variables, ["FOO_TOKEN"]);
+}
+
+// covers: B-24
+#[test]
+fn a_long_value_no_ci_set_holds_its_block_back_and_ci_values_and_keyed_ones_dont() {
+    let (_, r) = with_value_in_output("LICENSE_SERVER", "licence.example.internal", false);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert_eq!(portable.variables, ["LICENSE_SERVER"], "{portable:?}");
+    // GitHub's own variable, in every step of a job, and in the doc comments of half the
+    // libraries: the block may leave.
+    let (_, r) = with_value_in_output("GITHUB_SERVER_URL", "https://github.com", false);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // A secret's value the dep-info names is in the second key: another value is another block.
+    let (_, r) = with_value_in_output("FOO_TOKEN", "s3cr3t-value-1234", true);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // Too short to search for.
+    let (_, r) = with_value_in_output("FOO_TOKEN", "short", false);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
 }

@@ -56,6 +56,10 @@ pub enum Reason {
     /// A proc macro among the externs is one another machine would name differently: it is not
     /// named by what it was built from, or that names this machine.
     Extern,
+    /// An output holds the value of a variable that looks like a secret and is not in the
+    /// block's key ([`unkeyed_candidate`]): anyone who can open the block could read it, and
+    /// another machine with another value would reuse this one's bytes.
+    UnkeyedValue,
 }
 
 impl Reason {
@@ -74,6 +78,7 @@ impl Reason {
             Reason::HomeInRecord => "home-in-record",
             Reason::VariableNamesBase => "variable-names-base",
             Reason::Extern => "extern",
+            Reason::UnkeyedValue => "unkeyed-value",
         }
     }
 
@@ -104,6 +109,10 @@ pub struct Portability {
     /// The externs [`Reason::Extern`] is about, by crate name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub externs: Vec<String>,
+    /// The variables [`Reason::UnkeyedValue`] is about, by name only: a value is never
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<String>,
 }
 
 impl Portability {
@@ -150,6 +159,9 @@ pub struct Facts<'a> {
     /// Each proc macro among the externs by crate name, and whether another machine names it
     /// the same way.
     pub externs: &'a [(String, bool)],
+    /// The variables whose value an output holds, of those [`unkeyed_candidate`] chose: by
+    /// name.
+    pub unkeyed: &'a [String],
 }
 
 /// Whether the block may leave the machine, and every reason it may not.
@@ -199,11 +211,79 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
     if !externs.is_empty() {
         reasons.insert(Reason::Extern);
     }
+    let mut variables: Vec<String> = facts.unkeyed.to_vec();
+    variables.sort();
+    variables.dedup();
+    if !variables.is_empty() {
+        reasons.insert(Reason::UnkeyedValue);
+    }
     Portability {
         portable: reasons.is_empty(),
         reasons: reasons.into_iter().collect(),
         externs,
+        variables,
     }
+}
+
+/// The prefixes of the variables a CI system sets itself, documented by each: GitHub Actions,
+/// GitLab, Buildkite, CircleCI, Travis, Jenkins, Azure Pipelines, Bitbucket, Drone, TeamCity,
+/// AppVeyor and Codebuild. Their values (a server's URL, a ref, a run's number) are the same for
+/// every job of a repository and turn up in crates by chance: `https://github.com` is in the
+/// doc comments of nearly half the libraries on crates.io. A name among them that looks like a
+/// secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is searched all the same.
+pub const SET_BY_CI: &[&str] = &[
+    "GITHUB_",
+    "RUNNER_",
+    "ACTIONS_",
+    "CI_",
+    "GITLAB_",
+    "BUILDKITE_",
+    "BUILDKITE",
+    "CIRCLE_",
+    "CIRCLECI",
+    "TRAVIS_",
+    "TRAVIS",
+    "JENKINS_",
+    "BUILD_",
+    "SYSTEM_",
+    "AGENT_",
+    "TF_BUILD",
+    "BITBUCKET_",
+    "DRONE_",
+    "DRONE",
+    "TEAMCITY_",
+    "APPVEYOR_",
+    "APPVEYOR",
+    "CODEBUILD_",
+];
+
+/// The prefixes of the variables the build tools set for a compile, and hushrun's own: cargo's
+/// (the ones B-5 keys are skipped as keyed; the rest name folders, flags or jobs), rustc's and
+/// rustup's. A name among them that looks like a secret is searched all the same.
+const SET_BY_TOOLS: &[&str] = &[
+    "CARGO", "__CARGO", "RUSTC", "RUSTDOC", "RUSTUP_", "RUST_", "OUT_DIR", "HUSHRUN_",
+];
+
+/// The least bytes a value of a variable that looks like a secret must have to be searched
+/// for: a shorter one turns up in outputs by chance.
+pub const SECRET_MIN_BYTES: usize = 8;
+/// The least bytes a value of any other variable must have to be searched for.
+pub const OTHER_MIN_BYTES: usize = 16;
+
+/// Whether an output holding the value `value` of the variable `name`, which is not in the
+/// compile's key, keeps its block on this machine (B-24): a name that looks like a secret (E-12)
+/// with a value of [`SECRET_MIN_BYTES`] or more, or any variable no CI system or build tool set
+/// itself with a value of [`OTHER_MIN_BYTES`] or more. The caller leaves out values that hold a
+/// root or a folder of this machine, which the search already finds by their own rules.
+pub fn unkeyed_candidate(name: &str, value: &[u8]) -> bool {
+    if hushrun_core::secret_names::is_secret_name(name) {
+        return value.len() >= SECRET_MIN_BYTES;
+    }
+    let set_by_others = SET_BY_CI
+        .iter()
+        .chain(SET_BY_TOOLS)
+        .any(|prefix| name.starts_with(prefix));
+    !set_by_others && value.len() >= OTHER_MIN_BYTES
 }
 
 /// Every place the second key names: reads, native places and folders, shapes, what was
@@ -308,6 +388,7 @@ mod tests {
             machine: &machine,
             variable_names_base: false,
             externs,
+            unkeyed: &[],
         })
     }
 
@@ -407,6 +488,7 @@ mod tests {
             machine: &machine,
             variable_names_base: true,
             externs: &[],
+            unkeyed: &[],
         });
         assert_eq!(reasons(p), "variable-names-base");
     }
@@ -428,6 +510,7 @@ mod tests {
                 machine: &machine,
                 variable_names_base: false,
                 externs: &[],
+                unkeyed: &[],
             })
         };
         // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
@@ -454,6 +537,7 @@ mod tests {
             machine: &machine,
             variable_names_base: false,
             externs: &[],
+            unkeyed: &[],
         });
         assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
@@ -473,11 +557,64 @@ mod tests {
             Reason::HomeInRecord,
             Reason::VariableNamesBase,
             Reason::Extern,
+            Reason::UnkeyedValue,
         ] {
             assert_eq!(
                 serde_json::to_value(reason).unwrap(),
                 serde_json::Value::String(reason.as_str().into())
             );
         }
+    }
+
+    // covers: B-24
+    #[test]
+    fn a_value_is_searched_for_when_it_looks_like_a_secret_or_no_one_set_it() {
+        // GitHub's own variables stay out, whatever their length; its token doesn't.
+        assert!(!unkeyed_candidate(
+            "GITHUB_SERVER_URL",
+            b"https://github.com"
+        ));
+        assert!(!unkeyed_candidate("GITHUB_REF", b"refs/heads/main"));
+        assert!(unkeyed_candidate("GITHUB_TOKEN", b"ghs_0123456789"));
+        assert!(unkeyed_candidate("CI_JOB_TOKEN", b"glcbt-0123456789"));
+        // A secret's name searches from 8 bytes; any other name from 16.
+        assert!(unkeyed_candidate("FOO_TOKEN", b"12345678"));
+        assert!(!unkeyed_candidate("FOO_TOKEN", b"1234567"));
+        assert!(unkeyed_candidate("LICENSE_SERVER", b"0123456789abcdef"));
+        assert!(!unkeyed_candidate("LICENSE_SERVER", b"0123456789abcde"));
+        // The build tools' own, and hushrun's, stay out unless they look like a secret.
+        assert!(!unkeyed_candidate(
+            "CARGO_TARGET_DIR",
+            b"/home/dev/w/target-long"
+        ));
+        assert!(!unkeyed_candidate(
+            "HUSHRUN_BUILD_SESSION",
+            b"/home/dev/.cache/x/y"
+        ));
+        assert!(unkeyed_candidate("HUSHRUN_TOKEN", b"hru_0123456789"));
+    }
+
+    // covers: B-24
+    #[test]
+    fn an_unkeyed_value_in_an_output_keeps_the_block_here_and_names_only_its_variable() {
+        let unkeyed = ["FOO_TOKEN".to_string(), "FOO_TOKEN".to_string()];
+        let machine = machine();
+        let p = portable(&Facts {
+            class: Class::Library,
+            asked: &asked(),
+            observed: &observed(),
+            records: &[],
+            in_outputs: &BTreeSet::new(),
+            machine: &machine,
+            variable_names_base: false,
+            externs: &[],
+            unkeyed: &unkeyed,
+        });
+        assert!(!p.portable);
+        assert_eq!(p.reasons, vec![Reason::UnkeyedValue]);
+        assert_eq!(p.variables, ["FOO_TOKEN"]);
+        // A record from before the rule reads, and has no variables.
+        let old: Portability = serde_json::from_str(r#"{"portable":true,"reasons":[]}"#).unwrap();
+        assert!(old.variables.is_empty());
     }
 }

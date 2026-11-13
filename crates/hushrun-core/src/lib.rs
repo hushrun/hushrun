@@ -18,6 +18,7 @@ pub mod plan;
 pub mod policy;
 pub mod run;
 pub mod scope;
+pub mod secret_names;
 pub mod signers;
 pub mod time;
 pub mod transparency;

@@ -191,6 +191,7 @@ mod tests {
                 portable: false,
                 reasons: vec![crate::portable::Reason::Tied],
                 externs: Vec::new(),
+                variables: Vec::new(),
             },
             outputs: vec![
                 Output {

@@ -273,6 +273,11 @@ pub struct Counts {
     pub min_free_gb: u32,
     /// The distinct notes the compiles left, in the order first seen.
     pub notes: Vec<String>,
+    /// Compiles whose block may not leave the machine because an output holds the value of a
+    /// variable not in its key (B-24).
+    pub unkeyed: u64,
+    /// Those variables, by name only, sorted.
+    pub unkeyed_variables: Vec<String>,
 }
 
 impl Counts {
@@ -299,6 +304,18 @@ impl Counts {
             counts.found += u64::from(entry.found);
             counts.differed += u64::from(entry.differed);
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
+            if let Some(portability) = &entry.portable
+                && portability
+                    .reasons
+                    .contains(&crate::portable::Reason::UnkeyedValue)
+            {
+                counts.unkeyed += 1;
+                counts
+                    .unkeyed_variables
+                    .extend(portability.variables.iter().cloned());
+                counts.unkeyed_variables.sort();
+                counts.unkeyed_variables.dedup();
+            }
             counts.stored_bytes = counts.stored_bytes.saturating_add(entry.stored_bytes);
             if let Some(note) = entry.note.as_deref().map(str::trim)
                 && !note.is_empty()

@@ -318,24 +318,41 @@ struct Produced {
     portability: Portability,
 }
 
-/// An output searched (B-10): whether it holds a root, and which folders that name the machine.
+/// An output searched (B-10): whether it holds a root, which folders that name the machine, and
+/// which unkeyed variables' values (B-24).
 struct Searched {
     file: OutputFile,
     tied: bool,
     machine: BTreeSet<Folder>,
+    /// The variables whose value the output holds, by name.
+    values: BTreeSet<String>,
 }
 
-/// What outputs are searched for: the roots (B-10) and the folders that name the machine, each
-/// text once with every kind it stands for.
+/// What a text an output is searched for stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Hit {
+    /// A root (B-10).
+    Root,
+    /// A folder that names the machine.
+    Machine(Folder),
+    /// The value of a variable that is not in the key and looks like a secret (B-24), by the
+    /// variable's name.
+    Value(String),
+}
+
+/// What outputs are searched for: the roots (B-10), the folders that name the machine and the
+/// values of unkeyed variables (B-24), each text once with every kind it stands for, so that one
+/// pass over each output finds them all.
 struct Search {
     needles: Needles,
-    kinds: Vec<Vec<Option<Folder>>>,
+    kinds: Vec<Vec<Hit>>,
 }
 
 impl Search {
-    fn new(roots: &Roots) -> Search {
-        let mut texts: Vec<(Vec<u8>, Vec<Option<Folder>>)> = Vec::new();
-        let mut add = |bytes: Vec<u8>, kind: Option<Folder>| {
+    /// `values` are the variables to look for by name and value.
+    fn new(roots: &Roots, values: &[(String, Vec<u8>)]) -> Search {
+        let mut texts: Vec<(Vec<u8>, Vec<Hit>)> = Vec::new();
+        let mut add = |bytes: Vec<u8>, kind: Hit| {
             if bytes.is_empty() {
                 return;
             }
@@ -345,10 +362,13 @@ impl Search {
             }
         };
         for needle in roots.needles() {
-            add(needle, None);
+            add(needle, Hit::Root);
         }
         for (folder, text) in roots.machine_needles() {
-            add(text.as_bytes().to_vec(), Some(*folder));
+            add(text.as_bytes().to_vec(), Hit::Machine(*folder));
+        }
+        for (name, value) in values {
+            add(value.clone(), Hit::Value(name.clone()));
         }
         let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
         Search {
@@ -379,15 +399,19 @@ impl Search {
             };
         let mut tied = false;
         let mut machine = BTreeSet::new();
+        let mut values = BTreeSet::new();
         for (hit, kinds) in found.iter().zip(&self.kinds) {
             if !hit {
                 continue;
             }
             for kind in kinds {
                 match kind {
-                    None => tied = true,
-                    Some(folder) => {
+                    Hit::Root => tied = true,
+                    Hit::Machine(folder) => {
                         machine.insert(*folder);
+                    }
+                    Hit::Value(name) => {
+                        values.insert(name.clone());
                     }
                 }
             }
@@ -403,6 +427,7 @@ impl Search {
             },
             tied,
             machine,
+            values,
         })
     }
 }
@@ -1179,7 +1204,8 @@ impl Call<'_> {
                 &mut std::collections::BTreeSet::new(),
             );
         }
-        let search = Search::new(roots);
+        let tracked: Vec<&str> = info.env.iter().map(|dep| dep.name.as_str()).collect();
+        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked));
         let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
@@ -1210,6 +1236,12 @@ impl Call<'_> {
         }
 
         let tied_by_bytes = outputs.iter().any(|o| o.tied);
+        let unkeyed: Vec<String> = outputs
+            .iter()
+            .flat_map(|o| o.values.iter().cloned())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
         let in_outputs: BTreeSet<Folder> = outputs
             .iter()
             .flat_map(|o| o.machine.iter().copied())
@@ -1274,6 +1306,7 @@ impl Call<'_> {
             machine: roots.machine_needles(),
             variable_names_base,
             externs: &common.externs_portable,
+            unkeyed: &unkeyed,
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:
@@ -1314,6 +1347,37 @@ impl Call<'_> {
             dep_info: info,
             portability,
         })
+    }
+
+    /// The variables whose values the outputs are searched for (B-24): each one that is in
+    /// neither key (the first key's variables, and `tracked`, those the dep-info names, which the
+    /// second key holds) and that [`portable::unkeyed_candidate`] chooses, less those whose value
+    /// holds a root or a folder of this machine, which the search finds by their own rules.
+    /// Values stay in this process: only a name is ever written.
+    fn unkeyed_values(&self, roots: &Roots, tracked: &[&str]) -> Vec<(String, Vec<u8>)> {
+        let keyed = self.asked.as_ref().map(|asked| &asked.env);
+        let machine = roots.machine_needles();
+        self.env
+            .names()
+            .filter(|name| !keyed.is_some_and(|keyed| keyed.contains_key(*name)))
+            .filter(|name| !tracked.contains(name))
+            .filter_map(|name| {
+                let value = self.env.get(name)?;
+                let bytes = value.as_encoded_bytes();
+                if !portable::unkeyed_candidate(name, bytes) {
+                    return None;
+                }
+                if let Some(text) = value.to_str()
+                    && (roots.to_placeholders(text) != text
+                        || machine
+                            .iter()
+                            .any(|(_, folder)| text.contains(folder.as_str())))
+                {
+                    return None;
+                }
+                Some((name.to_string(), bytes.to_vec()))
+            })
+            .collect()
     }
 
     /// Every archive directly in a folder rustc searches for native libraries, whatever its
@@ -2236,7 +2300,7 @@ mod tests {
             home: Some("/home/dev".into()),
         };
         let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
-        let search = Search::new(&roots);
+        let search = Search::new(&roots, &[]);
         let path = dir.path().join("out.rlib");
         std::fs::write(&path, b"\0/opt/tools/cargo_cache\0").unwrap();
         let found = search

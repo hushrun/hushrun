@@ -512,6 +512,25 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   naming another folder didn't give the same bytes, or couldn't be made.
 - `extern`: a proc macro among its externs is one a dependent on another machine would name
   differently (B-6): it is tied, or what names it holds this machine.
+- `unkeyed-value`: an output holds, as it is, the value of an environment variable that is in
+  neither key (not among the first key's variables, and not named by the dep-info) and that
+  looks like a secret: a name that reads like one (E-12's one definition) with a value of 8
+  bytes or more, or any name with a value of 16 bytes or more that no CI system set itself
+  (`GITHUB_`, `RUNNER_`, `ACTIONS_`, `CI_`, `GITLAB_` and the other systems' documented prefixes)
+  and no build tool did (`CARGO`, `RUSTC`, `RUSTUP_`, `RUST_`, `OUT_DIR`, `HUSHRUN_`). A
+  variable among those whose name reads like a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is
+  searched all the same. A value that holds a root or a folder of the machine is left to those
+  rules. The values are looked for in the same pass over each output as the roots, and only
+  the variables' names are recorded, in the description and the run's log, which counts the
+  blocks held back and their variables; a value is never written anywhere. *Rests on:* a value
+  a compile reads without telling rustc (a proc macro calling `std::env::var`) reaching the
+  bytes as it is: then anyone who could open the block could read it, and another machine with
+  another value would reuse this one's bytes. *Breaks if:* the value is transformed on the way
+  (hashed, encoded, split), or is shorter than the thresholds; the audit (B-16) is what catches
+  a block built with another value. CI's own variables are left out because their values are
+  the same for every job of a repository and turn up by chance (`https://github.com` is in the
+  doc comments of nearly half of the libraries on crates.io); a project whose build reads one
+  without telling names it in `build: env:` (B-35).
 
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
