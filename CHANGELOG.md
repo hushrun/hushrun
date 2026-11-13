@@ -228,6 +228,13 @@ Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check ask
 - With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
   tests: Go names only what failed, so a test that skipped because another failed looked passed.
   The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.
+- A Jest test that awaits `promisify(exec)` or `promisify(execFile)` gets `{ stdout, stderr }`
+  again, `promisify(fs.exists)` resolves to a boolean instead of rejecting with it, and
+  `promisify(fs.read)` resolves to `{ bytesRead, buffer }`, on Jest 29 and 30: Jest's adapter
+  dropped `util.promisify.custom` from what it wraps. Its wrappers now keep what they wrap
+  carries, its name, length and own properties, and add none: `worker_threads.Worker` and
+  `vm.Script` have their lengths again, `process.dlopen` its name. A child process the promisified
+  form starts is still one hushrun can't follow.
 - `hushrun why` gives a test that kept no result the reason its run recorded with it in this
   machine's store, rather than one guessed from COMMAND: a Go test that a panic or a timeout left
   unrun is told so, not to add `-v`, and a `-v` that comes only from `GOFLAGS` is no longer asked
