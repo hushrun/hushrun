@@ -641,7 +641,12 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         report.invocations = new ArrayList(invocations)
         report.suiteFailures = new ArrayList(suiteFailures)
         Set<String> outers = new TreeSet<>()
-        invocations.each { if (it.c) outers << HushrunRun.outerOf(it.c as String) }
+        // A case's parents too: a JUnit 4 suite's cases name classes no test file is (Guava's
+        // testlib), and the suite class that ran them is a parent of theirs.
+        invocations.each {
+            if (it.c) outers << HushrunRun.outerOf(it.c as String)
+            (it.p ?: []).each { List pp -> if (pp[1]) outers << HushrunRun.outerOf(pp[1] as String) }
+        }
         suiteFailures.each { if (it.c) outers << HushrunRun.outerOf(it.c as String) }
         HushrunReport.addNames(report, s, outers)
         if (framework == null) report.notFollowed << [why: "test-framework", detail: "a test framework hushrun doesn't know"]

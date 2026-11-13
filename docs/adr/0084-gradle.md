@@ -303,6 +303,19 @@ build published it. Amendment 11's rules now come first there too: a jar a remot
 fine, one a project of the build published reads that project, a file of it that git tracks is
 read as a file, and any other is `not observed` for the same reason, in the same words.
 
+## Amendment 13: a JUnit 4 suite's cases no test class owns (2026-11-13)
+
+A JUnit 4 class run by `AllTests` (a static `suite()`, as Guava's testlib builds them) runs cases
+whose class is no test class of its task, or none that loads. The script named a test class only
+by the class an invocation names, so the suite class was no unit at all: its cases were dropped,
+no count held them, and it ran every time unseen. The decision: the script also names the classes
+of each invocation's parents, and a case whose class no test class of the task is belongs to its
+nearest parent that is (the suite class that ran it), with its own id (`testlib.Checks.testOne`).
+Such a class is told never left out, of itself and of each of its tests: it keeps no pass of its
+own, runs every time, and no plan counts it as reused; its failures are its own, so the other
+classes of a failed run keep their passes. Gradle doesn't run a class that only has a static
+`suite()`, without `@RunWith(AllTests.class)` or `TestCase` as its superclass.
+
 ## Measured
 
 What the script adds to a build that leaves nothing out, with a warm daemon, on the spike's
