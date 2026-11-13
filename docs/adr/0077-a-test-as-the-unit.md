@@ -378,3 +378,8 @@ fmt, FTXUI, two Swift packages): no wrong reuse, but several lines said somethin
   nothing was followed the last time; no pass was kept the last time (with the stored reason);
   only then that none had passed here yet. `hushrun why` gives each unit its own reason for the
   same cause.
+- **`observe` and `reuse` counted differently.** On the same tree, werkzeug's `observe` said 28
+  test files and its plan 27; svgo's 19 and 18. A run counted every file the runner reported,
+  the plan the adapter's unit rule: pytest's doctest plugin collects `tests/res/test.txt`, a data
+  file, and Vitest's typecheck runs `*.test-d.ts` outside its list. A run now counts, and keeps,
+  only the units the plan would: pytest's of `python_files`, Vitest's of its list.

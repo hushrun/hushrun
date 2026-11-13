@@ -541,6 +541,11 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let Some(name) = relative(&root, Path::new(&unit.unit)) else {
             continue;
         };
+        // \[C-30\] A test file is one of Vitest's list, as a plan counts them: a file only its
+        // typecheck runs (a `*.test-d.ts`, with tsc, outside its workers) is none, here or there.
+        if !out.unit_files.is_empty() && !out.unit_files.contains(&name) {
+            continue;
+        }
         let entry = ended.entry(name).or_insert_with(|| Ended {
             deselected: true,
             ..Ended::default()

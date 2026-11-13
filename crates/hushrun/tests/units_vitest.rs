@@ -462,6 +462,40 @@ fn without_the_config_line_or_one_run_vitest_is_left_alone_and_says_why() {
     );
 }
 
+// covers: C-30, C-35
+#[test]
+fn observe_counts_the_test_files_a_plan_counts_with_typecheck_on() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // Vitest's typecheck runs test/types.test-d.ts with tsc, outside its list of test files, which
+    // a plan counts: `observe` counts the same seven.
+    let mut files = shop("observe");
+    files.retain(|(path, _)| path != "vitest.config.ts");
+    files.push(file(
+        "vitest.config.ts",
+        &config("  test: { typecheck: { enabled: true } },\n"),
+    ));
+    files.push(file(
+        "tsconfig.json",
+        "{\"compilerOptions\": {\"strict\": true, \"module\": \"esnext\", \"moduleResolution\": \"bundler\", \"noEmit\": true, \"skipLibCheck\": true}, \"include\": [\"src\", \"test\"]}\n",
+    ));
+    files.push(file(
+        "test/types.test-d.ts",
+        "import { expectTypeOf, test } from 'vitest'\n\ntest('types', () => { expectTypeOf(1).toEqualTypeOf<number>() })\n",
+    ));
+    let r = Repo::new(&files);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr
+            .contains("hushrun: unit: with `tests: reuse`, all 7 test files would have run"),
+        "{}\n{}",
+        ran.stderr,
+        ran.stdout
+    );
+}
+
 // covers: C-34, C-35
 #[test]
 fn vitest_reuses_what_already_passed() {

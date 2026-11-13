@@ -390,8 +390,12 @@ impl Adapter for Pytest {
             detail: "pytest's python_files isn't what hushrun read of its configuration".into(),
         });
         let failures_by_unit = merged.values().all(|m| m.failures_by_unit);
+        // \[C-30\] A unit is a test file of python_files, as the plan counts them: a file pytest
+        // collected for another reason (its doctest plugin's `test*.txt`) is none, here or there.
+        // Where python_files can't be read, every file pytest reported stays, not followed.
         let seen: BTreeMap<String, Seen> = merged
             .into_iter()
+            .filter(|(unit, _)| guard.is_some() || is_test_file(&patterns, unit) == Some(true))
             .map(|(unit, m)| {
                 let mut not_followed = m.not_followed;
                 not_followed.extend(guard.clone());

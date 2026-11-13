@@ -941,6 +941,47 @@ fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
     );
 }
 
+// covers: C-30, C-33
+#[test]
+fn observe_counts_the_test_files_the_plan_counts() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // pytest's doctest plugin collects `test*.txt` files too: tests/res/test.txt, a data file,
+    // holds no doctest and is no test file of python_files, which a plan counts. `observe` counts
+    // the same two.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("pytest.ini", "[pytest]\ntestpaths = tests\n"),
+        ("tests/test_a.py", "def test_a():\n    pass\n"),
+        ("tests/test_b.py", "def test_b():\n    pass\n"),
+        ("tests/res/test.txt", "some data\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr
+            .contains("hushrun: unit: with `tests: reuse`, all 2 test files would have run"),
+        "{}",
+        ran.stderr
+    );
+}
+
 // covers: C-32
 #[test]
 fn a_pytest_a_test_starts_and_stops_is_no_start_of_the_runner() {

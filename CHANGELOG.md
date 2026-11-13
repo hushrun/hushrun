@@ -171,6 +171,8 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
   Jest, a failed Vitest run with an error no test owns, a stale build, what was left out twice):
   every one the run decided keeps a row with why. Contract: an adapter's facts file may say
   `notKept`, why no pass of a failed run whose failures aren't told by unit is kept.
+- `observe` and a plan count the same test files: a data file pytest's doctest plugin collects
+  (`test*.txt`) and a file only Vitest's typecheck runs are no longer counted by a run.
 - When every test file runs, the plan's line, `observe`'s and `hushrun ready` give the true
   reason: a file every one reads changed, none was followed last time, or none kept a pass last
   time and why; "none had passed here yet" only when that is so.
