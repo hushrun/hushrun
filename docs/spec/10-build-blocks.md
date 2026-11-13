@@ -750,7 +750,9 @@ counts can show.
 block built here is reused as any. A block only downloaded is reused without asking while its
 entry for this run's host, org and repository is under 24 hours old; otherwise the wrapper asks
 the relay, which asks the server without fetching. "Served, with these outputs" renews the entry
-and the block is reused; anything else is a miss, and the compile's block takes its place. When
+and the block is reused. Anything else is a miss: nothing is fetched in its place, rustc runs,
+and the block that compile builds takes the downloaded one's place and is from then on built
+here (B-32). When
 no server could be reached in the run, an entry of any age counts; a run with no relay asks
 nothing and reuses it. On a person's machine a downloaded library's first reuse is audited one
 time in ten, which the record notes, then one in fifty as any (B-16). A difference found by an
