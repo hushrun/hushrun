@@ -31,8 +31,9 @@ const SCHEMA: &str = "hushrun.build.run-digest/1";
 /// From this size on, a file is hashed under a lock on its entry's name.
 const LOCK_FROM: u64 = 8 << 20;
 
+/// The files hashed, for a test that counts its own (tests of one process share it).
 #[cfg(test)]
-static HASHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HASHED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 #[derive(Serialize, Deserialize)]
 struct Entry {
@@ -80,7 +81,9 @@ pub fn digest(session: Option<&Path>, path: &Path) -> io::Result<(Digest, Stat)>
         return Ok((sha, now));
     }
     #[cfg(test)]
-    HASHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut hashed) = HASHED.lock() {
+        hashed.push(path.to_path_buf());
+    }
     let (sha, stat) = regular::hash_steady(path)?;
     // Best effort: an entry is a saving, never the answer's source of truth.
     let _ = write(&dir, &entry, text, &stat, sha);
@@ -226,7 +229,6 @@ mod tests {
         let session = dir.path().join("session");
         let big = dir.path().join("rust-lld");
         fs::write(&big, vec![7u8; (LOCK_FROM + 1) as usize]).unwrap();
-        let before = HASHED.load(std::sync::atomic::Ordering::SeqCst);
         let digests: Vec<Digest> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| scope.spawn(|| digest(Some(&session), &big).unwrap().0))
@@ -234,7 +236,8 @@ mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         assert!(digests.iter().all(|d| *d == digests[0]));
-        assert_eq!(HASHED.load(std::sync::atomic::Ordering::SeqCst) - before, 1);
+        let hashed = HASHED.lock().unwrap();
+        assert_eq!(hashed.iter().filter(|p| **p == big).count(), 1);
         // No lock is left behind.
         let left: Vec<_> = fs::read_dir(session.join(DIR))
             .unwrap()
