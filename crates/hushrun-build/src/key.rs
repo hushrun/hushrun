@@ -24,7 +24,8 @@ pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 /// crate's own objects count as rustc's (a v7 hint judged by a member's suffix). v9: a block
 /// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]). v10: a
 /// library bundled nothing only when no member of its `.rlib` is a native library's member too.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v10";
+/// v11: an archive in a native folder counts whatever its name.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v11";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -870,7 +871,7 @@ mod tests {
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "ea3f41fa2c8cd1c450fffe749187e45322cba559f7541d48eeadb4815fbfd9d8"
+            "a958233576b000bbbb7492a4e01829434d45ef952e9b21be2fcf713e96433073"
         );
     }
 

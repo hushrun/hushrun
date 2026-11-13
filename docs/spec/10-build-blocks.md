@@ -114,24 +114,36 @@ metadata can't be found, and a tied proc macro,
   (`+verbatim`, a rename or `:file`, a kind this crate doesn't know) is `built, not stored`;
 - `native folders`: for a library, every `-L native=`, `all=` and bare folder, whether or not a
   `-l` names anything in it (a `#[link(kind = "static")]` in the source bundles a static library
-  found there into the `.rlib`, and nothing reports it): the names of its entries, and each `*.a`
-  and `*.lib` directly in it by SHA-256. A library whose `.rlib` holds nothing but rustc's own
-  members bundled no static library, so the bytes of those static libraries are not in it: its
-  key names the folders by their entries alone, and its hint says so, so that the lookup names
-  them the same way. It holds only its own when both hold: every member is the one `lib.rmeta`,
-  which holds rustc's metadata header, or an object rustc names `<crate name><extra
-  filename>.<codegen unit>.rcgu.o`, the prefix taken from the call's `--crate-name` and
-  `-C extra-filename`; and no member is, byte for byte, a member of a static library (`*.a`,
-  `*.lib`) directly in a folder rustc searched for one (every `-L native=`, `-L all=` and bare
-  `-L`). Names alone prove nothing: a build script can name its object `lib.rmeta`, and can read
-  the dependent's extra filename from `target/<profile>/.fingerprint/`, which cargo makes before
-  build scripts run. An archive or `.rlib` that can't be read counts as bundled. *Rests on:*
-  rustc copying a bundled archive's members into the `.rlib` byte for byte, as 1.94.0 does with
-  `-l static`, `+whole-archive`, incremental, LTO and `-C embed-bitcode`, for each kind of
-  folder (a test builds real `.rlib`s that bundle, including objects named as rustc's own, and
-  fails if one comes out as bundling nothing); a static library in the sysroot's target folder,
-  which rustc also searches, is in the compiler's identity (B-17). *Breaks if:* a rustc rewrote
-  a bundled member while copying it, or bundled from a folder other than those. A compile that
+  found there into the `.rlib`, and nothing reports it): the names of its entries, and by SHA-256
+  each static library directly in it, that is each `*.a` and `*.lib` and each other file that is
+  an archive (starts with `!<arch>` or `!<thin>`), since `+verbatim` bundles one under any name.
+  A library whose `.rlib` holds nothing but rustc's own members bundled no static library, so
+  the bytes of those static libraries are not in it: its key names the folders by their entries
+  alone, and its hint says so, so that the lookup names them the same way. It holds only its own
+  when both hold: every member is the one `lib.rmeta`, which holds rustc's metadata header, or
+  an object rustc names `<crate name><extra filename>.<codegen unit>.rcgu.o`, the prefix taken
+  from the call's `--crate-name` and `-C extra-filename`; and no member is, byte for byte, a
+  member of an archive directly in a folder rustc searched for native libraries (every
+  `-L native=`, `-L all=` and bare `-L`), whatever the archive's file name. Only members of a
+  size the other side has are hashed, so a large archive beside a library costs its headers. An
+  archive or `.rlib` that can't be read counts as bundled. A `-l static` on the command line
+  with `+verbatim`, or a name that is a path, is never stored (its file can't be found with
+  certainty). *Covers:* accident, which is what it is for: a crate that bundles a static
+  library from a folder it was handed, under any file name and any member names, is keyed by
+  that library's bytes. *Can't see:* a build script that sets out to fool it. A script can name
+  its object `lib.rmeta` or with the dependent's prefix (read from
+  `target/<profile>/.fingerprint/`, which cargo makes before build scripts run); those are
+  caught by their bytes. But a `#[link(name = "/elsewhere/x.archive", kind = "static",
+  modifiers = "+verbatim")]` in source takes an archive from outside every searched folder
+  (rustc 1.94.0 does, with an absolute or `..` path), and with forged member names it would pass.
+  Such a script already runs with the person's rights and could write the store itself; the
+  audit (B-16) is what would catch it. *Rests on:* rustc copying a bundled archive's members
+  into the `.rlib` byte for byte, as 1.94.0 does with `-l static`, `+verbatim`,
+  `+whole-archive`, incremental, LTO and `-C embed-bitcode`, for each kind of folder (a test
+  builds real `.rlib`s that bundle, including objects named as rustc's own and an archive with
+  no static library's name, and fails if one comes out as bundling nothing); a static library
+  in the sysroot's target folder, which rustc also searches, is in the compiler's identity
+  (B-17). *Breaks if:* a rustc rewrote a bundled member while copying it. A compile that
   writes no `.rlib` keys the static libraries' bytes. These folders are usually other packages' `OUT_DIR`s: no
   record is written there, and digests are remembered for the run under its session's folder, by
   path and stat. A linked output (a program, a proc macro, a build-script binary) has none:

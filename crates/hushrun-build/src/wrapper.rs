@@ -1316,37 +1316,22 @@ impl Call<'_> {
         })
     }
 
-    /// Every static library (`*.a`, `*.lib`) directly in a folder rustc searches for native
-    /// libraries: each `-L native=`, `-L all=` and bare `-L` (B-6). A folder that can't be
-    /// listed adds nothing; one rustc couldn't list either bundles nothing from it.
+    /// Every archive directly in a folder rustc searches for native libraries, whatever its
+    /// name (`+verbatim` bundles one as named): each `-L native=`, `-L all=` and bare `-L` (B-6).
     fn native_archives(&self) -> Vec<PathBuf> {
         let inv = self.invocation;
-        let mut out = Vec::new();
-        for search in inv.search_paths() {
-            if !matches!(
-                search.kind,
-                crate::invocation::SearchKind::Native | crate::invocation::SearchKind::All
-            ) {
-                continue;
-            }
-            let dir = Path::new(inv.cwd()).join(&search.path);
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if (name.ends_with(".a") || name.ends_with(".lib"))
-                    && std::fs::metadata(&path).is_ok_and(|m| m.is_file())
-                {
-                    out.push(path);
-                }
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
+        let dirs: Vec<PathBuf> = inv
+            .search_paths()
+            .iter()
+            .filter(|search| {
+                matches!(
+                    search.kind,
+                    crate::invocation::SearchKind::Native | crate::invocation::SearchKind::All
+                )
+            })
+            .map(|search| Path::new(inv.cwd()).join(&search.path))
+            .collect();
+        crate::rlib::archives_in(&dirs)
     }
 
     /// Step 11: the files rustc announced, each hashed and searched for the roots and for the

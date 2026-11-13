@@ -592,12 +592,14 @@ impl Context<'_> {
 
     /// B-6's `native_dirs`: each `-L native=`, `all=` and bare folder, by where it lies, the
     /// names of its entries, and the bytes of each static library directly in it (`*.a`,
-    /// `*.lib`), which a `#[link(kind = "static")]` in the source would bundle. These are
+    /// `*.lib`, and any other file that is an archive), which a `#[link(kind = "static")]` in
+    /// the source would bundle. These are
     /// usually other packages' build-script outputs: each is a root of its own (B-8) and no
     /// record is written there; digests are remembered for the run instead ([`crate::memo`]).
     ///
-    /// Cost: one `readdir` per folder, and per static library one `stat` and a small read once
-    /// it was hashed in this run.
+    /// Cost: one `readdir` per folder, an 8-byte read of each entry not named as a static
+    /// library, and per static library one `stat` and a small read once it was hashed in this
+    /// run.
     fn native_dirs(
         &self,
         generated: bool,
@@ -629,11 +631,13 @@ impl Context<'_> {
             });
             let mut archives = Vec::new();
             for name in names.iter().flatten() {
-                if !(name.ends_with(".a") || name.ends_with(".lib")) {
-                    continue;
-                }
                 let path = dir.join(name);
-                if fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                // A static library by its name, or any archive, whatever its name: a
+                // `#[link(..., modifiers = "+verbatim")]` bundles one as it is named.
+                let named = name.ends_with(".a") || name.ends_with(".lib");
+                if fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    || !(named || crate::rlib::is_archive(&path))
+                {
                     continue;
                 }
                 let (sha, stat) =

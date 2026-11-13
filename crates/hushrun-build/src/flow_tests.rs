@@ -2785,13 +2785,19 @@ fn a_bundled_object_under_rustcs_own_names_is_found_by_its_bytes() {
     // own prefix (which a build script can read from `target/debug/.fingerprint/`): the names
     // look like rustc's, the bytes are the static library's. A changed C file must not reuse
     // the library built from the old one.
-    for forged in ["lib.rmeta", "a-xa.inner.rcgu.o"] {
+    // The third: the archive under a name of its own (`inner.archive`), which a
+    // `#[link(..., modifiers = "+verbatim")]` bundles as it is named.
+    for (forged, archive) in [
+        ("lib.rmeta", "libinner.a"),
+        ("a-xa.inner.rcgu.o", "libinner.a"),
+        ("a-xa.inner.rcgu.o", "inner.archive"),
+    ] {
         let w = world(Mode::On);
         let setup = |name: &str, object: &[u8]| {
             let ws = w.checkout(name);
             let dir = ws.join("target/debug/build/u-1/out");
             fs::create_dir_all(&dir).unwrap();
-            crate::rlib::write_gnu(&dir.join("libinner.a"), &[("inner.o", object)]).unwrap();
+            crate::rlib::write_gnu(&dir.join(archive), &[("inner.o", object)]).unwrap();
             fs::write(ws.join("inner.o"), object).unwrap();
             let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
             (ws, format!("native={dir}"))
@@ -2815,12 +2821,12 @@ fn a_bundled_object_under_rustcs_own_names_is_found_by_its_bytes() {
         assert_eq!(
             run(&setup("two", b"inner_value returns 2")),
             STORED,
-            "{forged}: the C changed"
+            "{forged} in {archive}: the C changed"
         );
         assert_eq!(
             run(&setup("three", b"inner_value returns 1")),
             REUSED,
-            "{forged}: the same C"
+            "{forged} in {archive}: the same C"
         );
     }
 }

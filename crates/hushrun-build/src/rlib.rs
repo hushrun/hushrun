@@ -35,9 +35,13 @@ pub fn own_prefix(crate_name: &str, extra_filename: &str) -> String {
     format!("{crate_name}{extra_filename}.")
 }
 
-/// Calls `each` with every member of the `ar` archive at `path` but its symbol index, by name
-/// and bytes, in order. `None` when it isn't an `ar` archive rustc writes or `each` says stop.
-fn members(path: &Path, mut each: impl FnMut(&str, &[u8]) -> bool) -> Option<()> {
+/// Calls `each` with every member of the `ar` archive at `path` but its symbol index: its
+/// name, its size and a way to read its bytes, which only a caller that needs them pays for.
+/// `None` when it isn't an `ar` archive rustc writes, a read fails, or `each` says stop.
+fn members(
+    path: &Path,
+    mut each: impl FnMut(&str, u64, &mut dyn FnMut() -> Option<Vec<u8>>) -> bool,
+) -> Option<()> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let mut magic = [0u8; 8];
@@ -67,22 +71,30 @@ fn members(path: &Path, mut each: impl FnMut(&str, &[u8]) -> bool) -> Option<()>
             .ok()?;
         let raw = std::str::from_utf8(&header[..16]).ok()?.trim_end();
         let data = at + HEADER as u64;
-        at = data + size;
-        let mut bytes = vec![0u8; usize::try_from(size).ok()?];
-        file.read_exact(&mut bytes).ok()?;
-        let (name, body): (String, &[u8]) = if let Some(n) = raw.strip_prefix("#1/") {
+        at = data.checked_add(size)?;
+        if at > len {
+            return None;
+        }
+        let read_at = |file: &mut File, from: u64, size: u64| -> Option<Vec<u8>> {
+            file.seek(SeekFrom::Start(from)).ok()?;
+            let mut bytes = vec![0u8; usize::try_from(size).ok()?];
+            file.read_exact(&mut bytes).ok()?;
+            Some(bytes)
+        };
+        let (name, body, body_size) = if let Some(n) = raw.strip_prefix("#1/") {
             // BSD: the name is the first `n` bytes of the data.
-            let n: usize = n.parse().ok()?;
-            let name = bytes.get(..n)?;
+            let n: u64 = n.parse().ok()?;
+            let name = read_at(&mut file, data, n.min(size))?;
             (
-                String::from_utf8_lossy(name)
+                String::from_utf8_lossy(&name)
                     .trim_end_matches('\0')
                     .to_string(),
-                &bytes[n..],
+                data + n,
+                size.checked_sub(n)?,
             )
         } else if raw == "//" {
             // GNU: the table of long names.
-            names = bytes;
+            names = read_at(&mut file, data, size)?;
             continue;
         } else if let Some(offset) = raw.strip_prefix('/').filter(|o| !o.is_empty()) {
             match offset.parse::<usize>() {
@@ -93,57 +105,129 @@ fn members(path: &Path, mut each: impl FnMut(&str, &[u8]) -> bool) -> Option<()>
                         String::from_utf8_lossy(&rest[..end])
                             .trim_end_matches('/')
                             .to_string(),
-                        &bytes[..],
+                        data,
+                        size,
                     )
                 }
                 // `/SYM64/` and the like: an index, not a member.
-                Err(_) => (raw.to_string(), &bytes[..]),
+                Err(_) => (raw.to_string(), data, size),
             }
         } else {
-            (raw.trim_end_matches('/').to_string(), &bytes[..])
+            (raw.trim_end_matches('/').to_string(), data, size)
         };
         if index(&name) {
             continue;
         }
-        if !each(&name, body) {
+        let mut bytes = || read_at(&mut file, body, body_size);
+        if !each(&name, body_size, &mut bytes) {
             return None;
         }
     }
     Some(())
 }
 
+/// Whether the file at `path` is an `ar` archive (`!<arch>`) or a thin one (`!<thin>`), whatever
+/// its name: rustc bundles one under any name through `+verbatim`.
+pub fn is_archive(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let mut magic = [0u8; 8];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && (&magic == MAGIC || &magic == b"!<thin>\n")
+}
+
+/// Every archive ([`is_archive`]) directly in these folders, sorted: what rustc could bundle
+/// from the folders it searched for native libraries. A folder that can't be listed adds
+/// nothing.
+pub fn archives_in(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = dirs
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| is_archive(path))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Whether the `.rlib` at `path` holds only rustc's own members for the crate whose objects
-/// start with `prefix` ([`own_prefix`]), none of them a member of one of `archives` (the static
-/// libraries in the folders rustc searched for native libraries): `Some(true)` when it bundled
+/// start with `prefix` ([`own_prefix`]), none of them a member of one of `archives` (the
+/// archives in the folders rustc searched for native libraries): `Some(true)` when it bundled
 /// nothing, `Some(false)` when it holds another member, `None` when it, or one of the archives,
 /// can't be read as an `ar` archive (the caller then assumes it bundled something).
+///
+/// Cost: the `.rlib`'s and each archive's member headers, `lib.rmeta`'s bytes, and the bytes of
+/// only those members whose size is the size of a member on the other side, which a library
+/// that bundled nothing seldom has. A large archive beside a library costs its headers.
 pub fn bundles_nothing(path: &Path, prefix: &str, archives: &[PathBuf]) -> Option<bool> {
-    let mut theirs: BTreeSet<Digest> = BTreeSet::new();
-    for archive in archives {
-        members(archive, |_, bytes| {
-            if !bytes.is_empty() {
-                theirs.insert(Digest::of(bytes));
-            }
-            true
-        })?;
-    }
+    // The `.rlib`'s names, and its members' sizes.
     let mut metadata = 0usize;
-    let mut own = true;
-    let read = members(path, |name, bytes| {
-        let named = if name == "lib.rmeta" {
+    let mut named = true;
+    let mut sizes: BTreeSet<u64> = BTreeSet::new();
+    let read = members(path, |name, size, bytes| {
+        named = if name == "lib.rmeta" {
             metadata += 1;
-            metadata == 1 && memchr::memmem::find(bytes, METADATA_HEADER).is_some()
+            metadata == 1
+                && bytes().is_some_and(|b| memchr::memmem::find(&b, METADATA_HEADER).is_some())
         } else {
             name.strip_prefix(prefix)
                 .is_some_and(|unit| unit.ends_with(".rcgu.o"))
         };
-        own = named && !theirs.contains(&Digest::of(bytes));
-        own
+        if size > 0 {
+            sizes.insert(size);
+        }
+        named
     });
-    match (own, read) {
-        (false, _) => Some(false),
-        (true, Some(())) => Some(true),
-        (true, None) => None,
+    match (named, read) {
+        (false, _) => return Some(false),
+        (true, None) => return None,
+        (true, Some(())) => {}
+    }
+    // The archives' members of a size the `.rlib` has, by their bytes.
+    let mut theirs: BTreeSet<(u64, Digest)> = BTreeSet::new();
+    for archive in archives {
+        members(archive, |_, size, bytes| {
+            if !sizes.contains(&size) {
+                return true;
+            }
+            match bytes() {
+                Some(b) => {
+                    theirs.insert((size, Digest::of(&b)));
+                    true
+                }
+                None => false,
+            }
+        })?;
+    }
+    if theirs.is_empty() {
+        return Some(true);
+    }
+    // The `.rlib`'s members of those sizes: one of them among the archives' means it bundled.
+    let wanted: BTreeSet<u64> = theirs.iter().map(|(size, _)| *size).collect();
+    let mut copied = false;
+    let read = members(path, |_, size, bytes| {
+        if !wanted.contains(&size) {
+            return true;
+        }
+        match bytes() {
+            Some(b) => {
+                copied = theirs.contains(&(size, Digest::of(&b)));
+                !copied
+            }
+            None => false,
+        }
+    });
+    match (copied, read) {
+        (true, _) => Some(false),
+        (false, Some(())) => Some(true),
+        (false, None) => None,
     }
 }
 
@@ -252,6 +336,12 @@ mod tests {
         write_gnu(&rlib, &[("lib.rmeta", b"C object, not metadata")]).unwrap();
         assert_eq!(bundles_nothing(&rlib, &prefix, &archives), Some(false));
         write_gnu(&rlib, &own).unwrap();
+        // An archive under any name is one; a thin archive can't be read: can't tell.
+        let renamed = dir.path().join("inner.archive");
+        std::fs::copy(&archive, &renamed).unwrap();
+        assert!(is_archive(&renamed) && !is_archive(dir.path()));
+        assert_eq!(with("x-1a2b.inner.rcgu.o", b"C object"), Some(false));
+        write_gnu(&rlib, &own).unwrap();
         // An archive that can't be read, or an rlib: can't tell.
         let odd = dir.path().join("libodd.a");
         std::fs::write(&odd, b"!<thin>\n").unwrap();
@@ -299,13 +389,16 @@ mod tests {
         let object = std::fs::read(dir.path().join("inner.o")).unwrap();
         let native = dir.path().join("native");
         std::fs::create_dir_all(&native).unwrap();
-        // One object under a plain name, one named as the crate's own, one as `lib.rmeta`.
-        for (lib, member) in [
-            ("inner", "inner.o"),
-            ("forged", "x-1a2b.inner.rcgu.o"),
-            ("meta", "lib.rmeta"),
+        // One object under a plain name, one named as the crate's own, one as `lib.rmeta`; and
+        // one named as the crate's own in an archive named as no static library is, which
+        // `+verbatim` bundles.
+        for (file, member) in [
+            ("libinner.a", "inner.o"),
+            ("libforged.a", "x-1a2b.inner.rcgu.o"),
+            ("libmeta.a", "lib.rmeta"),
+            ("inner.archive", "x-1a2b.inner.rcgu.o"),
         ] {
-            write_gnu(&native.join(format!("lib{lib}.a")), &[(member, &object)]).unwrap();
+            write_gnu(&native.join(file), &[(member, &object)]).unwrap();
         }
         // A Rust static library: every member an `.rcgu.o` of std, core or the crate.
         run(&[
@@ -315,10 +408,9 @@ mod tests {
             "native/libinner2.a",
             "inner.rs",
         ]);
-        let archives: Vec<PathBuf> = ["inner", "forged", "meta", "inner2"]
-            .iter()
-            .map(|lib| native.join(format!("lib{lib}.a")))
-            .collect();
+        std::fs::write(native.join("notes.txt"), b"not an archive").unwrap();
+        let archives = archives_in(std::slice::from_ref(&native));
+        assert_eq!(archives.len(), 5, "{archives:?}");
         let prefix = own_prefix("x", "-1a2b");
         let build = |search: &str, extra: &[&str]| {
             let mut args = vec![
@@ -344,6 +436,11 @@ mod tests {
                 build(search, &["-lstatic:+whole-archive=forged"]),
                 Some(false),
                 "{search}"
+            );
+            assert_eq!(
+                build(search, &["-lstatic:+verbatim=inner.archive"]),
+                Some(false),
+                "{search} +verbatim"
             );
             // Not bundled: the archive is linked later, by whoever links the program.
             assert_eq!(
