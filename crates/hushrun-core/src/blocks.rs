@@ -462,6 +462,23 @@ pub struct Policy {
     pub manifest: Vec<Pair>,
 }
 
+/// The start of the scope a repository's trusted blocks are written to, `protected/<repository>`:
+/// only a trusted job of the repository writes there.
+pub const TRUSTED_SCOPE: &str = "protected/";
+
+impl Policy {
+    /// Whether this caller writes the repository's trusted blocks: the scope it writes is the
+    /// repository's trusted one, and nothing else decides it. A pull request's job writes
+    /// `ci/…` with no reason it isn't trusted, and is not trusted.
+    pub fn writes_trusted(&self) -> bool {
+        self.writes
+            && self
+                .write
+                .as_deref()
+                .is_some_and(|scope| scope.starts_with(TRUSTED_SCOPE))
+    }
+}
+
 // --- hints -------------------------------------------------------------------------------------
 
 /// `POST v0/build/hints/lookup`: the sealed read lists kept for first keys' addresses.

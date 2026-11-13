@@ -1731,6 +1731,38 @@ fn stale_download(fake: &FakeBuild, m: &Machine, cost_ms: u64) -> (Digest, Diges
     (key, step)
 }
 
+// covers: B-31
+#[test]
+fn only_a_job_writing_the_repository_s_trusted_blocks_gets_the_trusted_job_s_wait() {
+    // A pull request's job writes `ci/…`, with no reason it isn't trusted; a push to the listed
+    // branch writes `protected/…`. Both have a stalled upload whose compile took 400 seconds.
+    for (write, trusted) in [("ci/1/pr7", false), ("protected/1", true)] {
+        let fake = FakeBuild::start();
+        fake.set_scopes(Some(write), &[write, "protected/1"]);
+        fake.delay(route::STORE_PUT, Duration::from_secs(10));
+        let m = machine();
+        let relay = start(&fake, &m, |c| {
+            with_id_token(&fake)(c);
+            c.tuning.ci_wait = Duration::from_secs(1);
+            c.tuning.ci_trusted_wait = Duration::from_secs(6);
+        });
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        let by = job_identity(&fake, &relay);
+        let (key, step) = block(&m.store, 66, 5_000, Some(by));
+        assert_eq!(ask(&relay, built_costing(key, step, 400_000)), Answer::Ok);
+        until("its PUT started", || fake.count(route::STORE_PUT) > 0);
+        let started = Instant::now();
+        relay.end_check(&[]);
+        let took = started.elapsed();
+        if trusted {
+            assert!(took >= Duration::from_millis(3_500), "{write}: {took:?}");
+        } else {
+            assert!(took < Duration::from_millis(2_500), "{write}: {took:?}");
+        }
+    }
+}
+
 // covers: B-26, B-34
 #[test]
 fn a_stale_vouch_counts_as_unreachable_only_when_open_failed_or_missed_the_block_s_budget() {

@@ -2087,7 +2087,7 @@ impl Relay {
                 .state()
                 .policy
                 .as_ref()
-                .is_some_and(|p| p.writes && p.untrusted.is_none());
+                .is_some_and(Policy::writes_trusted);
         let outbox = Outbox::new(&self.config.store);
         let cost_ms: u64 = outbox
             .waiting()

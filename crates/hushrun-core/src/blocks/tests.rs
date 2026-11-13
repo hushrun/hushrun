@@ -583,3 +583,19 @@ fn an_address_is_the_kind_and_the_key_under_its_schema() {
     // The key's own SHA-256 is not its address: the address is taken under its schema.
     assert_ne!(address("rustc/1", &key), Hex32::sha256(&key));
 }
+
+// covers: B-31
+#[test]
+fn only_a_caller_writing_a_trusted_scope_writes_trusted_blocks() {
+    let policy = |write: Option<&str>| -> Policy {
+        serde_json::from_value(json!({
+            "sharing": true, "mode": "on", "writes": write.is_some(), "write": write,
+            "keptDays": 30, "allowanceBytes": 1, "heldBytes": 0
+        }))
+        .unwrap()
+    };
+    assert!(policy(Some("protected/9001")).writes_trusted());
+    assert!(!policy(Some("ci/9001/pr7")).writes_trusted());
+    assert!(!policy(Some("person/1")).writes_trusted());
+    assert!(!policy(None).writes_trusted());
+}

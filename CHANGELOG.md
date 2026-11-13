@@ -183,6 +183,10 @@ with its ID token; an agent's sandbox fetches at setup what its later runs reuse
 
 ### Fixed
 
+- Build blocks in CI: only a job whose policy says it writes the repository's trusted scope
+  (`protected/…`) gets the trusted job's 2 minutes at its end; a pull request's job gets 20
+  seconds. Before, any job that wrote with no reason it wasn't trusted counted as trusted, and a
+  pull request's job was held about 42 seconds against its 20.
 - Build blocks: a `commit` answering `differs`, an upload that arrived broken, keeps the block
   built here and tries it again later; only `begin` refusing `differs` (a trusted copy with other
   bytes) discards it, and the run says in one line how many blocks it discarded. Before, a

@@ -810,7 +810,10 @@ backend counts as a commit other than its token's, so it writes no trusted block
 doesn't track, and changes inside a submodule's own checkout, are not compared; a job the
 policy calls untrusted says once, in plain words, why it writes nothing to the repository's
 trusted blocks. The end of the command waits for uploads as one function of its context says
-(`upload::wait_at_end`): a job writing trusted blocks up to 2 minutes, any other up to 20 seconds,
+(`upload::wait_at_end`): a job writing trusted blocks (the scope the policy says it writes is the
+repository's trusted one, `protected/…`, and nothing else decides it: `Policy::writes_trusted`; a
+pull request's job writes `ci/…` with no reason it isn't trusted, and is not trusted) up to 2
+minutes, any other up to 20 seconds,
 never longer than a quarter of what the compiles of the blocks still to go took, and both for the
 whole `hushrun run` call; meanwhile uploads go on, since the store goes with the job. That is one
 deadline for everything after the command, `close` included, which keeps its 5 seconds (B-29):

@@ -92,8 +92,7 @@ pub(crate) fn after_commit(state: CommitState) -> Move {
 pub(crate) struct End {
     /// A CI job: its store goes with the job, so what it built goes up now or never.
     pub(crate) in_ci: bool,
-    /// The job writes the repository's trusted blocks: the policy gives it a scope to write and
-    /// no reason it isn't trusted.
+    /// The job writes the repository's trusted blocks, as `Policy::writes_trusted` says.
     pub(crate) trusted: bool,
     /// What the compiles of the blocks still to go up took, together.
     pub(crate) waiting_cost: Duration,
