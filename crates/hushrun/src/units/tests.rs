@@ -786,8 +786,10 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         not_kept: None,
         list: None,
     };
+    // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {
         reported: true,
+        whole_ms: Some(1_000),
         ..store::Map::default()
     };
     map.units.insert(
@@ -1099,8 +1101,10 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
         not_kept: None,
         list: None,
     };
+    // \[C-33\] A run that reused nothing took a second here: what reuse can save at most.
     let mut map = store::Map {
         reported: true,
+        whole_ms: Some(1_000),
         ..store::Map::default()
     };
     map.units.insert(
