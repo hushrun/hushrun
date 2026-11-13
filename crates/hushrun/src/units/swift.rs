@@ -718,22 +718,59 @@ pub fn read_events(bytes: &[u8], listing: &Listing) -> Events {
             _ => {}
         }
     }
-    for (event_id, listed) in functions {
-        let outcome = if skipped.contains(&event_id) {
+    // \[C-39\] Swift Testing runs a target's tests at once, in one process: a test's wall time
+    // holds the others'. Each test's own is its share of each moment it ran (that moment's time
+    // over the tests running then), so the shares add up to the run's time at most, never to a
+    // multiple of it.
+    let spans: BTreeMap<&str, (f64, f64)> = functions
+        .keys()
+        .filter_map(|id| {
+            let (start, end) = (*started.get(id)?, *ended.get(id)?);
+            (end >= start).then_some((id.as_str(), (start, end)))
+        })
+        .collect();
+    let own = shares(&spans);
+    for (event_id, listed) in &functions {
+        let outcome = if skipped.contains(event_id) {
             Outcome::Skipped(0)
-        } else if let (Some(start), Some(end)) = (started.get(&event_id), ended.get(&event_id)) {
-            let ms = millis(end - start);
-            if issues.contains(&event_id) {
+        } else if let (Some(_), Some(_)) = (started.get(event_id), ended.get(event_id)) {
+            let ms = millis(own.get(event_id.as_str()).copied().unwrap_or(0.0));
+            if issues.contains(event_id) {
                 Outcome::Failed(ms)
             } else {
                 Outcome::Passed(ms)
             }
-        } else if started.contains_key(&event_id) {
+        } else if started.contains_key(event_id) {
             Outcome::Started
         } else {
             continue;
         };
-        out.outcomes.insert(listed, outcome);
+        out.outcomes.insert(listed.clone(), outcome);
+    }
+    out
+}
+
+/// \[C-39\] Each span's share of the time it covers, in seconds: every moment's length divided
+/// among the spans that cover it. The shares add up to the time the spans cover together.
+fn shares<'a>(spans: &BTreeMap<&'a str, (f64, f64)>) -> BTreeMap<&'a str, f64> {
+    let mut edges: Vec<f64> = spans.values().flat_map(|(s, e)| [*s, *e]).collect();
+    edges.sort_by(f64::total_cmp);
+    edges.dedup();
+    let mut out: BTreeMap<&str, f64> = spans.keys().map(|id| (*id, 0.0)).collect();
+    for pair in edges.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let running: Vec<&str> = spans
+            .iter()
+            .filter(|(_, (s, e))| *s <= from && *e >= to)
+            .map(|(id, _)| *id)
+            .collect();
+        if running.is_empty() {
+            continue;
+        }
+        let each = (to - from) / running.len() as f64;
+        for id in running {
+            *out.entry(id).or_default() += each;
+        }
     }
     out
 }
@@ -2217,6 +2254,10 @@ mod tests {
     const EVENTS_LINUX: &str = include_str!("../../../../testdata/swift/events-linux.jsonl");
     const XUNIT: &str = include_str!("../../../../testdata/swift/xunit-macos-parallel.xml");
     const XUNIT_NESTED: &str = include_str!("../../../../testdata/swift/xunit-macos-nested.xml");
+    /// Swift Testing on macOS: ten tests of one target, each waiting 300 ms and then counting,
+    /// run in parallel in one process (the run took 0.36 s).
+    const EVENTS_PARALLEL: &str =
+        include_str!("../../../../testdata/swift/events-macos-parallel.jsonl");
 
     fn words(text: &str) -> Vec<String> {
         text.split(' ').map(str::to_string).collect()
@@ -3087,5 +3128,29 @@ mod tests {
                 .unwrap_err()
                 .contains("one argument")
         );
+    }
+
+    // covers: C-48, C-39
+    #[test]
+    fn tests_that_ran_at_once_share_the_time_they_took() {
+        let listing = Listing::parse(
+            &(0..10)
+                .map(|i| format!("TenTests.t{i}()\n"))
+                .collect::<String>(),
+        );
+        let events = read_events(EVENTS_PARALLEL.as_bytes(), &listing);
+        let ms: Vec<u64> = listing
+            .tests
+            .iter()
+            .map(|id| match events.outcomes[id] {
+                Outcome::Passed(ms) => ms,
+                ref other => panic!("{id}: {other:?}"),
+            })
+            .collect();
+        // Each took about 0.35 s of the run's 0.36 s, all at once: what each one's own time is
+        // can't be more than its share, and together they are at most the run's.
+        let total: u64 = ms.iter().sum();
+        assert!(total <= 360, "{ms:?}");
+        assert!(ms.iter().all(|m| *m >= 25), "{ms:?}");
     }
 }

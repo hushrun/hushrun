@@ -306,6 +306,9 @@ machine, through a rustc wrapper that `hushrun run` sets. New, and off until a p
 - `swift test`: an executable target is read by every test target, which may start it; hushrun's
   `swift` stops waiting a second after swift ends whatever output keeps arriving, and keeps at most
   16 MiB of it.
+- `swift test`: what reuse saved is no longer a multiple of the run: Swift Testing runs a target's
+  tests at once, and each test's time is now its share of the moments it ran, not its wall time
+  ("reusing 317 tests saved about 2m 57s" of a 3-second suite).
 - `swift test`: hushrun keeps only XCTest's `Test Case` lines of what swift prints, as they go by,
   so a suite that prints more than 16 MiB besides is still recorded; past 16 MiB of those lines,
   or with output still held after swift ended, the run says once why no test is recorded, and

@@ -290,3 +290,15 @@ Two limits a third review found are kept, and said here rather than fixed:
 A wrapper COMMAND whose text starts `swift test` by a path (`sh -c "/usr/bin/swift test"`), where
 a package is, says what a COMMAND that starts it by its path says: `COMMAND starts swift by its
 path, and hushrun's swift is on PATH`. It said nothing before.
+
+## Amendment 8: a test's own time (2026-11-13)
+
+On swift-argument-parser (Swift Testing), a run said `reusing 317 tests saved about 2m 57s` of a
+suite that takes 3 seconds. A recorded stream of ten tests run at once (each waiting 300 ms, the
+run 0.36 s) showed why: each test's `testEnded` less its `testStarted` is its wall time, about
+0.35 s, and Swift Testing runs a target's tests at once in one process, so the ten summed to ten
+times the run. A test's time is now its share of each moment it ran (that moment's length divided
+among the tests running then): the shares add up to the run's time at most, and a test that ran
+alone keeps its whole time. XCTest's durations were checked the same way and kept: the console's
+`(… seconds)` and the xunit file's `time` are measured in the process that ran the test, one test
+at a time (a `--parallel` worker runs one at a time too).
