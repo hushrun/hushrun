@@ -188,6 +188,8 @@ def reason_slug(reason: str) -> str:
         # [ADR 0050] What may put a secret in a result's record.
         ("it passes a secret", "secret"), ("an earlier step sets", "unknown-variable"),
         ("a command fills in its words", "substitution"),
+        # [ADR 0055 item 6] A RUSTFLAGS or RUSTDOCFLAGS CI sets that init can't carry into the line.
+        ("its job sets ", "flags"), ("an earlier step may set ", "flags"),
     ]:
         if reason.startswith(prefix):
             return slug
@@ -262,8 +264,17 @@ def shape(family: str, line: str) -> str:
 # ---------------------------------------------------------------- A5: edits keep the files whole
 
 SETUP = re.compile(r"^hushrun/hushrun/action/setup@")
-# [ADR 0050] with the `env` init puts in front of a line's own `NAME=value` words.
-WRAP = re.compile(r"hushrun run (?:--scope \S+ )?[\w.:${}\-\[\]]+ -- (?:env (?=[A-Za-z_]\w*=))?")
+# [ADR 0055 item 6] A `RUSTFLAGS` or `RUSTDOCFLAGS` CI sets, carried into a cargo line through
+# `env`, as one shell word: bare, or between `'`s or `"`s.
+CARRIED = r"""(?:'RUST(?:DOC)?FLAGS=[^']*'|"RUST(?:DOC)?FLAGS=(?:[^"\\]|\\.)*"|RUST(?:DOC)?FLAGS=[^\s'"]*) """
+# The line's own `NAME=value` words, up to its cargo.
+OWN_THEN_CARGO = r"""(?=(?:[A-Za-z_]\w*=(?:'[^']*'|"[^"]*"|[^\s'"])* )*cargo\b)"""
+# [ADR 0050] with the `env` init puts in front of a line's own `NAME=value` words, and
+# [ADR 0055 item 6] the flags it carries in front of a cargo line.
+WRAP = re.compile(
+    r"hushrun run (?:--scope \S+ )?[\w.:${}\-\[\]]+ -- "
+    rf"(?:env (?:(?:{CARRIED})+{OWN_THEN_CARGO}|(?=[A-Za-z_]\w*=)))?"
+)
 
 
 def is_setup(item) -> bool:
@@ -751,7 +762,7 @@ def score(args):
     missing = sorted(set(keys) - set(records))
     for repo in missing:
         fail("A7", {"repo": repo, "why": "no run"})
-    regressions, changes, to_reports, to_aside = [], [], [], []
+    regressions, changes, to_reports, to_aside, to_flags = [], [], [], [], []
     if baseline:
         if baseline.get("corpus") != corpus_hash:
             results["A8"]["status"] = "not measured"
@@ -771,6 +782,11 @@ def score(args):
                     # left to that tool. Each is listed.
                     elif old == "skips" and j["outcome"] == "stepped-aside":
                         to_aside.append(key)
+                    # [ADR 0055 item 6] A cargo line whose RUSTFLAGS or RUSTDOCFLAGS init can't
+                    # carry into it stays as it is: a pass without CI's flags never skips CI's.
+                    # Each is listed.
+                    elif old == "skips" and j["outcome"] == "left:flags":
+                        to_flags.append(key)
                     elif old == "skips":
                         case = {"repo": j["repo"], "workflow": j["workflow"], "job": j["job"],
                                 "why": f"skips → {j['outcome']}"}
@@ -843,6 +859,7 @@ def score(args):
         "changes": changes,
         "toReports": to_reports,
         "toSteppedAside": to_aside,
+        "toFlags": to_flags,
         "jobs": jobs_out,
     }
     args.out.mkdir(parents=True, exist_ok=True)
@@ -906,6 +923,10 @@ def markdown(board, baseline, short=False):
         lines += ["", f"## Left to a remote build cache ({len(board['toSteppedAside'])})",
                   "", "A8 lets these go: their tool reuses its own results across machines.", ""]
         lines += [f"- {job}" for job in board["toSteppedAside"]]
+    if board.get("toFlags"):
+        lines += ["", f"## Left, since init can't carry CI's Rust flags into the line ({len(board['toFlags'])})",
+                  "", "A8 lets these go: a pass without CI's RUSTFLAGS or RUSTDOCFLAGS never skips CI's (ADR 0055).", ""]
+        lines += [f"- {job}" for job in board["toFlags"]]
     if board["changes"]:
         lines += ["", f"## Changed against the baseline ({len(board['changes'])})", ""]
         lines += [f"- {c['job']}: `{c['from']}` → `{c['to']}`" for c in board["changes"][:200]]

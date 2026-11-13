@@ -166,11 +166,42 @@ fn attempts_are_ordered_by_started_and_a_stages_events_are_left_out() {
         states(&events, "18:00", &[]),
         [AttemptState::Failed, AttemptState::Passed]
     );
+    // An attempt started earlier comes first though it ends after one started later.
+    let overlapping = [
+        event(9, Started, "z", "14:00"),
+        event(0, Started, "a", "15:00"),
+        event(1, Passed, "a", "15:10"),
+        event(10, Failed, "z", "16:00"),
+    ];
+    assert_eq!(
+        states(&overlapping, "18:00", &[]),
+        [AttemptState::Failed, AttemptState::Passed]
+    );
     let mut staging = event(2, Passed, "s", "16:00");
     staging.event.stage = Some(StageName::new("staging").unwrap());
     let policy = Policy::parse("hushrun.yaml", POLICY.as_bytes()).unwrap();
     assert!(!records_attempt(&staging, &CiOnly::none()));
     assert!(attempts(&[staging], &[], &policy, &CiOnly::none(), at("18:00")).is_empty());
+}
+
+// covers: P-6 (the index stores an attempt's terminal state by these names)
+#[test]
+fn terminal_states_are_named_after_their_events() {
+    use EventKind::*;
+    let all = [
+        (Terminal::Passed, "passed", Passed),
+        (Terminal::Failed, "failed", Failed),
+        (Terminal::Superseded(None), "superseded", Superseded),
+        (
+            Terminal::Superseded(Some(SupersededReason::Stale)),
+            "superseded",
+            Superseded,
+        ),
+    ];
+    for (state, text, kind) in all {
+        assert_eq!(state.as_str(), text);
+        assert_eq!(state.as_str(), kind.as_str());
+    }
 }
 
 #[test]

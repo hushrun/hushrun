@@ -18,7 +18,7 @@ stay in `$HUSHRUN_CORPUS_DIR`, else `cli/target/corpus/repos/`, out of git. Late
 nothing but the CPU: about three minutes on a laptop, a minute of it in the analyzer. The scoreboard is
 `target/corpus/scoreboard.md`, with every number in `scoreboard.json`. The command exits 1 when an
 assertion fails, or a job loses its skip against the baseline, unless `known.json` lists the case.
-`cli-nightly.yml` runs it weekly and by hand, and uploads the scoreboard.
+`.github/workflows/nightly.yml` runs it every night and by hand, and uploads the scoreboard.
 
 ## What a run does
 
@@ -60,7 +60,7 @@ command matches the survey's `TESTY` words (`test`, `spec`, `pytest`, `nextest`,
 | `runs:reusable` | wrapped, in a job CI names by its caller's workflow |
 | `runs:cant-tell` | wrapped, and the run can't find or read its job |
 | `stepped-aside` | a remote build cache already reuses its results (Phase 4): init leaves the job's command, or the package.json script it runs, to Turborepo, Nx, Gradle, Bazel or Pants, and the plan says `ciWhy: stepped-aside` for it. Such a command counts though its words say no test, as `./gradlew build` |
-| `left:<reason>` | init leaves its test command: `variants`, `dollar-words`, `shell-operator`, `var-prefix`, `writes-report`, `advisory`, `cd`, `watches` or `other` |
+| `left:<reason>` | init leaves its test command: `variants`, `dollar-words`, `shell-operator`, `var-prefix`, `writes-report`, `advisory`, `cd`, `watches`, `flags` (a `RUSTFLAGS` or `RUSTDOCFLAGS` CI sets that init can't carry into the line, ADR 0055) or `other` |
 | `js-not-wrapped` | a JavaScript script or tool init doesn't wrap there |
 | `unseen` | init didn't see a test command in this job; from Phase 3 init reads a workflow another of this repository's running ones calls, so only a file other repositories call stays here |
 
@@ -80,10 +80,10 @@ reads with the survey's own parser.
 | A2, variants | no wrapped command or script in a job with several (or unknown) variants predicts `skips` without identity | now |
 | A3, reusable | no wrapped command or script in a job of a workflow that only `workflow_call` starts predicts `skips` without `HUSHRUN_WORKFLOW` | now |
 | A4, secrets | no wrapped command holds `secrets.`, `github.token`, or a variable the job's `env` sets from them | now |
-| A5, valid edits | every edit applies with `git apply`; every edited workflow still loads, keeps every job, step and key, and only gains setup steps, `id-token`/`contents` permissions, `hushrun run` in front of `run:` lines (and `env` before a line's own `NAME=value` words), and init's own env keys with the values it writes: `HUSHRUN_VARIANT: ${{ toJSON(matrix) }}`, `HUSHRUN_INPUTS: ${{ toJSON(inputs) }}` and `HUSHRUN_WORKFLOW` naming its own file in a job's `env`, `HUSHRUN_REPORTS_READ` in GitLab's `variables`; package.json changes only `scripts`, `hushrun` and the hushrun dependency; a composite action of the repository's is held to a workflow's rules (Phase 4); turbo.json only gains hushrun's and CI's variables at the end of `globalPassThroughEnv`, and keeps every comment (Phase 5) | now |
+| A5, valid edits | every edit applies with `git apply`; every edited workflow still loads, keeps every job, step and key, and only gains setup steps, `id-token`/`contents` permissions, `hushrun run` in front of `run:` lines (and `env` before a line's own `NAME=value` words, and before the `RUSTFLAGS` and `RUSTDOCFLAGS` it carries into a cargo line, ADR 0055), and init's own env keys with the values it writes: `HUSHRUN_VARIANT: ${{ toJSON(matrix) }}`, `HUSHRUN_INPUTS: ${{ toJSON(inputs) }}` and `HUSHRUN_WORKFLOW` naming its own file in a job's `env`, `HUSHRUN_REPORTS_READ` in GitLab's `variables`; package.json changes only `scripts`, `hushrun` and the hushrun dependency; a composite action of the repository's is held to a workflow's rules (Phase 4); turbo.json only gains hushrun's and CI's variables at the end of `globalPassThroughEnv`, and keeps every comment (Phase 5) | now |
 | A6, idempotent | init run again on its own edits proposes none | now |
 | A7, no crash | init exits 0 on every repository, within 60 s, with no `panicked` on stderr | now |
-| A8, no regression | no test job that skipped in the baseline stops skipping | now; Phase 1 moves the survey's six report jobs to `runs:reports`, and Phase 4 the jobs a remote build cache keeps to `stepped-aside` (D7), and each list is in the scoreboard |
+| A8, no regression | no test job that skipped in the baseline stops skipping | now; Phase 1 moves the survey's six report jobs to `runs:reports`, Phase 4 the jobs a remote build cache keeps to `stepped-aside` (D7), and ADR 0055 the cargo lines whose Rust flags init can't carry to `left:flags`, and each list is in the scoreboard |
 | A9, prediction equals decision | checked by `crates/hushrun/tests/init_fixtures.rs` on every fixture, not here | |
 | A10, workspace graph | every package scope holds the workspace packages the harness finds it depends on | from Phase 5 |
 
