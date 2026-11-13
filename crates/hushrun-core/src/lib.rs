@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod blocks;
 pub mod counts_from;
 pub mod digest;
 pub mod event;
