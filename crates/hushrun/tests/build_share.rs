@@ -375,3 +375,84 @@ fn a_job_whose_backend_doesnt_answer_runs_unwrapped_with_one_line() {
     assert!(started.elapsed() >= Duration::from_secs(5));
     assert!(fake.stored().is_empty());
 }
+
+/// Every `origin.json` under `dir`, its vouches dated at the epoch: two days old and more.
+fn age_vouches(dir: &Path) -> usize {
+    let mut aged = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() && !path.is_symlink() {
+            aged += age_vouches(&path);
+        } else if path.file_name().is_some_and(|n| n == "origin.json") {
+            let mut origin: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if let Some(vouched) = origin["vouched"].as_array_mut() {
+                for vouch in vouched {
+                    vouch["date_ms"] = serde_json::json!(0);
+                    aged += 1;
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&origin).unwrap()).unwrap();
+        }
+    }
+    aged
+}
+
+/// `cargo clean`, then a timed `cargo build` through hushrun, with `share` as the share setting.
+fn timed_build(m: &Machine, fake: &FakeBuild, share: &str) -> (Duration, String) {
+    let clean = std::process::Command::new("cargo")
+        .args(["clean", "-q"])
+        .current_dir(&m.repo)
+        .status()
+        .unwrap();
+    assert!(clean.success());
+    let started = Instant::now();
+    let output = m
+        .hushrun(fake)
+        .env("HUSHRUN_BUILD_SHARE", share)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "cargo",
+            "build",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    (took, stderr)
+}
+
+// covers: B-26, B-34
+#[test]
+fn a_warm_build_with_stale_vouches_and_a_slow_open_takes_what_it_takes_with_sharing_off() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stderr) = a.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    fake.set_manifest(fake.closes().last().cloned().unwrap().manifest);
+    let b = Machine::new(dir.path(), "b", Some(&a.repo));
+    let (code, stderr) = b.build(&fake);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("from the shared store)"), "{stderr}");
+    // What a warm build takes with sharing on and vouches fresh, and what a build with sharing
+    // off takes on a third checkout (it compiles: downloaded hints aren't followed there).
+    let (fresh, stderr) = timed_build(&b, &fake, "on");
+    assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
+    let c = Machine::new(dir.path(), "c", Some(&a.repo));
+    let (off, _) = timed_build(&c, &fake, "off");
+    // A day off: every vouch B holds is older than a day, and `open` takes 10 seconds.
+    assert!(age_vouches(&b.root.join("cache/build")) > 0);
+    fake.delay(route::OPEN, Duration::from_secs(10));
+    let (on, stderr) = timed_build(&b, &fake, "on");
+    assert!(stderr.contains("2 of 2 crates reused"), "{stderr}");
+    assert!(
+        on < fresh.max(off) + Duration::from_millis(1_500),
+        "with stale vouches {on:?}, fresh {fresh:?}, sharing off {off:?}: {stderr}"
+    );
+}

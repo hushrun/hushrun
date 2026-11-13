@@ -1385,15 +1385,18 @@ impl Relay {
     /// age counts.
     async fn vouch(self: Arc<Relay>, key: Digest, outputs: Hex32) -> Answer {
         let address = Relay::address(&key);
-        // Before `open` answers, wait for it, within the wrapper's wait.
-        let deadline = Instant::now() + self.config.tuning.open * 2;
+        // C1: the question is answered within the block's budget, half what its compile costs,
+        // as a fetch is (B-26): cargo never waits on the network for longer than a compile.
+        let deadline = Instant::now() + self.vouch_budget(&key);
         loop {
             let phase = self.state().phase_now(Instant::now()).clone();
             match phase {
                 Phase::Opening if Instant::now() < deadline => {
                     tokio::time::sleep(self.config.tuning.tick).await;
                 }
-                Phase::Opening => return Answer::None,
+                // An `open` that hasn't answered within the budget is a server that can't be
+                // reached, for this question: an entry of any age counts (B-34).
+                Phase::Opening => return Answer::Offline,
                 Phase::Stopped(Stop::Offline(_)) => return Answer::Offline,
                 Phase::Stopped(_) => return Answer::None,
                 Phase::Resting(_) | Phase::Answering => break,
@@ -1402,18 +1405,24 @@ impl Relay {
         let known = self.state().vouched.get(&address).copied();
         let served = match known {
             Some(served) => served,
-            None => match self.lookup(&[address], false).await {
-                Some(found) => found
-                    .iter()
-                    .find(|f| f.address == address)
-                    .map(|f| f.outputs),
-                None => {
-                    return match self.state().phase.clone() {
-                        Phase::Stopped(Stop::Refused(_)) => Answer::None,
-                        _ => Answer::Offline,
-                    };
+            None => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let asked = tokio::time::timeout(left, self.lookup(&[address], false)).await;
+                match asked {
+                    // Not within the budget: as unreachable, for this question.
+                    Err(_) => return Answer::Offline,
+                    Ok(Some(found)) => found
+                        .iter()
+                        .find(|f| f.address == address)
+                        .map(|f| f.outputs),
+                    Ok(None) => {
+                        return match self.state().phase.clone() {
+                            Phase::Stopped(Stop::Refused(_)) => Answer::None,
+                            _ => Answer::Offline,
+                        };
+                    }
                 }
-            },
+            }
         };
         if served != Some(outputs) {
             return Answer::None;
@@ -1445,6 +1454,20 @@ impl Relay {
         } else {
             Answer::None
         }
+    }
+
+    /// How long a question about `key`'s vouch may take (C1): half what its compile took, as
+    /// the store's record says, under the ceiling of a fetch's cost.
+    fn vouch_budget(&self, key: &Digest) -> Duration {
+        let cost_ms = self
+            .config
+            .store
+            .block(key)
+            .ok()
+            .flatten()
+            .and_then(|block| block.description["rustc_ms"].as_u64())
+            .unwrap_or(0);
+        Duration::from_millis(cost_ms).min(self.config.tuning.most_cost) / 2
     }
 
     // --- what was built ------------------------------------------------------------------

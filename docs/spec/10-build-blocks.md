@@ -754,7 +754,10 @@ and the block is reused. Anything else is a miss: nothing is fetched in its plac
 and the block that compile builds takes the downloaded one's place and is from then on built
 here (B-32). When
 no server could be reached in the run, an entry of any age counts; a run with no relay asks
-nothing and reuses it. On a person's machine a downloaded library's first reuse is audited one
+nothing and reuses it. The question is answered within the block's budget, half what its compile
+took (B-26): an `open` that hasn't answered by then, or a lookup that takes longer, counts as a
+server that can't be reached, for that question, so cargo never waits on the network longer than
+the compile it may save. On a person's machine a downloaded library's first reuse is audited one
 time in ten, which the record notes, then one in fifty as any (B-16). A difference found by an
 audit or a comparison of a downloaded block, and a dependent that can't load one (B-15), suspend
 its first key for `keep_days`, not until `hushrun build clean`, and are reported to the scope the

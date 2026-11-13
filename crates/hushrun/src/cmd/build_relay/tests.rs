@@ -1526,3 +1526,50 @@ fn a_ci_job_s_end_sends_what_it_built_last_and_waits_no_longer_than_its_context_
         started.elapsed()
     );
 }
+
+// covers: B-26, B-34
+#[test]
+fn a_stale_vouch_is_answered_within_the_block_s_budget_while_open_is_slow() {
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_secs(10));
+    let m = machine();
+    // A block only downloaded, vouched for two days ago, whose compile took 2 seconds.
+    let (key, step) = (Digest::of(b"stale"), Digest::of(b"stale step"));
+    let src = m.store.root().with_file_name("stale");
+    std::fs::write(&src, b"bytes").unwrap();
+    m.store
+        .publish_with_origin(
+            &key,
+            &json!({"step": step, "class": "library", "rustc_ms": 2000}),
+            &[NewFile {
+                name: "liba.rlib".into(),
+                source: src,
+            }],
+            &Origin::downloaded(Vouch {
+                host: fake.origin(),
+                org: "acme".into(),
+                repository: "github.com/acme/shop".into(),
+                scope: "person/2".into(),
+                outputs: Hex32([1; 32]),
+                date_ms: 0,
+            }),
+            SystemTime::now(),
+        )
+        .unwrap();
+    let relay = start(&fake, &m, |c| c.tuning.open = Duration::from_secs(10));
+    begin(&relay, &m);
+    let started = Instant::now();
+    let answer = ask(
+        &relay,
+        Request::Vouch {
+            key,
+            step,
+            outputs: Hex32([1; 32]),
+        },
+    );
+    let took = started.elapsed();
+    // `open` hasn't answered within half the compile: as unreachable, the entry counts.
+    assert_eq!(answer, Answer::Offline);
+    assert!(took < Duration::from_millis(1_500), "{took:?}");
+    assert!(took >= Duration::from_millis(900), "{took:?}");
+}
