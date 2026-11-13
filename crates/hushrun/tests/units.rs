@@ -808,6 +808,15 @@ fn a_test_file_whose_last_test_pytest_exit_cut_short_didnt_run_whole() {
     );
     assert_eq!(ran.code, 3, "{}\n{}", ran.stdout, ran.stderr);
     assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+    // \[C-37\] `hushrun why` says a test of it didn't finish, not that a start of its runner
+    // didn't run it whole.
+    let why = r.run(&["why", "unit", "test_k.py"], &[]);
+    assert!(
+        why.stdout.contains("test_k.py would run with `tests: reuse`: not every test of it finished the last time it ran"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
 }
 
 // covers: C-32

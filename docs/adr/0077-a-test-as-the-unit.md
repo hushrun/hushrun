@@ -332,3 +332,12 @@ test that failed first; the plugin's are in ADR 0080's Amendment 3.
   store now keeps such a row while the run's adapter tells the unit, run, reused or not run; and
   `why` splits `UNIT::TEST` where the unit is one the store knows, so a Gradle or Maven class of
   no file (`<project directory>::<class>`) is found whole, with its tests after it.
+
+## Amendment 12: what the confirmation pass ran (2026-11-12)
+
+- **A test file's reason, through its test.** After a session fixture's end failed, `why` of the
+  test said the fixture's end, but `why` of its test file said it "didn't run whole in every start
+  of its runner", which points at a start. A test file kept out because not every test of it
+  finished, or one was skipped in a run that failed, now says it through the first such test and
+  that test's own reason; with no test told, it says not every test of it finished, without a
+  start.

@@ -442,6 +442,30 @@ fn not_kept(
     )
 }
 
+/// \[C-37\] Why a test file kept no result of its own, as `decision` says: when the rule that
+/// decided it is one a test of it was decided by too (not every test finished, a skip in a run
+/// that failed), through the first such test and the reason its row keeps (`tests`), so that a
+/// test a failing wider fixture served names the fixture for its file too; else the rule's.
+fn file_not_kept(
+    decision: Decision,
+    tests: &BTreeMap<String, store::TestRow>,
+    words: &RunWords,
+) -> Option<String> {
+    let through = match decision.not_kept? {
+        units::NotKept::Unfinished | units::NotKept::SkippedInFailedRun => tests
+            .iter()
+            .find(|(_, row)| row.state == State::NotRun && row.not_kept.is_some()),
+        _ => None,
+    };
+    match through {
+        Some((id, row)) => Some(format!(
+            "its test {id} kept no result: {}",
+            row.not_kept.as_deref().unwrap_or_default()
+        )),
+        None => not_kept(decision, false, None, words),
+    }
+}
+
 /// \[C-39, C-22\] What a plan reuses when tests are the unit, counted for the run's line and for
 /// `hushrun ready`: the tests, when this machine knows every test file's (its rows or \[C-41\]
 /// hints), and the test files, with the tests reused one by one beside them.
@@ -2480,6 +2504,7 @@ fn decide(
                     ))
                 })
                 .collect();
+            let file_why = file_not_kept(decision, &tests_rows, &mode.words);
             out.mapped.insert(
                 unit.clone(),
                 Mapped {
@@ -2503,7 +2528,7 @@ fn decide(
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
-                    not_kept: not_kept(decision, false, None, &mode.words),
+                    not_kept: file_why,
                 },
             );
         }

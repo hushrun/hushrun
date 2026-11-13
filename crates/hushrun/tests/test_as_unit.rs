@@ -439,7 +439,7 @@ fn a_skip_in_a_run_that_failed_records_nothing() {
     assert_eq!(file["reason"], "not-kept", "{file:#}");
     assert_eq!(
         file["says"],
-        "tests/test_skips.py runs: one of its tests was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides",
+        "tests/test_skips.py runs: its test test_in_setup kept no result: it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides",
         "{file:#}"
     );
     // A test file skipped whole as it loads, which no test of it says: the same reason, not that
@@ -689,6 +689,14 @@ fn a_session_fixture_asked_for_at_run_time_whose_end_fails_keeps_the_test_from_a
     assert_ne!(
         map["units"]["tests/test_l.py"]["tests"]["test_leaky"], "passed",
         "{map:#}"
+    );
+    // \[C-37\] Its test file keeps no pass for the same reason, said through the test.
+    let file = why_json(&r, "tests/test_l.py");
+    assert_eq!(file["reason"], "not-kept", "{file:#}");
+    let says = file["says"].as_str().unwrap();
+    assert!(
+        says.starts_with("tests/test_l.py runs: its test test_leaky kept no result: a fixture of a wider scope it was served (db) failed as it ended"),
+        "{file:#}"
     );
     let second = r.run(&pytest_args(&python, &[]), &[("BUG", "1")]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
@@ -1638,7 +1646,7 @@ fn each_rule_that_keeps_a_result_says_why_through_hushrun_why() {
             rules_units(json!([ok("t1"), {"id": "t2"}]), json!({"finished": 1})),
             vec![],
             None,
-            Some("it didn't run whole in every start of its runner"),
+            Some("its test t2 kept no result: it didn't finish in every process that ran it"),
         ),
         (
             "a start that died",
@@ -1669,7 +1677,7 @@ fn each_rule_that_keeps_a_result_says_why_through_hushrun_why() {
             ),
             vec![("FAKE_EXIT", "1")],
             Some("it was skipped in a run that failed"),
-            Some("one of its tests was skipped in a run that failed"),
+            Some("its test t1 kept no result: it was skipped in a run that failed"),
         ),
         (
             "a failure no test explains",

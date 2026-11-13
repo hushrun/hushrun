@@ -676,7 +676,7 @@ impl NotKept {
                 "it didn't finish in every process that ran it the last time, so it keeps no result"
             }
             (NotKept::Unfinished, false) => {
-                "it didn't run whole in every start of its runner the last time, so it keeps no result of its own"
+                "not every test of it finished the last time it ran (one was cut short, or a start of its runner stopped first), so it keeps no result of its own"
             }
             (NotKept::TestsReused, _) => {
                 "some of its tests were reused one by one the last time it ran, so it didn't run whole and keeps no pass of its own"
