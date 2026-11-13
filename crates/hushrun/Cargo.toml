@@ -60,6 +60,9 @@ semver.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+# A PUT of a build block's pack streams it from its file (B-29): the stream reqwest's body takes.
+# Already part of the binary's build through the ledger's HTTP client.
+futures-util.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

@@ -37,11 +37,40 @@ impl Spool {
         }
     }
 
-    /// The bytes, read whole: for a PUT body.
+    /// The bytes, read whole: for tests and small packs.
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> io::Result<Vec<u8>> {
         match self {
             Spool::Memory(bytes) => Ok(bytes.clone()),
             Spool::File(path, _) => fs::read(path),
+        }
+    }
+
+    /// A PUT's body (B-29): the bytes held in memory as they are, or the file streamed a chunk
+    /// at a time, never read whole. The file, to remove once the PUT is done.
+    pub(crate) fn into_body(self) -> io::Result<(reqwest::Body, Option<PathBuf>)> {
+        match self {
+            Spool::Memory(bytes) => Ok((reqwest::Body::from(bytes), None)),
+            Spool::File(path, _) => {
+                let file = File::open(&path)?;
+                let chunks = futures_util::stream::unfold(Some(file), |file| async move {
+                    let mut file = file?;
+                    let read = tokio::task::spawn_blocking(move || {
+                        let mut chunk = vec![0u8; PUT_CHUNK];
+                        let n = file.read(&mut chunk)?;
+                        chunk.truncate(n);
+                        Ok::<_, io::Error>((file, chunk))
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(io::Error::other(err)));
+                    match read {
+                        Ok((_, chunk)) if chunk.is_empty() => None,
+                        Ok((file, chunk)) => Some((Ok(chunk), Some(file))),
+                        Err(err) => Some((Err(err), None)),
+                    }
+                });
+                Ok((reqwest::Body::wrap_stream(chunks), Some(path)))
+            }
         }
     }
 
@@ -53,17 +82,21 @@ impl Spool {
     }
 }
 
-/// A writer that spills into `dir` past [`IN_MEMORY`].
+/// How much of a spilled pack a PUT reads at once.
+const PUT_CHUNK: usize = 1 << 20;
+
+/// A writer that spills into `dir` past `limit` bytes ([`IN_MEMORY`] but in tests).
 struct Spilling<'a> {
     spool: Spool,
     dir: &'a Path,
     name: String,
+    limit: usize,
 }
 
 impl Write for Spilling<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Spool::Memory(bytes) = &mut self.spool {
-            if bytes.len() + buf.len() <= IN_MEMORY {
+            if bytes.len() + buf.len() <= self.limit {
                 bytes.extend_from_slice(buf);
                 return Ok(buf.len());
             }
@@ -112,7 +145,18 @@ pub(crate) enum NotPacked {
 
 /// Packs the block under `key` from `store`, spilling into `dir`. Each file's size and SHA-256
 /// are checked against the store's record while it is read (B-29).
+#[cfg(test)]
 pub(crate) fn pack_block(store: &Store, key: &Digest, dir: &Path) -> Result<Packed, NotPacked> {
+    pack_block_within(store, key, dir, IN_MEMORY)
+}
+
+/// [`pack_block`], holding at most `limit` bytes of each pass in memory.
+pub(crate) fn pack_block_within(
+    store: &Store,
+    key: &Digest,
+    dir: &Path,
+    limit: usize,
+) -> Result<Packed, NotPacked> {
     let block = match store.block(key) {
         Ok(Some(block)) => block,
         _ => return Err(NotPacked::Gone),
@@ -142,6 +186,7 @@ pub(crate) fn pack_block(store: &Store, key: &Digest, dir: &Path) -> Result<Pack
         spool: Spool::new(),
         dir,
         name: format!("{}.stream", key.hex()),
+        limit,
     };
     let stream_sha = pack::compress(
         &record,
@@ -157,6 +202,7 @@ pub(crate) fn pack_block(store: &Store, key: &Digest, dir: &Path) -> Result<Pack
         spool: Spool::new(),
         dir,
         name: format!("{}.pack", key.hex()),
+        limit,
     };
     let sealed = (|| {
         let mut reader = stream.reader().map_err(PackError::Io)?;

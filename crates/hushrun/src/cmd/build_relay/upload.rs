@@ -27,7 +27,7 @@ use hushrun_core::blocks::{
 };
 
 use super::http::Failure;
-use super::pack::{NotPacked, Packed, pack_block};
+use super::pack::{NotPacked, Packed, pack_block_within};
 use super::{Phase, Relay, Stop, Tuning};
 
 /// How long a marker waits before it is tried again after a failure that may pass.
@@ -206,6 +206,7 @@ impl Relay {
             );
             let floor = u64::from(self.config.min_free_gb).saturating_mul(1 << 30);
             let key = marker.key;
+            let spill = self.config.tuning.spill;
             let result = self
                 .runtime
                 .spawn_blocking(move || {
@@ -213,7 +214,7 @@ impl Relay {
                     if store.free_bytes().unwrap_or(u64::MAX) < floor {
                         return Err(NotPacked::Io("low on space".into()));
                     }
-                    pack_block(&store, &key, &dir)
+                    pack_block_within(&store, &key, &dir, spill)
                 })
                 .await
                 .unwrap_or(Err(NotPacked::Io("packing stopped".into())));
@@ -306,12 +307,17 @@ impl Relay {
             let relay = self.clone();
             let size = p.sealed.bytes;
             let handle = self.runtime.spawn(async move {
-                let bytes = p.pack.bytes().ok();
-                p.pack.remove();
-                let bytes = bytes?;
-                let request = relay.client.link(&link)?;
-                let response = request.body(bytes).send().await.ok()?;
-                Some(response.status().as_u16())
+                // Streamed from where the pack is, with the length and checksum the signed
+                // link names in its headers.
+                let (body, file) = p.pack.into_body().ok()?;
+                let sent = match relay.client.link(&link) {
+                    Some(request) => request.body(body).send().await.ok(),
+                    None => None,
+                };
+                if let Some(file) = file {
+                    let _ = std::fs::remove_file(file);
+                }
+                Some(sent?.status().as_u16())
             });
             self.state().puts.insert(marker.key, handle.abort_handle());
             puts.push((marker, size, handle));

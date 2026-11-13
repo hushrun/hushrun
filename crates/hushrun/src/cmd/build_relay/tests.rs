@@ -52,6 +52,7 @@ fn tuning() -> Tuning {
         close: Duration::from_secs(2),
         downloads: 8,
         tick: Duration::from_millis(5),
+        spill: super::pack::IN_MEMORY,
     }
 }
 
@@ -1093,4 +1094,48 @@ fn a_block_that_may_not_leave_the_machine_gets_no_marker() {
     relay.end_check(&[]);
     assert!(waiting(&m).is_empty());
     assert_eq!(fake.count(route::BEGIN), 0);
+}
+
+// covers: B-28, B-29
+#[test]
+fn a_pack_larger_than_memory_holds_goes_up_streamed_from_its_file() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    // 3 MB of bytes that don't compress, against 1 MiB held in memory: both passes spill.
+    let (key, step) = block(&m.store, 81, 3_000_000, Some(me(&fake)));
+    let relay = start(&fake, &m, |c| c.tuning.spill = 1 << 20);
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    ask(&relay, built(key, step));
+    until("stored", || {
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    relay.end_check(&[]);
+    let packed = super::pack::pack_block(&m.store, &key, &m.session).unwrap();
+    assert!(packed.sealed.bytes > 1 << 20);
+    assert_eq!(
+        fake.object(address(&key)).unwrap(),
+        packed.pack.bytes().unwrap()
+    );
+    // The spilled files went with the upload.
+    let packs = m.store.root().join("outbox/tmp");
+    let left: Vec<_> = walk(&packs);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|e| {
+            if e.path().is_dir() {
+                walk(&e.path())
+            } else {
+                vec![e.path()]
+            }
+        })
+        .collect()
 }

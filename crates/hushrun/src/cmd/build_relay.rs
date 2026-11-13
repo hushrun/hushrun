@@ -68,6 +68,8 @@ pub(crate) struct Tuning {
     pub(crate) downloads: usize,
     /// How often a waiting fetch looks at its progress.
     pub(crate) tick: Duration,
+    /// Bytes of a pack held in memory while it is made; more go to a file.
+    pub(crate) spill: usize,
 }
 
 impl Default for Tuning {
@@ -81,6 +83,7 @@ impl Default for Tuning {
             close: Duration::from_secs(5),
             downloads: 8,
             tick: Duration::from_millis(20),
+            spill: pack::IN_MEMORY,
         }
     }
 }
