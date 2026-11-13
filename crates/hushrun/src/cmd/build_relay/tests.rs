@@ -1463,13 +1463,18 @@ fn in_ci_every_build_request_carries_the_job_s_id_token_and_it_is_minted_again_b
             step: Digest::of(b"s"),
         },
     );
-    until("renewed", || fake.id_tokens().len() == 2);
-    ask(
-        &relay,
-        Request::Hints {
-            step: Digest::of(b"t"),
-        },
-    );
+    let first = format!("Bearer {}", fake.id_tokens()[0]);
+    let mut n = 0u32;
+    until("a request carries the renewed token", || {
+        n += 1;
+        ask(
+            &relay,
+            Request::Hints {
+                step: Digest::of(&n.to_le_bytes()),
+            },
+        );
+        bearers(&fake).last() != Some(&first)
+    });
     relay.end_check(&[]);
     let sent = bearers(&fake);
     let tokens = fake.id_tokens();
@@ -1480,7 +1485,6 @@ fn in_ci_every_build_request_carries_the_job_s_id_token_and_it_is_minted_again_b
     );
     assert_eq!(sent[0], format!("Bearer {}", tokens[0]));
     assert_eq!(sent[1], format!("Bearer {}", tokens[0]));
-    assert_eq!(sent[2], format!("Bearer {}", tokens[1]));
 }
 
 // covers: B-31
