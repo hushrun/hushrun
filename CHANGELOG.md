@@ -6,6 +6,14 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+### Fixed
+
+- A blob-less or tree-less partial clone read through the git CLI (`HUSHRUN_GIT_READER=cli`, a
+  SHA-256 repository, or one gix can't open) fails with `E_MISSING_OBJECTS` and its advice on git
+  2.43, as on newer git. git 2.43 dies on the object it can't fetch from the promisor remote
+  instead of saying it is missing, and hushrun said "output ended early". Another early end of
+  `git cat-file --batch` now shows git's own error.
+
 ## [0.14.0] - 2026-11-13
 
 Build blocks ([ADR 0076](docs/adr/0076-compiled-crates-are-reused-between-worktrees.md)): a crate

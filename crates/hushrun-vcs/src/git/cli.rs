@@ -5,7 +5,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use hushrun_digest::Sha256;
 use hushrun_digest::hash::{CHUNK, Hasher};
@@ -17,14 +17,40 @@ const MAX_CAT_FILE: usize = 4;
 /// Below this many objects per process, fewer processes are faster.
 const MIN_OBJECTS_PER_PROCESS: usize = 256;
 
+/// The program a git command runs, with any arguments it takes before git's own.
+type Program<'a> = &'a [&'a str];
+/// `git` on PATH. Only tests pass another program: a stand-in for a git version this machine
+/// doesn't have.
+const GIT: Program<'static> = &["git"];
+
+fn command(program: Program) -> Command {
+    let (name, args) = program.split_first().expect("a program has a name");
+    let mut command = Command::new(name);
+    command.args(args);
+    command
+}
+
 /// Runs `git -C <root> <args>` and returns its stdout.
 pub(crate) fn run<I, S>(root: &Path, args: I, envs: &[(&str, &OsStr)]) -> Result<Vec<u8>, Error>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_in(GIT, root, args, envs)
+}
+
+fn run_in<I, S>(
+    program: Program,
+    root: &Path,
+    args: I,
+    envs: &[(&str, &OsStr)],
+) -> Result<Vec<u8>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let args: Vec<_> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-    let mut command = Command::new("git");
+    let mut command = command(program);
     command.arg("-C").arg(root).args(&args);
     command.env("GIT_OPTIONAL_LOCKS", "0");
     for (key, value) in envs {
@@ -134,17 +160,28 @@ pub(crate) struct TreeRecord {
 
 /// Every non-tree entry of `treeish`, recursively.
 pub(crate) fn ls_tree(root: &Path, treeish: &str) -> Result<Vec<TreeRecord>, Error> {
-    let out = run(
+    ls_tree_in(GIT, root, treeish)
+}
+
+fn ls_tree_in(program: Program, root: &Path, treeish: &str) -> Result<Vec<TreeRecord>, Error> {
+    let out = run_in(
+        program,
         root,
         ["ls-tree", "-r", "-z", "--full-tree", treeish],
-        &[no_lazy_fetch()],
+        &no_lazy_fetch(),
     )
     .map_err(|err| match &err {
-        Error::Git { stderr, .. } if stderr.contains("missing") || stderr.contains("bad tree") => {
-            Error::MissingObjects {
-                object: treeish.to_string(),
+        Error::Git { stderr, .. } => match promisor_fetch_failed(stderr) {
+            Some(object) => Error::MissingObjects {
+                object: object.to_string(),
+            },
+            None if stderr.contains("missing") || stderr.contains("bad tree") => {
+                Error::MissingObjects {
+                    object: treeish.to_string(),
+                }
             }
-        }
+            None => err,
+        },
         _ => err,
     })?;
     let bad = |detail: &str| Error::GitOutput {
@@ -186,6 +223,15 @@ pub(crate) fn hash_blobs(
     oids: &[&[u8]],
     jobs: usize,
 ) -> Result<Vec<(Sha256, u64)>, Error> {
+    hash_blobs_in(GIT, root, oids, jobs)
+}
+
+fn hash_blobs_in(
+    program: Program,
+    root: &Path,
+    oids: &[&[u8]],
+    jobs: usize,
+) -> Result<Vec<(Sha256, u64)>, Error> {
     if oids.is_empty() {
         return Ok(Vec::new());
     }
@@ -197,7 +243,7 @@ pub(crate) fn hash_blobs(
     std::thread::scope(|scope| {
         let handles: Vec<_> = oids
             .chunks(per_process)
-            .map(|chunk| scope.spawn(move || cat_file(root, chunk)))
+            .map(|chunk| scope.spawn(move || cat_file(program, root, chunk)))
             .collect();
         let mut out = Vec::with_capacity(oids.len());
         for handle in handles {
@@ -209,17 +255,64 @@ pub(crate) fn hash_blobs(
 
 /// The bytes of one blob.
 pub(crate) fn read_blob(root: &Path, oid: &[u8]) -> Result<Vec<u8>, Error> {
+    read_blob_in(GIT, root, oid)
+}
+
+fn read_blob_in(program: Program, root: &Path, oid: &[u8]) -> Result<Vec<u8>, Error> {
     let oid = hex::encode(oid);
-    run(root, ["cat-file", "blob", &oid], &[no_lazy_fetch()])
+    run_in(program, root, ["cat-file", "blob", &oid], &no_lazy_fetch()).map_err(|err| match &err {
+        Error::Git { stderr, .. } => match promisor_fetch_failed(stderr) {
+            Some(object) => Error::MissingObjects {
+                object: object.to_string(),
+            },
+            None => err,
+        },
+        _ => err,
+    })
 }
 
-/// A partial clone must fail with E_MISSING_OBJECTS, not fetch what's left out one object at a time.
-fn no_lazy_fetch() -> (&'static str, &'static OsStr) {
-    ("GIT_NO_LAZY_FETCH", OsStr::new("1"))
+/// A partial clone must fail with E_MISSING_OBJECTS, not fetch what's left out one object at a
+/// time. `LC_ALL=C` keeps git's messages in English, for `promisor_fetch_failed`; the plumbing
+/// output read here (`cat-file --batch`, `cat-file blob`, `ls-tree -z`) is never translated.
+fn no_lazy_fetch() -> [(&'static str, &'static OsStr); 2] {
+    [
+        ("GIT_NO_LAZY_FETCH", OsStr::new("1")),
+        ("LC_ALL", OsStr::new("C")),
+    ]
 }
 
-fn cat_file(root: &Path, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)>, Error> {
-    batch(root, oids, |out| read_batch(out, oids))
+/// The object git died on, when it died because it couldn't fetch the object from a promisor
+/// remote. That is how some versions of git, such as 2.43, end when lazy fetching is disabled
+/// and a partial clone lacks an object; newer ones say the object is missing. The message is read
+/// as git writes it under `no_lazy_fetch`.
+fn promisor_fetch_failed(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .find_map(|line| {
+            line.trim_end()
+                .strip_prefix("fatal: could not fetch ")?
+                .strip_suffix(" from promisor remote")
+        })
+        .filter(|oid| !oid.is_empty() && oid.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Why a reader of `git cat-file --batch` stopped.
+#[derive(Debug)]
+enum Stop {
+    /// The output ended where the header of the object at this index was due: git exited, and
+    /// `batch` tells why from its exit status and stderr.
+    EndedAt(usize),
+    Failed(Error),
+}
+
+impl From<Error> for Stop {
+    fn from(err: Error) -> Self {
+        Stop::Failed(err)
+    }
+}
+
+fn cat_file(program: Program, root: &Path, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)>, Error> {
+    batch(program, root, oids, |out| read_batch(out, oids))
 }
 
 /// \[M8\] Calls `sink` with the bytes of each blob in `oids`, in order, from one
@@ -229,10 +322,19 @@ pub(crate) fn read_blobs(
     oids: &[&[u8]],
     sink: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), Error>,
 ) -> Result<(), Error> {
+    read_blobs_in(GIT, root, oids, sink)
+}
+
+fn read_blobs_in(
+    program: Program,
+    root: &Path,
+    oids: &[&[u8]],
+    sink: &mut dyn FnMut(usize, Vec<u8>) -> Result<(), Error>,
+) -> Result<(), Error> {
     if oids.is_empty() {
         return Ok(());
     }
-    batch(root, oids, |mut out| {
+    batch(program, root, oids, |mut out| {
         let bad = |detail: String| Error::GitOutput {
             args: "cat-file --batch".into(),
             detail,
@@ -245,17 +347,18 @@ pub(crate) fn read_blobs(
                 .map_err(|e| bad(e.to_string()))?
                 == 0
             {
-                return Err(bad("output ended early".into()));
+                return Err(Stop::EndedAt(i));
             }
             let line = String::from_utf8_lossy(&header);
             let fields: Vec<&str> = line.trim_end().split(' ').collect();
             if fields.get(1) == Some(&"missing") {
                 return Err(Error::MissingObjects {
                     object: hex::encode(oid),
-                });
+                }
+                .into());
             }
             let [_, "blob", size] = fields[..] else {
-                return Err(bad(format!("unexpected header {:?}", line.trim_end())));
+                return Err(bad(format!("unexpected header {:?}", line.trim_end())).into());
             };
             let size: usize = size
                 .parse()
@@ -273,15 +376,16 @@ pub(crate) fn read_blobs(
 
 /// Runs one `git cat-file --batch` that is asked for `oids`, and reads its output with `read`.
 fn batch<T>(
+    program: Program,
     root: &Path,
     oids: &[&[u8]],
-    read: impl FnOnce(BufReader<std::process::ChildStdout>) -> Result<T, Error>,
+    read: impl FnOnce(BufReader<std::process::ChildStdout>) -> Result<T, Stop>,
 ) -> Result<T, Error> {
-    let mut child = Command::new("git")
+    let mut child = command(program)
         .arg("-C")
         .arg(root)
         .args(["cat-file", "--batch"])
-        .envs([no_lazy_fetch()])
+        .envs(no_lazy_fetch())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -314,7 +418,11 @@ fn batch<T>(
     });
     let (read, write, stderr) = result;
     let status = child.wait().map_err(Error::GitSpawn)?;
-    let value = read?;
+    let value = match read {
+        Ok(value) => value,
+        Err(Stop::Failed(err)) => return Err(err),
+        Err(Stop::EndedAt(i)) => return Err(ended_early(oids[i], status, &stderr)),
+    };
     if let Err(err) = write {
         return Err(Error::Git {
             args: "cat-file --batch".into(),
@@ -332,7 +440,29 @@ fn batch<T>(
     Ok(value)
 }
 
-fn read_batch(mut out: impl BufRead, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)>, Error> {
+/// What it means that `git cat-file --batch` ended before it said anything about `oid`. git
+/// that died because it couldn't fetch the object from a promisor remote lacks it; anything else
+/// is git's own error, in its words.
+fn ended_early(oid: &[u8], status: ExitStatus, stderr: &str) -> Error {
+    if status.success() {
+        Error::GitOutput {
+            args: "cat-file --batch".into(),
+            detail: "output ended early".into(),
+        }
+    } else if promisor_fetch_failed(stderr).is_some() {
+        Error::MissingObjects {
+            object: hex::encode(oid),
+        }
+    } else {
+        Error::Git {
+            args: "cat-file --batch".into(),
+            status: status.to_string(),
+            stderr: stderr.trim().to_string(),
+        }
+    }
+}
+
+fn read_batch(mut out: impl BufRead, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)>, Stop> {
     let bad = |detail: String| Error::GitOutput {
         args: "cat-file --batch".into(),
         detail,
@@ -340,13 +470,13 @@ fn read_batch(mut out: impl BufRead, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)
     let mut hashes = Vec::with_capacity(oids.len());
     let mut header = Vec::new();
     let mut buf = vec![0u8; CHUNK];
-    for oid in oids {
+    for (i, oid) in oids.iter().enumerate() {
         header.clear();
         let n = out
             .read_until(b'\n', &mut header)
             .map_err(|e| bad(e.to_string()))?;
         if n == 0 {
-            return Err(bad("output ended early".into()));
+            return Err(Stop::EndedAt(i));
         }
         let line = String::from_utf8_lossy(&header);
         let line = line.trim_end();
@@ -354,13 +484,14 @@ fn read_batch(mut out: impl BufRead, oids: &[&[u8]]) -> Result<Vec<(Sha256, u64)
         if fields.get(1) == Some(&"missing") {
             return Err(Error::MissingObjects {
                 object: hex::encode(oid),
-            });
+            }
+            .into());
         }
         let [_, kind, size] = fields[..] else {
-            return Err(bad(format!("unexpected header {line:?}")));
+            return Err(bad(format!("unexpected header {line:?}")).into());
         };
         if kind != "blob" {
-            return Err(bad(format!("{} is a {kind}, not a blob", hex::encode(oid))));
+            return Err(bad(format!("{} is a {kind}, not a blob", hex::encode(oid))).into());
         }
         let size: u64 = size
             .parse()
@@ -530,7 +661,155 @@ mod tests {
         let hashes = read_batch(body.as_bytes(), &[oid]).unwrap();
         assert_eq!(hashes, [(hushrun_digest::hash::sha256(b"hello"), 5)]);
         let body = format!("{} missing\n", hex::encode(missing));
-        let err = read_batch(body.as_bytes(), &[missing]).unwrap_err();
+        let Err(Stop::Failed(err)) = read_batch(body.as_bytes(), &[missing]) else {
+            panic!("a missing object is an error");
+        };
         assert_eq!(err.code(), Some("E_MISSING_OBJECTS"));
+        // An early end is for `batch` to judge, once git has exited.
+        let body = format!("{} blob 5\nhello\n", hex::encode(oid));
+        let ended = read_batch(body.as_bytes(), &[oid, missing]);
+        assert!(matches!(ended, Err(Stop::EndedAt(1))), "{ended:?}");
+    }
+
+    /// Stand-ins for `git`, run by `sh`. git 2.43 with lazy fetching disabled doesn't report an
+    /// object a partial clone lacks as missing: it warns, dies on it with this message and exits
+    /// 128. Like a translated git, a stand-in says it in English only under `LC_ALL=C`.
+    #[cfg(unix)]
+    mod stand_in {
+        use super::*;
+
+        const PROMISOR: &str = r#"
+promisor() {
+    echo 'warning: lazy fetching disabled; some objects may not be available' >&2
+    if [ "$LC_ALL" = C ] && [ "$GIT_NO_LAZY_FETCH" = 1 ]; then
+        echo "fatal: could not fetch $1 from promisor remote" >&2
+    else
+        echo "Fehler: $1 konnte nicht vom Promisor-Remote abgerufen werden" >&2
+    fi
+    exit 128
+}
+"#;
+
+        /// git 2.43 asked for an object a blob-less clone lacks first.
+        const DIES_ON_FIRST: &str = "read -r oid; promisor \"$oid\"";
+        /// git 2.43 that has the first blob ("hello") and lacks the second.
+        const DIES_ON_SECOND: &str = r#"
+read -r oid; printf '%s blob 5\nhello\n' "$oid"
+read -r oid; promisor "$oid"
+"#;
+        /// git dying early for another reason.
+        const OTHER_FATAL: &str = r#"
+read -r oid
+echo "fatal: packed object $oid (stored in pack-1.pack) is corrupt" >&2
+exit 128
+"#;
+        /// git exiting 0 without printing a thing.
+        const SAYS_NOTHING: &str = "cat >/dev/null; exit 0";
+
+        /// Runs `f` with `script` as the git program, and a folder for the repository.
+        fn with<T>(script: &str, f: impl FnOnce(Program, &Path) -> T) -> T {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("git.sh");
+            std::fs::write(&path, format!("{PROMISOR}\n{script}\n")).unwrap();
+            f(&["sh", path.to_str().unwrap()], dir.path())
+        }
+
+        /// What `hash_blobs` and `read_blobs` give when `script` is git, and which blobs
+        /// `read_blobs` handed over before it.
+        fn both_readers(script: &str, oids: &[&[u8]]) -> (Error, Error, Vec<(usize, Vec<u8>)>) {
+            with(script, |git, root| {
+                let hashed = hash_blobs_in(git, root, oids, 1).unwrap_err();
+                let mut read = Vec::new();
+                let streamed = read_blobs_in(git, root, oids, &mut |i, bytes| {
+                    read.push((i, bytes));
+                    Ok(())
+                })
+                .unwrap_err();
+                (hashed, streamed, read)
+            })
+        }
+
+        fn oids(n: u32) -> Vec<[u8; 20]> {
+            (1..=n)
+                .map(|i| {
+                    let mut oid = [0x5a; 20];
+                    oid[..4].copy_from_slice(&i.to_be_bytes());
+                    oid
+                })
+                .collect()
+        }
+
+        fn assert_missing(err: &Error, oid: &[u8]) {
+            assert_eq!(err.code(), Some("E_MISSING_OBJECTS"), "{err}");
+            assert!(err.to_string().contains(&hex::encode(oid)), "{err}");
+            assert!(err.to_string().contains("full or shallow clone"), "{err}");
+        }
+
+        // covers: D-9
+        #[test]
+        fn a_promisor_fetch_failure_on_the_first_object_is_missing_objects() {
+            // More ids than a pipe holds: git dies before reading them all, and the write of
+            // the rest fails.
+            let oids = oids(5000);
+            let oids: Vec<&[u8]> = oids.iter().map(|o| o.as_slice()).collect();
+            let (hashed, streamed, read) = both_readers(DIES_ON_FIRST, &oids);
+            assert_missing(&hashed, oids[0]);
+            assert_missing(&streamed, oids[0]);
+            assert!(read.is_empty());
+        }
+
+        // covers: D-9
+        #[test]
+        fn a_promisor_fetch_failure_names_the_object_it_stopped_at() {
+            let oids = oids(3);
+            let oids: Vec<&[u8]> = oids.iter().map(|o| o.as_slice()).collect();
+            let (hashed, streamed, read) = both_readers(DIES_ON_SECOND, &oids);
+            assert_missing(&hashed, oids[1]);
+            assert_missing(&streamed, oids[1]);
+            assert_eq!(read, [(0, b"hello".to_vec())]);
+        }
+
+        #[test]
+        fn other_early_ends_are_not_missing_objects() {
+            let oids = oids(2);
+            let oids: Vec<&[u8]> = oids.iter().map(|o| o.as_slice()).collect();
+            let (hashed, streamed, _) = both_readers(OTHER_FATAL, &oids);
+            for err in [hashed, streamed] {
+                assert_eq!(err.code(), None, "{err}");
+                assert!(err.to_string().contains("is corrupt"), "{err}");
+            }
+            let (hashed, streamed, _) = both_readers(SAYS_NOTHING, &oids);
+            for err in [hashed, streamed] {
+                assert_eq!(err.code(), None, "{err}");
+                assert!(err.to_string().contains("output ended early"), "{err}");
+            }
+        }
+
+        // covers: D-9
+        #[test]
+        fn ls_tree_reports_the_tree_git_could_not_fetch() {
+            // A tree-less clone: git names the tree it lacks, here one below the root.
+            let subtree = "ab".repeat(20);
+            let script = format!("promisor {subtree}");
+            let err = with(&script, |git, root| ls_tree_in(git, root, "HEAD^{tree}")).err();
+            let err = err.expect("ls-tree fails");
+            assert_eq!(err.code(), Some("E_MISSING_OBJECTS"), "{err}");
+            assert!(err.to_string().contains(&subtree), "{err}");
+
+            let err = with(OTHER_FATAL, |git, root| ls_tree_in(git, root, "HEAD")).err();
+            let err = err.expect("ls-tree fails");
+            assert_eq!(err.code(), None, "{err}");
+            assert!(err.to_string().contains("is corrupt"), "{err}");
+        }
+
+        // covers: D-9
+        #[test]
+        fn read_blob_reports_a_blob_git_could_not_fetch() {
+            let oid = [0xcd; 20];
+            // The object is git's last argument.
+            let script = r#"for oid; do :; done; promisor "$oid""#;
+            let err = with(script, |git, root| read_blob_in(git, root, &oid)).unwrap_err();
+            assert_missing(&err, &oid);
+        }
     }
 }
