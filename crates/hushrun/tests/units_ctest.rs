@@ -1651,6 +1651,100 @@ fn a_rule_that_leaves_its_output_as_it_was_keeps_its_program_up_to_date_where_th
     }
 }
 
+// covers: C-49, C-32
+#[test]
+fn a_build_tree_older_than_its_configuration_records_no_pass_until_configured_and_built() {
+    for cmake in with_cmake() {
+        for generator in generators(&cmake) {
+            let at = format!("CMake {:?}, {generator}", cmake.version);
+            let base = "cmake_minimum_required(VERSION 3.19)\nproject(conf C)\nenable_testing()\n\
+                        include(cmake/opts.cmake)\n\
+                        add_executable(t_a tests/t_a.c)\nadd_executable(t_b tests/t_b.c)\n\
+                        add_test(NAME a COMMAND t_a)\nadd_test(NAME b COMMAND t_b)\n";
+            let p = Project::new(
+                &cmake,
+                generator,
+                &[
+                    file("hushrun.yaml", &yaml("reuse")),
+                    file(".gitignore", "build/\n"),
+                    file("README.md", "# conf\n"),
+                    file("CMakeLists.txt", base),
+                    file("cmake/opts.cmake", "# options\n"),
+                    file(
+                        "tests/t_a.c",
+                        "int main(void) {\n#ifdef FAIL\n  return 1;\n#endif\n  return 0;\n}\n",
+                    ),
+                    file("tests/t_b.c", "int main(void) { return 0; }\n"),
+                ],
+            );
+            let first = p.run(CTEST, &[]);
+            assert_eq!(first.code, 0, "{at}: {}", first.stderr);
+            // A file no configure reads: nothing is old.
+            p.write("README.md", "# conf\n\nA note.\n");
+            git::commit_all(&p.repo, "readme");
+            let ran = p.run(CTEST, &[]);
+            assert_eq!(ran.code, 0, "{at}: {}", ran.stderr);
+            assert!(not_recorded(&ran).is_empty(), "{at}: {}", ran.stderr);
+            // Each edit to what configuring reads, neither configured nor built: the old programs
+            // pass, and nothing is recorded; configured and built, the run fails, as it does.
+            for (path, edited, original) in [
+                (
+                    "CMakeLists.txt",
+                    base.replace(
+                        "include(cmake/opts.cmake)\n",
+                        "include(cmake/opts.cmake)\nadd_compile_options(-DFAIL)\n",
+                    ),
+                    base.to_string(),
+                ),
+                (
+                    "CMakeLists.txt",
+                    format!("{base}set_tests_properties(b PROPERTIES WILL_FAIL TRUE)\n"),
+                    base.to_string(),
+                ),
+                (
+                    "cmake/opts.cmake",
+                    "# options\nadd_compile_definitions(FAIL)\n".to_string(),
+                    "# options\n".to_string(),
+                ),
+            ] {
+                p.write(path, &edited);
+                git::commit_all(&p.repo, "edit");
+                let ran = p.run(CTEST, &[]);
+                assert_eq!(ran.code, 0, "{at}: {path}: {}", ran.stderr);
+                let said = not_recorded(&ran);
+                assert!(
+                    !said.is_empty()
+                        && said[0].ends_with(&format!(
+                            "{path} changed after build was configured; configure and build before ctest"
+                        )),
+                    "{at}: {path}: {}",
+                    ran.stderr
+                );
+                p.build();
+                let built = p.run(CTEST, &[]);
+                assert_ne!(built.code, 0, "{at}: {path}: {}", built.stderr);
+                assert!(
+                    not_recorded(&built).is_empty(),
+                    "{at}: {path}: {}",
+                    built.stderr
+                );
+                p.write(path, &original);
+                git::commit_all(&p.repo, "back");
+                p.build();
+                let back = p.run(CTEST, &[]);
+                assert_eq!(back.code, 0, "{at}: {path}: {}", back.stderr);
+                assert!(
+                    not_recorded(&back).is_empty(),
+                    "{at}: {path}: {}",
+                    back.stderr
+                );
+            }
+            // An untouched tree records, and the next run skips.
+            assert!(p.run(CTEST, &[]).stderr.contains("unit skipped"), "{at}");
+        }
+    }
+}
+
 // covers: C-49, C-30
 #[test]
 fn a_fixture_whose_program_isnt_built_here_adds_only_what_its_command_names() {

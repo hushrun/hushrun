@@ -395,3 +395,26 @@ hasn't run since and the object is old, as before. Makefiles record nothing of i
 stays old there, and the line names the cure: `VERSION changed after
 CMakeFiles/t_ver.dir/tests/t_ver.c.o was made, through build/ver.h: build before ctest; if the build
 leaves build/ver.h as it was, touch build/ver.h, then build before ctest`.
+
+## Amendment 14: a tree older than its own configuration (2026-11-13)
+
+The first runs on real repositories found a wrong result on fmt, on Ninja and Makefiles alike:
+`add_compile_options(-ffinite-math-only)` added to `CMakeLists.txt`, or
+`set_tests_properties(args-test PROPERTIES WILL_FAIL TRUE)` to `test/CMakeLists.txt`, neither
+configured nor built, recorded the old programs' passes; once built, four tests failed, the
+check skipped, and a later run left those four out as passed. Amendment 12 caught a command
+configured and not built; a file edited and not configured was what Amendment 8 called unseen,
+and a test's own properties aren't a command at all.
+
+CMake records which files configuring read, so the build can run it again (the regeneration rule's
+inputs in `build.ninja`, `CMAKE_MAKEFILE_DEPENDS` in `CMakeFiles/Makefile.cmake`), and when it
+last configured (`CMakeFiles/cmake.check_cache`, written again by every configure). **When any of
+those files of the repository is newer than the last configure, the whole build tree is old:**
+what the build would make, and which tests it would list, can't be told from it. Every program of
+it is old, so no test of the start keeps a pass and the check's pass isn't recorded, and the line
+says what a person does: `CMakeLists.txt changed after build was configured; configure and build
+before ctest`. This replaces Amendment 6's check, which applied only to a program that read a file
+configuring wrote. Kept out: files outside the repository (CMake's own modules, a toolchain file
+elsewhere), `CMakePresets.json` and `CMakeUserPresets.json`, a `CONFIGURE_DEPENDS` glob's check
+(in the build directory), and a file rewritten with its time unchanged. A file no configure reads,
+such as `README.md`, makes nothing old.

@@ -108,6 +108,8 @@ pub struct Walker<'a> {
     times: HashMap<PathBuf, Option<SystemTime>>,
     /// Each Ninja build directory's log, once read ([`Walker::ninja_log`]).
     logs: HashMap<PathBuf, BTreeMap<String, SystemTime>>,
+    /// Each build directory's tree, once judged ([`Walker::tree`]).
+    trees: HashMap<PathBuf, Option<Stale>>,
 }
 
 /// What a build directory says of its programs beside its graph.
@@ -168,6 +170,7 @@ impl<'a> Walker<'a> {
             walking: BTreeSet::new(),
             times: HashMap::new(),
             logs: HashMap::new(),
+            trees: HashMap::new(),
         }
     }
 
@@ -211,6 +214,9 @@ impl<'a> Walker<'a> {
             _ => None,
         };
         let mut built = read.unwrap_or_else(|| self.every_source(program));
+        // \[ADR 0087\] A tree older than its own configuration: every program of it is old.
+        let tree = self.tree(build);
+        built.stale = Stale::either(tree, built.stale.take());
         // \[ADR 0087\] A program or module it may start: what that is built from, it reads too.
         self.walking.insert(program.to_path_buf());
         for start in std::mem::take(&mut built.starts) {
@@ -637,8 +643,6 @@ impl<'a> Walker<'a> {
                     configure.insert(rel);
                 }
             }
-            let reconfigured = self.reconfigured(build, &configure, target);
-            out.stale = Stale::either(out.stale.take(), reconfigured);
             out.reads.extend(configure);
         }
         // \[ADR 0087\] What it waits for, through phony edges, that is a program or a module,
@@ -815,8 +819,6 @@ impl<'a> Walker<'a> {
         );
         if configured {
             let configure = configure_inputs_make(build, self);
-            let reconfigured = self.reconfigured(build, &configure, target);
-            out.stale = Stale::either(out.stale.take(), reconfigured);
             out.reads.extend(configure);
         }
         // \[ADR 0087\] The targets its own waits for (`CMakeFiles/Makefile2`) that link a
@@ -1665,28 +1667,61 @@ impl Walker<'_> {
         out
     }
 
-    /// \[ADR 0087\] For a program that reads a file CMake wrote when it configured the build:
-    /// old when a file configuring read (`configure`) is newer than the build's last configure
-    /// (`CMakeFiles/cmake.check_cache`, which every configure writes again), since the build
-    /// configures again, and may write that file again, before it builds.
-    fn reconfigured(
-        &mut self,
-        build: &Path,
-        configure: &BTreeSet<String>,
-        target: &str,
-    ) -> Option<Stale> {
-        let configured_at = self.time(&build.join("CMakeFiles/cmake.check_cache"))?;
-        for file in configure {
-            let Some(changed) = self.time(&self.root.join(file)) else {
-                continue;
-            };
-            if newer(changed, configured_at) != Newer::No {
-                return Some(Stale::Old(format!(
-                    "{file} changed after the build was configured, and {target} reads a file configuring wrote; build before ctest"
-                )));
+    /// \[ADR 0087\] Whether the build tree in `build` is older than its own configuration: a file
+    /// of the repository configuring read (what the build re-runs CMake for: the regeneration
+    /// rule's inputs in `build.ninja`, `CMAKE_MAKEFILE_DEPENDS` on Makefiles) newer than its last
+    /// configure (`CMakeFiles/cmake.check_cache`, which every configure writes again). Then every
+    /// program of it is old: what the build would make, and which tests it would list, can't be
+    /// told from it. Files outside the repository (CMake's own modules, a toolchain file) and the
+    /// preset files aren't asked. `None` when it is current or can't be read; once per build.
+    fn tree(&mut self, build: &Path) -> Option<Stale> {
+        if let Some(known) = self.trees.get(build) {
+            return known.clone();
+        }
+        let configured_at = self.time(&build.join("CMakeFiles/cmake.check_cache"));
+        let configure = match self.dirs.get(build) {
+            Some(Dir::Ninja { ninja, .. }) => {
+                let ninja = ninja.clone();
+                let inputs = query(&ninja, build, &["build.ninja".to_string()], &self.assigned);
+                let names: Vec<String> = inputs
+                    .as_ref()
+                    .and_then(|i| i.get("build.ninja"))
+                    .map(|e| e.inputs.iter().map(|(i, _)| i.clone()).collect())
+                    .unwrap_or_default();
+                let mut out = BTreeSet::new();
+                for name in names {
+                    if let Place::Repo(rel) = self.place(&name, build) {
+                        out.insert(rel);
+                    }
+                }
+                out
+            }
+            Some(Dir::Make { .. }) => configure_inputs_make(build, self),
+            _ => BTreeSet::new(),
+        };
+        let shown = self.shown(build);
+        let mut found = None;
+        if let Some(configured_at) = configured_at {
+            for file in configure {
+                let preset = file.rsplit('/').next().is_some_and(|name| {
+                    matches!(name, "CMakePresets.json" | "CMakeUserPresets.json")
+                });
+                if preset {
+                    continue;
+                }
+                let Some(changed) = self.time(&self.root.join(&file)) else {
+                    continue;
+                };
+                if newer(changed, configured_at) != Newer::No {
+                    found = Some(Stale::Old(format!(
+                        "{file} changed after {shown} was configured; configure and build before ctest"
+                    )));
+                    break;
+                }
             }
         }
-        None
+        self.trees.insert(build.to_path_buf(), found.clone());
+        found
     }
 }
 
