@@ -97,6 +97,8 @@ pub struct Prepared {
     pid: u32,
     origin: Option<Digest>,
     step: Digest,
+    /// The block's key, which each file's record names.
+    block: Digest,
     /// Whether another machine names the block's files as this one does.
     portable: bool,
 }
@@ -304,6 +306,7 @@ impl Restore<'_> {
             // Only a block that may move is known to dependents by its origin (B-6).
             origin: (description.place == PlaceKind::Anywhere).then_some(description.origin),
             step: description.step,
+            block: self.block.key,
             portable: description.portability.named_portably(description.class),
         })
     }
@@ -334,6 +337,7 @@ impl Prepared {
             pid,
             origin,
             step,
+            block,
             portable,
         } = self;
         let mut placed: Vec<PathBuf> = Vec::with_capacity(ready.len());
@@ -348,7 +352,7 @@ impl Prepared {
                 let produced_by = origin.and_then(|known| {
                     crate::metadata::produced_by(known, &file.dest, file.metadata)
                 });
-                sidecar::record_block(&file.dest, sha256, produced_by, Some(step), true, portable)
+                sidecar::record_reused(&file.dest, sha256, produced_by, step, block, portable)
                     .map_err(at(&file.dest))?;
             }
             Ok(())

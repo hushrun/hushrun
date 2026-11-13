@@ -2023,6 +2023,9 @@ mod tests {
             differed: false,
             note: None,
             portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         }
     }
 

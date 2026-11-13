@@ -22,7 +22,9 @@ use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Bound, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
 use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs, RootName};
+use crate::origin::Origin;
 use crate::portable::{self, Portability, Reason};
+use crate::relay::{self, Answer, Request};
 use crate::restore::Restore;
 use crate::roots::{Machine, RootPaths, Roots, resolve_on_disk};
 use crate::scan::Needles;
@@ -101,6 +103,20 @@ pub trait Ports {
     fn audited(&self, key: &Digest, started_ms: u64) -> bool {
         audit::picked(key, started_ms)
     }
+    /// Whether the audit picks the first reuse here of the downloaded library `key` (B-16,
+    /// B-34): one time in ten. Tests choose.
+    fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
+        audit::picked_one_in(key, started_ms, audit::FIRST_DOWNLOAD_ONE_IN)
+    }
+    /// Asks the run's relay (B-26). Tests stand in for it.
+    fn relay(
+        &self,
+        socket: &Path,
+        request: &relay::Request,
+        wait: Duration,
+    ) -> Option<relay::Answer> {
+        relay::ask(socket, request, wait)
+    }
 }
 
 /// One compiler call. The process's own arguments are `[<this name>, <rustc>, <args>…]`, as
@@ -178,6 +194,8 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         keys: std::cell::RefCell::new(KeyLine::default()),
         asked: None,
         native_cpu: false,
+        downloaded: std::cell::Cell::new(false),
+        replace_downloaded: std::cell::Cell::new(false),
     }
     .run()
 }
@@ -196,6 +214,9 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         differed: false,
         note: None,
         portable: None,
+        step: None,
+        key: None,
+        downloaded: false,
     }
 }
 
@@ -265,6 +286,11 @@ struct Call<'a> {
     /// It compiles for this machine's CPU (`-C target-cpu=native`, B-5): the block stays on this
     /// machine (B-24).
     native_cpu: bool,
+    /// The block this compile reuses was downloaded for it (B-26).
+    downloaded: std::cell::Cell<bool>,
+    /// The block in the store under this compile's key was only downloaded and no server
+    /// vouches for it now: the compile's block takes its place (B-32, B-34).
+    replace_downloaded: std::cell::Cell<bool>,
 }
 
 /// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
@@ -303,6 +329,42 @@ struct Found {
     /// The files the hint that found it hashed, at the stats they were hashed at: a compile
     /// that follows must find them unchanged (B-11).
     watched: Vec<inputs::Watched>,
+    /// The block's record of where it came from (B-32), when it has one.
+    origin: Option<Origin>,
+}
+
+/// How a lookup follows a list of hints (B-7, B-30).
+enum Following<'a> {
+    /// The hints compiles here wrote. `measure`: keep in `largest` the most bytes one of them
+    /// names, the budget's measure for the downloaded ones.
+    Local { measure: bool, largest: &'a mut u64 },
+    /// Hints downloaded from the shared store: one that names more than `budget` bytes is
+    /// skipped.
+    Downloaded { budget: u64 },
+}
+
+/// What a downloaded hint may make a compile hash when no hint of this machine's says how much
+/// the first key reads (B-30): 64 MiB.
+const DOWNLOADED_HINT_BUDGET: u64 = 64 << 20;
+
+/// The most second keys a compile asks the relay to fetch, the likeliest first.
+const MOST_FETCH_KEYS: usize = 4;
+
+/// How long a wrapper waits for the relay to take a notice: what it built, a problem.
+const NOTICE_WAIT: Duration = Duration::from_secs(2);
+
+/// The digest of a stored block's outputs, as the shared store's rows hold it (B-28).
+fn outputs_of(block: &Block) -> hushrun_core::blocks::Hex32 {
+    let files: Vec<hushrun_core::blocks::OutputFile<'_>> = block
+        .files
+        .iter()
+        .map(|f| hushrun_core::blocks::OutputFile {
+            name: &f.name,
+            size: f.size,
+            sha256: hushrun_core::blocks::Hex32(*f.sha256.as_bytes()),
+        })
+        .collect();
+    hushrun_core::blocks::outputs_digest(&files)
 }
 
 /// What a linked output was linked from (B-18), with the facts B-8 and B-11 need.
@@ -849,7 +911,7 @@ impl Call<'_> {
             (None, _) => Lookup::KeyFailed,
             (Some(_), Some(why)) => Lookup::Unstorable(why),
             (Some(cx), None) => {
-                if store.suspended(&cx.step).is_some() {
+                if store.suspended_at(&cx.step, self.ports.now()).is_some() {
                     Lookup::Suspended
                 } else {
                     self.look_up(&store, cx, &mut common, &mut found)
@@ -897,7 +959,10 @@ impl Call<'_> {
         }
     }
 
-    /// B-7: each hint, followed with the files as they are now, until one finds a block.
+    /// B-7: each hint, followed with the files as they are now, until one finds a block. With
+    /// a relay (B-26, B-30): the hints compiles here wrote first, then those downloaded, asked
+    /// of the relay when the store has none, each within a budget of bytes to hash; then, when
+    /// a hint gave a second key the store lacks, the relay is asked to fetch the block.
     fn look_up(
         &self,
         store: &Store,
@@ -905,61 +970,237 @@ impl Call<'_> {
         common: &mut Option<Result<Common, NotStored>>,
         found: &mut Option<Found>,
     ) -> Lookup {
-        let hints = store.hints(&cx.step);
-        if hints.is_empty() {
+        let share = self.current.share.as_ref();
+        let local = store.hints(&cx.step);
+        if local.is_empty() && share.is_none() {
             return Lookup::Missing;
         }
         let shared = match common.get_or_insert_with(|| cx.common()) {
             Ok(shared) => shared.clone(),
             Err(_) => return Lookup::KeyFailed,
         };
+        let mut candidates: Vec<(Digest, Observed, Vec<inputs::Watched>)> = Vec::new();
+        let mut local_bytes = 0u64;
+        if let Some(lookup) = self.follow(
+            store,
+            cx,
+            &shared,
+            &local,
+            Following::Local {
+                measure: share.is_some(),
+                largest: &mut local_bytes,
+            },
+            &mut candidates,
+            found,
+        ) {
+            return lookup;
+        }
+        let Some(share) = share else {
+            return Lookup::Missing;
+        };
+        let mut downloaded = store.shared_hints(&cx.step);
+        if downloaded.is_empty()
+            && let Some(Answer::Hints { count }) = self.ports.relay(
+                &share.socket,
+                &Request::Hints { step: cx.step },
+                relay::WAIT,
+            )
+            && count > 0
+        {
+            downloaded = store.shared_hints(&cx.step);
+        }
+        // F-14: a downloaded hint is untrusted bytes that set how much a compile hashes.
+        let budget = if local_bytes > 0 {
+            local_bytes.saturating_mul(2)
+        } else {
+            DOWNLOADED_HINT_BUDGET
+        };
+        if let Some(lookup) = self.follow(
+            store,
+            cx,
+            &shared,
+            &downloaded,
+            Following::Downloaded { budget },
+            &mut candidates,
+            found,
+        ) {
+            return lookup;
+        }
+        if candidates.is_empty() {
+            return Lookup::Missing;
+        }
+        candidates.truncate(MOST_FETCH_KEYS);
+        let asked = Request::Fetch {
+            step: cx.step,
+            keys: candidates.iter().map(|(key, _, _)| *key).collect(),
+            class: self.invocation.class(),
+            local_ms: store.step_cost(&cx.step),
+        };
+        let Some(Answer::Ready { key }) = self.ports.relay(&share.socket, &asked, relay::WAIT)
+        else {
+            return Lookup::Missing;
+        };
+        let Some((_, observed, watched)) = candidates.into_iter().find(|(k, _, _)| *k == key)
+        else {
+            return Lookup::Missing;
+        };
+        match store.block(&key) {
+            Err(_) => Lookup::StoreFailed,
+            Ok(None) => Lookup::Missing,
+            Ok(Some(block)) => {
+                let origin = store.origin(&key);
+                match self.found(cx.step, key, block, observed, watched, origin, found) {
+                    Some(lookup) => {
+                        self.downloaded.set(true);
+                        lookup
+                    }
+                    None => Lookup::Missing,
+                }
+            }
+        }
+    }
+
+    /// Follows `hints` until one finds a block in the store. A second key the store lacks is
+    /// kept in `candidates`, for the relay to fetch. `None`: no block found.
+    #[allow(clippy::too_many_arguments)]
+    fn follow(
+        &self,
+        store: &Store,
+        cx: &Context<'_>,
+        shared: &Common,
+        hints: &[Vec<u8>],
+        mut following: Following<'_>,
+        candidates: &mut Vec<(Digest, Observed, Vec<inputs::Watched>)>,
+        found: &mut Option<Found>,
+    ) -> Option<Lookup> {
         for bytes in hints {
-            let Ok(hint) = serde_json::from_slice::<ReadList>(&bytes) else {
+            let Ok(hint) = serde_json::from_slice::<ReadList>(bytes) else {
                 continue;
             };
-            let Some((observed, watched)) = cx.from_hint(&hint, &shared) else {
+            match &mut following {
+                Following::Local {
+                    measure: true,
+                    largest,
+                } => {
+                    if let Some(size) = cx.hint_bytes(&hint) {
+                        **largest = (**largest).max(size);
+                    }
+                }
+                Following::Local { .. } => {}
+                Following::Downloaded { budget } => {
+                    if cx.hint_bytes(&hint).is_none_or(|size| size > *budget) {
+                        continue;
+                    }
+                }
+            }
+            let Some((observed, watched)) = cx.from_hint(&hint, shared) else {
                 continue;
             };
             let Ok(key) = observed.key() else {
                 continue;
             };
             match store.block(&key) {
-                Err(_) => return Lookup::StoreFailed,
-                Ok(None) => continue,
-                Ok(Some(block)) => {
-                    let Some(description) = Description::from_value(&block.description)
-                        .filter(|d| d.step == cx.step && d.class == self.invocation.class())
-                    else {
-                        continue;
-                    };
-                    let serves_form = description.messages.form() == self.invocation.form()
-                        || description.messages.only_notices();
-                    let audit = self
-                        .current
-                        .audit
-                        .picks(|| self.ports.audited(&key, self.current.started_ms));
-                    if self.current.key_log.is_some() {
-                        let mut keys = self.keys.borrow_mut();
-                        keys.block = Some(key);
-                        keys.second_parts = observed.parts().ok();
-                        keys.externs = observed.externs.clone();
-                        keys.outputs = block
-                            .files
-                            .iter()
-                            .map(|f| (f.name.clone(), f.sha256))
-                            .collect();
+                Err(_) => return Some(Lookup::StoreFailed),
+                Ok(None) => {
+                    if !candidates.iter().any(|(k, _, _)| *k == key) {
+                        candidates.push((key, observed, watched));
                     }
-                    *found = Some(Found {
-                        block,
-                        description,
-                        observed,
-                        watched,
-                    });
-                    return Lookup::Found { audit, serves_form };
+                }
+                Ok(Some(block)) => {
+                    let origin = store.origin(&key);
+                    // B-34: a block that was only downloaded is reused only while a server the
+                    // run belongs to vouches for it. Not vouched for, it is a miss: rustc runs,
+                    // and its block takes this one's place.
+                    if !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
+                        self.replace_downloaded.set(true);
+                        return Some(Lookup::Missing);
+                    }
+                    if let Some(lookup) =
+                        self.found(cx.step, key, block, observed, watched, origin, found)
+                    {
+                        return Some(lookup);
+                    }
                 }
             }
         }
-        Lookup::Missing
+        None
+    }
+
+    /// A block found under `key`, when its description is this compile's: the lookup's answer,
+    /// with the audit's pick (B-16), one in ten on a downloaded library's first reuse here.
+    #[allow(clippy::too_many_arguments)]
+    fn found(
+        &self,
+        step: Digest,
+        key: Digest,
+        block: Block,
+        observed: Observed,
+        watched: Vec<inputs::Watched>,
+        origin: Option<Origin>,
+        found: &mut Option<Found>,
+    ) -> Option<Lookup> {
+        let description = Description::from_value(&block.description)
+            .filter(|d| d.step == step && d.class == self.invocation.class())?;
+        let serves_form = description.messages.form() == self.invocation.form()
+            || description.messages.only_notices();
+        let first_download = self.invocation.class() == Class::Library
+            && origin
+                .as_ref()
+                .is_some_and(|o| o.downloaded_only() && !o.reused);
+        let started = self.current.started_ms;
+        let audit = self.current.audit.picks(|| {
+            if first_download {
+                self.ports.audited_first(&key, started)
+            } else {
+                self.ports.audited(&key, started)
+            }
+        });
+        if self.current.key_log.is_some() {
+            let mut keys = self.keys.borrow_mut();
+            keys.block = Some(key);
+            keys.second_parts = observed.parts().ok();
+            keys.externs = observed.externs.clone();
+            keys.outputs = block
+                .files
+                .iter()
+                .map(|f| (f.name.clone(), f.sha256))
+                .collect();
+        }
+        *found = Some(Found {
+            block,
+            description,
+            observed,
+            watched,
+            origin,
+        });
+        Some(Lookup::Found { audit, serves_form })
+    }
+
+    /// Whether a block may be reused as far as who vouches for it goes (B-34). A block built
+    /// here, or with no record, may. One only downloaded may when its entry for this run's
+    /// host, org and repository is under a day old; else the relay asks the server, and
+    /// "served" or "no server could be reached in this run" lets it. With no relay in the run,
+    /// nothing can be asked, as offline: it may.
+    fn vouched(&self, key: &Digest, step: &Digest, block: &Block, origin: Option<&Origin>) -> bool {
+        let Some(origin) = origin.filter(|o| o.downloaded_only()) else {
+            return true;
+        };
+        let Some(share) = &self.current.share else {
+            return true;
+        };
+        let now = epoch_ms(self.ports.now());
+        if origin.fresh(&share.by.host, &share.by.org, &share.repository, now) {
+            return true;
+        }
+        let asked = Request::Vouch {
+            key: *key,
+            step: *step,
+            outputs: outputs_of(block),
+        };
+        matches!(
+            self.ports.relay(&share.socket, &asked, relay::WAIT),
+            Some(Answer::Served | Answer::Offline)
+        )
     }
 
     /// B-12: the block's files in place, then its messages; rustc doesn't start. Any failure
@@ -1005,12 +1246,30 @@ impl Call<'_> {
         let _ = self.err.flush();
         let now = self.ports.now();
         let _ = store.used(&found.block.key, now);
+        // B-34: a downloaded block's first reuse here is noted, after which the audit picks it
+        // as it picks any block.
+        if found
+            .origin
+            .as_ref()
+            .is_some_and(|o| o.downloaded_only() && !o.reused)
+        {
+            let _ = store.update_origin(&found.block.key, |origin| {
+                let mut origin = origin?;
+                (!origin.reused).then(|| {
+                    origin.reused = true;
+                    origin
+                })
+            });
+        }
         let took = millis(now.duration_since(self.start).unwrap_or_default());
         let verdict = decide::after(Plan::Reuse, &Facts::ran(Rustc::NotRun));
         self.log(Entry {
             saved_ms: found.description.rustc_ms.saturating_sub(took),
             found: true,
             portable: Some(found.description.portability.clone()),
+            step: Some(found.description.step),
+            key: Some(found.block.key),
+            downloaded: self.downloaded.get(),
             ..entry(verdict.outcome, Some(self.invocation.class()))
         });
         0
@@ -1069,8 +1328,10 @@ impl Call<'_> {
         let mut log = Entry {
             rustc_ms,
             found: found.is_some(),
+            step: Some(cx.step),
             ..entry(Outcome::BuiltAndStored, Some(inv.class()))
         };
+        let _ = store.set_step_cost(&cx.step, rustc_ms, self.ports.now());
         let ran = match ran {
             Ok(ran) => ran,
             Err(err) => {
@@ -1172,18 +1433,53 @@ impl Call<'_> {
                     let min_free = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
                     facts.low_space = store.free_bytes().is_ok_and(|free| free < min_free);
                     if !facts.low_space {
-                        let (stored, bytes) =
+                        let (stored, bytes, second) =
                             self.store(store, cx, roots, &produced, &recorded, rustc_ms);
                         facts.stored = stored;
+                        facts.second_opinion = second;
                         if stored == Stored::Took {
                             log.stored_bytes = bytes;
+                        }
+                        if matches!(stored, Stored::Took | Stored::AlreadyHad) {
+                            log.key = produced.observed.key().ok();
                         }
                     }
                 }
             }
         }
         let verdict = decide::after(plan, &facts);
-        if verdict.suspend {
+        let downloaded =
+            found.filter(|found| found.origin.as_ref().is_some_and(Origin::downloaded_only));
+        if verdict.suspend
+            && facts.compared == Compared::Differed
+            && let Some(found) = downloaded
+        {
+            // B-34: an audit of a downloaded block that differs suspends its first key for the
+            // store's kept days and is reported to the scope the block came from.
+            let now = self.ports.now();
+            let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+            let _ = store.suspend_until(
+                &cx.step,
+                "a compile's outputs differed from a downloaded block's",
+                until,
+                now,
+            );
+            if let Some(share) = &self.current.share {
+                let _ = self.ports.relay(
+                    &share.socket,
+                    &Request::Report {
+                        key: found.block.key,
+                        problem: relay::Problem::Differs,
+                    },
+                    NOTICE_WAIT,
+                );
+            }
+            log.note = Some(format!(
+                "{} built differently from the block downloaded for it; its blocks are not reused for {} days",
+                inv.crate_name(),
+                self.current.keep_days
+            ));
+        } else if verdict.suspend {
             let _ = store.suspend(
                 &cx.step,
                 "a compile's outputs differed from the block's",
@@ -1194,8 +1490,27 @@ impl Call<'_> {
                 inv.crate_name()
             ));
         }
-        log.differed = facts.compared == Compared::Differed;
+        log.differed =
+            facts.compared == Compared::Differed || facts.second_opinion == Compared::Differed;
         log.outcome = verdict.outcome;
+        // B-29: the relay hears of a block this run built and stored, and decides whether it
+        // goes up; in shared `observe` it compares it with the shared store's copy.
+        if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
+            (&self.current.share, verdict.outcome, log.key)
+        {
+            let portable = log.portable.as_ref().is_some_and(|p| p.portable);
+            let _ = self.ports.relay(
+                &share.socket,
+                &Request::Built {
+                    key,
+                    step: cx.step,
+                    class: inv.class(),
+                    portable,
+                    cost_ms: rustc_ms,
+                },
+                NOTICE_WAIT,
+            );
+        }
         self.log(log);
         ran.code
     }
@@ -1864,9 +2179,9 @@ impl Call<'_> {
         produced: &Produced,
         recorded: &Recorded,
         rustc_ms: u64,
-    ) -> (Stored, u64) {
+    ) -> (Stored, u64, Compared) {
         let Ok(key) = produced.observed.key() else {
-            return (Stored::Refused, 0);
+            return (Stored::Refused, 0, Compared::NotTried);
         };
         let placeholders = |text: &str| roots.to_placeholders(text);
         let description = Description {
@@ -1897,7 +2212,7 @@ impl Call<'_> {
             built_ms: epoch_ms(self.start),
         };
         let Ok(value) = description.to_value() else {
-            return (Stored::Refused, 0);
+            return (Stored::Refused, 0, Compared::NotTried);
         };
         let files: Vec<NewFile> = produced
             .outputs
@@ -1908,17 +2223,118 @@ impl Call<'_> {
             })
             .collect();
         let now = self.ports.now();
-        let stored = match store.publish(&key, &value, &files, now) {
+        // B-32: built here, by this run, and by whom when the run shares.
+        let run = self
+            .current
+            .share
+            .as_ref()
+            .map(|share| share.run.clone())
+            .or_else(|| {
+                self.current
+                    .folder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let origin = Origin::built_here(
+            &run,
+            self.current.share.as_ref().map(|share| share.by.clone()),
+        );
+        let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+        let published = if self.replace_downloaded.get() {
+            // The block there was only downloaded and no server vouches for it now.
+            store
+                .replace(&key, &value, &files, &origin, now, only_downloaded)
+                .map(|replaced| match replaced {
+                    crate::store::Replaced::Stored => Published::Stored,
+                    crate::store::Replaced::Kept => Published::AlreadyThere,
+                })
+        } else {
+            store.publish_with_origin(&key, &value, &files, &origin, now)
+        };
+        let mut second = Compared::NotTried;
+        let stored = match published {
             Ok(Published::Stored) => Stored::Took,
-            Ok(Published::AlreadyThere) => Stored::AlreadyHad,
-            Err(_) => return (Stored::Refused, 0),
+            Ok(Published::AlreadyThere) => self.already_there(
+                store,
+                &key,
+                produced,
+                &value,
+                &files,
+                &origin,
+                now,
+                &mut second,
+            ),
+            Err(_) => return (Stored::Refused, 0, Compared::NotTried),
         };
         if let Ok(hint) = serde_json::to_vec(&ReadList::of(&produced.observed)) {
             let _ = store.add_hint(&cx.step, &hint, now);
         }
         let _ = store.used(&key, now);
         let bytes = produced.outputs.iter().map(|o| o.size).sum();
-        (stored, bytes)
+        (stored, bytes, second)
+    }
+
+    /// B-32: a compile whose own publish found a block already there. Built here, a library's
+    /// outputs are compared with it, a second opinion that costs nothing (a difference is
+    /// treated as B-16 treats one). Only downloaded, the compile's outputs take its place where
+    /// the two differ, and the difference is reported; where they are the same, the block is
+    /// from then on also built here. A block with no record stays as it is.
+    #[allow(clippy::too_many_arguments)]
+    fn already_there(
+        &self,
+        store: &Store,
+        key: &Digest,
+        produced: &Produced,
+        description: &serde_json::Value,
+        files: &[NewFile],
+        origin: &Origin,
+        now: SystemTime,
+        second: &mut Compared,
+    ) -> Stored {
+        let Some(there) = store.origin(key) else {
+            return Stored::AlreadyHad;
+        };
+        let Ok(Some(block)) = store.block(key) else {
+            return Stored::AlreadyHad;
+        };
+        let compared = compare_outputs(&produced.outputs, &block);
+        if there.built.is_some() {
+            if self.invocation.class() == Class::Library {
+                *second = compared;
+            }
+            return Stored::AlreadyHad;
+        }
+        if !there.downloaded_only() {
+            return Stored::AlreadyHad;
+        }
+        if compared == Compared::Differed {
+            let only_downloaded = |o: Option<&Origin>| o.is_some_and(Origin::downloaded_only);
+            let replaced = store.replace(key, description, files, origin, now, only_downloaded);
+            if let Some(share) = &self.current.share {
+                let _ = self.ports.relay(
+                    &share.socket,
+                    &Request::Report {
+                        key: *key,
+                        problem: relay::Problem::Differs,
+                    },
+                    NOTICE_WAIT,
+                );
+            }
+            return match replaced {
+                Ok(crate::store::Replaced::Stored) => Stored::Took,
+                _ => Stored::AlreadyHad,
+            };
+        }
+        let built = origin.built.clone();
+        let _ = store.update_origin(key, |o| {
+            let mut o = o?;
+            (o.built.is_none()).then(|| {
+                o.built = built;
+                o
+            })
+        });
+        Stored::AlreadyHad
     }
 
     /// B-15: a dependent that could not load a reused crate suspends that crate's first key and
@@ -1950,7 +2366,36 @@ impl Call<'_> {
             let (true, Some(step)) = (known.reused, known.step) else {
                 continue;
             };
-            let _ = store.suspend(&step, "a dependent could not load a reused block", now);
+            // B-34: a block that was only downloaded is reported to the scope it came from, and
+            // its first key is suspended for the store's kept days, not until a clean.
+            let downloaded = known
+                .block
+                .filter(|block| store.origin(block).is_some_and(|o| o.downloaded_only()));
+            match downloaded {
+                Some(block) => {
+                    let until =
+                        now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+                    let _ = store.suspend_until(
+                        &step,
+                        "a dependent could not load a downloaded block",
+                        until,
+                        now,
+                    );
+                    if let Some(share) = &self.current.share {
+                        let _ = self.ports.relay(
+                            &share.socket,
+                            &Request::Report {
+                                key: block,
+                                problem: relay::Problem::Rejected,
+                            },
+                            NOTICE_WAIT,
+                        );
+                    }
+                }
+                None => {
+                    let _ = store.suspend(&step, "a dependent could not load a reused block", now);
+                }
+            }
             if let Some(dir) = path.parent() {
                 for file in sidecar::reused_in(dir).unwrap_or_default() {
                     if sidecar::lookup(&file).is_ok_and(|k| k.step == Some(step)) {

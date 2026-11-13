@@ -68,6 +68,8 @@ struct Seen {
     execs: Vec<Vec<String>>,
     /// What the wrapper wrote to its stdout.
     stdout: Vec<u8>,
+    /// How many times the audit was asked about a downloaded library's first reuse here.
+    first_audits: usize,
 }
 
 struct Fake {
@@ -83,6 +85,26 @@ struct Fake {
     /// What the compiler says `native` is (B-5), shared between calls to count the asks; none:
     /// it can't be asked.
     native: Option<Rc<RefCell<NativeStandIn>>>,
+    /// The run's relay (B-26), shared between calls; none: the real client, which finds no
+    /// socket and misses.
+    relay: Option<Rc<RefCell<RelayStandIn>>>,
+}
+
+type Answering = Box<dyn FnMut(&crate::relay::Request) -> Option<crate::relay::Answer>>;
+
+/// A relay that answers as a test says and keeps what it was asked.
+struct RelayStandIn {
+    answer: Answering,
+    asked: Vec<crate::relay::Request>,
+}
+
+fn relay_answering(
+    answer: impl FnMut(&crate::relay::Request) -> Option<crate::relay::Answer> + 'static,
+) -> Rc<RefCell<RelayStandIn>> {
+    Rc::new(RefCell::new(RelayStandIn {
+        answer: Box::new(answer),
+        asked: Vec::new(),
+    }))
 }
 
 /// A compiler's answer to what `-C target-cpu=native` is, and how often it was asked.
@@ -502,6 +524,25 @@ impl Ports for Fake {
         }
         self.audit
     }
+
+    fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
+        self.seen.borrow_mut().first_audits += 1;
+        self.audited(key, started_ms)
+    }
+
+    fn relay(
+        &self,
+        socket: &Path,
+        request: &crate::relay::Request,
+        wait: Duration,
+    ) -> Option<crate::relay::Answer> {
+        let Some(relay) = &self.relay else {
+            return crate::relay::ask(socket, request, wait);
+        };
+        let mut relay = relay.borrow_mut();
+        relay.asked.push(request.clone());
+        (relay.answer)(request)
+    }
 }
 
 /// A store, a session, a fake toolchain and checkouts.
@@ -570,6 +611,23 @@ fn settle() {
 }
 
 impl World {
+    /// Gives the run a relay (B-26): `session.json` names one, run by `org` on a fake host.
+    fn share(&mut self, org: &str) {
+        let socket = self.dir.path().join("no-relay.sock");
+        self.session
+            .set_share(session::Share {
+                socket,
+                run: "1-1".into(),
+                by: crate::origin::Identity {
+                    host: "https://api.example.com".into(),
+                    org: org.into(),
+                    credential: crate::origin::fingerprint("hru_test"),
+                },
+                repository: "test/repo".into(),
+            })
+            .unwrap();
+    }
+
     fn store(&self) -> Store {
         Store::new(&self.session.current().store)
     }
@@ -670,6 +728,7 @@ impl World {
             audit: false,
             on_found: RefCell::new(None),
             native: None,
+            relay: None,
         };
         change(&mut fake);
         let before = self.session.current().entries().len();
@@ -753,6 +812,7 @@ fn probes_pass_through_before_anything_and_are_not_logged() {
         audit: false,
         on_found: RefCell::new(None),
         native: None,
+        relay: None,
     };
     // The session's file is gone: a probe must not need it.
     fs::remove_file(w.session.current().folder.join("session.json")).unwrap();
@@ -1600,6 +1660,7 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
         audit: false,
         on_found: RefCell::new(None),
         native: None,
+        relay: None,
     };
     let code = call(&mut fake, &mut Vec::new(), &args);
     assert_eq!(code, 0);
@@ -1660,6 +1721,7 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
             audit: false,
             on_found: RefCell::new(None),
             native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &as_proc_macro(&w, ws));
         w.session.current().entries().last().unwrap().outcome
@@ -1743,6 +1805,7 @@ fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {
         audit: false,
         on_found: RefCell::new(None),
         native: None,
+        relay: None,
     };
     assert_eq!(call(&mut fake, &mut Vec::new(), &args), 0);
     assert_eq!(
@@ -2513,6 +2576,7 @@ fn linked_in(w: &World, ws: &Path) -> Outcome {
         audit: false,
         on_found: RefCell::new(None),
         native: None,
+        relay: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -2659,6 +2723,7 @@ fn a_link_input_replaced_during_the_compile_is_not_stored() {
             audit: false,
             on_found: RefCell::new(None),
             native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         let outcome = w.session.current().entries().last().unwrap().outcome;
@@ -2699,6 +2764,7 @@ fn a_linker_outside_every_root_ties_the_block() {
             audit: false,
             on_found: RefCell::new(None),
             native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         w.session.current().entries().last().unwrap().outcome
@@ -2942,6 +3008,7 @@ fn linked_with(w: &World, ws: &Path, line: &str) -> Outcome {
         audit: false,
         on_found: RefCell::new(None),
         native: None,
+        relay: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -4361,4 +4428,397 @@ fn a_compiler_that_cant_say_what_native_is_keeps_its_block_here_keyed_by_the_tex
     );
     assert!(r.entry.unwrap().portable.unwrap().portable);
     assert_eq!(unasked.borrow().asked, 0);
+}
+
+// --- sharing through a relay (B-26, B-30, B-32, B-34) -------------------------------------
+
+use crate::origin::{Origin, Vouch};
+use crate::relay::{Answer, Problem, Request};
+
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn vouch(date_ms: u64) -> Vouch {
+    Vouch {
+        host: "https://api.example.com".into(),
+        org: "acme".into(),
+        repository: "test/repo".into(),
+        scope: "person/2".into(),
+        outputs: hushrun_core::blocks::Hex32([0; 32]),
+        date_ms,
+    }
+}
+
+/// Copies the block under `key` from `from` into `to` as a download vouched for at `date_ms`.
+fn download(from: &Store, to: &Store, key: &Digest, date_ms: u64) -> bool {
+    let Ok(Some(block)) = from.block(key) else {
+        return false;
+    };
+    let files: Vec<crate::store::NewFile> = block
+        .files
+        .iter()
+        .map(|f| crate::store::NewFile {
+            name: f.name.clone(),
+            source: f.path.clone(),
+        })
+        .collect();
+    to.publish_with_origin(
+        key,
+        &block.description,
+        &files,
+        &Origin::downloaded(vouch(date_ms)),
+        SystemTime::now(),
+    )
+    .is_ok()
+}
+
+/// A relay that serves what `from` holds, publishing into `to`, and answers `vouch` to a
+/// vouch request.
+fn serving(from: Store, to: Store, vouched: Option<Answer>) -> Rc<RefCell<RelayStandIn>> {
+    relay_answering(move |request| match request {
+        Request::Hints { step } => {
+            let hints = from.hints(step);
+            for hint in &hints {
+                to.add_shared_hint(step, hint, SystemTime::now()).unwrap();
+            }
+            Some(Answer::Hints {
+                count: hints.len() as u32,
+            })
+        }
+        Request::Fetch { keys, .. } => Some(
+            keys.iter()
+                .find(|key| download(&from, &to, key, now_ms()))
+                .map_or(Answer::None, |key| Answer::Ready { key: *key }),
+        ),
+        Request::Vouch { .. } => vouched.clone(),
+        _ => Some(Answer::Ok),
+    })
+}
+
+/// Another machine's store, with library `a` built there.
+fn built_elsewhere() -> (World, Digest) {
+    let other = world(Mode::On);
+    let ws = other.checkout("ws");
+    settle();
+    let r = other.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let key = r.entry.unwrap().key.unwrap();
+    (other, key)
+}
+
+// covers: B-26, B-30, B-32, B-34
+#[test]
+fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in_ten_at_first() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert!(entry.downloaded);
+    assert_eq!(entry.key, Some(key));
+    // The first reuse of a downloaded library asks the one-in-ten audit, and is noted.
+    assert_eq!(r.seen.first_audits, 1);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.downloaded_only() && origin.reused);
+    assert!(matches!(
+        relay.borrow().asked[..],
+        [Request::Hints { .. }, Request::Fetch { .. }]
+    ));
+    // A second reuse is audited as any block is, and asks the relay nothing: the entry is fresh.
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(!r.entry.unwrap().downloaded);
+    assert_eq!(r.seen.first_audits, 0);
+    assert_eq!(relay.borrow().asked.len(), 2);
+}
+
+// covers: B-34
+#[test]
+fn a_downloaded_block_is_reused_without_asking_for_a_day_then_only_while_a_server_vouches() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let run = |answer: Option<Answer>| {
+        let relay = serving(other.store(), w.store(), answer);
+        let stand_in = relay.clone();
+        let _ = fs::remove_file(w.rlib(&ws, "a"));
+        let r = w.call_with(&ws, "a", &[], move |fake| {
+            from_a_registry(fake);
+            fake.relay = Some(stand_in);
+        });
+        let asked_vouch = relay
+            .borrow()
+            .asked
+            .iter()
+            .any(|r| matches!(r, Request::Vouch { .. }));
+        (r, asked_vouch)
+    };
+    let set_date = |date_ms: u64| {
+        w.store()
+            .update_origin(&key, |o| {
+                let mut o = o?;
+                o.vouched = vec![vouch(date_ms)];
+                Some(o)
+            })
+            .unwrap();
+    };
+    // Fetched in this run: reused.
+    assert_eq!(run(None).0.outcome(), REUSED);
+    // Under a day old: reused, nothing asked.
+    set_date(now_ms() - DAY_MS / 2);
+    let (r, asked) = run(None);
+    assert_eq!(r.outcome(), REUSED);
+    assert!(!asked);
+    // A day old: asked. Served, or no server reachable in this run: reused.
+    set_date(now_ms() - DAY_MS - 1);
+    let (r, asked) = run(Some(Answer::Served));
+    assert_eq!((r.outcome(), asked), (REUSED, true));
+    let (r, _) = run(Some(Answer::Offline));
+    assert_eq!(r.outcome(), REUSED);
+    // Anything else: a miss. rustc runs, and its block takes the downloaded one's place.
+    let (r, asked) = run(Some(Answer::None));
+    assert!(asked);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.built.is_some() && origin.vouched.is_empty());
+    // A block built here is never asked about.
+    let (r, asked) = run(Some(Answer::None));
+    assert_eq!((r.outcome(), asked), (REUSED, false));
+}
+
+// covers: B-26, B-29
+#[test]
+fn a_compile_tells_the_relay_what_it_built_and_with_no_relay_it_is_a_plain_compile() {
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    // No socket and no stand-in: every request misses, and the compile goes on as without one.
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let key = r.entry.as_ref().unwrap().key.unwrap();
+    let origin = w.store().origin(&key).unwrap();
+    let built = origin.built.unwrap();
+    assert_eq!(built.run, "1-1");
+    assert_eq!(built.by.unwrap().org, "acme");
+    // With a relay: it hears of the block, portable and with its cost.
+    let w = {
+        let mut w = world(Mode::On);
+        w.share("acme");
+        w
+    };
+    let ws = w.checkout("ws");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED);
+    let asked = relay.borrow().asked.clone();
+    let built: Vec<&Request> = asked
+        .iter()
+        .filter(|r| matches!(r, Request::Built { .. }))
+        .collect();
+    assert!(
+        matches!(built[..], [Request::Built { key: k, portable: true, class: crate::model::Class::Library, .. }] if *k == key),
+        "{asked:?}"
+    );
+    // A run without a relay records a build with no backend.
+    let plain = world(Mode::On);
+    let ws = plain.checkout("ws");
+    settle();
+    let r = plain.call_with(&ws, "a", &[], from_a_registry);
+    let origin = plain
+        .store()
+        .origin(&r.entry.unwrap().key.unwrap())
+        .unwrap();
+    assert!(origin.built.unwrap().by.is_none());
+}
+
+// covers: B-32
+#[test]
+fn a_compile_whose_publish_finds_a_downloaded_block_with_other_bytes_takes_its_place() {
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    let key = r.entry.unwrap().key.unwrap();
+    let block = w.store().block(&key).unwrap().unwrap();
+    let ours = fs::read(&block.files[0].path).unwrap();
+    // Gone from the store; the hint stays, so the next compile asks the relay for that key.
+    w.store().discard(&key).unwrap();
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let elsewhere = w.dir.path().join("elsewhere.rlib");
+    fs::write(&elsewhere, b"other bytes").unwrap();
+    let store = w.store();
+    let description = block.description.clone();
+    let name = block.files[0].name.clone();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+        // While it compiles, a download of the same key with other bytes lands.
+        fake.during = Some(Box::new(move || {
+            let files = [crate::store::NewFile {
+                name: name.clone(),
+                source: elsewhere.clone(),
+            }];
+            store
+                .publish_with_origin(
+                    &key,
+                    &description,
+                    &files,
+                    &Origin::downloaded(vouch(now_ms())),
+                    SystemTime::now(),
+                )
+                .unwrap();
+        }));
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let block = w.store().block(&key).unwrap().unwrap();
+    assert_eq!(fs::read(&block.files[0].path).unwrap(), ours);
+    assert!(w.store().origin(&key).unwrap().built.is_some());
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Differs } if *k == key)
+        ),
+        "{:?}",
+        relay.borrow().asked
+    );
+}
+
+// covers: B-16, B-34
+#[test]
+fn an_audit_of_a_downloaded_block_that_differs_reports_it_and_suspends_for_the_kept_days() {
+    let (other, key) = built_elsewhere();
+    // The other machine's block, with other bytes than a compile here makes.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let block = other.store().block(&key).unwrap().unwrap();
+    let wrong = w.dir.path().join("wrong.rlib");
+    fs::write(&wrong, b"not what rustc makes").unwrap();
+    let mut files: Vec<crate::store::NewFile> = block
+        .files
+        .iter()
+        .map(|f| crate::store::NewFile {
+            name: f.name.clone(),
+            source: f.path.clone(),
+        })
+        .collect();
+    let rlib = files
+        .iter_mut()
+        .find(|f| f.name.ends_with(".rlib"))
+        .unwrap();
+    rlib.source = wrong;
+    w.store()
+        .publish_with_origin(
+            &key,
+            &block.description,
+            &files,
+            &Origin::downloaded(vouch(now_ms())),
+            SystemTime::now(),
+        )
+        .unwrap();
+    for hint in other.store().hints(&only_step(&other)) {
+        w.store()
+            .add_shared_hint(&only_step(&other), &hint, SystemTime::now())
+            .unwrap();
+    }
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+        fake.audit = true;
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Differed), "{}", r.stderr);
+    assert_eq!(r.seen.first_audits, 1);
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Differs } if *k == key)
+        )
+    );
+    let step = only_step(&other);
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none(),
+        "a downloaded block's suspension lasts the kept days"
+    );
+}
+
+// covers: B-15, B-34
+#[test]
+fn a_dependent_that_cant_load_a_downloaded_block_reports_it_rejected() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let step = only_step(&other);
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `core` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "b", &["--extern", &ext], move |fake| {
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.code, 1);
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Rejected } if *k == key)
+        )
+    );
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
+    );
 }

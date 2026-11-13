@@ -175,6 +175,15 @@ pub struct Entry {
     /// searching its outputs, and for a reuse (from the block's record). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable: Option<crate::portable::Portability>,
+    /// The compile's first key, when computed: with `key`, the manifest's pair (B-30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<hushrun_core::Digest>,
+    /// The block's key: of the block reused, or of the block this compile stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<hushrun_core::Digest>,
+    /// The block was downloaded from the shared store for this compile (B-26).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub downloaded: bool,
 }
 
 const SESSION_FILE: &str = "session.json";
@@ -833,6 +842,9 @@ mod tests {
             differed: false,
             note: None,
             portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         };
         found.log(&entry);
         found.log(&entry);
@@ -940,6 +952,9 @@ mod tests {
             differed: false,
             note: None,
             portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         }
     }
 

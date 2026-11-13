@@ -70,6 +70,9 @@ pub struct Record {
     /// it came from is portable, or is a proc macro named by what it was built from
     /// ([`crate::portable::Portability::named_portably`]).
     pub portable: bool,
+    /// The key of the block a reuse put it from: where a dependent that can't load it finds
+    /// the block's record, and whom to tell (B-32).
+    pub block: Option<Digest>,
 }
 
 /// The answer of [`lookup`]: the file's SHA-256 now and where it came from.
@@ -85,6 +88,8 @@ pub struct Known {
     pub reused: bool,
     /// Whether another machine names the file the same way, if its record still holds.
     pub portable: bool,
+    /// The key of the block a reuse put it from, if its record still holds.
+    pub block: Option<Digest>,
     /// Whether the file had to be hashed to answer.
     pub read: bool,
 }
@@ -106,6 +111,8 @@ struct Stored {
     reused: bool,
     #[serde(default)]
     portable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    block: Option<Digest>,
 }
 
 impl From<&Record> for Stored {
@@ -123,6 +130,7 @@ impl From<&Record> for Stored {
             step: record.step,
             reused: record.reused,
             portable: record.portable,
+            block: record.block,
         }
     }
 }
@@ -143,6 +151,7 @@ impl Stored {
             step: self.step,
             reused: self.reused,
             portable: self.portable,
+            block: self.block,
         })
     }
 }
@@ -200,6 +209,38 @@ pub fn record_block(
     reused: bool,
     portable: bool,
 ) -> io::Result<()> {
+    record_from(file, sha256, produced_by, step, reused, portable, None)
+}
+
+/// [`record_block`] for a file a reuse put in place from the block `block` (B-12, B-32).
+pub fn record_reused(
+    file: &Path,
+    sha256: Digest,
+    produced_by: Option<Digest>,
+    step: Digest,
+    block: Digest,
+    portable: bool,
+) -> io::Result<()> {
+    record_from(
+        file,
+        sha256,
+        produced_by,
+        Some(step),
+        true,
+        portable,
+        Some(block),
+    )
+}
+
+fn record_from(
+    file: &Path,
+    sha256: Digest,
+    produced_by: Option<Digest>,
+    step: Option<Digest>,
+    reused: bool,
+    portable: bool,
+    block: Option<Digest>,
+) -> io::Result<()> {
     let stat = Stat::of(&fs::metadata(file)?);
     write(
         file,
@@ -210,6 +251,7 @@ pub fn record_block(
             step,
             reused,
             portable,
+            block,
         },
     )
 }
@@ -233,6 +275,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
             step: old.step,
             reused: old.reused,
             portable: old.portable,
+            block: old.block,
             read: false,
         });
     }
@@ -246,6 +289,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
             step: None,
             reused: false,
             portable: false,
+            block: None,
         },
     };
     // Best effort: a record is a saving, never the answer's source of truth here.
@@ -256,6 +300,7 @@ pub fn lookup(file: &Path) -> io::Result<Known> {
         step: fresh.step,
         reused: fresh.reused,
         portable: fresh.portable,
+        block: fresh.block,
         read: true,
     })
 }
@@ -446,6 +491,7 @@ mod tests {
                 step: None,
                 reused: true,
                 portable: false,
+                block: None,
                 read: false,
             }
         );
@@ -498,6 +544,7 @@ mod tests {
                 step: None,
                 reused: false,
                 portable: false,
+                block: None,
                 read: true,
             }
         );
@@ -541,6 +588,7 @@ mod tests {
                     step: None,
                     reused: false,
                     portable: false,
+                    block: None,
                     read: true,
                 }
             );
@@ -579,6 +627,7 @@ mod tests {
                 step: None,
                 reused: false,
                 portable: false,
+                block: None,
                 read: true,
             }
         );

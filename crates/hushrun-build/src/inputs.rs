@@ -716,6 +716,22 @@ impl Context<'_> {
         skip
     }
 
+    /// How many bytes the files `hint` names hold now, before any is hashed: what a downloaded
+    /// hint is held to (B-30). `None` when the hint can't be followed here. Only stats.
+    pub fn hint_bytes(&self, hint: &ReadList) -> Option<u64> {
+        if hint.place == PlaceKind::Tied && hint.roots != Some(roots_digest(&self.roots.tied())) {
+            return None;
+        }
+        let mut total = 0u64;
+        for at in &hint.reads {
+            let path = self.open_at(at)?;
+            if let Ok(meta) = fs::metadata(&path) {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        Some(total)
+    }
+
     /// The second key's parts from a hint, with every file as it is now (B-7), and the stats
     /// they were hashed at, which the compile that may follow checks again (B-11). `None` when
     /// the hint can't be followed here: a tied block's hint recorded with other roots (checked

@@ -246,6 +246,9 @@ pub struct Facts {
     pub stored: Stored,
     /// What the comparison found.
     pub compared: Compared,
+    /// What a second opinion found (B-32): the store had this key already, from a compile here,
+    /// and a library's outputs were compared with that block's.
+    pub second_opinion: Compared,
 }
 
 impl Facts {
@@ -258,6 +261,7 @@ impl Facts {
             error: None,
             stored: Stored::NotTried,
             compared: Compared::NotTried,
+            second_opinion: Compared::NotTried,
         }
     }
 }
@@ -299,7 +303,9 @@ pub fn after(plan: Plan, facts: &Facts) -> Verdict {
                 Outcome::BuiltNotStored(NotStored::Changed)
             } else if let Some(why) = facts.error {
                 Outcome::BuiltNotStored(why)
-            } else if compare && facts.compared == Compared::Differed {
+            } else if (compare && facts.compared == Compared::Differed)
+                || facts.second_opinion == Compared::Differed
+            {
                 return Verdict {
                     outcome: Outcome::BuiltNotStored(NotStored::Differed),
                     suspend: true,
@@ -726,6 +732,7 @@ mod tests {
                                         error,
                                         stored,
                                         compared,
+                                        second_opinion: Compared::NotTried,
                                     };
                                     let row = table
                                         .iter()
@@ -800,6 +807,37 @@ mod tests {
             passed_through(PassedThrough::Ci),
             Outcome::PassedThrough(PassedThrough::Ci)
         );
+    }
+
+    // covers: B-16, B-32
+    #[test]
+    fn a_second_opinion_that_differs_suspends_like_an_audit() {
+        let differed = Facts {
+            second_opinion: Compared::Differed,
+            stored: Stored::AlreadyHad,
+            ..Facts::ran(Rustc::Succeeded)
+        };
+        assert_eq!(
+            after(compile(Keep::Store, false), &differed),
+            Verdict {
+                outcome: Outcome::BuiltNotStored(NotStored::Differed),
+                suspend: true,
+            }
+        );
+        let same = Facts {
+            second_opinion: Compared::Same,
+            ..differed
+        };
+        assert_eq!(
+            after(compile(Keep::Store, false), &same).outcome,
+            Outcome::BuiltAndStored
+        );
+        // A read that changed is never trusted, for a second opinion either.
+        let changed = Facts {
+            changed: true,
+            ..differed
+        };
+        assert!(!after(compile(Keep::Store, false), &changed).suspend);
     }
 
     // covers: B-16
