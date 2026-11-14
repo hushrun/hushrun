@@ -849,6 +849,8 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   `tied`, or one the wrapper leaves as it is, still names the standard library by it.
 - `tied`: its place is its roots (B-10), or it is a movable macOS program whose output folder
   lies outside its workspace, whose first key holds that folder (B-9).
+- `unsearchable`: its outputs can't be searched for folders (B-10): it is `tied` as well, and
+  never travels.
 - `read-outside`: a read lies outside every root, base and shared folder.
 - `read-in-shared-folder`: a read lies in a shared folder that is not a base (a system folder,
   the rustup home outside the toolchain), whose path is this machine's.
@@ -924,9 +926,6 @@ key, and travels with a block marked portable today as well). *Breaks if:* two m
 folder of the same text and other content that the keys don't hold: the cargo home's files are
 keyed by content where a compile reads them, and a path a program only names is read when it
 runs, so this is the case of any tied block on one machine whose folder's content changed.
-
-- `unsearchable`: its outputs can't be searched for folders (B-10): it is `tied` as well, and
-  never travels.
 
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
