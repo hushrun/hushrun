@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-14
+
 Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):
 when an org's backend keeps a shared store of compiled crates and the person lets this machine
 take part, `hushrun run NAME -- COMMAND` uploads what it builds, sealed with each block's own key,
