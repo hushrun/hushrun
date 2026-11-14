@@ -1714,13 +1714,13 @@ impl Call<'_> {
         if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
             (self.current.share.relay(), verdict.outcome, log.key)
         {
-            // A key kept on this machine goes nowhere, whatever its block holds.
-            let portable =
-                log.portable.as_ref().is_some_and(|p| p.portable) && !self.kept_local.get();
+            // A key kept on this machine goes nowhere, whatever its block holds. The store is
+            // asked here too: a compile that looked nothing up never read the mark.
+            let kept = self.kept_local.get() || store.kept_local(&cx.step).is_some();
+            let portable = log.portable.as_ref().is_some_and(|p| p.portable) && !kept;
             // B-24: one that holds folders its keys hold the values of may go where those
             // folders are the same; who may send such a block is the relay's to say.
-            let bound =
-                log.portable.as_ref().is_some_and(|p| p.bound_only()) && !self.kept_local.get();
+            let bound = log.portable.as_ref().is_some_and(|p| p.bound_only()) && !kept;
             let _ = self.ports.relay(
                 &share.socket,
                 &Request::Built {
