@@ -52,6 +52,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 - **The prefetch fetches by class** (B-30): proc macros and build-script binaries first, then
   libraries in the manifest's order; programs only when a compile asks for one.
 
+- **A downloaded build script or program is asked whether it can start before it is reused**
+  (B-38): its loader lists what it needs (`ld.so --list` on Linux; on macOS each library a load
+  command names must be there), and none of its code runs. One that can't start is a miss: it
+  is compiled here, that block takes its place, and the run's log says why. Before, cargo would
+  have run a build script that can't start, and failed every build until the target folder was
+  cleaned.
+
 - **The link environment names the linker that really runs** (B-18, B-37): it takes the `ld`
   from the one rule that says which `ld` a driver runs (the one `collect2` finds; a gcc 15
   driver's own answer only where that rule believes it) and searches for none itself, and where

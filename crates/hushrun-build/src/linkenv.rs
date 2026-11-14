@@ -418,7 +418,7 @@ impl Gathered<'_, '_> {
                 }
                 binary::Binary::MachO(macho) => {
                     for dylib in &macho.dylibs {
-                        match self.macho_library(&object, main, &macho, dylib) {
+                        match macho_place(&object, main, &macho, dylib) {
                             MachOPlace::File(place) => {
                                 self.file("loads", dylib, &place)?;
                                 next.push(place);
@@ -489,65 +489,66 @@ impl Gathered<'_, '_> {
             .map(|dir| self.q.cwd.join(dir).join(needed))
             .find(|path| path.is_file()))
     }
-
-    fn macho_library(
-        &self,
-        object: &Path,
-        main: &Path,
-        macho: &binary::MachO,
-        dylib: &str,
-    ) -> MachOPlace {
-        let loader = object.parent().unwrap_or(Path::new("/"));
-        let executable = main.parent().unwrap_or(Path::new("/"));
-        let expand = |text: &String| -> PathBuf {
-            if let Some(rest) = text.strip_prefix("@loader_path") {
-                return PathBuf::from(format!("{}{rest}", loader.display()));
-            }
-            if let Some(rest) = text.strip_prefix("@executable_path") {
-                return PathBuf::from(format!("{}{rest}", executable.display()));
-            }
-            PathBuf::from(text)
-        };
-        // `@rpath` is each `LC_RPATH` of the image that loads it, then of the program it is
-        // loaded for, as dyld searches them.
-        let main_rpaths: Vec<PathBuf> = match binary::read(main) {
-            Some(binary::Binary::MachO(main_macho)) if main != object => main_macho
-                .rpaths
-                .iter()
-                .map(|rpath| {
-                    let rest = rpath
-                        .strip_prefix("@executable_path")
-                        .or_else(|| rpath.strip_prefix("@loader_path"));
-                    match rest {
-                        Some(rest) => PathBuf::from(format!("{}{rest}", executable.display())),
-                        None => PathBuf::from(rpath),
-                    }
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        let candidates: Vec<PathBuf> = match dylib.strip_prefix("@rpath/") {
-            Some(rest) => macho
-                .rpaths
-                .iter()
-                .map(expand)
-                .chain(main_rpaths)
-                .map(|dir| dir.join(rest))
-                .collect(),
-            None => vec![expand(&dylib.to_owned())],
-        };
-        if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
-            return MachOPlace::File(found);
-        }
-        // macOS keeps its own libraries only in the shared cache: not files on disk.
-        if dylib.starts_with("/usr/lib/") || dylib.starts_with("/System/") {
-            return MachOPlace::System;
-        }
-        MachOPlace::Nowhere
-    }
 }
 
-enum MachOPlace {
+/// Where dyld takes the library `dylib` from, which the Mach-O image `object` loads for the
+/// program `main`.
+pub(crate) fn macho_place(
+    object: &Path,
+    main: &Path,
+    macho: &binary::MachO,
+    dylib: &str,
+) -> MachOPlace {
+    let loader = object.parent().unwrap_or(Path::new("/"));
+    let executable = main.parent().unwrap_or(Path::new("/"));
+    let expand = |text: &String| -> PathBuf {
+        if let Some(rest) = text.strip_prefix("@loader_path") {
+            return PathBuf::from(format!("{}{rest}", loader.display()));
+        }
+        if let Some(rest) = text.strip_prefix("@executable_path") {
+            return PathBuf::from(format!("{}{rest}", executable.display()));
+        }
+        PathBuf::from(text)
+    };
+    // `@rpath` is each `LC_RPATH` of the image that loads it, then of the program it is
+    // loaded for, as dyld searches them.
+    let main_rpaths: Vec<PathBuf> = match binary::read(main) {
+        Some(binary::Binary::MachO(main_macho)) if main != object => main_macho
+            .rpaths
+            .iter()
+            .map(|rpath| {
+                let rest = rpath
+                    .strip_prefix("@executable_path")
+                    .or_else(|| rpath.strip_prefix("@loader_path"));
+                match rest {
+                    Some(rest) => PathBuf::from(format!("{}{rest}", executable.display())),
+                    None => PathBuf::from(rpath),
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let candidates: Vec<PathBuf> = match dylib.strip_prefix("@rpath/") {
+        Some(rest) => macho
+            .rpaths
+            .iter()
+            .map(expand)
+            .chain(main_rpaths)
+            .map(|dir| dir.join(rest))
+            .collect(),
+        None => vec![expand(&dylib.to_owned())],
+    };
+    if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
+        return MachOPlace::File(found);
+    }
+    // macOS keeps its own libraries only in the shared cache: not files on disk.
+    if dylib.starts_with("/usr/lib/") || dylib.starts_with("/System/") {
+        return MachOPlace::System;
+    }
+    MachOPlace::Nowhere
+}
+
+pub(crate) enum MachOPlace {
     File(PathBuf),
     System,
     Nowhere,
@@ -1124,7 +1125,7 @@ fn tree(top: &Path, dir: &Path, out: &mut Vec<(PathBuf, String)>) {
 }
 
 /// Just enough of ELF and Mach-O to know what a program loads.
-mod binary {
+pub(crate) mod binary {
     use std::fs::File;
     use std::path::Path;
 

@@ -5985,6 +5985,109 @@ fn a_linked_output_compiled_over_a_differing_download_takes_its_place_without_a_
     );
 }
 
+// covers: B-38, B-34
+#[cfg(unix)]
+#[test]
+fn a_downloaded_program_that_cant_start_here_is_a_miss_and_is_built_in_its_place() {
+    // Another machine's program under this compile's key, downloaded. Cargo would run it (a
+    // build script) or a test would: before it is put in place its loader is asked whether it
+    // can start. One that can't is compiled here instead, and that block takes its place.
+    for (loads, starts) in [
+        ("/usr/lib/libSystem.B.dylib", true),
+        ("/opt/only-there/lib/libq.9.dylib", false),
+    ] {
+        let other = world(Mode::On);
+        other.plan("a", program_plan(false));
+        let there = program_checkout(&other, "ws");
+        settle();
+        let built = call_program(&other, &there, &[]);
+        assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+        let key = built.entry.unwrap().key.unwrap();
+        let step = only_step(&other);
+
+        let mut w = world(Mode::On);
+        w.share("acme");
+        w.plan("a", program_plan(false));
+        let ws = program_checkout(&w, "ws");
+        settle();
+        // The other machine's block, its program a real one in form that loads `loads`.
+        let block = other.store().block(&key).unwrap().unwrap();
+        let program = w.dir.path().join("their-program");
+        fs::write(&program, crate::loader::tests::macho(&[loads])).unwrap();
+        let mut files: Vec<crate::store::NewFile> = block
+            .files
+            .iter()
+            .map(|f| crate::store::NewFile {
+                name: f.name.clone(),
+                source: f.path.clone(),
+            })
+            .collect();
+        // The fake compiler writes a program under a library's name.
+        files
+            .iter_mut()
+            .find(|f| f.name == "liba-xa.rlib")
+            .unwrap()
+            .source = program.clone();
+        w.store()
+            .publish_with_origin(
+                &key,
+                &block.description,
+                &files,
+                &Origin::downloaded(vouch(now_ms())),
+                SystemTime::now(),
+            )
+            .unwrap();
+        for hint in other.store().hints(&step) {
+            w.store()
+                .add_shared_hint(&step, &hint, SystemTime::now())
+                .unwrap();
+        }
+        let relay = relay_answering(|_| Some(Answer::Ok));
+        let stand_in = relay.clone();
+        let tools = ws.join("tools").to_str().unwrap().to_string();
+        let r = w.call_args(&ws, "a", program_args(&w, &ws, &[]), move |fake| {
+            fake.vars.insert("PATH".into(), tools);
+            fake.relay = Some(stand_in);
+        });
+        let entry = r.entry.clone().unwrap();
+        let here = ws.join("target/debug/deps/liba-xa.rlib");
+        if starts {
+            assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+            assert_eq!(fs::read(&here).unwrap(), fs::read(&program).unwrap());
+            continue;
+        }
+        assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+        assert!(!entry.found && !entry.downloaded, "{entry:?}");
+        assert!(
+            entry
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("can't start") && n.contains("libq.9.dylib")),
+            "{:?}",
+            entry.note
+        );
+        // What rustc made here, not the program that can't start; and the store's block is
+        // this machine's from now on.
+        assert_ne!(fs::read(&here).unwrap(), fs::read(&program).unwrap());
+        let origin = w.store().origin(&key).unwrap();
+        assert!(
+            origin.built.is_some() && !origin.downloaded_only(),
+            "{origin:?}"
+        );
+        // Nothing is reported and nothing suspended: it is a miss, not a broken build.
+        assert!(
+            !relay
+                .borrow()
+                .asked
+                .iter()
+                .any(|r| matches!(r, Request::Report { .. })),
+            "{:?}",
+            relay.borrow().asked
+        );
+        assert_eq!(w.store().suspended_at(&step, SystemTime::now()), None);
+    }
+}
+
 // covers: B-15, B-34
 #[test]
 fn a_dependent_that_cant_load_a_downloaded_block_reports_it_rejected() {

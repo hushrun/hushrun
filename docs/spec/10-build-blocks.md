@@ -1386,6 +1386,29 @@ on, a cost and never a wrong reuse; or the results lookup is answered by somethi
 backend (a proxy's error page): the run takes that for an org that doesn't share, and compiles
 its downloads once.
 
+**B-38 A downloaded program is asked whether it can start.** Before a build-script binary or a
+program that was only downloaded is put in place, each time, its loader is asked whether it can
+start here; no code of the program runs. Cargo runs a build script itself, so no rule that reads
+rustc's errors sees one fail to start (B-15): the build fails with "failed to run custom build
+command", cargo takes the binary for up to date, and every later build fails the same way until
+the target folder is cleaned. One function decides, by the file's own format. An ELF program
+with a loader (`PT_INTERP`): that loader must be a file on this machine, and is run with
+`--list` and the program, as `ldd` does; a library it finds nowhere, a symbol version a library
+lacks, or any other error makes the program one that can't start. A static program has nothing
+to find. A Mach-O program: each library a load command names must be a file where dyld looks
+(`@rpath`, `@loader_path` and `@executable_path` followed) or one of the system's own, which lie
+only in the shared cache (`/usr/lib/…`, `/System/…`); nothing is run, since macOS has no loader
+that lists without starting the program. Any other file is not checked. A program that can't
+start is **a miss**: rustc runs, the block that compile builds takes the downloaded one's place
+and is from then on built here (B-32), and the run's log says why. Nothing is suspended or
+reported: the block is right for the machine that built it. A proc macro is not asked about:
+rustc loads it, and B-15 acts on its error. *Rests on:* the loader's listing failing whenever
+starting would (glibc 2.39 checked: a missing library exits 127 with "cannot open shared object
+file"). *Breaks if:* a program starts and then fails on something no loader lists (a library it
+opens by name while running); or needs a variable only cargo sets when it runs it
+(`LD_LIBRARY_PATH` for a library in a build's own folder): such a program is compiled here once
+though it would have run, which costs a compile and never a wrong block.
+
 **B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
 `build: env:` list; every compile of that repository is keyed by their values (B-5), on every
 machine and in both forms of `hushrun run`, and the list is part of no check's definition and no

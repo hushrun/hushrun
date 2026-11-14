@@ -237,6 +237,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         downloaded: std::cell::Cell::new(false),
         replace_downloaded: std::cell::Cell::new(false),
         kept_local: std::cell::Cell::new(false),
+        cant_start: std::cell::RefCell::new(None),
     }
     .run()
 }
@@ -343,6 +344,9 @@ struct Call<'a> {
     /// The first key is kept on this machine ([`Store::keep_local`]): nothing of it is asked
     /// of the shared store or sent to it.
     kept_local: std::cell::Cell<bool>,
+    /// Why a downloaded program or build script found for this compile can't start here
+    /// (B-38): the compile ran in its place, and its line says so.
+    cant_start: std::cell::RefCell<Option<String>>,
 }
 
 /// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
@@ -1175,6 +1179,10 @@ impl Call<'_> {
             Ok(None) => Lookup::Missing,
             Ok(Some(block)) => {
                 let origin = store.origin(&key);
+                if !self.starts_here(&block, origin.as_ref()) {
+                    self.replace_downloaded.set(true);
+                    return Lookup::Missing;
+                }
                 match self.found(cx.step, key, block, observed, watched, origin, found) {
                     Some(lookup) => {
                         self.downloaded.set(true);
@@ -1241,7 +1249,10 @@ impl Call<'_> {
                     // downloaded: this machine links it otherwise.
                     let kept_out = self.kept_local.get()
                         && origin.as_ref().is_some_and(Origin::downloaded_only);
-                    if kept_out || !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
+                    if kept_out
+                        || !self.vouched(&key, &cx.step, &block, origin.as_ref())
+                        || !self.starts_here(&block, origin.as_ref())
+                    {
                         self.replace_downloaded.set(true);
                         return Some(Lookup::Missing);
                     }
@@ -1304,6 +1315,36 @@ impl Call<'_> {
             origin,
         });
         Some(Lookup::Found { audit, serves_form })
+    }
+
+    /// B-38: whether a program or a build-script binary that was only downloaded can start on
+    /// this machine, asked of its loader before it is put in place, every time: cargo runs a
+    /// build script itself, so one that can't start would fail the build, and every build
+    /// after it. One that can't is a miss: the compile runs, and its block takes this one's
+    /// place. A proc macro is not asked about: rustc loads it and says so when it can't (B-15).
+    fn starts_here(&self, block: &Block, origin: Option<&Origin>) -> bool {
+        let class = self.invocation.class();
+        if !matches!(class, Class::BuildScript | Class::Program)
+            || !origin.is_some_and(Origin::downloaded_only)
+        {
+            return true;
+        }
+        let linked: Vec<String> = Description::from_value(&block.description)
+            .map(|d| {
+                d.outputs
+                    .iter()
+                    .filter(|o| o.kind == OutputKind::Link)
+                    .map(|o| o.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for file in block.files.iter().filter(|f| linked.contains(&f.name)) {
+            if let Err(why) = crate::loader::can_start(&file.path, self.asker) {
+                *self.cant_start.borrow_mut() = Some(why);
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether a block may be reused as far as who vouches for it goes (B-34), as
@@ -1654,6 +1695,16 @@ impl Call<'_> {
         }
         if facts.compared == Compared::KeptOwn {
             log.note = self.keep_to_this_machine(store, &cx.step, found.map(|f| f.block.key));
+        }
+        if let Some(why) = self.cant_start.borrow_mut().take() {
+            log.note.get_or_insert(format!(
+                "the {} downloaded for {} can't start on this machine ({why}); it was built here instead",
+                match inv.class() {
+                    Class::BuildScript => "build script",
+                    _ => "program",
+                },
+                inv.crate_name()
+            ));
         }
         log.differed = matches!(facts.compared, Compared::Differed | Compared::KeptOwn)
             || facts.second_opinion == Compared::Differed;
