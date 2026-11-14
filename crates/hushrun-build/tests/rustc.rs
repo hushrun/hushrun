@@ -1022,8 +1022,16 @@ fn a_program_that_links_from_a_folder_of_its_checkout_is_reused_in_another_check
         ok(&out);
         entry
     };
-    let first = build(&w.checkout("one"));
+    let (one, two) = (w.checkout("one"), w.checkout("another/longer-checkout"));
+    let first = build(&one);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
-    let second = build(&w.checkout("another/longer-checkout"));
+    let second = build(&two);
+    assert!(reused(&second), "{second:?}");
+    // A proc macro too: on Linux rustc hands every link a temporary search folder under the
+    // output folder (`-L <out>/rustcXXXXXX/raw-dylibs`), which gcc repeats, quoted, among the
+    // options it passes on.
+    let first = proc_macro_with(&w, &one, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = proc_macro_with(&w, &two, &[], &[]);
     assert!(reused(&second), "{second:?}");
 }

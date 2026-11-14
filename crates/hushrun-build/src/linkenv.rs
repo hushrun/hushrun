@@ -271,10 +271,11 @@ pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
 fn normalize_word(word: &str, placeholders: &dyn Fn(&str) -> String) -> String {
     let word = fixed_temporary(word);
     // `-L/x` and `-B/x`: no root starts after a letter, so the part from the `/` is replaced on
-    // its own. Behind a quote too: clang quotes every word of its dry run (`"-L/x"`).
-    let (quote, body) = match word.strip_prefix('"') {
-        Some(body) => ("\"", body),
-        None => ("", word.as_str()),
+    // its own. Behind a quote too: clang quotes every word of its dry run (`"-L/x"`), and gcc
+    // the options it hands `collect2` through the environment (`'-L/x'`).
+    let (quote, body) = match word.chars().next() {
+        Some(quote @ ('"' | '\'')) => word.split_at(quote.len_utf8()),
+        _ => ("", word.as_str()),
     };
     match body.find('/') {
         Some(at)
@@ -1843,6 +1844,15 @@ mod tests {
                 &placeholders
             ),
             r#""/usr/bin/ld" "-L{ws}/target/debug/build/ring-1/out" -L{ws}/target "-o" "{ws}/out/p""#
+        );
+        // gcc quotes the options it hands collect2 through the environment with `'`: rustc's
+        // own temporary search folder is among them at every link on Linux.
+        assert_eq!(
+            normalize(
+                "COLLECT_GCC_OPTIONS='-o' '/nonexistent/x' '-L/home/dev/ws/out/rustcAbC123/raw-dylibs' '-shared-libgcc'",
+                &placeholders
+            ),
+            "COLLECT_GCC_OPTIONS='-o' '/nonexistent/x' '-L{ws}/out/rustcXXXXXX/raw-dylibs' '-shared-libgcc'"
         );
     }
 
