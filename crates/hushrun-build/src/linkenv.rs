@@ -271,15 +271,19 @@ pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
 fn normalize_word(word: &str, placeholders: &dyn Fn(&str) -> String) -> String {
     let word = fixed_temporary(word);
     // `-L/x` and `-B/x`: no root starts after a letter, so the part from the `/` is replaced on
-    // its own.
-    match word.find('/') {
+    // its own. Behind a quote too: clang quotes every word of its dry run (`"-L/x"`).
+    let (quote, body) = match word.strip_prefix('"') {
+        Some(body) => ("\"", body),
+        None => ("", word.as_str()),
+    };
+    match body.find('/') {
         Some(at)
             if at > 0
-                && word[..at]
+                && body[..at]
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-') =>
         {
-            format!("{}{}", &word[..at], placeholders(&word[at..]))
+            format!("{quote}{}{}", &body[..at], placeholders(&body[at..]))
         }
         _ => placeholders(&word),
     }
@@ -1807,6 +1811,39 @@ mod tests {
         s.env = vec![("SDKROOT".into(), Some("/sdk/two".into()))];
         assert_ne!(s.digest(), one);
         assert_ne!(one, before);
+    }
+
+    // covers: B-37
+    #[test]
+    fn a_quoted_option_with_a_root_after_its_letters_is_normalized_as_an_unquoted_one() {
+        // clang quotes every word of its dry run, gcc none. A root is replaced only where it
+        // starts a path, which after an option's letters it does not: the part from the `/` is
+        // replaced on its own, behind a quote too. Without that, a program that links a
+        // library from a folder of its checkout (`-L <target>/debug/build/x/out`, what every
+        // build script that compiles C hands its crate) had another E in every checkout.
+        let placeholders = |text: &str| {
+            // As the real roots do: only where the folder starts a path.
+            let mut out = String::new();
+            let mut rest = text;
+            while let Some(at) = rest.find("/home/dev/ws") {
+                let starts = rest[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_alphanumeric() || "._-+~@/".contains(c)));
+                out.push_str(&rest[..at]);
+                out.push_str(if starts { "{ws}" } else { "/home/dev/ws" });
+                rest = &rest[at + "/home/dev/ws".len()..];
+            }
+            out.push_str(rest);
+            out
+        };
+        assert_eq!(
+            normalize(
+                r#" "/usr/bin/ld" "-L/home/dev/ws/target/debug/build/ring-1/out" -L/home/dev/ws/target "-o" "/home/dev/ws/out/p""#,
+                &placeholders
+            ),
+            r#""/usr/bin/ld" "-L{ws}/target/debug/build/ring-1/out" -L{ws}/target "-o" "{ws}/out/p""#
+        );
     }
 
     // covers: B-37

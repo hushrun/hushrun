@@ -1005,3 +1005,25 @@ fn a_toolchain_installed_elsewhere_links_the_same_program_proc_macro_and_build_s
         assert!(!entry.differed, "the same bytes: {entry:?}");
     }
 }
+
+// covers: B-37
+#[test]
+fn a_program_that_links_from_a_folder_of_its_checkout_is_reused_in_another_checkout() {
+    // What a build script that compiles C hands its crate: `-L native=<a folder of the
+    // checkout>`, which rustc passes on to the linker. The folder is a root, so the link
+    // environment must be the same in two checkouts, whichever way the driver quotes its dry run
+    // (clang quotes every word, gcc none).
+    let w = world();
+    let build = |ws: &Path| {
+        fs::create_dir_all(ws.join("native")).unwrap();
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let native = format!("native={}", ws.join("native").display());
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-L", &native], &[]);
+        ok(&out);
+        entry
+    };
+    let first = build(&w.checkout("one"));
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = build(&w.checkout("another/longer-checkout"));
+    assert!(reused(&second), "{second:?}");
+}
