@@ -1239,6 +1239,81 @@ fn observe_opens_what_it_compares_within_the_room_a_download_gets() {
     relay.end_check(&[]);
 }
 
+// covers: B-30, B-34
+#[test]
+fn the_prefetch_takes_macros_scripts_and_libraries_and_leaves_programs_and_kept_keys() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let classes = [
+        blocks::Class::Library,
+        blocks::Class::Program,
+        blocks::Class::ProcMacro,
+        blocks::Class::BuildScript,
+        // A library whose first key this machine keeps to itself.
+        blocks::Class::Library,
+    ];
+    let mut pairs = Vec::new();
+    let mut made = Vec::new();
+    for (i, class) in classes.into_iter().enumerate() {
+        let (key, step) = block(&a.store, 150 + i as u8, 20_000, Some(me(&fake)));
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            5000,
+            class,
+        );
+        pairs.push(Pair(address(&step), address(&key)));
+        made.push((key, step));
+    }
+    fake.set_manifest(pairs);
+    let b = machine();
+    let now = SystemTime::now();
+    b.store
+        .keep_local(
+            &made[4].1,
+            "links otherwise here",
+            now + Duration::from_secs(86_400),
+            now,
+        )
+        .unwrap();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let _ = ask(&relay, Request::Hints { step: made[0].1 });
+    let arrived = |i: usize| {
+        relay
+            .state()
+            .fetches
+            .get(&address(&made[i].0))
+            .is_some_and(|f| matches!(f.state, super::Download::Arrived(_)))
+    };
+    until("prefetched", || arrived(0) && arrived(2) && arrived(3));
+    let state = relay.state();
+    assert!(
+        !state.fetches.contains_key(&address(&made[1].0)),
+        "a program waits to be asked for"
+    );
+    assert!(
+        !state.fetches.contains_key(&address(&made[4].0)),
+        "a key kept on this machine asks the shared store nothing"
+    );
+    drop(state);
+    assert!(super::prefetched(blocks::Class::ProcMacro));
+    assert!(super::prefetched(blocks::Class::BuildScript));
+    assert!(super::prefetched(blocks::Class::Library));
+    for class in [
+        blocks::Class::Program,
+        blocks::Class::Other,
+        blocks::Class::Unknown,
+    ] {
+        assert!(!super::prefetched(class), "{class:?}");
+    }
+    relay.end_check(&[]);
+}
+
 // covers: B-29, B-34
 #[test]
 fn a_linked_output_the_trusted_copy_disagrees_with_stays_and_its_key_is_kept_here() {

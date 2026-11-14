@@ -2340,9 +2340,13 @@ impl Relay {
 /// with the shared store's copy, and how many differed, which are reported and not reused here
 /// for `keep_days`.
 /// Whether a block of `class` is fetched from a manifest without being asked for (B-30):
-/// libraries. Anything else is fetched only when a compile asks for it.
+/// libraries, proc macros and build-script binaries. A program is fetched only when a compile
+/// asks for it; a class this version doesn't know never is.
 fn prefetched(class: blocks::Class) -> bool {
-    matches!(class, blocks::Class::Library)
+    matches!(
+        class,
+        blocks::Class::Library | blocks::Class::ProcMacro | blocks::Class::BuildScript
+    )
 }
 
 fn observed_line(compared: u64, differed: u64, keep_days: u32) -> String {

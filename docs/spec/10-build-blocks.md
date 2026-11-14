@@ -1139,8 +1139,12 @@ for the repository, the check and the platform. The prefetch starts when the fir
 the run asks the relay anything: a run whose compiles all find their blocks here (a warm target
 with an empty store, or no compile at all) downloads nothing. The relay then drops every pair
 whose block or first key the store holds, asks for the rest's hints in one request and looks up the rest's blocks in
-one, and downloads the libraries, 8 at a time and in order, before cargo asks; programs are
-fetched only when asked for. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
+one, and downloads by class, 8 at a time, before cargo asks: proc macros and build-script
+binaries first, since cargo can start no dependent of a macro and no build script's run before
+they are there, and they are small; then the libraries, in the manifest's order. Programs are
+the last thing a build needs and the largest: they are fetched only when asked for, and so is
+a class this version doesn't know. A pair whose first key this machine keeps to itself (B-34)
+is left out. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
 key that opens it, and is deleted once opened and published, or when the run ends. A hint is
 written where downloaded hints live, apart from the hints compiles here wrote: those are tried
 first, and a downloaded hint naming more bytes than twice what this machine's own hints of the
