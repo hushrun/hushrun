@@ -271,23 +271,20 @@ pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
 fn normalize_word(word: &str, placeholders: &dyn Fn(&str) -> String) -> String {
     let word = fixed_temporary(word);
     // `-L/x` and `-B/x`: no root starts after a letter, so the part from the `/` is replaced on
-    // its own. Behind a quote too: clang quotes every word of its dry run (`"-L/x"`), and gcc
-    // the options it hands `collect2` through the environment (`'-L/x'`).
-    let (quote, body) = match word.chars().next() {
-        Some(quote @ ('"' | '\'')) => word.split_at(quote.len_utf8()),
-        _ => ("", word.as_str()),
-    };
-    match body.find('/') {
-        Some(at)
-            if at > 0
-                && body[..at]
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-') =>
-        {
-            format!("{quote}{}{}", &body[..at], placeholders(&body[at..]))
+    // its own. The option is the run of letters, digits and `-` straight before the first `/`,
+    // when it starts with `-`, whatever comes before it: nothing, a quote (clang quotes every
+    // word of its dry run, `"-L/x"`), or the name of the variable gcc repeats the options it
+    // hands `collect2` in (`COLLECT_GCC_OPTIONS='-L/x'`).
+    if let Some(at) = word.find('/') {
+        let head = &word[..at];
+        let option = head
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map_or(head, |before| &head[before + 1..]);
+        if option.starts_with('-') {
+            return format!("{head}{}", placeholders(&word[at..]));
         }
-        _ => placeholders(&word),
     }
+    placeholders(&word)
 }
 
 /// `word` with each `/rustcXXXXXX` folder (rustc's temporary folder, six letters or digits)
@@ -1853,6 +1850,19 @@ mod tests {
                 &placeholders
             ),
             "COLLECT_GCC_OPTIONS='-o' '/nonexistent/x' '-L{ws}/out/rustcXXXXXX/raw-dylibs' '-shared-libgcc'"
+        );
+        // As gcc 13 really writes it: the first option straight after the variable's name.
+        assert_eq!(
+            normalize(
+                "COLLECT_GCC_OPTIONS='-L/home/dev/ws/out/rustcAbC123/raw-dylibs' '-nodefaultlibs'",
+                &placeholders
+            ),
+            "COLLECT_GCC_OPTIONS='-L{ws}/out/rustcXXXXXX/raw-dylibs' '-nodefaultlibs'"
+        );
+        // A path that only holds a `-` is no option: it is replaced where it starts, or not.
+        assert_eq!(
+            normalize("lib/x-y/home/dev/ws/z /home/dev/ws/a-b/c", &placeholders),
+            "lib/x-y/home/dev/ws/z {ws}/a-b/c"
         );
     }
 
