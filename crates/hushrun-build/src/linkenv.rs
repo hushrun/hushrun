@@ -254,39 +254,48 @@ fn split_command(line: &str) -> Result<Vec<String>, Why> {
     }
 }
 
-/// A dry run's text as E holds it: each word with rustc's temporary folder name
-/// (`rustcXXXXXX`) and gcc's temporary file names (`ccXXXXXX.res`) made fixed, and roots and
-/// bases replaced by their names, also after an option's letters (`-L/…`, `-B/…`); one space
-/// between words.
+/// A dry run's text as E holds it: rustc's temporary folder name (`rustcXXXXXX`) and gcc's
+/// temporary file names (`ccXXXXXX.res`) made fixed, and roots and bases replaced by their
+/// names, also after an option's letters (`-L/…`, `-B/…`); then one space between words.
+///
+/// Roots are replaced in each line as a whole, before it is taken apart at spaces: a root may
+/// hold a space (a checkout under `My Projects/`), and a line cut at spaces first would never
+/// show it whole.
 pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
     text.lines()
         .map(|line| {
-            line.split_whitespace()
-                .map(|word| normalize_word(word, placeholders))
-                .collect::<Vec<_>>()
-                .join(" ")
+            let mut replaced = String::with_capacity(line.len());
+            let mut from = 0;
+            for at in after_option(line) {
+                replaced.push_str(&placeholders(&fixed_temporary(&line[from..at])));
+                from = at;
+            }
+            replaced.push_str(&placeholders(&fixed_temporary(&line[from..])));
+            replaced.split_whitespace().collect::<Vec<_>>().join(" ")
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn normalize_word(word: &str, placeholders: &dyn Fn(&str) -> String) -> String {
-    let word = fixed_temporary(word);
-    // `-L/x` and `-B/x`: no root starts after a letter, so the part from the `/` is replaced on
-    // its own. The option is the run of letters, digits and `-` straight before the first `/`,
-    // when it starts with `-`, whatever comes before it: nothing, a quote (clang quotes every
-    // word of its dry run, `"-L/x"`), or the name of the variable gcc repeats the options it
-    // hands `collect2` in (`COLLECT_GCC_OPTIONS='-L/x'`).
-    if let Some(at) = word.find('/') {
-        let head = &word[..at];
-        let option = head
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .map_or(head, |before| &head[before + 1..]);
-        if option.starts_with('-') {
-            return format!("{head}{}", placeholders(&word[at..]));
+/// Where a path follows an option's letters in `line` (`-L/x`, `-B/x`): each `/` straight after
+/// a run of letters, digits and `-` that starts with `-`, whatever comes before the run:
+/// nothing, a space, a quote (clang quotes every word of its dry run, `"-L/x"`), or the name
+/// of the variable gcc repeats the options it hands `collect2` in
+/// (`COLLECT_GCC_OPTIONS='-L/x'`). No root starts after a letter, so the text from such a `/`
+/// is handed to the replacement on its own.
+fn after_option(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in line.match_indices('/') {
+        let option = bytes[..at]
+            .iter()
+            .rposition(|c| !(c.is_ascii_alphanumeric() || *c == b'-'))
+            .map_or(&bytes[..at], |before| &bytes[before + 1..at]);
+        if option.first() == Some(&b'-') {
+            out.push(at);
         }
     }
-    placeholders(&word)
+    out
 }
 
 /// `word` with each `/rustcXXXXXX` folder (rustc's temporary folder, six letters or digits)
@@ -1865,6 +1874,55 @@ mod tests {
         assert_eq!(
             normalize("lib/x-y/home/dev/ws/z /home/dev/ws/a-b/c", &placeholders),
             "lib/x-y/home/dev/ws/z {ws}/a-b/c"
+        );
+    }
+
+    // covers: B-37
+    #[test]
+    fn a_root_with_a_space_in_its_path_is_replaced_in_a_dry_run() {
+        // A checkout in a folder whose name has a space: the root is replaced before the text
+        // is taken apart at spaces, wherever the drivers put it.
+        let root = "/home/dev/my work/check out";
+        let placeholders = |text: &str| {
+            // As the real roots do: only where the folder starts a path.
+            let mut out = String::new();
+            let mut rest = text;
+            while let Some(at) = rest.find(root) {
+                let starts = rest[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_alphanumeric() || "._-+~@/".contains(c)));
+                out.push_str(&rest[..at]);
+                out.push_str(if starts { "{ws}" } else { root });
+                rest = &rest[at + root.len()..];
+            }
+            out.push_str(rest);
+            out
+        };
+        // clang: every word quoted.
+        assert_eq!(
+            normalize(
+                r#" "/usr/bin/ld" "-L/home/dev/my work/check out/native" "-o" "/home/dev/my work/check out/out/rustcAbC123/p" "-lSystem""#,
+                &placeholders
+            ),
+            r#""/usr/bin/ld" "-L{ws}/native" "-o" "{ws}/out/rustcXXXXXX/p" "-lSystem""#
+        );
+        // gcc: a word with a space quoted, and the options it hands on in single quotes.
+        assert_eq!(
+            normalize(
+                "COLLECT_GCC_OPTIONS='-L/home/dev/my work/check out/out/rustcAbC123/raw-dylibs' '-nodefaultlibs'\n /usr/libexec/collect2   \"-L/home/dev/my work/check out/native\" -L/usr/lib",
+                &placeholders
+            ),
+            "COLLECT_GCC_OPTIONS='-L{ws}/out/rustcXXXXXX/raw-dylibs' '-nodefaultlibs'\n/usr/libexec/collect2 \"-L{ws}/native\" -L/usr/lib"
+        );
+        // The same text as a checkout without a space gives.
+        let plain = |text: &str| text.replace("/home/dev/ws", "{ws}");
+        assert_eq!(
+            normalize(
+                r#" "/usr/bin/ld" "-L/home/dev/my work/check out/native""#,
+                &placeholders
+            ),
+            normalize(r#" "/usr/bin/ld" "-L/home/dev/ws/native""#, &plain)
         );
     }
 

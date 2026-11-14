@@ -108,6 +108,11 @@ where that folder is the same. Every linked output's key changes once.
   macOS a program cut short, built for the other CPU, or loading a `/usr/lib/` library this
   system doesn't have passed the check. All of these are now misses, told from the headers.
 
+- **A checkout whose path holds a space shares its linked outputs again** (B-37): the dry run's
+  text was cut at spaces before the checkout's folder was replaced by its name, so the folder
+  stayed in the link environment and no program, proc macro or build script was found in
+  another checkout.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

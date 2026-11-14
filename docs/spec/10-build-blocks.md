@@ -628,7 +628,9 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    and its output, with `-o /nonexistent/hushrun-link -###`, the link's `PATH` and the variables
    the line set (`SDKROOT`, `LC_ALL`, …). Its **whole text**, every word, with rustc's temporary
    folder names (`rustcXXXXXX`) and gcc's temporary files (`ccXXXXXX.res`) made fixed and roots
-   and bases replaced by their names, also after an option's letters (`-L{…}`). The text holds
+   and bases replaced by their names, also after an option's letters (`-L{…}`), in each line
+   as a whole and only then taken apart at spaces, so a root whose path holds a space (a
+   checkout under `My Projects/`) is replaced like any other. The text holds
    every flag the link passes, not only the files it names, and the loader's path the driver
    adds. What it does **not** carry is a path rustc computes from where a checkout lies:
    `-C rpath` writes the way from the output folder to the toolchain as a relative `RUNPATH`

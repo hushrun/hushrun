@@ -1208,3 +1208,35 @@ fn a_program_with_rustcs_rpath_is_reused_only_where_its_folders_are_the_same() {
         assert!(moved.found && !moved.differed, "{mode:?}: {moved:?}");
     }
 }
+
+// covers: B-37
+#[test]
+fn a_checkout_whose_path_has_a_space_shares_its_linked_outputs_with_another() {
+    // The dry run names the checkout's folders; one with a space in its path must be replaced
+    // by its root's name like any other, or no linked output is found in another checkout.
+    let w = world();
+    let build = |ws: &Path| {
+        fs::create_dir_all(ws.join("native")).unwrap();
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let native = format!("native={}", ws.join("native").display());
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-L", &native], &[]);
+        ok(&out);
+        entry
+    };
+    let one = w.checkout("my one");
+    let two = w.checkout("another longer/check out");
+    let three = w.checkout("plain");
+    let first = build(&one);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    for ws in [&two, &three] {
+        let next = build(ws);
+        assert!(reused(&next), "{}: {next:?}", ws.display());
+    }
+    let first = proc_macro_with(&w, &one, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    assert!(first.portable.as_ref().unwrap().portable, "{first:?}");
+    for ws in [&two, &three] {
+        let next = proc_macro_with(&w, ws, &[], &[]);
+        assert!(reused(&next), "{}: {next:?}", ws.display());
+    }
+}
