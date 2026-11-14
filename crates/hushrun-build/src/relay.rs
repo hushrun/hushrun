@@ -77,6 +77,10 @@ pub enum Problem {
     Differs,
     /// A dependent couldn't load it.
     Rejected,
+    /// A linked output's compile here made other bytes than the downloaded copy: the two
+    /// machines' link environments differ in something the key doesn't hold. Not a sign of a
+    /// poisoned build, as [`Problem::Differs`] is for a library.
+    LinkDiffers,
 }
 
 /// The relay's answer.

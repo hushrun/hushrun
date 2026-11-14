@@ -1231,12 +1231,61 @@ fn observe_opens_what_it_compares_within_the_room_a_download_gets() {
     until("open", || answering(&relay));
     relay
         .runtime
-        .block_on(relay.clone().compare(key, address(&key)));
+        .block_on(relay.clone().compare(key, address(&key), false));
     // Downloaded, then refused before it was unpacked: nothing compared, nothing reported.
     assert_eq!(fake.count(route::STORE_GET), 1);
     assert_eq!(relay.state().tally.compared, 0);
     assert!(fake.reports().is_empty());
     relay.end_check(&[]);
+}
+
+// covers: B-29, B-34
+#[test]
+fn a_linked_output_the_trusted_copy_disagrees_with_stays_and_its_key_is_kept_here() {
+    // `begin` refuses a library with `differs` and the trusted copy is served in its place. A
+    // linked output is what this machine's linker makes: it stays, and its key is kept here.
+    for class in [
+        LocalClass::ProcMacro,
+        LocalClass::BuildScript,
+        LocalClass::Program,
+    ] {
+        let fake = FakeBuild::start();
+        let m = machine();
+        let (key, step) = block(&m.store, 9, 10_000, Some(me(&fake)));
+        fake.force_begin(
+            address(&key),
+            json!({"answer":"refused","reason":"differs"}),
+            1,
+        );
+        let relay = start(&fake, &m, |_| {});
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        ask(
+            &relay,
+            Request::Built {
+                key,
+                step,
+                class,
+                portable: true,
+                cost_ms: 1000,
+            },
+        );
+        until("refused", || {
+            fake.count(route::BEGIN) >= 1 && waiting(&m).is_empty() && no_claims(&m)
+        });
+        let lines = relay.end_check(&[]);
+        assert!(
+            m.store.block(&key).unwrap().is_some(),
+            "{class:?}: it stays"
+        );
+        assert!(m.store.kept_local(&step).is_some(), "{class:?}");
+        assert_eq!(m.store.suspended(&step), None, "{class:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("keeps its own")),
+            "{class:?}: {lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("discarded")), "{lines:?}");
+    }
 }
 
 /// A store holding `n` libraries of `size` bytes, each in the fake's object store too.

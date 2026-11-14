@@ -268,6 +268,9 @@ struct Tally {
     compared_differed: u64,
     /// Blocks built here this check discarded (B-29): said in one line.
     discarded: u64,
+    /// Linked outputs built here that the trusted copy disagrees with, kept to this machine
+    /// (B-29, B-34): said in one line.
+    kept_local: u64,
 }
 
 /// A check the relay serves.
@@ -894,18 +897,26 @@ impl Relay {
 
     /// B-30: from the manifest `open` returned, drop every pair the store already holds the
     /// block or the hint of, ask for the rest's hints and look up the rest's blocks, one request
-    /// each, and queue the libraries' downloads in order. Programs wait to be asked for.
+    /// each, and queue the downloads [`prefetched`] names: proc macros and build-script binaries
+    /// first, then libraries in order. Programs wait to be asked for.
     async fn prefetch(self: Arc<Relay>, manifest: Vec<Pair>) {
         if manifest.is_empty() {
             return;
         }
         let store = self.config.store.clone();
-        let (held_blocks, held_hints) = self
+        let (held_blocks, held_hints, kept_local) = self
             .runtime
             .spawn_blocking(move || {
                 let blocks: HashSet<Hex32> = store.keys().iter().map(Relay::address).collect();
-                let hints: HashSet<Hex32> = store.steps().iter().map(Relay::address).collect();
-                (blocks, hints)
+                let steps = store.steps();
+                let hints: HashSet<Hex32> = steps.iter().map(Relay::address).collect();
+                // B-34: a first key this machine keeps to itself asks the shared store nothing.
+                let kept: HashSet<Hex32> = steps
+                    .iter()
+                    .filter(|step| store.kept_local(step).is_some())
+                    .map(Relay::address)
+                    .collect();
+                (blocks, hints, kept)
             })
             .await
             .unwrap_or_default();
@@ -924,19 +935,30 @@ impl Relay {
         let wanted: Vec<Hex32> = dedup(
             manifest
                 .iter()
+                .filter(|pair| !kept_local.contains(&pair.hint()))
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
         for batch in hints.chunks(limit) {
             self.lookup_hints(batch).await;
         }
+        // What is fetched without being asked for, by class (B-30): proc macros and
+        // build-script binaries first, since cargo can start no dependent of a macro and no
+        // build script's run before they are there, and they are small; then libraries, in the
+        // manifest's order. A program is the last thing a build needs and the largest: it
+        // waits to be asked for.
+        let mut looked_up = Vec::new();
         for batch in wanted.chunks(limit) {
-            let found = self.lookup(batch, true).await;
+            looked_up.extend(self.lookup(batch, true).await.into_iter().flatten());
+        }
+        let (first, libraries): (Vec<Found>, Vec<Found>) = looked_up
+            .into_iter()
+            .filter(|found| prefetched(found.class))
+            .partition(|found| found.class != blocks::Class::Library);
+        {
             let mut state = self.state();
-            for found in found.into_iter().flatten() {
-                if found.class == blocks::Class::Library
-                    && !state.fetches.contains_key(&found.address)
-                {
+            for found in first.into_iter().chain(libraries) {
+                if !state.fetches.contains_key(&found.address) {
                     state.queue.push_back(found.address);
                     let looked = state
                         .found
@@ -1893,10 +1915,12 @@ impl Relay {
                 }
             }
         }
-        if sharing == Sharing::Observe && class == LocalClass::Library {
+        // B-33: every class is compared, a linked output among them (B-16).
+        if sharing == Sharing::Observe {
             let relay = self.clone();
+            let linked = class != LocalClass::Library;
             self.runtime
-                .spawn(async move { relay.compare(key, address).await });
+                .spawn(async move { relay.compare(key, address, linked).await });
         }
     }
 
@@ -1911,8 +1935,10 @@ impl Relay {
 
     /// B-33: shared `observe`'s comparison of a block built here with the shared store's copy:
     /// downloaded and opened in the background, never published. A difference suspends the
-    /// first key here for the store's kept days and is reported to the scope it came from.
-    async fn compare(self: Arc<Relay>, key: Digest, address: Hex32) {
+    /// first key here for the store's kept days and is reported to the scope it came from. For
+    /// a linked output (`linked`) it keeps the first key to this machine instead, and the
+    /// report says the link differs (B-34): this machine's linker makes these bytes.
+    async fn compare(self: Arc<Relay>, key: Digest, address: Hex32, linked: bool) {
         let Some(found) = self
             .lookup(&[address], true)
             .await
@@ -2003,15 +2029,28 @@ impl Relay {
             if let Some(step) = step {
                 let now = SystemTime::now();
                 let until = now + Duration::from_secs(u64::from(self.config.keep_days) * 86_400);
-                let _ = self.config.store.suspend_until(
-                    &step,
-                    "the shared store's copy differed from a compile here",
-                    until,
-                    now,
-                );
+                let _ = if linked {
+                    self.config.store.keep_local(
+                        &step,
+                        "the shared store's copy was linked otherwise",
+                        until,
+                        now,
+                    )
+                } else {
+                    self.config.store.suspend_until(
+                        &step,
+                        "the shared store's copy differed from a compile here",
+                        until,
+                        now,
+                    )
+                };
             }
-            self.report(address, &found.scope, blocks::Problem::Differs)
-                .await;
+            let problem = if linked {
+                blocks::Problem::LinkDiffers
+            } else {
+                blocks::Problem::Differs
+            };
+            self.report(address, &found.scope, problem).await;
         }
     }
 
@@ -2032,6 +2071,7 @@ impl Relay {
         let problem = match problem {
             Problem::Differs => blocks::Problem::Differs,
             Problem::Rejected => blocks::Problem::Rejected,
+            Problem::LinkDiffers => blocks::Problem::LinkDiffers,
         };
         self.report(Relay::address(&key), &scope, problem).await;
     }
@@ -2171,6 +2211,17 @@ impl Relay {
                 if n == 1 { "was" } else { "were" },
             ));
         }
+        // B-29, B-34: nor is a linked output this machine keeps to itself.
+        if state.tally.kept_local > 0 {
+            let n = state.tally.kept_local;
+            lines.push(format!(
+                "build: {n} {} linked here {} from the repository's trusted copy: this machine keeps its own and doesn't share {} for {} days (the two link environments differ in something hushrun doesn't see)",
+                if n == 1 { "program, proc macro or build script" } else { "programs, proc macros or build scripts" },
+                if n == 1 { "differs" } else { "differ" },
+                if n == 1 { "it" } else { "them" },
+                self.config.keep_days,
+            ));
+        }
         // B-20, B-33: shared `observe` says what it compared and how many differed.
         if state.sharing == Sharing::Observe && state.tally.compared > 0 {
             lines.push(observed_line(
@@ -2288,6 +2339,12 @@ impl Relay {
 /// The summary's line for shared `observe` (B-20, B-33): how many blocks built here were compared
 /// with the shared store's copy, and how many differed, which are reported and not reused here
 /// for `keep_days`.
+/// Whether a block of `class` is fetched from a manifest without being asked for (B-30):
+/// libraries. Anything else is fetched only when a compile asks for it.
+fn prefetched(class: blocks::Class) -> bool {
+    matches!(class, blocks::Class::Library)
+}
+
 fn observed_line(compared: u64, differed: u64, keep_days: u32) -> String {
     let blocks = if compared == 1 { "block" } else { "blocks" };
     if differed == 0 {

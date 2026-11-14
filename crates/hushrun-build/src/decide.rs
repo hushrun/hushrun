@@ -233,6 +233,10 @@ pub enum Compared {
     Same,
     /// An output differs.
     Differed,
+    /// An output of a linked output differs from a copy that was only downloaded: this machine
+    /// keeps its own and keeps the key to itself (B-16, B-34). No suspension: its own block is
+    /// what it reuses.
+    KeptOwn,
 }
 
 /// What happened after the plan.
@@ -722,7 +726,12 @@ mod tests {
             Stored::AlreadyHad,
             Stored::Refused,
         ];
-        let compares = [Compared::NotTried, Compared::Same, Compared::Differed];
+        let compares = [
+            Compared::NotTried,
+            Compared::Same,
+            Compared::Differed,
+            Compared::KeptOwn,
+        ];
         let mut checked = 0;
         for plan in plans {
             for rustc in rustcs {
@@ -785,7 +794,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 9 * 3 * 2 * 2 * 3 * 4 * 3);
+        assert_eq!(checked, 9 * 3 * 2 * 2 * 3 * 4 * 4);
     }
 
     // covers: B-3

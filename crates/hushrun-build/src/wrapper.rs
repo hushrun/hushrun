@@ -236,6 +236,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         native_cpu: false,
         downloaded: std::cell::Cell::new(false),
         replace_downloaded: std::cell::Cell::new(false),
+        kept_local: std::cell::Cell::new(false),
     }
     .run()
 }
@@ -339,6 +340,9 @@ struct Call<'a> {
     /// The block in the store under this compile's key was only downloaded and no server
     /// vouches for it now: the compile's block takes its place (B-32, B-34).
     replace_downloaded: std::cell::Cell<bool>,
+    /// The first key is kept on this machine ([`Store::keep_local`]): nothing of it is asked
+    /// of the shared store or sent to it.
+    kept_local: std::cell::Cell<bool>,
 }
 
 /// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
@@ -1086,7 +1090,13 @@ impl Call<'_> {
         common: &mut Option<Result<Common, NotStored>>,
         found: &mut Option<Found>,
     ) -> Lookup {
-        let share = self.current.share.relay();
+        // A first key kept on this machine asks the shared store nothing (B-34).
+        self.kept_local.set(store.kept_local(&cx.step).is_some());
+        let share = self
+            .current
+            .share
+            .relay()
+            .filter(|_| !self.kept_local.get());
         let local = store.hints(&cx.step);
         if local.is_empty() && share.is_none() {
             return Lookup::Missing;
@@ -1227,7 +1237,11 @@ impl Call<'_> {
                     // B-34: a block that was only downloaded is reused only while a server the
                     // run belongs to vouches for it. Not vouched for, it is a miss: rustc runs,
                     // and its block takes this one's place.
-                    if !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
+                    // A key kept on this machine never reuses a copy that was only
+                    // downloaded: this machine links it otherwise.
+                    let kept_out = self.kept_local.get()
+                        && origin.as_ref().is_some_and(Origin::downloaded_only);
+                    if kept_out || !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
                         self.replace_downloaded.set(true);
                         return Some(Lookup::Missing);
                     }
@@ -1513,6 +1527,20 @@ impl Call<'_> {
             Ok(produced) => {
                 if compare && let Some(found) = found {
                     facts.compared = compare_outputs(&produced.outputs, &found.block);
+                    // B-16, B-34: a linked output that differs from a copy this machine only
+                    // downloaded was linked in an environment that differs in something the
+                    // key doesn't hold. This machine's own link is what it would make every
+                    // time: it keeps it, in the downloaded copy's place, and keeps the key
+                    // to itself. A library that differs is another matter: rustc alone wrote
+                    // it, so one of the two was built from other inputs than the key names.
+                    if facts.compared == Compared::Differed
+                        && linked
+                        && !facts.changed
+                        && found.origin.as_ref().is_some_and(Origin::downloaded_only)
+                    {
+                        facts.compared = Compared::KeptOwn;
+                        self.replace_downloaded.set(true);
+                    }
                 }
                 let trusted = !facts.changed && facts.compared != Compared::Differed;
                 log.portable = Some(produced.portability.clone());
@@ -1624,15 +1652,20 @@ impl Call<'_> {
                 inv.crate_name()
             ));
         }
-        log.differed =
-            facts.compared == Compared::Differed || facts.second_opinion == Compared::Differed;
+        if facts.compared == Compared::KeptOwn {
+            log.note = self.keep_to_this_machine(store, &cx.step, found.map(|f| f.block.key));
+        }
+        log.differed = matches!(facts.compared, Compared::Differed | Compared::KeptOwn)
+            || facts.second_opinion == Compared::Differed;
         log.outcome = verdict.outcome;
         // B-29: the relay hears of a block this run built and stored, and decides whether it
         // goes up; in shared `observe` it compares it with the shared store's copy.
         if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
             (self.current.share.relay(), verdict.outcome, log.key)
         {
-            let portable = log.portable.as_ref().is_some_and(|p| p.portable);
+            // A key kept on this machine goes nowhere, whatever its block holds.
+            let portable =
+                log.portable.as_ref().is_some_and(|p| p.portable) && !self.kept_local.get();
             let _ = self.ports.relay(
                 &share.socket,
                 &Request::Built {
@@ -2593,6 +2626,19 @@ impl Call<'_> {
         if !there.downloaded_only() {
             return Stored::AlreadyHad;
         }
+        if compared == Compared::Differed && self.invocation.class() != Class::Library {
+            // B-16, B-34: a linked output. This machine's own link takes the downloaded
+            // copy's place and the key stays here; nothing is suspended.
+            let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+                o.is_some_and(Origin::downloaded_only)
+            };
+            let replaced = store.replace(key, description, files, origin, now, only_downloaded);
+            let _ = self.keep_to_this_machine(store, step, Some(*key));
+            return match replaced {
+                Ok(crate::store::Replaced::Stored) => Stored::Took,
+                _ => Stored::AlreadyHad,
+            };
+        }
         if compared == Compared::Differed {
             // B-34: a comparison of a downloaded block that differs suspends its first key for
             // the store's kept days, first, so that whatever the replace below finds, the next
@@ -2632,6 +2678,43 @@ impl Call<'_> {
             })
         });
         Stored::AlreadyHad
+    }
+
+    /// B-16, B-34: this machine links the first key `step` otherwise than the copy it
+    /// downloaded (`key`, when it is known). The key is kept here for the store's kept days:
+    /// nothing of it is asked of the shared store or sent to it, and what this machine links
+    /// is reused here as always. The scope the copy came from is told, in words that don't say
+    /// "poisoned". The line for the run.
+    fn keep_to_this_machine(
+        &self,
+        store: &Store,
+        step: &Digest,
+        key: Option<Digest>,
+    ) -> Option<String> {
+        let now = self.ports.now();
+        let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+        let _ = store.keep_local(
+            step,
+            "this machine links it otherwise than the copy it downloaded",
+            until,
+            now,
+        );
+        self.kept_local.set(true);
+        if let (Some(share), Some(key)) = (self.current.share.relay(), key) {
+            let _ = self.ports.relay(
+                &share.socket,
+                &Request::Report {
+                    key,
+                    problem: relay::Problem::LinkDiffers,
+                },
+                NOTICE_WAIT,
+            );
+        }
+        Some(format!(
+            "{} links differently here than the copy downloaded for it: this machine keeps its own, and doesn't share it for {} days",
+            self.invocation.crate_name(),
+            self.current.keep_days
+        ))
     }
 
     /// B-15: a dependent that could not load a reused crate suspends that crate's first key and

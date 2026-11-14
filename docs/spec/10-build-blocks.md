@@ -461,7 +461,7 @@ reused. `hushrun build clean` clears it.
 a hash of the key and the run's start, whatever its class. Its outputs are compared byte for byte
 with the block's: a library's, and a program's, a proc macro's or a build-script binary's, each
 file of a program's debug bundle among them (less `Contents/Resources/Relocations`, which is
-never stored, B-9). A difference serves the fresh outputs, suspends the key and is reported. In
+never stored, B-9). A difference serves the fresh outputs, suspends the key and is reported; for a linked output found different from a copy that was only downloaded, B-34 says what happens instead. In
 `observe` every block found is compared the same way, and a compile whose block's messages don't
 serve its form is compared too. *Rests on:* a link being as deterministic as rustc's own output
 (the same link repeated, at the same path and at two, gave the same bytes on Linux and on macOS
@@ -1102,7 +1102,8 @@ move is a file written whole or a rename:
 | claimed | sent | packed, `begin` answered `put`, and the PUT succeeded or found the object there |
 | sent | done | `commit` answered `stored` |
 | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope` or `suspended`; the block is gone, or no longer matches its record |
-| claimed | done, the local block discarded | `begin` refused `differs`: a trusted copy with other bytes exists |
+| claimed | done, the local block discarded | `begin` refused `differs` for a library: a trusted copy with other bytes exists |
+| claimed | done, the local block kept and its first key kept to this machine | `begin` refused `differs` for a program, a proc macro or a build-script binary (B-34) |
 | claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing`, `gone` or `differs`, any word this version doesn't know |
 | claimed, sent | waiting, one more cut-off | the end of the command cut off its `begin`, PUT or `commit` in flight |
 | waiting | done | three cut-offs |
@@ -1354,7 +1355,22 @@ class (B-16), is audited one time in ten, which the record notes, then one in fi
 found by an audit or a comparison of a downloaded block, and a dependent that can't load one
 (B-15), suspend its first key for `keep_days`, not until `hushrun build clean`, and are reported
 to the scope the record names: `differs`, `rejected`, or `unreadable` for a pack that failed its
-checks. *Rests on:* the server answering a lookup only for blocks it still serves to this
+checks. **A linked output is the exception to the suspension.** A library is written by rustc
+alone, so two that differ under one key mean one was built from other inputs than the key
+names. A program, a proc macro or a build-script binary is written by a linker, and two that
+differ mean the two machines' link environments differ in something B-37 doesn't hold; what this
+machine's linker makes is what it would make every time. So when an audit, a comparison in
+shared `observe` or a compile finds such an output different from a copy that was only
+downloaded, and when `begin` refuses one this machine built with `differs` (B-29), the machine
+**keeps its own and keeps the first key to itself** for `keep_days`: its block takes the
+downloaded one's place (or stays, for a refused upload), nothing is suspended, and until the
+date no block of that first key is asked of the shared store, fetched from a manifest, reused
+from a download or offered for upload, while this machine's own is reused here as always. The
+mark is one file beside the first key's hints (`local`, with its end; `hushrun build clean`
+clears it, and the sweep removes an ended one), read by the wrapper's lookup and by the relay's
+prefetch; the run says so in one line, and the report to the scope is `link_differs`, a word a
+server that doesn't know it records nothing for. Each block's description holds its link
+environment as a list (B-37), so two that disagree can be laid side by side. *Rests on:* the server answering a lookup only for blocks it still serves to this
 caller, so that a withdrawn block stops being reused on laptops within a day without a list of
 withdrawals, and a "no" from it being final for that copy; a lookup without fetching counting as
 a use, so blocks in daily use don't expire (a stale block the run doesn't reuse, asked about with

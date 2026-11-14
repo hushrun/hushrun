@@ -5804,6 +5804,187 @@ fn an_audit_of_a_downloaded_block_that_differs_reports_it_and_suspends_for_the_k
     );
 }
 
+/// The proc macro `a`, linked by `tools/cc`, whose linker writes `salt` around its metadata: two
+/// machines with one key and other bytes.
+fn linked_with_salt(
+    w: &World,
+    ws: &Path,
+    salt: &str,
+    relay: Option<Rc<RefCell<RelayStandIn>>>,
+    audit: bool,
+) -> Result {
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            link_salt: Some(salt.into()),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    w.call_args(ws, "a", args, move |fake| {
+        from_a_registry(fake);
+        fake.relay = relay;
+        fake.audit = audit;
+    })
+}
+
+// covers: B-16, B-34
+#[test]
+fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_stays_here() {
+    // Another machine linked the proc macro with another linker than its key says: its link
+    // environment missed something. A library in this place is a poisoned or broken build and
+    // suspends its key. A linked output is what this machine's own linker makes every time:
+    // it keeps its own, in the downloaded copy's place, and keeps the key to itself.
+    let other = world(Mode::On);
+    let there = other.checkout("ws");
+    with_tools(&there);
+    let built = linked_with_salt(&other, &there, "their linker", None, false);
+    assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+    let key = built.entry.unwrap().key.unwrap();
+    let step = only_step(&other);
+
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let relay = serving(other.store(), w.store(), None);
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), true);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert_eq!(entry.key, Some(key), "the same key");
+    assert!(entry.differed);
+    assert!(
+        entry
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("keeps its own")),
+        "{:?}",
+        entry.note
+    );
+    // The store holds this machine's bytes now, as built here.
+    let origin = w.store().origin(&key).unwrap();
+    assert!(
+        origin.built.is_some() && !origin.downloaded_only(),
+        "{origin:?}"
+    );
+    let ours = fs::read(ws.join("target/debug/deps/liba-xa.dylib")).unwrap();
+    let stored = w.store().block(&key).unwrap().unwrap();
+    let file = stored
+        .files
+        .iter()
+        .find(|f| f.name.ends_with(".dylib"))
+        .unwrap();
+    assert_eq!(fs::read(&file.path).unwrap(), ours);
+    // Nothing is suspended; the key is kept here for the store's kept days.
+    let now = SystemTime::now();
+    assert_eq!(w.store().suspended_at(&step, now), None);
+    assert!(w.store().kept_local_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .kept_local_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
+    );
+    // The scope is told, not in a library's words, and the block is not offered for upload.
+    {
+        let asked = &relay.borrow().asked;
+        assert!(
+            asked.iter().any(|r| matches!(
+                r,
+                Request::Report { key: k, problem: Problem::LinkDiffers } if *k == key
+            )),
+            "{asked:?}"
+        );
+        assert!(
+            !asked.iter().any(|r| matches!(
+                r,
+                Request::Report {
+                    problem: Problem::Differs,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|r| matches!(
+                r,
+                Request::Built {
+                    portable: false,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+    }
+    // From then on: this machine's own block is reused, and the shared store is asked nothing
+    // of that key.
+    fs::remove_file(ws.join("target/debug/deps/liba-xa.dylib")).unwrap();
+    let before = relay.borrow().asked.len();
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), false);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(!r.entry.unwrap().downloaded);
+    assert_eq!(
+        fs::read(ws.join("target/debug/deps/liba-xa.dylib")).unwrap(),
+        ours
+    );
+    assert_eq!(
+        relay.borrow().asked.len(),
+        before,
+        "{:?}",
+        relay.borrow().asked
+    );
+}
+
+// covers: B-32, B-34
+#[test]
+fn a_linked_output_compiled_over_a_differing_download_takes_its_place_without_a_suspension() {
+    // The download arrived while this compile ran (no hint led to it): the publish finds it
+    // there with other bytes.
+    let other = world(Mode::On);
+    let there = other.checkout("ws");
+    with_tools(&there);
+    let built = linked_with_salt(&other, &there, "their linker", None, false);
+    let key = built.entry.unwrap().key.unwrap();
+    let step = only_step(&other);
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), false);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let now = SystemTime::now();
+    assert_eq!(w.store().suspended_at(&step, now), None);
+    assert!(w.store().kept_local_at(&step, now).is_some());
+    assert!(w.store().origin(&key).unwrap().built.is_some());
+    let asked = &relay.borrow().asked;
+    assert!(
+        asked.iter().any(|r| matches!(
+            r,
+            Request::Report {
+                problem: Problem::LinkDiffers,
+                ..
+            }
+        )),
+        "{asked:?}"
+    );
+    assert!(
+        asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                ..
+            }
+        )),
+        "{asked:?}"
+    );
+}
+
 // covers: B-15, B-34
 #[test]
 fn a_dependent_that_cant_load_a_downloaded_block_reports_it_rejected() {

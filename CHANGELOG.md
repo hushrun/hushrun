@@ -41,6 +41,14 @@ codes, environment variables, event formats, the ledger layout) are listed first
   were only the first one's. Every macOS proc macro's, build script's and program's key changes
   once.
 
+- **A machine whose linker disagrees with a downloaded program, proc macro or build script keeps
+  its own** (B-34): where an audit, a comparison or a compile finds one different from a copy
+  that was only downloaded, or `begin` refuses one built here with `differs`, the machine's own
+  block stays (in the downloaded one's place), nothing is suspended, and that first key is kept
+  to the machine for `keep_days`: not asked of the shared store, not fetched, not uploaded. One
+  line says so, and the report to the scope is the new word `link_differs`, which a server that
+  doesn't know it records nothing for. A library that differs is treated as before.
+
 - **The link environment names the linker that really runs** (B-18, B-37): it takes the `ld`
   from the one rule that says which `ld` a driver runs (the one `collect2` finds; a gcc 15
   driver's own answer only where that rule believes it) and searches for none itself, and where
