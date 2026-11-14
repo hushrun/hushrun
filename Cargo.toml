@@ -6,7 +6,7 @@ default-members = ["crates/*"]
 [workspace.package]
 # The release version, which the release script moves. hushrun-core, -attest, -ledger and -tlog
 # keep a fixed version of their own, because the hosted service builds with them.
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.94"
 # MIT (LICENSE.md, ADR 0063), with THIRD-PARTY-NOTICES.md for the crates it is built with.
