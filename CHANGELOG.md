@@ -113,7 +113,8 @@ where that folder is the same. Every linked output's key changes once.
 - **A checkout whose path holds a space shares its linked outputs again** (B-37): the dry run's
   text was cut at spaces before the checkout's folder was replaced by its name, so the folder
   stayed in the link environment and no program, proc macro or build script was found in
-  another checkout.
+  another checkout. The dry run's command line is also kept with one way of quoting, since gcc
+  quotes a folder with a space and not the same folder without one.
 
 - **On macOS a proc macro's and a build script's debug map is dropped only in a run that
   shares** (B-9). It was dropped in every run, also with sharing off or nobody signed in, where

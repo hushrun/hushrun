@@ -652,7 +652,12 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    folder names (`rustcXXXXXX`) and gcc's temporary files (`ccXXXXXX.res`) made fixed and roots
    and bases replaced by their names, also after an option's letters (`-L{…}`), in each line
    as a whole and only then taken apart at spaces, so a root whose path holds a space (a
-   checkout under `My Projects/`) is replaced like any other. The text holds
+   checkout under `My Projects/`) is replaced like any other. A command line of the dry run
+   (the drivers start one with a space) is then written word by word, each between quotes only
+   where it is empty or holds a space, a quote or a backslash: gcc quotes a word by the
+   characters in it, so a folder with a space came quoted and the same folder elsewhere did
+   not, and clang quotes every word. Other lines keep their own quotes, which don't depend on
+   what a path holds. The text holds
    every flag the link passes, not only the files it names, and the loader's path the driver
    adds. What it does **not** carry is a path rustc computes from where a checkout lies:
    `-C rpath` writes the way from the output folder to the toolchain as a relative `RUNPATH`

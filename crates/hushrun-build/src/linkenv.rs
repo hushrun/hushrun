@@ -256,7 +256,8 @@ fn split_command(line: &str) -> Result<Vec<String>, Why> {
 
 /// A dry run's text as E holds it: rustc's temporary folder name (`rustcXXXXXX`) and gcc's
 /// temporary file names (`ccXXXXXX.res`) made fixed, and roots and bases replaced by their
-/// names, also after an option's letters (`-L/…`, `-B/…`); then one space between words.
+/// names, also after an option's letters (`-L/…`, `-B/…`); then one space between words, and
+/// a command line's words quoted only where they must be.
 ///
 /// Roots are replaced in each line as a whole, before it is taken apart at spaces: a root may
 /// hold a space (a checkout under `My Projects/`), and a line cut at spaces first would never
@@ -271,10 +272,44 @@ pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
                 from = at;
             }
             replaced.push_str(&placeholders(&fixed_temporary(&line[from..])));
-            replaced.split_whitespace().collect::<Vec<_>>().join(" ")
+            // A command line (the drivers start one with a space) is written word by word,
+            // each quoted only where it must be: gcc quotes a word by the characters in it, so
+            // a folder with a space is quoted and the same folder elsewhere is not, and clang
+            // quotes every word. Any other line keeps its own quotes, which don't depend on
+            // what a path holds (gcc's `COLLECT_GCC_OPTIONS` quotes every option).
+            match line.starts_with(' ').then(|| split_command(&replaced)) {
+                Some(Ok(words)) => words
+                    .iter()
+                    .map(|word| quoted_where_needed(word))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => replaced.split_whitespace().collect::<Vec<_>>().join(" "),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `word` as a dry run's command line holds it in E: as it is, or between `"` with a `\`
+/// before each `"` and `\` when it is empty or holds a space, a quote or a `\`.
+fn quoted_where_needed(word: &str) -> String {
+    let plain = !word.is_empty()
+        && !word
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'));
+    if plain {
+        return word.to_owned();
+    }
+    let mut out = String::with_capacity(word.len() + 2);
+    out.push('"');
+    for c in word.chars() {
+        if matches!(c, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// Where a path follows an option's letters in `line` (`-L/x`, `-B/x`): each `/` straight after
@@ -1851,7 +1886,7 @@ mod tests {
                 r#" "/usr/bin/ld" "-L/home/dev/ws/target/debug/build/ring-1/out" -L/home/dev/ws/target "-o" "/home/dev/ws/out/p""#,
                 &placeholders
             ),
-            r#""/usr/bin/ld" "-L{ws}/target/debug/build/ring-1/out" -L{ws}/target "-o" "{ws}/out/p""#
+            "/usr/bin/ld -L{ws}/target/debug/build/ring-1/out -L{ws}/target -o {ws}/out/p"
         );
         // gcc quotes the options it hands collect2 through the environment with `'`: rustc's
         // own temporary search folder is among them at every link on Linux.
@@ -1905,7 +1940,7 @@ mod tests {
                 r#" "/usr/bin/ld" "-L/home/dev/my work/check out/native" "-o" "/home/dev/my work/check out/out/rustcAbC123/p" "-lSystem""#,
                 &placeholders
             ),
-            r#""/usr/bin/ld" "-L{ws}/native" "-o" "{ws}/out/rustcXXXXXX/p" "-lSystem""#
+            "/usr/bin/ld -L{ws}/native -o {ws}/out/rustcXXXXXX/p -lSystem"
         );
         // gcc: a word with a space quoted, and the options it hands on in single quotes.
         assert_eq!(
@@ -1913,9 +1948,11 @@ mod tests {
                 "COLLECT_GCC_OPTIONS='-L/home/dev/my work/check out/out/rustcAbC123/raw-dylibs' '-nodefaultlibs'\n /usr/libexec/collect2   \"-L/home/dev/my work/check out/native\" -L/usr/lib",
                 &placeholders
             ),
-            "COLLECT_GCC_OPTIONS='-L{ws}/out/rustcXXXXXX/raw-dylibs' '-nodefaultlibs'\n/usr/libexec/collect2 \"-L{ws}/native\" -L/usr/lib"
+            "COLLECT_GCC_OPTIONS='-L{ws}/out/rustcXXXXXX/raw-dylibs' '-nodefaultlibs'\n/usr/libexec/collect2 -L{ws}/native -L/usr/lib"
         );
-        // The same text as a checkout without a space gives.
+        // The same text as a checkout without a space gives: from clang, which quotes every
+        // word, and from gcc, which quotes a word by the characters in it, so the folder with
+        // a space is quoted and the one without is not.
         let plain = |text: &str| text.replace("/home/dev/ws", "{ws}");
         assert_eq!(
             normalize(
@@ -1923,6 +1960,18 @@ mod tests {
                 &placeholders
             ),
             normalize(r#" "/usr/bin/ld" "-L/home/dev/ws/native""#, &plain)
+        );
+        assert_eq!(
+            normalize(
+                r#" /usr/libexec/collect2 "-L/home/dev/my work/check out/native" -lc"#,
+                &placeholders
+            ),
+            normalize(" /usr/libexec/collect2 -L/home/dev/ws/native -lc", &plain)
+        );
+        // A word that still holds a space, a quote or nothing at all stays one word.
+        assert_eq!(
+            normalize(r#" "/x/ld" "-o" "/out \"q\" x" "" "a\\b""#, &plain),
+            r#"/x/ld -o "/out \"q\" x" "" "a\\b""#
         );
     }
 
@@ -1935,7 +1984,7 @@ mod tests {
                 "  /x/collect2  \"-plugin-opt=-fresolution=/tmp/ccAb12Cd.res\" -L/home/dev/ws/target \"/home/dev/ws/out/rustcAbC123/list\"\nCOLLECT_GCC_OPTIONS='-L/home/dev/ws/x'",
                 &placeholders
             ),
-            "/x/collect2 \"-plugin-opt=-fresolution=/tmp/ccXXXXXX.res\" -L{ws}/target \"{ws}/out/rustcXXXXXX/list\"\nCOLLECT_GCC_OPTIONS='-L{ws}/x'"
+            "/x/collect2 -plugin-opt=-fresolution=/tmp/ccXXXXXX.res -L{ws}/target {ws}/out/rustcXXXXXX/list\nCOLLECT_GCC_OPTIONS='-L{ws}/x'"
         );
         // A folder that only looks like one keeps its name.
         assert_eq!(
