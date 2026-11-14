@@ -6110,10 +6110,7 @@ fn a_downloaded_program_that_cant_start_here_is_a_miss_and_is_built_in_its_place
     // Another machine's program under this compile's key, downloaded. Cargo would run it (a
     // build script) or a test would: before it is put in place its loader is asked whether it
     // can start. One that can't is compiled here instead, and that block takes its place.
-    for (loads, starts) in [
-        ("/usr/lib/libSystem.B.dylib", true),
-        ("/opt/only-there/lib/libq.9.dylib", false),
-    ] {
+    for (missing, starts) in [(None, true), (Some("libq.9.dylib"), false)] {
         let other = world(Mode::On);
         other.plan("a", program_plan(false));
         let there = program_checkout(&other, "ws");
@@ -6128,10 +6125,11 @@ fn a_downloaded_program_that_cant_start_here_is_a_miss_and_is_built_in_its_place
         w.plan("a", program_plan(false));
         let ws = program_checkout(&w, "ws");
         settle();
-        // The other machine's block, its program a real one in form that loads `loads`.
+        // The other machine's block, its program one in this system's own format that loads
+        // what this machine has, or a library it doesn't.
         let block = other.store().block(&key).unwrap().unwrap();
         let program = w.dir.path().join("their-program");
-        fs::write(&program, crate::loader::tests::macho(&[loads])).unwrap();
+        fs::write(&program, crate::loader::tests::host_program(missing)).unwrap();
         let mut files: Vec<crate::store::NewFile> = block
             .files
             .iter()

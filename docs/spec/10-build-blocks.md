@@ -1436,28 +1436,56 @@ on, a cost and never a wrong reuse; or the results lookup is answered by somethi
 backend (a proxy's error page): the run takes that for an org that doesn't share, and compiles
 its downloads once.
 
-**B-38 A downloaded program is asked whether it can start.** Before a build-script binary or a
-program that was only downloaded is put in place, each time, its loader is asked whether it can
-start here; no code of the program runs. Cargo runs a build script itself, so no rule that reads
-rustc's errors sees one fail to start (B-15): the build fails with "failed to run custom build
-command", cargo takes the binary for up to date, and every later build fails the same way until
-the target folder is cleaned. One function decides, by the file's own format. An ELF program
-with a loader (`PT_INTERP`): that loader must be a file on this machine, and is run with
-`--list` and the program, as `ldd` does; a library it finds nowhere, a symbol version a library
-lacks, or any other error makes the program one that can't start. A static program has nothing
-to find. A Mach-O program: each library a load command names must be a file where dyld looks
-(`@rpath`, `@loader_path` and `@executable_path` followed) or one of the system's own, which lie
-only in the shared cache (`/usr/lib/…`, `/System/…`); nothing is run, since macOS has no loader
-that lists without starting the program. Any other file is not checked. A program that can't
-start is **a miss**: rustc runs, the block that compile builds takes the downloaded one's place
-and is from then on built here (B-32), and the run's log says why. Nothing is suspended or
-reported: the block is right for the machine that built it. A proc macro is not asked about:
-rustc loads it, and B-15 acts on its error. *Rests on:* the loader's listing failing whenever
-starting would (glibc 2.39 checked: a missing library exits 127 with "cannot open shared object
-file"). *Breaks if:* a program starts and then fails on something no loader lists (a library it
-opens by name while running); or needs a variable only cargo sets when it runs it
-(`LD_LIBRARY_PATH` for a library in a build's own folder): such a program is compiled here once
-though it would have run, which costs a compile and never a wrong block.
+**B-38 A downloaded program is checked before it may start.** Before a build-script binary or a
+program that was only downloaded is put in place, each time, its headers are read to tell
+whether it can start here. **Nothing is run**: not the program, not the loader it names, no
+tool. The file came from another machine, so every path in it is data, never a command. Cargo
+runs a build script itself, so no rule that reads rustc's errors sees one fail to start (B-15):
+the build fails with "failed to run custom build command", cargo takes the binary for up to
+date, and every later build fails the same way until the target folder is cleaned. One function
+decides, by the file's own format, and only for a compile whose target is this machine's (a
+program for another target is not started here).
+
+- **ELF**, where this system starts ELF. Its class, byte order and CPU (`e_machine`) are this
+  machine's. The file is whole: the program-header table, the section-header table, and every
+  segment and section that takes bytes of the file lie inside it. Its loader (`PT_INTERP`),
+  when it has one, is an absolute path without `..` in one of the system's own folders (`/lib`,
+  `/lib64`, `/usr/lib`, `/usr/lib64`, `/libexec`, `/usr/libexec`; Android's `/system/bin` and
+  `/apex`), both as written and as it resolves through links, and is a regular file with a run
+  bit: never a file of the workspace, of the store, or of any other place a download or a
+  checkout can write. Each library it needs (`DT_NEEDED`) is a regular ELF file for this CPU,
+  the first of that name in the program's run paths (`DT_RUNPATH`, or `DT_RPATH` when there is
+  none; `$ORIGIN` is the folder the program is put in; a folder with any other `$` word is left
+  out), then in the folders the system's loader searches (those `/etc/ld.so.conf` lists, then
+  `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib`). Each symbol version the program requires of such a
+  library (`DT_VERNEED`, weak ones excepted) is one that library defines (`DT_VERDEF`). A
+  static program has nothing to find.
+- **Mach-O**, where this system starts Mach-O. The file is 64-bit and for this machine's CPU, or
+  a universal file whose part for this CPU is; a program for the other CPU only is not started
+  (not through Rosetta either). It is whole: its load commands, each segment's bytes and each
+  table of `__LINKEDIT` (symbols, strings, signature, fixups) lie inside it. Its dynamic loader
+  (`LC_LOAD_DYLINKER`) is `/usr/lib/dyld`. Each library a load command names, weak loads
+  excepted, is a Mach-O file for this CPU where dyld looks (`@rpath` through each `LC_RPATH`,
+  `@loader_path`, `@executable_path`, all from the folder the program is put in), or an image
+  of this system's dyld shared cache, whose list of image paths is read from the cache file
+  (`/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/`, `/System/Library/dyld/`): a
+  path under `/usr/lib/` is no proof by itself. Where no cache can be read, a library under
+  `/usr/lib/` or `/System/` counts when `SDKROOT` names an SDK that has its stub (`.tbd`).
+- A file of the other format, or of neither (a script), is not a program this system starts.
+  On Windows nothing is checked: no linked output is stored there.
+
+A program that fails any of this is **a miss**, not a broken build: rustc runs, the block that
+compile builds takes the downloaded one's place and is from then on built here (B-32), and the
+run's log says why. Nothing is suspended or reported: the block is right for the machine that
+built it. A proc macro is not checked: rustc loads it, and B-15 acts on its error. *Rests on:*
+the kernel and the loader refusing nothing this reading accepts (shown on real programs: one
+the system's compiler links passes; cut in half, built for the other CPU, or loading a
+`/usr/lib/` library that is not there, it is a miss). *Breaks if:* a program starts and then
+fails on something no header names (a library it opens by name while running, a minimum OS
+version newer than this system); or needs a variable only cargo sets when it runs it
+(`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` for a library in a build's own folder), which this
+reading never consults, or a loader outside the system's folders (Nix, Guix): such a program
+is compiled here once though it would have run, which costs a compile and never a wrong block.
 
 **B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
 `build: env:` list; every compile of that repository is keyed by their values (B-5), on every

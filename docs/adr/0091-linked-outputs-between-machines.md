@@ -81,8 +81,10 @@ own, and no suspension is made here.
 
 **Before a downloaded program runs** (B-38). Cargo runs a build script itself, and one that
 can't start fails the build, and every build after it, with no error rustc prints. A downloaded
-build script or program is asked of its loader first, without running any of its code; one
-that can't start is a miss and is compiled here.
+build script or program is checked first by reading its headers, with nothing run: its CPU,
+that the file is whole, that its loader is one of the system's own files, that each library
+it needs is on this machine. The bytes came from another machine, so the loader they name is
+never run to ask. One that can't start is a miss and is compiled here.
 
 **What the relay fetches unasked** (B-30): proc macros and build scripts first, then libraries;
 programs only when a compile asks.
@@ -105,6 +107,10 @@ is as deterministic as rustc, so a difference means a key that names less than w
 - **Suspending a linked output that differs, as a library is.** It made the machine compile
   that crate on every build for the kept days, and threw away a block its own linker makes for
   bytes it never would.
+- **Asking the program's own loader to list what it needs** (`ld.so --list`, as `ldd` does).
+  The loader's path is read from the downloaded file: a crafted file names any program, and the
+  check ran it. Reading the headers finds the same missing library and missing symbol version
+  and runs nothing.
 - **No check before a downloaded build script runs**, since E is meant to make a failure
   impossible. The failure, if E is ever incomplete, needs `cargo clean`: not a state a build
   may be left in.

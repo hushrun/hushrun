@@ -560,7 +560,7 @@ pub(crate) enum MachOPlace {
 
 /// The folders the Linux loader searches by default: those `/etc/ld.so.conf` lists (and the
 /// files it includes), then the system's own.
-fn system_library_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_library_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     conf_dirs(Path::new("/etc/ld.so.conf"), &mut out, 0);
     for dir in ["/lib64", "/usr/lib64", "/lib", "/usr/lib"] {

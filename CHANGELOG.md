@@ -57,12 +57,14 @@ where that folder is the same. Every linked output's key changes once.
 - **The prefetch fetches by class** (B-30): proc macros and build-script binaries first, then
   libraries in the manifest's order; programs only when a compile asks for one.
 
-- **A downloaded build script or program is asked whether it can start before it is reused**
-  (B-38): its loader lists what it needs (`ld.so --list` on Linux; on macOS each library a load
-  command names must be there), and none of its code runs. One that can't start is a miss: it
-  is compiled here, that block takes its place, and the run's log says why. Before, cargo would
-  have run a build script that can't start, and failed every build until the target folder was
-  cleaned.
+- **A downloaded build script or program is checked before it is reused, and nothing is run to
+  check it** (B-38): its headers are read. Its CPU is this machine's; the file is whole; on
+  Linux its loader is a file in one of the system's own folders (never one of the workspace or
+  the store), each library it needs is found in its run paths or the system's folders, with
+  the symbol versions it needs; on macOS each library it loads is a file where dyld looks or an
+  image of this system's shared cache. One that fails is a miss: it is compiled here, that
+  block takes its place, and the run's log says why. Before, cargo would have run a build
+  script that can't start, and failed every build until the target folder was cleaned.
 
 - **A block that holds a machine's folder travels to machines where that folder is the same**
   (B-24): such a block's keys already hold the folder's value (`tied`, the `…-in-output` and
@@ -99,6 +101,12 @@ where that folder is the same. Every linked output's key changes once.
   second checkout reused the first one's program. Its first key now holds the output folder,
   the dependency folders and the toolchain's folder, and the block is `tied`: it travels only
   from CI, to jobs with the same paths.
+
+- **The check before a downloaded program is reused no longer runs the loader the file names**
+  (B-38). It asked an ELF file's own loader (`PT_INTERP`) to list its libraries, and that path
+  came from the downloaded bytes: a crafted file could name any program and have it run. On
+  macOS a program cut short, built for the other CPU, or loading a `/usr/lib/` library this
+  system doesn't have passed the check. All of these are now misses, told from the headers.
 
 ## [0.16.0] - 2026-11-14
 

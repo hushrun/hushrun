@@ -231,6 +231,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         bundle: false,
         clear_bundle: false,
         keyed_by_place: false,
+        for_host: true,
         keys: std::cell::RefCell::new(KeyLine::default()),
         asked: None,
         native_cpu: false,
@@ -329,6 +330,8 @@ struct Call<'a> {
     /// with rustc's own run paths (`-C rpath`) (B-9): its first key holds those folders as this
     /// machine has them, so the block is tied to its place (B-24).
     keyed_by_place: bool,
+    /// The compile is for this machine's own target, so what it links is started here (B-38).
+    for_host: bool,
     /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
     keys: std::cell::RefCell<KeyLine>,
     /// The first key's parts, once computed: what decides whether the block may leave the
@@ -852,6 +855,7 @@ impl Call<'_> {
         // outputs, one per toolchain, so that the linker names the standard library's objects
         // from the output folder and not by where this machine keeps the toolchain.
         let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+        self.for_host = inv.target().is_none_or(|target| target == identity.host);
         let mut place = None;
         let mut view = view;
         if class != Class::Library {
@@ -1343,17 +1347,26 @@ impl Call<'_> {
     }
 
     /// B-38: whether a program or a build-script binary that was only downloaded can start on
-    /// this machine, asked of its loader before it is put in place, every time: cargo runs a
-    /// build script itself, so one that can't start would fail the build, and every build
-    /// after it. One that can't is a miss: the compile runs, and its block takes this one's
-    /// place. A proc macro is not asked about: rustc loads it and says so when it can't (B-15).
+    /// this machine, read from its headers and this machine's files before it is put in place,
+    /// every time, with nothing run: cargo runs a build script itself, so one that can't start
+    /// would fail the build, and every build after it. One that can't is a miss: the compile
+    /// runs, and its block takes this one's place. A proc macro is not asked about: rustc loads
+    /// it and says so when it can't (B-15). Neither is a program built for another target than
+    /// this machine's: nothing here starts it.
     fn starts_here(&self, block: &Block, origin: Option<&Origin>) -> bool {
         let class = self.invocation.class();
         if !matches!(class, Class::BuildScript | Class::Program)
             || !origin.is_some_and(Origin::downloaded_only)
+            || !self.for_host
         {
             return true;
         }
+        let folder = self.out_dir();
+        let sdk = self.env.get("SDKROOT").map(PathBuf::from);
+        let here = crate::loader::Here {
+            folder: &folder,
+            sdk: sdk.as_deref(),
+        };
         let linked: Vec<String> = Description::from_value(&block.description)
             .map(|d| {
                 d.outputs
@@ -1364,7 +1377,7 @@ impl Call<'_> {
             })
             .unwrap_or_default();
         for file in block.files.iter().filter(|f| linked.contains(&f.name)) {
-            if let Err(why) = crate::loader::can_start(&file.path, self.asker) {
+            if let Err(why) = crate::loader::can_start(&file.path, &here) {
                 *self.cant_start.borrow_mut() = Some(why);
                 return false;
             }
