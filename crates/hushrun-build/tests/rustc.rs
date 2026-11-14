@@ -1235,16 +1235,18 @@ fn a_checkout_whose_path_has_a_space_shares_its_linked_outputs_with_another() {
     let one = w.checkout("my one");
     let two = w.checkout("another longer/check out");
     let three = w.checkout("plain");
+    // A folder whose name starts like an option, as some tools name their scratch folders.
+    let four = w.checkout("-Users-dev--scratch/ws");
     let first = build(&one);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
-    for ws in [&two, &three] {
+    for ws in [&two, &three, &four] {
         let next = build(ws);
         assert!(reused(&next), "{}: {next:?}", ws.display());
     }
     let first = proc_macro_with(&w, &one, &[], &[]);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
     assert!(first.portable.as_ref().unwrap().portable, "{first:?}");
-    for ws in [&two, &three] {
+    for ws in [&two, &three, &four] {
         let next = proc_macro_with(&w, ws, &[], &[]);
         assert!(reused(&next), "{}: {next:?}", ws.display());
     }

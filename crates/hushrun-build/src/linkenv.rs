@@ -267,7 +267,7 @@ pub fn normalize(text: &str, placeholders: &dyn Fn(&str) -> String) -> String {
         .map(|line| {
             let mut replaced = String::with_capacity(line.len());
             let mut from = 0;
-            for at in after_option(line) {
+            for at in after_option(line, placeholders) {
                 replaced.push_str(&placeholders(&fixed_temporary(&line[from..at])));
                 from = at;
             }
@@ -312,13 +312,15 @@ fn quoted_where_needed(word: &str) -> String {
     out
 }
 
-/// Where a path follows an option's letters in `line` (`-L/x`, `-B/x`): each `/` straight after
-/// a run of letters, digits and `-` that starts with `-`, whatever comes before the run:
-/// nothing, a space, a quote (clang quotes every word of its dry run, `"-L/x"`), or the name
-/// of the variable gcc repeats the options it hands `collect2` in
-/// (`COLLECT_GCC_OPTIONS='-L/x'`). No root starts after a letter, so the text from such a `/`
-/// is handed to the replacement on its own.
-fn after_option(line: &str) -> Vec<usize> {
+/// Where a root follows an option's letters in `line` (`-L/x`, `-B/x`): each `/` straight
+/// after a run of letters, digits and `-` that starts with `-`, whatever comes before the run
+/// (nothing, a space, a quote, since clang quotes every word of its dry run, or the name of
+/// the variable gcc repeats the options it hands `collect2` in, `COLLECT_GCC_OPTIONS='-L/x'`),
+/// **and** from which the text, taken alone, starts with a root. No root starts after a letter,
+/// so the text from such a `/` is handed to the replacement on its own. The second condition
+/// is what tells an option from a folder whose name starts with `-` on the way to a root
+/// (`/tmp/-scratch-1/ws`): cutting there would take the root apart.
+fn after_option(line: &str, placeholders: &dyn Fn(&str) -> String) -> Vec<usize> {
     let bytes = line.as_bytes();
     let mut out = Vec::new();
     for (at, _) in line.match_indices('/') {
@@ -326,7 +328,7 @@ fn after_option(line: &str) -> Vec<usize> {
             .iter()
             .rposition(|c| !(c.is_ascii_alphanumeric() || *c == b'-'))
             .map_or(&bytes[..at], |before| &bytes[before + 1..at]);
-        if option.first() == Some(&b'-') {
+        if option.first() == Some(&b'-') && !placeholders(&line[at..]).starts_with('/') {
             out.push(at);
         }
     }
@@ -1967,6 +1969,34 @@ mod tests {
                 &placeholders
             ),
             normalize(" /usr/libexec/collect2 -L/home/dev/ws/native -lc", &plain)
+        );
+        // A folder on the way to the checkout whose name starts with `-` is no option: the
+        // root is replaced whole, here and after an option's letters.
+        let odd = "/tmp/-Users-dev--scratch-Z9/ws";
+        let in_odd = |text: &str| text.replace(odd, "{ws}");
+        assert_eq!(
+            normalize(
+                r#" "/usr/bin/ld" "-L/tmp/-Users-dev--scratch-Z9/ws/native" "/tmp/-Users-dev--scratch-Z9/ws/out/p""#,
+                &|text| {
+                    // As the real roots do: only where the folder starts a path.
+                    let mut out = String::new();
+                    let mut rest = text;
+                    while let Some(at) = rest.find(odd) {
+                        let starts = rest[..at]
+                            .chars()
+                            .next_back()
+                            .is_none_or(|c| !(c.is_alphanumeric() || "._-+~@/".contains(c)));
+                        out.push_str(&rest[..at]);
+                        out.push_str(if starts { "{ws}" } else { odd });
+                        rest = &rest[at + odd.len()..];
+                    }
+                    out.push_str(rest);
+                    out
+                }
+            ),
+            in_odd(
+                "/usr/bin/ld -L/tmp/-Users-dev--scratch-Z9/ws/native /tmp/-Users-dev--scratch-Z9/ws/out/p"
+            )
         );
         // A word that still holds a space, a quote or nothing at all stays one word.
         assert_eq!(
