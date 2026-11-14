@@ -3830,10 +3830,49 @@ fn where_a_programs_output_folder_lies_from_its_workspace_is_keyed_or_ties_it() 
 
 // covers: B-9
 #[test]
-fn a_proc_macro_and_a_build_script_are_linked_without_a_debug_map_on_apple() {
+fn a_proc_macro_and_a_build_script_are_linked_without_a_debug_map_on_apple_where_the_run_shares() {
     // The debug map names every object the link took, the standard library's among them, by
-    // where this machine has it: with it no proc macro or build script could leave a Mac.
-    let w = world(Mode::On);
+    // where this machine has it: with it no proc macro or build script could leave a Mac. It
+    // is also what gives a panic's frames their file and line, so a run that shares nothing
+    // keeps it; the two are different compiles, with different keys.
+    let alone = debug_map_call(|_| {});
+    assert!(!alone.0.iter().any(|a| a == "link-arg=-Wl,-S"), "{alone:?}");
+    let would = debug_map_call(World::unreached);
+    assert!(would.0.iter().any(|a| a == "link-arg=-Wl,-S"), "{would:?}");
+    let shares = debug_map_call(|w| w.share("acme"));
+    assert!(
+        shares.0.iter().any(|a| a == "link-arg=-Wl,-S"),
+        "{shares:?}"
+    );
+    assert_eq!(
+        shares.1, would.1,
+        "one key whether or not the backend answers"
+    );
+    assert_ne!(alone.1, shares.1, "another compile, another key");
+    // Alone, the map stays without the folder it was linked in, as before linked outputs
+    // travelled; shared, there is no map to take a prefix off.
+    assert!(
+        alone.0.iter().any(|a| a.contains("-oso_prefix,")),
+        "{alone:?}"
+    );
+    assert!(
+        !shares.0.iter().any(|a| a.contains("oso_prefix")),
+        "{shares:?}"
+    );
+    for asked in [&alone.0, &shares.0] {
+        assert!(
+            asked.iter().any(|a| a.contains("-install_name,@rpath/")),
+            "{asked:?}"
+        );
+        assert_eq!(sysroot_arg(asked), None);
+    }
+}
+
+/// What rustc is asked for a proc macro with debug info on an Apple target, and the first key,
+/// in a world that `share` set up.
+fn debug_map_call(share: impl FnOnce(&mut World)) -> (Vec<String>, Option<Digest>) {
+    let mut w = world(Mode::On);
+    share(&mut w);
     let ws = w.checkout("ws");
     with_tools(&ws);
     let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
@@ -3850,14 +3889,7 @@ fn a_proc_macro_and_a_build_script_are_linked_without_a_debug_map_on_apple() {
     args[at] = "proc-macro".into();
     let r = w.call_args(&ws, "a", args, |_| {});
     assert_eq!(r.outcome(), STORED, "{}", r.stderr);
-    let asked = &r.seen.compiles[0];
-    assert!(asked.iter().any(|a| a == "link-arg=-Wl,-S"), "{asked:?}");
-    assert!(!asked.iter().any(|a| a.contains("oso_prefix")), "{asked:?}");
-    assert!(
-        asked.iter().any(|a| a.contains("-install_name,@rpath/")),
-        "{asked:?}"
-    );
-    assert_eq!(sysroot_arg(asked), None);
+    (r.seen.compiles[0].clone(), r.entry.unwrap().step)
 }
 
 /// Begins the world's next session in the same store, with its settings changed.
@@ -5524,7 +5556,10 @@ fn a_downloaded_proc_macros_first_reuse_is_audited_one_in_ten_like_a_librarys() 
             fake.relay = relay;
         })
     };
-    let other = world(Mode::On);
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
     let there = other.checkout("ws");
     with_tools(&there);
     assert_eq!(call(&other, &there, None).outcome(), STORED);
@@ -5957,7 +5992,10 @@ fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_sta
     // environment missed something. A library in this place is a poisoned or broken build and
     // suspends its key. A linked output is what this machine's own linker makes every time:
     // it keeps its own, in the downloaded copy's place, and keeps the key to itself.
-    let other = world(Mode::On);
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
     let there = other.checkout("ws");
     with_tools(&there);
     let built = linked_with_salt(&other, &there, "their linker", None, false);
@@ -6062,7 +6100,10 @@ fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_sta
 fn a_linked_output_compiled_over_a_differing_download_takes_its_place_without_a_suspension() {
     // The download arrived while this compile ran (no hint led to it): the publish finds it
     // there with other bytes.
-    let other = world(Mode::On);
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
     let there = other.checkout("ws");
     with_tools(&there);
     let built = linked_with_salt(&other, &there, "their linker", None, false);

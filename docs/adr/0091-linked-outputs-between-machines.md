@@ -42,10 +42,12 @@ replaced, a variable Apple's linker reads by itself.
 - **A library a crate asks for with `-l` is keyed by content wherever it is found, and stays in
   the name a dependent uses for a proc macro.** Only E is left out of that name, so libraries
   keep sharing between machines whose linkers differ.
-- **On macOS a link no longer records where the toolchain is** (B-9): proc macros and build
-  scripts are linked without a debug map; a program sees the toolchain through a link beside
-  its outputs, one per toolchain. A panic inside a build script or a proc macro keeps its
-  message, its location and its frames' names, and loses each frame's file and line.
+- **On macOS a link no longer records where the toolchain is** (B-9): in a run that shares,
+  proc macros and build scripts are linked without a debug map; a program sees the toolchain
+  through a link beside its outputs, one per toolchain. A panic inside a build script or a
+  proc macro keeps its message, its location and its frames' names, and loses each frame's
+  file and line. A run that shares nothing keeps the map, as before: nothing is bought by
+  dropping it there. The two are keyed apart.
 - **A block bound to folders, where those folders are the same** (B-24): a block that holds a
   folder of its checkout or its machine, or reads a library from a system folder, has that
   folder in its keys, so another machine computes them only where the folder is the same text. A CI job offers such a block for

@@ -79,6 +79,15 @@ fn world_in(mode: Mode) -> World {
     }
 }
 
+/// A world whose run would share and whose backend is out of reach: no relay is asked, and on
+/// an Apple target a proc macro and a build script are linked as in any run that shares,
+/// without their debug map (B-9).
+fn sharing_world_in(mode: Mode) -> World {
+    let mut w = world_in(mode);
+    w.session.set_unreached().unwrap();
+    w
+}
+
 impl World {
     /// An empty checkout with an output folder.
     fn checkout(&self, name: &str) -> PathBuf {
@@ -927,7 +936,7 @@ fn a_real_proc_macro_leaves_the_machine_where_its_environment_is_known_and_its_b
     // The system's own driver (gcc on Linux, Apple's clang on macOS) and a toolchain whose
     // path no output holds: on macOS because the link drops the debug map (`-Wl,-S`), which
     // named the standard library's objects by it.
-    let w = world();
+    let w = sharing_world_in(Mode::On);
     let ws = w.checkout("ws");
     let entry = proc_macro_with(&w, &ws, &[], &[]);
     assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
@@ -942,7 +951,7 @@ fn a_toolchain_installed_elsewhere_links_the_same_program_proc_macro_and_build_s
     // The same toolchain at another path (another user's rustup home, another machine): what it
     // links must be byte for byte what the first one linked, or a block could not go from one
     // to the other. In `observe` every block found is compiled anyway and compared (B-16).
-    let mut w = world_in(Mode::Observe);
+    let mut w = sharing_world_in(Mode::Observe);
     let real = real_rustc();
     let sysroot = real.parent().unwrap().parent().unwrap();
     let build = |w: &World, ws: &Path| {
@@ -1214,7 +1223,7 @@ fn a_program_with_rustcs_rpath_is_reused_only_where_its_folders_are_the_same() {
 fn a_checkout_whose_path_has_a_space_shares_its_linked_outputs_with_another() {
     // The dry run names the checkout's folders; one with a space in its path must be replaced
     // by its root's name like any other, or no linked output is found in another checkout.
-    let w = world();
+    let w = sharing_world_in(Mode::On);
     let build = |ws: &Path| {
         fs::create_dir_all(ws.join("native")).unwrap();
         write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
@@ -1238,5 +1247,66 @@ fn a_checkout_whose_path_has_a_space_shares_its_linked_outputs_with_another() {
     for ws in [&two, &three] {
         let next = proc_macro_with(&w, ws, &[], &[]);
         assert!(reused(&next), "{}: {next:?}", ws.display());
+    }
+}
+
+// covers: B-9
+#[cfg(target_os = "macos")]
+#[test]
+fn a_proc_macro_and_a_build_script_keep_their_debug_map_where_the_run_shares_nothing() {
+    // The debug map is what gives a panic's frames their file and line. Dropping it (`-Wl,-S`)
+    // is what lets a proc macro or a build script leave a Mac, so it is dropped only in a run
+    // that shares; alone, the map stays and two checkouts still link the same bytes.
+    let build = |w: &World, ws: &Path| {
+        // As cargo's dev profile asks on macOS, with the dependency folder cargo always names.
+        let deps = format!("dependency={}", ws.join("out").display());
+        let debug = [
+            "-C",
+            "debuginfo=2",
+            "-C",
+            "split-debuginfo=unpacked",
+            "-L",
+            deps.as_str(),
+        ];
+        let macro_entry = proc_macro_with(w, ws, &debug, &[]);
+        write(
+            &ws.join("b/build.rs"),
+            "fn main() { println!(\"cargo:rerun-if-changed=x\"); }\n",
+        );
+        let (out, script) = w.call_as(
+            ws,
+            "build_script_build",
+            "b/build.rs",
+            "bin",
+            &debug,
+            &[("CARGO_PKG_NAME", "b")],
+        );
+        ok(&out);
+        [
+            (macro_entry, fs::read(ws.join("out/libm-x.dylib")).unwrap()),
+            (
+                script,
+                fs::read(ws.join("out/build_script_build-x")).unwrap(),
+            ),
+        ]
+    };
+    // The debug map names each object file the link took.
+    let maps = |bytes: &[u8]| bytes.windows(8).any(|w| w == b".rcgu.o\0");
+    let alone = world();
+    let (one, two) = (alone.checkout("one"), alone.checkout("another/longer"));
+    let first = build(&alone, &one);
+    for (entry, bytes) in &first {
+        assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+        assert!(maps(bytes), "{} keeps its debug map", entry.crate_name);
+    }
+    for (entry, _) in build(&alone, &two) {
+        assert!(reused(&entry), "{entry:?}");
+    }
+    let sharing = sharing_world_in(Mode::On);
+    let ws = sharing.checkout("one");
+    for ((entry, bytes), (other, _)) in build(&sharing, &ws).iter().zip(&first) {
+        assert!(!maps(bytes), "{} has no debug map", entry.crate_name);
+        assert!(entry.portable.as_ref().unwrap().portable, "{entry:?}");
+        assert_ne!(entry.step, other.step, "another compile, another key");
     }
 }

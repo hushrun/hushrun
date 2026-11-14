@@ -940,7 +940,11 @@ impl Call<'_> {
             unstorable = unstorable.or(Some(NotStored::NativeOutside));
         }
         if class != Class::Library {
-            self.link_extra = linked_args(inv, apple, place.as_ref());
+            // B-9: the debug map goes only where dropping it buys something, which is a run
+            // that shares or would (its backend out of reach is the same compile, so the key
+            // doesn't turn with the network).
+            let shares = self.current.share != crate::session::Shared::Off;
+            self.link_extra = linked_args(inv, apple, place.as_ref(), shares);
             // Debug info packed beside a proc macro or a build script, or beside a program the
             // wrapper leaves as it is, is not something a block carries.
             if inv.debug().split.as_deref() == Some("packed") && !self.bundle {
@@ -2975,15 +2979,24 @@ pub(crate) fn program_place(cwd: &str, out_dir: &Path) -> ProgramPlace {
 
 /// What a linked output's compile gets besides the remaps: `--print=link-args` for its link
 /// inputs (B-18) and, on Apple targets (B-9): for a proc macro an install name that doesn't
-/// hold its folder; for a proc macro and a build script no debug map at all (`-Wl,-S`), since
-/// nobody debugs those and the map names every object, the standard library's among them, by
-/// where this machine has it; and for a program that gets a debug bundle ([`bundled`], `place`
+/// hold its folder; for a proc macro and a build script in a run that shares (`shares`: the
+/// shared mode is `observe` or `on`, whether or not the backend answered) no debug map at all
+/// (`-Wl,-S`), since the map names every object, the standard library's among them, by where
+/// this machine has it, and such a block could not leave the machine; in a run that shares
+/// nothing the map stays, and with it the file and line of a panic's frames, with a prefix
+/// (`-oso_prefix`) that takes the folder it was linked in off its names; and for a program
+/// that gets a debug bundle ([`bundled`], `place`
 /// says where its output folder lies): `-C split-debuginfo=packed`, so rustc runs dsymutil and
 /// writes `<program>.dSYM` with the DWARF of every object; `-C strip=debuginfo`, so the program
 /// keeps no debug map naming those objects by path (the bundle has what it pointed at); and
 /// `-oso_prefix` for the workspace, so the program's UUID, which the linker computes before the
 /// strip, holds no path when the output folder is inside it.
-fn linked_args(inv: &Invocation, apple: bool, place: Option<&ProgramPlace>) -> Vec<OsString> {
+fn linked_args(
+    inv: &Invocation,
+    apple: bool,
+    place: Option<&ProgramPlace>,
+    shares: bool,
+) -> Vec<OsString> {
     let mut out = vec![OsString::from("--print=link-args")];
     if !apple {
         return out;
@@ -3010,8 +3023,15 @@ fn linked_args(inv: &Invocation, apple: bool, place: Option<&ProgramPlace>) -> V
         );
     }
     if matches!(class, Class::ProcMacro | Class::BuildScript) {
-        out.push("-C".into());
-        out.push("link-arg=-Wl,-S".into());
+        if shares {
+            out.push("-C".into());
+            out.push("link-arg=-Wl,-S".into());
+        } else if let Some(deps) = inv.dependency_dirs().next() {
+            // The map stays, without the folder the objects were linked in, so that two
+            // checkouts on this machine link the same bytes.
+            out.push("-C".into());
+            out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
+        }
     }
     out
 }

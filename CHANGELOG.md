@@ -36,9 +36,11 @@ where that folder is the same. Every linked output's key changes once.
   block already stored is a second opinion for every class.
 
 - **On macOS, proc macros, build scripts and programs no longer hold where the toolchain is
-  installed** (B-9), so they are the same bytes on two Macs. Proc macros and build scripts are
-  linked without their debug map (`-Wl,-S`): a panic inside one keeps its message, its location
-  and its frames' function names, and loses the file and line of each frame. A program that
+  installed** (B-9), so they are the same bytes on two Macs. In a run that shares (the shared
+  mode is `observe` or `on`), proc macros and build scripts are linked without their debug map
+  (`-Wl,-S`): a panic inside one keeps its message, its location and its frames' function
+  names, and loses the file and line of each frame, and a debugger has nothing to step through.
+  A run that shares nothing links them as before, with the map. A program that
   gets a debug bundle is compiled with `--sysroot` naming a link beside its outputs
   (`<output folder>/.hushrun/sysroot-…`, one per toolchain). A program whose target folder lies
   outside its workspace (`CARGO_TARGET_DIR` elsewhere) is now keyed by that folder and `tied`:
@@ -112,6 +114,14 @@ where that folder is the same. Every linked output's key changes once.
   text was cut at spaces before the checkout's folder was replaced by its name, so the folder
   stayed in the link environment and no program, proc macro or build script was found in
   another checkout.
+
+- **On macOS a proc macro's and a build script's debug map is dropped only in a run that
+  shares** (B-9). It was dropped in every run, also with sharing off or nobody signed in, where
+  nothing is gained by it: a build script compiled with debug info
+  (`[profile.dev.build-override] debug = true`) lost the file and line of every backtrace frame.
+  **To keep file and line while your org shares**: turn sharing off on your machine
+  (`hushrun build share off`), or name the package under `never_store` in the build settings.
+  The two ways of linking have different keys.
 
 ## [0.16.0] - 2026-11-14
 

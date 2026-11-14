@@ -308,13 +308,30 @@ and its resolved form, ordered by length so that of two folders that hold a path
 wins (as B-8 places it), with the scope left whole. A registry or git crate's paths then name no
 machine. It leaves `-C incremental` out. On Apple targets it also gives
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
-links proc macros and build-script binaries without their debug map (`-Wl,-S`): the map names
-every object the link took by its path, the standard library's by where this machine keeps the
-toolchain, so with it none could be the same on two machines. What that costs: a panic inside
-one still prints its message, its location (`build.rs:1:64`) and every frame's function name,
-and no frame has a file and line any more, where the script or macro was compiled with debug
-info at all (cargo's dev profile compiles them without; measured on a build script with
-`debuginfo=2`: 14 of 14 frames had a file and line before, none after). A program (a `bin` that is
+decides what becomes of a proc macro's and a build-script binary's debug map, which names every
+object the link took by its path, the standard library's by where this machine keeps the
+toolchain:
+
+- **In a run that shares** (the shared mode is `observe` or `on`: the org shares, someone is
+  signed in, and the person didn't turn sharing off; whether or not the backend answered, so
+  the key doesn't turn with the network) they are linked **without the map** (`-Wl,-S`). With
+  it none could be the same on two machines, so this is what lets them travel. What it costs:
+  a panic inside one still prints its message, its location (`build.rs:1:64`) and every
+  frame's function name, and no frame has a file and line any more, and a debugger has
+  nothing to step through, where the script or macro was compiled with debug info at all
+  (cargo's dev profile compiles them without; measured on a build script with `debuginfo=2`:
+  14 of 14 frames had a file and line before, none after).
+- **In a run that shares nothing** (sharing off for the org or on this machine, nobody signed
+  in, a command that never shares) the map **stays**, with the folder it was linked in taken
+  off its names (`-oso_prefix <the first dependency folder>/`), as before linked outputs
+  travelled: local debugging keeps file and line, two checkouts on one machine still link the
+  same bytes, and the block stays on the machine because it names the toolchain.
+
+The two are different compiles: what the wrapper adds is in the first key (B-5), so a block of
+one kind is never reused for the other. **To keep the map while the org shares**: turn sharing
+off on this machine (`hushrun build share off`, B-33), or name the package under `never_store`
+(B-4), which passes all of that package's compiles through untouched.
+A program (a `bin` that is
 not a build script, or a test) that links with debug info gets a debug bundle instead, unless the
 person set `programs` to `tied` (B-21), through four additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
 `<program>.dSYM` beside it with the DWARF of every object it was linked from;
