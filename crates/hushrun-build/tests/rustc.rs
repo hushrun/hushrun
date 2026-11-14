@@ -581,6 +581,49 @@ fn runs_and_marks(path: &Path, real: &Path, marker: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// `PATH` with `first` before everything it holds.
+fn path_after(first: &Path) -> String {
+    let path = std::env::join_paths(
+        std::iter::once(first.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+/// Puts in `dir` an `ld` and an `ld.lld` that leave `marker` and run the real `ld`.
+fn put_an_ld(dir: &Path, marker: &Path) {
+    let real = on_path("ld");
+    for name in ["ld", "ld.lld"] {
+        runs_and_marks(&dir.join(name), &real, marker);
+    }
+}
+
+/// Whether an `ld` first on `PATH` is the one that runs when `rustc` links a proc macro with
+/// `more`: seen from a link by rustc alone, no wrapper, with a marking `ld` put there. It is not
+/// where rustc hands the driver its own folder, nor where the driver has its `ld` built in
+/// (a gcc configured with one, as Ubuntu's since 26.04) or in a folder of its own.
+fn the_ld_on_path_runs(rustc: &Path, more: &[&str]) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    let early = dir.path().join("early");
+    fs::create_dir_all(&early).unwrap();
+    let marker = dir.path().join("ran");
+    put_an_ld(&early, &marker);
+    write(&dir.path().join("m.rs"), PROC_MACRO);
+    let out = Command::new(rustc)
+        .args(["--crate-name", "m", "--edition=2021", "m.rs"])
+        .args(["--crate-type", "proc-macro", "--extern", "proc_macro"])
+        .args(["--out-dir", "out"])
+        .args(more)
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", path_after(&early))
+        .output()
+        .unwrap();
+    ok(&out);
+    marker.exists()
+}
+
 /// Links the proc macro with `more` twice with an empty folder first on `PATH`, puts there an
 /// `ld` (and an `ld.lld`) that runs the real `ld`, and links again: that last link's entry, and
 /// whether a program put there ran.
@@ -589,49 +632,51 @@ fn linked_after_an_ld_is_put_first_on_path(more: &[&str]) -> (Entry, bool) {
     let ws = w.checkout("ws");
     let early = w.dir.path().join("early");
     fs::create_dir_all(&early).unwrap();
-    let path = std::env::join_paths(
-        std::iter::once(early.clone())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let path = path.to_str().unwrap();
-    let first = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
+    let path = path_after(&early);
+    let first = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
-    let again = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
+    let again = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
     assert!(reused(&again), "{again:?}");
-    let real = on_path("ld");
     let marker = w.dir.path().join("ran");
-    for name in ["ld", "ld.lld"] {
-        runs_and_marks(&early.join(name), &real, &marker);
-    }
-    let after = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
+    put_an_ld(&early, &marker);
+    let after = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
     (after, marker.exists())
+}
+
+/// An `ld` put first on `PATH` between two links with `more` is another link exactly where
+/// that `ld` is the one that runs (`from_path`); where it is not, the block is reused.
+fn the_ld_on_path_counts_only_where_it_runs(more: &[&str], from_path: bool) {
+    let (after, ran) = linked_after_an_ld_is_put_first_on_path(more);
+    if from_path {
+        assert!(!after.found, "the ld on PATH changed: {after:?}");
+        assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+        assert!(ran, "the ld on PATH never ran");
+    } else {
+        assert!(reused(&after), "the ld on PATH never runs: {after:?}");
+        assert!(!ran, "the ld on PATH ran");
+    }
 }
 
 // covers: B-18
 #[test]
 fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path() {
-    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc's own folders have none: an
-    // `ld` put earlier on `PATH` (here a script that runs the real one) is another linker, with
-    // the same driver, line and files. Apple's driver runs the selected Xcode's `ld` whatever
-    // `PATH` says, and where rustc links with its own lld the driver takes it from the folder
-    // rustc hands it: there the `ld` on `PATH` never runs and the block is still reused.
-    let (after, ran) = linked_after_an_ld_is_put_first_on_path(&[]);
-    if cfg!(target_os = "macos") || own_ld_folder(&real_rustc(), &[]).is_some() {
-        assert!(reused(&after), "{after:?}");
-        assert!(!ran, "the ld on PATH ran");
-    } else {
-        assert!(!after.found, "the ld on PATH changed: {after:?}");
-        assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
-        assert!(ran, "the ld on PATH never ran");
-    }
+    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc has none built in and its own
+    // folders have none: an `ld` put earlier on `PATH` (here a script that runs the real one) is
+    // another linker, with the same driver, line and files. Apple's driver runs the selected
+    // Xcode's `ld` whatever `PATH` says; where rustc links with its own lld the driver takes it
+    // from the folder rustc hands it; a gcc configured with its `ld` runs that one. There the
+    // `ld` on `PATH` never runs and the block is still reused. Which it is here is seen from a
+    // link, never told from the system.
+    let from_path = !cfg!(target_os = "macos") && the_ld_on_path_runs(&real_rustc(), &[]);
+    the_ld_on_path_counts_only_where_it_runs(&[], from_path);
 }
 
 // covers: B-18
 #[test]
-fn with_rustcs_own_lld_turned_off_the_ld_on_path_is_another_link_again() {
+fn with_rustcs_own_lld_turned_off_the_ld_on_path_counts_where_the_driver_takes_it_from_path() {
     // `-C linker-features=-lld` is how a build asks for the system's linker where rustc would
-    // link with its own: the line has no folder of rustc's then, and `PATH` decides again.
+    // link with its own: the line has no folder of rustc's then, and the driver decides as it
+    // does for any other link.
     const OFF: &[&str] = &["-C", "linker-features=-lld"];
     let rustc = real_rustc();
     if own_ld_folder(&rustc, &[]).is_none() {
@@ -639,10 +684,8 @@ fn with_rustcs_own_lld_turned_off_the_ld_on_path_is_another_link_again() {
         return;
     }
     assert_eq!(own_ld_folder(&rustc, OFF), None);
-    let (after, ran) = linked_after_an_ld_is_put_first_on_path(OFF);
-    assert!(!after.found, "the ld on PATH changed: {after:?}");
-    assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
-    assert!(ran, "the ld on PATH never ran");
+    assert!(!the_ld_on_path_runs(&rustc, &[]), "rustc's own lld is on");
+    the_ld_on_path_counts_only_where_it_runs(OFF, the_ld_on_path_runs(&rustc, OFF));
 }
 
 /// `from`, a folder of a toolchain, again at `to`: every file a link to the real one, but
