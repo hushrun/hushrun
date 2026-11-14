@@ -519,11 +519,20 @@ struct Server {
     /// \[ADR 0060\] Whether this is CI, where no login goes, and a person's token signs with the
     /// key the job names only.
     in_ci: bool,
+    /// Whether this is GitHub Actions, where a build credential is the job's ID token or none
+    /// (B-31).
+    in_github: bool,
     /// \[ADR 0052\] With no credential in GitHub Actions, the repository its lookups ask as, and
     /// then it records nothing.
     reads_as: Option<String>,
     /// Whether such a lookup was answered.
     answered: Cell<bool>,
+    /// B-31: the repository this run's lookups name when they say they come from CI
+    /// ([`Server::says_ci`]): what the CI provider says, else what the run read
+    /// ([`Backend::names_repository`]).
+    ci_repository: RefCell<Option<String>>,
+    /// In GitHub Actions: the ID token endpoint and the request token (B-31).
+    oidc: Option<(String, String)>,
     /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
     /// this run asks nothing more of them, and says so once.
     keeps_no_hints: Cell<bool>,
@@ -817,12 +826,26 @@ impl Backend {
         let agent = given.as_deref().is_some_and(is_agent_token);
         let sends = named_by == NamedBy::Environment
             || (agent && hosted::agent_token_goes_to(&env, &crate::credentials::origin(&url)));
-        let withheld = given.is_some() && !sends;
         // \[ADR 0060\] CI takes no person's login, as the repository's ledger doesn't (C-13): on a
         // runner where someone signed in, a job's results aren't that person's.
         let in_ci = hushrun_ci::is_ci(hushrun_ci::detect(&env));
+        let in_github = hushrun_ci::detect(&env) == Provider::Github;
+        // GitHub sets both when the job has `permissions: id-token: write`. The ID token names
+        // this URL as its audience, so no other server can use it.
+        let oidc = match (
+            var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+            var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+        ) {
+            (Some(url), Some(token)) => Some((url, token)),
+            _ => None,
+        };
+        // C-13, B-31: in GitHub Actions the job's ID token, when it has one, comes before any
+        // token the environment holds, as the repository's ledger takes it (L-10): what the
+        // backend answers, `Hushrun-Build` included, is an answer to the job itself.
+        let id_token_first = in_github && oidc.is_some();
+        let withheld = given.is_some() && !sends && !id_token_first;
         let mut signed_in_machine = None;
-        let (token, mut credential) = match given.filter(|_| sends) {
+        let (token, mut credential) = match given.filter(|_| sends && !id_token_first) {
             Some(token) if env.agent().is_some() => (Some(token), Credential::Agent),
             Some(token) => (Some(token), Credential::Token { agent }),
             None if in_ci => (None, Credential::Nothing),
@@ -844,18 +867,10 @@ impl Backend {
                 None => (None, Credential::Nothing),
             },
         };
-        // GitHub sets both when the job has `permissions: id-token: write`. The ID token names
-        // this URL as its audience, so no other server can use it.
-        let github_oidc = match (
-            var("ACTIONS_ID_TOKEN_REQUEST_URL"),
-            var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
-        ) {
-            (Some(url), Some(token)) => Some(OidcEndpoint {
-                url,
-                token: Secret::new(token),
-            }),
-            _ => None,
-        };
+        let github_oidc = oidc.clone().map(|(url, token)| OidcEndpoint {
+            url,
+            token: Secret::new(token),
+        });
         if credential == Credential::Nothing && github_oidc.is_some() {
             credential = Credential::GithubOidc;
         }
@@ -881,8 +896,11 @@ impl Backend {
                 signed_in_machine,
                 machine: OnceCell::new(),
                 in_ci,
+                in_github,
                 reads_as,
                 answered: Cell::new(false),
+                ci_repository: RefCell::new(hushrun_ci::context(&env).repository),
+                oidc,
                 keeps_no_hints: Cell::new(false),
             })),
         })
@@ -894,6 +912,17 @@ impl Backend {
         match &self.store {
             Store::Server(server) if server.withheld => Some(&server.base),
             _ => None,
+        }
+    }
+
+    /// B-31: the repository this run is of, as a result it records would name it, for the
+    /// lookups of a CI job whose credential is a token. What the CI provider says stays.
+    pub fn names_repository(&self, repository: Option<&str>) {
+        if let Store::Server(server) = &self.store {
+            let mut named = server.ci_repository.borrow_mut();
+            if named.is_none() {
+                *named = repository.map(str::to_string);
+            }
         }
     }
 
@@ -1080,11 +1109,27 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
-                let (status, body) = match &query {
-                    Some(query) => server.ledger.json_get_query(&path, query),
-                    None => server.ledger.json_request("GET", &path, None),
-                }
-                .map_err(plain)?;
+                // B-31: a person's or an agent's token in CI says so, and names its repository,
+                // so the answer's `Hushrun-Build` is CI's and not the token's.
+                let says_ci = server.says_ci();
+                let query = match (server.ci_repository.borrow().as_deref(), query) {
+                    (Some(repository), query)
+                        if says_ci
+                            && !query.as_deref().is_some_and(|q| q.contains("repository=")) =>
+                    {
+                        let named = format!("repository={}", query_value(repository));
+                        Some(match query {
+                            Some(query) => format!("{query}&{named}"),
+                            None => named,
+                        })
+                    }
+                    (_, query) => query,
+                };
+                let header = says_ci.then(|| (hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                let (status, body) = server
+                    .ledger
+                    .json_get_with(&path, query.as_deref(), header)
+                    .map_err(plain)?;
                 if status != 200 {
                     return Err(server.refused(status, &body, "reading the newest result"));
                 }
@@ -1203,6 +1248,151 @@ impl Backend {
             }
         }
         Ok(())
+    }
+}
+
+/// What a run's relay needs to talk to an org's shared store of build blocks (the build protocol, B-26):
+/// where, as whom, and whether the org said it shares.
+pub struct BuildAccess {
+    /// The org's base URL.
+    pub base: String,
+    /// The backend's origin.
+    pub host: String,
+    /// The org, as in the URL.
+    pub org: String,
+    /// What the requests carry: a person's or an agent's token, or in GitHub Actions the job's
+    /// ID token, minted for each request as it nears its expiry. `None`: nothing to send (CI
+    /// with no ID token), and the run shares nothing.
+    pub credential: Option<BuildCredential>,
+    /// Whether the token is an agent token.
+    pub agent: bool,
+    /// The machine that signs a `begin`, when one is here. It is not registered from here: the
+    /// results a run records do that, and a `begin` before it is refused and waits.
+    pub machine: Option<crate::machine::Machine>,
+    /// Whether an answer of this run carried `Hushrun-Build: on`.
+    pub shares: bool,
+    /// Whether the server answered any request of this run: without, whether the org shares is
+    /// unknown, which a CI job says (B-2).
+    pub answered: bool,
+}
+
+/// The backend a run's results go to, as a saved fetch is compared with (B-36): its origin and
+/// org, as a relay names them, and whether it answered any request of this run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPlace {
+    pub host: String,
+    pub org: String,
+    pub answered: bool,
+}
+
+impl BuildPlace {
+    fn of(base: &str, answered: bool) -> Option<BuildPlace> {
+        let url = LedgerUrl::parse(base).ok()?;
+        Some(BuildPlace {
+            host: crate::credentials::origin(&url),
+            org: hosted::org_of(base).unwrap_or_else(|| base.to_string()),
+            answered,
+        })
+    }
+}
+
+/// What a relay's requests carry (B-26, B-31).
+#[derive(Clone)]
+pub enum BuildCredential {
+    /// A person's or an agent's token.
+    Token(String),
+    /// GitHub Actions: where the job mints ID tokens, the request token that asks, and the
+    /// job's digest (`cmd::build_session::github_job`), which its fingerprint is made of.
+    GithubOidc {
+        url: String,
+        request_token: String,
+        job: String,
+    },
+}
+
+impl Backend {
+    /// The backend a saved fetch must be from (B-36): a server, or the one the repository names
+    /// while nothing here signs in to it, which is asked nothing. `None` when nothing names one.
+    pub fn build_place(&self) -> Option<BuildPlace> {
+        match &self.store {
+            Store::Server(server) => BuildPlace::of(&server.base, server.ledger.answered_any()),
+            Store::File(_, _, Local::SignedOut { base, .. }) => BuildPlace::of(base, false),
+            Store::File(_, _, Local::Unnamed) => None,
+        }
+    }
+
+    /// B-25: whether the org shares build blocks, asked with one results lookup of `key` (whose
+    /// answer carries `Hushrun-Build: on` then, and is otherwise not read): for a command that
+    /// doesn't share and only has a line to say where the org does. `false` for a directory,
+    /// with nothing to send, and when the backend didn't answer.
+    pub fn org_shares_blocks(&self, key: &Digest) -> bool {
+        let Store::Server(server) = &self.store else {
+            return false;
+        };
+        let sends = self
+            .build_access()
+            .is_some_and(|access| access.credential.is_some());
+        if sends {
+            let _ = self.latest(key);
+        }
+        sends && server.ledger.build_sharing_seen()
+    }
+
+    /// What a relay needs (B-26, B-31): for a server, the credential its build requests carry.
+    /// In CI that is the job's ID token and nothing else, also beside an agent token (B-31); in
+    /// GitHub Actions with none, the credential is `None`, whatever token the job holds; in other
+    /// CI with none, an agent token, which reads only. Elsewhere a person's or an agent's token; with
+    /// none, no access. `None` for a directory.
+    pub fn build_access(&self) -> Option<BuildAccess> {
+        let Store::Server(server) = &self.store else {
+            return None;
+        };
+        let url = LedgerUrl::parse(&server.base).ok()?;
+        let agent_token = matches!(server.signer(), Signer::Agent);
+        let (credential, agent) = if server.in_ci {
+            match (server.oidc.clone(), server.token.clone()) {
+                (Some((url, request_token)), _) => {
+                    let job =
+                        crate::cmd::build_session::github_job(&|name| hushrun_ci::var_os(name))
+                            .map_or_else(
+                                || hushrun_build::origin::fingerprint(&request_token),
+                                |job| job.digest,
+                            );
+                    (
+                        Some(BuildCredential::GithubOidc {
+                            url,
+                            request_token,
+                            job,
+                        }),
+                        false,
+                    )
+                }
+                // In GitHub Actions without an ID token, nothing: whatever else the job holds,
+                // sharing is off there (B-31).
+                (None, _) if server.in_github => (None, false),
+                // Anywhere else in CI an agent token reads the org's blocks, and writes none
+                // (`hushrun_build::share::what_a_run_does`).
+                (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),
+                (None, _) => (None, false),
+            }
+        } else {
+            let token = server.token.clone()?;
+            (Some(BuildCredential::Token(token)), agent_token)
+        };
+        Some(BuildAccess {
+            base: server.base.clone(),
+            host: crate::credentials::origin(&url),
+            org: hosted::org_of(&server.base).unwrap_or_else(|| server.base.clone()),
+            credential,
+            agent,
+            machine: if server.in_ci {
+                None
+            } else {
+                server.key().ok().flatten()
+            },
+            shares: server.ledger.build_sharing_seen(),
+            answered: server.ledger.answered_any(),
+        })
     }
 }
 
@@ -1436,6 +1626,18 @@ impl Server {
     }
 
     /// Who signs this server's results: a person's token, an agent token, or nobody.
+    /// B-31: whether this server's results lookups say they come from CI (`Hushrun-Ci`): a CI
+    /// job whose credential is a person's or an agent's token. A job's ID token says who it is
+    /// by itself, and a lookup with no credential asks as the repository's CI already. The
+    /// relay's requests of such a run say the same (`hushrun_core::blocks::CI_HEADER`).
+    fn says_ci(&self) -> bool {
+        self.in_ci
+            && matches!(
+                self.credential,
+                Credential::Token { .. } | Credential::Agent
+            )
+    }
+
     fn signer(&self) -> Signer {
         let Some(token) = self.token.as_deref() else {
             return Signer::Nobody;

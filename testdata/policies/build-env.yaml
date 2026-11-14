@@ -1,0 +1,9 @@
+version: 1
+repository: github.com/acme/shop
+# A proc macro of this repository reads APP_FLAVOR while it expands, without telling the
+# compiler: every compile is keyed by it, on every machine (B-35).
+build:
+  env: [APP_FLAVOR]
+checks:
+  test:
+    run: cargo test

@@ -78,6 +78,7 @@ fn world() -> World {
         exe: &wrapper_exe(),
         in_ci: false,
         repository: None,
+        repository_env: &[],
         env: &|_| None,
         now: SystemTime::now(),
     })

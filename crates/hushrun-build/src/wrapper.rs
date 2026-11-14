@@ -4,7 +4,7 @@
 //! [`main`] wires the real ones; tests drive [`call`] with a fake compiler. Every error of this
 //! machinery is a value that ends in rustc running as asked (rule 1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -19,17 +19,20 @@ use crate::depinfo;
 use crate::description::{Description, Output, OutputKind, SCHEMA, StoredDepInfo};
 use crate::inputs::{Common, Context};
 use crate::invocation::{self, Emit, Env, Invocation, Parsed};
-use crate::key::{Asked, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
+use crate::key::{Asked, Bound, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
-use crate::model::{Class, Located, NotStored, Outcome, PassedThrough, Programs};
+use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs, RootName};
+use crate::origin::{Origin, Standing};
+use crate::portable::{self, Portability, Reason};
+use crate::relay::{self, Answer, Request};
 use crate::restore::Restore;
-use crate::roots::{RootPaths, Roots, resolve_on_disk};
+use crate::roots::{Machine, RootPaths, Roots, resolve_on_disk};
 use crate::scan::Needles;
 use crate::script::{self, Script};
 use crate::session::{self, Current, Entry};
 use crate::store::{Block, NewFile, Published, Store};
 use crate::unit::{self, Seen};
-use crate::{audit, compiler, inputs, link, sidecar};
+use crate::{audit, compiler, inputs, link, metadata, sidecar};
 
 /// Whether the binary was called by the wrapper's name (B-2). `main` asks this first, before it
 /// reads any setting.
@@ -85,6 +88,9 @@ pub trait Ports {
     fn rustc_version(&self, rustc: &Path) -> io::Result<String>;
     /// What `<rustc> --print target-list` prints: the compiler's built-in targets (B-4).
     fn rustc_targets(&self, rustc: &Path) -> io::Result<String>;
+    /// What `<rustc> --print target-cpus` and `<rustc> --print cfg -C target-cpu=native` print,
+    /// each with `--target <target>` when there is one: what `native` means here (B-5).
+    fn rustc_native(&self, rustc: &Path, target: Option<&str>) -> io::Result<(String, String)>;
     /// Writes to the wrapper's stdout what rustc printed there (B-18).
     fn stdout(&mut self, bytes: &[u8]);
     /// Runs rustc exactly as asked and returns its exit code. The real one replaces the process
@@ -97,6 +103,42 @@ pub trait Ports {
     fn audited(&self, key: &Digest, started_ms: u64) -> bool {
         audit::picked(key, started_ms)
     }
+    /// Whether the audit picks the first reuse here of the downloaded library `key` (B-16,
+    /// B-34): one time in ten. Tests choose.
+    fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
+        audit::picked_one_in(key, started_ms, audit::FIRST_DOWNLOAD_ONE_IN)
+    }
+    /// Asks the run's relay (B-26). Tests stand in for it.
+    fn relay(
+        &self,
+        socket: &Path,
+        request: &relay::Request,
+        wait: Duration,
+    ) -> Option<relay::Answer> {
+        relay::ask(socket, request, wait)
+    }
+    /// What asks the C driver and `ld` which `ld` a link runs and where it looks for libraries
+    /// (B-18): runs the program with the wrapper's variables, the link's `PATH` and `LC_ALL=C`.
+    /// Tests stand in for the programs.
+    fn asker(&self) -> Box<link::Ask<'static>> {
+        Box::new(ask_program)
+    }
+}
+
+/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path` and
+/// `LC_ALL=C`, and nothing on stdin, for one of B-18's questions. `None` when it can't start.
+fn ask_program(program: &Path, args: &[String], path: &OsStr) -> Option<link::Answer> {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .env("PATH", path)
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some(link::Answer {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+    })
 }
 
 /// One compiler call. The process's own arguments are `[<this name>, <rustc>, <args>…]`, as
@@ -138,6 +180,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         }
         Parsed::PassedThrough(why) => {
             unit::forget_for_args(args, Some(&cwd));
+            unit::mark_as_asked_for_args(args, &cwd);
             if let Some(current) = session::current(&|name| ports.var(name)) {
                 let var = |name: &str| env.get(name).and_then(OsStr::to_str).map(str::to_string);
                 current.log(&Entry {
@@ -157,7 +200,10 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         ports.file_clock(&Path::new(invocation.cwd()).join(invocation.out_dir())),
         start,
     );
+    let asker = ports.asker();
     Call {
+        asker: &*asker,
+        apple: false,
         ports,
         err,
         current: &current,
@@ -167,8 +213,15 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         floor,
         link_extra: Vec::new(),
         sysroot: None,
+        hide_sources: None,
+        view: None,
         bundle: false,
         clear_bundle: false,
+        keys: std::cell::RefCell::new(KeyLine::default()),
+        asked: None,
+        native_cpu: false,
+        downloaded: std::cell::Cell::new(false),
+        replace_downloaded: std::cell::Cell::new(false),
     }
     .run()
 }
@@ -186,6 +239,10 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         found: false,
         differed: false,
         note: None,
+        portable: None,
+        step: None,
+        key: None,
+        downloaded: false,
     }
 }
 
@@ -224,6 +281,11 @@ fn epoch_ms(time: SystemTime) -> u64 {
 
 /// One call the wrapper handles, after the probes and the session.
 struct Call<'a> {
+    /// Asks the C driver and `ld` (B-18), apart from `ports` so that a lookup's context can
+    /// hold it while the call runs rustc.
+    asker: &'a link::Ask<'a>,
+    /// The call's target is Apple's: its linker is Apple's `ld` (B-18).
+    apple: bool,
     ports: &'a mut dyn Ports,
     err: &'a mut dyn Write,
     current: &'a Current,
@@ -236,12 +298,57 @@ struct Call<'a> {
     link_extra: Vec<OsString>,
     /// The compiler's sysroot (B-17), where a link's `-B` folders must lie (B-18).
     sysroot: Option<PathBuf>,
+    /// `--sysroot=<the toolchain without its sources>`, when it has sources (B-9, B-17).
+    hide_sources: Option<OsString>,
+    /// That view and the toolchain it leads into: a path under the view is judged by what it
+    /// points at, the toolchain's own file (B-11).
+    view: Option<(PathBuf, PathBuf)>,
     /// A program that gets a debug bundle and may move (B-9): its compile is changed so, and
     /// its block carries the bundle.
     bundle: bool,
     /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
     /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
     clear_bundle: bool,
+    /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
+    keys: std::cell::RefCell<KeyLine>,
+    /// The first key's parts, once computed: what decides whether the block may leave the
+    /// machine reads them.
+    asked: Option<Asked>,
+    /// It compiles for this machine's CPU (`-C target-cpu=native`, B-5): the block stays on this
+    /// machine (B-24).
+    native_cpu: bool,
+    /// The block this compile reuses was downloaded for it (B-26).
+    downloaded: std::cell::Cell<bool>,
+    /// The block in the store under this compile's key was only downloaded and no server
+    /// vouches for it now: the compile's block takes its place (B-32, B-34).
+    replace_downloaded: std::cell::Cell<bool>,
+}
+
+/// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
+/// machines' lines for one crate tell which part differs. Written only when the log is asked
+/// for.
+#[derive(Debug, Default, serde::Serialize)]
+struct KeyLine {
+    /// The first key.
+    step: Option<Digest>,
+    /// The first key's body as it is hashed: the compiler's digest, the arguments and the
+    /// variables with roots and bases as placeholders.
+    first: Option<serde_json::Value>,
+    /// The first key's parts, each by digest.
+    first_parts: Option<serde_json::Value>,
+    /// The compiler identity's parts, each by digest (B-17).
+    compiler: Option<compiler::Parts>,
+    /// The second key: of the block stored, or the one a lookup found.
+    block: Option<Digest>,
+    /// The second key's parts, each by digest, list entries by what they name.
+    second_parts: Option<serde_json::Value>,
+    /// The outputs, by name and SHA-256.
+    outputs: Vec<(String, Digest)>,
+    /// The folders that name the machine found in an output.
+    in_outputs: Vec<Folder>,
+    /// Each `--extern` as the second key holds it: by the SHA-256 of its file, or a proc macro
+    /// by what it was built from. With `outputs`, what joins a crate to its dependencies.
+    externs: Vec<crate::key::ExternInput>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -253,6 +360,42 @@ struct Found {
     /// The files the hint that found it hashed, at the stats they were hashed at: a compile
     /// that follows must find them unchanged (B-11).
     watched: Vec<inputs::Watched>,
+    /// The block's record of where it came from (B-32), when it has one.
+    origin: Option<Origin>,
+}
+
+/// How a lookup follows a list of hints (B-7, B-30).
+enum Following<'a> {
+    /// The hints compiles here wrote. `measure`: keep in `largest` the most bytes one of them
+    /// names, the budget's measure for the downloaded ones.
+    Local { measure: bool, largest: &'a mut u64 },
+    /// Hints downloaded from the shared store: one that names more than `budget` bytes is
+    /// skipped.
+    Downloaded { budget: u64 },
+}
+
+/// What a downloaded hint may make a compile hash when no hint of this machine's says how much
+/// the first key reads (B-30): 64 MiB.
+const DOWNLOADED_HINT_BUDGET: u64 = 64 << 20;
+
+/// The most second keys a compile asks the relay to fetch, the likeliest first.
+const MOST_FETCH_KEYS: usize = 4;
+
+/// How long a wrapper waits for the relay to take a notice: what it built, a problem.
+const NOTICE_WAIT: Duration = Duration::from_secs(2);
+
+/// The digest of a stored block's outputs, as the shared store's rows hold it (B-28).
+fn outputs_of(block: &Block) -> hushrun_core::blocks::Hex32 {
+    let files: Vec<hushrun_core::blocks::OutputFile<'_>> = block
+        .files
+        .iter()
+        .map(|f| hushrun_core::blocks::OutputFile {
+            name: &f.name,
+            size: f.size,
+            sha256: hushrun_core::blocks::Hex32(*f.sha256.as_bytes()),
+        })
+        .collect();
+    hushrun_core::blocks::outputs_digest(&files)
 }
 
 /// What a linked output was linked from (B-18), with the facts B-8 and B-11 need.
@@ -267,9 +410,126 @@ struct Linked {
 /// What a compile produced, for the store.
 struct Produced {
     observed: Observed,
-    origin: Digest,
+    /// What dependents name a linked library by when the block may move (B-6).
+    known_by: Digest,
     outputs: Vec<OutputFile>,
     dep_info: depinfo::DepInfo,
+    /// Whether the block may leave the machine.
+    portability: Portability,
+}
+
+/// An output searched (B-10): whether it holds a root, which folders that name the machine, and
+/// which unkeyed variables' values (B-24).
+struct Searched {
+    file: OutputFile,
+    tied: bool,
+    machine: BTreeSet<Folder>,
+    /// The variables whose value the output holds, by name.
+    values: BTreeSet<String>,
+}
+
+/// What a text an output is searched for stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Hit {
+    /// A root (B-10).
+    Root,
+    /// A folder that names the machine.
+    Machine(Folder),
+    /// The value of a variable that is not in the key and looks like a secret (B-24), by the
+    /// variable's name.
+    Value(String),
+}
+
+/// What outputs are searched for: the roots (B-10), the folders that name the machine and the
+/// values of unkeyed variables (B-24), each text once with every kind it stands for, so that one
+/// pass over each output finds them all.
+struct Search {
+    needles: Needles,
+    kinds: Vec<Vec<Hit>>,
+}
+
+impl Search {
+    /// `values` are the variables to look for by name and value.
+    fn new(roots: &Roots, values: &[(String, Vec<u8>)]) -> Search {
+        let mut texts: Vec<(Vec<u8>, Vec<Hit>)> = Vec::new();
+        let mut add = |bytes: Vec<u8>, kind: Hit| {
+            if bytes.is_empty() {
+                return;
+            }
+            match texts.iter_mut().find(|(text, _)| *text == bytes) {
+                Some((_, kinds)) => kinds.push(kind),
+                None => texts.push((bytes, vec![kind])),
+            }
+        };
+        for needle in roots.needles() {
+            add(needle, Hit::Root);
+        }
+        for (folder, text) in roots.machine_needles() {
+            add(text.as_bytes().to_vec(), Hit::Machine(*folder));
+        }
+        for (name, value) in values {
+            add(value.clone(), Hit::Value(name.clone()));
+        }
+        let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
+        Search {
+            needles: Needles::new(texts.into_iter().map(|(text, _)| text).collect()),
+            kinds,
+        }
+    }
+
+    /// One output, hashed and searched in one pass.
+    fn file(&self, path: PathBuf, name: String, kind: OutputKind) -> Result<Searched, NotStored> {
+        // A linked library (a proc macro) is read whole once: its SHA-256, the search and the
+        // digest of its metadata (B-6) all come from the bytes that are stored.
+        let (found, sha256, size, metadata) =
+            if kind == OutputKind::Link && inputs::is_linked_library(&path) {
+                let bytes = crate::regular::read(&path).map_err(|_| NotStored::Scan)?;
+                (
+                    self.needles.all_in_bytes(&bytes),
+                    Digest::of(&bytes),
+                    bytes.len() as u64,
+                    metadata::digest(&bytes),
+                )
+            } else {
+                let (found, sha256, size) = self
+                    .needles
+                    .all_in_file_hashed(&path)
+                    .map_err(|_| NotStored::Scan)?;
+                (found, sha256, size, None)
+            };
+        let mut tied = false;
+        let mut machine = BTreeSet::new();
+        let mut values = BTreeSet::new();
+        for (hit, kinds) in found.iter().zip(&self.kinds) {
+            if !hit {
+                continue;
+            }
+            for kind in kinds {
+                match kind {
+                    Hit::Root => tied = true,
+                    Hit::Machine(folder) => {
+                        machine.insert(*folder);
+                    }
+                    Hit::Value(name) => {
+                        values.insert(name.clone());
+                    }
+                }
+            }
+        }
+        Ok(Searched {
+            file: OutputFile {
+                path,
+                name,
+                kind,
+                sha256,
+                size,
+                metadata,
+            },
+            tied,
+            machine,
+            values,
+        })
+    }
 }
 
 /// One output file of a compile.
@@ -279,16 +539,54 @@ struct OutputFile {
     kind: OutputKind,
     sha256: Digest,
     size: u64,
+    /// For a linked library, the digest of the crate metadata in it ([`metadata::digest`]),
+    /// from the same read as `sha256`.
+    metadata: Option<Digest>,
 }
 
 impl Call<'_> {
     fn log(&self, entry: Entry) {
         let package = self.invocation.package();
-        self.current.log(&Entry {
+        let entry = Entry {
             crate_name: self.invocation.crate_name().to_string(),
             package: package_id(package.name.clone(), package.version.clone()),
             ..entry
+        };
+        self.current.log(&entry);
+        self.log_keys(&entry);
+    }
+
+    /// Appends this call's line to the key log, when the run asked for one. A line that can't
+    /// be written never fails a compile.
+    fn log_keys(&self, entry: &Entry) {
+        use std::io::Write as _;
+        let Some(path) = &self.current.key_log else {
+            return;
+        };
+        let keys = self.keys.borrow();
+        let line = serde_json::json!({
+            "crate_name": entry.crate_name,
+            "package": entry.package,
+            "class": entry.class,
+            "outcome": entry.outcome,
+            "found": entry.found,
+            "differed": entry.differed,
+            "audit": self.current.audit,
+            "portable": entry.portable,
+            "keys": &*keys,
         });
+        let Ok(mut bytes) = serde_json::to_vec(&line) else {
+            return;
+        };
+        bytes.push(b'\n');
+        // One write of one whole line, to a file opened for appending.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(&bytes);
+        }
     }
 
     /// Runs rustc exactly as asked, logging `outcome`: the one place that decides how, for every
@@ -311,6 +609,7 @@ impl Call<'_> {
             return self.watched_as_asked(outcome, record);
         }
         self.forget_unit();
+        sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         self.log(entry(outcome, Some(self.invocation.class())));
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
@@ -426,6 +725,7 @@ impl Call<'_> {
     fn watched_as_asked(&mut self, outcome: Outcome, record: bool) -> i32 {
         let store = Store::new(&self.current.store);
         self.forget_unit();
+        sidecar::mark_as_asked(&self.out_dir(), &self.invocation.file_stem());
         let since = self.ports.now();
         let rustc = OsString::from(self.invocation.rustc());
         let args: Vec<OsString> = self.invocation.args().iter().map(OsString::from).collect();
@@ -484,7 +784,7 @@ impl Call<'_> {
                 Path::new(inv.rustc()),
                 inv.target(),
                 &|name| ports.var(name),
-                &store.root().join("compilers"),
+                &store.root().join(compiler::MEMOS),
                 &|path| ports.rustc_version(path),
                 &|path| ports.rustc_targets(path),
             )
@@ -493,6 +793,27 @@ impl Call<'_> {
             return self.pass(PassedThrough::Compiler);
         };
         self.sysroot = identity.sysroot.clone();
+        // Every compile sees the toolchain as one without sources does (B-9, B-17). `hushrun
+        // run` made the view as it began; a toolchain it couldn't foresee gets one here.
+        let used =
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(self.current.started_ms);
+        let view = match &identity.sysroot {
+            Some(sysroot) => match compiler::hidden_sources(
+                sysroot,
+                &store.root().join(compiler::MEMOS).join(compiler::SYSROOTS),
+                Some(used),
+            ) {
+                Ok(view) => view,
+                Err(_) => return self.pass(PassedThrough::Compiler),
+            },
+            None => None,
+        };
+        self.hide_sources = view.as_ref().map(|view| {
+            let mut arg = OsString::from("--sysroot=");
+            arg.push(view);
+            arg
+        });
+        self.view = view.clone().zip(identity.sysroot.clone());
         // A target that is not one of the compiler's own is a file rustc loads (B-4).
         if inv
             .target()
@@ -500,8 +821,42 @@ impl Call<'_> {
         {
             return self.pass(PassedThrough::TargetFile);
         }
-        let Ok(roots) = Roots::new(&RootPaths::of(inv), &self.current.shared, resolve_on_disk)
-        else {
+        // B-5: `-C target-cpu=native` means this machine's CPU. Here the key holds what the
+        // compiler says it is, asked once per compiler and target (unanswered, its text), so a
+        // store carried to another machine isn't reused there. B-24: the block never leaves the
+        // machine, answered or not, since rustc gives the code generator more of the CPU than
+        // it prints.
+        let native = inv.native_cpu().then(|| {
+            let ports = &*self.ports;
+            compiler::native_cpu(
+                &identity,
+                inv.target(),
+                &store.root().join(compiler::MEMOS),
+                &|target| ports.rustc_native(Path::new(inv.rustc()), target),
+            )
+        });
+        self.native_cpu = inv.native_cpu() || inv.native_in_llvm_args();
+        // The bases (B-8) and what outputs are searched for besides the roots (B-10).
+        let machine = Machine {
+            cargo_home: self.current.cargo_home.clone(),
+            toolchain: identity
+                .sysroot
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_string),
+            toolchain_view: view
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_string),
+            rustup_home: self.current.rustup_home.clone(),
+            home: self.current.home.clone(),
+        };
+        let Ok(roots) = Roots::new(
+            &RootPaths::of(inv),
+            &self.current.shared,
+            &machine,
+            resolve_on_disk,
+        ) else {
             return self.pass(PassedThrough::Roots);
         };
 
@@ -519,6 +874,7 @@ impl Call<'_> {
         }
         if class != Class::Library {
             let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+            self.apple = apple;
             self.clear_bundle = bundled(inv, apple);
             self.bundle = self.clear_bundle && self.current.programs == Programs::Movable;
             self.link_extra = linked_args(inv, apple, self.bundle);
@@ -530,6 +886,7 @@ impl Call<'_> {
         }
 
         let mut extra: Vec<String> = self.current.env.clone();
+        extra.extend(self.current.repository_env.iter().cloned());
         if let Some(script) = &script {
             extra.extend(script.rustc_env.iter().map(|(name, _)| name.clone()));
         }
@@ -553,7 +910,10 @@ impl Call<'_> {
             args: inv
                 .key_args()
                 .iter()
-                .map(|arg| roots.to_placeholders(arg))
+                .map(|arg| match &native {
+                    Some(Some(native)) if arg == "-Ctarget-cpu=native" => native.key_arg(),
+                    _ => roots.to_placeholders(arg),
+                })
                 .collect(),
             env: key_env
                 .into_iter()
@@ -562,6 +922,14 @@ impl Call<'_> {
             added,
         };
         let step = asked.key().ok();
+        if self.current.key_log.is_some() {
+            let mut keys = self.keys.borrow_mut();
+            keys.step = step;
+            keys.first = serde_json::to_value(&asked).ok();
+            keys.first_parts = asked.parts().ok();
+            keys.compiler = Some(identity.parts.clone());
+        }
+        self.asked = Some(asked.clone());
         let cx = step.map(|step| Context {
             invocation: inv,
             roots: &roots,
@@ -569,6 +937,10 @@ impl Call<'_> {
             step,
             script: script.as_ref(),
             run_memo: Some(&self.current.folder),
+            store: Some(&store),
+            seal: store.seal(),
+            ask: Some(self.asker),
+            apple: self.apple,
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -577,7 +949,7 @@ impl Call<'_> {
             (None, _) => Lookup::KeyFailed,
             (Some(_), Some(why)) => Lookup::Unstorable(why),
             (Some(cx), None) => {
-                if store.suspended(&cx.step).is_some() {
+                if store.suspended_at(&cx.step, self.ports.now()).is_some() {
                     Lookup::Suspended
                 } else {
                     self.look_up(&store, cx, &mut common, &mut found)
@@ -596,12 +968,22 @@ impl Call<'_> {
             Plan::PassThrough(why) => self.pass(why),
             Plan::AsAsked(why) => self.as_asked(Outcome::BuiltNotStored(why)),
             Plan::Reuse => {
-                let (Some(found), Some(_)) = (&found, &cx) else {
-                    return self.as_asked(
-                        decide::after(decide::restore_failed(), &Facts::ran(Rustc::NotRun)).outcome,
-                    );
+                let (Some(found), Some(cx)) = (&found, &cx) else {
+                    return self.as_asked(Outcome::BuiltNotStored(NotStored::Restore));
                 };
-                self.reuse(&store, &roots, found, cx.as_ref())
+                if let Some(code) = self.reuse(&store, &roots, found, cx) {
+                    return code;
+                }
+                // B-12, B-19: the block couldn't be put in place (another run's relay moved it,
+                // a file went). The compile runs with the wrapper's changes and stores nothing,
+                // so its outputs are the bytes its key names and its dependents get the keys
+                // every other machine computes; as asked, without the remaps, they would not.
+                let plan = decide::restore_failed();
+                let Plan::Compile { keep, compare } = plan else {
+                    return self.as_asked(Outcome::BuiltNotStored(NotStored::Restore));
+                };
+                let common = common.unwrap_or_else(|| cx.common());
+                self.compile(&store, &roots, cx, common, plan, keep, compare, None)
             }
             Plan::Compile { keep, compare } => {
                 let Some(cx) = &cx else {
@@ -625,7 +1007,10 @@ impl Call<'_> {
         }
     }
 
-    /// B-7: each hint, followed with the files as they are now, until one finds a block.
+    /// B-7: each hint, followed with the files as they are now, until one finds a block. With
+    /// a relay (B-26, B-30): the hints compiles here wrote first, then those downloaded, asked
+    /// of the relay when the store has none, each within a budget of bytes to hash; then, when
+    /// a hint gave a second key the store lacks, the relay is asked to fetch the block.
     fn look_up(
         &self,
         store: &Store,
@@ -633,59 +1018,269 @@ impl Call<'_> {
         common: &mut Option<Result<Common, NotStored>>,
         found: &mut Option<Found>,
     ) -> Lookup {
-        let hints = store.hints(&cx.step);
-        if hints.is_empty() {
+        let share = self.current.share.relay();
+        let local = store.hints(&cx.step);
+        if local.is_empty() && share.is_none() {
             return Lookup::Missing;
         }
         let shared = match common.get_or_insert_with(|| cx.common()) {
             Ok(shared) => shared.clone(),
             Err(_) => return Lookup::KeyFailed,
         };
+        let mut candidates: Vec<(Digest, Observed, Vec<inputs::Watched>)> = Vec::new();
+        let mut local_bytes = 0u64;
+        if let Some(lookup) = self.follow(
+            store,
+            cx,
+            &shared,
+            &local,
+            Following::Local {
+                measure: share.is_some(),
+                largest: &mut local_bytes,
+            },
+            &mut candidates,
+            found,
+        ) {
+            return lookup;
+        }
+        let Some(share) = share else {
+            return Lookup::Missing;
+        };
+        let mut downloaded = store.shared_hints(&cx.step);
+        if downloaded.is_empty()
+            && let Some(Answer::Hints { count }) = self.ports.relay(
+                &share.socket,
+                &Request::Hints { step: cx.step },
+                relay::WAIT,
+            )
+            && count > 0
+        {
+            downloaded = store.shared_hints(&cx.step);
+        }
+        // F-14: a downloaded hint is untrusted bytes that set how much a compile hashes.
+        let budget = if local_bytes > 0 {
+            local_bytes.saturating_mul(2)
+        } else {
+            DOWNLOADED_HINT_BUDGET
+        };
+        if let Some(lookup) = self.follow(
+            store,
+            cx,
+            &shared,
+            &downloaded,
+            Following::Downloaded { budget },
+            &mut candidates,
+            found,
+        ) {
+            return lookup;
+        }
+        if candidates.is_empty() {
+            return Lookup::Missing;
+        }
+        candidates.truncate(MOST_FETCH_KEYS);
+        let asked = Request::Fetch {
+            step: cx.step,
+            keys: candidates.iter().map(|(key, _, _)| *key).collect(),
+            class: self.invocation.class(),
+            local_ms: store.step_cost(&cx.step),
+        };
+        let Some(Answer::Ready { key }) = self.ports.relay(&share.socket, &asked, relay::WAIT)
+        else {
+            return Lookup::Missing;
+        };
+        let Some((_, observed, watched)) = candidates.into_iter().find(|(k, _, _)| *k == key)
+        else {
+            return Lookup::Missing;
+        };
+        match store.block(&key) {
+            Err(_) => Lookup::StoreFailed,
+            Ok(None) => Lookup::Missing,
+            Ok(Some(block)) => {
+                let origin = store.origin(&key);
+                match self.found(cx.step, key, block, observed, watched, origin, found) {
+                    Some(lookup) => {
+                        self.downloaded.set(true);
+                        lookup
+                    }
+                    None => Lookup::Missing,
+                }
+            }
+        }
+    }
+
+    /// Follows `hints` until one finds a block in the store. A second key the store lacks is
+    /// kept in `candidates`, for the relay to fetch. `None`: no block found.
+    #[allow(clippy::too_many_arguments)]
+    fn follow(
+        &self,
+        store: &Store,
+        cx: &Context<'_>,
+        shared: &Common,
+        hints: &[Vec<u8>],
+        mut following: Following<'_>,
+        candidates: &mut Vec<(Digest, Observed, Vec<inputs::Watched>)>,
+        found: &mut Option<Found>,
+    ) -> Option<Lookup> {
         for bytes in hints {
-            let Ok(hint) = serde_json::from_slice::<ReadList>(&bytes) else {
+            let Ok(hint) = serde_json::from_slice::<ReadList>(bytes) else {
                 continue;
             };
-            let Some((observed, watched)) = cx.from_hint(&hint, &shared) else {
+            match &mut following {
+                Following::Local {
+                    measure: true,
+                    largest,
+                } => {
+                    if let Some(size) = cx.hint_bytes(&hint) {
+                        **largest = (**largest).max(size);
+                    }
+                }
+                Following::Local { .. } => {}
+                Following::Downloaded { budget } => {
+                    if cx.hint_bytes(&hint).is_none_or(|size| size > *budget) {
+                        continue;
+                    }
+                }
+            }
+            let Some((observed, watched)) = cx.from_hint(&hint, shared) else {
                 continue;
             };
             let Ok(key) = observed.key() else {
                 continue;
             };
             match store.block(&key) {
-                Err(_) => return Lookup::StoreFailed,
-                Ok(None) => continue,
+                Err(_) => return Some(Lookup::StoreFailed),
+                Ok(None) => {
+                    if !candidates.iter().any(|(k, _, _)| *k == key) {
+                        candidates.push((key, observed, watched));
+                    }
+                }
                 Ok(Some(block)) => {
-                    let Some(description) = Description::from_value(&block.description)
-                        .filter(|d| d.step == cx.step && d.class == self.invocation.class())
-                    else {
-                        continue;
-                    };
-                    let serves_form = description.messages.form() == self.invocation.form()
-                        || description.messages.only_notices();
-                    let audit = self.ports.audited(&key, self.current.started_ms);
-                    *found = Some(Found {
-                        block,
-                        description,
-                        observed,
-                        watched,
-                    });
-                    return Lookup::Found { audit, serves_form };
+                    let origin = store.origin(&key);
+                    // B-34: a block that was only downloaded is reused only while a server the
+                    // run belongs to vouches for it. Not vouched for, it is a miss: rustc runs,
+                    // and its block takes this one's place.
+                    if !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
+                        self.replace_downloaded.set(true);
+                        return Some(Lookup::Missing);
+                    }
+                    if let Some(lookup) =
+                        self.found(cx.step, key, block, observed, watched, origin, found)
+                    {
+                        return Some(lookup);
+                    }
                 }
             }
         }
-        Lookup::Missing
+        None
     }
 
-    /// B-12: the block's files in place, then its messages; rustc doesn't start. Any failure
-    /// before the first message runs rustc as asked.
+    /// A block found under `key`, when its description is this compile's: the lookup's answer,
+    /// with the audit's pick (B-16), one in ten on a downloaded library's first reuse here.
+    #[allow(clippy::too_many_arguments)]
+    fn found(
+        &self,
+        step: Digest,
+        key: Digest,
+        block: Block,
+        observed: Observed,
+        watched: Vec<inputs::Watched>,
+        origin: Option<Origin>,
+        found: &mut Option<Found>,
+    ) -> Option<Lookup> {
+        let description = Description::from_value(&block.description)
+            .filter(|d| d.step == step && d.class == self.invocation.class())?;
+        let serves_form = description.messages.form() == self.invocation.form()
+            || description.messages.only_notices();
+        let first_download = self.invocation.class() == Class::Library
+            && origin
+                .as_ref()
+                .is_some_and(|o| o.downloaded_only() && !o.reused);
+        let started = self.current.started_ms;
+        let audit = self.current.audit.picks(|| {
+            if first_download {
+                self.ports.audited_first(&key, started)
+            } else {
+                self.ports.audited(&key, started)
+            }
+        });
+        if self.current.key_log.is_some() {
+            let mut keys = self.keys.borrow_mut();
+            keys.block = Some(key);
+            keys.second_parts = observed.parts().ok();
+            keys.externs = observed.externs.clone();
+            keys.outputs = block
+                .files
+                .iter()
+                .map(|f| (f.name.clone(), f.sha256))
+                .collect();
+        }
+        *found = Some(Found {
+            block,
+            description,
+            observed,
+            watched,
+            origin,
+        });
+        Some(Lookup::Found { audit, serves_form })
+    }
+
+    /// Whether a block may be reused as far as who vouches for it goes (B-34), as
+    /// [`Origin::standing`] and the run's [`Shared`](crate::session::Shared) say. A block built
+    /// here, or with no record, may. One only downloaded never may once a server said it no
+    /// longer serves it, and never in a run that isn't sharing by a decision. In a run whose
+    /// backend couldn't be reached, its entry of any age counts. With a relay: on an entry for
+    /// this run's host, org and repository under a day old it may unless the relay says sharing
+    /// stopped by a decision; else the relay asks the server, and "served" or "no server could
+    /// be reached in this run" lets it.
+    fn vouched(&self, key: &Digest, step: &Digest, block: &Block, origin: Option<&Origin>) -> bool {
+        use crate::session::Shared;
+        let Some(origin) = origin else {
+            return true;
+        };
+        let run = self
+            .current
+            .share
+            .relay()
+            .map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
+        let standing = origin.standing(run, epoch_ms(self.ports.now()));
+        let (share, asked) = match (standing, &self.current.share) {
+            (Standing::Any, _) => return true,
+            (Standing::Withdrawn, _) | (_, Shared::Off) => return false,
+            (_, Shared::Unreached) => return true,
+            // Only an answer that says so stops a reuse: a relay that is gone is no decision.
+            (Standing::Fresh, Shared::Relay(share)) => {
+                return !matches!(
+                    self.ports
+                        .relay(&share.socket, &Request::Sharing, relay::WAIT),
+                    Some(Answer::None)
+                );
+            }
+            (Standing::Stale, Shared::Relay(share)) => (
+                share,
+                Request::Vouch {
+                    key: *key,
+                    step: *step,
+                    outputs: outputs_of(block),
+                },
+            ),
+        };
+        matches!(
+            self.ports.relay(&share.socket, &asked, relay::WAIT),
+            Some(Answer::Served | Answer::Offline)
+        )
+    }
+
+    /// B-12: the block's files in place, then its messages; rustc doesn't start. `None`: a
+    /// failure before the first message, after which the caller compiles.
     fn reuse(
         &mut self,
         store: &Store,
         roots: &Roots,
         found: &Found,
-        cx: Option<&Context<'_>>,
-    ) -> i32 {
+        cx: &Context<'_>,
+    ) -> Option<i32> {
         self.forget_unit();
+        sidecar::clear_as_asked(&self.out_dir(), &self.invocation.file_stem());
         let restored = Restore {
             block: &found.block,
             description: &found.description,
@@ -693,17 +1288,11 @@ impl Call<'_> {
             roots,
             start: self.start,
             pid: self.ports.pid(),
+            seal: cx.seal,
         }
         .run();
-        let restored = match restored {
-            Ok(restored) => restored,
-            Err(_) => {
-                let outcome =
-                    decide::after(decide::restore_failed(), &Facts::ran(Rustc::NotRun)).outcome;
-                return self.as_asked(outcome);
-            }
-        };
-        if let Some(cx) = cx {
+        let restored = restored.ok()?;
+        {
             let out_dir = self.out_dir();
             let outputs = found
                 .description
@@ -719,14 +1308,33 @@ impl Call<'_> {
         let _ = self.err.flush();
         let now = self.ports.now();
         let _ = store.used(&found.block.key, now);
+        // B-34: a downloaded block's first reuse here is noted, after which the audit picks it
+        // as it picks any block.
+        if found
+            .origin
+            .as_ref()
+            .is_some_and(|o| o.downloaded_only() && !o.reused)
+        {
+            let _ = store.update_origin(&found.block.key, |origin| {
+                let mut origin = origin?;
+                (!origin.reused).then(|| {
+                    origin.reused = true;
+                    origin
+                })
+            });
+        }
         let took = millis(now.duration_since(self.start).unwrap_or_default());
         let verdict = decide::after(Plan::Reuse, &Facts::ran(Rustc::NotRun));
         self.log(Entry {
             saved_ms: found.description.rustc_ms.saturating_sub(took),
             found: true,
+            portable: Some(found.description.portability.clone()),
+            step: Some(found.description.step),
+            key: Some(found.block.key),
+            downloaded: self.downloaded.get(),
             ..entry(verdict.outcome, Some(self.invocation.class()))
         });
-        0
+        Some(0)
     }
 
     /// Steps 8 to 16: compile with the wrapper's changes, gather what it read, store, compare.
@@ -744,9 +1352,7 @@ impl Call<'_> {
     ) -> i32 {
         let inv = self.invocation;
         let linked = inv.class() != Class::Library;
-        let mut extra = roots.remap_args();
-        extra.extend(self.link_extra.iter().cloned());
-        let args = inv.command(&extra);
+        let args = inv.command(&self.added(roots));
         let rustc = OsString::from(inv.rustc());
         let before = if inv.class() == Class::Program && !self.bundle {
             debug_objects(&self.out_dir(), &inv.file_stem())
@@ -759,6 +1365,7 @@ impl Call<'_> {
             && crate::restore::remove_aside(&self.bundle_dir(), &self.out_dir(), self.ports.pid())
                 .is_err();
         self.forget_unit();
+        sidecar::clear_as_asked(&self.out_dir(), &inv.file_stem());
         // What the compile reads is dated against this, a date of the file system's (B-11).
         let floor = inputs::floor(self.ports.file_clock(&self.out_dir()), self.ports.now());
         let compile_start = self.ports.now();
@@ -784,8 +1391,10 @@ impl Call<'_> {
         let mut log = Entry {
             rustc_ms,
             found: found.is_some(),
+            step: Some(cx.step),
             ..entry(Outcome::BuiltAndStored, Some(inv.class()))
         };
+        let _ = store.set_step_cost(&cx.step, rustc_ms, self.ports.now());
         let ran = match ran {
             Ok(ran) => ran,
             Err(err) => {
@@ -838,22 +1447,17 @@ impl Call<'_> {
                     facts.compared = compare_outputs(&produced.outputs, &found.block);
                 }
                 let trusted = !facts.changed && facts.compared != Compared::Differed;
-                if trusted {
-                    // Dependents may know a block by its origin only if it may move: a tied one
-                    // is another file in another checkout, under the same origin (B-6).
-                    let produced_by = matches!(produced.observed.place, Place::Anywhere)
-                        .then_some(produced.origin);
-                    // A bundle's files are a program's debug info: no dependent loads them, and
-                    // no record is written inside the bundle.
-                    for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
-                        let _ = sidecar::record_block(
-                            &output.path,
-                            output.sha256,
-                            produced_by,
-                            Some(cx.step),
-                            false,
-                        );
-                    }
+                log.portable = Some(produced.portability.clone());
+                if self.current.key_log.is_some() {
+                    let mut keys = self.keys.borrow_mut();
+                    keys.block = produced.observed.key().ok();
+                    keys.second_parts = produced.observed.parts().ok();
+                    keys.externs = produced.observed.externs.clone();
+                    keys.outputs = produced
+                        .outputs
+                        .iter()
+                        .map(|o| (o.name.clone(), o.sha256))
+                        .collect();
                 }
                 // What it read, for the check before a later run (B-23): only when nothing
                 // changed while compiling, or the record would describe other bytes.
@@ -871,18 +1475,77 @@ impl Call<'_> {
                     let min_free = u64::from(self.current.min_free_gb).saturating_mul(1 << 30);
                     facts.low_space = store.free_bytes().is_ok_and(|free| free < min_free);
                     if !facts.low_space {
-                        let (stored, bytes) =
+                        let (stored, bytes, second) =
                             self.store(store, cx, roots, &produced, &recorded, rustc_ms);
                         facts.stored = stored;
+                        facts.second_opinion = second;
                         if stored == Stored::Took {
                             log.stored_bytes = bytes;
                         }
+                        if matches!(stored, Stored::Took | Stored::AlreadyHad) {
+                            log.key = produced.observed.key().ok();
+                        }
+                    }
+                }
+                if trusted {
+                    // Dependents may know a block by what it was built from only if it may move:
+                    // a tied one is another file in another checkout, under the same name (B-6).
+                    let produced_by = matches!(produced.observed.place, Place::Anywhere)
+                        .then_some(produced.known_by);
+                    let portable = produced.portability.named_portably(inv.class());
+                    // A bundle's files are a program's debug info: no dependent loads them, and
+                    // no record is written inside the bundle. Each record names the block the
+                    // store now holds, which is what a dependent confirms it by; one not stored
+                    // names none, and its dependents know its files by their bytes.
+                    for output in produced.outputs.iter().filter(|o| !o.kind.in_bundle()) {
+                        let _ = sidecar::record_built(
+                            &output.path,
+                            output.sha256,
+                            produced_by.and_then(|known| {
+                                metadata::produced_by(known, &output.path, output.metadata)
+                            }),
+                            cx.step,
+                            portable,
+                            log.key,
+                            cx.seal.as_ref(),
+                        );
                     }
                 }
             }
         }
         let verdict = decide::after(plan, &facts);
-        if verdict.suspend {
+        let downloaded =
+            found.filter(|found| found.origin.as_ref().is_some_and(Origin::downloaded_only));
+        if verdict.suspend
+            && facts.compared == Compared::Differed
+            && let Some(found) = downloaded
+        {
+            // B-34: an audit of a downloaded block that differs suspends its first key for the
+            // store's kept days and is reported to the scope the block came from.
+            let now = self.ports.now();
+            let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+            let _ = store.suspend_until(
+                &cx.step,
+                "a compile's outputs differed from a downloaded block's",
+                until,
+                now,
+            );
+            if let Some(share) = self.current.share.relay() {
+                let _ = self.ports.relay(
+                    &share.socket,
+                    &Request::Report {
+                        key: found.block.key,
+                        problem: relay::Problem::Differs,
+                    },
+                    NOTICE_WAIT,
+                );
+            }
+            log.note = Some(format!(
+                "{} built differently from the block downloaded for it; its blocks are not reused for {} days",
+                inv.crate_name(),
+                self.current.keep_days
+            ));
+        } else if verdict.suspend {
             let _ = store.suspend(
                 &cx.step,
                 "a compile's outputs differed from the block's",
@@ -893,8 +1556,27 @@ impl Call<'_> {
                 inv.crate_name()
             ));
         }
-        log.differed = facts.compared == Compared::Differed;
+        log.differed =
+            facts.compared == Compared::Differed || facts.second_opinion == Compared::Differed;
         log.outcome = verdict.outcome;
+        // B-29: the relay hears of a block this run built and stored, and decides whether it
+        // goes up; in shared `observe` it compares it with the shared store's copy.
+        if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
+            (self.current.share.relay(), verdict.outcome, log.key)
+        {
+            let portable = log.portable.as_ref().is_some_and(|p| p.portable);
+            let _ = self.ports.relay(
+                &share.socket,
+                &Request::Built {
+                    key,
+                    step: cx.step,
+                    class: inv.class(),
+                    portable,
+                    cost_ms: rustc_ms,
+                },
+                NOTICE_WAIT,
+            );
+        }
         self.log(log);
         ran.code
     }
@@ -929,57 +1611,212 @@ impl Call<'_> {
                 &mut std::collections::BTreeSet::new(),
             );
         }
-        let mut outputs = self.outputs(recorded, roots)?;
+        let tracked: Vec<&str> = info.env.iter().map(|dep| dep.name.as_str()).collect();
+        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked));
+        let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
+        // B-6: a library whose `.rlib` holds only rustc's own members (its metadata, and the
+        // objects named with its crate name and extra filename), none of them a member of a
+        // static library in its native folders, bundled none, so their bytes are not in its own.
+        if inv.class() == Class::Library
+            && observed
+                .native_dirs
+                .iter()
+                .any(|dir| !dir.archives.is_empty())
+        {
+            observed.bundles_nothing = outputs
+                .iter()
+                .find(|o| o.file.kind == OutputKind::Link && o.file.name.ends_with(".rlib"))
+                .is_some_and(|o| {
+                    let prefix = crate::rlib::own_prefix(inv.crate_name(), inv.extra_filename());
+                    crate::rlib::bundles_nothing(&o.file.path, &prefix, &self.native_archives())
+                        == Some(true)
+                });
+        }
         if inv.class() != Class::Library {
             let linked = self.link(cx, stdout, floor)?;
             observed.link = Some(linked.link);
             outside |= linked.outside;
             facts.changed |= linked.changed;
-            outputs.extend(self.debug_outputs(roots, before)?);
+            outputs.extend(self.debug_outputs(&search, before)?);
         }
 
-        let tied_by_bytes = outputs.iter().any(|o| o.1);
-        let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.0).collect();
+        let tied_by_bytes = outputs.iter().any(|o| o.tied);
+        let unkeyed: Vec<String> = outputs
+            .iter()
+            .flat_map(|o| o.values.iter().cloned())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        let in_outputs: BTreeSet<Folder> = outputs
+            .iter()
+            .flat_map(|o| o.machine.iter().copied())
+            .collect();
+        let outputs: Vec<OutputFile> = outputs.into_iter().map(|o| o.file).collect();
         let origin = observed.key().map_err(|_| NotStored::Key)?;
+        let known_by = observed.known_by().map_err(|_| NotStored::Key)?;
         let mut tied = !inv.searchable() || tied_by_bytes || outside;
-        if !tied && !facts.changed {
-            let through_vars: Vec<(String, String)> = info
-                .env
-                .iter()
-                .filter_map(|dep| {
-                    let value = dep.value.as_ref()?;
-                    (roots.to_placeholders(value) != *value)
-                        .then(|| (dep.name.clone(), value.clone()))
-                })
-                .collect();
-            // Proved before, by whoever stored this very block (B-10).
-            if !through_vars.is_empty() && !matches!(store.block(&origin), Ok(Some(_))) {
-                tied = !self.prove(roots, &through_vars, &outputs)?;
+        // The variables the compile read whose value names a root, or only bases (B-10).
+        let mut through_roots: Vec<(String, String)> = Vec::new();
+        let mut through_bases: Vec<(String, String)> = Vec::new();
+        for dep in &info.env {
+            let Some(value) = dep.value.as_ref() else {
+                continue;
+            };
+            let named = roots.named(value);
+            if !named.is_empty() && named.iter().all(|name| name.is_base()) {
+                through_bases.push((dep.name.clone(), value.clone()));
+            } else if roots.to_placeholders(value) != *value {
+                through_roots.push((dep.name.clone(), value.clone()));
             }
         }
+        // Proved before, by whoever stored this very block (B-10).
+        let stored_before = || match store.block(&origin) {
+            Ok(Some(block)) => Some(Description::from_value(&block.description)),
+            _ => None,
+        };
+        if !tied && !facts.changed && !through_roots.is_empty() && stored_before().is_none() {
+            tied = !self.prove(roots, &through_roots, &outputs)?;
+        }
+        // A variable that names only a base is the same in every checkout of one person: it
+        // never ties the block to a checkout. Whether its value left a trace in the outputs (a
+        // path hashed, say) is proved the same way, once: otherwise the block stays here, keyed
+        // by the base's value (`bound`, below).
+        let variable_names_base = match () {
+            _ if through_bases.is_empty() => false,
+            _ if tied || facts.changed => true,
+            _ => match stored_before() {
+                Some(description) => description
+                    .is_none_or(|d| d.portability.reasons.contains(&Reason::VariableNamesBase)),
+                None => !self.prove(roots, &through_bases, &outputs).unwrap_or(false),
+            },
+        };
         if tied {
             observed.place = Place::Tied(roots.tied());
         }
+        let placeholders = |text: &str| roots.to_placeholders(text);
+        let records: Vec<String> = [
+            serde_json::to_string(&StoredDepInfo::of(&info, placeholders)),
+            serde_json::to_string(&recorded.store(placeholders)),
+        ]
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .map_err(|_| NotStored::Messages)?;
+        let asked = self.asked.as_ref().ok_or(NotStored::Key)?;
+        let portability = portable::portable(&portable::Facts {
+            class: inv.class(),
+            asked,
+            observed: &observed,
+            records: &records,
+            in_outputs: &in_outputs,
+            machine: roots.machine_needles(),
+            variable_names_base,
+            externs: &common.externs_portable,
+            unkeyed: &unkeyed,
+            native_cpu: self.native_cpu,
+        });
+        // B-10: a block that holds a folder of this machine holds its value here. One store can
+        // serve people with other homes, and one person can move a cargo home or a toolchain:
+        // the block is keyed by those folders' values, so another value finds another block and
+        // stores its own beside it.
+        let mut bound: Vec<Bound> = Vec::new();
+        for reason in &portability.reasons {
+            match reason {
+                Reason::CargoHomeInOutput | Reason::CargoHomeInRecord => {
+                    bound.push(Bound::CargoHome);
+                }
+                Reason::RustupHomeInOutput | Reason::RustupHomeInRecord => {
+                    bound.push(Bound::RustupHome);
+                }
+                Reason::HomeInOutput | Reason::HomeInRecord => bound.push(Bound::Home),
+                Reason::VariableNamesBase => {
+                    for (_, value) in &through_bases {
+                        for name in roots.named(value) {
+                            match name {
+                                RootName::CargoHome => bound.push(Bound::CargoHome),
+                                RootName::Toolchain => bound.push(Bound::Toolchain),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        observed.bound = roots.bound(&bound);
+        if self.current.key_log.is_some() {
+            self.keys.borrow_mut().in_outputs = in_outputs.into_iter().collect();
+        }
         Ok(Produced {
             observed,
-            origin,
+            known_by,
             outputs,
             dep_info: info,
+            portability,
         })
     }
 
-    /// Step 11: the files rustc announced, each hashed and searched for the roots in one pass.
-    /// The dep-info is left out: it holds real paths by design.
-    fn outputs(
-        &self,
-        recorded: &Recorded,
-        roots: &Roots,
-    ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    /// The variables whose values the outputs are searched for (B-24): each one that is in
+    /// neither key (the first key's variables, and `tracked`, those the dep-info names, which the
+    /// second key holds) and that [`portable::unkeyed_candidate`] chooses, less those whose value
+    /// holds a root or a folder of this machine, which the search finds by their own rules.
+    /// Values stay in this process: only a name is ever written.
+    fn unkeyed_values(&self, roots: &Roots, tracked: &[&str]) -> Vec<(String, Vec<u8>)> {
+        let keyed = self.asked.as_ref().map(|asked| &asked.env);
+        let machine = roots.machine_needles();
+        let ci = portable::SetByCi::detect(|name| {
+            self.env
+                .get(name)
+                .map(|value| value.to_string_lossy().into_owned())
+        });
+        self.env
+            .names()
+            .filter(|name| !keyed.is_some_and(|keyed| keyed.contains_key(*name)))
+            .filter(|name| !tracked.contains(name))
+            .filter_map(|name| {
+                let value = self.env.get(name)?;
+                let bytes = value.as_encoded_bytes();
+                if !portable::unkeyed_candidate(name, bytes, &ci) {
+                    return None;
+                }
+                if let Some(text) = value.to_str()
+                    && (roots.to_placeholders(text) != text
+                        || machine
+                            .iter()
+                            .any(|(_, folder)| text.contains(folder.as_str())))
+                {
+                    return None;
+                }
+                Some((name.to_string(), bytes.to_vec()))
+            })
+            .collect()
+    }
+
+    /// Every archive directly in a folder rustc searches for native libraries, whatever its
+    /// name (`+verbatim` bundles one as named): each `-L native=`, `-L all=` and bare `-L` (B-6).
+    fn native_archives(&self) -> Vec<PathBuf> {
+        let inv = self.invocation;
+        let dirs: Vec<PathBuf> = inv
+            .search_paths()
+            .iter()
+            .filter(|search| {
+                matches!(
+                    search.kind,
+                    crate::invocation::SearchKind::Native | crate::invocation::SearchKind::All
+                )
+            })
+            .map(|search| Path::new(inv.cwd()).join(&search.path))
+            .collect();
+        crate::rlib::archives_in(&dirs)
+    }
+
+    /// Step 11: the files rustc announced, each hashed and searched for the roots and for the
+    /// folders that name the machine in one pass. The dep-info is left out: it holds real paths
+    /// by design.
+    fn outputs(&self, recorded: &Recorded, search: &Search) -> Result<Vec<Searched>, NotStored> {
         let inv = self.invocation;
         let out_dir = Path::new(inv.cwd()).join(inv.out_dir());
-        let needles = Needles::new(roots.needles());
         let mut emits: Vec<Emit> = Vec::new();
         let mut out = Vec::new();
         for line in recorded.lines() {
@@ -1011,17 +1848,7 @@ impl Call<'_> {
                 .and_then(OsStr::to_str)
                 .ok_or(NotStored::Outputs)?
                 .to_string();
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, kind)?);
         }
         let mut asked = inv.emits().to_vec();
         asked.sort();
@@ -1062,8 +1889,7 @@ impl Call<'_> {
         let inv = self.invocation;
         let scratch_out = scratch.join("out");
         std::fs::create_dir_all(&scratch_out).map_err(|_| NotStored::PlaceCheck)?;
-        let mut extra = roots.remap_args();
-        extra.extend(self.link_extra.iter().cloned());
+        let mut extra = self.added(roots);
         let mut env = Vec::with_capacity(vars.len());
         for (i, (name, value)) in vars.iter().enumerate() {
             let target = Path::new(inv.cwd()).join(value);
@@ -1107,6 +1933,15 @@ impl Call<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// What the wrapper adds to a compile it doesn't pass through (B-9): the remaps, the
+    /// sysroot without sources when the toolchain has sources, and a linked output's additions.
+    fn added(&self, roots: &Roots) -> Vec<OsString> {
+        let mut extra = roots.remap_args();
+        extra.extend(self.hide_sources.iter().cloned());
+        extra.extend(self.link_extra.iter().cloned());
+        extra
     }
 
     /// Whether `dir` lies under the compiler's sysroot, in either form.
@@ -1167,30 +2002,66 @@ impl Call<'_> {
                 return Err(NotStored::LinkInputs);
             }
         }
-        let path_var = args
-            .set_var("PATH")
-            .map(OsString::from)
-            .or_else(|| self.env.get("PATH").map(OsStr::to_os_string));
+        // A specs or configuration file can change which `ld` runs and what it is handed.
+        if args.driver_reads_options() {
+            return Err(NotStored::LinkInputs);
+        }
+        let inherited = self.env.get("PATH");
+        let (path_before, path_inherits) = link::path_parts(args.set_var("PATH"), inherited);
+        let path_var = link::link_path(&path_before, path_inherits, inherited);
         let linker =
             link::linker(&args.linker, path_var.as_deref(), &cwd).ok_or(NotStored::LinkInputs)?;
-        // The linker the driver runs instead of its own (B-18).
-        let ld = match &inputs.fuse_ld {
-            None => None,
-            Some(name) => Some(
-                link::fuse_linker(name, &inputs.prefixes, path_var.as_deref(), &cwd)
-                    .ok_or(NotStored::LinkInputs)?
-                    .path,
-            ),
+        // Which `ld` the driver runs and where it looks for a library after rustc's folders,
+        // asked at every link (B-6, B-18).
+        let query = link::Query {
+            driver: linker.path.clone(),
+            flags: args.driver_flags(),
+            ld_sysroot: args.ld_sysroot(),
+            path: path_var.clone().unwrap_or_default(),
+            cwd: cwd.clone(),
+            apple: self.apple,
+            sdk: inputs.sdk.clone(),
+            library_path: self.env.get("LIBRARY_PATH").map(OsStr::to_os_string),
+        };
+        let environment =
+            link::environment(&query, self.asker).map_err(|_| NotStored::LinkInputs)?;
+        let ld = Some(environment.ld.clone());
+        let placeholders = |text: &str| cx.roots.to_placeholders(text);
+        let kept = crate::key::LinkQuery {
+            program: (!args.linker.contains('/')).then(|| args.linker.clone()),
+            path_before: path_before
+                .iter()
+                .map(|entry| entry.to_str().map(placeholders))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(NotStored::LinkInputs)?,
+            path_inherits,
+            flags: query
+                .flags
+                .iter()
+                .map(|flag| link::flag_with_paths(flag, placeholders))
+                .collect(),
+            ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
         };
         let mut outside = false;
         let mut changed = false;
         let mut links = std::collections::BTreeSet::new();
+        let view = self.view.clone();
         let mut moved = |path: &Path, stat: Option<&Stat>| {
+            // A path under the view is the toolchain's file it leads to: the view's links are
+            // new when the run made them, and the compiler's identity holds the toolchain by
+            // content (B-11, B-17).
+            let path = match &view {
+                Some((view, sysroot)) => match path.strip_prefix(view) {
+                    Ok(rest) => sysroot.join(rest),
+                    Err(_) => path.to_path_buf(),
+                },
+                None => path.to_path_buf(),
+            };
             stat.is_some_and(|stat| inputs::dated_after(stat, start))
-                || inputs::links_changed(path, start, &mut links)
+                || inputs::links_changed(&path, start, &mut links)
         };
-        // The linker, the one `-fuse-ld` names and the SDK, located like every other path, so a
-        // path under another checkout is never recorded as it is (B-8).
+        // The driver, the `ld` it runs and the SDK, located like every other path, so a path
+        // under another checkout is never recorded as it is (B-8).
         let linker_at = cx.located_path(&linker.path)?;
         let ld_at = match &ld {
             Some(path) => Some(cx.located_path(path)?),
@@ -1225,16 +2096,59 @@ impl Call<'_> {
             }
         }
         outside |= matches!(sdk_at, Some(Located::Outside(_)));
-        // Libraries named with `-l` found through `-L` and `-F`, and the files options name
-        // (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
+        // Libraries named with `-l` found through `-L` and `-F`, then in the driver's and
+        // `ld`'s own folders, each linker script found among them followed, and the files
+        // options name (B-6, B-18). Cost: one stat per candidate, only for linked outputs.
         let mut files = Vec::new();
+        let mut system = Vec::new();
         let mut keyed: std::collections::BTreeSet<PathBuf> =
             inputs.libraries.iter().cloned().collect();
-        for place in link::library_places(&inputs) {
+        let mut search = inputs.search.clone();
+        for dir in &environment.folders {
+            if !search.contains(dir) {
+                search.push(dir.clone());
+            }
+        }
+        // Each place, whether it goes with the C runtime (left out of a dependent's name), and
+        // how many scripts led to it.
+        let mut queue: std::collections::VecDeque<(PathBuf, bool, u8)> =
+            link::library_places(&inputs)
+                .into_iter()
+                .map(|place| (place, false, 0))
+                .collect();
+        for named in &inputs.named {
+            let runtime = link::C_RUNTIME.contains(&named.as_str());
+            for place in link::places_in(named, &environment.folders, &environment.frameworks) {
+                queue.push_back((place, runtime, 0));
+            }
+        }
+        let mut places_seen = std::collections::BTreeSet::new();
+        while let Some((place, runtime, depth)) = queue.pop_front() {
+            if !places_seen.insert(place.clone()) {
+                continue;
+            }
             let (read, stat, is_outside) = cx.place(&place)?;
             outside |= is_outside;
             changed |= stat.is_some() && moved(&place, stat.as_ref());
-            files.push(read);
+            if read.state != crate::key::ReadState::Absent
+                && let Some(text) = script_text(&place).map_err(|_| NotStored::LinkInputs)?
+            {
+                // A sysroot moves where `ld` finds a script's names; and scripts that lead to
+                // scripts without end are not followed.
+                if environment.sysroot.is_some() || depth >= 8 {
+                    return Err(NotStored::LinkInputs);
+                }
+                let names = link::script_names(&text).map_err(|_| NotStored::LinkInputs)?;
+                for name in &names {
+                    for next in link::script_places(name, &place, &cwd, &search) {
+                        queue.push_back((next, runtime, depth + 1));
+                    }
+                }
+            }
+            match runtime {
+                true => system.push(read),
+                false => files.push(read),
+            }
             keyed.insert(place);
         }
         for (places, script) in link::file_places(&inputs, &cwd) {
@@ -1321,6 +2235,13 @@ impl Call<'_> {
             ld_path: ld_at,
             sdk_path: sdk_at,
             dsymutil_path: dsymutil_at,
+            folders: environment
+                .folders
+                .iter()
+                .map(|dir| cx.located_path(dir))
+                .collect::<Result<Vec<_>, _>>()?,
+            system,
+            query: Some(kept),
         };
         Ok(Linked {
             link,
@@ -1334,11 +2255,11 @@ impl Call<'_> {
     /// doesn't carry (a `.dSYM` the wrapper didn't ask for, `.dwp`) refuse the store.
     fn debug_outputs(
         &self,
-        roots: &Roots,
+        search: &Search,
         before: &BTreeMap<String, Stat>,
-    ) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    ) -> Result<Vec<Searched>, NotStored> {
         if self.bundle {
-            return self.bundle_outputs(roots);
+            return self.bundle_outputs(search);
         }
         let inv = self.invocation;
         let stem = inv.file_stem();
@@ -1354,7 +2275,6 @@ impl Call<'_> {
         if inv.class() != Class::Program {
             return Ok(Vec::new());
         }
-        let needles = Needles::new(roots.needles());
         let mut out = Vec::new();
         for (name, stat) in debug_objects(&out_dir, &stem) {
             if before
@@ -1364,17 +2284,7 @@ impl Call<'_> {
                 continue;
             }
             let path = out_dir.join(&name);
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind: OutputKind::DebugObject,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, OutputKind::DebugObject)?);
         }
         Ok(out)
     }
@@ -1385,7 +2295,7 @@ impl Call<'_> {
     /// (`Contents/Resources/Relocations`) name the program by its absolute path; no debugger
     /// reads them, and they are removed first. A bundle with no DWARF file, or holding anything
     /// but folders and regular files, refuses the store.
-    fn bundle_outputs(&self, roots: &Roots) -> Result<Vec<(OutputFile, bool)>, NotStored> {
+    fn bundle_outputs(&self, search: &Search) -> Result<Vec<Searched>, NotStored> {
         let dir = self.bundle_dir();
         let top = bundle_name(&self.invocation.file_stem());
         match std::fs::remove_dir_all(dir.join(RELOCATIONS)) {
@@ -1399,20 +2309,9 @@ impl Call<'_> {
         if !files.iter().any(|(_, name)| name.starts_with(&dwarf)) {
             return Err(NotStored::DebugFiles);
         }
-        let needles = Needles::new(roots.needles());
         let mut out = Vec::with_capacity(files.len());
         for (path, name) in files {
-            let (hit, sha256, size) = needles.in_file_hashed(&path).map_err(|_| NotStored::Scan)?;
-            out.push((
-                OutputFile {
-                    path,
-                    name,
-                    kind: OutputKind::DebugBundle,
-                    sha256,
-                    size,
-                },
-                hit.is_some(),
-            ));
+            out.push(search.file(path, name, OutputKind::DebugBundle)?);
         }
         Ok(out)
     }
@@ -1426,9 +2325,9 @@ impl Call<'_> {
         produced: &Produced,
         recorded: &Recorded,
         rustc_ms: u64,
-    ) -> (Stored, u64) {
+    ) -> (Stored, u64, Compared) {
         let Ok(key) = produced.observed.key() else {
-            return (Stored::Refused, 0);
+            return (Stored::Refused, 0, Compared::NotTried);
         };
         let placeholders = |text: &str| roots.to_placeholders(text);
         let description = Description {
@@ -1438,17 +2337,19 @@ impl Call<'_> {
             crate_name: self.invocation.crate_name().to_string(),
             package: self.invocation.package().name.clone(),
             step: cx.step,
-            origin: produced.origin,
+            origin: produced.known_by,
             place: match produced.observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
                 Place::Tied(_) => PlaceKind::Tied,
             },
+            portability: produced.portability.clone(),
             outputs: produced
                 .outputs
                 .iter()
                 .map(|o| Output {
                     name: o.name.clone(),
                     kind: o.kind,
+                    metadata: o.metadata,
                 })
                 .collect(),
             dep_info: StoredDepInfo::of(&produced.dep_info, placeholders),
@@ -1457,7 +2358,7 @@ impl Call<'_> {
             built_ms: epoch_ms(self.start),
         };
         let Ok(value) = description.to_value() else {
-            return (Stored::Refused, 0);
+            return (Stored::Refused, 0, Compared::NotTried);
         };
         let files: Vec<NewFile> = produced
             .outputs
@@ -1468,17 +2369,134 @@ impl Call<'_> {
             })
             .collect();
         let now = self.ports.now();
-        let stored = match store.publish(&key, &value, &files, now) {
+        // B-32: built here, by this run, and by whom when the run shares.
+        let run = self
+            .current
+            .share
+            .relay()
+            .map(|share| share.run.clone())
+            .or_else(|| {
+                self.current
+                    .folder
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let origin = Origin::built_here(
+            &run,
+            self.current.share.relay().map(|share| share.by.clone()),
+        );
+        let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+            o.is_some_and(Origin::downloaded_only)
+        };
+        let published = if self.replace_downloaded.get() {
+            // The block there was only downloaded and no server vouches for it now.
+            store
+                .replace(&key, &value, &files, &origin, now, only_downloaded)
+                .map(|replaced| match replaced {
+                    crate::store::Replaced::Stored => Published::Stored,
+                    crate::store::Replaced::Kept => Published::AlreadyThere,
+                })
+        } else {
+            store.publish_with_origin(&key, &value, &files, &origin, now)
+        };
+        let mut second = Compared::NotTried;
+        let stored = match published {
             Ok(Published::Stored) => Stored::Took,
-            Ok(Published::AlreadyThere) => Stored::AlreadyHad,
-            Err(_) => return (Stored::Refused, 0),
+            Ok(Published::AlreadyThere) => self.already_there(
+                store,
+                &key,
+                &cx.step,
+                produced,
+                &value,
+                &files,
+                &origin,
+                now,
+                &mut second,
+            ),
+            Err(_) => return (Stored::Refused, 0, Compared::NotTried),
         };
         if let Ok(hint) = serde_json::to_vec(&ReadList::of(&produced.observed)) {
             let _ = store.add_hint(&cx.step, &hint, now);
         }
         let _ = store.used(&key, now);
         let bytes = produced.outputs.iter().map(|o| o.size).sum();
-        (stored, bytes)
+        (stored, bytes, second)
+    }
+
+    /// B-32: a compile whose own publish found a block already there. Built here, a library's
+    /// outputs are compared with it, a second opinion that costs nothing (a difference is
+    /// treated as B-16 treats one). Only downloaded, the compile's outputs take its place where
+    /// the two differ, and the difference is reported; where they are the same, the block is
+    /// from then on also built here. A block with no record stays as it is.
+    #[allow(clippy::too_many_arguments)]
+    fn already_there(
+        &self,
+        store: &Store,
+        key: &Digest,
+        step: &Digest,
+        produced: &Produced,
+        description: &serde_json::Value,
+        files: &[NewFile],
+        origin: &Origin,
+        now: SystemTime,
+        second: &mut Compared,
+    ) -> Stored {
+        let Some(there) = store.origin(key) else {
+            return Stored::AlreadyHad;
+        };
+        let Ok(Some(block)) = store.block(key) else {
+            return Stored::AlreadyHad;
+        };
+        let compared = compare_outputs(&produced.outputs, &block);
+        if there.built.is_some() {
+            if self.invocation.class() == Class::Library {
+                *second = compared;
+            }
+            return Stored::AlreadyHad;
+        }
+        if !there.downloaded_only() {
+            return Stored::AlreadyHad;
+        }
+        if compared == Compared::Differed {
+            // B-34: a comparison of a downloaded block that differs suspends its first key for
+            // the store's kept days, first, so that whatever the replace below finds, the next
+            // run compiles rather than reuses it.
+            let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+            let _ = store.suspend_until(
+                step,
+                "a compile's outputs differed from a downloaded block's",
+                until,
+                now,
+            );
+            let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+                o.is_some_and(Origin::downloaded_only)
+            };
+            let replaced = store.replace(key, description, files, origin, now, only_downloaded);
+            if let Some(share) = self.current.share.relay() {
+                let _ = self.ports.relay(
+                    &share.socket,
+                    &Request::Report {
+                        key: *key,
+                        problem: relay::Problem::Differs,
+                    },
+                    NOTICE_WAIT,
+                );
+            }
+            return match replaced {
+                Ok(crate::store::Replaced::Stored) => Stored::Took,
+                _ => Stored::AlreadyHad,
+            };
+        }
+        let built = origin.built.clone();
+        let _ = store.update_origin(key, |o| {
+            let mut o = o?;
+            (o.built.is_none()).then(|| {
+                o.built = built;
+                o
+            })
+        });
+        Stored::AlreadyHad
     }
 
     /// B-15: a dependent that could not load a reused crate suspends that crate's first key and
@@ -1490,6 +2508,7 @@ impl Call<'_> {
         });
         let named = decide::not_loaded(diagnostics)?;
         let now = self.ports.now();
+        let seal = store.seal();
         let mut names = Vec::new();
         for ext in self.invocation.externs() {
             let Some(given) = &ext.path else { continue };
@@ -1504,16 +2523,54 @@ impl Call<'_> {
             if !is_named {
                 continue;
             }
-            let Ok(known) = sidecar::lookup(&path) else {
+            let Ok(known) = sidecar::lookup(&path, seal.as_ref()) else {
                 continue;
             };
-            let (true, Some(step)) = (known.reused, known.step) else {
+            if !known.reused {
+                continue;
+            }
+            // Which block it is, the store says, never the record alone (B-6): a record that
+            // came with a restored `target/` could name any block. One the store can't confirm
+            // suspends and reports nothing; the file is removed, so cargo builds it.
+            let Some(vouched) = sidecar::vouched(store, &path, &known) else {
+                let _ = std::fs::remove_file(&path);
+                let _ = sidecar::forget(&path);
+                names.push(ext.name.clone());
                 continue;
             };
-            let _ = store.suspend(&step, "a dependent could not load a reused block", now);
+            let step = vouched.step;
+            // B-34: a block that was only downloaded is reported to the scope it came from, and
+            // its first key is suspended for the store's kept days, not until a clean.
+            let downloaded = Some(vouched.block)
+                .filter(|block| store.origin(block).is_some_and(|o| o.downloaded_only()));
+            match downloaded {
+                Some(block) => {
+                    let until =
+                        now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+                    let _ = store.suspend_until(
+                        &step,
+                        "a dependent could not load a downloaded block",
+                        until,
+                        now,
+                    );
+                    if let Some(share) = self.current.share.relay() {
+                        let _ = self.ports.relay(
+                            &share.socket,
+                            &Request::Report {
+                                key: block,
+                                problem: relay::Problem::Rejected,
+                            },
+                            NOTICE_WAIT,
+                        );
+                    }
+                }
+                None => {
+                    let _ = store.suspend(&step, "a dependent could not load a reused block", now);
+                }
+            }
             if let Some(dir) = path.parent() {
                 for file in sidecar::reused_in(dir).unwrap_or_default() {
-                    if sidecar::lookup(&file).is_ok_and(|k| k.step == Some(step)) {
+                    if sidecar::lookup(&file, seal.as_ref()).is_ok_and(|k| k.step == Some(step)) {
                         let _ = std::fs::remove_file(&file);
                         let _ = sidecar::forget(&file);
                     }
@@ -1705,6 +2762,21 @@ fn run_for_output(rustc: &Path, args: &[&str]) -> io::Result<String> {
     String::from_utf8(out.stdout).map_err(io::Error::other)
 }
 
+/// The text of a file the linker took for a library when it is a GNU linker script
+/// ([`link::is_script`]), up to 1 MiB; `None` for an object, an archive, a stub or any other
+/// binary.
+fn script_text(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(4096).read_to_end(&mut bytes)?;
+    if !link::is_script(path, &bytes) {
+        return Ok(None);
+    }
+    file.take((1 << 20) - 4096).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
 /// The real world.
 struct Real;
 
@@ -1740,6 +2812,20 @@ impl Ports for Real {
 
     fn rustc_targets(&self, rustc: &Path) -> io::Result<String> {
         run_for_output(rustc, &["--print", "target-list"])
+    }
+
+    fn rustc_native(&self, rustc: &Path, target: Option<&str>) -> io::Result<(String, String)> {
+        let with_target = |args: &[&str]| {
+            let mut all = args.to_vec();
+            if let Some(target) = target {
+                all.extend(["--target", target]);
+            }
+            run_for_output(rustc, &all)
+        };
+        Ok((
+            with_target(&["--print", "target-cpus"])?,
+            with_target(&["--print", "cfg", "-C", "target-cpu=native"])?,
+        ))
     }
 
     fn exec(&mut self, rustc: &OsStr, args: &[OsString]) -> i32 {
@@ -1857,6 +2943,44 @@ mod tests {
         // The probe leaves nothing behind.
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 2);
+    }
+
+    // covers: B-10, B-24
+    #[test]
+    fn a_machine_folder_is_found_in_an_output_whatever_follows_it() {
+        // A proc macro that writes `$CARGO_HOME` and `_cache` into a library: another machine
+        // would print this machine's folder.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = "/home/dev/ws";
+        let paths = RootPaths {
+            workspace: ws.to_string(),
+            package: Some(ws.to_string()),
+            script_out: None,
+            out_dir: format!("{ws}/target/debug/deps"),
+            deps: vec![],
+            native: vec![],
+            package_id: "app-0.1.0".to_string(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
+        };
+        let machine = Machine {
+            cargo_home: Some("/opt/tools/cargo".into()),
+            toolchain: Some("/opt/tools/rustup/toolchains/stable-x".into()),
+            toolchain_view: None,
+            rustup_home: Some("/opt/tools/rustup".into()),
+            home: Some("/home/dev".into()),
+        };
+        let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
+        let search = Search::new(&roots, &[]);
+        let path = dir.path().join("out.rlib");
+        std::fs::write(&path, b"\0/opt/tools/cargo_cache\0").unwrap();
+        let found = search
+            .file(path, "out.rlib".into(), OutputKind::Link)
+            .unwrap()
+            .machine;
+        assert!(found.contains(&Folder::CargoHome), "{found:?}");
     }
 
     // covers: B-2

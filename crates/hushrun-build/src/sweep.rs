@@ -28,6 +28,12 @@ pub struct SweepReport {
     pub hints: u64,
     /// Output folders the registry forgot: gone, or not seen for the kept days (B-23).
     pub out_dirs: u64,
+    /// Compiler memos and views without sources no run used for the kept days, and what a
+    /// maker of a view left (B-17).
+    pub compilers: u64,
+    /// Markers of the outbox dropped (B-29), claims of dead runs put back, and folders of dead
+    /// runs removed (B-26).
+    pub outbox: u64,
     /// Steps that failed and were skipped. Another process removing the same thing first is
     /// not one.
     pub errors: u64,
@@ -70,10 +76,22 @@ pub fn force(store: &Store, now: SystemTime, keep_days: u32) -> SweepReport {
         let out_dirs = store.remove_stale_out_dirs(cutoff);
         report.out_dirs = out_dirs.removed;
         report.errors += out_dirs.errors;
+        let runs = crate::outbox::remove_dead_runs(store);
+        let markers = crate::outbox::Outbox::new(store).sweep(now, keep_days);
+        report.outbox = runs.removed + markers.removed;
+        report.errors += runs.errors + markers.errors;
+        let leftover = now.checked_sub(DAY).unwrap_or(now);
+        let compilers = store.remove_unused_compilers(cutoff, leftover);
+        report.compilers = compilers.removed;
+        report.errors += compilers.errors;
     }
+    // B-36: a sandbox's fetch is good for a day, whatever the blocks' kept days.
+    let fetched = crate::prefetched::sweep(store, now);
+    report.leftovers += fetched.removed;
+    report.errors += fetched.errors;
     if let Some(before) = now.checked_sub(DAY) {
         let leftovers = store.remove_leftovers(before);
-        report.leftovers = leftovers.removed;
+        report.leftovers += leftovers.removed;
         report.errors += leftovers.errors;
     }
     report
@@ -170,6 +188,53 @@ mod tests {
         assert!(w.has(2));
         // Day 1 is exactly fifteen days before day 16: not more, so it stays.
         assert!(w.has(3));
+        assert_eq!(fs::read_dir(w.path(TRASH)).unwrap().count(), 0);
+    }
+
+    /// Dates `path` (a file or a folder) `when`.
+    fn date(path: &std::path::Path, when: SystemTime) {
+        fs::File::open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    // covers: B-14, B-17
+    #[test]
+    fn views_and_memos_no_run_used_for_the_kept_days_go_and_so_does_what_a_crash_left() {
+        let w = world();
+        let memos = w.path(crate::compiler::MEMOS);
+        let views = memos.join(crate::compiler::SYSROOTS);
+        let view = |name: &str, used: Option<SystemTime>| {
+            let path = views.join(name);
+            fs::create_dir_all(path.join("lib/rustlib")).unwrap();
+            if let Some(used) = used {
+                let marker = path.join(crate::compiler::VIEW_MARKER);
+                fs::write(&marker, b"").unwrap();
+                date(&marker, used);
+            }
+            date(&path, day(0));
+            path
+        };
+        let old_view = view("aaaa", Some(day(0)));
+        let used_view = view("bbbb", Some(day(14)));
+        let unmarked = view("cccc", None);
+        let crashed = view(".aaaa.42.0.tmp", None);
+        let fresh_temp = views.join(".aaaa.43.0.tmp");
+        fs::create_dir_all(&fresh_temp).unwrap();
+        date(&fresh_temp, day(16) - hours(1));
+        let old_memo = memos.join("0123.json");
+        fs::write(&old_memo, b"{}").unwrap();
+        date(&old_memo, day(0));
+        let used_memo = memos.join("4567.json");
+        fs::write(&used_memo, b"{}").unwrap();
+        date(&used_memo, day(10));
+        let report = sweep(&w.store, day(16), KEEP);
+        assert_eq!(report.compilers, 4, "{report:?}");
+        assert_eq!(report.errors, 0);
+        for gone in [&old_view, &unmarked, &crashed, &old_memo] {
+            assert!(!gone.exists(), "{}", gone.display());
+        }
+        for kept in [&used_view, &fresh_temp, &used_memo] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
         assert_eq!(fs::read_dir(w.path(TRASH)).unwrap().count(), 0);
     }
 

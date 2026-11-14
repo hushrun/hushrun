@@ -5,13 +5,14 @@
 //! and calls [`Session::finish`] after it exits. The wrapper finds the session through
 //! [`SESSION`] and reads no setting of its own, so every compile of one run sees one mode.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::audit::Audit;
 use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs};
 use crate::settings::{self, Overrides, Settings};
 use crate::store::{DAY, Store};
@@ -19,6 +20,11 @@ use crate::unit::Checked;
 
 /// The variable that names the session's folder for the wrapper.
 pub const SESSION: &str = "HUSHRUN_BUILD_SESSION";
+
+/// The variable that names a file each compile of the run appends its keys' parts to, one JSON
+/// line per compile ([`Current::key_log`]). Read once, as `hushrun run` begins; a path that is
+/// not absolute is ignored, since compiles run in other folders.
+pub const KEY_LOG: &str = "HUSHRUN_BUILD_KEY_LOG";
 
 /// The variable cargo reads the wrapper from.
 pub const RUSTC_WRAPPER: &str = "RUSTC_WRAPPER";
@@ -35,6 +41,8 @@ pub struct Start<'a> {
     pub in_ci: bool,
     /// The repository's name, when hushrun knows it. Blocks record it (B-13).
     pub repository: Option<&'a str>,
+    /// The repository's `build: env:` (B-35): variables every compile is keyed by.
+    pub repository_env: &'a [String],
     /// The environment of `hushrun run`.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
     /// The command's time.
@@ -66,6 +74,8 @@ pub struct Session {
     link: PathBuf,
     /// What the check before COMMAND removed, as the summary says it (B-23).
     rebuilt: Vec<String>,
+    /// Lines the run adds to its summary: what its relay said (B-26).
+    more: Vec<String>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -82,6 +92,10 @@ pub struct Current {
     pub never_store: Vec<String>,
     /// The person's extra variables for the first key (B-5).
     pub env: Vec<String>,
+    /// The repository's `build: env:` (B-35): variables every compile of the repository is
+    /// keyed by, on every machine.
+    #[serde(default)]
+    pub repository_env: Vec<String>,
     /// Nothing is stored with less free space than this (B-22). 0 turns the rule off.
     pub min_free_gb: u32,
     /// What the wrapper does with a program on an Apple target (B-9, B-21).
@@ -94,8 +108,80 @@ pub struct Current {
     /// Folders that are the same for every checkout on this machine (B-8): the cargo home, the
     /// rustup home and the system's own.
     pub shared: Vec<String>,
+    /// The cargo home, as `hushrun run` found it: a base (B-8), and searched for in outputs.
+    #[serde(default)]
+    pub cargo_home: Option<String>,
+    /// The rustup home, as `hushrun run` found it: searched for in outputs.
+    #[serde(default)]
+    pub rustup_home: Option<String>,
+    /// The home folder, `HOME`: searched for in outputs.
+    #[serde(default)]
+    pub home: Option<String>,
+    /// Where each compile appends one line of its keys' parts, when `HUSHRUN_BUILD_KEY_LOG`
+    /// named a file as `hushrun run` began: what tells which part of a key differs between two
+    /// machines. Nothing is written otherwise.
+    #[serde(default)]
+    pub key_log: Option<PathBuf>,
+    /// How many of the compiles that could be reused this run audits (B-16), from
+    /// `HUSHRUN_BUILD_AUDIT` as `hushrun run` began.
+    #[serde(default)]
+    pub audit: Audit,
     /// The session's folder.
     pub folder: PathBuf,
+    /// How the run stands with its backend's shared store (B-26, B-34).
+    #[serde(default)]
+    pub share: Shared,
+    /// The person's share setting for this command (B-33): it lowers the org's shared mode on
+    /// this machine and never raises it.
+    #[serde(default = "share_on")]
+    pub share_setting: Mode,
+}
+
+fn share_on() -> Mode {
+    Mode::On
+}
+
+/// How a run stands with its backend's shared store (B-26, B-34): the one state every wrapper of
+/// the run reads to know whether there is a relay to ask, and whether a block that was only
+/// downloaded may be reused.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shared {
+    /// The run shares nothing, by a decision: the org doesn't share, the person turned sharing
+    /// off on this machine, nobody is signed in, or the command is one that never shares.
+    /// Nothing goes to or comes from a shared store, and a block that was only downloaded is
+    /// not reused (B-34).
+    #[default]
+    Off,
+    /// The run would share, and its backend was asked in this run and couldn't be reached: no
+    /// relay, and a downloaded block's entry of any age counts (B-34).
+    Unreached,
+    /// The run's relay: where its socket is and who the run is.
+    Relay(Share),
+}
+
+impl Shared {
+    /// The run's relay, when it has one.
+    pub fn relay(&self) -> Option<&Share> {
+        match self {
+            Shared::Relay(share) => Some(share),
+            Shared::Off | Shared::Unreached => None,
+        }
+    }
+}
+
+/// What a wrapper needs of its run's relay (B-26, B-32).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Share {
+    /// The relay's socket.
+    pub socket: PathBuf,
+    /// The relay's run: the name of its folders in the store.
+    pub run: String,
+    /// Who the run is: the backend's host, the org and the credential's fingerprint.
+    pub by: crate::origin::Identity,
+    /// The run's repository as the server reads it; empty when none.
+    #[serde(default)]
+    pub repository: String,
 }
 
 /// One compile's line in the run's log (B-20).
@@ -123,6 +209,19 @@ pub struct Entry {
     pub differed: bool,
     /// One line for the person, when something needs saying (a suspension, low space).
     pub note: Option<String>,
+    /// Whether the block may leave the machine, and why not: for a compile that got as far as
+    /// searching its outputs, and for a reuse (from the block's record). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable: Option<crate::portable::Portability>,
+    /// The compile's first key, when computed: with `key`, the manifest's pair (B-30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<hushrun_core::Digest>,
+    /// The block's key: of the block reused, or of the block this compile stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<hushrun_core::Digest>,
+    /// The block was downloaded from the shared store for this compile (B-26).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub downloaded: bool,
 }
 
 const SESSION_FILE: &str = "session.json";
@@ -189,18 +288,27 @@ impl Current {
     }
 }
 
+/// A folder a variable names, else `default` under the home folder, as cargo and rustup find
+/// theirs.
+fn under_home(
+    env: &dyn Fn(&str) -> Option<OsString>,
+    variable: &str,
+    default: &str,
+) -> Option<String> {
+    let home = env("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    env(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(default)))
+        .and_then(|path| path.to_str().map(str::to_string))
+}
+
 fn shared_folders(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<String> {
-    let home = env("HOME").map(PathBuf::from);
-    let under_home = |variable: &str, default: &str| {
-        env(variable)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(default)))
-            .and_then(|path| path.to_str().map(str::to_string))
-    };
     let mut shared: Vec<String> = SYSTEM.iter().map(|s| s.to_string()).collect();
-    shared.extend(under_home("CARGO_HOME", ".cargo"));
-    shared.extend(under_home("RUSTUP_HOME", ".rustup"));
+    shared.extend(under_home(env, "CARGO_HOME", ".cargo"));
+    shared.extend(under_home(env, "RUSTUP_HOME", ".rustup"));
     shared
 }
 
@@ -216,6 +324,8 @@ pub struct Counts {
     pub compiles: u64,
     /// Compiles whose block was put in place, with rustc not started.
     pub reused: u64,
+    /// Of those, the ones whose block was downloaded from the shared store for them (B-26).
+    pub downloaded: u64,
     /// Compiles that ran and were stored.
     pub built_and_stored: u64,
     /// Compiles that ran and were not stored, for any reason.
@@ -236,6 +346,11 @@ pub struct Counts {
     pub min_free_gb: u32,
     /// The distinct notes the compiles left, in the order first seen.
     pub notes: Vec<String>,
+    /// Compiles whose block may not leave the machine because an output holds the value of a
+    /// variable not in its key (B-24).
+    pub unkeyed: u64,
+    /// Those variables, by name only, sorted.
+    pub unkeyed_variables: Vec<String>,
 }
 
 impl Counts {
@@ -249,7 +364,10 @@ impl Counts {
         for entry in entries.iter().filter(|entry| !is_probe(entry.outcome)) {
             counts.compiles += 1;
             match entry.outcome {
-                Outcome::Reused => counts.reused += 1,
+                Outcome::Reused => {
+                    counts.reused += 1;
+                    counts.downloaded += u64::from(entry.downloaded);
+                }
                 Outcome::BuiltAndStored => counts.built_and_stored += 1,
                 Outcome::BuiltNotStored(why) => {
                     counts.built_not_stored += 1;
@@ -262,6 +380,18 @@ impl Counts {
             counts.found += u64::from(entry.found);
             counts.differed += u64::from(entry.differed);
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
+            if let Some(portability) = &entry.portable
+                && portability
+                    .reasons
+                    .contains(&crate::portable::Reason::UnkeyedValue)
+            {
+                counts.unkeyed += 1;
+                counts
+                    .unkeyed_variables
+                    .extend(portability.variables.iter().cloned());
+                counts.unkeyed_variables.sort();
+                counts.unkeyed_variables.dedup();
+            }
             counts.stored_bytes = counts.stored_bytes.saturating_add(entry.stored_bytes);
             if let Some(note) = entry.note.as_deref().map(str::trim)
                 && !note.is_empty()
@@ -295,6 +425,10 @@ fn is_probe(outcome: Outcome) -> bool {
         )
     )
 }
+
+/// The line a run whose audit is off ends with (B-16).
+const AUDIT_OFF: &str = "build: the audit is off for this run (HUSHRUN_BUILD_AUDIT=none): no \
+                         reused block was compared with a fresh compile";
 
 /// What a run's compiles came to (B-20).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -355,6 +489,9 @@ fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
         }
         Mode::On | Mode::Off => {
             let mut line = format!("build: {} of {all} reused", counts.reused);
+            if counts.downloaded > 0 {
+                line.push_str(&format!(" ({} from the shared store)", counts.downloaded));
+            }
             if counts.built() > 0 {
                 line.push_str(&format!(", {} built", counts.built()));
             }
@@ -418,7 +555,8 @@ pub fn store_dir(cache_dir: Option<&Path>, overrides: &Overrides) -> Option<Path
     }
 }
 
-/// Starts a session, or says why there is none.
+/// Starts a session, or says why there is none. Never in CI: there a session begins only in the
+/// job's own store, with [`begin_in_ci`].
 pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
     if cfg!(windows) {
         return Err(NotBegun::Windows);
@@ -440,6 +578,59 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
     let Some(store) = store_dir(start.cache_dir, &overrides) else {
         return Err(NotBegun::NoCache);
     };
+    begin_at(start, settings, store)
+}
+
+/// The free-space floor of a store in CI, in gigabytes (B-31): a runner's disk is small, and the
+/// store goes with the job.
+pub const CI_MIN_FREE_GB: u32 = 2;
+
+/// B-2, B-31: starts a CI job's session in `store`, a folder under the job's own temporary
+/// folder that goes with the job, for a job whose org shares build blocks. No person's settings
+/// file is read there: reuse is on unless `HUSHRUN_BUILD` says otherwise, the floor is
+/// [`CI_MIN_FREE_GB`], and `HUSHRUN_BUILD_DIR` is not followed, so nothing outlives the job.
+pub fn begin_in_ci(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
+    begin_without_settings(start, store, Mode::On, CI_MIN_FREE_GB)
+}
+
+/// B-25, B-36: starts a session in `store` on a machine where no person is signed in (a
+/// sandbox): reuse is on unless the machine's settings file says `off`
+/// ([`settings::sandbox_mode`]), and `HUSHRUN_BUILD` sets this command's mode over either.
+pub fn begin_in_sandbox(start: &Start<'_>, store: &Path) -> Result<Session, NotBegun> {
+    let mode = settings::sandbox_mode(start.settings)
+        .map_err(|err| NotBegun::Unusable(err.to_string()))?;
+    begin_without_settings(start, store, mode, settings::MIN_FREE_GB)
+}
+
+/// A session whose settings are the defaults but for `mode` and the floor, and the command's
+/// variables.
+fn begin_without_settings(
+    start: &Start<'_>,
+    store: &Path,
+    mode: Mode,
+    min_free_gb: u32,
+) -> Result<Session, NotBegun> {
+    if cfg!(windows) {
+        return Err(NotBegun::Windows);
+    }
+    let overrides =
+        Overrides::from(start.env).map_err(|err| NotBegun::Unusable(err.to_string()))?;
+    let settings = Settings {
+        mode,
+        min_free_gb,
+        ..Settings::default()
+    }
+    .with(&overrides);
+    if settings.mode == Mode::Off {
+        return Err(NotBegun::Off);
+    }
+    if (start.env)(RUSTC_WRAPPER).is_some_and(|value| !value.is_empty()) {
+        return Err(NotBegun::WrapperSet);
+    }
+    begin_at(start, settings, store.to_path_buf())
+}
+
+fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Session, NotBegun> {
     let millis = start
         .now
         .duration_since(UNIX_EPOCH)
@@ -448,6 +639,7 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         .join(SESSIONS)
         .join(format!("{millis}-{}", std::process::id()));
     std::fs::create_dir_all(&folder)
+        .and_then(|()| private(&folder))
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", folder.display())))?;
     let link = link_to(&store, start.exe)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", store.display())))?;
@@ -457,32 +649,110 @@ pub fn begin(start: &Start<'_>) -> Result<Session, NotBegun> {
         keep_days: settings.keep_days,
         never_store: settings.never_store,
         env: settings.env,
+        repository_env: start.repository_env.to_vec(),
         min_free_gb: settings.min_free_gb,
         programs: settings.programs,
         repository: start.repository.map(str::to_string),
         started_ms: millis,
         shared: shared_folders(start.env),
+        cargo_home: under_home(start.env, "CARGO_HOME", ".cargo"),
+        rustup_home: under_home(start.env, "RUSTUP_HOME", ".rustup"),
+        home: (start.env)("HOME")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.into_string().ok()),
+        key_log: (start.env)(KEY_LOG)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute()),
+        audit: Audit::from_var(
+            (start.env)(crate::audit::VAR)
+                .as_deref()
+                .and_then(OsStr::to_str),
+        ),
         folder,
+        share: Shared::Off,
+        share_setting: settings.share,
     };
-    let file = current.folder.join(SESSION_FILE);
-    serde_json::to_vec(&current)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(&file, bytes))
-        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", file.display())))?;
+    write_current(&current)
+        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", current.folder.display())))?;
     Ok(Session {
         current,
         link,
         rebuilt: Vec::new(),
+        more: Vec::new(),
     })
 }
 
+/// Writes `session.json` whole: a temporary file in the session's folder, then a rename, so a
+/// wrapper never reads half of it.
+fn write_current(current: &Current) -> std::io::Result<()> {
+    let file = current.folder.join(SESSION_FILE);
+    let temp = current
+        .folder
+        .join(format!(".{SESSION_FILE}.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(current).map_err(std::io::Error::other)?;
+    std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, &file))
+}
+
+/// Makes `folder` this user's alone (mode 0700): the relay's socket lives in it (B-26).
+#[cfg(unix)]
+fn private(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn private(_folder: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 impl Session {
+    /// Names the run's relay in `session.json` (B-26), before COMMAND starts, so every wrapper
+    /// of the run finds it. The file is rewritten whole.
+    pub fn set_share(&mut self, share: Share) -> std::io::Result<()> {
+        self.current.share = Shared::Relay(share);
+        write_current(&self.current)
+    }
+
+    /// Records in `session.json`, before COMMAND starts, that the run would share and its
+    /// backend couldn't be reached (B-34). A run with a relay keeps it: the relay is what knows
+    /// whether its server can be reached.
+    pub fn set_unreached(&mut self) -> std::io::Result<()> {
+        if self.current.share != Shared::Off {
+            return Ok(());
+        }
+        self.current.share = Shared::Unreached;
+        write_current(&self.current)
+    }
+
+    /// Makes, before COMMAND starts, the sysroot without sources the compiles of this run will
+    /// be given for the toolchain at `sysroot`, when it has sources (B-9, B-17), so that the
+    /// wrappers find it whole and only read it. `None` when it has none or the view can't be
+    /// made: a wrapper then makes it, or passes its compile through.
+    pub fn hide_sources(&self, sysroot: &Path) -> Option<PathBuf> {
+        let used = UNIX_EPOCH + Duration::from_millis(self.current.started_ms);
+        let dir = self
+            .current
+            .store
+            .join(crate::compiler::MEMOS)
+            .join(crate::compiler::SYSROOTS);
+        crate::compiler::hidden_sources(sysroot, &dir, Some(used))
+            .ok()
+            .flatten()
+    }
+
     /// What to set on COMMAND: the wrapper for cargo, and the session for the wrapper.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         vec![
             (RUSTC_WRAPPER.into(), self.link.clone().into_os_string()),
             (SESSION.into(), self.current.folder.clone().into_os_string()),
         ]
+    }
+
+    /// Adds a line to the run's summary, once: what its relay said (B-26).
+    pub fn add_line(&mut self, line: String) {
+        if !self.more.contains(&line) {
+            self.more.push(line);
+        }
     }
 
     /// The mode every compile of this run sees.
@@ -512,12 +782,28 @@ impl Session {
     /// same at once.
     pub fn finish(self, now: SystemTime) -> Summary {
         let current = &self.current;
-        let summary = Summary::of_run(
+        let mut summary = Summary::of_run(
             current.mode,
             current.min_free_gb,
             &current.entries(),
             &self.rebuilt,
         );
+        // B-16: whoever turned the audit off turned a guard off; the run says so every time.
+        if current.audit == Audit::Never {
+            summary.lines.push(AUDIT_OFF.to_string());
+        }
+        // B-24: with a shared store, what the search for unkeyed values held back, by name.
+        if current.share.relay().is_some() && summary.counts.unkeyed > 0 {
+            let n = summary.counts.unkeyed;
+            summary.lines.push(format!(
+                "build: {} {} on this machine: {} the value of {}, which no key holds (a project names such a variable under build: env:)",
+                crates(n),
+                if n == 1 { "stays" } else { "stay" },
+                if n == 1 { "its outputs hold" } else { "their outputs hold" },
+                summary.counts.unkeyed_variables.join(", ")
+            ));
+        }
+        summary.lines.extend(self.more.iter().cloned());
         let _ = remove_dir(&current.folder);
         let _ = crate::sweep::sweep(&Store::new(&current.store), now, current.keep_days);
         remove_stale_sessions(&current.store, now);
@@ -638,6 +924,7 @@ mod tests {
             exe,
             in_ci: false,
             repository: None,
+            repository_env: &[],
             env,
             now: UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
         }
@@ -686,6 +973,10 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         };
         found.log(&entry);
         found.log(&entry);
@@ -698,7 +989,52 @@ mod tests {
         let folder = session.env()[1].1.clone();
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(found.programs, Programs::Tied);
+        assert_eq!(found.audit, Audit::OneIn);
         session.finish(UNIX_EPOCH);
+
+        // The view of a toolchain with sources is made as the run begins, before any compile
+        // (B-9), and found by the wrappers whole; a toolchain without sources has none.
+        let toolchain = dir.path().join("toolchain");
+        std::fs::create_dir_all(toolchain.join("lib/rustlib/x86_64-unknown-linux-gnu/lib"))
+            .unwrap();
+        let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        assert_eq!(session.hide_sources(&toolchain), None);
+        std::fs::create_dir_all(toolchain.join("lib/rustlib/src/rust/library")).unwrap();
+        let view = session.hide_sources(&toolchain).unwrap();
+        assert!(view.starts_with(&session.current().store));
+        assert!(view.join(crate::compiler::VIEW_MARKER).is_file());
+        assert!(
+            view.join("lib/rustlib/x86_64-unknown-linux-gnu/lib")
+                .is_dir()
+        );
+        assert!(!view.join("lib/rustlib/src").exists());
+        session.finish(UNIX_EPOCH);
+
+        // How many compiles the run audits is read once, as it begins (B-16).
+        let every = |name: &str| (name == crate::audit::VAR).then(|| OsString::from("every"));
+        let session = begin(&start(dir.path(), &settings, &exe, &every)).unwrap();
+        let folder = session.env()[1].1.clone();
+        let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
+        assert_eq!(found.audit, Audit::Every);
+        assert!(
+            session
+                .finish(UNIX_EPOCH)
+                .lines()
+                .iter()
+                .all(|l| !l.contains("audit"))
+        );
+        // Turned off, the guard it is gone for the run, and the run says so (B-16).
+        let none = |name: &str| (name == crate::audit::VAR).then(|| OsString::from("none"));
+        let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        let lines = session.finish(UNIX_EPOCH).lines().to_vec();
+        assert_eq!(
+            lines,
+            vec![
+                "build: the audit is off for this run (HUSHRUN_BUILD_AUDIT=none): no reused block \
+                 was compared with a fresh compile"
+                    .to_string()
+            ]
+        );
 
         // Never in CI, and never over a wrapper the person set.
         let mut ci = start(dir.path(), &settings, &exe, &none);
@@ -747,6 +1083,10 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         }
     }
 
@@ -756,6 +1096,26 @@ mod tests {
             saved_ms,
             ..entry(Outcome::Reused)
         }
+    }
+
+    // covers: B-20, B-26
+    #[test]
+    fn the_summary_says_how_many_reuses_came_from_the_shared_store() {
+        let downloaded = Entry {
+            downloaded: true,
+            ..reused(500)
+        };
+        let summary = Summary::of(
+            Mode::On,
+            10,
+            &[downloaded.clone(), downloaded, reused(500), built()],
+        );
+        assert_eq!(
+            summary.lines()[0],
+            "build: 3 of 4 crates reused (2 from the shared store), 1 built, saving about 1s"
+        );
+        let summary = Summary::of(Mode::On, 10, &[reused(500), built()]);
+        assert_eq!(summary.lines()[0], "build: 1 of 2 crates reused, 1 built");
     }
 
     fn built() -> Entry {

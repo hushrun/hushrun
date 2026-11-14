@@ -76,6 +76,8 @@ pub struct Restore<'a> {
     pub start: SystemTime,
     /// This process's id, for temporary names no other process uses.
     pub pid: u32,
+    /// The store's seal, which each placed file's record is sealed with (B-6).
+    pub seal: Option<crate::sidecar::Seal>,
 }
 
 /// A block in place.
@@ -97,6 +99,11 @@ pub struct Prepared {
     pid: u32,
     origin: Option<Digest>,
     step: Digest,
+    /// The block's key, which each file's record names.
+    block: Digest,
+    /// Whether another machine names the block's files as this one does.
+    portable: bool,
+    seal: Option<crate::sidecar::Seal>,
 }
 
 /// A file, or a program's whole debug bundle, ready to be renamed into place.
@@ -106,6 +113,8 @@ struct Ready {
     dest: PathBuf,
     /// The file's SHA-256, or `None` for the bundle's folder, whose files were each checked.
     sha256: Option<Digest>,
+    /// For a linked library, the digest of its metadata the block recorded from its bytes.
+    metadata: Option<Digest>,
 }
 
 /// Whether `name` is one plain file name of this call's outputs: no folder, not hidden, holding
@@ -245,6 +254,7 @@ impl Restore<'_> {
                     temp: temp.clone(),
                     dest: out_dir.join(&name),
                     sha256: None,
+                    metadata: None,
                 });
                 for file in bundle {
                     let rest = in_bundle(&file.name, &stem)
@@ -267,6 +277,11 @@ impl Restore<'_> {
                     temp: temp.clone(),
                     dest: out_dir.join(&file.name),
                     sha256: Some(file.sha256),
+                    metadata: description
+                        .outputs
+                        .iter()
+                        .find(|o| o.name == file.name)
+                        .and_then(|o| o.metadata),
                 });
                 copy_checked(&file.path, &temp, file.sha256)?;
                 finish_file(&temp, self.start)?;
@@ -277,6 +292,7 @@ impl Restore<'_> {
                 temp: temp.clone(),
                 dest: dep_dest.clone(),
                 sha256: Some(Digest::of(dep_text.as_bytes())),
+                metadata: None,
             });
             finish_file(&temp, self.start)
         })();
@@ -293,6 +309,9 @@ impl Restore<'_> {
             // Only a block that may move is known to dependents by its origin (B-6).
             origin: (description.place == PlaceKind::Anywhere).then_some(description.origin),
             step: description.step,
+            block: self.block.key,
+            portable: description.portability.named_portably(description.class),
+            seal: self.seal,
         })
     }
 }
@@ -322,6 +341,9 @@ impl Prepared {
             pid,
             origin,
             step,
+            block,
+            portable,
+            seal,
         } = self;
         let mut placed: Vec<PathBuf> = Vec::with_capacity(ready.len());
         let renamed = (|| -> Result<(), RestoreError> {
@@ -332,8 +354,19 @@ impl Prepared {
             for file in &ready {
                 // A bundle is no dependent's input: no record, and none written inside it.
                 let Some(sha256) = file.sha256 else { continue };
-                sidecar::record_block(&file.dest, sha256, origin, Some(step), true)
-                    .map_err(at(&file.dest))?;
+                let produced_by = origin.and_then(|known| {
+                    crate::metadata::produced_by(known, &file.dest, file.metadata)
+                });
+                sidecar::record_reused(
+                    &file.dest,
+                    sha256,
+                    produced_by,
+                    step,
+                    block,
+                    portable,
+                    seal.as_ref(),
+                )
+                .map_err(at(&file.dest))?;
             }
             Ok(())
         })();

@@ -11,9 +11,10 @@ use crate::depinfo::{DepInfo, EnvDep};
 use crate::key::PlaceKind;
 use crate::messages;
 use crate::model::Class;
+use crate::portable::Portability;
 
 /// The schema name every description carries. One with another name is not read.
-pub const SCHEMA: &str = "hushrun.build.description/2";
+pub const SCHEMA: &str = "hushrun.build.description/4";
 
 /// What one output file of a block is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,10 @@ pub struct Output {
     pub name: String,
     /// What it is.
     pub kind: OutputKind,
+    /// For a linked library, the digest of the crate metadata in it, taken from the bytes stored
+    /// ([`crate::metadata::digest`]): what a reuse's record names it by (B-6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Digest>,
 }
 
 /// One `# env-dep:` line, with roots in its value as placeholders.
@@ -128,11 +133,13 @@ pub struct Description {
     pub package: Option<String>,
     /// The first key (B-5). A dependent that can't load the block suspends it (B-15).
     pub step: Digest,
-    /// The second key computed without its place: what a proc macro is known by to its
-    /// dependents (B-6).
+    /// What a proc macro is known by to its dependents (B-6): the second key computed without
+    /// its place and without the link environment ([`crate::key::Observed::known_by`]).
     pub origin: Digest,
     /// Whether the block may move (B-10).
     pub place: PlaceKind,
+    /// Whether the block may leave the machine, and why not ([`crate::portable::portable`]).
+    pub portability: Portability,
     /// Its files, by name and kind, in the store's order.
     pub outputs: Vec<Output>,
     /// The dep-info file, in parsed form with placeholders. Not a file of the block: it holds
@@ -180,14 +187,22 @@ mod tests {
             step: Digest::of(b"step"),
             origin: Digest::of(b"origin"),
             place: PlaceKind::Anywhere,
+            portability: Portability {
+                portable: false,
+                reasons: vec![crate::portable::Reason::Tied],
+                externs: Vec::new(),
+                variables: Vec::new(),
+            },
             outputs: vec![
                 Output {
                     name: "liba.rmeta".into(),
                     kind: OutputKind::Metadata,
+                    metadata: None,
                 },
                 Output {
                     name: "a.dSYM/Contents/Resources/DWARF/a".into(),
                     kind: OutputKind::DebugBundle,
+                    metadata: None,
                 },
             ],
             dep_info: StoredDepInfo {
@@ -212,6 +227,8 @@ mod tests {
         let value = description().to_value().unwrap();
         assert_eq!(value["repository"], "hushrun/hushrun");
         assert_eq!(value["outputs"][1]["kind"], "debug-bundle");
+        assert_eq!(value["portability"]["portable"], false);
+        assert_eq!(value["portability"]["reasons"][0], "tied");
         assert_eq!(Description::from_value(&value), Some(description()));
         let mut other = value.clone();
         other["schema"] = "other/1".into();

@@ -78,6 +78,12 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["env-filter", "fmt", "ansi", "std"] }
 unicode-normalization = "0.1.24"
 zeroize = "1.8"
+# \[B-28\] The pack a build block travels in between machines: a zstd stream, compressed on one
+# thread at level 3, so one CLI version packs one block to the same bytes on every machine. C code
+# built with cc, as ring and mimalloc are. Only `hushrun_core::blocks::pack` uses it, behind
+# hushrun-core's `pack` feature, which the binary turns on: never hushrun-build, the wrapper's
+# crate, and never the backend, which reads the wire types without it.
+zstd = { version = "0.13.3", default-features = false }
 # \[C-38\] A hint's bytes are a zlib stream: pure Rust, which the binary already builds for gix
 # (gix-zlib), so the release targets gain no crate and no C code.
 zlib-rs = { version = "0.6.8", default-features = false, features = ["std"] }
@@ -107,6 +113,12 @@ cms = { version = "0.2.3", default-features = false, features = ["std"] }
 assert_cmd = "2.0.17"
 predicates = { version = "3.1", default-features = false }
 proptest = { version = "1.6", default-features = false, features = ["std"] }
+
+# The rustc wrapper hashes the toolchain once per install (a few hundred megabytes, B-17) and
+# every output it stores: unoptimized, SHA-256 makes the debug wrapper the tests run crawl (a
+# toolchain took 20 seconds instead of one).
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = "fat"

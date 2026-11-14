@@ -235,6 +235,21 @@ pub fn settle(out_dir: &Path, stem: &str, seen: Option<&Seen>) -> bool {
 /// no session, or arguments the parser refused (B-23). Cost: a scan of the arguments and one
 /// `unlink`.
 pub fn forget_for_args(args: &[std::ffi::OsString], cwd: Option<&Path>) {
+    if let Some((dir, stem)) = unit_of_args(args, cwd) {
+        remove(&record_path(&dir, &stem));
+    }
+}
+
+/// Marks the unit the arguments name as compiled as asked ([`crate::sidecar::mark_as_asked`]),
+/// for a call the parser refused inside a run: rustc runs without the wrapper's remaps.
+pub fn mark_as_asked_for_args(args: &[std::ffi::OsString], cwd: &Path) {
+    if let Some((dir, stem)) = unit_of_args(args, Some(cwd)) {
+        crate::sidecar::mark_as_asked(&dir, &stem);
+    }
+}
+
+/// The output folder and the unit's stem (`<crate name><extra filename>`) the arguments name.
+fn unit_of_args(args: &[std::ffi::OsString], cwd: Option<&Path>) -> Option<(PathBuf, String)> {
     let mut crate_name = None;
     let mut extra = None;
     let mut out_dir = None;
@@ -262,18 +277,15 @@ pub fn forget_for_args(args: &[std::ffi::OsString], cwd: Option<&Path>) {
         }
     }
     let (Some(name), Some(dir)) = (crate_name, out_dir) else {
-        return;
+        return None;
     };
     let dir = Path::new(dir);
     let dir = match (dir.is_absolute(), cwd) {
         (true, _) => dir.to_path_buf(),
         (false, Some(cwd)) => cwd.join(dir),
-        (false, None) => return,
+        (false, None) => return None,
     };
-    remove(&record_path(
-        &dir,
-        &format!("{name}{}", extra.unwrap_or("")),
-    ));
+    Some((dir, format!("{name}{}", extra.unwrap_or(""))))
 }
 
 fn remove(path: &Path) {
@@ -450,7 +462,10 @@ pub fn digests(cx: &Context<'_>, observed: &Observed) -> BTreeMap<PathBuf, Diges
         let ReadState::Present(sha) = read.state else {
             continue;
         };
-        if matches!(read.at, Located::Shared(_)) {
+        // What lies in a shared folder or a base is the same for every checkout: never watched.
+        if matches!(&read.at, Located::Shared(_))
+            || matches!(&read.at, Located::Rooted(rooted) if rooted.root.is_base())
+        {
             continue;
         }
         if let Some(path) = cx.open_at(&read.at) {
@@ -1134,6 +1149,7 @@ mod tests {
             Digest::of(b"rlib"),
             None,
             false,
+            None,
         )
         .unwrap();
         fs::write(u.src.join("notes.txt"), b"").unwrap();

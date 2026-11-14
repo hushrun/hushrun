@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod blocks;
 pub mod counts_from;
 pub mod digest;
 pub mod event;
@@ -17,6 +18,7 @@ pub mod plan;
 pub mod policy;
 pub mod run;
 pub mod scope;
+pub mod secret_names;
 pub mod signers;
 pub mod time;
 pub mod transparency;

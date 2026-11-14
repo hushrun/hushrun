@@ -6,8 +6,359 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):
+when an org's backend keeps a shared store of compiled crates and the person lets this machine
+take part, `hushrun run NAME -- COMMAND` uploads what it builds, sealed with each block's own key,
+and reuses what another machine built. Off unless the org shares. `hushrun run CHECK…` shares
+nothing: it reuses this machine's own store, and reads a saved fetch, but never asks the backend.
+
+Sharing build blocks in CI and sandboxes ([ADR 0079](docs/adr/0079-sharing-build-blocks-in-ci-and-sandboxes.md)):
+a CI job's `hushrun run NAME -- COMMAND` whose org shares gets the wrapper, in a store that goes
+with the job, and asks as itself with its ID token (`hushrun run CHECK…` gets none in CI); an
+agent's sandbox shares as the org's mode says, and fetches at setup what its later runs reuse
+offline.
+
+### Added
+
+- Contract: **in CI, `hushrun run NAME -- COMMAND` sets `RUSTC_WRAPPER` when the org shares build
+  blocks** (`hushrun run CHECK…` never does there): the results lookup carried `Hushrun-Build:
+  on`, the job can be asked as itself, and `open` answered within 5 seconds. The store is `hushrun-build-<run>-<attempt>-<digest>` under `RUNNER_TEMP`,
+  named by the job (elsewhere a folder of the run's, removed with it), with a 2 GB floor. A backend that didn't answer in time is one line,
+  `build reuse is off for this run: the backend didn't answer in time`; an org that doesn't share
+  changes nothing.
+- Contract: **in GitHub Actions every build request carries the job's ID token**, also beside an
+  agent token, minted again near its expiry and after a 401; with none, sharing is off and the
+  run says why. Elsewhere in CI an agent token reads and never uploads.
+- Contract: **the end of a CI job's command waits for its uploads**: up to 2 minutes for a job
+  that writes trusted blocks, 20 seconds for any other, never more than a quarter of what the
+  waiting blocks' compiles took, for the whole call.
+- Contract: **`hushrun build fetch`**, for a sandbox's setup phase: saves the crates the org's
+  newest build of this repository used, sealed, with no token, into the store's `prefetched/`,
+  good for 24 hours; a later run with no network or token reuses them and sends nothing.
+  `--format json` gives `blocks`, `bytes`, `hints`, `store` and `good_for_hours`.
+- Contract: **lookup requests of the build protocol carry `commit`**, the workspace's, when it can
+  be read; an older backend ignores it.
+- Contract: **`hushrun repository usage` shows the org's shared store** when the backend's usage
+  answer carries `shared_store`: `shared     3.2 GB held, of 10 GB`, and, when a smaller allowance
+  is coming, `being trimmed to 10 GB from 2026-11-03`. `--format json` passes it on as
+  `usage.shared_store`, only when the server sent it; an answer without it reads as before.
+- Contract: **`open`'s off reason `contract`** (`OffReason::Contract` in `hushrun_core::blocks`):
+  the org's plan sets its shared storage by contract alone, and none is set yet. The run says so
+  in one line and to get in touch with hushrun to set it, also in a CI job, which then runs
+  unwrapped; an older CLI reads the word as unknown.
+- Contract: **`HUSHRUN_BUILD_AUDIT`**, read as `hushrun run` begins: `every` compares every
+  compile that could be reused with its block, `none` none (for tests; it removes the check
+  that catches two compiles with one key and different bytes, and the run ends with `build: the
+  audit is off for this run`), anything else one in fifty. `HUSHRUN_BUILD_KEY_LOG`, an absolute
+  file, gets one JSON line per compile with each key's parts, whether it found a block, whether it
+  differed, and the run's audit setting.
+- **Portable blocks** ([ADR 0077](docs/adr/0077-portable-build-blocks.md)): keys no longer name
+  the machine, so the same toolchain and sources give the same keys on two machines, and each
+  block records whether it may ever leave the machine and why not. The compiler is known by its
+  content (the SHA-256 of `rustc`, its libraries and the standard library, and `rustc -vV`), not
+  by its path and dates; the cargo home and the toolchain are named in keys like the workspace,
+  and every compile's paths under the cargo home read `/hushrun/cargo`; a proc macro is named by
+  what it was built from and by the crate metadata in it. A library's key no longer holds the
+  SDK or the linker's variables, nor the bytes of the static libraries beside it when its `.rlib`
+  holds only its own objects. Nothing leaves the machine yet. Every local key changes once, so
+  blocks stored before are built again and expire.
+- A block whose bytes or records hold a folder of the machine (the cargo home, the rustup home,
+  the home folder, or a toolchain a variable names) is reused only where that folder has the same
+  value. Before, two people sharing one store, or one person who changed `CARGO_HOME`, could get a
+  library built with the other cargo home. Each value now compiles once and keeps its own block.
+- Where the toolchain has rustup's `rust-src` (or `rustc-dev`), compiles inside `hushrun run`
+  are given a view of the toolchain without those sources (`--sysroot`), since with them rustc
+  gives some crates another crate hash and one machine's blocks failed to load on another. For
+  those compiles, an error that points into the standard library shows `/rustc/<commit>/…` and
+  no source line, and debug info names the standard library's files that way. The view is a
+  folder of links in the store, made as `hushrun run` begins and swept like unused blocks.
+- Contract: **`hushrun build share on|observe|off`**, saved as `share` in `build.json` (`on`
+  unless set), and **`HUSHRUN_BUILD_SHARE`** for one command. It lowers the org's shared mode on
+  this machine and never raises it. `hushrun build status` shows it, and what sharing does here
+  and why (`share` and `sharing` in `--format json`).
+- Contract: a top-level **`build: env:`** list in `hushrun.yaml`: every compile of the repository
+  is keyed by those variables, on every machine and in both forms of `hushrun run`. It changes no
+  check's definition.
+- Contract: the run's line says how many reuses came from the shared store (`331 of 372 crates
+  reused (212 from the shared store)`), and one more line only when something needs saying: why
+  sharing is off or stopped for the run, how many blocks wait to upload, or which variables held
+  blocks back.
+- Contract: `close`'s counts carry **`comparedDiffered`**, how many of the comparisons differed;
+  a server that doesn't know it ignores it.
+- The relay: the part of `hushrun run` that talks to the backend for the wrappers over a Unix
+  socket in the session's private folder. Cargo never waits for it; a fetch is started only when
+  it should arrive within half the crate's compile time, and given up as soon as it can't; three
+  failures rest it for 30 seconds; a refusal mid-run stops sharing for the run and keeps what
+  waits to upload.
+- The store keeps a record beside each block of where it came from: built here (and by which
+  host, org and credential), or downloaded (and who vouches for it). Only a block built here goes
+  up, in the org that built it; a downloaded block is reused only while a server the run belongs
+  to vouched for it within a day, or when no server can be reached.
+- The outbox, `incoming/` and the run folders in the store, swept with dead runs; uploads end with
+  the command, those in flight getting 5 seconds.
+- `zstd` (C, built with `cc`) compresses packs; it is in the binary and in `hushrun-core`'s `pack`
+  feature, and listed in the notices.
+
+### Changed
+
+- Contract: **in CI, `hushrun run` no longer always leaves `RUSTC_WRAPPER` alone**: `NAME --
+  COMMAND` sets it there when the org shares build blocks (see Added); `hushrun run CHECK…` still
+  never does in CI.
+- Build blocks, from a review of the relay: a block whose output holds the value, 8 bytes or more,
+  of any variable no CI system or build tool set stays on the machine (it was 16 for names that
+  don't look like secrets); the prefetch starts at the first compile that asks, so a run that
+  compiles nothing downloads nothing; a stale vouch is decided within half the block's compile
+  time, so a slow backend never delays cargo; a downloaded block that differs from a compile here
+  is suspended as well as replaced; a pack that would unpack past 64 times its size, or past the
+  disk's floor, is refused before any file is written.
+- A block whose output holds the value of an environment variable that looks like a secret and
+  isn't in its key, or that was compiled for `target-cpu=native`, never leaves the machine. On the
+  machine, `target-cpu=native` is keyed by what the compiler reports for this host, asked once per
+  compiler.
+- A key suspended because a downloaded block differed or couldn't be loaded comes back after the
+  store's kept days.
+- Build blocks: a block that can't be put in place now compiles with the wrapper's remaps
+  (storing nothing) rather than as asked, so its dependents keep the keys other machines
+  compute; a dependent of a crate compiled as asked stays on the machine; two runs on one store
+  that download the same block leave its folder where it is. Before, a reuse could copy from a
+  block another run's download was replacing, compile as asked, and give a dozen dependents keys
+  no other machine computes.
+- Shared `observe` downloads each block it compares once (it fetched each twice, the prefetch's
+  copy unused), and its summary says how many blocks it compared and how many differed.
+
 ### Fixed
 
+- `hushrun run CHECK…` in an org that shares build blocks says once, when a check compiled Rust,
+  that it didn't use the shared store: ``build: only `hushrun run NAME -- COMMAND` uses the org's
+  shared store: this run's crates were neither downloaded from it nor uploaded to it``. It still
+  shares nothing; it asks the backend whether the org shares with one results lookup, and only
+  after a check compiled. In CI, where that form sets no wrapper, it says nothing.
+- `hushrun build fetch` says which credentials it takes, in its help and when it finds none: an
+  agent token in `HUSHRUN_AGENT`, an agent or a personal token in `HUSHRUN_TOKEN`, a person's
+  sign-in, or in GitHub Actions the job's ID token. It already worked with a person's sign-in;
+  the error named only `HUSHRUN_AGENT`.
+- `hushrun repository usage`: an org whose shared store has no allowance no longer reads
+  `0 bytes held, of 0 bytes`. The line says why there is none, from the usage answer's `reason`
+  when the backend sends one: `nothing held: the plan sets its storage by contract, and none is
+  set yet`, or `the plan includes no shared storage`; with no reason, `no storage is set for it`.
+  Contract: `usage.shared_store` in `hushrun.repository.usage/v1` may carry `reason`.
+- Build blocks: **on x86-64 Linux, a crate that uses a proc macro is shared like any other.**
+  rustc links there with its own lld and hands the C driver the toolchain's folder as
+  `-B<folder>`; what a proc macro's block kept of that named the folder as this machine has it,
+  so the macro counted as one another machine would name differently, and every crate compiled
+  against it stayed on the machine, with no line that said so. The kept flag now names the
+  toolchain, as the rest of the block does.
+- Build blocks: **with gcc 15, a program or proc macro linked by another `ld` earlier on `PATH`
+  is no longer reused.** gcc 15 answers `-print-prog-name=ld` with the `<target>-ld` it finds on
+  `PATH` (`/usr/bin/x86_64-linux-gnu-ld` on Ubuntu 26.04), but its `collect2` still runs the
+  first `ld` on `PATH`; the key named the first. Now a path from a driver that links through
+  `collect2` counts only when the driver says it without any `PATH` too (its own folder, a `-B`
+  folder, or an `ld` built in); otherwise the `ld` is looked up as `collect2` does. One more
+  question per link in that case, none with rustc's own lld, clang or older gcc.
+- Build blocks: a run that passes through because `RUSTC_WRAPPER` is set already (sccache, for
+  one) says so where its org shares build blocks: `build reuse is off for this run: another
+  compiler wrapper is set (RUSTC_WRAPPER)`. Before, it said nothing, and the shared store was
+  silently unused. Where the org doesn't share, or reuse is off here, it still says nothing.
+- Build blocks: **an agent's run on a person's machine no longer turns build reuse on by
+  itself.** A machine with an agent token and no `build.json` was taken for a sandbox, so on a
+  laptop where an agent ran with a token, crates were reused and shared without anyone choosing
+  it. A machine is a sandbox for this only when no person is signed in to the backend there and
+  the run carries an agent token; where a person is signed in, an agent's run follows that
+  person's `hushrun build` settings, off by default.
+- Contract: **a person's or an agent's token used in CI says so.** Every build request of such a
+  run and its results lookup carry `Hushrun-Ci: 1`, and the lookup names the run's repository
+  (`?repository=`). The backend then lets the token read that repository's trusted blocks alone
+  and write nothing, and `open` says `"untrusted": "credential"`: the run uploads nothing, makes
+  no marker, and says once `build: this job reads the repository's trusted blocks and writes
+  none: it uses a person's or an agent's token in CI, not the job's own ID token`. Before, a main
+  job and a pull request job holding one token shared that token's scope. Outside CI nothing
+  changes, and a job's own ID token is asked as before.
+- Build blocks: **a run that is not sharing reuses no block it only downloaded.** After an admin
+  turned an org's sharing off or deleted its blocks, after `hushrun build share off`, and signed
+  out, a machine went on reusing the blocks it had downloaded for as long as it used them: a run
+  with no relay was taken for one that is offline. Now only a run that would share and whose
+  backend couldn't be reached counts a download whatever its age. Where sharing is off by a
+  decision (the org's, the person's, nobody signed in, `open` saying no, a refused caller, or
+  `hushrun run CHECK…`), the crate is compiled, once, and that block is built here from then on.
+  A block built here is reused as before. "Couldn't be reached" means no server gave any HTTP
+  response: a redirect, a proxy's or captive portal's page, an answer cut on its way, an error
+  status or a refused credential request is an answer, and downloads are compiled once then.
+- Build blocks: a program, proc macro or build script whose `-l` library is found in a folder
+  the C driver or `ld` adds (the system's library folders, `LIBRARY_PATH`'s, on macOS the SDK's)
+  no longer reuses one linked against another file there. Such a library was "covered by the SDK
+  and the linker" and keyed by nothing, so swapping it kept the key. Now every place it may be
+  found in those folders is keyed by SHA-256 or as absent, a GNU linker script found there
+  (glibc's `libc.so`) has the files it names keyed the same way, and a script that does more, or
+  a sysroot other than `/`, builds without storing. With the `ld` question below, about 5.5 ms
+  more per link and 2.5 ms more per lookup on Linux with gcc, nothing more on macOS.
+- Build blocks: a program, proc macro or build script no longer reuses one linked by another
+  `ld`. The key named the C driver (`cc`) by its size and date, not the `ld` it runs, which
+  `collect2` takes from `PATH`: another `ld` earlier on `PATH` linked other bytes under the same
+  key. Now the driver is asked which `ld` it runs (`-print-prog-name`, then `collect2`'s search),
+  at every link and before every lookup, and that file is keyed by where it lies, size, dates and
+  inode; on macOS it is the selected Xcode's `ld`. clang's `--ld-path=` is taken as the linker,
+  and a link given a specs or configuration file (`-specs=`, `--config`) builds without storing.
+  About 12 ms more per link and per lookup on macOS, where the driver answers slowly, and
+  about 1 ms on Linux with gcc.
+- Build blocks: a program, proc macro or build script linked with a variable the linker reads
+  from its own environment set no longer reuses one linked without it. Apple's `ld` reads
+  `RC_UUID_SALT` (every output's UUID) and `LD_APPLICATION_EXTENSION_SAFE` and `LD_NO_ENCRYPT`
+  (a dynamic library's header), and the key held none of them. Now every variable whose name
+  starts with `LD_`, `RC_` or `COLLECT_`, and `LDEMULATION` and `GNUTARGET`, is keyed for a linked
+  output.
+- Build blocks: a proc macro in a `target/` folder restored from a cache or copied from
+  elsewhere no longer gives its dependents the keys of the macro its record names. The record
+  beside it was believed whenever its own SHA-256 matched the file, so a doctored macro with a
+  record naming the honest one gave every crate built against it the honest key, and a trusted
+  CI job uploaded those crates. Now a record is believed only when the run's own store holds the
+  block it names with the same file; any other proc macro is named by its bytes, and nothing
+  built against it leaves the machine. In CI the store starts empty, so a job shares only what it
+  compiled itself.
+- Build blocks: a record beside an output answers for the file's bytes without a read only when
+  this store's wrapper wrote it. A record restored with a `target/` folder whose stat matched the
+  restored file (size, modification time, inode, device) answered for any bytes it claimed, so a
+  library or proc macro could be keyed as other bytes than it held. Records are now sealed with a
+  secret the store keeps (`seal` at its root); any other record has its file hashed first, once.
+- Build blocks: a dependent that can't load a crate whose record came with a restored `target/`
+  no longer suspends, or reports as `rejected` to the shared store, whatever block that record
+  names. The record alone decided which first key was suspended and which download was reported,
+  so a planted record could get a good shared block reported. Now only a block the run's own
+  store confirms is acted on; any other such crate is removed so cargo builds it.
+- Build blocks: a lookup of stale vouches that panics no longer holds up its run. Its mark stayed
+  set, so the end of the command waited until uploads were cut off, and every later question
+  about a stale download waited out its budget and was a miss. Now the mark goes however the
+  lookup ends, and the next question starts a lookup of its own.
+- Build blocks: an upload that panics in the middle of a run no longer holds up the end of its
+  command. The end waited its whole deadline (10 seconds on a person's machine, up to 2 minutes in
+  a CI job), then sent no `close`, and no later check in the same process uploaded anything. Now
+  the end goes on at once and sends `close`; what the upload held goes back at the next run's
+  start, as after a crash.
+- Build blocks: when the shared store's host can't be reached while the backend can (a sandbox
+  behind an allow-list), the run says once which host to allow, by its name alone, and so does
+  `hushrun build fetch`. Before, downloads failed silently, and a line about the backend could
+  carry a download's signed link.
+- `hushrun build status` in CI says what `hushrun run NAME -- COMMAND` does in the job and why,
+  from the same function a run asks: reuse in the job's own store when the org shares (reading
+  only with an agent token outside GitHub Actions), or nothing, because there is no backend or the
+  job can't mint an ID token. Before, it said `this is CI, where hushrun run reuses nothing`,
+  stale since CI reuses when the org shares.
+- Build blocks: an agent's sandbox with the network reuses and shares when its org shares. A run
+  under an agent token on a machine where no person is signed in now has reuse on, in the store,
+  and shares as the org's mode says, as the table of who shares says; `HUSHRUN_BUILD=off` still
+  turns it off, and so does an `off` written on the machine (below). Before, only a run from a saved `hushrun build fetch` counted as a sandbox, so a
+  sandbox with the network reused nothing unless `HUSHRUN_BUILD=on` was set.
+- `hushrun build fetch` with nothing to sign in with says to set `HUSHRUN_AGENT` for the phase,
+  the variable the documentation gives an agent's string, and that an agent token in
+  `HUSHRUN_TOKEN` works too. Before, it named only `HUSHRUN_TOKEN`.
+- Build blocks: `HUSHRUN_BUILD=true` or `false`, which `hushrun plan --format env` and `hushrun
+  artifact resolve` print for a shell to evaluate, no longer turns build reuse off. Only `off`,
+  `observe` and `on` set the mode for one command; those two values count as unset, silently.
+  Before, the next `hushrun run` after `eval "$(hushrun plan --format env)"` said
+  `HUSHRUN_BUILD="true" is not valid` and reused nothing, in CI too.
+- Nothing from the HTTP client's internals reaches a person's terminal without `-v` or
+  `HUSHRUN_LOG`: a `WARN tcp set_nodelay error` line from hyper was printed in the middle of a
+  build.
+- Build blocks: a backend that stops answering in the middle of a run is said in one line, once,
+  and uploads rest as downloads do: a `begin`, PUT or `commit` that errors or times out counts
+  toward the three failures that rest the relay, and while it rests no new `begin` goes. Before,
+  nothing was said and `begin`s kept going: 138 were dropped in one run.
+- Build blocks: a `TMPDIR` too long for a socket's path falls through to `/tmp` for the relay's
+  socket, as an unset one does. Before, it turned sharing off for the run.
+- Build blocks: in a repository with several scopes in its `hushrun.yaml`, `hushrun run NAME --
+  COMMAND` without `--scope` shares build blocks, which belong to the repository, not to a scope.
+  It makes no results lookup, so its `open` asks whether the org shares, and an org that doesn't
+  says nothing. Before, it never shared and said nothing.
+- Build blocks in CI: only a job whose policy says it writes the repository's trusted scope
+  (`protected/…`) gets the trusted job's 2 minutes at its end; a pull request's job gets 20
+  seconds. Before, any job that wrote with no reason it wasn't trusted counted as trusted, and a
+  pull request's job was held about 42 seconds against its 20.
+- Build blocks: a `commit` answering `differs`, an upload that arrived broken, keeps the block
+  built here and tries it again later; only `begin` refusing `differs` (a trusted copy with other
+  bytes) discards it, and the run says in one line how many blocks it discarded. Before, a
+  `commit` answering `differs` deleted the machine's own good block, silently: in one run a store
+  fell from 360 blocks to 62.
+- Build blocks: a fresh machine reuses what its prefetch downloaded. A wrapper that gives up on a
+  download that wouldn't arrive within half its compile no longer counts as a failure; only a
+  request that errors or times out does, and three of those rest the relay, which then sends
+  nothing new but still answers from the hints, packs and vouches it holds. Before, three give-ups
+  on small crates at the start of a parallel build rested it for 30 seconds, during which it
+  answered no hint request: in one run 232 packs (199 MB) were downloaded and 1 crate reused.
+- Build blocks in CI: a job whose tracked files differ from its commit (a version bump or a
+  nightly `cargo update` before the build) names no commit in its build requests, so the backend
+  doesn't take what it builds for that commit's; it is checked once per run. Before, every job
+  named `HEAD`, whatever it built. A file git doesn't track isn't compared.
+- Build blocks: a warm build whose downloaded crates were vouched for more than a day ago asks
+  about them all in one lookup, sent as `open` answers, which each crate waits for within half
+  its compile. Before, each crate waited up to half its compile for `open`, then asked alone:
+  6.2 to 6.7 seconds against 1.7 to 2.1 for 83 crates.
+- Build blocks: a withdrawn download is no longer reused once its entry is a day old. Only an
+  `open` that failed, or didn't answer within half the crate's compile, counts as a server that
+  can't be reached; once `open` has answered, a crate whose answer doesn't come in time compiles.
+  A server's "no" is kept in the block's record (`origin.json`'s entry says `"word":
+  "withdrawn"`), and that block is never reused as a download again, also offline; the downloaded
+  blocks a run reused are asked about again at its end, so a machine in daily use never goes
+  stale. Before, a question not answered within half a small crate's compile counted as a server
+  that can't be reached: 14 of 53 withdrawn blocks two days old were reused.
+- Build blocks: everything after a command, the last uploads and `close`, has one deadline. A
+  `begin` or `commit` that doesn't answer is cut off at it, as a PUT was, and counts a cut-off;
+  `close` goes within it. In CI that is the end's 20 seconds (2 minutes for a job writing trusted
+  blocks), never less than `close`'s 5; on a person's machine 5 seconds for uploads and 5 for
+  `close`. Before, a stalled `begin` ran out its own 10 seconds and `close` added 5: a job stayed
+  29.3 seconds after its command on a 20-second limit.
+- Build blocks in GitHub Actions: a slow ID token endpoint no longer slows cargo or holds the job
+  after its command. A token near its expiry is renewed in the background and still sent until it
+  expires, also when the renewal fails; a request with no token waits for the one mint in flight
+  only within its own deadline (5 seconds at most for the mint), and no token is minted once the
+  command has ended. Before, every request waited in turn for each mint: with an endpoint taking
+  9 seconds, cargo took 96.7 seconds against 37.6, and the job stayed 65 seconds after its
+  command.
+- Build blocks: a run that uploads nothing (one from a saved fetch, an agent token's in CI)
+  leaves no outbox marker for what it builds and says nothing about uploads; before, a sandbox's
+  offline run said blocks waited to upload, under a credential no run could have. Shared
+  `observe`'s comparison opens a downloaded pack within the room a download gets (64 times its
+  size, and the disk's floor), so a pack made to expand costs it no more work than a download.
+- `hushrun build fetch [CHECK]...` takes the checks to fetch for, by the names `hushrun run` runs
+  them under, and asks the backend for each one's newest manifest; with none, it asks for the
+  repository's newest. Before, it named no check, and a backend that matches the check exactly
+  answered an empty manifest, so a sandbox fetched nothing. The test fake now answers each
+  `open` with the named check's manifest, as the contract says.
+- In GitHub Actions, `hushrun build fetch` saves into the job's own store, and a later step of
+  the same job whose backend can't be reached reuses what it fetched, read only, as a sandbox's
+  later phase does: a coding agent on a GitHub Actions runner behind a firewall is served. Before,
+  a CI run never read a fetch, and the fetch went into the cache directory. Elsewhere in CI,
+  `hushrun build fetch` now says it has no store that lasts to the next step.
+- `hushrun build fetch`: a saved fetch serves only a run of the same backend host, org and
+  repository, and only while that backend answers nothing in the run; an answer always wins,
+  that the org doesn't share, a 401 or a 403 included. Before, a fetch served another repository,
+  another org, and a run whose backend said the org had turned sharing off.
+- In GitHub Actions, when the job has an ID token (`permissions: id-token: write`), results
+  requests carry it before an agent token or `HUSHRUN_TOKEN` beside it, as the repository's
+  ledger already did, so the answer that turns build sharing on is one to the job itself. A job
+  without an ID token shares no build blocks, whatever token it holds; before, an agent token
+  there read the org's blocks.
+- Build blocks in CI: a job never reuses or uploads what another job left on a runner that keeps
+  its temporary folder. The job's store and its credential's fingerprint are named by the
+  repository, run, attempt, job and the job's own request token; another job's store found at
+  the start is removed unread, and only markers of this job and its store go up. Before, every
+  GitHub Actions job had the same fingerprint, and a main branch's job uploaded, as trusted, 29
+  blocks a pull request's job had built.
+- Build blocks: a variable whose name merely starts like a CI system's (`BUILD_ENV`,
+  `CI_REGION`, `AGENT_POOL`) is searched for in a block's outputs like any other, so a block
+  holding its value stays on the machine. Only the exact names a CI system documents as its own
+  are left out, and only in that system; the shell's `_`, `PWD` and `OLDPWD` are left out too.
+  Before, any name under a CI prefix was left out, and a 14-byte `BUILD_ENV` reached another
+  machine, whose program printed the first machine's value.
+- Build blocks: **a written `hushrun build off` wins in a sandbox too.** Where no person is
+  signed in and the run carries an agent token, reuse is on by default; a settings file there
+  that says `"mode": "off"` now turns it off, for the run and for a saved fetch, and nothing is
+  shared. No file, or one that names no mode, leaves reuse on, and `HUSHRUN_BUILD` still sets one
+  command's mode over either. A settings file there that can't be read turns reuse off and says
+  so. `hushrun build status` says the same.
+- Build blocks: **a save of another build setting writes no mode nobody chose.** `build.json`
+  names `mode` only once someone chose it with `hushrun build on|observe|off`; `hushrun build
+  share …` keeps the mode the file had and writes none where it had none. Before, any save wrote
+  `"mode": "off"`, which in a sandbox would have counted as a written off and turned reuse off.
+  A file with no `mode` is `off` on a person's machine, as before, and 0.14.0 reads it the same.
 - With `tests: observe` or `reuse`, a Vitest test that awaits `promisify(exec)` or
   `promisify(execFile)` gets `{ stdout, stderr }` again, and a rejection carries both, as without
   hushrun: the setup module's wrappers now keep what they wrap carries, `util.promisify.custom`

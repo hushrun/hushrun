@@ -127,6 +127,14 @@
     "repository_url": {"type": "string", "description": "The repository's URL on hushrun, where its events go: https://, such as the hosted one, or http:// on a loopback host (C-3, L-1).", "pattern": "^https?://"},
     "backend": {"type": "string", "description": "[ADR 0037] Where its `hushrun run`s share results (C-3, C-11).", "pattern": "^https?://"},
     "counts_from": {"$ref": "#/$defs/counts_from"},
+    "build": {
+      "description": "What every machine's build blocks take from the repository (B-35).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": {"description": "Variables every compile of the repository is keyed by, in both forms of `hushrun run` (B-35). Part of no check's definition.", "type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}
+      }
+    },
     "scopes": {
       "type": "object",
       "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,62}$"},

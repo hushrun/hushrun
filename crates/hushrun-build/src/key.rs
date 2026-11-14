@@ -14,11 +14,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Located, RootName};
 
-/// The schema of the first key.
-pub const STEP_SCHEMA: &str = "hushrun.build-step/v5";
+/// The schema of the first key. v6: the compiler by content, the cargo home and the toolchain
+/// named as bases. v7: no compile sees the toolchain's sources.
+pub const STEP_SCHEMA: &str = "hushrun.build-step/v7";
 
-/// The schema of the second key.
-pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v4";
+/// The schema of the second key. v5: reads under the cargo home and the toolchain named as
+/// bases, a proc macro named by what it was built from. v6: and by its metadata. v7: a library
+/// that bundled nothing names its native folders without their static libraries. v8: only the
+/// crate's own objects count as rustc's (a v7 hint judged by a member's suffix). v9: a block
+/// that holds a machine's folder is keyed by that folder's value ([`Observed::bound`]). v10: a
+/// library bundled nothing only when no member of its `.rlib` is a native library's member too.
+/// v11: an archive in a native folder counts whatever its name.
+pub const BLOCK_SCHEMA: &str = "hushrun.build-block/v11";
 
 /// Why a key can't be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -114,7 +121,14 @@ impl EnvRead {
 pub enum ExternBy {
     /// By the SHA-256 of the file passed.
     Content(Digest),
-    /// A proc macro, by the key of the block that produced it, without its place.
+    /// A proc macro whose block may move, by what it was built from and what a dependent's
+    /// compiler reads from it ([`crate::metadata::name`]): the key of the block that produced
+    /// it without its place and without the linker, the SDK and `dsymutil`
+    /// ([`Observed::known_by`]), and the crate metadata in the file. The same sources,
+    /// dependencies, flags and compiler give a macro that expands the same way whichever linker
+    /// packed it, and the metadata is what a dependent is compiled against: a macro whose
+    /// metadata came out different for any reason gives another key, never a dependent that
+    /// fails to load.
     ProducedBy(Digest),
     /// No file was passed: `--extern proc_macro`. The name and options are all there is.
     Builtin,
@@ -221,6 +235,41 @@ pub struct Link {
     pub sdk_path: Option<Located>,
     /// Where the `dsymutil` the compile runs is. Kept for the hint; the key holds only `linker`.
     pub dsymutil_path: Option<Located>,
+    /// The folders the C driver hands `ld` and those `ld` searches by itself, after rustc's own,
+    /// in order: where a `-l` found in none of rustc's folders is looked for (B-6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<Located>,
+    /// Each place in those folders the C runtime the standard library asks for may be (`-lc`,
+    /// `-lm`, …, `-lSystem`, [`crate::link::C_RUNTIME`]), and each place a linker script found
+    /// there names, present or absent. Like the linker and the SDK, and unlike `files`, left out
+    /// of what a dependent names a proc macro by (B-6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<Read>,
+    /// How to ask again which `ld` the link runs and where it looks. Kept for the hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<LinkQuery>,
+}
+
+/// What a hint keeps to ask again, before a lookup, which `ld` a link runs and where it looks
+/// for libraries (B-7, B-18): never the answers, which follow the files as they are then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkQuery {
+    /// The C driver as rustc named it, when that is a bare name: found again on the link's
+    /// `PATH`. `None` when it is a path, the hint's `linker`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// The entries the link command's `PATH` has before the one rustc inherited (the
+    /// toolchain's own `bin`), roots replaced (B-8).
+    pub path_before: Vec<String>,
+    /// Whether the link command's `PATH` ends with the inherited one, which the lookup takes
+    /// from its own variables; when it doesn't, `path_before` is all of it.
+    pub path_inherits: bool,
+    /// The driver's options the questions pass on ([`crate::link::LinkArgs::driver_flags`]),
+    /// roots replaced.
+    pub flags: Vec<String>,
+    /// The sysroot the line gives `ld`, roots replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ld_sysroot: Option<String>,
 }
 
 /// The link part of a hint (B-18): what to hash and stat again before a lookup.
@@ -240,6 +289,12 @@ pub struct LinkList {
     /// Where the `dsymutil` a program's compile runs is (B-9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsymutil: Option<Located>,
+    /// The places of the C runtime in the driver's and `ld`'s folders ([`Link::system`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<Located>,
+    /// How to ask again which `ld` runs and where it looks; a hint without it is not followed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<LinkQuery>,
 }
 
 /// Where a block may be reused (B-10).
@@ -268,6 +323,12 @@ pub struct Observed {
     pub native: Vec<Read>,
     /// Every `-L native=`, `all=` and bare folder: its names and its static libraries (B-6).
     pub native_dirs: Vec<NativeDir>,
+    /// A library whose `.rlib` holds nothing but rustc's own members (its metadata and the
+    /// objects named with its crate name and extra filename), none of them a member of a static
+    /// library in its native folders, bundled none (B-6): its native folders are named without
+    /// their static libraries' bytes, which are not in its own.
+    #[serde(default)]
+    pub bundles_nothing: bool,
     /// Every folder that directly holds a read file.
     pub shape: Vec<Shape>,
     /// Every file under `OUT_DIR`; `None` when the package has no build script.
@@ -278,12 +339,61 @@ pub struct Observed {
     pub link: Option<Link>,
     /// Where the block may be reused.
     pub place: Place,
+    /// The machine's folders the block holds (in an output, in a record, or through a variable
+    /// that names a base), each with its forms on the machine that built it (B-10): such a block
+    /// is reused only where they are the same. Empty for any other.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound: Vec<(Bound, Vec<String>)>,
+}
+
+/// A folder of the machine whose value a block can hold (B-10): the three that outputs are
+/// searched for, and the toolchain, which a variable can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Bound {
+    /// The cargo home.
+    CargoHome,
+    /// The rustup home.
+    RustupHome,
+    /// The home folder.
+    Home,
+    /// The toolchain's folder.
+    Toolchain,
 }
 
 impl Observed {
     /// The second key.
     pub fn key(&self) -> Result<Digest, KeyError> {
-        let body = BlockBody {
+        digest(BLOCK_SCHEMA, &self.body()?)
+    }
+
+    /// What a dependent names this block's linked library by when it may move (B-6): the key
+    /// without its place and without the link environment (the linker, the SDK and `dsymutil`),
+    /// which differs between machines and doesn't change how a proc macro expands. The same as
+    /// the key without its place for a block with no link part.
+    pub fn known_by(&self) -> Result<Digest, KeyError> {
+        let mut body = self.body()?;
+        body.place = Place::Anywhere;
+        body.bound = Vec::new();
+        if let Some(link) = body.link.as_mut() {
+            link.linker = String::new();
+            link.sdk = String::new();
+            link.folders = Vec::new();
+            link.system = Vec::new();
+        }
+        digest(BLOCK_SCHEMA, &body)
+    }
+
+    /// The second key's body, each part as a digest of its JCS form, and each list part's
+    /// entries by what they name: what tells which part of two keys differs.
+    pub fn parts(&self) -> Result<serde_json::Value, KeyError> {
+        let body =
+            serde_json::to_value(self.body()?).map_err(|e| KeyError::Canonical(e.to_string()))?;
+        parts_of(&body)
+    }
+
+    fn body(&self) -> Result<BlockBody, KeyError> {
+        Ok(BlockBody {
             step: self.step,
             reads: normalize(&self.reads, "reads", |r| r.at.clone())?,
             env: normalize(&self.env, "env", |e| e.name.clone())?,
@@ -291,7 +401,37 @@ impl Observed {
                 (e.name.clone(), e.options.clone())
             })?,
             native: normalize(&self.native, "native", |r| r.at.clone())?,
-            native_dirs: normalize(&self.native_dirs, "native folders", |d| d.dir.clone())?,
+            native_dirs: normalize(
+                &self
+                    .native_dirs
+                    .iter()
+                    .map(|dir| match self.bundles_nothing {
+                        true => NativeDir {
+                            archives: Vec::new(),
+                            ..dir.clone()
+                        },
+                        false => dir.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                "native folders",
+                |d| d.dir.clone(),
+            )?,
+            bundles_nothing: self.bundles_nothing,
+            bound: {
+                let mut bound: Vec<(Bound, Vec<String>)> = self
+                    .bound
+                    .iter()
+                    .map(|(name, forms)| {
+                        let mut forms = forms.clone();
+                        forms.sort();
+                        forms.dedup();
+                        (*name, forms)
+                    })
+                    .collect();
+                bound.sort();
+                bound.dedup();
+                bound
+            },
             shape: normalize_shape(&self.shape)?,
             generated: self
                 .generated
@@ -324,6 +464,8 @@ impl Observed {
                         files: normalize(&link.files, "link files", |r| r.at.clone())?,
                         linker: link.linker.clone(),
                         sdk: link.sdk.clone(),
+                        folders: link.folders.clone(),
+                        system: normalize(&link.system, "link system", |r| r.at.clone())?,
                     })
                 })
                 .transpose()?,
@@ -336,13 +478,83 @@ impl Observed {
                     Place::Tied(roots)
                 }
             },
-        };
-        digest(BLOCK_SCHEMA, &body)
+        })
     }
 }
 
+impl Asked {
+    /// The first key's body, each part as a digest of its JCS form, with each argument and
+    /// variable by itself: what tells which part of two keys differs.
+    pub fn parts(&self) -> Result<serde_json::Value, KeyError> {
+        let body = serde_json::to_value(self).map_err(|e| KeyError::Canonical(e.to_string()))?;
+        parts_of(&body)
+    }
+}
+
+/// A key body's parts: each top-level part by the digest of its JCS form, and, for a part that
+/// is a list or a map, each entry by its digest too. A list's entries are named by what they
+/// name (`at`, `dir`, `name` and `options`, or `rest`, as compact JSON with sorted keys) when
+/// every entry has it, else by position.
+fn parts_of(body: &serde_json::Value) -> Result<serde_json::Value, KeyError> {
+    use serde_json::{Map, Value};
+    let jcs = |value: &Value| {
+        hushrun_core::jcs::digest(value)
+            .map(|d| Value::String(d.to_string()))
+            .map_err(|e| KeyError::Canonical(e.to_string()))
+    };
+    let label = |item: &Value| -> Option<String> {
+        ["at", "dir", "rest"]
+            .iter()
+            .find_map(|field| item.get(field))
+            .map(Value::to_string)
+            .or_else(|| {
+                let name = item.get("name")?;
+                Some(match item.get("options") {
+                    Some(options) => format!("{name} {options}"),
+                    None => name.to_string(),
+                })
+            })
+    };
+    let mut out = Map::new();
+    let Value::Object(members) = body else {
+        return jcs(body);
+    };
+    for (name, value) in members {
+        let entries = match value {
+            Value::Array(items) => {
+                let labels: Option<Vec<String>> = items.iter().map(label).collect();
+                match labels {
+                    Some(labels) if !labels.is_empty() => Some(Value::Object(
+                        labels
+                            .into_iter()
+                            .zip(items)
+                            .map(|(l, item)| Ok((l, jcs(item)?)))
+                            .collect::<Result<_, KeyError>>()?,
+                    )),
+                    _ => Some(Value::Array(
+                        items.iter().map(jcs).collect::<Result<_, _>>()?,
+                    )),
+                }
+            }
+            Value::Object(map) => Some(Value::Object(
+                map.iter()
+                    .map(|(k, v)| Ok((k.clone(), jcs(v)?)))
+                    .collect::<Result<_, KeyError>>()?,
+            )),
+            _ => None,
+        };
+        let mut part = Map::new();
+        part.insert("digest".into(), jcs(value)?);
+        if let Some(entries) = entries {
+            part.insert("entries".into(), entries);
+        }
+        out.insert(name.clone(), Value::Object(part));
+    }
+    Ok(Value::Object(out))
+}
+
 /// The second key's parts, sorted, as they are hashed.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct BlockBody {
     step: Digest,
     reads: Vec<Read>,
@@ -350,6 +562,10 @@ struct BlockBody {
     externs: Vec<ExternInput>,
     native: Vec<Read>,
     native_dirs: Vec<NativeDir>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bundles_nothing: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    bound: Vec<(Bound, Vec<String>)>,
     shape: Vec<Shape>,
     generated: Option<Vec<Generated>>,
     declared: Option<DeclaredBody>,
@@ -357,19 +573,24 @@ struct BlockBody {
     place: Place,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct DeclaredBody {
     files: Vec<Read>,
     env: Vec<EnvRead>,
     above: Vec<FoundAbove>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct LinkBody {
     libraries: Vec<Digest>,
     files: Vec<Read>,
     linker: String,
     sdk: String,
+    /// In order: the order is the search's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<Located>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<Read>,
 }
 
 /// Sorts `items` by what they name, drops exact repeats, and rejects two that name one thing
@@ -472,6 +693,15 @@ pub struct ReadList {
     /// lookup whose roots differ skips the hint before it opens anything: its paths outside
     /// every root are another checkout's (B-8).
     pub roots: Option<Digest>,
+    /// The compile bundled no static library ([`Observed::bundles_nothing`]): the lookup names
+    /// the native folders as it did. Whether a crate bundles one follows from what is keyed
+    /// besides (its sources and flags), so a compile that bundles one never finds this key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bundles_nothing: bool,
+    /// The machine's folders the block holds ([`Observed::bound`]): the lookup keys them by
+    /// their values on this machine, so another value of one finds another block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound: Vec<Bound>,
 }
 
 /// The digest of a call's roots as [`crate::roots::Roots::tied`] gives them, in any order.
@@ -510,6 +740,8 @@ impl ReadList {
                 ld: l.ld_path.clone(),
                 sdk: l.sdk_path.clone(),
                 dsymutil: l.dsymutil_path.clone(),
+                system: sorted(l.system.iter().map(|r| r.at.clone()).collect()),
+                query: l.query.clone(),
             }),
             place: match observed.place {
                 Place::Anywhere => PlaceKind::Anywhere,
@@ -519,6 +751,8 @@ impl ReadList {
                 Place::Anywhere => None,
                 Place::Tied(roots) => Some(roots_digest(roots)),
             },
+            bundles_nothing: observed.bundles_nothing,
+            bound: sorted(observed.bound.iter().map(|(name, _)| *name).collect()),
         }
     }
 }
@@ -608,6 +842,8 @@ mod tests {
                 names: Some(vec!["libx.a".into(), "x.h".into()]),
                 archives: vec![("libx.a".into(), d(11))],
             }],
+            bundles_nothing: false,
+            bound: Vec::new(),
             shape: vec![Shape {
                 dir: at(RootName::Package, "src"),
                 names: vec!["lib.rs".into(), "util.rs".into()],
@@ -641,11 +877,11 @@ mod tests {
     fn first_key_is_fixed() {
         assert_eq!(
             asked().key().unwrap().hex(),
-            "24d66a5d192aaeeec35ab19a84dadf9fb86964300a0b13ee14f6af19e83dde9a"
+            "9845ee648cfb553df63b7a9441144b665f331711c85a5e010421910f05b85b8f"
         );
         // The form, spelled out: the schema name first, then the parts in JCS order.
         let text = concat!(
-            r#"["hushrun.build-step/v5",{"args":["--crate-name=app","--edition=2024","#,
+            r#"["hushrun.build-step/v7",{"args":["--crate-name=app","--edition=2024","#,
             r#""src/lib.rs","--crate-type=lib"],"compiler":"sha256:"#,
             "0101010101010101010101010101010101010101010101010101010101010101",
             r#"","env":{"CARGO_MANIFEST_DIR":"{hushrun:package}","CARGO_PKG_NAME":"app"}}]"#,
@@ -653,12 +889,41 @@ mod tests {
         assert_eq!(asked().key().unwrap(), Digest::of(text.as_bytes()));
     }
 
+    // covers: B-10
+    #[test]
+    fn a_block_that_holds_a_machine_folder_is_keyed_by_its_value() {
+        let base = observed();
+        let mut one = observed();
+        one.bound = vec![(Bound::CargoHome, vec!["/home/dev/.cargo".into()])];
+        let mut two = observed();
+        two.bound = vec![(Bound::CargoHome, vec!["/home/dev2/.cargo".into()])];
+        assert_ne!(one.key().unwrap(), base.key().unwrap());
+        assert_ne!(one.key().unwrap(), two.key().unwrap());
+        // Forms in any order are one value.
+        let mut both = observed();
+        both.bound = vec![(
+            Bound::CargoHome,
+            vec!["/b/.cargo".into(), "/a/.cargo".into()],
+        )];
+        let mut again = observed();
+        again.bound = vec![(
+            Bound::CargoHome,
+            vec!["/a/.cargo".into(), "/b/.cargo".into()],
+        )];
+        assert_eq!(both.key().unwrap(), again.key().unwrap());
+        // What a dependent names a proc macro by leaves it out, as it leaves out the place.
+        assert_eq!(one.known_by().unwrap(), two.known_by().unwrap());
+        // The hint says which folders, never their values.
+        assert_eq!(ReadList::of(&one), ReadList::of(&two));
+        assert_eq!(ReadList::of(&one).bound, vec![Bound::CargoHome]);
+    }
+
     // covers: B-6
     #[test]
     fn second_key_is_fixed() {
         assert_eq!(
             observed().key().unwrap().hex(),
-            "3a8ea260bb4d6fc29c751ab5ecc5de8b2675433f00393eccda649a12325f21f9"
+            "a958233576b000bbbb7492a4e01829434d45ef952e9b21be2fcf713e96433073"
         );
     }
 
@@ -776,6 +1041,9 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    folders: Vec::new(),
+                    system: Vec::new(),
+                    query: None,
                 })
             }),
             ("a file the linker reads", |o| {
@@ -791,6 +1059,9 @@ mod tests {
                     ld_path: None,
                     sdk_path: None,
                     dsymutil_path: None,
+                    folders: Vec::new(),
+                    system: Vec::new(),
+                    query: None,
                 })
             }),
             ("place", |o| {
@@ -821,6 +1092,9 @@ mod tests {
                 ld_path: None,
                 sdk_path: None,
                 dsymutil_path: None,
+                folders: Vec::new(),
+                system: Vec::new(),
+                query: None,
             });
             o.key().unwrap()
         };
@@ -873,6 +1147,137 @@ mod tests {
                 "sdk 16"
             )
         );
+    }
+
+    fn linked(linker: &str, sdk: &str, byte: u8) -> Observed {
+        let mut o = observed();
+        o.link = Some(Link {
+            libraries: vec![LinkLibrary {
+                at: at(RootName::Deps(0), "libsyn.rlib"),
+                sha256: d(byte),
+            }],
+            files: vec![Read {
+                at: at(RootName::Toolchain, "lib/rustlib/x/lib/libSystem.tbd"),
+                state: ReadState::Absent,
+            }],
+            linker: linker.into(),
+            sdk: sdk.into(),
+            linker_path: Located::Shared(format!("/usr/bin/{linker}")),
+            ld_path: None,
+            sdk_path: None,
+            dsymutil_path: None,
+            folders: Vec::new(),
+            system: Vec::new(),
+            query: None,
+        });
+        o
+    }
+
+    // covers: B-6, B-18
+    #[test]
+    fn the_c_runtime_and_the_folders_it_is_in_count_in_the_key_but_not_in_the_name() {
+        let with = |folders: &[&str], system: u8, asked: u8| {
+            let mut o = linked("cc 10 5\nld 1 2 3 4", "", 1);
+            let link = o.link.as_mut().unwrap();
+            link.folders = folders
+                .iter()
+                .map(|f| Located::Shared((*f).into()))
+                .collect();
+            link.system = vec![Read {
+                at: Located::Shared("/usr/lib/x86_64-linux-gnu/libc.so.6".into()),
+                state: ReadState::Present(d(system)),
+            }];
+            // A library a crate asked for, found in the same folders: in `files`.
+            link.files.push(Read {
+                at: Located::Shared("/usr/lib/x86_64-linux-gnu/libz.so".into()),
+                state: ReadState::Present(d(asked)),
+            });
+            o
+        };
+        let base = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 1);
+        // Another C library, other folders, the same folders in another order: other keys.
+        for other in [
+            with(&["/usr/lib/gcc/14", "/usr/lib"], 2, 1),
+            with(&["/usr/lib/gcc/15", "/usr/lib"], 1, 1),
+            with(&["/usr/lib", "/usr/lib/gcc/14"], 1, 1),
+        ] {
+            assert_ne!(base.key().unwrap(), other.key().unwrap());
+            // A dependent names the macro the same: like the linker and the SDK.
+            assert_eq!(base.known_by().unwrap(), other.known_by().unwrap());
+        }
+        // A library a crate asked for is in the name too.
+        let asked = with(&["/usr/lib/gcc/14", "/usr/lib"], 1, 2);
+        assert_ne!(base.key().unwrap(), asked.key().unwrap());
+        assert_ne!(base.known_by().unwrap(), asked.known_by().unwrap());
+        // A link with none of these keys as it did.
+        let plain = linked("cc 10 5", "sdk 15", 1);
+        let body = serde_json::to_value(plain.body().unwrap()).unwrap();
+        assert!(body["link"].get("folders").is_none(), "{body}");
+        assert!(body["link"].get("system").is_none(), "{body}");
+    }
+
+    // covers: B-6
+    #[test]
+    fn a_proc_macro_is_known_by_what_it_was_built_from_not_by_its_linker() {
+        let here = linked("cc 10 5", "sdk 15", 1);
+        // Another machine: another linker, another SDK, the same sources and libraries.
+        let there = linked("ld.lld 99 1\ndsymutil x 1 2", "sdk 16", 1);
+        assert_ne!(here.key().unwrap(), there.key().unwrap());
+        assert_eq!(here.known_by().unwrap(), there.known_by().unwrap());
+        // What it was linked from still counts, and so does every other part.
+        assert_ne!(
+            here.known_by().unwrap(),
+            linked("cc 10 5", "sdk 15", 2).known_by().unwrap()
+        );
+        let mut read = linked("cc 10 5", "sdk 15", 1);
+        read.reads[0].state = ReadState::Present(d(99));
+        assert_ne!(here.known_by().unwrap(), read.known_by().unwrap());
+        // Without its place, as before; and for a block with no link part, the key without its
+        // place.
+        let mut tied = here.clone();
+        tied.place = Place::Tied(vec![(RootName::Workspace, "/w".into())]);
+        assert_eq!(tied.known_by().unwrap(), here.known_by().unwrap());
+        assert_eq!(observed().known_by().unwrap(), observed().key().unwrap());
+    }
+
+    // covers: B-5, B-6
+    #[test]
+    fn the_parts_of_two_keys_tell_which_part_differs() {
+        let base = observed().parts().unwrap();
+        let mut o = observed();
+        o.reads[1].state = ReadState::Present(d(77));
+        let changed = o.parts().unwrap();
+        let differing: Vec<&String> = base
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(name, part)| changed[name.as_str()]["digest"] != part["digest"])
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(differing, ["reads"]);
+        // Each read by where it is.
+        let label = |at: Located| serde_json::to_value(at).unwrap().to_string();
+        let entry = label(at(RootName::Package, "src/util.rs"));
+        assert_ne!(
+            base["reads"]["entries"][&entry],
+            changed["reads"]["entries"][&entry]
+        );
+        let other = label(at(RootName::Package, "src/lib.rs"));
+        assert_eq!(
+            base["reads"]["entries"][&other],
+            changed["reads"]["entries"][&other]
+        );
+        // The first key's arguments by position and its variables by name.
+        let first = asked().parts().unwrap();
+        let mut a = asked();
+        a.env.insert("CARGO_PKG_NAME".into(), "other".into());
+        let second = a.parts().unwrap();
+        assert_eq!(first["args"], second["args"]);
+        assert_ne!(
+            first["env"]["entries"]["CARGO_PKG_NAME"],
+            second["env"]["entries"]["CARGO_PKG_NAME"]
+        );
+        assert_eq!(first["compiler"], second["compiler"]);
     }
 
     // covers: B-6
@@ -1005,6 +1410,9 @@ mod tests {
             ld_path: Some(Located::Shared("/usr/bin/ld.lld".into())),
             sdk_path: Some(Located::Outside("/sdk".into())),
             dsymutil_path: None,
+            folders: Vec::new(),
+            system: Vec::new(),
+            query: None,
         });
         let hint = ReadList::of(&o);
         assert_eq!(hint.reads.len(), 4);
@@ -1031,6 +1439,8 @@ mod tests {
                 ld: Some(Located::Shared("/usr/bin/ld.lld".into())),
                 sdk: Some(Located::Outside("/sdk".into())),
                 dsymutil: None,
+                system: Vec::new(),
+                query: None,
             })
         );
         assert_eq!(hint.place, PlaceKind::Tied);

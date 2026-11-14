@@ -700,6 +700,7 @@ impl Plan {
                     exe: hushrun,
                     in_ci: false,
                     repository: Some(&self.repository),
+                    repository_env: &[],
                     env: &lookup,
                     now: SystemTime::now(),
                 };
@@ -2021,6 +2022,10 @@ mod tests {
             found: false,
             differed: false,
             note: None,
+            portable: None,
+            step: None,
+            key: None,
+            downloaded: false,
         }
     }
 
