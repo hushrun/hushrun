@@ -6,6 +6,11 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Linked outputs between machines ([ADR 0091](docs/adr/0091-linked-outputs-between-machines.md)):
+programs, proc macros and build-script binaries are shared between machines whose link
+environment is the same by content, and a block that holds a machine's folder between CI jobs
+where that folder is the same. Every linked output's key changes once.
+
 ### Changed
 
 - **A program, a proc macro or a build-script binary is keyed by its link environment by
