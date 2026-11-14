@@ -619,7 +619,8 @@ pub fn flag_with_paths(flag: &str, path: impl Fn(&str) -> String) -> String {
     }
 }
 
-/// The arguments as the linker sees them ([`flatten`]), for a caller outside this module.
+/// The arguments as the linker sees them (`-Wl,` and `-Xlinker` taken apart), for a caller
+/// outside this module.
 pub fn flatten_args(args: &[String]) -> Vec<&str> {
     flatten(args)
 }
