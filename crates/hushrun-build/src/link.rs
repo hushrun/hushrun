@@ -539,6 +539,46 @@ impl LinkArgs {
         out
     }
 
+    /// The line without its inputs and its output, for the C driver's dry run (B-37): every
+    /// argument but `-o` and its value and each input file given by path (an object or a
+    /// library, by its name, that is not an option's value). Every other flag stays, in order.
+    pub fn dry_args(&self) -> Vec<String> {
+        const TAKES_VALUE: &[&str] = &[
+            "-Xlinker",
+            "-L",
+            "-F",
+            "-B",
+            "-T",
+            "-arch",
+            "-framework",
+            "-weak_framework",
+            "-needed_framework",
+            "-reexport_framework",
+            "-target",
+            "--sysroot",
+            "-isysroot",
+            "-l",
+            "-u",
+            "-e",
+            "-z",
+        ];
+        let mut out = Vec::with_capacity(self.args.len());
+        let mut value_next = false;
+        let mut iter = self.args.iter();
+        while let Some(arg) = iter.next() {
+            if !value_next && arg == "-o" {
+                iter.next();
+                continue;
+            }
+            if !value_next && !arg.starts_with('-') && kind_of(arg).is_some() {
+                continue;
+            }
+            value_next = !value_next && TAKES_VALUE.contains(&arg.as_str());
+            out.push(arg.clone());
+        }
+        out
+    }
+
     /// The sysroot the line gives `ld`: the last `--sysroot`, whether the driver's (which passes
     /// it on) or one of `-Wl,` (B-6).
     pub fn ld_sysroot(&self) -> Option<String> {
@@ -577,6 +617,12 @@ pub fn flag_with_paths(flag: &str, path: impl Fn(&str) -> String) -> String {
         Some(folder) if !folder.is_empty() => format!("-B{}", path(folder)),
         _ => path(flag),
     }
+}
+
+/// The arguments as the linker sees them (`-Wl,` and `-Xlinker` taken apart), for a caller
+/// outside this module.
+pub fn flatten_args(args: &[String]) -> Vec<&str> {
+    flatten(args)
 }
 
 /// The C driver's `-B` folders among `args`, joined to `cwd`, each once.
@@ -783,12 +829,18 @@ pub struct Answer {
     pub success: bool,
     /// What it wrote on stdout.
     pub stdout: String,
+    /// What it wrote on stderr: where a C driver writes its dry run (`-###`, B-37).
+    pub stderr: String,
 }
 
+/// The variables a question changes: each set, or removed for `None`.
+pub type EnvChanges = [(String, Option<String>)];
+
 /// Asks a program (the C driver, `ld`) one question: runs it with these arguments, the link's
-/// `PATH` and `LC_ALL=C`, nothing on stdin, and the wrapper's other variables. `None` when it
-/// can't be started.
-pub type Ask<'a> = dyn Fn(&Path, &[String], &OsStr) -> Option<Answer> + 'a;
+/// `PATH` and `LC_ALL=C`, nothing on stdin, and the wrapper's other variables changed as the
+/// last argument says (each set, or removed for `None`: the variables the link command itself
+/// set, for a dry run of it). `None` when it can't be started.
+pub type Ask<'a> = dyn Fn(&Path, &[String], &OsStr, &EnvChanges) -> Option<Answer> + 'a;
 
 /// What decides which `ld` a C driver runs and where that `ld` looks for a library named with
 /// `-l` (B-6, B-18): asked again at every link and before every lookup, never remembered.
@@ -879,7 +931,7 @@ struct SearchDirs {
 fn search_dirs(query: &Query, ask: &Ask<'_>) -> Result<SearchDirs, Unknown> {
     let mut args = query.flags.clone();
     args.push("-print-search-dirs".to_owned());
-    let answer = ask(&query.driver, &args, &query.path).ok_or(Unknown::Driver)?;
+    let answer = ask(&query.driver, &args, &query.path, &[]).ok_or(Unknown::Driver)?;
     if !answer.success {
         return Err(Unknown::Driver);
     }
@@ -981,7 +1033,7 @@ fn prog_name(
     args: &[String],
     path: &OsStr,
 ) -> Result<String, Unknown> {
-    let answer = ask(&query.driver, args, path).ok_or(Unknown::Driver)?;
+    let answer = ask(&query.driver, args, path, &[]).ok_or(Unknown::Driver)?;
     let said = answer
         .stdout
         .lines()
@@ -1069,13 +1121,13 @@ pub fn environment(query: &Query, ask: &Ask<'_>) -> Result<Environment, Unknown>
             args.push(format!("--sysroot={root}"));
         }
         args.push("--print-sysroot".to_owned());
-        let said = match ask(&ld, &args, &query.path) {
+        let said = match ask(&ld, &args, &query.path, &[]) {
             Some(answer) if answer.success => answer.stdout.trim().to_owned(),
             // No such option (`lld`): the line's own, if any.
             _ => query.ld_sysroot.clone().unwrap_or_default(),
         };
         sysroot = (!said.is_empty() && Path::new(&said) != Path::new("/")).then_some(said);
-        if let Some(answer) = ask(&ld, &["--verbose".to_owned()], &query.path)
+        if let Some(answer) = ask(&ld, &["--verbose".to_owned()], &query.path, &[])
             && answer.success
         {
             for dir in search_dir_entries(&answer.stdout) {
@@ -1103,7 +1155,7 @@ pub fn environment(query: &Query, ask: &Ask<'_>) -> Result<Environment, Unknown>
 }
 
 /// The folders of `SEARCH_DIR("…")` in `ld --verbose`'s default script, in order.
-fn search_dir_entries(text: &str) -> Vec<String> {
+pub fn search_dir_entries(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find("SEARCH_DIR(") {
@@ -1720,19 +1772,24 @@ mod tests {
             }
         }
 
-        fn ask(&self) -> impl Fn(&Path, &[String], &OsStr) -> Option<Answer> + '_ {
-            |program, args, path| {
+        fn ask(&self) -> impl Fn(&Path, &[String], &OsStr, &EnvChanges) -> Option<Answer> + '_ {
+            |program, args, path, env| {
                 self.seen
                     .borrow_mut()
                     .push((program.to_path_buf(), args.to_vec()));
-                let out = std::process::Command::new(program)
-                    .args(args)
-                    .env("PATH", path)
-                    .output()
-                    .ok()?;
+                let mut command = std::process::Command::new(program);
+                command.args(args).env("PATH", path);
+                for (name, value) in env {
+                    match value {
+                        Some(value) => command.env(name, value),
+                        None => command.env_remove(name),
+                    };
+                }
+                let out = command.output().ok()?;
                 Some(Answer {
                     success: out.status.success(),
                     stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
                 })
             }
         }

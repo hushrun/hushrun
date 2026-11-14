@@ -8,7 +8,9 @@
 //! is hashed again. The session folder goes with the run.
 //!
 //! Many wrapper processes read and write entries at once. An entry is written whole, under a
-//! temporary name, and renamed into place; one that can't be read or parsed is absent.
+//! temporary name, and renamed into place; one that can't be read or parsed is absent. A large
+//! file (a linker, the toolchain's `rust-lld`, B-37) is hashed under a lock on its entry's name,
+//! so that the links a cold build starts at once hash it once and the others read the entry.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -25,6 +27,13 @@ pub const DIR: &str = "digests";
 
 /// The schema every entry carries.
 const SCHEMA: &str = "hushrun.build.run-digest/1";
+
+/// From this size on, a file is hashed under a lock on its entry's name.
+const LOCK_FROM: u64 = 8 << 20;
+
+/// The files hashed, for a test that counts its own (tests of one process share it).
+#[cfg(test)]
+static HASHED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 #[derive(Serialize, Deserialize)]
 struct Entry {
@@ -61,10 +70,54 @@ pub fn digest(session: Option<&Path>, path: &Path) -> io::Result<(Digest, Stat)>
     if let Some(sha) = read(&entry, text, &now) {
         return Ok((sha, now));
     }
+    // One process hashes a large file; the others that wanted it at once wait, then read what
+    // it wrote. Without a lock (it can't be taken), each hashes it.
+    let _lock = (now.size >= LOCK_FROM)
+        .then(|| EntryLock::take(&dir, &entry))
+        .flatten();
+    if _lock.is_some()
+        && let Some(sha) = read(&entry, text, &now)
+    {
+        return Ok((sha, now));
+    }
+    #[cfg(test)]
+    if let Ok(mut hashed) = HASHED.lock() {
+        hashed.push(path.to_path_buf());
+    }
     let (sha, stat) = regular::hash_steady(path)?;
     // Best effort: an entry is a saving, never the answer's source of truth.
     let _ = write(&dir, &entry, text, &stat, sha);
     Ok((sha, stat))
+}
+
+/// A lock on an entry's name while one process hashes its file, removed when dropped.
+struct EntryLock {
+    file: fs::File,
+    path: std::path::PathBuf,
+}
+
+impl EntryLock {
+    fn take(dir: &Path, entry: &Path) -> Option<EntryLock> {
+        fs::create_dir_all(dir).ok()?;
+        let name = entry.file_name()?.to_string_lossy();
+        let path = dir.join(format!(".{name}.lock"));
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .ok()?;
+        file.lock().ok()?;
+        Some(EntryLock { file, path })
+    }
+}
+
+impl Drop for EntryLock {
+    fn drop(&mut self) {
+        // Removed while still held: a process that comes later reads the entry, written by now.
+        let _ = fs::remove_file(&self.path);
+        let _ = self.file.unlock();
+    }
 }
 
 fn read(entry: &Path, path: &str, now: &Stat) -> Option<Digest> {
@@ -167,6 +220,31 @@ mod tests {
         );
         // Without a session: hashed every time.
         assert_eq!(digest(None, &lib).unwrap().0, Digest::of(b"version two"));
+    }
+
+    // covers: B-37
+    #[test]
+    fn a_large_file_wanted_by_many_at_once_is_hashed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        let big = dir.path().join("rust-lld");
+        fs::write(&big, vec![7u8; (LOCK_FROM + 1) as usize]).unwrap();
+        let digests: Vec<Digest> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| digest(Some(&session), &big).unwrap().0))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(digests.iter().all(|d| *d == digests[0]));
+        let hashed = HASHED.lock().unwrap();
+        assert_eq!(hashed.iter().filter(|p| **p == big).count(), 1);
+        // No lock is left behind.
+        let left: Vec<_> = fs::read_dir(session.join(DIR))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".lock"))
+            .collect();
+        assert!(left.is_empty());
     }
 
     // covers: B-19

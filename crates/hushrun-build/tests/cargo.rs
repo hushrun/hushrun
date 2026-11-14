@@ -218,8 +218,8 @@ fn rlib(ws: &Path, name: &str) -> Vec<u8> {
     fs::read(file).unwrap()
 }
 
-/// Reused, or picked by the audit (B-16: one library compile in fifty that could be reused runs
-/// anyway, chosen by a hash of the key and the run's start) and found the same.
+/// Reused, or picked by the audit (B-16: one compile in fifty that could be reused runs anyway,
+/// whatever its class, chosen by a hash of the key and the run's start) and found the same.
 fn reused(entry: &Entry) -> bool {
     entry.outcome == Outcome::Reused
         || (entry.outcome == Outcome::BuiltAndStored && entry.found && !entry.differed)
@@ -255,14 +255,9 @@ fn a_second_checkout_reuses_what_the_first_built() {
     assert!(reused(&last(&second, "b", Class::Library)), "{second:#?}");
     // The proc macro and the build script, linked with the Apple fixes, move too; the program
     // names its own target folder in its debug map and is tied (macOS).
-    assert_eq!(
-        last(&second, "m", Class::ProcMacro).outcome,
-        Outcome::Reused,
-        "{second:#?}"
-    );
-    assert_eq!(
-        last(&second, "build_script_build", Class::BuildScript).outcome,
-        Outcome::Reused,
+    assert!(reused(&last(&second, "m", Class::ProcMacro)), "{second:#?}");
+    assert!(
+        reused(&last(&second, "build_script_build", Class::BuildScript)),
         "{second:#?}"
     );
     eprintln!(
@@ -312,11 +307,7 @@ fn a_second_checkout_reuses_what_the_first_built() {
     build(&two, &session);
     let back = entries(&session)[before..].to_vec();
     assert!(reused(&last(&back, "a", Class::Library)), "{back:#?}");
-    assert_eq!(
-        last(&back, "c", Class::Program).outcome,
-        Outcome::Reused,
-        "{back:#?}"
-    );
+    assert!(reused(&last(&back, "c", Class::Program)), "{back:#?}");
     assert!(run_c(&two).starts_with("first text|"));
 
     // (6) A damaged block still gives a green build.
@@ -1005,11 +996,7 @@ fn a_static_library_that_changes_rebuilds_only_what_links_or_bundles_it() {
     let after = entries(&session)[n..].to_vec();
     // A program that links nothing from the folder is reused: its link line doesn't name the
     // library, and the folder is not its input.
-    assert_eq!(
-        last(&after, "plain", Class::Program).outcome,
-        Outcome::Reused,
-        "{after:#?}"
-    );
+    assert!(reused(&last(&after, "plain", Class::Program)), "{after:#?}");
     // One that links it through the rlib that bundles it, or by `-l`, is built again.
     for name in ["uses", "linked"] {
         let entry = last(&after, name, Class::Program);
@@ -1386,9 +1373,9 @@ fn lines_after_a_move(
 
 /// Builds the tests at `one`, then at `two`, and checks what moved (B-5, B-8, B-9, B-10, B-12):
 /// the bin and the test binaries are reused, may move, and are `one`'s bytes, bundles included;
-/// the bin that holds its folder is built again and prints `two`'s. That holds with
-/// `CARGO_TARGET_DIR` outside the checkouts too: the integration test's `CARGO_TARGET_TMPDIR` and
-/// `CARGO_BIN_EXE_*` lie under the target folder, which is a root of its own. The test that bakes
+/// the bin that holds its folder is built again and prints `two`'s. With `CARGO_TARGET_DIR`
+/// outside the checkouts a program is tied to its target folder instead: its UUID holds that
+/// folder's path, so each target folder builds its own. The test that bakes
 /// `env!("CARGO_BIN_EXE_prog")` in is tied, by the search, in either layout.
 #[cfg(target_os = "macos")]
 fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Path)>) {
@@ -1410,14 +1397,31 @@ fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Pat
     );
     let second = entries(&session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
-        assert_eq!(
-            last(&second, name, Class::Program).outcome,
-            Outcome::Reused,
-            "{name}: {second:#?}"
-        );
+        let entry = last(&second, name, Class::Program);
         let places = places(&session.current().store, name, "program");
-        assert_eq!(places, ["anywhere"], "{name}");
         let (a, b) = (program(&target_one, name), program(&target_two, name));
+        if targets.is_some() {
+            // The linker names each object by its path, and a target folder outside the
+            // workspace is in those names as this machine has it: the program's UUID differs
+            // between the two target folders, so each is keyed by its own and built there.
+            assert!(!entry.found, "{name}: {second:#?}");
+            assert_eq!(
+                entry.outcome,
+                Outcome::BuiltAndStored,
+                "{name}: {second:#?}"
+            );
+            let portable = entry.portable.clone().unwrap();
+            assert!(
+                portable
+                    .reasons
+                    .contains(&hushrun_build::portable::Reason::Tied),
+                "{name}: {portable:?}"
+            );
+            assert_ne!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
+            continue;
+        }
+        assert!(reused(&entry), "{name}: {second:#?}");
+        assert_eq!(places, ["anywhere"], "{name}");
         assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
         assert_eq!(bundle(&a), bundle(&b), "{name}'s bundle");
     }
@@ -1460,7 +1464,7 @@ fn a_program_moves_with_its_debug_bundle_and_keeps_its_lines() {
 // covers: B-5, B-8, B-9, B-10, B-12, B-18
 #[cfg(target_os = "macos")]
 #[test]
-fn a_program_moves_with_its_debug_bundle_when_cargo_target_dir_is_elsewhere() {
+fn a_program_is_tied_to_a_target_folder_outside_its_workspace() {
     let w = World::new();
     let one = w.programs("one");
     let two = w.programs("a-second-checkout/with-a-longer-path");
@@ -1513,9 +1517,8 @@ fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
     cargo_ok(&one, &["test", "--no-run"], &env);
     let back = entries(&session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
-        assert_eq!(
-            last(&back, name, Class::Program).outcome,
-            Outcome::Reused,
+        assert!(
+            reused(&last(&back, name, Class::Program)),
             "{name}: {back:#?}"
         );
         no_bundle(name);

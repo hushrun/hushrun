@@ -545,28 +545,41 @@ impl Ports for Fake {
     }
 
     /// A C driver that says its `ld` is `FAKE_LD` (a path, or a name looked up as `collect2`
-    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders; an `ld` with no
-    /// such options as `--verbose`.
+    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders, and whose dry run
+    /// (`-###`) prints `FAKE_DRY_RUN` on stderr; an `ld` with no such options as `--verbose`.
     fn asker(&self) -> Box<crate::link::Ask<'static>> {
         let ld = self.vars.get("FAKE_LD").cloned();
         let libraries = self.vars.get("FAKE_LIBRARIES").cloned().unwrap_or_default();
-        Box::new(move |program: &Path, args: &[String], _path: &OsStr| {
-            let last = args.last().map(String::as_str).unwrap_or_default();
-            if last.starts_with("-print-prog-name=") {
-                let said = ld.clone().unwrap_or_else(|| program.display().to_string());
-                return Some(crate::link::Answer {
-                    success: true,
-                    stdout: format!("{said}\n"),
-                });
-            }
-            if last == "-print-search-dirs" {
-                return Some(crate::link::Answer {
-                    success: true,
-                    stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
-                });
-            }
-            Some(crate::link::Answer::default())
-        })
+        let dry_run = self.vars.get("FAKE_DRY_RUN").cloned();
+        Box::new(
+            move |program: &Path, args: &[String], _path: &OsStr, _env: &[_]| {
+                let last = args.last().map(String::as_str).unwrap_or_default();
+                // The C driver's dry run (B-37), when the test gives one.
+                if last == "-###" {
+                    return dry_run.as_ref().map(|text| crate::link::Answer {
+                        success: true,
+                        stderr: text.clone(),
+                        ..Default::default()
+                    });
+                }
+                if last.starts_with("-print-prog-name=") {
+                    let said = ld.clone().unwrap_or_else(|| program.display().to_string());
+                    return Some(crate::link::Answer {
+                        success: true,
+                        stdout: format!("{said}\n"),
+                        ..Default::default()
+                    });
+                }
+                if last == "-print-search-dirs" {
+                    return Some(crate::link::Answer {
+                        success: true,
+                        stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
+                        ..Default::default()
+                    });
+                }
+                Some(crate::link::Answer::default())
+            },
+        )
     }
 }
 
@@ -1482,6 +1495,56 @@ fn a_block_that_differs_from_a_fresh_compile_suspends_its_key() {
     assert!(w.store().suspended(&only_step(&w)).is_some());
 }
 
+// covers: B-16
+#[test]
+fn an_audit_finds_a_proc_macro_or_a_debug_bundle_that_differs_from_its_block() {
+    // Every class is compared byte for byte, a program's debug bundle file by file: a block
+    // whose bytes are not what this machine links (tampered, or an input E missed) suspends.
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), STORED);
+    let step = w.session.current().entries().last().unwrap().step.unwrap();
+    // The linker now writes other bytes for the same inputs.
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            link_salt: Some("another linker".into()),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = w.call_args(&ws, "a", args, |fake| fake.audit = true);
+    let entry = r.entry.unwrap();
+    assert!(entry.found && entry.differed, "{entry:?}");
+    assert_eq!(entry.outcome, not_stored(NotStored::Differed));
+    assert!(w.store().suspended(&step).is_some());
+
+    // A program whose debug bundle alone differs.
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let ws = program_checkout(&w, "ws");
+    settle();
+    assert_eq!(call_program(&w, &ws, &[]).outcome(), STORED);
+    let step = w.session.current().entries().last().unwrap().step.unwrap();
+    w.plan("a", program_plan(true));
+    let tools = ws.join("tools").to_str().unwrap().to_string();
+    settle();
+    let r = w.call_args(&ws, "a", program_args(&w, &ws, &[]), move |fake| {
+        fake.vars.insert("PATH".into(), tools);
+        fake.audit = true;
+    });
+    let entry = r.entry.unwrap();
+    assert!(entry.found && entry.differed, "{entry:?}");
+    assert_eq!(entry.outcome, not_stored(NotStored::Differed));
+    assert!(w.store().suspended(&step).is_some());
+}
+
 // covers: B-22
 #[test]
 fn low_free_space_stores_nothing() {
@@ -1917,6 +1980,263 @@ fn another_ld_earlier_on_path_is_another_link() {
         link_proc_macro(&w, &ws, line, &nowhere, &[]),
         not_stored(NotStored::LinkInputs)
     );
+}
+
+/// A gcc-like setup for E (B-37): a driver `cc` and an executable `ld` in `bin` (outside the
+/// checkout, as a system's are), `tools/collect2`, a start file and `-lc` in `lib`; and a dry
+/// run naming them.
+#[cfg(unix)]
+fn gcc_setup(ws: &Path, bin: &Path) -> String {
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(bin.join("cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/collect2"), b"collect2").unwrap();
+    executable(&bin.join("ld"), "ld one");
+    fs::create_dir_all(ws.join("lib")).unwrap();
+    fs::write(ws.join("lib/crt1.o"), b"crt one").unwrap();
+    fs::write(ws.join("lib/libc.a"), b"!<arch>\nc one").unwrap();
+    let w = ws.display();
+    format!(
+        "Using built-in specs.\ngcc version 99.1.0 (fixture)\nCOMPILER_PATH={w}/tools/\n {w}/tools/collect2 \"-plugin-opt=-fresolution=/tmp/ccAb12Cd.res\" {w}/lib/crt1.o -L{w}/lib -lc\n"
+    )
+}
+
+/// The block the last call of the run stored or reused, by the key its log line names.
+fn last_block(w: &World) -> crate::store::Block {
+    let key = w.session.current().entries().last().unwrap().key.unwrap();
+    w.store().block(&key).unwrap().unwrap()
+}
+
+// covers: B-37, B-6, B-18
+#[cfg(unix)]
+#[test]
+fn a_known_link_environment_takes_the_place_of_the_linkers_size_and_date() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let early = w.dir.path().join("early");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&early).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    let path = std::env::join_paths([&early, &bin]).unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    // The toolchain's own linker tools (B-37), which the compiler's identity doesn't hash.
+    let tools = w
+        .dir
+        .path()
+        .join("toolchain/lib/rustlib/aarch64-apple-darwin/bin");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("rust-objcopy"), b"objcopy one").unwrap();
+    let target = ["--target", "x86_64-unknown-linux-gnu"];
+    let line = format!(
+        r#""{}/cc" "{{ws}}/target/debug/deps/x.o" "-lc" "-o" "{{ws}}/target/debug/deps/liba-xa.so""#,
+        bin.display()
+    );
+    let line = line.as_str();
+    let known = [
+        ("PATH", path.as_str()),
+        ("FAKE_LD", "ld"),
+        ("FAKE_DRY_RUN", dry_run.as_str()),
+    ];
+    let link = || link_proc_macro(&w, &ws, line, &known, &target);
+    assert_eq!(link(), STORED);
+    let description = last_block(&w).description;
+    let items = &description["link_environment"]["known"]["items"];
+    let roles: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "dry-run",
+            "driver",
+            "program",
+            "ld",
+            "file",
+            "library",
+            "toolchain"
+        ],
+        "{description}"
+    );
+    assert_eq!(link(), REUSED, "the lookup asks the hint's question again");
+    // The driver's date changed, its bytes didn't: its size and date are no longer keyed.
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(bin.join("cc"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(link(), REUSED, "the driver by its bytes");
+    fs::write(ws.join("lib/crt1.o"), b"crt two").unwrap();
+    assert_eq!(link(), STORED, "a start file changed");
+    assert_eq!(link(), REUSED);
+    fs::write(ws.join("lib/libc.a"), b"!<arch>\nc two").unwrap();
+    assert_eq!(link(), STORED, "the C library changed");
+    fs::write(tools.join("rust-objcopy"), b"objcopy two").unwrap();
+    assert_eq!(link(), STORED, "the toolchain's rust-objcopy changed");
+    assert_eq!(link(), REUSED);
+    // Another `ld` earlier on `PATH`, which `collect2` runs: found at the lookup, never
+    // remembered (the review's r-memo).
+    executable(&early.join("ld"), "ld two");
+    assert_eq!(link(), STORED, "another ld runs now");
+    assert_eq!(link(), REUSED);
+
+    // E unknown (the driver gives no dry run): today's identification stays in the key.
+    let unknown = [("PATH", path.as_str()), ("FAKE_LD", "ld")];
+    let link = || link_proc_macro(&w, &ws, line, &unknown, &target);
+    assert_eq!(link(), STORED);
+    let description = last_block(&w).description;
+    assert!(
+        description["link_environment"]["unknown"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("dry run"),
+        "{description}"
+    );
+    assert_eq!(link(), REUSED);
+    let older = SystemTime::now() - Duration::from_secs(7200);
+    fs::File::options()
+        .write(true)
+        .open(bin.join("cc"))
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    assert_eq!(link(), STORED, "the driver by its size and date");
+}
+
+// covers: B-24, B-10, B-37
+#[cfg(unix)]
+#[test]
+fn a_linked_output_with_a_known_environment_may_leave_unless_it_holds_the_toolchain() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    // The driver and `ld` are the repository's own here, so that nothing the link reads lies
+    // outside the roots and the bases (that ties a block, B-8).
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    executable(&ws.join("tools/ld"), "ld one");
+    let path = ws.join("tools").to_str().unwrap().to_owned();
+    let bin = ws.join("tools");
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    let run = |salt: Option<String>, vars: &[(&str, &str)]| -> Entry {
+        // Another crate for each output asked for: a source of its own.
+        fs::write(
+            ws.join("a/src/lib.rs"),
+            format!("// {}\nmod foo;\n", salt.as_deref().unwrap_or_default()),
+        )
+        .unwrap();
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                link_salt: salt,
+                ..Plan::default()
+            },
+        );
+        settle();
+        let mut args = w.args(&ws, "a", &["--target", "x86_64-unknown-linux-gnu"]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        let r = w.call_args(&ws, "a", args, |fake| {
+            for (name, value) in vars {
+                fake.vars.insert((*name).to_string(), (*value).to_string());
+            }
+        });
+        r.entry.unwrap()
+    };
+    let ld = format!("{}/ld", bin.display());
+    let known = [
+        ("PATH", path.as_str()),
+        ("FAKE_LD", ld.as_str()),
+        ("FAKE_DRY_RUN", dry_run.as_str()),
+    ];
+    let entry = run(None, &known);
+    assert_eq!(entry.outcome, STORED);
+    let portable = entry.portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // Unknown: the reason says why.
+    let unknown = [("PATH", path.as_str()), ("FAKE_LD", ld.as_str())];
+    let portable = run(None, &unknown).portable.unwrap();
+    assert_eq!(
+        portable.reasons,
+        [crate::portable::Reason::LinkEnvironmentUnknown]
+    );
+    assert!(
+        portable
+            .link_environment
+            .as_deref()
+            .is_some_and(|why| why.contains("dry run")),
+        "{portable:?}"
+    );
+    // The toolchain's own folder in the output, given or resolved: not portable, and keyed by
+    // the toolchain's place, which another install has not.
+    // The fake compiler's sysroot is its resolved folder; the toolchain's given form is
+    // searched for too (`roots::toolchain_needles`).
+    let toolchain = w.dir.path().join("toolchain");
+    {
+        let form = crate::roots::resolve_on_disk(toolchain.to_str().unwrap()).unwrap();
+        let salt = format!("N_OSO {form}/lib/rustlib/x/lib/libstd.rlib");
+        let entry = run(Some(salt), &known);
+        assert_eq!(entry.outcome, STORED);
+        let portable = entry.portable.unwrap();
+        assert!(
+            portable
+                .reasons
+                .contains(&crate::portable::Reason::ToolchainInOutput),
+            "{form}: {portable:?}"
+        );
+        let block = last_block(&w);
+        assert!(
+            block.description["portability"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "toolchain-in-output")
+        );
+    }
+}
+
+// covers: B-11, B-37
+#[cfg(unix)]
+#[test]
+fn a_file_the_link_environment_reads_that_changes_while_compiling_stores_nothing() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let dry_run = gcc_setup(&ws, &bin);
+    let path = bin.to_str().unwrap().to_owned();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &["--target", "x86_64-unknown-linux-gnu"]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let crt = ws.join("lib/crt1.o");
+    let r = w.call_args(&ws, "a", args, move |fake| {
+        for (name, value) in [
+            ("PATH", path.as_str()),
+            ("FAKE_LD", "ld"),
+            ("FAKE_DRY_RUN", dry_run.as_str()),
+        ] {
+            fake.vars.insert(name.into(), value.into());
+        }
+        // A start file rewritten while rustc runs: which one the link read can't be told.
+        fake.during = Some(Box::new(move || fs::write(&crt, b"crt during").unwrap()));
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Changed), "{}", r.stderr);
 }
 
 // covers: B-18
@@ -2796,6 +3116,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             seal: None,
             ask: None,
             apple: true,
+            toolchain: None,
         };
         let common = cx.common().unwrap();
         hints
@@ -3382,6 +3703,195 @@ fn program_plan(bundle_root: bool) -> Plan {
     }
 }
 
+// covers: B-9, B-11
+#[cfg(unix)]
+#[test]
+fn a_movable_program_sees_the_toolchain_through_a_link_beside_its_outputs() {
+    // Apple's linker names each object by the path it is given, and the program's UUID is a
+    // hash over those names. Through the link the standard library's objects are named from
+    // the output folder, not by where this machine keeps the toolchain.
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let link = sysroot_arg(&r.seen.compiles[0]).expect("a sysroot");
+    let beside = one.join("target/debug/deps/.hushrun");
+    assert_eq!(link.parent(), Some(beside.as_path()), "{}", link.display());
+    let name = link.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(name.starts_with("sysroot-") && name.len() == 24, "{name}");
+    let toolchain = fs::canonicalize(w.rustc.parent().unwrap().parent().unwrap()).unwrap();
+    let leads_to = |link: &Path| fs::canonicalize(fs::read_link(link).unwrap()).unwrap();
+    assert_eq!(leads_to(&link), toolchain);
+    // Nothing else is left beside it: the link was made under another name and renamed.
+    let left: Vec<String> = fs::read_dir(&beside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains("sysroot") && *n != name)
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    // Another checkout: its own link under the same name, and the first one's block.
+    let r = call_program(&w, &two, &[]);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(
+        leads_to(&two.join("target/debug/deps/.hushrun").join(&name)),
+        toolchain
+    );
+    // A link that leads elsewhere (a toolchain moved, a target folder copied from another
+    // machine) is put right before the compile reads through it.
+    let elsewhere = w.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    fs::write(one.join("a/src/lib.rs"), "mod foo;\nfn edited() {}\n").unwrap();
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert_eq!(leads_to(&link), toolchain);
+    // A library gets none.
+    w.plan("a", Plan::default());
+    let lib = w.call(&two, "a", &[]);
+    assert_eq!(sysroot_arg(&lib.seen.compiles[0]), None);
+}
+
+// covers: B-9
+#[test]
+fn where_a_programs_output_folder_lies_from_its_workspace_is_keyed_or_ties_it() {
+    use crate::wrapper::{ProgramPlace, program_place};
+    let dir = tempfile::tempdir().unwrap();
+    let real = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
+    let ws = real.join("ws");
+    fs::create_dir_all(ws.join("target/debug/deps")).unwrap();
+    let cwd = ws.to_str().unwrap();
+    // Inside, as cargo gives it: the prefix the linker takes off, and the rest, which the key
+    // holds (two layouts of one workspace are two UUIDs).
+    assert_eq!(
+        program_place(cwd, &ws.join("target/debug/deps")),
+        ProgramPlace::Inside {
+            prefix: cwd.to_owned(),
+            rest: "target/debug/deps".to_owned()
+        }
+    );
+    // The text counts, as the linker gets it: a `..` stays in the rest.
+    assert_eq!(
+        program_place(cwd, &ws.join("out/../build//debug/deps/")),
+        ProgramPlace::Inside {
+            prefix: cwd.to_owned(),
+            rest: "out/../build/debug/deps".to_owned()
+        }
+    );
+    // Outside: the folder as this machine has it.
+    let outside = real.join("targets/debug/deps");
+    assert_eq!(
+        program_place(cwd, &outside),
+        ProgramPlace::Outside(outside.to_str().unwrap().to_owned())
+    );
+    // A folder that only starts like the workspace is outside.
+    let beside = real.join("ws2/target");
+    assert!(matches!(
+        program_place(cwd, &beside),
+        ProgramPlace::Outside(_)
+    ));
+    // The workspace reached through a link, the output folder written with the resolved form
+    // (cargo resolves the folder it runs in): the prefix is the form the output folder has.
+    #[cfg(unix)]
+    {
+        let through = real.join("link-to-ws");
+        std::os::unix::fs::symlink(&ws, &through).unwrap();
+        assert_eq!(
+            program_place(through.to_str().unwrap(), &ws.join("target/debug/deps")),
+            ProgramPlace::Inside {
+                prefix: cwd.to_owned(),
+                rest: "target/debug/deps".to_owned()
+            }
+        );
+        // And the other way round: the linker is given the names with the link in them.
+        assert_eq!(
+            program_place(
+                through.to_str().unwrap(),
+                &through.join("target/debug/deps")
+            ),
+            ProgramPlace::Inside {
+                prefix: through.to_str().unwrap().to_owned(),
+                rest: "target/debug/deps".to_owned()
+            }
+        );
+    }
+    // A workspace whose path holds a comma: `-Wl,` can't carry the prefix.
+    let comma = real.join("a,b");
+    fs::create_dir_all(comma.join("target")).unwrap();
+    assert!(matches!(
+        program_place(comma.to_str().unwrap(), &comma.join("target")),
+        ProgramPlace::Outside(_)
+    ));
+}
+
+// covers: B-9
+#[test]
+fn a_proc_macro_and_a_build_script_are_linked_without_a_debug_map_on_apple_where_the_run_shares() {
+    // The debug map names every object the link took, the standard library's among them, by
+    // where this machine has it: with it no proc macro or build script could leave a Mac. It
+    // is also what gives a panic's frames their file and line, so a run that shares nothing
+    // keeps it; the two are different compiles, with different keys.
+    let alone = debug_map_call(|_| {});
+    assert!(!alone.0.iter().any(|a| a == "link-arg=-Wl,-S"), "{alone:?}");
+    let would = debug_map_call(World::unreached);
+    assert!(would.0.iter().any(|a| a == "link-arg=-Wl,-S"), "{would:?}");
+    let shares = debug_map_call(|w| w.share("acme"));
+    assert!(
+        shares.0.iter().any(|a| a == "link-arg=-Wl,-S"),
+        "{shares:?}"
+    );
+    assert_eq!(
+        shares.1, would.1,
+        "one key whether or not the backend answers"
+    );
+    assert_ne!(alone.1, shares.1, "another compile, another key");
+    // Alone, the map stays without the folder it was linked in, as before linked outputs
+    // travelled; shared, there is no map to take a prefix off.
+    assert!(
+        alone.0.iter().any(|a| a.contains("-oso_prefix,")),
+        "{alone:?}"
+    );
+    assert!(
+        !shares.0.iter().any(|a| a.contains("oso_prefix")),
+        "{shares:?}"
+    );
+    for asked in [&alone.0, &shares.0] {
+        assert!(
+            asked.iter().any(|a| a.contains("-install_name,@rpath/")),
+            "{asked:?}"
+        );
+        assert_eq!(sysroot_arg(asked), None);
+    }
+}
+
+/// What rustc is asked for a proc macro with debug info on an Apple target, and the first key,
+/// in a world that `share` set up.
+fn debug_map_call(share: impl FnOnce(&mut World)) -> (Vec<String>, Option<Digest>) {
+    let mut w = world(Mode::On);
+    share(&mut w);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &["-C", "debuginfo=2"]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = w.call_args(&ws, "a", args, |_| {});
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    (r.seen.compiles[0].clone(), r.entry.unwrap().step)
+}
+
 /// Begins the world's next session in the same store, with its settings changed.
 fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
     let settings = w.dir.path().join("build.json");
@@ -3852,6 +4362,11 @@ impl Box2 {
 
     /// The registry crate `reg`, built in the checkout `ws`.
     fn call_reg(&self, ws: &Path) -> Result {
+        self.call_reg_with(ws, None)
+    }
+
+    /// [`Box2::call_reg`], in a run whose relay is `relay`.
+    fn call_reg_with(&self, ws: &Path, relay: Option<Rc<RefCell<RelayStandIn>>>) -> Result {
         let source = self.package().join("src/lib.rs");
         let args: Vec<OsString> = self
             .w
@@ -3872,6 +4387,7 @@ impl Box2 {
                 self.package().to_str().unwrap().into(),
             );
             fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+            fake.relay = relay;
         })
     }
 
@@ -4421,6 +4937,117 @@ fn a_registry_crate_whose_output_holds_the_cargo_home_is_reused_here_but_stays_h
     assert!(dependent.entry.unwrap().portable.unwrap().portable);
 }
 
+// covers: B-24, B-29
+#[test]
+fn a_block_bound_to_a_machines_folder_is_reused_only_where_that_folder_is_the_same() {
+    // A registry crate that bakes its own path in (a C library's debug info does, and
+    // `env!("CARGO_MANIFEST_DIR")`): its bytes hold the cargo home. Its second key holds that
+    // folder's value, so a machine computes the key only where the folder is the same text,
+    // and there the block is as right as where it was built: every job of a repository in CI.
+    let embeds = || Plan {
+        embed_var: Some("CARGO_MANIFEST_DIR".into()),
+        ..Plan::default()
+    };
+    let mut m = a_machine("runner", "stable-aarch64-apple-darwin");
+    m.w.share("acme");
+    m.w.plan("reg", embeds());
+    let one = m.w.checkout("one");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let first = m.call_reg_with(&one, Some(relay.clone()));
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    let entry = first.entry.unwrap();
+    let portable = entry.portable.clone().unwrap();
+    assert!(!portable.portable && portable.bound_only(), "{portable:?}");
+    // The relay is told both: not portable, and bound to folders its keys hold.
+    assert!(
+        relay.borrow().asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                bound: true,
+                ..
+            }
+        )),
+        "{:?}",
+        relay.borrow().asked
+    );
+    let key = entry.key.unwrap();
+    let step = only_step(&m.w);
+
+    // The shared store: the block and its hint, which names the folder and not its value.
+    let shared = Store::new(&m.w.dir.path().join("shared-store"));
+    assert!(download(&m.w.store(), &shared, &key, now_ms()));
+    for hint in m.w.store().hints(&step) {
+        let text = String::from_utf8_lossy(&hint).into_owned();
+        assert!(!text.contains(m.cargo_home.to_str().unwrap()), "{text}");
+        shared.add_hint(&step, &hint, SystemTime::now()).unwrap();
+    }
+
+    // Another job on a machine with the same folders and nothing of its own: the same key.
+    m.w.store().clean().unwrap();
+    let two = m.w.checkout("two");
+    settle();
+    let relay = serving(shared.clone(), m.w.store(), None);
+    let second = m.call_reg_with(&two, Some(relay));
+    assert_eq!(second.outcome(), REUSED, "{}", second.stderr);
+    let entry = second.entry.unwrap();
+    assert!(entry.downloaded);
+    assert_eq!(entry.key, Some(key));
+
+    // A machine whose cargo home lies elsewhere: the hint leads it to another key, which the
+    // shared store doesn't hold. It compiles, and stores a block of its own.
+    let mut other = a_machine("someone-else", "stable-aarch64-apple-darwin");
+    other.w.share("acme");
+    other.w.plan("reg", embeds());
+    let ws = other.w.checkout("ws");
+    settle();
+    let relay = serving(shared, other.w.store(), None);
+    let there = other.call_reg_with(&ws, Some(relay));
+    assert_eq!(there.outcome(), STORED, "{}", there.stderr);
+    let entry = there.entry.unwrap();
+    assert!(!entry.found && !entry.downloaded, "{entry:?}");
+    assert_ne!(entry.key, Some(key));
+    assert_eq!(entry.step, Some(step), "the same first key");
+}
+
+// covers: B-10, B-24
+#[test]
+fn a_block_whose_outputs_cant_be_searched_never_travels() {
+    // `-C lto` writes bitcode a search can't read: such a block may hold a folder nobody saw.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &["-C", "lto"], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::Unsearchable),
+        "{portable:?}"
+    );
+    assert!(!portable.portable && !portable.bound_only(), "{portable:?}");
+    assert!(
+        relay.borrow().asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                bound: false,
+                ..
+            }
+        )),
+        "{:?}",
+        relay.borrow().asked
+    );
+}
+
 // covers: B-10
 #[test]
 fn a_variable_naming_the_cargo_home_is_proved_before_a_block_may_leave() {
@@ -4908,6 +5535,45 @@ fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in
     );
 }
 
+// covers: B-16, B-34
+#[test]
+fn a_downloaded_proc_macros_first_reuse_is_audited_one_in_ten_like_a_librarys() {
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let call = |w: &World, ws: &Path, relay: Option<Rc<RefCell<RelayStandIn>>>| {
+        w.plan(
+            "a",
+            Plan {
+                stdout: Some(format!("{line}\n")),
+                ..Plan::default()
+            },
+        );
+        settle();
+        let mut args = w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        w.call_args(ws, "a", args, move |fake| {
+            from_a_registry(fake);
+            fake.relay = relay;
+        })
+    };
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
+    let there = other.checkout("ws");
+    with_tools(&there);
+    assert_eq!(call(&other, &there, None).outcome(), STORED);
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let relay = serving(other.store(), w.store(), None);
+    let r = call(&w, &ws, Some(relay));
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(r.entry.unwrap().downloaded);
+    assert_eq!(r.seen.first_audits, 1);
+}
+
 // covers: B-34
 #[test]
 fn a_downloaded_block_is_reused_without_asking_for_a_day_then_only_while_a_server_vouches() {
@@ -5288,6 +5954,295 @@ fn an_audit_of_a_downloaded_block_that_differs_reports_it_and_suspends_for_the_k
             .is_none(),
         "a downloaded block's suspension lasts the kept days"
     );
+}
+
+/// The proc macro `a`, linked by `tools/cc`, whose linker writes `salt` around its metadata: two
+/// machines with one key and other bytes.
+fn linked_with_salt(
+    w: &World,
+    ws: &Path,
+    salt: &str,
+    relay: Option<Rc<RefCell<RelayStandIn>>>,
+    audit: bool,
+) -> Result {
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            link_salt: Some(salt.into()),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    w.call_args(ws, "a", args, move |fake| {
+        from_a_registry(fake);
+        fake.relay = relay;
+        fake.audit = audit;
+    })
+}
+
+// covers: B-16, B-34
+#[test]
+fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_stays_here() {
+    // Another machine linked the proc macro with another linker than its key says: its link
+    // environment missed something. A library in this place is a poisoned or broken build and
+    // suspends its key. A linked output is what this machine's own linker makes every time:
+    // it keeps its own, in the downloaded copy's place, and keeps the key to itself.
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
+    let there = other.checkout("ws");
+    with_tools(&there);
+    let built = linked_with_salt(&other, &there, "their linker", None, false);
+    assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+    let key = built.entry.unwrap().key.unwrap();
+    let step = only_step(&other);
+
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let linked = ws.join(format!(
+        "target/debug/deps/liba-xa.{}",
+        std::env::consts::DLL_EXTENSION
+    ));
+    let relay = serving(other.store(), w.store(), None);
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), true);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert_eq!(entry.key, Some(key), "the same key");
+    assert!(entry.differed);
+    assert!(
+        entry
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("keeps its own")),
+        "{:?}",
+        entry.note
+    );
+    // The store holds this machine's bytes now, as built here.
+    let origin = w.store().origin(&key).unwrap();
+    assert!(
+        origin.built.is_some() && !origin.downloaded_only(),
+        "{origin:?}"
+    );
+    let ours = fs::read(&linked).unwrap();
+    let stored = w.store().block(&key).unwrap().unwrap();
+    let file = stored
+        .files
+        .iter()
+        .find(|f| f.name.ends_with(std::env::consts::DLL_EXTENSION))
+        .unwrap();
+    assert_eq!(fs::read(&file.path).unwrap(), ours);
+    // Nothing is suspended; the key is kept here for the store's kept days.
+    let now = SystemTime::now();
+    assert_eq!(w.store().suspended_at(&step, now), None);
+    assert!(w.store().kept_local_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .kept_local_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
+    );
+    // The scope is told, not in a library's words, and the block is not offered for upload.
+    {
+        let asked = &relay.borrow().asked;
+        assert!(
+            asked.iter().any(|r| matches!(
+                r,
+                Request::Report { key: k, problem: Problem::LinkDiffers } if *k == key
+            )),
+            "{asked:?}"
+        );
+        assert!(
+            !asked.iter().any(|r| matches!(
+                r,
+                Request::Report {
+                    problem: Problem::Differs,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|r| matches!(
+                r,
+                Request::Built {
+                    portable: false,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+    }
+    // From then on: this machine's own block is reused, and the shared store is asked nothing
+    // of that key.
+    fs::remove_file(&linked).unwrap();
+    let before = relay.borrow().asked.len();
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), false);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(!r.entry.unwrap().downloaded);
+    assert_eq!(fs::read(&linked).unwrap(), ours);
+    assert_eq!(
+        relay.borrow().asked.len(),
+        before,
+        "{:?}",
+        relay.borrow().asked
+    );
+}
+
+// covers: B-32, B-34
+#[test]
+fn a_linked_output_compiled_over_a_differing_download_takes_its_place_without_a_suspension() {
+    // The download arrived while this compile ran (no hint led to it): the publish finds it
+    // there with other bytes.
+    // The machine that built it shares too: on an Apple target that is part of what a
+    // proc macro's and a build script's compile is asked (B-9).
+    let mut other = world(Mode::On);
+    other.unreached();
+    let there = other.checkout("ws");
+    with_tools(&there);
+    let built = linked_with_salt(&other, &there, "their linker", None, false);
+    let key = built.entry.unwrap().key.unwrap();
+    let step = only_step(&other);
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), false);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let now = SystemTime::now();
+    assert_eq!(w.store().suspended_at(&step, now), None);
+    assert!(w.store().kept_local_at(&step, now).is_some());
+    assert!(w.store().origin(&key).unwrap().built.is_some());
+    let asked = &relay.borrow().asked;
+    assert!(
+        asked.iter().any(|r| matches!(
+            r,
+            Request::Report {
+                problem: Problem::LinkDiffers,
+                ..
+            }
+        )),
+        "{asked:?}"
+    );
+    assert!(
+        asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                ..
+            }
+        )),
+        "{asked:?}"
+    );
+}
+
+// covers: B-38, B-34
+#[cfg(unix)]
+#[test]
+fn a_downloaded_program_that_cant_start_here_is_a_miss_and_is_built_in_its_place() {
+    // Another machine's program under this compile's key, downloaded. Cargo would run it (a
+    // build script) or a test would: before it is put in place its loader is asked whether it
+    // can start. One that can't is compiled here instead, and that block takes its place.
+    for (missing, starts) in [(None, true), (Some("libq.9.dylib"), false)] {
+        let other = world(Mode::On);
+        other.plan("a", program_plan(false));
+        let there = program_checkout(&other, "ws");
+        settle();
+        let built = call_program(&other, &there, &[]);
+        assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+        let key = built.entry.unwrap().key.unwrap();
+        let step = only_step(&other);
+
+        let mut w = world(Mode::On);
+        w.share("acme");
+        w.plan("a", program_plan(false));
+        let ws = program_checkout(&w, "ws");
+        settle();
+        // The other machine's block, its program one in this system's own format that loads
+        // what this machine has, or a library it doesn't.
+        let block = other.store().block(&key).unwrap().unwrap();
+        let program = w.dir.path().join("their-program");
+        fs::write(&program, crate::loader::tests::host_program(missing)).unwrap();
+        let mut files: Vec<crate::store::NewFile> = block
+            .files
+            .iter()
+            .map(|f| crate::store::NewFile {
+                name: f.name.clone(),
+                source: f.path.clone(),
+            })
+            .collect();
+        // The fake compiler writes a program under a library's name.
+        files
+            .iter_mut()
+            .find(|f| f.name == "liba-xa.rlib")
+            .unwrap()
+            .source = program.clone();
+        w.store()
+            .publish_with_origin(
+                &key,
+                &block.description,
+                &files,
+                &Origin::downloaded(vouch(now_ms())),
+                SystemTime::now(),
+            )
+            .unwrap();
+        for hint in other.store().hints(&step) {
+            w.store()
+                .add_shared_hint(&step, &hint, SystemTime::now())
+                .unwrap();
+        }
+        let relay = relay_answering(|_| Some(Answer::Ok));
+        let stand_in = relay.clone();
+        let tools = ws.join("tools").to_str().unwrap().to_string();
+        let r = w.call_args(&ws, "a", program_args(&w, &ws, &[]), move |fake| {
+            fake.vars.insert("PATH".into(), tools);
+            fake.relay = Some(stand_in);
+        });
+        let entry = r.entry.clone().unwrap();
+        let here = ws.join("target/debug/deps/liba-xa.rlib");
+        if starts {
+            assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+            assert_eq!(fs::read(&here).unwrap(), fs::read(&program).unwrap());
+            continue;
+        }
+        assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+        assert!(!entry.found && !entry.downloaded, "{entry:?}");
+        assert!(
+            entry
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("can't start") && n.contains("libq.9.dylib")),
+            "{:?}",
+            entry.note
+        );
+        // What rustc made here, not the program that can't start; and the store's block is
+        // this machine's from now on.
+        assert_ne!(fs::read(&here).unwrap(), fs::read(&program).unwrap());
+        let origin = w.store().origin(&key).unwrap();
+        assert!(
+            origin.built.is_some() && !origin.downloaded_only(),
+            "{origin:?}"
+        );
+        // Nothing is reported and nothing suspended: it is a miss, not a broken build.
+        assert!(
+            !relay
+                .borrow()
+                .asked
+                .iter()
+                .any(|r| matches!(r, Request::Report { .. })),
+            "{:?}",
+            relay.borrow().asked
+        );
+        assert_eq!(w.store().suspended_at(&step, SystemTime::now()), None);
+    }
 }
 
 // covers: B-15, B-34

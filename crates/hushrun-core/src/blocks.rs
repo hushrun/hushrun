@@ -792,6 +792,11 @@ pub enum Problem {
     Missing,
     /// It opened, but a compile that depends on it couldn't load it.
     Rejected,
+    /// It is a linked output (a program, a proc macro, a build-script binary), and a link on
+    /// the reporter's machine made other bytes: the two link environments differ in something
+    /// the key doesn't hold. The reporter keeps its own. A server that doesn't know the word
+    /// records nothing, which is right for it: it is not a sign of a poisoned build.
+    LinkDiffers,
     /// A word this version doesn't know: a server records nothing for it.
     #[serde(other)]
     Unknown,

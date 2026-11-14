@@ -125,19 +125,32 @@ pub trait Ports {
     }
 }
 
-/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path` and
-/// `LC_ALL=C`, and nothing on stdin, for one of B-18's questions. `None` when it can't start.
-fn ask_program(program: &Path, args: &[String], path: &OsStr) -> Option<link::Answer> {
-    let out = std::process::Command::new(program)
+/// Runs `program` with `args`, the wrapper's own variables with `PATH` set to `path`,
+/// `LC_ALL=C` and `env` applied, and nothing on stdin, for one of B-18's and B-37's questions.
+/// `None` when it can't start.
+fn ask_program(
+    program: &Path,
+    args: &[String],
+    path: &OsStr,
+    env: &[(String, Option<String>)],
+) -> Option<link::Answer> {
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .env("PATH", path)
         .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    for (name, value) in env {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let out = command.output().ok()?;
     Some(link::Answer {
         success: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
 }
 
@@ -217,11 +230,15 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         view: None,
         bundle: false,
         clear_bundle: false,
+        keyed_by_place: false,
+        for_host: true,
         keys: std::cell::RefCell::new(KeyLine::default()),
         asked: None,
         native_cpu: false,
         downloaded: std::cell::Cell::new(false),
         replace_downloaded: std::cell::Cell::new(false),
+        kept_local: std::cell::Cell::new(false),
+        cant_start: std::cell::RefCell::new(None),
     }
     .run()
 }
@@ -309,6 +326,12 @@ struct Call<'a> {
     /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
     /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
     clear_bundle: bool,
+    /// A movable program whose output folder lies outside the workspace, or a linked output
+    /// with rustc's own run paths (`-C rpath`) (B-9): its first key holds those folders as this
+    /// machine has them, so the block is tied to its place (B-24).
+    keyed_by_place: bool,
+    /// The compile is for this machine's own target, so what it links is started here (B-38).
+    for_host: bool,
     /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
     keys: std::cell::RefCell<KeyLine>,
     /// The first key's parts, once computed: what decides whether the block may leave the
@@ -322,6 +345,12 @@ struct Call<'a> {
     /// The block in the store under this compile's key was only downloaded and no server
     /// vouches for it now: the compile's block takes its place (B-32, B-34).
     replace_downloaded: std::cell::Cell<bool>,
+    /// The first key is kept on this machine ([`Store::keep_local`]): nothing of it is asked
+    /// of the shared store or sent to it.
+    kept_local: std::cell::Cell<bool>,
+    /// Why a downloaded program or build script found for this compile can't start here
+    /// (B-38): the compile ran in its place, and its line says so.
+    cant_start: std::cell::RefCell<Option<String>>,
 }
 
 /// One line of the key log ([`Current::key_log`]): the parts of a compile's keys, so that two
@@ -349,6 +378,9 @@ struct KeyLine {
     /// Each `--extern` as the second key holds it: by the SHA-256 of its file, or a proc macro
     /// by what it was built from. With `outputs`, what joins a crate to its dependencies.
     externs: Vec<crate::key::ExternInput>,
+    /// How long computing a link's environment took at the link, in milliseconds (B-37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_environment_ms: Option<f64>,
 }
 
 /// What the lookup found, beyond the plan's facts.
@@ -426,6 +458,8 @@ struct Searched {
     machine: BTreeSet<Folder>,
     /// The variables whose value the output holds, by name.
     values: BTreeSet<String>,
+    /// It holds the toolchain's own folder (B-10).
+    toolchain: bool,
 }
 
 /// What a text an output is searched for stands for.
@@ -438,6 +472,8 @@ enum Hit {
     /// The value of a variable that is not in the key and looks like a secret (B-24), by the
     /// variable's name.
     Value(String),
+    /// The toolchain's own folder, searched for in linked outputs (B-10).
+    Toolchain,
 }
 
 /// What outputs are searched for: the roots (B-10), the folders that name the machine and the
@@ -449,8 +485,9 @@ struct Search {
 }
 
 impl Search {
-    /// `values` are the variables to look for by name and value.
-    fn new(roots: &Roots, values: &[(String, Vec<u8>)]) -> Search {
+    /// `values` are the variables to look for by name and value; `toolchain` the forms of the
+    /// toolchain's own folder, for a linked output (B-10).
+    fn new(roots: &Roots, values: &[(String, Vec<u8>)], toolchain: &[String]) -> Search {
         let mut texts: Vec<(Vec<u8>, Vec<Hit>)> = Vec::new();
         let mut add = |bytes: Vec<u8>, kind: Hit| {
             if bytes.is_empty() {
@@ -469,6 +506,9 @@ impl Search {
         }
         for (name, value) in values {
             add(value.clone(), Hit::Value(name.clone()));
+        }
+        for form in toolchain {
+            add(form.as_bytes().to_vec(), Hit::Toolchain);
         }
         let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
         Search {
@@ -500,6 +540,7 @@ impl Search {
         let mut tied = false;
         let mut machine = BTreeSet::new();
         let mut values = BTreeSet::new();
+        let mut toolchain = false;
         for (hit, kinds) in found.iter().zip(&self.kinds) {
             if !hit {
                 continue;
@@ -513,6 +554,7 @@ impl Search {
                     Hit::Value(name) => {
                         values.insert(name.clone());
                     }
+                    Hit::Toolchain => toolchain = true,
                 }
             }
         }
@@ -528,6 +570,7 @@ impl Search {
             tied,
             machine,
             values,
+            toolchain,
         })
     }
 }
@@ -808,6 +851,30 @@ impl Call<'_> {
             },
             None => None,
         };
+        // B-9: a program that gets a debug bundle sees the toolchain through a link beside its
+        // outputs, one per toolchain, so that the linker names the standard library's objects
+        // from the output folder and not by where this machine keeps the toolchain.
+        let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+        self.for_host = inv.target().is_none_or(|target| target == identity.host);
+        let mut place = None;
+        let mut view = view;
+        if class != Class::Library {
+            self.apple = apple;
+            self.clear_bundle = bundled(inv, apple);
+            self.bundle = self.clear_bundle
+                && self.current.programs == Programs::Movable
+                && identity.sysroot.is_some();
+        }
+        if self.bundle
+            && let Some(sysroot) = &identity.sysroot
+        {
+            let leads_to = view.clone().unwrap_or_else(|| sysroot.clone());
+            match compiler::sysroot_link(&self.out_dir(), &identity.digest, &leads_to) {
+                Ok(link) => view = Some(link),
+                Err(_) => return self.pass(PassedThrough::Compiler),
+            }
+            place = Some(program_place(inv.cwd(), &self.out_dir()));
+        }
         self.hide_sources = view.as_ref().map(|view| {
             let mut arg = OsString::from("--sysroot=");
             arg.push(view);
@@ -873,11 +940,11 @@ impl Call<'_> {
             unstorable = unstorable.or(Some(NotStored::NativeOutside));
         }
         if class != Class::Library {
-            let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
-            self.apple = apple;
-            self.clear_bundle = bundled(inv, apple);
-            self.bundle = self.clear_bundle && self.current.programs == Programs::Movable;
-            self.link_extra = linked_args(inv, apple, self.bundle);
+            // B-9: the debug map goes only where dropping it buys something, which is a run
+            // that shares or would (its backend out of reach is the same compile, so the key
+            // doesn't turn with the network).
+            let shares = self.current.share != crate::session::Shared::Off;
+            self.link_extra = linked_args(inv, apple, place.as_ref(), shares);
             // Debug info packed beside a proc macro or a build script, or beside a program the
             // wrapper leaves as it is, is not something a block carries.
             if inv.debug().split.as_deref() == Some("packed") && !self.bundle {
@@ -905,6 +972,44 @@ impl Call<'_> {
         else {
             return self.pass(PassedThrough::NotUtf8);
         };
+        // Where the output folder lies for the linker is in a movable program's UUID (B-9):
+        // from the workspace when it is inside, which every checkout shares, else as this
+        // machine has it.
+        let mut added = added;
+        match &place {
+            Some(ProgramPlace::Inside { rest, .. }) => {
+                added.push(format!("hushrun:out-dir-in-workspace={rest}"));
+            }
+            Some(ProgramPlace::Outside(path)) => {
+                added.push(format!("hushrun:out-dir={path}"));
+                self.keyed_by_place = true;
+            }
+            None => {}
+        }
+        // B-9: `-C rpath` makes rustc write the way from the output folder to the toolchain's
+        // and the dependencies' folders into a linked output, relative to the output
+        // (`$ORIGIN/../../…`, `@loader_path/../../…`). No root's name is in such a path and no
+        // search of the outputs finds one, so the first key holds every folder it is made
+        // from as this machine has it: the block is reused only where they are the same.
+        if class != Class::Library && inv.rpath() {
+            let cwd = Path::new(inv.cwd());
+            let folders = std::iter::once(inv.out_dir()).chain(inv.dependency_dirs());
+            for folder in folders {
+                let folder = cwd.join(folder).to_string_lossy().into_owned();
+                added.push(format!("hushrun:rpath-from={folder}"));
+                if let Some(resolved) = resolve_on_disk(&folder)
+                    && resolved != folder
+                {
+                    added.push(format!("hushrun:rpath-from={resolved}"));
+                }
+            }
+            let toolchain = identity.sysroot.as_ref().map(|path| path.to_string_lossy());
+            added.push(format!(
+                "hushrun:rpath-to={}",
+                toolchain.as_deref().unwrap_or("unknown")
+            ));
+            self.keyed_by_place = true;
+        }
         let asked = Asked {
             compiler: identity.digest,
             args: inv
@@ -941,6 +1046,10 @@ impl Call<'_> {
             seal: store.seal(),
             ask: Some(self.asker),
             apple: self.apple,
+            toolchain: identity
+                .sysroot
+                .clone()
+                .map(|sysroot| (sysroot, identity.host.clone())),
         });
 
         let mut common: Option<Result<Common, NotStored>> = None;
@@ -1018,7 +1127,13 @@ impl Call<'_> {
         common: &mut Option<Result<Common, NotStored>>,
         found: &mut Option<Found>,
     ) -> Lookup {
-        let share = self.current.share.relay();
+        // A first key kept on this machine asks the shared store nothing (B-34).
+        self.kept_local.set(store.kept_local(&cx.step).is_some());
+        let share = self
+            .current
+            .share
+            .relay()
+            .filter(|_| !self.kept_local.get());
         let local = store.hints(&cx.step);
         if local.is_empty() && share.is_none() {
             return Lookup::Missing;
@@ -1097,6 +1212,10 @@ impl Call<'_> {
             Ok(None) => Lookup::Missing,
             Ok(Some(block)) => {
                 let origin = store.origin(&key);
+                if !self.starts_here(&block, origin.as_ref()) {
+                    self.replace_downloaded.set(true);
+                    return Lookup::Missing;
+                }
                 match self.found(cx.step, key, block, observed, watched, origin, found) {
                     Some(lookup) => {
                         self.downloaded.set(true);
@@ -1159,7 +1278,14 @@ impl Call<'_> {
                     // B-34: a block that was only downloaded is reused only while a server the
                     // run belongs to vouches for it. Not vouched for, it is a miss: rustc runs,
                     // and its block takes this one's place.
-                    if !self.vouched(&key, &cx.step, &block, origin.as_ref()) {
+                    // A key kept on this machine never reuses a copy that was only
+                    // downloaded: this machine links it otherwise.
+                    let kept_out = self.kept_local.get()
+                        && origin.as_ref().is_some_and(Origin::downloaded_only);
+                    if kept_out
+                        || !self.vouched(&key, &cx.step, &block, origin.as_ref())
+                        || !self.starts_here(&block, origin.as_ref())
+                    {
                         self.replace_downloaded.set(true);
                         return Some(Lookup::Missing);
                     }
@@ -1175,7 +1301,7 @@ impl Call<'_> {
     }
 
     /// A block found under `key`, when its description is this compile's: the lookup's answer,
-    /// with the audit's pick (B-16), one in ten on a downloaded library's first reuse here.
+    /// with the audit's pick (B-16), one in ten on a downloaded block's first reuse here.
     #[allow(clippy::too_many_arguments)]
     fn found(
         &self,
@@ -1191,10 +1317,10 @@ impl Call<'_> {
             .filter(|d| d.step == step && d.class == self.invocation.class())?;
         let serves_form = description.messages.form() == self.invocation.form()
             || description.messages.only_notices();
-        let first_download = self.invocation.class() == Class::Library
-            && origin
-                .as_ref()
-                .is_some_and(|o| o.downloaded_only() && !o.reused);
+        // Every class, linked outputs among them (B-16, B-34).
+        let first_download = origin
+            .as_ref()
+            .is_some_and(|o| o.downloaded_only() && !o.reused);
         let started = self.current.started_ms;
         let audit = self.current.audit.picks(|| {
             if first_download {
@@ -1222,6 +1348,45 @@ impl Call<'_> {
             origin,
         });
         Some(Lookup::Found { audit, serves_form })
+    }
+
+    /// B-38: whether a program or a build-script binary that was only downloaded can start on
+    /// this machine, read from its headers and this machine's files before it is put in place,
+    /// every time, with nothing run: cargo runs a build script itself, so one that can't start
+    /// would fail the build, and every build after it. One that can't is a miss: the compile
+    /// runs, and its block takes this one's place. A proc macro is not asked about: rustc loads
+    /// it and says so when it can't (B-15). Neither is a program built for another target than
+    /// this machine's: nothing here starts it.
+    fn starts_here(&self, block: &Block, origin: Option<&Origin>) -> bool {
+        let class = self.invocation.class();
+        if !matches!(class, Class::BuildScript | Class::Program)
+            || !origin.is_some_and(Origin::downloaded_only)
+            || !self.for_host
+        {
+            return true;
+        }
+        let folder = self.out_dir();
+        let sdk = self.env.get("SDKROOT").map(PathBuf::from);
+        let here = crate::loader::Here {
+            folder: &folder,
+            sdk: sdk.as_deref(),
+        };
+        let linked: Vec<String> = Description::from_value(&block.description)
+            .map(|d| {
+                d.outputs
+                    .iter()
+                    .filter(|o| o.kind == OutputKind::Link)
+                    .map(|o| o.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for file in block.files.iter().filter(|f| linked.contains(&f.name)) {
+            if let Err(why) = crate::loader::can_start(&file.path, &here) {
+                *self.cant_start.borrow_mut() = Some(why);
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether a block may be reused as far as who vouches for it goes (B-34), as
@@ -1445,6 +1610,20 @@ impl Call<'_> {
             Ok(produced) => {
                 if compare && let Some(found) = found {
                     facts.compared = compare_outputs(&produced.outputs, &found.block);
+                    // B-16, B-34: a linked output that differs from a copy this machine only
+                    // downloaded was linked in an environment that differs in something the
+                    // key doesn't hold. This machine's own link is what it would make every
+                    // time: it keeps it, in the downloaded copy's place, and keeps the key
+                    // to itself. A library that differs is another matter: rustc alone wrote
+                    // it, so one of the two was built from other inputs than the key names.
+                    if facts.compared == Compared::Differed
+                        && linked
+                        && !facts.changed
+                        && found.origin.as_ref().is_some_and(Origin::downloaded_only)
+                    {
+                        facts.compared = Compared::KeptOwn;
+                        self.replace_downloaded.set(true);
+                    }
                 }
                 let trusted = !facts.changed && facts.compared != Compared::Differed;
                 log.portable = Some(produced.portability.clone());
@@ -1556,15 +1735,34 @@ impl Call<'_> {
                 inv.crate_name()
             ));
         }
-        log.differed =
-            facts.compared == Compared::Differed || facts.second_opinion == Compared::Differed;
+        if facts.compared == Compared::KeptOwn {
+            log.note = self.keep_to_this_machine(store, &cx.step, found.map(|f| f.block.key));
+        }
+        if let Some(why) = self.cant_start.borrow_mut().take() {
+            log.note.get_or_insert(format!(
+                "the {} downloaded for {} can't start on this machine ({why}); it was built here instead",
+                match inv.class() {
+                    Class::BuildScript => "build script",
+                    _ => "program",
+                },
+                inv.crate_name()
+            ));
+        }
+        log.differed = matches!(facts.compared, Compared::Differed | Compared::KeptOwn)
+            || facts.second_opinion == Compared::Differed;
         log.outcome = verdict.outcome;
         // B-29: the relay hears of a block this run built and stored, and decides whether it
         // goes up; in shared `observe` it compares it with the shared store's copy.
         if let (Some(share), Outcome::BuiltAndStored, Some(key)) =
             (self.current.share.relay(), verdict.outcome, log.key)
         {
-            let portable = log.portable.as_ref().is_some_and(|p| p.portable);
+            // A key kept on this machine goes nowhere, whatever its block holds. The store is
+            // asked here too: a compile that looked nothing up never read the mark.
+            let kept = self.kept_local.get() || store.kept_local(&cx.step).is_some();
+            let portable = log.portable.as_ref().is_some_and(|p| p.portable) && !kept;
+            // B-24: one that holds folders its keys hold the values of may go where those
+            // folders are the same; who may send such a block is the relay's to say.
+            let bound = log.portable.as_ref().is_some_and(|p| p.bound_only()) && !kept;
             let _ = self.ports.relay(
                 &share.socket,
                 &Request::Built {
@@ -1572,6 +1770,7 @@ impl Call<'_> {
                     step: cx.step,
                     class: inv.class(),
                     portable,
+                    bound,
                     cost_ms: rustc_ms,
                 },
                 NOTICE_WAIT,
@@ -1612,7 +1811,15 @@ impl Call<'_> {
             );
         }
         let tracked: Vec<&str> = info.env.iter().map(|dep| dep.name.as_str()).collect();
-        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked));
+        // A linked output is also searched for the toolchain's own folder, which a link can
+        // write (macOS's debug map names the standard library's objects by it) and which names
+        // no checkout but the machine's install (B-10).
+        let toolchain = if inv.class() == Class::Library {
+            Vec::new()
+        } else {
+            roots.toolchain_needles()
+        };
+        let search = Search::new(roots, &self.unkeyed_values(roots, &tracked), &toolchain);
         let mut outputs = self.outputs(recorded, &search)?;
         let mut outside = gathered.outside;
         let mut observed = gathered.observed;
@@ -1643,6 +1850,7 @@ impl Call<'_> {
         }
 
         let tied_by_bytes = outputs.iter().any(|o| o.tied);
+        let toolchain_in_output = outputs.iter().any(|o| o.toolchain);
         let unkeyed: Vec<String> = outputs
             .iter()
             .flat_map(|o| o.values.iter().cloned())
@@ -1715,6 +1923,9 @@ impl Call<'_> {
             externs: &common.externs_portable,
             unkeyed: &unkeyed,
             native_cpu: self.native_cpu,
+            toolchain_in_output,
+            keyed_by_place: self.keyed_by_place,
+            searchable: inv.searchable(),
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:
@@ -1730,6 +1941,7 @@ impl Call<'_> {
                     bound.push(Bound::RustupHome);
                 }
                 Reason::HomeInOutput | Reason::HomeInRecord => bound.push(Bound::Home),
+                Reason::ToolchainInOutput => bound.push(Bound::Toolchain),
                 Reason::VariableNamesBase => {
                     for (_, value) in &through_bases {
                         for name in roots.named(value) {
@@ -2026,6 +2238,14 @@ impl Call<'_> {
         let environment =
             link::environment(&query, self.asker).map_err(|_| NotStored::LinkInputs)?;
         let ld = Some(environment.ld.clone());
+        // The line as its dry run asks it, and the variables it set but `PATH` (B-37).
+        let dry_args = args.dry_args();
+        let set: Vec<(String, Option<String>)> = args
+            .env
+            .iter()
+            .filter(|(name, _)| name != "PATH")
+            .cloned()
+            .collect();
         let placeholders = |text: &str| cx.roots.to_placeholders(text);
         let kept = crate::key::LinkQuery {
             program: (!args.linker.contains('/')).then(|| args.linker.clone()),
@@ -2041,6 +2261,17 @@ impl Call<'_> {
                 .map(|flag| link::flag_with_paths(flag, placeholders))
                 .collect(),
             ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
+            name: placeholders(&args.linker),
+            dry_args: Some(
+                dry_args
+                    .iter()
+                    .map(|arg| link::flag_with_paths(arg, placeholders))
+                    .collect(),
+            ),
+            env: set
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_deref().map(placeholders)))
+                .collect(),
         };
         let mut outside = false;
         let mut changed = false;
@@ -2221,16 +2452,48 @@ impl Call<'_> {
             changed |= moved(library, Some(&stat));
             libraries.push(LinkLibrary { at, sha256 });
         }
+        // E, the link environment by content (B-37): known, it stands for the driver, the `ld`,
+        // `dsymutil` and the SDK, whose size-and-date texts then leave the key; unknown, they
+        // stay, and the block is reused here as before and never leaves the machine (B-24).
+        let started = std::time::Instant::now();
+        let (env, read) = cx.link_env(
+            &linker.path,
+            &args.linker,
+            &dry_args,
+            &set,
+            path_var.as_deref().unwrap_or_default(),
+            &environment.ld,
+            &cwd,
+            dsymutil.as_deref(),
+        );
+        // A file E read that is dated during the compile, or a link on the way to it that is,
+        // may not be the one the link read (B-11).
+        for file in &read {
+            changed |= moved(&file.path, file.stat.as_ref());
+        }
+        if self.current.key_log.is_some() {
+            self.keys.borrow_mut().link_environment_ms =
+                Some(started.elapsed().as_secs_f64() * 1e3);
+        }
+        let (linker_text, sdk_text) = match env.digest() {
+            Some(_) => (String::new(), String::new()),
+            None => (
+                inputs::linkers_text(
+                    (&linker_at, &linker.path),
+                    ld_at.as_ref().zip(ld.as_deref()),
+                    dsymutil_at.as_ref().zip(dsymutil.as_deref()),
+                )
+                .ok_or(NotStored::LinkInputs)?,
+                inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
+            ),
+        };
         let link = Link {
             libraries,
             files,
-            linker: inputs::linkers_text(
-                (&linker_at, &linker.path),
-                ld_at.as_ref().zip(ld.as_deref()),
-                dsymutil_at.as_ref().zip(dsymutil.as_deref()),
-            )
-            .ok_or(NotStored::LinkInputs)?,
-            sdk: inputs::sdk_text(sdk_at.as_ref().zip(inputs.sdk.as_deref())),
+            linker: linker_text,
+            sdk: sdk_text,
+            environment: env.digest(),
+            environment_list: Some(env),
             linker_path: linker_at,
             ld_path: ld_at,
             sdk_path: sdk_at,
@@ -2356,6 +2619,11 @@ impl Call<'_> {
             messages: recorded.store(placeholders),
             rustc_ms,
             built_ms: epoch_ms(self.start),
+            link_environment: produced
+                .observed
+                .link
+                .as_ref()
+                .and_then(|link| link.environment_list.clone()),
         };
         let Ok(value) = description.to_value() else {
             return (Stored::Refused, 0, Compared::NotTried);
@@ -2450,13 +2718,25 @@ impl Call<'_> {
         };
         let compared = compare_outputs(&produced.outputs, &block);
         if there.built.is_some() {
-            if self.invocation.class() == Class::Library {
-                *second = compared;
-            }
+            // Every class: a linked output is as deterministic as a library (B-16, B-32).
+            *second = compared;
             return Stored::AlreadyHad;
         }
         if !there.downloaded_only() {
             return Stored::AlreadyHad;
+        }
+        if compared == Compared::Differed && self.invocation.class() != Class::Library {
+            // B-16, B-34: a linked output. This machine's own link takes the downloaded
+            // copy's place and the key stays here; nothing is suspended.
+            let only_downloaded = |o: Option<&Origin>, _: Option<&crate::store::Block>| {
+                o.is_some_and(Origin::downloaded_only)
+            };
+            let replaced = store.replace(key, description, files, origin, now, only_downloaded);
+            let _ = self.keep_to_this_machine(store, step, Some(*key));
+            return match replaced {
+                Ok(crate::store::Replaced::Stored) => Stored::Took,
+                _ => Stored::AlreadyHad,
+            };
         }
         if compared == Compared::Differed {
             // B-34: a comparison of a downloaded block that differs suspends its first key for
@@ -2497,6 +2777,43 @@ impl Call<'_> {
             })
         });
         Stored::AlreadyHad
+    }
+
+    /// B-16, B-34: this machine links the first key `step` otherwise than the copy it
+    /// downloaded (`key`, when it is known). The key is kept here for the store's kept days:
+    /// nothing of it is asked of the shared store or sent to it, and what this machine links
+    /// is reused here as always. The scope the copy came from is told, in words that don't say
+    /// "poisoned". The line for the run.
+    fn keep_to_this_machine(
+        &self,
+        store: &Store,
+        step: &Digest,
+        key: Option<Digest>,
+    ) -> Option<String> {
+        let now = self.ports.now();
+        let until = now + Duration::from_secs(u64::from(self.current.keep_days) * 86_400);
+        let _ = store.keep_local(
+            step,
+            "this machine links it otherwise than the copy it downloaded",
+            until,
+            now,
+        );
+        self.kept_local.set(true);
+        if let (Some(share), Some(key)) = (self.current.share.relay(), key) {
+            let _ = self.ports.relay(
+                &share.socket,
+                &Request::Report {
+                    key,
+                    problem: relay::Problem::LinkDiffers,
+                },
+                NOTICE_WAIT,
+            );
+        }
+        Some(format!(
+            "{} links differently here than the copy downloaded for it: this machine keeps its own, and doesn't share it for {} days",
+            self.invocation.crate_name(),
+            self.current.keep_days
+        ))
     }
 
     /// B-15: a dependent that could not load a reused crate suspends that crate's first key and
@@ -2624,37 +2941,76 @@ fn bundled(inv: &Invocation, apple: bool) -> bool {
         && matches!(debug.strip.as_deref(), None | Some("none"))
 }
 
+/// Where a movable program's output folder lies, as the linker is told it (B-9). Apple's `ld`
+/// names each object by the path it was given, and the program's UUID is a hash over those
+/// names, taken before the debug map is stripped; `-oso_prefix` takes one prefix off them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProgramPlace {
+    /// Under the workspace: `prefix` is the workspace in the form the output folder is written
+    /// with (as cargo gave it, or resolved), and `rest` the folder from there. The names then
+    /// start at the workspace on every machine.
+    Inside { prefix: String, rest: String },
+    /// Anywhere else (or under a workspace whose path holds a comma, which `-Wl,` can't
+    /// carry): the names hold the folder as this machine has it.
+    Outside(String),
+}
+
+/// [`ProgramPlace`] of `out_dir` for a compile whose working directory is `cwd`.
+pub(crate) fn program_place(cwd: &str, out_dir: &Path) -> ProgramPlace {
+    let out = crate::roots::clean_path(&out_dir.to_string_lossy());
+    let given = crate::roots::clean_path(cwd);
+    let resolved = crate::roots::resolve_on_disk(cwd).map(|path| crate::roots::clean_path(&path));
+    for form in std::iter::once(given).chain(resolved) {
+        if form.contains(',') || form == "/" {
+            continue;
+        }
+        if let Some(rest) = out
+            .strip_prefix(form.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return ProgramPlace::Inside {
+                prefix: form,
+                rest: rest.to_owned(),
+            };
+        }
+    }
+    ProgramPlace::Outside(out)
+}
+
 /// What a linked output's compile gets besides the remaps: `--print=link-args` for its link
-/// inputs (B-18) and, on Apple targets (B-9), an install name and debug-map prefix that don't
-/// hold the folder it was linked in for a proc macro and a build script, and for a program that
-/// gets a debug bundle ([`bundled`]): `-C split-debuginfo=packed`, so rustc runs dsymutil and
+/// inputs (B-18) and, on Apple targets (B-9): for a proc macro an install name that doesn't
+/// hold its folder; for a proc macro and a build script in a run that shares (`shares`: the
+/// shared mode is `observe` or `on`, whether or not the backend answered) no debug map at all
+/// (`-Wl,-S`), since the map names every object, the standard library's among them, by where
+/// this machine has it, and such a block could not leave the machine; in a run that shares
+/// nothing the map stays, and with it the file and line of a panic's frames, with a prefix
+/// (`-oso_prefix`) that takes the folder it was linked in off its names; and for a program
+/// that gets a debug bundle ([`bundled`], `place`
+/// says where its output folder lies): `-C split-debuginfo=packed`, so rustc runs dsymutil and
 /// writes `<program>.dSYM` with the DWARF of every object; `-C strip=debuginfo`, so the program
 /// keeps no debug map naming those objects by path (the bundle has what it pointed at); and
 /// `-oso_prefix` for the workspace, so the program's UUID, which the linker computes before the
-/// strip, holds no path when the target folder is inside it.
-fn linked_args(inv: &Invocation, apple: bool, bundle: bool) -> Vec<OsString> {
+/// strip, holds no path when the output folder is inside it.
+fn linked_args(
+    inv: &Invocation,
+    apple: bool,
+    place: Option<&ProgramPlace>,
+    shares: bool,
+) -> Vec<OsString> {
     let mut out = vec![OsString::from("--print=link-args")];
     if !apple {
         return out;
     }
     let class = inv.class();
-    if bundle {
+    if place.is_some() {
         for arg in ["split-debuginfo=packed", "strip=debuginfo"] {
             out.push("-C".into());
             out.push(arg.into());
         }
-        // The linker names objects by their real path. A comma would split `-Wl,`.
-        let workspace = crate::roots::resolve_on_disk(inv.cwd()).unwrap_or(inv.cwd().to_string());
-        if !workspace.contains(',') {
-            out.push("-C".into());
-            out.push(
-                format!(
-                    "link-arg=-Wl,-oso_prefix,{}/",
-                    workspace.trim_end_matches('/')
-                )
-                .into(),
-            );
-        }
+    }
+    if let Some(ProgramPlace::Inside { prefix, .. }) = place {
+        out.push("-C".into());
+        out.push(format!("link-arg=-Wl,-oso_prefix,{prefix}/").into());
     }
     if class == Class::ProcMacro {
         out.push("-C".into());
@@ -2666,11 +3022,16 @@ fn linked_args(inv: &Invocation, apple: bool, bundle: bool) -> Vec<OsString> {
             .into(),
         );
     }
-    if matches!(class, Class::ProcMacro | Class::BuildScript)
-        && let Some(deps) = inv.dependency_dirs().next()
-    {
-        out.push("-C".into());
-        out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
+    if matches!(class, Class::ProcMacro | Class::BuildScript) {
+        if shares {
+            out.push("-C".into());
+            out.push("link-arg=-Wl,-S".into());
+        } else if let Some(deps) = inv.dependency_dirs().next() {
+            // The map stays, without the folder the objects were linked in, so that two
+            // checkouts on this machine link the same bytes.
+            out.push("-C".into());
+            out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
+        }
     }
     out
 }
@@ -2973,7 +3334,7 @@ mod tests {
             home: Some("/home/dev".into()),
         };
         let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
-        let search = Search::new(&roots, &[]);
+        let search = Search::new(&roots, &[], &[]);
         let path = dir.path().join("out.rlib");
         std::fs::write(&path, b"\0/opt/tools/cargo_cache\0").unwrap();
         let found = search

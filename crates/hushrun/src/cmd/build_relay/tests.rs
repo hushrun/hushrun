@@ -173,6 +173,7 @@ fn built(key: Digest, step: Digest) -> Request {
         step,
         class: LocalClass::Library,
         portable: true,
+        bound: false,
         cost_ms: 1000,
     }
 }
@@ -1231,12 +1232,159 @@ fn observe_opens_what_it_compares_within_the_room_a_download_gets() {
     until("open", || answering(&relay));
     relay
         .runtime
-        .block_on(relay.clone().compare(key, address(&key)));
+        .block_on(relay.clone().compare(key, address(&key), false));
     // Downloaded, then refused before it was unpacked: nothing compared, nothing reported.
     assert_eq!(fake.count(route::STORE_GET), 1);
     assert_eq!(relay.state().tally.compared, 0);
     assert!(fake.reports().is_empty());
     relay.end_check(&[]);
+}
+
+// covers: B-30, B-34
+#[test]
+fn the_prefetch_takes_macros_scripts_and_libraries_and_leaves_programs_and_kept_keys() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let classes = [
+        blocks::Class::Library,
+        blocks::Class::Program,
+        blocks::Class::ProcMacro,
+        blocks::Class::BuildScript,
+        // A library whose first key this machine keeps to itself.
+        blocks::Class::Library,
+    ];
+    let mut pairs = Vec::new();
+    let mut made = Vec::new();
+    for (i, class) in classes.into_iter().enumerate() {
+        let (key, step) = block(&a.store, 150 + i as u8, 20_000, Some(me(&fake)));
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            5000,
+            class,
+        );
+        pairs.push(Pair(address(&step), address(&key)));
+        made.push((key, step));
+    }
+    fake.set_manifest(pairs);
+    let b = machine();
+    let now = SystemTime::now();
+    b.store
+        .keep_local(
+            &made[4].1,
+            "links otherwise here",
+            now + Duration::from_secs(86_400),
+            now,
+        )
+        .unwrap();
+    let relay = start(&fake, &b, |_| {});
+    begin(&relay, &b);
+    until("open", || answering(&relay));
+    let _ = ask(&relay, Request::Hints { step: made[0].1 });
+    let arrived = |i: usize| {
+        relay
+            .state()
+            .fetches
+            .get(&address(&made[i].0))
+            .is_some_and(|f| matches!(f.state, super::Download::Arrived(_)))
+    };
+    until("prefetched", || arrived(0) && arrived(2) && arrived(3));
+    let state = relay.state();
+    assert!(
+        !state.fetches.contains_key(&address(&made[1].0)),
+        "a program waits to be asked for"
+    );
+    assert!(
+        !state.fetches.contains_key(&address(&made[4].0)),
+        "a key kept on this machine asks the shared store nothing"
+    );
+    drop(state);
+    assert!(super::prefetched(blocks::Class::ProcMacro));
+    assert!(super::prefetched(blocks::Class::BuildScript));
+    assert!(super::prefetched(blocks::Class::Library));
+    for class in [
+        blocks::Class::Program,
+        blocks::Class::Other,
+        blocks::Class::Unknown,
+    ] {
+        assert!(!super::prefetched(class), "{class:?}");
+    }
+    relay.end_check(&[]);
+}
+
+// covers: B-30
+#[test]
+fn the_prefetch_queues_macros_and_scripts_before_libraries_each_in_the_manifests_order() {
+    use blocks::Class::{BuildScript, Library, Other, ProcMacro, Program};
+    // As a lookup answers the manifest: the order cargo would need them is not its order.
+    let found = vec![
+        (Library, 1),
+        (Program, 2),
+        (ProcMacro, 3),
+        (Library, 4),
+        (BuildScript, 5),
+        (Other, 6),
+        (ProcMacro, 7),
+        (Library, 8),
+    ];
+    let order: Vec<u8> = super::prefetch_order(found, |found| found.0)
+        .into_iter()
+        .map(|found| found.1)
+        .collect();
+    assert_eq!(order, [3, 5, 7, 1, 4, 8]);
+}
+
+// covers: B-29, B-34
+#[test]
+fn a_linked_output_the_trusted_copy_disagrees_with_stays_and_its_key_is_kept_here() {
+    // `begin` refuses a library with `differs` and the trusted copy is served in its place. A
+    // linked output is what this machine's linker makes: it stays, and its key is kept here.
+    for class in [
+        LocalClass::ProcMacro,
+        LocalClass::BuildScript,
+        LocalClass::Program,
+    ] {
+        let fake = FakeBuild::start();
+        let m = machine();
+        let (key, step) = block(&m.store, 9, 10_000, Some(me(&fake)));
+        fake.force_begin(
+            address(&key),
+            json!({"answer":"refused","reason":"differs"}),
+            1,
+        );
+        let relay = start(&fake, &m, |_| {});
+        begin(&relay, &m);
+        until("open", || answering(&relay));
+        ask(
+            &relay,
+            Request::Built {
+                key,
+                step,
+                class,
+                portable: true,
+                bound: false,
+                cost_ms: 1000,
+            },
+        );
+        until("refused", || {
+            fake.count(route::BEGIN) >= 1 && waiting(&m).is_empty() && no_claims(&m)
+        });
+        let lines = relay.end_check(&[]);
+        assert!(
+            m.store.block(&key).unwrap().is_some(),
+            "{class:?}: it stays"
+        );
+        assert!(m.store.kept_local(&step).is_some(), "{class:?}");
+        assert_eq!(m.store.suspended(&step), None, "{class:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("keeps its own")),
+            "{class:?}: {lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("discarded")), "{lines:?}");
+    }
 }
 
 /// A store holding `n` libraries of `size` bytes, each in the fake's object store too.
@@ -1545,6 +1693,7 @@ fn a_block_that_may_not_leave_the_machine_gets_no_marker() {
             step,
             class: LocalClass::Library,
             portable: false,
+            bound: false,
             cost_ms: 1000,
         },
     );
@@ -2137,6 +2286,7 @@ fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
         step,
         class: LocalClass::Library,
         portable: true,
+        bound: false,
         cost_ms,
     }
 }
@@ -2144,6 +2294,101 @@ fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
 fn job_identity(fake: &FakeBuild, relay: &Arc<Relay>) -> Identity {
     let _ = fake;
     relay.by.clone()
+}
+
+// covers: B-24, B-29
+#[test]
+fn a_block_bound_to_folders_goes_up_from_a_ci_job_and_from_no_person() {
+    // Bound: not portable only because it holds folders whose values its keys hold. Every job
+    // of a repository has the same paths, and they name nobody; a person's hold a user name.
+    let bound = |key, step| Request::Built {
+        key,
+        step,
+        class: LocalClass::Program,
+        portable: false,
+        bound: true,
+        cost_ms: 1000,
+    };
+    // A person's run: no marker.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = block(&m.store, 71, 5_000, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert_eq!(fake.count(route::BEGIN), 0);
+    // A CI job: it goes up.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 72, 5_000, Some(by));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::COMMIT), 1, "it went up");
+    // A run taken for a CI job by anything but its credential (the environment says CI on a
+    // laptop, a token pasted into a job): its credential is a token, no job's ID token, so its
+    // bound block, which holds that machine's folders, is not offered. What it built that is
+    // portable still goes up.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 75, 5_000, Some(by.clone()));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty(), "a bound block is not offered");
+    assert_eq!(fake.count(route::BEGIN), 0);
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 76, 5_000, Some(by));
+    assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::COMMIT), 1, "a portable one went up");
+    // Neither portable nor bound: it stays, in CI too.
+    let fake2 = FakeBuild::start();
+    let m2 = machine();
+    let relay2 = start(&fake2, &m2, with_id_token(&fake2));
+    begin(&relay2, &m2);
+    until("open", || answering(&relay2));
+    let (key, step) = block(&m2.store, 74, 5_000, Some(job_identity(&fake2, &relay2)));
+    assert_eq!(
+        ask(
+            &relay2,
+            Request::Built {
+                key,
+                step,
+                class: LocalClass::Program,
+                portable: false,
+                bound: false,
+                cost_ms: 1000,
+            }
+        ),
+        Answer::Ok
+    );
+    relay2.end_check(&[]);
+    assert_eq!(fake2.count(route::BEGIN), 0);
 }
 
 // covers: B-31

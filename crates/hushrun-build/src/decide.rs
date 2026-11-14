@@ -77,14 +77,14 @@ pub enum Plan {
     },
 }
 
-/// Plans a compile (B-1, B-9, B-12, B-15, B-16). In `observe` nothing is reused and a library
-/// whose block exists is compared with it. In `on` a found block is reused, except a library the
-/// audit picked, which is compiled and compared, and a block whose messages don't serve this
-/// call's form, which is compiled. A suspended key is never reused and not stored. A rebuild in
-/// a warm target that finds no block stays incremental and runs as asked. Programs, build
-/// scripts and proc macros are never compared: their bytes are not stable.
+/// Plans a compile (B-1, B-9, B-12, B-15, B-16). In `observe` nothing is reused and a block
+/// that exists is compared with the compile's outputs. In `on` a found block is reused, except
+/// one the audit picked, which is compiled and compared, and one whose messages don't serve this
+/// call's form, which is compiled and compared. A suspended key is never reused and not stored.
+/// A rebuild in a warm target that finds no block stays incremental and runs as asked. Every
+/// class is compared: a library, and a program, a proc macro or a build-script binary, whose
+/// link is as deterministic as rustc's own output (B-16).
 pub fn before(facts: &Before) -> Plan {
-    let comparable = facts.class == Class::Library;
     let compile = |keep, compare| Plan::Compile { keep, compare };
     match (facts.mode, facts.lookup) {
         (Mode::Off, _) => Plan::PassThrough(PassedThrough::Off),
@@ -98,10 +98,10 @@ pub fn before(facts: &Before) -> Plan {
         (_, Lookup::Suspended) => compile(Keep::Not(NotStored::Suspended), false),
         (_, Lookup::Unstorable(why)) => compile(Keep::Not(why), false),
         (_, Lookup::Missing) => compile(Keep::Store, false),
-        (Mode::Observe, Lookup::Found { .. }) => compile(Keep::Store, comparable),
+        (Mode::Observe, Lookup::Found { .. }) => compile(Keep::Store, true),
         (Mode::On, Lookup::Found { audit, serves_form }) => {
-            if (audit && comparable) || !serves_form {
-                compile(Keep::Store, comparable)
+            if audit || !serves_form {
+                compile(Keep::Store, true)
             } else {
                 Plan::Reuse
             }
@@ -233,6 +233,10 @@ pub enum Compared {
     Same,
     /// An output differs.
     Differed,
+    /// An output of a linked output differs from a copy that was only downloaded: this machine
+    /// keeps its own and keeps the key to itself (B-16, B-34). No suspension: its own block is
+    /// what it reuses.
+    KeptOwn,
 }
 
 /// What happened after the plan.
@@ -370,7 +374,8 @@ mod tests {
 
     /// The plan the rules give, written out case by case.
     fn expected(mode: Mode, class: Class, lookup: Lookup, rebuild: bool) -> Plan {
-        let lib = class == Class::Library;
+        // Every class is compared (B-16).
+        let _ = class;
         if mode == Mode::Off {
             return Plan::PassThrough(PassedThrough::Off);
         }
@@ -383,11 +388,11 @@ mod tests {
             Lookup::Suspended => compile(Keep::Not(NotStored::Suspended), false),
             Lookup::Unstorable(why) => compile(Keep::Not(why), false),
             Lookup::Missing => compile(Keep::Store, false),
-            Lookup::Found { .. } if mode == Mode::Observe => compile(Keep::Store, lib),
+            Lookup::Found { .. } if mode == Mode::Observe => compile(Keep::Store, true),
             Lookup::Found {
                 serves_form: false, ..
-            } => compile(Keep::Store, lib),
-            Lookup::Found { audit: true, .. } if lib => compile(Keep::Store, true),
+            } => compile(Keep::Store, true),
+            Lookup::Found { audit: true, .. } => compile(Keep::Store, true),
             Lookup::Found { .. } => Plan::Reuse,
         }
     }
@@ -721,7 +726,12 @@ mod tests {
             Stored::AlreadyHad,
             Stored::Refused,
         ];
-        let compares = [Compared::NotTried, Compared::Same, Compared::Differed];
+        let compares = [
+            Compared::NotTried,
+            Compared::Same,
+            Compared::Differed,
+            Compared::KeptOwn,
+        ];
         let mut checked = 0;
         for plan in plans {
             for rustc in rustcs {
@@ -784,7 +794,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 9 * 3 * 2 * 2 * 3 * 4 * 3);
+        assert_eq!(checked, 9 * 3 * 2 * 2 * 3 * 4 * 4);
     }
 
     // covers: B-3

@@ -228,6 +228,8 @@ pub struct Invocation {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    link_lto: bool,
+    rpath: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -420,6 +422,8 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
+        link_lto: seen.link_lto,
+        rpath: seen.rpath,
         native_cpu: seen.native_cpu,
         native_in_llvm_args: seen.native_in_llvm_args,
         debug: seen.debug,
@@ -529,6 +533,19 @@ impl Invocation {
     /// `-C linker-plugin-lto`, `-C embed-bitcode=yes` or compressed debug sections.
     pub fn searchable(&self) -> bool {
         self.searchable
+    }
+
+    /// Whether the link itself does link-time optimization: `-C lto` or `-C linker-plugin-lto`
+    /// not switched off. Its link environment can't be told (B-37).
+    pub fn link_lto(&self) -> bool {
+        self.link_lto
+    }
+
+    /// Whether rustc writes run paths itself: its last `-C rpath` is not switched off. They
+    /// lead from the output folder to the toolchain's and the dependencies' folders, relative
+    /// to the output (B-9).
+    pub fn rpath(&self) -> bool {
+        self.rpath
     }
 
     /// Whether the CPU the call compiles for is this machine's: its last `-C target-cpu` is
@@ -829,6 +846,8 @@ struct Seen {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    link_lto: bool,
+    rpath: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -855,6 +874,8 @@ impl Default for Seen {
             incremental: None,
             target: None,
             searchable: true,
+            link_lto: false,
+            rpath: false,
             native_cpu: false,
             native_in_llvm_args: false,
             debug: DebugFlags::default(),
@@ -978,7 +999,11 @@ impl Seen {
                             setting.ok_or(PassedThrough::Malformed)?,
                         )?;
                     }
-                    "lto" | "linker-plugin-lto" | "embed-bitcode" if !switched_off(setting) => {
+                    "lto" | "linker-plugin-lto" if !switched_off(setting) => {
+                        self.searchable = false;
+                        self.link_lto = true;
+                    }
+                    "embed-bitcode" if !switched_off(setting) => {
                         self.searchable = false;
                     }
                     "link-arg" | "link-args" => {
@@ -987,6 +1012,7 @@ impl Seen {
                         }
                     }
                     // The last one wins, as in rustc.
+                    "rpath" => self.rpath = !switched_off(setting),
                     "target-cpu" => self.native_cpu = setting == Some("native"),
                     "llvm-args" => {
                         self.native_in_llvm_args |= setting.is_some_and(|words| {
@@ -1943,6 +1969,23 @@ pub(crate) mod tests {
         ));
     }
 
+    // covers: B-9
+    #[test]
+    fn rustcs_own_run_paths_are_on_when_the_last_rpath_is_not_switched_off() {
+        for (extra, on) in [
+            ("", false),
+            ("-C rpath", true),
+            ("-Crpath=yes", true),
+            ("-C rpath=no", false),
+            ("-C rpath -C rpath=off", false),
+            ("-C rpath=no -C rpath", true),
+            ("-C link-arg=-Wl,-rpath,$ORIGIN/lib", false),
+        ] {
+            let inv = handled(&argv(&minimal(extra)), &Env::default());
+            assert_eq!(inv.rpath(), on, "{extra}");
+        }
+    }
+
     // covers: B-10
     #[test]
     fn outputs_that_cannot_be_searched() {
@@ -1959,6 +2002,12 @@ pub(crate) mod tests {
         for extra in unsearchable {
             let inv = handled(&argv(&minimal(extra)), &Env::default());
             assert!(!inv.searchable(), "{extra}");
+            // covers: B-37
+            assert_eq!(
+                inv.link_lto(),
+                extra.contains("lto"),
+                "only link-time optimization is: {extra}"
+            );
         }
         let searchable = [
             "",
@@ -1971,6 +2020,7 @@ pub(crate) mod tests {
         for extra in searchable {
             let inv = handled(&argv(&minimal(extra)), &Env::default());
             assert!(inv.searchable(), "{extra}");
+            assert!(!inv.link_lto(), "{extra}");
         }
     }
 

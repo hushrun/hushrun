@@ -16,6 +16,7 @@
 //! `begin` goes a few blocks at a time, just before their PUTs: links live 15 minutes. PUTs run
 //! 4 at a time, 2 while downloads are in flight.
 
+use hushrun_build::model::Class as LocalClass;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -44,12 +45,18 @@ pub(crate) enum Move {
     Done,
     /// Done, and the local block is discarded: a trusted copy exists with other bytes.
     DoneDiscard,
+    /// Done, the local block stays and its first key is kept on this machine: a trusted copy
+    /// of a linked output exists with other bytes, and this machine's linker makes these.
+    DoneKeepLocal,
     /// Waiting again, tried after a while.
     Later,
 }
 
-/// `begin`'s answer for one block.
-pub(crate) fn after_begin(answer: &Answer) -> Move {
+/// `begin`'s answer for one block of class `class`. `differs` for a library says one of two
+/// builds had other inputs than its key names, and the trusted copy is served in the local
+/// one's place. For a linked output it says the two machines' link environments differ in
+/// something the key doesn't hold (B-37): the machine keeps what its own linker makes.
+pub(crate) fn after_begin(answer: &Answer, class: LocalClass) -> Move {
     match answer {
         Answer::Put { .. } => Move::Next,
         Answer::Have { .. } => Move::Done,
@@ -57,7 +64,8 @@ pub(crate) fn after_begin(answer: &Answer) -> Move {
             Refusal::TooLarge | Refusal::Unsupported | Refusal::NoScope | Refusal::Suspended => {
                 Move::Done
             }
-            Refusal::Differs => Move::DoneDiscard,
+            Refusal::Differs if class == LocalClass::Library => Move::DoneDiscard,
+            Refusal::Differs => Move::DoneKeepLocal,
             Refusal::Busy | Refusal::OverAllowance | Refusal::TooManyUploads | Refusal::Unknown => {
                 Move::Later
             }
@@ -252,6 +260,24 @@ impl Relay {
                     self.state().tally.discarded += 1;
                 }
             }
+            Move::DoneKeepLocal => {
+                let _ = outbox.done(&run, &marker.key);
+                let now = std::time::SystemTime::now();
+                let until = now + Duration::from_secs(u64::from(self.config.keep_days) * 86_400);
+                if self
+                    .config
+                    .store
+                    .keep_local(
+                        &marker.step,
+                        "the repository's trusted copy was linked otherwise",
+                        until,
+                        now,
+                    )
+                    .is_ok()
+                {
+                    self.state().tally.kept_local += 1;
+                }
+            }
             Move::Later => release(marker, Back::Later(now_ms() + LATER.as_millis() as u64)),
             Move::Next => {}
         };
@@ -364,7 +390,7 @@ impl Relay {
                 .iter()
                 .find(|a| a.address == address)
                 .map_or(Answer::Unknown, |a| a.answer.clone());
-            let step = after_begin(&answer);
+            let step = after_begin(&answer, marker.class);
             let Answer::Put { link } = answer else {
                 p.pack.remove();
                 finish(&marker, step);
@@ -649,6 +675,7 @@ mod tests {
                 expires_in_seconds: 900,
             },
         };
+        let after_begin = |answer: &Answer| after_begin(answer, LocalClass::Library);
         assert_eq!(after_begin(&put), Move::Next);
         assert_eq!(after_begin(&Answer::Have { scope: "s".into() }), Move::Done);
         for (reason, step) in [
@@ -665,6 +692,23 @@ mod tests {
             assert_eq!(after_begin(&Answer::Refused { reason }), step, "{reason:?}");
         }
         assert_eq!(after_begin(&Answer::Unknown), Move::Later);
+        // A linked output the trusted copy disagrees with stays, kept to this machine; every
+        // other answer moves it as it moves a library.
+        for class in [
+            LocalClass::ProcMacro,
+            LocalClass::BuildScript,
+            LocalClass::Program,
+        ] {
+            let differs = Answer::Refused {
+                reason: Refusal::Differs,
+            };
+            assert_eq!(super::after_begin(&differs, class), Move::DoneKeepLocal);
+            let busy = Answer::Refused {
+                reason: Refusal::Busy,
+            };
+            assert_eq!(super::after_begin(&busy, class), Move::Later);
+            assert_eq!(super::after_begin(&put, class), Move::Next);
+        }
         assert_eq!(after_put(Some(200)), Move::Next);
         assert_eq!(after_put(Some(412)), Move::Next);
         assert_eq!(after_put(Some(403)), Move::Later);

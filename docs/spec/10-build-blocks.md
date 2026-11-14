@@ -149,8 +149,8 @@ arguments (a target specification file is already passed through, B-4).
 - `env`: each `env-dep` line of the dep-info, name and value with roots replaced, or unset;
 - `externs`: each `--extern`, by name and the SHA-256 of the file passed. A proc macro whose block
   may move (`anywhere`) is named by two things together: what it was built from, the key of the
-  block that produced it without its place and without the linker, the SDK, `dsymutil` and the C
-  runtime's places (`link`); and what a dependent's compiler reads from it, the SHA-256 of the crate
+  block that produced it without its place and without E (B-37), the linker, the SDK, `dsymutil`
+  and the C runtime's places (`link`); and what a dependent's compiler reads from it, the SHA-256 of the crate
   metadata rustc put in the linked file (its header, length and the metadata, found as the one place
   in the file where they are), which holds the crate hash a dependent is compiled against and which
   a linker places but doesn't write. A macro built elsewhere by another linker is the same input;
@@ -251,11 +251,12 @@ metadata can't be found, and a tied proc macro,
   linker may take a library named with `-l` from, in its `-L` and `-F` folders and then in the
   folders the C driver hands `ld` and those `ld` searches by itself (B-18), with each file a
   linker script found there names, and every file an option names for it (a linker script, a
-  symbol list), by SHA-256 or as absent; those folders of the driver's and `ld`'s, in order; the
-  C driver, the `ld` it runs and the SDK (B-18). The places in the driver's and `ld`'s folders of
+  symbol list), by SHA-256 or as absent; those folders of the driver's and `ld`'s, in order; and
+  the link environment's identity E when it is known (B-37), else the C driver, the `ld` it runs
+  and the SDK by where they lie and their dates (B-18). The places in the driver's and `ld`'s folders of
   the C runtime the standard library asks for (`-lc`, `-lm`, `-lrt`, `-lpthread`, `-ldl`,
   `-lutil`, `-lgcc_s`, `-lgcc`, `-lgcc_eh`, `-lSystem`), with what their scripts name, and the
-  folders themselves are, like the linker and the SDK, left out of what a dependent names a
+  folders themselves are, like E, the linker and the SDK, left out of what a dependent names a
   movable proc macro by; any other library found there, which a crate asked for, is in it. *Rests
   on:* the standard library calling the C runtime for services whose answer, for one input,
   doesn't follow its version. *Breaks if:* a macro's expansion depended on the C library's version
@@ -307,14 +308,67 @@ and its resolved form, ordered by length so that of two folders that hold a path
 wins (as B-8 places it), with the scope left whole. A registry or git crate's paths then name no
 machine. It leaves `-C incremental` out. On Apple targets it also gives
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
-gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
-debugs those, and without it each holds the folder it was linked in. A program (a `bin` that is
+decides what becomes of a proc macro's and a build-script binary's debug map, which names every
+object the link took by its path, the standard library's by where this machine keeps the
+toolchain:
+
+- **In a run that shares** (the shared mode is `observe` or `on`: the org shares, someone is
+  signed in, and the person didn't turn sharing off; whether or not the backend answered, so
+  the key doesn't turn with the network) they are linked **without the map** (`-Wl,-S`). With
+  it none could be the same on two machines, so this is what lets them travel. What it costs:
+  a panic inside one still prints its message, its location (`build.rs:1:64`) and every
+  frame's function name, and no frame has a file and line any more, and a debugger has
+  nothing to step through, where the script or macro was compiled with debug info at all
+  (cargo's dev profile compiles them without; measured on a build script with `debuginfo=2`:
+  14 of 14 frames had a file and line before, none after).
+- **In a run that shares nothing** (sharing off for the org or on this machine, nobody signed
+  in, a command that never shares) the map **stays**, with the folder it was linked in taken
+  off its names (`-oso_prefix <the first dependency folder>/`), as before linked outputs
+  travelled: local debugging keeps file and line, two checkouts on one machine still link the
+  same bytes, and the block stays on the machine because it names the toolchain.
+
+The two are different compiles: what the wrapper adds is in the first key (B-5), so a block of
+one kind is never reused for the other. **To keep the map while the org shares**: turn sharing
+off on this machine (`hushrun build share off`, B-33), or name the package under `never_store`
+(B-4), which passes all of that package's compiles through untouched.
+A program (a `bin` that is
 not a build script, or a test) that links with debug info gets a debug bundle instead, unless the
-person set `programs` to `tied` (B-21), through three additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
+person set `programs` to `tied` (B-21), through four additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
 `<program>.dSYM` beside it with the DWARF of every object it was linked from;
 `-C strip=debuginfo`, so that the program keeps no debug map naming those objects by their
-paths; and `-oso_prefix` for the workspace's resolved form, so that the UUID the linker computes
-before the strip holds no path when the target folder is inside the workspace. Before such a
+paths; `-oso_prefix` for the workspace, in the form the output folder is written with (as cargo
+gave it, or resolved), so that the UUID the linker computes before the strip holds no path of
+the checkout when the output folder is inside the workspace; and `--sysroot` naming a link
+beside the outputs, `<output folder>/.hushrun/sysroot-<the compiler's identity, 16 hex
+digits>`, that leads to the toolchain (to its view without sources where there is one, below),
+so that the linker, which names each object by the path it is given, names the standard
+library's objects from the output folder too and the UUID is the same wherever the toolchain is
+installed. The link is one per toolchain, so two toolchains building into one target folder
+never share it; a call that finds it leading elsewhere makes it again under a name of its own
+and renames it into place, before the compile; paths under it are paths under the toolchain
+(B-8, B-11). The name is the wrapper's own and is only ever a link: a folder found in its place
+(a target folder copied by a tool that followed the link, something planted) would be the
+sysroot rustc reads, so it is removed with what it holds and the link made; a file there is
+replaced by the rename; and a link under a temporary name that a process left when it died
+between making and renaming it is removed, once ten minutes old, by the next call that makes
+the link. Where the output folder lies from the workspace is part of every name the linker
+hashes, so it is in the first key: its path from the workspace when it is inside, and when it
+is outside (`CARGO_TARGET_DIR` elsewhere, a workspace whose path holds a comma) the folder as
+this machine has it, which ties the program to its place (`tied`, B-24): two target folders
+build one program each. On every target, a linked output compiled with rustc's own run paths
+(`-C rpath`, the last one not switched off) holds the way from its output folder to the
+toolchain's and its dependencies' folders, written relative to itself (`$ORIGIN/../../…`,
+`@loader_path/../../…`): no root's name is in it, the search of the outputs (B-10) can't see
+it, and it differs between two checkouts at another depth. Its first key therefore holds the
+output folder, each `-L dependency=` folder (each as given and as it resolves) and the
+toolchain's folder as this machine has them, and it is `tied`: reused only where those are the
+same text, on this machine or, from CI, on another (B-24's `bound`). Keying the folders was
+chosen over keeping such a block out of the store: two checkouts on one machine must not share
+it either, and CI jobs, whose paths are the same, still do. A run path the link line gives as
+text (`-C link-arg=-Wl,-rpath,…`) is an argument like any other, in the first key as written.
+*Rests on:* Apple's `ld` naming an input by the path it was given
+(shown: a toolchain copied to another path links the same program, bundle and UUID through the
+link, and other ones without it). *Breaks if:* a later `ld` resolved links in the names. Before such a
 compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one; it
 does so too for a program set to `tied` whose flags would allow a bundle, since that bundle
 matches no program compiled now and would keep it from being stored (B-18).
@@ -343,12 +397,19 @@ asked. A first build there is compiled without `-C incremental` and stored.
 **B-10 Place.** After a compile, every output is searched for each root as raw bytes, in its
 given and resolved forms, each file of a program's debug bundle among them. None found: the block's place is `anywhere`. Any found, or an output
 that can't be searched (`-C lto`, `-C linker-plugin-lto`, `-C embed-bitcode=yes`, compressed debug
-sections): the place is the roots, and the block is reused only where they are the same. A
+sections): the place is the roots, and the block is reused only where they are the same. One
+that can't be searched also never leaves its machine (`unsearchable`, B-24). A
 compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
 only if a second compile, with that variable naming a link to the same folder, gives the same
 bytes. In the same pass every output is searched for the folders that name the machine: the cargo
 home, the rustup home and the home folder, each in its given and resolved forms, as raw bytes
-wherever they lie: whatever comes before or after a hit, it counts. A short folder is therefore
+wherever they lie: whatever comes before or after a hit, it counts. A linked output is also
+searched for the toolchain's own folder, `<sysroot>/lib/rustlib`, in the toolchain's given and
+resolved forms and through its view without sources (B-9): a toolchain outside the rustup home
+and the home folder (a distribution's `/usr`, a Nix store path, `/opt`) names the machine's
+install as well, and a link can write it (macOS's debug map names the standard library's objects
+by it); `toolchain-in-output` (B-24). A library is not searched for it: rustc remaps the
+standard library's paths to `/rustc/<commit>/` in what it writes itself. A short folder is therefore
 also found in other text (a home `/root` in `/rootfs`, `/roots.rs` or `keyRings/root/`), and
 such a library stays on its machine: lost reuse elsewhere, never a block that prints another
 machine's folder (`$CARGO_HOME` followed by `_cache` is that folder too). Those don't change the
@@ -360,8 +421,8 @@ device around the compile and around its hashing. A compile is stored only if no
 changed and none carries a date at or after the compile's start, and no symlink on the way to
 one (each folder of its path, the path itself, and what each link points at, up to 40 links)
 carries such a date either: a link retargeted during the compile to an older file is new. The
-files a hint hashed for the lookup must be as they were then, and the files a link read and the
-native files (B-6) are checked the same way. Otherwise the outcome is `built, not stored`. The
+files a hint hashed for the lookup must be as they were then, and the files a link read, every
+file its link environment hashed (B-37) and the native files (B-6) are checked the same way. Otherwise the outcome is `built, not stored`. The
 start is taken as file dates count it: on Linux, which dates files from a clock that moves once a
 tick and lags the real one, it is the date the file system gives a file the wrapper creates in
 the output folder just before the compile (for a reuse, as the call begins), so that a file
@@ -430,10 +491,18 @@ lies outside the shared folders, for its unit record (B-23). Otherwise rustc rep
 wrapper, and so does it for a call whose arguments can't be read (B-4). A suspended key is never
 reused. `hushrun build clean` clears it.
 
-**B-16 Audit.** In `on`, one in fifty of the library compiles that could be reused runs anyway,
-chosen by a hash of the key and the run's start. Its outputs are compared byte for byte with the
-block's. A difference serves the fresh outputs, suspends the key and is reported. Programs and
-proc macros are not compared. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
+**B-16 Audit.** In `on`, one in fifty of the compiles that could be reused runs anyway, chosen by
+a hash of the key and the run's start, whatever its class. Its outputs are compared byte for byte
+with the block's: a library's, and a program's, a proc macro's or a build-script binary's, each
+file of a program's debug bundle among them (less `Contents/Resources/Relocations`, which is
+never stored, B-9). A difference serves the fresh outputs, suspends the key and is reported; for a linked output found different from a copy that was only downloaded, B-34 says what happens instead. In
+`observe` every block found is compared the same way, and a compile whose block's messages don't
+serve its form is compared too. *Rests on:* a link being as deterministic as rustc's own output
+(the same link repeated, at the same path and at two, gave the same bytes on Linux and on macOS
+with B-9's changes), so that a difference means a block built from other inputs than its key
+names: a link environment B-37 missed, or bytes that were tampered with. *Breaks if:* a linker
+wrote something of its own each time (a time, a random UUID): every audit of such outputs would
+differ and suspend its key, which loses reuse and never serves wrong bytes. `HUSHRUN_BUILD_AUDIT`, read once as `hushrun run` begins, audits
 every such compile when it is `every` and none when it is `none`; any other value keeps one in
 fifty. `every` is what a replay that compares two machines asks for. `none` removes the one check
 that catches two compiles with one key and different bytes, for whoever sets it, CI or not: it is
@@ -480,7 +549,16 @@ modification time; the `ld` that driver runs, the same way and, outside the root
 change time and inode, so that a file put in its place with the same size and date (a package
 that keeps dates, a link retargeted by `update-alternatives`) is another `ld`; and the SDK, by
 where it lies and the date of its settings file. A driver, `ld` or SDK outside every root ties
-the block.
+the block. When the link's environment is known (B-37), E takes the place of those texts of the
+driver, the `ld`, `dsymutil` and the SDK: it holds each of them by content, with what they load,
+the start files, the C runtime and the toolchain's own linker tools, so a driver whose date
+changed and whose bytes didn't is the same link, and one rebuilt with the same date is another.
+Where E is unknown the texts stay, the block is stored and reused on this machine as before, and
+it never leaves it (B-24); an `ld` in a folder named `gcc-ld` then also names the `rust-lld` in
+the folder above by its size, dates and inode, since that is the linker it runs and no part of
+the compiler's identity holds it (B-17). The hint keeps E's question (the driver as rustc named it, the line
+without its inputs and output, the variables the line set, roots replaced) beside the one below;
+a hint without it is not followed.
 
 *Which `ld` runs* is asked of the driver at every link, and again before every lookup: never
 remembered, never taken from a hint. When rustc runs `rust-lld` itself (`-flavor` first, as for
@@ -559,6 +637,121 @@ is stored with its debug bundle: every file under `<program>.dSYM`, named by its
 output folder; a bundle with no DWARF file, or that holds anything but folders and regular
 files, is `built, not stored`. A program the wrapper leaves as it is (B-9) is stored with the
 debug objects it names.
+
+**B-37 The link environment.** For a linked output, **E** is the identity by content of what,
+outside rustc's own command line, decides the link's bytes. One function computes it, from the
+link's own command (rustc's `--print=link-args` line) and this machine's files, at the link and
+again before every lookup, from the question the hint keeps (the driver as rustc named it, the
+line without its inputs and output, the variables the line set, roots replaced), never from an
+answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** of entries, each
+(role, name asked for, digest), so which file answered which request is part of it:
+
+1. the C driver's dry run: the line without its inputs (each object and library given by path)
+   and its output, with `-o /nonexistent/hushrun-link -###`, the link's `PATH` and the variables
+   the line set (`SDKROOT`, `LC_ALL`, …). Its **whole text**, every word, with rustc's temporary
+   folder names (`rustcXXXXXX`) and gcc's temporary files (`ccXXXXXX.res`) made fixed and roots
+   and bases replaced by their names, also after an option's letters (`-L{…}`), in each line
+   as a whole and only then taken apart at spaces, so a root whose path holds a space (a
+   checkout under `My Projects/`) is replaced like any other. A command line of the dry run
+   (the drivers start one with a space) is then written word by word, each between quotes only
+   where it is empty or holds a space, a quote or a backslash: gcc quotes a word by the
+   characters in it, so a folder with a space came quoted and the same folder elsewhere did
+   not, and clang quotes every word. Other lines keep their own quotes, which don't depend on
+   what a path holds. The text holds
+   every flag the link passes, not only the files it names, and the loader's path the driver
+   adds. What it does **not** carry is a path rustc computes from where a checkout lies:
+   `-C rpath` writes the way from the output folder to the toolchain as a relative `RUNPATH`
+   (`$ORIGIN/../../…`), and a lookup asks the dry run of the line a hint kept, which is the
+   line of the checkout that linked. That is B-9's to key, in the first key;
+2. the driver by SHA-256, as found on the link's `PATH`, on every target. A driver is a file
+   that decides what the linker is handed, and its dry run of a line without inputs need not
+   show what it does when it is given objects: a script of the workspace named with
+   `-C linker`, or another machine's `cc` first on `PATH`, is another file and another E. On
+   Apple's targets `/usr/bin/cc` is a small program that runs the selected Xcode's clang; it is
+   hashed like any driver, and what that clang hands the linker is the dry run's text; the program the dry run's
+   last command names (`collect2`, or the `ld` clang runs); the `ld` that really runs, which is
+   B-18's answer for this link and nothing E searches for by itself (one rule says which `ld`
+   runs: the one `collect2` finds, a gcc 15 driver's own answer believed only as B-18 says);
+   when that `ld` lies in a folder named `gcc-ld` (rustc's own, handed to the driver with `-B`
+   where rustc links with its lld, x86-64 Linux since 1.90), the `rust-lld` in the folder above,
+   which that small program only runs and which writes the bytes; the plugin it loads
+   (`-plugin`); and every shared
+   library each of those loads, transitively, where the loader would find it: ELF `DT_NEEDED`
+   through `DT_RPATH` (when there is no `DT_RUNPATH`), `LD_LIBRARY_PATH`, `DT_RUNPATH`, the
+   folders `/etc/ld.so.conf` lists and `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib`, with each
+   program's loader (`PT_INTERP`); Mach-O load commands through the image's and the program's
+   `LC_RPATH`, `@loader_path` and `@executable_path`, a system library that lies only in macOS's
+   shared cache (`/usr/lib/…`, `/System/…`) by its name;
+3. every absolute path of an existing file on that command, by SHA-256: the start files
+   (`Scrt1.o`, `crti.o`, `crtbeginS.o`, …), the compiler runtime, `lto-wrapper`;
+4. each library a `-l` of that command names, when it is the C runtime the standard library asks
+   for (`c`, `m`, `rt`, `pthread`, `dl`, `util`, `gcc_s`, `gcc`, `gcc_eh`, `System`) or one the
+   driver added, as `ld` finds it: the command's `-L` folders in order (on Apple's targets each
+   under the SDK first when it is there), then `ld`'s own (`ld --verbose`'s `SEARCH_DIR`s;
+   Apple's: the SDK's `usr/lib` and `usr/local/lib`, and `/usr/local/lib`), `.so` before `.a`
+   while the command links dynamically and `.a` alone while it links statically (`-Bstatic`,
+   `-Bdynamic`, `--push-state`, `--pop-state`), `.tbd`, `.dylib`, `.so`, `.a` on Apple's; and each
+   file a GNU linker script found there names (B-18's reading), eight deep at most. Any other
+   `-l` is a crate's, keyed by content in `link` wherever it is found (B-6), and so stays in
+   what a dependent names a proc macro by;
+5. every file under the toolchain's `<sysroot>/lib/rustlib/<host>/bin/` (`rust-lld`,
+   `gcc-ld/*`, `rust-objcopy`), which B-17 doesn't hash and rustc runs (`rust-lld` is the default
+   linker on x86-64 Linux, `rust-objcopy` strips on macOS), with what each loads where that is
+   found (a tool that doesn't run for this link may need a library only rustc's own variables
+   lead to, as Linux's `rust-objcopy` takes `libLLVM` from rustup's `LD_LIBRARY_PATH`: such a
+   library is listed as absent, not a reason E is unknown); and the
+   `dsymutil` rustc runs when a program gets a debug bundle, first on `PATH`, and on Apple's
+   targets, when that is the `/usr/bin` shim, the selected Xcode's beside its `ld`;
+6. on Apple's targets the SDK the dry run names (`-syslibroot`): its `SDKSettings.json` and
+   `System/Library/CoreServices/SystemVersion.plist` by content, and the `-platform_version`
+   triple.
+
+Where a file lies is in E only as far as the dry run's text says it (two installs of one image
+have the same text); the places searched and found empty are not in it. A file that appears
+earlier in a search (another `ld` earlier on `PATH`, a newer GCC beside the old one) changes
+which file answers, so **nothing about E is remembered**: the dry run and every search run again
+at each link and each lookup. Only each file's SHA-256 is remembered, for the run, by the path as
+found and its stat (size, both dates, inode, device; B-6's run digests), so a link retargeted to
+another file is another file. The list is stored with the block (its description's
+`link_environment`), never in a key but by its digest.
+
+E is **unknown**, with why, when: the dry run doesn't say it is gcc (`gcc version …`) or clang
+(`… clang version …`), judged from its output, never from the driver's name (a wrapper script
+named `clang` that runs clang is clang); the dry run exits with an error, prints `error:`, or
+names no program; that program is neither `collect2` nor an `ld` hushrun knows (`ld`, `ld.bfd`,
+`ld.gold`, `ld.lld`, `ld64.lld`, `ld64`, `ld-classic`); the `ld` B-18 found can't be run, or it
+is rustc's `gcc-ld` program and there is no `rust-lld` above it to run; a `-fuse-ld=` on rustc's line or on the
+command names anything but `bfd`, `gold` and `lld` (`mold`); `ld --print-sysroot`, with the
+command's `--sysroot`, is neither `/` nor empty (an `ld` that can't say: the command's own
+`--sysroot`); a linker script does more than name files; a `-l` or a library a program loads is
+found nowhere; a library search folder holds a `$` word other than `$ORIGIN`; the link's
+environment sets `LD_PRELOAD`, `LD_AUDIT`, any `DYLD_` variable but `DYLD_LIBRARY_PATH` and
+`DYLD_FALLBACK_LIBRARY_PATH`, or one of those or `LD_LIBRARY_PATH` with a folder that is neither
+a root nor a base (cargo's `deps` and rustup's toolchain `lib` are both) and, for the macOS
+fallback, not one of the defaults cargo adds (`$HOME/lib`, `/usr/local/lib`, `/usr/lib`); or the
+link itself does link-time optimization: `-C lto` or `-C linker-plugin-lto` on rustc's line, or
+a `-flto…` on the link line. The standard library's own bitcode (`.llvmbc` sections inside its
+objects) is not that: the linker takes those objects' code. *Rests on:* a link's bytes following
+from the files it reads and the programs it runs, which the driver's dry run and the loaders
+name; and the dry run printing the command the driver runs (gcc 14, clang 19 and Apple's clang
+checked; equal E gave equal bytes on seven pairs of machines and different E different bytes,
+Debian 12 against 13 among them). *Breaks if:* a program on the way read a file neither the dry
+run nor its loader names (a configuration file of its own, a plugin it searches for itself);
+the driver changed what it adds without printing it in its dry run; a library came from the
+loader's cache (`ld.so.cache`) where `ld.so.conf`'s folders don't lead, or from a
+`glibc-hwcaps` subfolder; macOS's shared cache held another version of a library a linker program
+loads and that changed what it writes; or another `ld` ran than B-18 finds (its own *breaks
+if*). The linker's version text is not asked: the `ld` it would describe is in E by content.
+
+Cost, measured on rustc 1.94 (median of 11 links of a proc macro and of a program after the
+first, release build): on macOS (Xcode 27.2 through `/usr/bin/cc`) about 12 to 19 ms at each
+link and the same at each lookup, nearly all of it the dry run through the shim; on Linux arm64
+with gcc 14 (Debian 13 in a container) about 3.5 to 6 ms (three questions, about 105 entries).
+The first link of a run also hashes what no earlier link of the run did, about 210 MB on macOS
+(`rust-lld` 122 MB, `libLTO.dylib` 69 MB) and 330 MB on Linux (`libLLVM` 155 MB, which the
+toolchain's tools load): 0.4 to 0.5 s on Linux and about 0.7 s on this Mac, whose SHA-256 is
+slow under load. A file of 8 MiB or more is hashed under a lock on its run digest's name, so the
+links a cold build starts at once hash it once and the others wait for it and read it.
 
 **B-19 Every failure runs rustc.** An error computing a key or reading the store MUST end in
 rustc running as asked with nothing stored; an error putting a block's files in place ends in a
@@ -667,8 +860,9 @@ wrapper answers by content as usual. Nothing is asked of the person.
   name added to a watched folder that a fresh compile would also see as an input (an editor's
   swap file beside a source) rebuilds the crate, as its key says.
 
-**B-24 Portable.** A block is **portable**, and is the only kind that may ever leave the machine
-that built it, when nothing in its keys, its hint, its record or its bytes names that machine.
+**B-24 Portable.** A block is **portable** when nothing in its keys, its hint, its record or its
+bytes names the machine that built it. A portable block may leave that machine; so may, from a
+CI job, one that is only bound to folders (below); nothing else ever does.
 One function decides it, from the compile's facts, and records the answer with every reason
 that holds in the block's description and in the run's log. On its own machine a block is
 reused whatever the answer, with one condition: a block that holds one of the machine's folders
@@ -689,9 +883,21 @@ by another person on a shared store with the first one's value. This is the limi
 input a compile isn't told about, not of portability alone; the audit (B-16) is the only thing
 that catches it, by compiling a reused block again and comparing. The reasons:
 
-- `linked`: a program, a proc macro or a build-script binary. Its linker, C runtime and SDK have
-  no content identity yet.
-- `tied`: its place is its roots (B-10).
+- `link-environment-unknown`: a program, a proc macro or a build-script binary whose link
+  environment can't be told by content (B-37): the description and the log say why. A linked
+  output whose E is known is portable on the same terms as a library: its key holds E, which two
+  machines compute alike only where the files that decide the link's bytes are alike. *Rests
+  on:* B-37's list being all that decides those bytes. *Breaks if:* it isn't (B-37's *breaks
+  if*); the audit (B-16), which compares every class, is the check on it.
+- `toolchain-in-output`: a linked output holds the toolchain's own folder (B-10). Such a block is
+  keyed by the toolchain's place (`bound`), as by any machine folder it holds. On macOS B-9's
+  changes keep it out of proc macros, build scripts and movable programs; a program set to
+  `tied`, or one the wrapper leaves as it is, still names the standard library by it.
+- `tied`: its place is its roots (B-10), or it is a movable macOS program whose output folder
+  lies outside its workspace, or a linked output with rustc's own run paths (`-C rpath`),
+  whose first key holds those folders (B-9).
+- `unsearchable`: its outputs can't be searched for folders (B-10): it is `tied` as well, and
+  never travels.
 - `read-outside`: a read lies outside every root, base and shared folder.
 - `read-in-shared-folder`: a read lies in a shared folder that is not a base (a system folder,
   the rustup home outside the toolchain), whose path is this machine's.
@@ -743,9 +949,45 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   a machine that agrees with them could still be given instructions it can't run. *Breaks if:*
   a compile reaches the host's CPU through something other than its arguments.
 
+**A block bound to folders travels where those folders are the same.** Some reasons name
+only folders whose values the block's keys hold: `tied` (its place, B-10, or the target folder
+of a movable macOS program, B-9), the `…-in-output` and `…-in-record` reasons with
+`toolchain-in-output`, and `variable-names-base`, whose folders are in the second key as
+`bound`; and `read-in-shared-folder`, whose read is in the second key by its path and its
+content (a library a crate asks for with `-l`, found in the system's or the SDK's folder, as
+`-liconv` and every framework are on macOS; so is every source read, native and declared
+input). The one read the second key holds by content alone is a library the linker is handed
+by its path: that path is an argument of rustc's own line, which the first key holds as
+written. A block whose reasons are all of those is **bound**: another machine computes its
+keys only where every such folder is the same text, and there the block is as right as on the
+machine that built it. One function says so (`Portability::bound_only`), and the wrapper tells
+the relay of a block it built both answers, portable and bound. A bound block is offered for
+upload **only by a CI job, which is a run whose credential is the job's own ID token** (B-29,
+B-31): the credential the server trusts a job by, never the environment, which says CI on any
+machine where a variable is set. A person's or an agent's token offers none, in CI or out of
+it. Every job of a repository has the same paths, which is
+where such a block is of use (a program that holds the cargo home through a C library's debug
+info, a test binary that bakes `CARGO_MANIFEST_DIR`, a library that bundles C code), and a
+CI path names nobody, where a person's folders hold their user name, which everyone the scope
+serves could read in the block's bytes. Nothing changes for the machine that looks one up: its
+hint names which folders and never their values (B-7), the lookup fills in this machine's, and
+a machine with another value finds another key. What never travels, bound or not: a block
+whose outputs can't be searched (`unsearchable`, which comes with `tied`: it may hold a folder
+nobody saw), and one with any other reason below. A tied test binary reused where its checkout
+is the same reads, when it runs, the files of the machine that runs it, as one built there
+would. *Rests on:* the search and the proofs finding every folder a block holds, so that
+every one is in a key (B-10's *can't see* applies: a folder written in another form is in no
+key, and travels with a block marked portable today as well). *Breaks if:* two machines have a
+folder of the same text and other content that the keys don't hold: the cargo home's files are
+keyed by content where a compile reads them, and a path a program only names is read when it
+runs, so this is the case of any tied block on one machine whose folder's content changed.
+
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
-block is not portable only because it is `linked` is still named alike on two machines (B-6).
+block is not portable only because of its link environment, or because its bytes hold a machine
+folder or the toolchain's, is still named alike on two machines (B-6): neither is in that name.
+A program that bakes its checkout (`env!("CARGO_MANIFEST_DIR")`, `CARGO_BIN_EXE_<name>`) is
+`tied` and stays on its machine, like any block that holds one of its roots.
 
 ## Sharing through a backend
 
@@ -928,7 +1170,9 @@ zstd giving the same stream for one version of it, so two versions of hushrun ma
 of one block, which costs a wait and nothing else.
 
 **B-29 Uploads and the outbox.** A block gets a marker in the store's `outbox/` only when it was
-built in this run, it is portable (B-24), the policy `open` returned says the caller writes,
+built in this run, it is portable or, in a run whose credential is a CI job's ID token, bound
+to folders (B-24), the policy `open`
+returned says the caller writes,
 sharing is `observe` or `on`, and the store's record says this run's host, org and credential
 built it (B-32). A marker an earlier run left goes up only from a run with the same host, org and
 credential. A downloaded block, and one with no record, never goes up. An upload's state is where
@@ -944,7 +1188,8 @@ move is a file written whole or a rename:
 | claimed | sent | packed, `begin` answered `put`, and the PUT succeeded or found the object there |
 | sent | done | `commit` answered `stored` |
 | claimed | done | `begin` answered `have`, or refused `too_large`, `unsupported`, `no_scope` or `suspended`; the block is gone, or no longer matches its record |
-| claimed | done, the local block discarded | `begin` refused `differs`: a trusted copy with other bytes exists |
+| claimed | done, the local block discarded | `begin` refused `differs` for a library: a trusted copy with other bytes exists |
+| claimed | done, the local block kept and its first key kept to this machine | `begin` refused `differs` for a program, a proc macro or a build-script binary (B-34) |
 | claimed, sent | waiting, not tried for 10 minutes | a network error, a 5xx, 401, 403, 404, an expired link, `busy`, `over_allowance`, `too_many_uploads`, `commit` answering `missing`, `gone` or `differs`, any word this version doesn't know |
 | claimed, sent | waiting, one more cut-off | the end of the command cut off its `begin`, PUT or `commit` in flight |
 | waiting | done | three cut-offs |
@@ -980,8 +1225,12 @@ for the repository, the check and the platform. The prefetch starts when the fir
 the run asks the relay anything: a run whose compiles all find their blocks here (a warm target
 with an empty store, or no compile at all) downloads nothing. The relay then drops every pair
 whose block or first key the store holds, asks for the rest's hints in one request and looks up the rest's blocks in
-one, and downloads the libraries, 8 at a time and in order, before cargo asks; programs are
-fetched only when asked for. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
+one, and downloads by class, 8 at a time, before cargo asks: proc macros and build-script
+binaries first, since cargo can start no dependent of a macro and no build script's run before
+they are there, and they are small; then the libraries, in the manifest's order. Programs are
+the last thing a build needs and the largest: they are fetched only when asked for, and so is
+a class this version doesn't know. A pair whose first key this machine keeps to itself (B-34)
+is left out. A pack waits sealed in `incoming/<run>/` until a wrapper brings the
 key that opens it, and is deleted once opened and published, or when the run ends. A hint is
 written where downloaded hints live, apart from the hints compiles here wrote: those are tried
 first, and a downloaded hint naming more bytes than twice what this machine's own hints of the
@@ -1120,7 +1369,7 @@ goes up. The relay publishes a download only to answer a wrapper still waiting f
 the store's own publish (first writer wins), never in shared `observe`. A block that was only
 downloaded may give way to this run's download or compile; a block built here never does. A
 compile whose own publish finds a block there compares outputs: a block built here is a second
-opinion for a library, and a difference is treated as B-16 treats one; a block only downloaded
+opinion for every class (B-16), and a difference is treated as B-16 treats one; a block only downloaded
 is replaced where the two differ, its first key suspended as B-34 says, and the difference
 reported. The replacement is one step under the block's lock (the two folders exchange names), so
 no other publish lands between the old block leaving and the new one arriving; where the
@@ -1191,12 +1440,27 @@ next question about a block no lookup named starts one, and the end of the check
 no longer. At the end of a check it asks again, within the uploads' cut, about every downloaded block
 the check reused that no lookup of the run answered for, so that a machine in daily use never
 goes stale. Every answer is written into the block's record: served with its outputs renews the
-entry, anything else is a "no". On a person's machine a downloaded library's first reuse is
-audited one time in ten, which the record notes, then one in fifty as any (B-16). A difference
+entry, anything else is a "no". On a person's machine a downloaded block's first reuse, of any
+class (B-16), is audited one time in ten, which the record notes, then one in fifty as any (B-16). A difference
 found by an audit or a comparison of a downloaded block, and a dependent that can't load one
 (B-15), suspend its first key for `keep_days`, not until `hushrun build clean`, and are reported
 to the scope the record names: `differs`, `rejected`, or `unreadable` for a pack that failed its
-checks. *Rests on:* the server answering a lookup only for blocks it still serves to this
+checks. **A linked output is the exception to the suspension.** A library is written by rustc
+alone, so two that differ under one key mean one was built from other inputs than the key
+names. A program, a proc macro or a build-script binary is written by a linker, and two that
+differ mean the two machines' link environments differ in something B-37 doesn't hold; what this
+machine's linker makes is what it would make every time. So when an audit, a comparison in
+shared `observe` or a compile finds such an output different from a copy that was only
+downloaded, and when `begin` refuses one this machine built with `differs` (B-29), the machine
+**keeps its own and keeps the first key to itself** for `keep_days`: its block takes the
+downloaded one's place (or stays, for a refused upload), nothing is suspended, and until the
+date no block of that first key is asked of the shared store, fetched from a manifest, reused
+from a download or offered for upload, while this machine's own is reused here as always. The
+mark is one file beside the first key's hints (`local`, with its end; `hushrun build clean`
+clears it, and the sweep removes an ended one), read by the wrapper's lookup and by the relay's
+prefetch; the run says so in one line, and the report to the scope is `link_differs`, a word a
+server that doesn't know it records nothing for. Each block's description holds its link
+environment as a list (B-37), so two that disagree can be laid side by side. *Rests on:* the server answering a lookup only for blocks it still serves to this
 caller, so that a withdrawn block stops being reused on laptops within a day without a list of
 withdrawals, and a "no" from it being final for that copy; a lookup without fetching counting as
 a use, so blocks in daily use don't expire (a stale block the run doesn't reuse, asked about with
@@ -1207,6 +1471,57 @@ machine that can't reach the server, until a run whose `open` answers in time; o
 on, a cost and never a wrong reuse; or the results lookup is answered by something that is not the
 backend (a proxy's error page): the run takes that for an org that doesn't share, and compiles
 its downloads once.
+
+**B-38 A downloaded program is checked before it may start.** Before a build-script binary or a
+program that was only downloaded is put in place, each time, its headers are read to tell
+whether it can start here. **Nothing is run**: not the program, not the loader it names, no
+tool. The file came from another machine, so every path in it is data, never a command. Cargo
+runs a build script itself, so no rule that reads rustc's errors sees one fail to start (B-15):
+the build fails with "failed to run custom build command", cargo takes the binary for up to
+date, and every later build fails the same way until the target folder is cleaned. One function
+decides, by the file's own format, and only for a compile whose target is this machine's (a
+program for another target is not started here).
+
+- **ELF**, where this system starts ELF. Its class, byte order and CPU (`e_machine`) are this
+  machine's. The file is whole: the program-header table, the section-header table, and every
+  segment and section that takes bytes of the file lie inside it. Its loader (`PT_INTERP`),
+  when it has one, is an absolute path without `..` in one of the system's own folders (`/lib`,
+  `/lib64`, `/usr/lib`, `/usr/lib64`, `/libexec`, `/usr/libexec`; Android's `/system/bin` and
+  `/apex`), both as written and as it resolves through links, and is a regular file with a run
+  bit: never a file of the workspace, of the store, or of any other place a download or a
+  checkout can write. Each library it needs (`DT_NEEDED`) is a regular ELF file for this CPU,
+  the first of that name in the program's run paths (`DT_RUNPATH`, or `DT_RPATH` when there is
+  none; `$ORIGIN` is the folder the program is put in; a folder with any other `$` word is left
+  out), then in the folders the system's loader searches (those `/etc/ld.so.conf` lists, then
+  `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib`). Each symbol version the program requires of such a
+  library (`DT_VERNEED`, weak ones excepted) is one that library defines (`DT_VERDEF`). A
+  static program has nothing to find.
+- **Mach-O**, where this system starts Mach-O. The file is 64-bit and for this machine's CPU, or
+  a universal file whose part for this CPU is; a program for the other CPU only is not started
+  (not through Rosetta either). It is whole: its load commands, each segment's bytes and each
+  table of `__LINKEDIT` (symbols, strings, signature, fixups) lie inside it. Its dynamic loader
+  (`LC_LOAD_DYLINKER`) is `/usr/lib/dyld`. Each library a load command names, weak loads
+  excepted, is a Mach-O file for this CPU where dyld looks (`@rpath` through each `LC_RPATH`,
+  `@loader_path`, `@executable_path`, all from the folder the program is put in), or an image
+  of this system's dyld shared cache, whose list of image paths is read from the cache file
+  (`/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/`, `/System/Library/dyld/`): a
+  path under `/usr/lib/` is no proof by itself. Where no cache can be read, a library under
+  `/usr/lib/` or `/System/` counts when `SDKROOT` names an SDK that has its stub (`.tbd`).
+- A file of the other format, or of neither (a script), is not a program this system starts.
+  On Windows nothing is checked: no linked output is stored there.
+
+A program that fails any of this is **a miss**, not a broken build: rustc runs, the block that
+compile builds takes the downloaded one's place and is from then on built here (B-32), and the
+run's log says why. Nothing is suspended or reported: the block is right for the machine that
+built it. A proc macro is not checked: rustc loads it, and B-15 acts on its error. *Rests on:*
+the kernel and the loader refusing nothing this reading accepts (shown on real programs: one
+the system's compiler links passes; cut in half, built for the other CPU, or loading a
+`/usr/lib/` library that is not there, it is a miss). *Breaks if:* a program starts and then
+fails on something no header names (a library it opens by name while running, a minimum OS
+version newer than this system); or needs a variable only cargo sets when it runs it
+(`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` for a library in a build's own folder), which this
+reading never consults, or a loader outside the system's folders (Nix, Guix): such a program
+is compiled here once though it would have run, which costs a compile and never a wrong block.
 
 **B-35 `build: env:`.** A repository's `hushrun.yaml` may name variables under a top-level
 `build: env:` list; every compile of that repository is keyed by their values (B-5), on every

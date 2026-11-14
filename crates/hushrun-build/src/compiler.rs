@@ -623,6 +623,88 @@ pub fn hidden_sources(
     Ok(Some(view))
 }
 
+/// The link a movable program's compile is given as its sysroot (B-9):
+/// `<output folder>/.hushrun/sysroot-<compiler>`, leading to `leads_to` (the toolchain, or its
+/// view without sources). Apple's linker names each object by the path it is given, and a
+/// program's UUID is a hash over those names: through this link the standard library's objects
+/// are named from the output folder, the same text on every machine, and not by where the
+/// toolchain is installed. One link per toolchain, named by the compiler's identity, so two
+/// toolchains building into one target folder never share one, and the name is the same on
+/// every machine. Found right, it is left alone; else it is made under a name of this
+/// process's own and renamed into place, so a reader sees the old link or the new one.
+///
+/// What lies there is the wrapper's alone (its own folder beside the outputs), and is only
+/// ever a link: a folder found in its place (a copied target folder that followed the link,
+/// something planted) would be what rustc takes for its sysroot, and a rename can't replace
+/// it, so it is removed first, with what it holds; a file is replaced by the rename. A link
+/// under a temporary name that a dead process left is removed once it is old.
+pub fn sysroot_link(out_dir: &Path, compiler: &Digest, leads_to: &Path) -> io::Result<PathBuf> {
+    let dir = out_dir.join(crate::sidecar::DIR);
+    let name = format!("sysroot-{}", &compiler.hex()[..16]);
+    let link = dir.join(&name);
+    if fs::read_link(&link).is_ok_and(|at| at == leads_to) {
+        return Ok(link);
+    }
+    fs::create_dir_all(&dir)?;
+    // Not followed: a link to a folder is a link, and is replaced by the rename below.
+    if fs::symlink_metadata(&link).is_ok_and(|meta| meta.is_dir()) {
+        fs::remove_dir_all(&link)?;
+    }
+    clear_stale_links(&dir, &name, SystemTime::now());
+    let pid = std::process::id();
+    for n in 0..64 {
+        let temp = dir.join(format!(".{name}.{pid}.{n}.tmp"));
+        match symlink(leads_to, &temp) {
+            Ok(()) => {
+                return match fs::rename(&temp, &link) {
+                    Ok(()) => Ok(link),
+                    Err(err) => {
+                        let _ = fs::remove_file(&temp);
+                        Err(err)
+                    }
+                };
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temp name",
+    ))
+}
+
+/// How old a link under a temporary name is before it is taken for one a dead process left: a
+/// live one is renamed within the call that made it.
+const STALE_LINK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Removes the temporary links for `name` in `dir` that are older than [`STALE_LINK`] at `now`:
+/// what a process left that died between making its link and renaming it into place.
+fn clear_stale_links(dir: &Path, name: &str, now: SystemTime) {
+    let prefix = format!(".{name}.");
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let file = entry.file_name();
+        let Some(file) = file.to_str() else {
+            continue;
+        };
+        if !file.starts_with(&prefix) || !file.ends_with(".tmp") {
+            continue;
+        }
+        let path = entry.path();
+        let old = fs::symlink_metadata(&path).is_ok_and(|meta| {
+            meta.file_type().is_symlink()
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|at| now.duration_since(at).ok())
+                    .is_some_and(|age| age >= STALE_LINK)
+        });
+        if old {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /// The folders of `lib/rustlib/` that hold a target's libraries (a `lib/` in them), but the
 /// sources, by name, sorted.
 fn target_folders(rustlib: &Path) -> Result<Vec<String>, Unknown> {
@@ -2033,6 +2115,79 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // The lock is gone once the memo is written: one memo file, nothing else.
         assert_eq!(fs::read_dir(&setup.memo).unwrap().count(), 1);
+    }
+    // covers: B-9
+    #[cfg(unix)]
+    #[test]
+    fn the_sysroot_link_is_made_right_whatever_lies_in_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("deps");
+        let (a, b) = (dir.path().join("tool-a"), dir.path().join("tool-b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let id = Digest::of(b"compiler");
+        let link = super::sysroot_link(&out, &id, &a).unwrap();
+        let leads = |link: &Path| fs::read_link(link).unwrap();
+        assert_eq!(leads(&link), a);
+        // A link that leads elsewhere, or nowhere.
+        for other in [b.clone(), dir.path().join("gone")] {
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
+        }
+        // Not a link at all: a file, an empty folder, a folder that looks like a toolchain.
+        // Each would otherwise be what rustc takes for its sysroot, or fail every compile.
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, b"x").unwrap();
+        assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
+        fs::remove_file(&link).unwrap();
+        fs::create_dir_all(link.join("lib/rustlib/host/lib")).unwrap();
+        fs::write(link.join("lib/rustlib/host/lib/libstd.rlib"), b"planted").unwrap();
+        assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
+        assert!(
+            a.read_dir().unwrap().next().is_none(),
+            "the toolchain is untouched"
+        );
+        // What a process that died between making its link and renaming it left: removed once
+        // it is old, by the next call that makes the link; a young one is another process's.
+        let folder = link.parent().unwrap();
+        let name = link.file_name().unwrap().to_str().unwrap();
+        let (old, young) = (
+            folder.join(format!(".{name}.1.0.tmp")),
+            folder.join(format!(".{name}.2.0.tmp")),
+        );
+        std::os::unix::fs::symlink(&b, &old).unwrap();
+        std::os::unix::fs::symlink(&b, &young).unwrap();
+        let now = SystemTime::now();
+        fs::remove_file(&link).unwrap();
+        super::clear_stale_links(folder, name, now + Duration::from_secs(3600));
+        assert!(fs::symlink_metadata(&old).is_err() && fs::symlink_metadata(&young).is_err());
+        std::os::unix::fs::symlink(&b, &young).unwrap();
+        assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
+        assert!(fs::symlink_metadata(&young).is_ok(), "a young one stays");
+        // Many at once, to two toolchains: always one of the two, and nothing left behind.
+        fs::remove_file(&young).unwrap();
+        std::thread::scope(|s| {
+            for n in 0..16 {
+                let (out, a, b) = (&out, &a, &b);
+                s.spawn(move || {
+                    for _ in 0..100 {
+                        let to = if n % 2 == 0 { a } else { b };
+                        let at = fs::read_link(super::sysroot_link(out, &id, to).unwrap()).unwrap();
+                        assert!(at == *a || at == *b, "{at:?}");
+                    }
+                });
+            }
+        });
+        let left: Vec<_> = fs::read_dir(folder)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from(name)]);
     }
 }
 

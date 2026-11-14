@@ -6,10 +6,10 @@
 //! base (the cargo home, the toolchain), none of the cargo home, the rustup home or the home
 //! folder in an output or a record, no variable naming a base that a second compile didn't prove
 //! harmless, and no proc macro among its externs that another machine names differently. A
-//! linked output (a program, a proc macro, a build-script binary) is never portable yet: the
-//! linker, the C runtime and the SDK it was linked with have no content identity. Whatever the
-//! answer, the block is reused on this machine exactly as before: this decides only whether it
-//! may leave.
+//! linked output (a program, a proc macro, a build-script binary) is portable on the same terms
+//! when its link environment is known by content (B-37), and when no output holds the
+//! toolchain's own folder either. Whatever the answer, the block is reused on this machine
+//! exactly as before: this decides only whether it may leave.
 //!
 //! A library among the externs is keyed by the SHA-256 of its file, so a dependency that is not
 //! portable gives its dependents other keys on another machine, never a wrong block; its own
@@ -27,12 +27,18 @@ use crate::model::{Class, Folder, Located};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
-    /// A program, a proc macro or a build-script binary: its link environment has no content
-    /// identity yet.
-    Linked,
+    /// A program, a proc macro or a build-script binary whose link environment can't be told
+    /// by content (B-37): [`Portability::link_environment`] says why.
+    LinkEnvironmentUnknown,
+    /// A linked output holds the toolchain's own folder (`<sysroot>/lib/rustlib`, B-10).
+    ToolchainInOutput,
     /// Its place is its roots (B-10): an output holds a folder of the checkout, a read lies
     /// outside every root, or the outputs can't be searched.
     Tied,
+    /// Its outputs can't be searched (B-10: `-C lto`, compressed debug sections): it may hold
+    /// a folder nobody saw, so it is `tied` too and never travels, even where every folder a
+    /// search could name is the same.
+    Unsearchable,
     /// A read lies outside every root, base and shared folder.
     ReadOutside,
     /// A read lies in a shared folder that is not a base (a system folder, the rustup home
@@ -71,8 +77,10 @@ impl Reason {
     /// The reason as logs and records write it.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Reason::Linked => "linked",
+            Reason::LinkEnvironmentUnknown => "link-environment-unknown",
+            Reason::ToolchainInOutput => "toolchain-in-output",
             Reason::Tied => "tied",
+            Reason::Unsearchable => "unsearchable",
             Reason::ReadOutside => "read-outside",
             Reason::ReadInSharedFolder => "read-in-shared-folder",
             Reason::CargoHomeInOutput => "cargo-home-in-output",
@@ -119,25 +127,63 @@ pub struct Portability {
     /// recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<String>,
+    /// Why a linked output's environment is unknown ([`Reason::LinkEnvironmentUnknown`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_environment: Option<String>,
 }
 
 impl Portability {
     /// Whether a dependent on another machine names this block's files as a dependent here
     /// does. A library: when it is portable, since it is named by its bytes. A proc macro: when
     /// it is named by what it was built from (its place is `anywhere`) and that names no
-    /// machine; its own bytes may still hold one (a link names the standard library's folder),
-    /// since no dependent keys them, and a folder its expansion writes into a dependent's output
-    /// is found there. Nothing else has dependents.
+    /// machine: its link environment is left out of that name, and its own bytes may still hold
+    /// a machine's folder (a link names the standard library's), since no dependent keys them,
+    /// and a folder its expansion writes into a dependent's output is found there. Nothing else
+    /// has dependents.
+    /// Whether the only things that keep the block on its machine are folders whose values
+    /// its keys hold (B-24): a folder of the checkout or of the machine in an output or a
+    /// record, a variable that names a base, a program keyed by its target folder, and a read
+    /// in a shared folder (a library a crate asks for with `-l`, found in the system's or the
+    /// SDK's folder). The second key holds such a read by its path and its content where it
+    /// is a source read, a native or declared input, or a place the linker may take a file
+    /// from (`link.files`, every candidate of a `-l`). A library the linker is handed by its
+    /// path (`link.libraries`) is in the second key by content alone: its path is an argument
+    /// of rustc's own line, which the first key holds as written. Another machine
+    /// computes those keys only where each such folder is the same text, so there the block is
+    /// as right as it is here. Never when the outputs can't be searched, a read lies outside
+    /// every root, base and shared folder, the link environment is unknown, a value no key
+    /// holds is in the bytes, the CPU is this machine's, or an extern is named by this machine
+    /// alone.
+    pub fn bound_only(&self) -> bool {
+        !self.portable
+            && self.reasons.iter().all(|reason| {
+                matches!(
+                    reason,
+                    Reason::Tied
+                        | Reason::ReadInSharedFolder
+                        | Reason::ToolchainInOutput
+                        | Reason::CargoHomeInOutput
+                        | Reason::RustupHomeInOutput
+                        | Reason::HomeInOutput
+                        | Reason::CargoHomeInRecord
+                        | Reason::RustupHomeInRecord
+                        | Reason::HomeInRecord
+                        | Reason::VariableNamesBase
+                )
+            })
+    }
+
     pub fn named_portably(&self, class: Class) -> bool {
         match class {
             Class::Library => self.portable,
             Class::ProcMacro => self.reasons.iter().all(|reason| {
                 matches!(
                     reason,
-                    Reason::Linked
+                    Reason::LinkEnvironmentUnknown
                         | Reason::CargoHomeInOutput
                         | Reason::RustupHomeInOutput
                         | Reason::HomeInOutput
+                        | Reason::ToolchainInOutput
                 )
             }),
             Class::BuildScript | Class::Program => false,
@@ -171,16 +217,44 @@ pub struct Facts<'a> {
     /// It is compiled for this machine's CPU: `-C target-cpu=native`, or `-mcpu=native` handed to
     /// the code generator.
     pub native_cpu: bool,
+    /// A linked output holds the toolchain's own folder (B-10).
+    pub toolchain_in_output: bool,
+    /// Its first key holds a folder as this machine has it (B-9: a movable program whose
+    /// output folder lies outside the workspace): it is reused only where that folder is the
+    /// same, which is what `tied` says.
+    pub keyed_by_place: bool,
+    /// The outputs can be searched for folders as raw bytes (B-10).
+    pub searchable: bool,
 }
 
 /// Whether the block may leave the machine, and every reason it may not.
 pub fn portable(facts: &Facts<'_>) -> Portability {
     let mut reasons = BTreeSet::new();
+    // A linked output leaves the machine only with its link environment known (B-37).
+    let mut link_environment = None;
     if facts.class != Class::Library {
-        reasons.insert(Reason::Linked);
+        let why = match facts.observed.link.as_ref() {
+            Some(link) if link.environment.is_some() => None,
+            Some(link) => Some(match &link.environment_list {
+                Some(crate::linkenv::LinkEnv::Unknown { reason }) => reason.clone(),
+                _ => "its link environment wasn't computed".to_owned(),
+            }),
+            None => Some("its link line wasn't read".to_owned()),
+        };
+        if let Some(why) = why {
+            reasons.insert(Reason::LinkEnvironmentUnknown);
+            link_environment = Some(why);
+        }
+        if facts.toolchain_in_output {
+            reasons.insert(Reason::ToolchainInOutput);
+        }
     }
-    if !matches!(facts.observed.place, Place::Anywhere) {
+    if !matches!(facts.observed.place, Place::Anywhere) || facts.keyed_by_place {
         reasons.insert(Reason::Tied);
+    }
+    if !facts.searchable {
+        reasons.insert(Reason::Tied);
+        reasons.insert(Reason::Unsearchable);
     }
     for at in places(facts.observed) {
         match at {
@@ -234,6 +308,7 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
         reasons: reasons.into_iter().collect(),
         externs,
         variables,
+        link_environment,
     }
 }
 
@@ -1091,6 +1166,9 @@ mod tests {
             externs,
             unkeyed: &[],
             native_cpu: false,
+            toolchain_in_output: false,
+            keyed_by_place: false,
+            searchable: true,
         })
     }
 
@@ -1115,7 +1193,7 @@ mod tests {
         };
         assert_eq!(
             reasons(decide(Class::ProcMacro, &a, &o, &[], &[], &[])),
-            "linked"
+            "link-environment-unknown"
         );
         assert!(decide(Class::ProcMacro, &a, &o, &[], &[], &[]).named_portably(Class::ProcMacro));
         // A proc macro whose bytes hold the rustup home (its link names the standard library)
@@ -1192,8 +1270,86 @@ mod tests {
             externs: &[],
             unkeyed: &[],
             native_cpu: false,
+            toolchain_in_output: false,
+            keyed_by_place: false,
+            searchable: true,
         });
         assert_eq!(reasons(p), "variable-names-base");
+    }
+
+    /// `observed()` linked, with E known (`Some`) or unknown with a reason.
+    fn linked(environment: Option<u8>) -> Observed {
+        let mut o = observed();
+        o.link = Some(crate::key::Link {
+            libraries: Vec::new(),
+            files: Vec::new(),
+            linker: String::new(),
+            sdk: String::new(),
+            environment: environment.map(|byte| Digest::of(&[byte])),
+            environment_list: Some(match environment {
+                Some(byte) => crate::linkenv::LinkEnv::Known {
+                    digest: Digest::of(&[byte]),
+                    items: Vec::new(),
+                },
+                None => crate::linkenv::LinkEnv::Unknown {
+                    reason: "LD_PRELOAD is set for the link".into(),
+                },
+            }),
+            linker_path: Located::Shared("/usr/bin/cc".into()),
+            ld_path: None,
+            sdk_path: None,
+            dsymutil_path: None,
+            folders: Vec::new(),
+            system: Vec::new(),
+            query: None,
+        });
+        o
+    }
+
+    // covers: B-24, B-37, B-10
+    #[test]
+    fn a_linked_output_leaves_with_its_link_environment_known_and_no_machine_folder() {
+        let a = asked();
+        let machine = machine();
+        let decide = |class, observed: &Observed, toolchain_in_output| {
+            portable(&Facts {
+                class,
+                asked: &a,
+                observed,
+                records: &[],
+                in_outputs: &BTreeSet::new(),
+                machine: &machine,
+                variable_names_base: false,
+                externs: &[],
+                unkeyed: &[],
+                native_cpu: false,
+                toolchain_in_output,
+                keyed_by_place: false,
+                searchable: true,
+            })
+        };
+        for class in [Class::ProcMacro, Class::BuildScript, Class::Program] {
+            let known = decide(class, &linked(Some(1)), false);
+            assert!(known.portable, "{class:?}: {known:?}");
+            assert_eq!(known.link_environment, None);
+            let unknown = decide(class, &linked(None), false);
+            assert_eq!(unknown.reasons, [Reason::LinkEnvironmentUnknown]);
+            assert_eq!(
+                unknown.link_environment.as_deref(),
+                Some("LD_PRELOAD is set for the link")
+            );
+            let toolchain = decide(class, &linked(Some(1)), true);
+            assert_eq!(toolchain.reasons, [Reason::ToolchainInOutput], "{class:?}");
+            // A program that bakes its checkout stays tied (decision 12).
+            let mut tied = linked(Some(1));
+            tied.place = Place::Tied(vec![(RootName::Workspace, "/w".into())]);
+            assert_eq!(decide(class, &tied, false).reasons, [Reason::Tied]);
+        }
+        // A proc macro is named alike on another machine whatever its own link environment or
+        // what its bytes hold of the toolchain: neither is in that name (B-6).
+        assert!(decide(Class::ProcMacro, &linked(None), true).named_portably(Class::ProcMacro));
+        // A library holding the toolchain's folder is not searched for it: no such fact.
+        assert!(decide(Class::Library, &observed(), true).portable);
     }
 
     // covers: B-24
@@ -1215,6 +1371,9 @@ mod tests {
                 externs: &[],
                 unkeyed: &[],
                 native_cpu: false,
+                toolchain_in_output: false,
+                keyed_by_place: false,
+                searchable: true,
             })
         };
         // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
@@ -1243,6 +1402,9 @@ mod tests {
             externs: &[],
             unkeyed: &[],
             native_cpu: false,
+            toolchain_in_output: false,
+            keyed_by_place: false,
+            searchable: true,
         });
         assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
@@ -1250,7 +1412,8 @@ mod tests {
     #[test]
     fn the_reasons_are_written_as_they_are_named() {
         for reason in [
-            Reason::Linked,
+            Reason::LinkEnvironmentUnknown,
+            Reason::ToolchainInOutput,
             Reason::Tied,
             Reason::ReadOutside,
             Reason::ReadInSharedFolder,
@@ -1397,6 +1560,9 @@ mod tests {
             externs: &[],
             unkeyed: &unkeyed,
             native_cpu: false,
+            toolchain_in_output: false,
+            keyed_by_place: false,
+            searchable: true,
         });
         assert!(!p.portable);
         assert_eq!(p.reasons, vec![Reason::UnkeyedValue]);
@@ -1404,5 +1570,45 @@ mod tests {
         // A record from before the rule reads, and has no variables.
         let old: Portability = serde_json::from_str(r#"{"portable":true,"reasons":[]}"#).unwrap();
         assert!(old.variables.is_empty());
+    }
+    // covers: B-24
+    #[test]
+    fn only_folders_the_keys_hold_let_a_block_travel_where_they_are_the_same() {
+        let with = |reasons: &[Reason]| Portability {
+            portable: reasons.is_empty(),
+            reasons: reasons.to_vec(),
+            ..Portability::default()
+        };
+        // Portable: it travels anyway, and is not "bound".
+        assert!(!with(&[]).bound_only());
+        // Each folder a key holds the value of, alone and together.
+        let held = [
+            Reason::Tied,
+            Reason::ToolchainInOutput,
+            Reason::CargoHomeInOutput,
+            Reason::RustupHomeInOutput,
+            Reason::HomeInOutput,
+            Reason::CargoHomeInRecord,
+            Reason::RustupHomeInRecord,
+            Reason::HomeInRecord,
+            Reason::VariableNamesBase,
+            Reason::ReadInSharedFolder,
+        ];
+        for reason in held {
+            assert!(with(&[reason]).bound_only(), "{reason:?}");
+        }
+        assert!(with(&held).bound_only());
+        // Anything else keeps it on its machine, whatever comes with it.
+        for reason in [
+            Reason::LinkEnvironmentUnknown,
+            Reason::Unsearchable,
+            Reason::ReadOutside,
+            Reason::Extern,
+            Reason::UnkeyedValue,
+            Reason::NativeCpu,
+        ] {
+            assert!(!with(&[reason]).bound_only(), "{reason:?}");
+            assert!(!with(&[Reason::Tied, reason]).bound_only(), "{reason:?}");
+        }
     }
 }

@@ -50,6 +50,8 @@ const USED: &str = "used";
 const FILES: &str = "files";
 const HINTS: &str = "hints";
 const SUSPENDED: &str = "suspended";
+/// Beside a first key's hints: the key is kept on this machine until a date ([`Store::keep_local`]).
+const LOCAL: &str = "local";
 /// Hints downloaded from a shared store, kept apart from the ones compiles here wrote (B-30).
 const SHARED_HINTS: &str = "shared-hints";
 /// What the last compile here of a first key took, in milliseconds (B-26).
@@ -689,6 +691,48 @@ impl Store {
         }
     }
 
+    /// Keeps the first key `step` on this machine until `until` (B-16, B-34): a linked output
+    /// this machine links otherwise than a copy it was served. Until then no block of it is
+    /// asked of a shared store or sent to one, a block of it that was only downloaded is not
+    /// reused, and what this machine builds of it is reused here as always. `reason` says why.
+    pub fn keep_local(
+        &self,
+        step: &Digest,
+        reason: &str,
+        until: SystemTime,
+        now: SystemTime,
+    ) -> Result<(), StoreError> {
+        let path = self.step_dir(step).join(LOCAL);
+        let text = format!("{UNTIL}{}\n{reason}", epoch_ms(until));
+        self.write_whole(&path, text.as_bytes(), Some(now), true)
+            .map_err(at(&path))
+    }
+
+    /// Why the first key `step` is kept on this machine at `now`, or `None` when it is not, or
+    /// no longer. A mark that can't be read counts as one: nothing of the key is shared.
+    pub fn kept_local_at(&self, step: &Digest, now: SystemTime) -> Option<String> {
+        match fs::read(self.step_dir(step).join(LOCAL)) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let (until, reason) = text
+                    .strip_prefix(UNTIL)
+                    .and_then(|rest| rest.split_once('\n'))
+                    .unwrap_or(("", text.as_str()));
+                match until.parse::<u64>() {
+                    Ok(until) if epoch_ms(now) >= until => None,
+                    _ => Some(reason.to_string()),
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => Some(format!("its mark can't be read: {err}")),
+        }
+    }
+
+    /// [`Store::kept_local_at`] now.
+    pub fn kept_local(&self, step: &Digest) -> Option<String> {
+        self.kept_local_at(step, SystemTime::now())
+    }
+
     /// Expires the block under `key`: it is renamed into `trash/` and deleted there. Used when
     /// a dependent rejects it. No block is fine.
     pub fn discard(&self, key: &Digest) -> Result<(), StoreError> {
@@ -1104,8 +1148,9 @@ impl Store {
                     // Only empty ones go: a hint written meanwhile keeps them.
                     let _ = fs::remove_dir(&hints);
                 }
-                // A cost and an ended suspension go with their age as hints do.
-                for name in [COST, SUSPENDED] {
+                // A cost, an ended suspension and an ended local mark go with their age as
+                // hints do.
+                for name in [COST, SUSPENDED, LOCAL] {
                     let path = step.join(name);
                     let stale = fs::metadata(&path)
                         .and_then(|meta| meta.modified())
@@ -1872,6 +1917,16 @@ mod tests {
             Some("a downloaded block differed")
         );
         assert_eq!(w.store.suspended_at(&key(1), day(16)), None);
+        // A key kept on this machine: until its date, and not after.
+        w.store
+            .keep_local(&key(3), "links otherwise here", day(16), day(1))
+            .unwrap();
+        assert_eq!(
+            w.store.kept_local_at(&key(3), day(15)).as_deref(),
+            Some("links otherwise here")
+        );
+        assert_eq!(w.store.kept_local_at(&key(3), day(16)), None);
+        assert_eq!(w.store.kept_local_at(&key(4), day(1)), None);
         w.store.suspend(&key(2), "for good", day(1)).unwrap();
         assert_eq!(
             w.store.suspended_at(&key(2), day(400)).as_deref(),

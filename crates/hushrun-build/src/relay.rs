@@ -63,6 +63,11 @@ pub enum Request {
         step: Digest,
         class: Class,
         portable: bool,
+        /// Not portable only because it holds folders whose values its keys hold
+        /// ([`crate::portable::Portability::bound_only`], B-24): right wherever those folders
+        /// are the same text. Never set with `portable`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bound: bool,
         cost_ms: u64,
     },
     /// A downloaded block was found wrong here: report it to the scope it came from.
@@ -77,6 +82,10 @@ pub enum Problem {
     Differs,
     /// A dependent couldn't load it.
     Rejected,
+    /// A linked output's compile here made other bytes than the downloaded copy: the two
+    /// machines' link environments differ in something the key doesn't hold. Not a sign of a
+    /// poisoned build, as [`Problem::Differs`] is for a library.
+    LinkDiffers,
 }
 
 /// The relay's answer.

@@ -6,6 +6,133 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+Linked outputs between machines ([ADR 0091](docs/adr/0091-linked-outputs-between-machines.md)):
+programs, proc macros and build-script binaries are shared between machines whose link
+environment is the same by content, and a block that holds a machine's folder between CI jobs
+where that folder is the same. Every linked output's key changes once.
+
+### Changed
+
+- **A program, a proc macro or a build-script binary is keyed by its link environment by
+  content** (B-37): the C driver's dry run of the link, the programs it runs and what they load,
+  the start files, the C runtime as `ld` finds it, the toolchain's own linker tools and, on macOS,
+  the SDK, computed again at every link and lookup. It takes the place of the driver's, `ld`'s,
+  `dsymutil`'s and the SDK's size and date in the key; where it can't be told (another driver
+  than gcc or clang, a loader variable, link-time optimization in the link, a sysroot other than
+  `/`), those stay and the block is reused only on this machine. The list of which file answered
+  which request is kept in the block's description. Every linked output's key changes once.
+
+- **A program, a proc macro or a build-script binary may leave the machine** when its link
+  environment is known and none of its outputs holds a machine's folder (B-24): the reason
+  `linked` is gone, replaced by `link-environment-unknown` (with why) and `toolchain-in-output`,
+  for a linked output that holds the toolchain's own folder (B-10). A program that bakes its
+  checkout stays `tied`.
+
+- **The audit compares every class** (B-16): a program, a proc macro or a build-script binary that
+  could be reused is compiled one time in fifty (every time with `HUSHRUN_BUILD_AUDIT=every`, in
+  `observe` whenever found) and compared byte for byte, each file of a program's debug bundle
+  included; a difference suspends its key as for a library. A downloaded block's first reuse on a
+  person's machine is audited one time in ten whatever its class, and a compile that finds its
+  block already stored is a second opinion for every class.
+
+- **On macOS, proc macros, build scripts and programs no longer hold where the toolchain is
+  installed** (B-9), so they are the same bytes on two Macs. In a run that shares (the shared
+  mode is `observe` or `on`), proc macros and build scripts are linked without their debug map
+  (`-Wl,-S`): a panic inside one keeps its message, its location and its frames' function
+  names, and loses the file and line of each frame, and a debugger has nothing to step through.
+  A run that shares nothing links them as before, with the map. A program that
+  gets a debug bundle is compiled with `--sysroot` naming a link beside its outputs
+  (`<output folder>/.hushrun/sysroot-…`, one per toolchain). A program whose target folder lies
+  outside its workspace (`CARGO_TARGET_DIR` elsewhere) is now keyed by that folder and `tied`:
+  its UUID holds the folder's path, and before, two target folders shared one block whose bytes
+  were only the first one's. Every macOS proc macro's, build script's and program's key changes
+  once.
+
+- **A machine whose linker disagrees with a downloaded program, proc macro or build script keeps
+  its own** (B-34): where an audit, a comparison or a compile finds one different from a copy
+  that was only downloaded, or `begin` refuses one built here with `differs`, the machine's own
+  block stays (in the downloaded one's place), nothing is suspended, and that first key is kept
+  to the machine for `keep_days`: not asked of the shared store, not fetched, not uploaded. One
+  line says so, and the report to the scope is the new word `link_differs`, which a server that
+  doesn't know it records nothing for. A library that differs is treated as before.
+
+- **The prefetch fetches by class** (B-30): proc macros and build-script binaries first, then
+  libraries in the manifest's order; programs only when a compile asks for one.
+
+- **A downloaded build script or program is checked before it is reused, and nothing is run to
+  check it** (B-38): its headers are read. Its CPU is this machine's; the file is whole; on
+  Linux its loader is a file in one of the system's own folders (never one of the workspace or
+  the store), each library it needs is found in its run paths or the system's folders, with
+  the symbol versions it needs; on macOS each library it loads is a file where dyld looks or an
+  image of this system's shared cache. One that fails is a miss: it is compiled here, that
+  block takes its place, and the run's log says why. Before, cargo would have run a build
+  script that can't start, and failed every build until the target folder was cleaned.
+
+- **A block that holds a machine's folder travels to machines where that folder is the same**
+  (B-24): such a block's keys already hold the folder's value (`tied`, the `…-in-output` and
+  `…-in-record` reasons, `toolchain-in-output`, `variable-names-base`, `read-in-shared-folder`),
+  so another machine
+  computes them only where the folder is the same text. A CI job now offers such a block for
+  upload, and only a CI job does: every job of a repository has the same paths, and they name
+  nobody. This is what shares CI's programs, its test binaries and the libraries that bundle C
+  code between jobs. The wrapper tells the relay `bound` beside `portable`; a block whose
+  outputs can't be searched has the new reason `unsearchable` and never travels.
+
+- **The link environment names the linker that really runs** (B-18, B-37): it takes the `ld`
+  from the one rule that says which `ld` a driver runs (the one `collect2` finds; a gcc 15
+  driver's own answer only where that rule believes it) and searches for none itself, and where
+  that `ld` is rustc's own `gcc-ld` program (x86-64 Linux) the toolchain's `rust-lld` behind it
+  is in the key by content. Before, a `rust-lld` replaced under an unchanged `rustc` kept every
+  linked output's key. Where the link environment is unknown, `rust-lld` is named by its size,
+  dates and inode.
+
+- A file of 8 MiB or more that a run hashes for the first time (a linker, the toolchain's
+  `rust-lld`) is hashed by one wrapper while the others that want it at once wait and read its
+  digest, so a cold build pays for it once (B-37).
+
+- **On macOS the C driver is in the link environment by content, as on Linux** (B-37). Before,
+  on Apple's targets a driver was keyed by its name and its dry run only, so a changed script
+  named with `-C linker`, or another `cc` first on `PATH`, reused the block the old driver
+  linked. Every macOS linked output's key changes once more. A list the link line names (an
+  order file, a symbol list, a linker script) was and stays in the key by content, and a link
+  with a response file (`@file`) is never stored.
+
+- **A program, proc macro or build script compiled with `-C rpath` is reused only where its
+  folders are the same** (B-9): rustc writes the way from the output folder to the toolchain
+  into it, relative to itself, so two checkouts at another depth link other bytes. Before, the
+  second checkout reused the first one's program. Its first key now holds the output folder,
+  the dependency folders and the toolchain's folder, and the block is `tied`: it travels only
+  from CI, to jobs with the same paths.
+
+- **The check before a downloaded program is reused no longer runs the loader the file names**
+  (B-38). It asked an ELF file's own loader (`PT_INTERP`) to list its libraries, and that path
+  came from the downloaded bytes: a crafted file could name any program and have it run. On
+  macOS a program cut short, built for the other CPU, or loading a `/usr/lib/` library this
+  system doesn't have passed the check. All of these are now misses, told from the headers.
+
+- **A checkout whose path holds a space shares its linked outputs again** (B-37): the dry run's
+  text was cut at spaces before the checkout's folder was replaced by its name, so the folder
+  stayed in the link environment and no program, proc macro or build script was found in
+  another checkout. The dry run's command line is also kept with one way of quoting, since gcc
+  quotes a folder with a space and not the same folder without one.
+
+- **On macOS a proc macro's and a build script's debug map is dropped only in a run that
+  shares** (B-9). It was dropped in every run, also with sharing off or nobody signed in, where
+  nothing is gained by it: a build script compiled with debug info
+  (`[profile.dev.build-override] debug = true`) lost the file and line of every backtrace frame.
+  **To keep file and line while your org shares**: turn sharing off on your machine
+  (`hushrun build share off`), or name the package under `never_store` in the build settings.
+  The two ways of linking have different keys.
+
+- **A block bound to a machine's folders is offered for upload only by a run whose credential
+  is a CI job's ID token** (B-24, B-29). The relay asked whether the run was "in CI", which is
+  decided from the environment; it now asks its credential. A token in a job, or on a machine
+  where a CI variable is set, offers no bound block.
+
+- **On macOS a folder found where a program's sysroot link belongs is replaced by the link**
+  (B-9). Before, every movable program of that output folder passed through, at every build,
+  until someone removed the folder by hand. A temporary link a crashed compile left is removed.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

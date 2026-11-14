@@ -79,6 +79,15 @@ fn world_in(mode: Mode) -> World {
     }
 }
 
+/// A world whose run would share and whose backend is out of reach: no relay is asked, and on
+/// an Apple target a proc macro and a build script are linked as in any run that shares,
+/// without their debug map (B-9).
+fn sharing_world_in(mode: Mode) -> World {
+    let mut w = world_in(mode);
+    w.session.set_unreached().unwrap();
+    w
+}
+
 impl World {
     /// An empty checkout with an output folder.
     fn checkout(&self, name: &str) -> PathBuf {
@@ -845,4 +854,461 @@ fn a_library_found_in_a_folder_the_driver_hands_ld_is_keyed_by_its_bytes() {
         Outcome::BuiltNotStored(hushrun_build::model::NotStored::LinkInputs),
         "{other:?}"
     );
+}
+
+/// The stored description of the block a log entry names.
+fn description_of(w: &World, entry: &Entry) -> serde_json::Value {
+    let store = hushrun_build::store::Store::new(&w.session.current().store);
+    store
+        .block(&entry.key.expect("a block"))
+        .unwrap()
+        .expect("stored")
+        .description
+}
+
+/// The roles of a known link environment's list, in order, each once.
+fn link_roles(description: &serde_json::Value) -> Vec<String> {
+    let items = description["link_environment"]["known"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("E unknown: {}", description["link_environment"]));
+    let mut roles: Vec<String> = Vec::new();
+    for item in items {
+        let role = item["role"].as_str().unwrap().to_owned();
+        if !roles.contains(&role) {
+            roles.push(role);
+        }
+    }
+    roles
+}
+
+// covers: B-37
+#[test]
+fn a_real_links_environment_is_known_and_lists_what_answered() {
+    // The system's own C driver: gcc on Linux, Apple's clang on macOS.
+    let w = world();
+    let ws = w.checkout("ws");
+    let entry = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+    let description = description_of(&w, &entry);
+    let roles = link_roles(&description);
+    eprintln!("{}", description["link_environment"]);
+    let want: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "dry-run",
+            "driver",
+            "program",
+            "loads",
+            "library",
+            "toolchain",
+            "sdk",
+            "platform-version",
+        ]
+    } else {
+        &[
+            "dry-run",
+            "driver",
+            "program",
+            "ld",
+            "plugin",
+            "file",
+            "library",
+            "script",
+            "toolchain",
+        ]
+    };
+    for role in want {
+        assert!(roles.iter().any(|r| r == role), "{role} in {roles:?}");
+    }
+    // A loader variable set for the link: unknown, and why.
+    let entry = proc_macro_with(&w, &ws, &[], &[("LD_PRELOAD", "/nonexistent/libhook.so")]);
+    let description = description_of(&w, &entry);
+    assert!(
+        description["link_environment"]["unknown"]["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("LD_PRELOAD")),
+        "{description}"
+    );
+}
+
+// covers: B-24, B-10, B-37
+#[test]
+fn a_real_proc_macro_leaves_the_machine_where_its_environment_is_known_and_its_bytes_name_none() {
+    // The system's own driver (gcc on Linux, Apple's clang on macOS) and a toolchain whose
+    // path no output holds: on macOS because the link drops the debug map (`-Wl,-S`), which
+    // named the standard library's objects by it.
+    let w = sharing_world_in(Mode::On);
+    let ws = w.checkout("ws");
+    let entry = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+    let portable = entry.portable.clone().unwrap();
+    assert!(portable.portable, "{portable:?}");
+}
+
+// covers: B-9, B-16
+#[cfg(target_os = "macos")]
+#[test]
+fn a_toolchain_installed_elsewhere_links_the_same_program_proc_macro_and_build_script() {
+    // The same toolchain at another path (another user's rustup home, another machine): what it
+    // links must be byte for byte what the first one linked, or a block could not go from one
+    // to the other. In `observe` every block found is compiled anyway and compared (B-16).
+    let mut w = sharing_world_in(Mode::Observe);
+    let real = real_rustc();
+    let sysroot = real.parent().unwrap().parent().unwrap();
+    let build = |w: &World, ws: &Path| {
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        write(&ws.join("m/lib.rs"), PROC_MACRO);
+        write(
+            &ws.join("b/build.rs"),
+            "fn main() { println!(\"cargo:rerun-if-changed=x\"); }\n",
+        );
+        // As cargo's dev profile asks on macOS.
+        let debug = ["-C", "debuginfo=2", "-C", "split-debuginfo=unpacked"];
+        let (out, program) = w.call_as(ws, "p", "p/main.rs", "bin", &debug, &[]);
+        ok(&out);
+        let (out, proc_macro) = w.call_as(
+            ws,
+            "m",
+            "m/lib.rs",
+            "proc-macro",
+            &[
+                "-C",
+                "debuginfo=2",
+                "-C",
+                "split-debuginfo=unpacked",
+                "--extern",
+                "proc_macro",
+            ],
+            &[],
+        );
+        ok(&out);
+        let (out, script) = w.call_as(
+            ws,
+            "build_script_build",
+            "b/build.rs",
+            "bin",
+            &debug,
+            &[("CARGO_PKG_NAME", "b")],
+        );
+        ok(&out);
+        [program, proc_macro, script]
+    };
+    let one = w.checkout("one");
+    for entry in build(&w, &one) {
+        assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+        let portable = entry.portable.clone().unwrap();
+        assert!(portable.portable, "{entry:?}");
+    }
+    // The toolchain again, in this test's folder: rustc and its driver library are copies (it
+    // takes its sysroot from where that library really lies), the rest links to the real one.
+    let own = w.dir.path().join("another-home/toolchains/copy");
+    mirror(
+        &sysroot.join("lib"),
+        &own.join("lib"),
+        Path::new("/nonexistent"),
+    );
+    fs::create_dir_all(own.join("bin")).unwrap();
+    fs::copy(&real, own.join("bin/rustc")).unwrap();
+    w.rustc = own.join("bin/rustc");
+    let two = w.checkout("a-second/longer-checkout");
+    for entry in build(&w, &two) {
+        assert!(entry.found, "the same key: {entry:?}");
+        assert!(!entry.differed, "the same bytes: {entry:?}");
+    }
+}
+
+// covers: B-37
+#[test]
+fn a_program_that_links_from_a_folder_of_its_checkout_is_reused_in_another_checkout() {
+    // What a build script that compiles C hands its crate: `-L native=<a folder of the
+    // checkout>`, which rustc passes on to the linker. The folder is a root, so the link
+    // environment must be the same in two checkouts, whichever way the driver quotes its dry run
+    // (clang quotes every word, gcc none).
+    let w = world();
+    let build = |ws: &Path| {
+        fs::create_dir_all(ws.join("native")).unwrap();
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let native = format!("native={}", ws.join("native").display());
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-L", &native], &[]);
+        ok(&out);
+        entry
+    };
+    let (one, two) = (w.checkout("one"), w.checkout("another/longer-checkout"));
+    let first = build(&one);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = build(&two);
+    assert!(reused(&second), "{second:?}");
+    // A proc macro too: on Linux rustc hands every link a temporary search folder under the
+    // output folder (`-L <out>/rustcXXXXXX/raw-dylibs`), which gcc repeats, quoted, among the
+    // options it passes on.
+    let first = proc_macro_with(&w, &one, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = proc_macro_with(&w, &two, &[], &[]);
+    assert!(reused(&second), "{second:?}");
+}
+
+/// Makes `path` an executable file with `text`.
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    write(path, text);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A C driver that is a script running the real one: `plain` as it is, or one that hands the
+/// linker one more option whenever it is given an object, so its dry run of a line without
+/// inputs says the same and the program it links differs.
+fn driver_script(plain: bool) -> String {
+    let real = on_path("cc");
+    let real = real.display();
+    let option = if cfg!(target_os = "macos") {
+        "-headerpad,0x8000"
+    } else {
+        "--build-id=none"
+    };
+    match plain {
+        true => format!("#!/bin/sh\nexec {real} \"$@\"\n"),
+        false => format!(
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *.o) exec {real} \"$@\" -Wl,{option};; esac; done\nexec {real} \"$@\"\n"
+        ),
+    }
+}
+
+// covers: B-37
+#[test]
+fn a_driver_that_is_a_file_of_the_workspace_is_keyed_by_its_content() {
+    // `-C linker=<workspace>/tools/mycc`: the file changes, the program it links changes, and
+    // the dry run of the line without its inputs says the same both times.
+    let w = world();
+    let ws = w.checkout("ws");
+    let cc = ws.join("tools/mycc");
+    executable(&cc, &driver_script(true));
+    write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+    let linker = format!("linker={}", cc.display());
+    let (out, first) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &linker], &[]);
+    ok(&out);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let one = fs::read(ws.join("out/p-x")).unwrap();
+    executable(&cc, &driver_script(false));
+    let (out, second) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &linker], &[]);
+    ok(&out);
+    assert!(!second.found, "another driver, another key: {second:?}");
+    assert_ne!(first.key, second.key);
+    assert_ne!(one, fs::read(ws.join("out/p-x")).unwrap());
+}
+
+// covers: B-37
+#[test]
+fn another_driver_first_on_path_is_another_key() {
+    // Another machine's `cc`: the same name, found first on `PATH`, another file.
+    let w = world();
+    let plain = std::env::var("PATH").unwrap();
+    let bin = w.dir.path().join("machine-two/bin");
+    executable(&bin.join("cc"), &driver_script(false));
+    let other = format!("{}:{plain}", bin.display());
+    let program = |ws: &Path, path: &str| {
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &[], &[("PATH", path)]);
+        ok(&out);
+        entry
+    };
+    let (one, two) = (w.checkout("one"), w.checkout("two"));
+    let first = program(&one, &plain);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = program(&two, &other);
+    assert!(!second.found, "{second:?}");
+    let first = proc_macro_with(&w, &one, &[], &[("PATH", &plain)]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = proc_macro_with(&w, &two, &[], &[("PATH", &other)]);
+    assert!(!second.found, "{second:?}");
+}
+
+// covers: B-18, B-37
+#[test]
+fn a_file_the_link_line_names_is_keyed_by_its_content_and_a_response_file_is_never_stored() {
+    // A list the linker reads (an order file on macOS, a dynamic list on Linux), in the
+    // workspace: its bytes are in the key whether or not E is known. A response file holds
+    // arguments nothing here reads, so such a link is built and never stored.
+    let w = world();
+    let ws = w.checkout("ws");
+    write(
+        &ws.join("p/main.rs"),
+        "#[unsafe(no_mangle)] pub extern \"C\" fn hrq_a() {}\n\
+         #[unsafe(no_mangle)] pub extern \"C\" fn hrq_b() {}\n\
+         fn main() { hrq_a(); hrq_b(); }\n",
+    );
+    let list = ws.join("link/list.txt");
+    let (option, one, two) = if cfg!(target_os = "macos") {
+        ("-order_file", "_hrq_a\n_hrq_b\n", "_hrq_b\n_hrq_a\n")
+    } else {
+        ("--dynamic-list", "{ hrq_a; };\n", "{ hrq_a; hrq_b; };\n")
+    };
+    let arg = format!("link-arg=-Wl,{option},{}", list.display());
+    let link = |text: &str| {
+        write(&list, text);
+        let (out, entry) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &arg], &[]);
+        ok(&out);
+        entry
+    };
+    let first = link(one);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = link(two);
+    assert!(!second.found, "{second:?}");
+    assert_ne!(first.key, second.key);
+    let again = link(one);
+    assert!(reused(&again), "{again:?}");
+
+    let response = ws.join("link/more.rsp");
+    let more = if cfg!(target_os = "macos") {
+        "-dead_strip\n"
+    } else {
+        "--as-needed\n"
+    };
+    write(&response, more);
+    let arg = format!("link-arg=-Wl,@{}", response.display());
+    let (out, entry) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &arg], &[]);
+    ok(&out);
+    assert_eq!(
+        entry.outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::LinkInputs),
+        "{entry:?}"
+    );
+}
+
+// covers: B-9, B-24
+#[test]
+fn a_program_with_rustcs_rpath_is_reused_only_where_its_folders_are_the_same() {
+    // `-C rpath` writes the way from the output folder to the toolchain's libraries into the
+    // program, as a path relative to the program (`$ORIGIN/../../…`, `@loader_path/../../…`):
+    // a checkout at another depth links other bytes, and no search of the outputs finds a
+    // folder's name in them.
+    for mode in [Mode::Observe, Mode::On] {
+        let w = world_in(mode);
+        let build = |ws: &Path| {
+            write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+            let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-C", "rpath"], &[]);
+            ok(&out);
+            (entry, fs::read(ws.join("out/p-x")).unwrap())
+        };
+        let (one, two) = (w.checkout("one"), w.checkout("another/longer-checkout"));
+        let (first, a) = build(&one);
+        assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+        let (second, b) = build(&two);
+        assert!(!second.found, "{mode:?}: {second:?}");
+        // Its key holds its folders, which is what `tied` says: it travels only where they
+        // are the same (from CI, B-24).
+        let portable = first.portable.clone().unwrap();
+        assert!(!portable.portable, "{portable:?}");
+        assert!(portable.reasons.contains(&Reason::Tied), "{portable:?}");
+        assert!(portable.bound_only(), "{portable:?}");
+        assert_ne!(first.step, second.step);
+        assert_ne!(a, b, "the two programs do differ");
+        // In the same folders it is the same compile.
+        let (again, c) = build(&one);
+        assert!(again.found && !again.differed, "{mode:?}: {again:?}");
+        assert_eq!(a, c);
+        // Switched off again, the last one wins and the program moves as any other.
+        let off = |ws: &Path| {
+            let args = ["-C", "rpath", "-C", "rpath=no"];
+            let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &args, &[]);
+            ok(&out);
+            entry
+        };
+        off(&one);
+        let moved = off(&two);
+        assert!(moved.found && !moved.differed, "{mode:?}: {moved:?}");
+    }
+}
+
+// covers: B-37
+#[test]
+fn a_checkout_whose_path_has_a_space_shares_its_linked_outputs_with_another() {
+    // The dry run names the checkout's folders; one with a space in its path must be replaced
+    // by its root's name like any other, or no linked output is found in another checkout.
+    let w = sharing_world_in(Mode::On);
+    let build = |ws: &Path| {
+        fs::create_dir_all(ws.join("native")).unwrap();
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let native = format!("native={}", ws.join("native").display());
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-L", &native], &[]);
+        ok(&out);
+        entry
+    };
+    let one = w.checkout("my one");
+    let two = w.checkout("another longer/check out");
+    let three = w.checkout("plain");
+    // A folder whose name starts like an option, as some tools name their scratch folders.
+    let four = w.checkout("-Users-dev--scratch/ws");
+    let first = build(&one);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    for ws in [&two, &three, &four] {
+        let next = build(ws);
+        assert!(reused(&next), "{}: {next:?}", ws.display());
+    }
+    let first = proc_macro_with(&w, &one, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    assert!(first.portable.as_ref().unwrap().portable, "{first:?}");
+    for ws in [&two, &three, &four] {
+        let next = proc_macro_with(&w, ws, &[], &[]);
+        assert!(reused(&next), "{}: {next:?}", ws.display());
+    }
+}
+
+// covers: B-9
+#[cfg(target_os = "macos")]
+#[test]
+fn a_proc_macro_and_a_build_script_keep_their_debug_map_where_the_run_shares_nothing() {
+    // The debug map is what gives a panic's frames their file and line. Dropping it (`-Wl,-S`)
+    // is what lets a proc macro or a build script leave a Mac, so it is dropped only in a run
+    // that shares; alone, the map stays and two checkouts still link the same bytes.
+    let build = |w: &World, ws: &Path| {
+        // As cargo's dev profile asks on macOS, with the dependency folder cargo always names.
+        let deps = format!("dependency={}", ws.join("out").display());
+        let debug = [
+            "-C",
+            "debuginfo=2",
+            "-C",
+            "split-debuginfo=unpacked",
+            "-L",
+            deps.as_str(),
+        ];
+        let macro_entry = proc_macro_with(w, ws, &debug, &[]);
+        write(
+            &ws.join("b/build.rs"),
+            "fn main() { println!(\"cargo:rerun-if-changed=x\"); }\n",
+        );
+        let (out, script) = w.call_as(
+            ws,
+            "build_script_build",
+            "b/build.rs",
+            "bin",
+            &debug,
+            &[("CARGO_PKG_NAME", "b")],
+        );
+        ok(&out);
+        [
+            (macro_entry, fs::read(ws.join("out/libm-x.dylib")).unwrap()),
+            (
+                script,
+                fs::read(ws.join("out/build_script_build-x")).unwrap(),
+            ),
+        ]
+    };
+    // The debug map names each object file the link took.
+    let maps = |bytes: &[u8]| bytes.windows(8).any(|w| w == b".rcgu.o\0");
+    let alone = world();
+    let (one, two) = (alone.checkout("one"), alone.checkout("another/longer"));
+    let first = build(&alone, &one);
+    for (entry, bytes) in &first {
+        assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+        assert!(maps(bytes), "{} keeps its debug map", entry.crate_name);
+    }
+    for (entry, _) in build(&alone, &two) {
+        assert!(reused(&entry), "{entry:?}");
+    }
+    let sharing = sharing_world_in(Mode::On);
+    let ws = sharing.checkout("one");
+    for ((entry, bytes), (other, _)) in build(&sharing, &ws).iter().zip(&first) {
+        assert!(!maps(bytes), "{} has no debug map", entry.crate_name);
+        assert!(entry.portable.as_ref().unwrap().portable, "{entry:?}");
+        assert_ne!(entry.step, other.step, "another compile, another key");
+    }
 }

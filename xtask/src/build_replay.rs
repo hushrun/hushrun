@@ -55,6 +55,10 @@ options:
   --paths KIND         rotate: each commit exported to a new, empty path of another length;
                        fixed: one path, updated in place as a checkout is (unchanged files keep
                        their date) (default: rotate)
+  --shares             start each session as a run that shares and whose backend is out of
+                       reach: nothing is asked of a server, and compiles are asked what a
+                       sharing run asks (on macOS, proc macros and build scripts without their
+                       debug map), so what could leave the machine is counted as it would be
   --keep               keep the exports and fresh targets (default: delete each after its
                        commit's run, a fixed export after the last, a target inside an export
                        with the export; the store is always kept)
@@ -237,6 +241,8 @@ struct Options {
     targets: Targets,
     paths: Paths,
     keep: bool,
+    /// Each session is one whose run shares, its backend out of reach (B-9, B-34).
+    shares: bool,
 }
 
 #[derive(Debug)]
@@ -297,6 +303,7 @@ fn parse(args: &[String]) -> Result<Parsed> {
     let mut targets = Targets::Fresh;
     let mut paths = Paths::Rotate;
     let mut keep = false;
+    let mut shares = false;
 
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -347,6 +354,7 @@ fn parse(args: &[String]) -> Result<Parsed> {
                 }
             }
             "--keep" => keep = true,
+            "--shares" => shares = true,
             other => bail!("unexpected argument {other:?}; see `cargo xtask build-replay --help`"),
         }
     }
@@ -396,6 +404,7 @@ fn parse(args: &[String]) -> Result<Parsed> {
         targets,
         paths,
         keep,
+        shares,
     }))
 }
 
@@ -704,9 +713,14 @@ impl Plan {
                     env: &lookup,
                     now: SystemTime::now(),
                 };
-                let session = session::begin(&start).map_err(|why| {
+                let mut session = session::begin(&start).map_err(|why| {
                     anyhow::anyhow!("the wrapper's session didn't start: {why:?}")
                 })?;
+                if o.shares {
+                    session
+                        .set_unreached()
+                        .context("marking the session as one that shares")?;
+                }
                 ensure!(
                     session.current().store.starts_with(&o.work),
                     "the session's store {} is outside --work",
@@ -1666,6 +1680,7 @@ mod tests {
         assert_eq!(o.targets, Targets::Fresh);
         assert_eq!(o.paths, Paths::Rotate);
         assert!(!o.keep);
+        assert!(!o.shares);
         assert_eq!(o.dir, None);
 
         let o = options(&[
@@ -1686,6 +1701,7 @@ mod tests {
             "--paths",
             "fixed",
             "--keep",
+            "--shares",
             "--command",
             "cargo build",
         ]);
@@ -1699,6 +1715,7 @@ mod tests {
         assert_eq!(o.targets, Targets::Shared);
         assert_eq!(o.paths, Paths::Fixed);
         assert!(o.keep);
+        assert!(o.shares);
         assert_eq!(o.command, "cargo build");
         assert_eq!(
             options(&[

@@ -2369,12 +2369,20 @@ fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() 
     assert_eq!(fake.stored().len(), stored, "it uploaded: {stderr}");
 
     // A job with an honest checkout of the same push builds `app` itself: nothing compiled
-    // against the doctored macro came down under its key.
+    // against the doctored macro came down under its key. The macro is the first job's honest
+    // one, which may come down now that a proc macro travels (within its download's budget:
+    // either is right), and is the only thing that may.
     let b = pushed(dir.path(), "b", &a.repo, None);
     let (stderr, close) = job(&b, "302");
     let close = close.expect(&stderr);
-    assert_eq!(close.counts.reused_shared, 0, "{close:?}\n{stderr}");
-    assert_eq!(close.counts.built, 2, "{close:?}\n{stderr}");
+    assert!(close.counts.reused_shared <= 1, "{close:?}\n{stderr}");
+    assert_eq!(
+        close.counts.built + close.counts.reused_shared,
+        2,
+        "{close:?}\n{stderr}"
+    );
+    // `app` is what it built: its block goes up, below, which a reused one never does.
+    assert!(close.counts.built >= 1, "{close:?}\n{stderr}");
     assert!(
         fake.stored().len() > stored,
         "the honest app went up: {stderr}\n{}",
