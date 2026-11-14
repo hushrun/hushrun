@@ -144,7 +144,11 @@ impl Portability {
     /// its keys hold (B-24): a folder of the checkout or of the machine in an output or a
     /// record, a variable that names a base, a program keyed by its target folder, and a read
     /// in a shared folder (a library a crate asks for with `-l`, found in the system's or the
-    /// SDK's folder), which the second key holds by its path and its content. Another machine
+    /// SDK's folder). The second key holds such a read by its path and its content where it
+    /// is a source read, a native or declared input, or a place the linker may take a file
+    /// from (`link.files`, every candidate of a `-l`). A library the linker is handed by its
+    /// path (`link.libraries`) is in the second key by content alone: its path is an argument
+    /// of rustc's own line, which the first key holds as written. Another machine
     /// computes those keys only where each such folder is the same text, so there the block is
     /// as right as it is here. Never when the outputs can't be searched, a read lies outside
     /// every root, base and shared folder, the link environment is unknown, a value no key

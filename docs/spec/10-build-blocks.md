@@ -950,7 +950,10 @@ of a movable macOS program, B-9), the `…-in-output` and `…-in-record` reason
 `toolchain-in-output`, and `variable-names-base`, whose folders are in the second key as
 `bound`; and `read-in-shared-folder`, whose read is in the second key by its path and its
 content (a library a crate asks for with `-l`, found in the system's or the SDK's folder, as
-`-liconv` and every framework are on macOS). A block whose reasons are all of those is **bound**: another machine computes its
+`-liconv` and every framework are on macOS; so is every source read, native and declared
+input). The one read the second key holds by content alone is a library the linker is handed
+by its path: that path is an argument of rustc's own line, which the first key holds as
+written. A block whose reasons are all of those is **bound**: another machine computes its
 keys only where every such folder is the same text, and there the block is as right as on the
 machine that built it. One function says so (`Portability::bound_only`), and the wrapper tells
 the relay of a block it built both answers, portable and bound. A bound block is offered for
