@@ -951,13 +951,9 @@ impl Relay {
         for batch in wanted.chunks(limit) {
             looked_up.extend(self.lookup(batch, true).await.into_iter().flatten());
         }
-        let (first, libraries): (Vec<Found>, Vec<Found>) = looked_up
-            .into_iter()
-            .filter(|found| prefetched(found.class))
-            .partition(|found| found.class != blocks::Class::Library);
         {
             let mut state = self.state();
-            for found in first.into_iter().chain(libraries) {
+            for found in prefetch_order(looked_up, |found| found.class) {
                 if !state.fetches.contains_key(&found.address) {
                     state.queue.push_back(found.address);
                     let looked = state
@@ -2345,10 +2341,18 @@ impl Relay {
     }
 }
 
-/// Why a CI job on a listed branch isn't trusted, in plain words (the policy's reason word).
-/// The summary's line for shared `observe` (B-20, B-33): how many blocks built here were compared
-/// with the shared store's copy, and how many differed, which are reported and not reused here
-/// for `keep_days`.
+/// The order the prefetch queues what it found in (B-30): what [`prefetched`] names, proc macros
+/// and build-script binaries first, each kind keeping the order it came in (the manifest's),
+/// then libraries, in that order too.
+fn prefetch_order<T>(found: Vec<T>, class: impl Fn(&T) -> blocks::Class) -> Vec<T> {
+    let (mut first, libraries): (Vec<T>, Vec<T>) = found
+        .into_iter()
+        .filter(|found| prefetched(class(found)))
+        .partition(|found| class(found) != blocks::Class::Library);
+    first.extend(libraries);
+    first
+}
+
 /// Whether a block of `class` is fetched from a manifest without being asked for (B-30):
 /// libraries, proc macros and build-script binaries. A program is fetched only when a compile
 /// asks for it; a class this version doesn't know never is.
@@ -2359,6 +2363,10 @@ fn prefetched(class: blocks::Class) -> bool {
     )
 }
 
+/// Why a CI job on a listed branch isn't trusted, in plain words (the policy's reason word).
+/// The summary's line for shared `observe` (B-20, B-33): how many blocks built here were compared
+/// with the shared store's copy, and how many differed, which are reported and not reused here
+/// for `keep_days`.
 fn observed_line(compared: u64, differed: u64, keep_days: u32) -> String {
     let blocks = if compared == 1 { "block" } else { "blocks" };
     if differed == 0 {

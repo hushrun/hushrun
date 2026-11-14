@@ -1315,6 +1315,28 @@ fn the_prefetch_takes_macros_scripts_and_libraries_and_leaves_programs_and_kept_
     relay.end_check(&[]);
 }
 
+// covers: B-30
+#[test]
+fn the_prefetch_queues_macros_and_scripts_before_libraries_each_in_the_manifests_order() {
+    use blocks::Class::{BuildScript, Library, Other, ProcMacro, Program};
+    // As a lookup answers the manifest: the order cargo would need them is not its order.
+    let found = vec![
+        (Library, 1),
+        (Program, 2),
+        (ProcMacro, 3),
+        (Library, 4),
+        (BuildScript, 5),
+        (Other, 6),
+        (ProcMacro, 7),
+        (Library, 8),
+    ];
+    let order: Vec<u8> = super::prefetch_order(found, |found| found.0)
+        .into_iter()
+        .map(|found| found.1)
+        .collect();
+    assert_eq!(order, [3, 5, 7, 1, 4, 8]);
+}
+
 // covers: B-29, B-34
 #[test]
 fn a_linked_output_the_trusted_copy_disagrees_with_stays_and_its_key_is_kept_here() {
