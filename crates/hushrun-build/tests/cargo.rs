@@ -1373,9 +1373,9 @@ fn lines_after_a_move(
 
 /// Builds the tests at `one`, then at `two`, and checks what moved (B-5, B-8, B-9, B-10, B-12):
 /// the bin and the test binaries are reused, may move, and are `one`'s bytes, bundles included;
-/// the bin that holds its folder is built again and prints `two`'s. That holds with
-/// `CARGO_TARGET_DIR` outside the checkouts too: the integration test's `CARGO_TARGET_TMPDIR` and
-/// `CARGO_BIN_EXE_*` lie under the target folder, which is a root of its own. The test that bakes
+/// the bin that holds its folder is built again and prints `two`'s. With `CARGO_TARGET_DIR`
+/// outside the checkouts a program is tied to its target folder instead: its UUID holds that
+/// folder's path, so each target folder builds its own. The test that bakes
 /// `env!("CARGO_BIN_EXE_prog")` in is tied, by the search, in either layout.
 #[cfg(target_os = "macos")]
 fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Path)>) {
@@ -1397,13 +1397,31 @@ fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Pat
     );
     let second = entries(&session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
-        assert!(
-            reused(&last(&second, name, Class::Program)),
-            "{name}: {second:#?}"
-        );
+        let entry = last(&second, name, Class::Program);
         let places = places(&session.current().store, name, "program");
-        assert_eq!(places, ["anywhere"], "{name}");
         let (a, b) = (program(&target_one, name), program(&target_two, name));
+        if targets.is_some() {
+            // The linker names each object by its path, and a target folder outside the
+            // workspace is in those names as this machine has it: the program's UUID differs
+            // between the two target folders, so each is keyed by its own and built there.
+            assert!(!entry.found, "{name}: {second:#?}");
+            assert_eq!(
+                entry.outcome,
+                Outcome::BuiltAndStored,
+                "{name}: {second:#?}"
+            );
+            let portable = entry.portable.clone().unwrap();
+            assert!(
+                portable
+                    .reasons
+                    .contains(&hushrun_build::portable::Reason::Tied),
+                "{name}: {portable:?}"
+            );
+            assert_ne!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
+            continue;
+        }
+        assert!(reused(&entry), "{name}: {second:#?}");
+        assert_eq!(places, ["anywhere"], "{name}");
         assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap(), "{name}");
         assert_eq!(bundle(&a), bundle(&b), "{name}'s bundle");
     }
@@ -1446,7 +1464,7 @@ fn a_program_moves_with_its_debug_bundle_and_keeps_its_lines() {
 // covers: B-5, B-8, B-9, B-10, B-12, B-18
 #[cfg(target_os = "macos")]
 #[test]
-fn a_program_moves_with_its_debug_bundle_when_cargo_target_dir_is_elsewhere() {
+fn a_program_is_tied_to_a_target_folder_outside_its_workspace() {
     let w = World::new();
     let one = w.programs("one");
     let two = w.programs("a-second-checkout/with-a-longer-path");

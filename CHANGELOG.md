@@ -21,7 +21,7 @@ codes, environment variables, event formats, the ledger layout) are listed first
   environment is known and none of its outputs holds a machine's folder (B-24): the reason
   `linked` is gone, replaced by `link-environment-unknown` (with why) and `toolchain-in-output`,
   for a linked output that holds the toolchain's own folder (B-10). A program that bakes its
-  checkout stays `tied`. On macOS proc macros and build scripts still hold the toolchain's path.
+  checkout stays `tied`.
 
 - **The audit compares every class** (B-16): a program, a proc macro or a build-script binary that
   could be reused is compiled one time in fifty (every time with `HUSHRUN_BUILD_AUDIT=every`, in
@@ -29,6 +29,17 @@ codes, environment variables, event formats, the ledger layout) are listed first
   included; a difference suspends its key as for a library. A downloaded block's first reuse on a
   person's machine is audited one time in ten whatever its class, and a compile that finds its
   block already stored is a second opinion for every class.
+
+- **On macOS, proc macros, build scripts and programs no longer hold where the toolchain is
+  installed** (B-9), so they are the same bytes on two Macs. Proc macros and build scripts are
+  linked without their debug map (`-Wl,-S`): a panic inside one keeps its message, its location
+  and its frames' function names, and loses the file and line of each frame. A program that
+  gets a debug bundle is compiled with `--sysroot` naming a link beside its outputs
+  (`<output folder>/.hushrun/sysroot-…`, one per toolchain). A program whose target folder lies
+  outside its workspace (`CARGO_TARGET_DIR` elsewhere) is now keyed by that folder and `tied`:
+  its UUID holds the folder's path, and before, two target folders shared one block whose bytes
+  were only the first one's. Every macOS proc macro's, build script's and program's key changes
+  once.
 
 - **The link environment names the linker that really runs** (B-18, B-37): it takes the `ld`
   from the one rule that says which `ld` a driver runs (the one `collect2` finds; a gcc 15

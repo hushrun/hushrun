@@ -3703,6 +3703,163 @@ fn program_plan(bundle_root: bool) -> Plan {
     }
 }
 
+// covers: B-9, B-11
+#[cfg(unix)]
+#[test]
+fn a_movable_program_sees_the_toolchain_through_a_link_beside_its_outputs() {
+    // Apple's linker names each object by the path it is given, and the program's UUID is a
+    // hash over those names. Through the link the standard library's objects are named from
+    // the output folder, not by where this machine keeps the toolchain.
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    let two = program_checkout(&w, "two-longer");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let link = sysroot_arg(&r.seen.compiles[0]).expect("a sysroot");
+    let beside = one.join("target/debug/deps/.hushrun");
+    assert_eq!(link.parent(), Some(beside.as_path()), "{}", link.display());
+    let name = link.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(name.starts_with("sysroot-") && name.len() == 24, "{name}");
+    let toolchain = fs::canonicalize(w.rustc.parent().unwrap().parent().unwrap()).unwrap();
+    let leads_to = |link: &Path| fs::canonicalize(fs::read_link(link).unwrap()).unwrap();
+    assert_eq!(leads_to(&link), toolchain);
+    // Nothing else is left beside it: the link was made under another name and renamed.
+    let left: Vec<String> = fs::read_dir(&beside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains("sysroot") && *n != name)
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    // Another checkout: its own link under the same name, and the first one's block.
+    let r = call_program(&w, &two, &[]);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(
+        leads_to(&two.join("target/debug/deps/.hushrun").join(&name)),
+        toolchain
+    );
+    // A link that leads elsewhere (a toolchain moved, a target folder copied from another
+    // machine) is put right before the compile reads through it.
+    let elsewhere = w.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    fs::write(one.join("a/src/lib.rs"), "mod foo;\nfn edited() {}\n").unwrap();
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert_eq!(leads_to(&link), toolchain);
+    // A library gets none.
+    w.plan("a", Plan::default());
+    let lib = w.call(&two, "a", &[]);
+    assert_eq!(sysroot_arg(&lib.seen.compiles[0]), None);
+}
+
+// covers: B-9
+#[test]
+fn where_a_programs_output_folder_lies_from_its_workspace_is_keyed_or_ties_it() {
+    use crate::wrapper::{ProgramPlace, program_place};
+    let dir = tempfile::tempdir().unwrap();
+    let real = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
+    let ws = real.join("ws");
+    fs::create_dir_all(ws.join("target/debug/deps")).unwrap();
+    let cwd = ws.to_str().unwrap();
+    // Inside, as cargo gives it: the prefix the linker takes off, and the rest, which the key
+    // holds (two layouts of one workspace are two UUIDs).
+    assert_eq!(
+        program_place(cwd, &ws.join("target/debug/deps")),
+        ProgramPlace::Inside {
+            prefix: cwd.to_owned(),
+            rest: "target/debug/deps".to_owned()
+        }
+    );
+    // The text counts, as the linker gets it: a `..` stays in the rest.
+    assert_eq!(
+        program_place(cwd, &ws.join("out/../build//debug/deps/")),
+        ProgramPlace::Inside {
+            prefix: cwd.to_owned(),
+            rest: "out/../build/debug/deps".to_owned()
+        }
+    );
+    // Outside: the folder as this machine has it.
+    let outside = real.join("targets/debug/deps");
+    assert_eq!(
+        program_place(cwd, &outside),
+        ProgramPlace::Outside(outside.to_str().unwrap().to_owned())
+    );
+    // A folder that only starts like the workspace is outside.
+    let beside = real.join("ws2/target");
+    assert!(matches!(
+        program_place(cwd, &beside),
+        ProgramPlace::Outside(_)
+    ));
+    // The workspace reached through a link, the output folder written with the resolved form
+    // (cargo resolves the folder it runs in): the prefix is the form the output folder has.
+    #[cfg(unix)]
+    {
+        let through = real.join("link-to-ws");
+        std::os::unix::fs::symlink(&ws, &through).unwrap();
+        assert_eq!(
+            program_place(through.to_str().unwrap(), &ws.join("target/debug/deps")),
+            ProgramPlace::Inside {
+                prefix: cwd.to_owned(),
+                rest: "target/debug/deps".to_owned()
+            }
+        );
+        // And the other way round: the linker is given the names with the link in them.
+        assert_eq!(
+            program_place(
+                through.to_str().unwrap(),
+                &through.join("target/debug/deps")
+            ),
+            ProgramPlace::Inside {
+                prefix: through.to_str().unwrap().to_owned(),
+                rest: "target/debug/deps".to_owned()
+            }
+        );
+    }
+    // A workspace whose path holds a comma: `-Wl,` can't carry the prefix.
+    let comma = real.join("a,b");
+    fs::create_dir_all(comma.join("target")).unwrap();
+    assert!(matches!(
+        program_place(comma.to_str().unwrap(), &comma.join("target")),
+        ProgramPlace::Outside(_)
+    ));
+}
+
+// covers: B-9
+#[test]
+fn a_proc_macro_and_a_build_script_are_linked_without_a_debug_map_on_apple() {
+    // The debug map names every object the link took, the standard library's among them, by
+    // where this machine has it: with it no proc macro or build script could leave a Mac.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    with_tools(&ws);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(&ws, "a", &["-C", "debuginfo=2"]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = w.call_args(&ws, "a", args, |_| {});
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let asked = &r.seen.compiles[0];
+    assert!(asked.iter().any(|a| a == "link-arg=-Wl,-S"), "{asked:?}");
+    assert!(!asked.iter().any(|a| a.contains("oso_prefix")), "{asked:?}");
+    assert!(
+        asked.iter().any(|a| a.contains("-install_name,@rpath/")),
+        "{asked:?}"
+    );
+    assert_eq!(sysroot_arg(asked), None);
+}
+
 /// Begins the world's next session in the same store, with its settings changed.
 fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
     let settings = w.dir.path().join("build.json");

@@ -649,6 +649,11 @@ fn sort_longest_first(texts: &mut [String]) {
     texts.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
 }
 
+/// [`clean`], for a caller outside this module.
+pub fn clean_path(path: &str) -> String {
+    clean(path)
+}
+
 /// `path` with repeated slashes, `.` parts and a trailing slash gone. `..` stays: resolving it
 /// without the file system could be wrong.
 fn clean(path: &str) -> String {

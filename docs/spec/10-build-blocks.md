@@ -308,14 +308,34 @@ and its resolved form, ordered by length so that of two folders that hold a path
 wins (as B-8 places it), with the scope left whole. A registry or git crate's paths then name no
 machine. It leaves `-C incremental` out. On Apple targets it also gives
 a proc macro an install name that doesn't hold its folder (`-install_name @rpath/<file>`), and
-gives proc macros and build-script binaries `-oso_prefix` for their dependency folder: nobody
-debugs those, and without it each holds the folder it was linked in. A program (a `bin` that is
+links proc macros and build-script binaries without their debug map (`-Wl,-S`): the map names
+every object the link took by its path, the standard library's by where this machine keeps the
+toolchain, so with it none could be the same on two machines. What that costs: a panic inside
+one still prints its message, its location (`build.rs:1:64`) and every frame's function name,
+and no frame has a file and line any more, where the script or macro was compiled with debug
+info at all (cargo's dev profile compiles them without; measured on a build script with
+`debuginfo=2`: 14 of 14 frames had a file and line before, none after). A program (a `bin` that is
 not a build script, or a test) that links with debug info gets a debug bundle instead, unless the
-person set `programs` to `tied` (B-21), through three additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
+person set `programs` to `tied` (B-21), through four additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
 `<program>.dSYM` beside it with the DWARF of every object it was linked from;
 `-C strip=debuginfo`, so that the program keeps no debug map naming those objects by their
-paths; and `-oso_prefix` for the workspace's resolved form, so that the UUID the linker computes
-before the strip holds no path when the target folder is inside the workspace. Before such a
+paths; `-oso_prefix` for the workspace, in the form the output folder is written with (as cargo
+gave it, or resolved), so that the UUID the linker computes before the strip holds no path of
+the checkout when the output folder is inside the workspace; and `--sysroot` naming a link
+beside the outputs, `<output folder>/.hushrun/sysroot-<the compiler's identity, 16 hex
+digits>`, that leads to the toolchain (to its view without sources where there is one, below),
+so that the linker, which names each object by the path it is given, names the standard
+library's objects from the output folder too and the UUID is the same wherever the toolchain is
+installed. The link is one per toolchain, so two toolchains building into one target folder
+never share it; a call that finds it leading elsewhere makes it again under a name of its own
+and renames it into place, before the compile; paths under it are paths under the toolchain
+(B-8, B-11). Where the output folder lies from the workspace is part of every name the linker
+hashes, so it is in the first key: its path from the workspace when it is inside, and when it
+is outside (`CARGO_TARGET_DIR` elsewhere, a workspace whose path holds a comma) the folder as
+this machine has it, which ties the program to its place (`tied`, B-24): two target folders
+build one program each. *Rests on:* Apple's `ld` naming an input by the path it was given
+(shown: a toolchain copied to another path links the same program, bundle and UUID through the
+link, and other ones without it). *Breaks if:* a later `ld` resolved links in the names. Before such a
 compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one; it
 does so too for a program set to `tied` whose flags would allow a bundle, since that bundle
 matches no program compiled now and would keep it from being stored (B-18).
@@ -822,10 +842,11 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   on:* B-37's list being all that decides those bytes. *Breaks if:* it isn't (B-37's *breaks
   if*); the audit (B-16), which compares every class, is the check on it.
 - `toolchain-in-output`: a linked output holds the toolchain's own folder (B-10). Such a block is
-  keyed by the toolchain's place (`bound`), as by any machine folder it holds. On macOS this is
-  every proc macro and build script until their link drops its debug map, and every program
-  whose link names the standard library by the toolchain's path.
-- `tied`: its place is its roots (B-10).
+  keyed by the toolchain's place (`bound`), as by any machine folder it holds. On macOS B-9's
+  changes keep it out of proc macros, build scripts and movable programs; a program set to
+  `tied`, or one the wrapper leaves as it is, still names the standard library by it.
+- `tied`: its place is its roots (B-10), or it is a movable macOS program whose output folder
+  lies outside its workspace, whose first key holds that folder (B-9).
 - `read-outside`: a read lies outside every root, base and shared folder.
 - `read-in-shared-folder`: a read lies in a shared folder that is not a base (a system folder,
   the rustup home outside the toolchain), whose path is this machine's.

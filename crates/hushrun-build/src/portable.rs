@@ -181,6 +181,10 @@ pub struct Facts<'a> {
     pub native_cpu: bool,
     /// A linked output holds the toolchain's own folder (B-10).
     pub toolchain_in_output: bool,
+    /// Its first key holds a folder as this machine has it (B-9: a movable program whose
+    /// output folder lies outside the workspace): it is reused only where that folder is the
+    /// same, which is what `tied` says.
+    pub keyed_by_place: bool,
 }
 
 /// Whether the block may leave the machine, and every reason it may not.
@@ -205,7 +209,7 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
             reasons.insert(Reason::ToolchainInOutput);
         }
     }
-    if !matches!(facts.observed.place, Place::Anywhere) {
+    if !matches!(facts.observed.place, Place::Anywhere) || facts.keyed_by_place {
         reasons.insert(Reason::Tied);
     }
     for at in places(facts.observed) {
@@ -1119,6 +1123,7 @@ mod tests {
             unkeyed: &[],
             native_cpu: false,
             toolchain_in_output: false,
+            keyed_by_place: false,
         })
     }
 
@@ -1221,6 +1226,7 @@ mod tests {
             unkeyed: &[],
             native_cpu: false,
             toolchain_in_output: false,
+            keyed_by_place: false,
         });
         assert_eq!(reasons(p), "variable-names-base");
     }
@@ -1272,6 +1278,7 @@ mod tests {
                 unkeyed: &[],
                 native_cpu: false,
                 toolchain_in_output,
+                keyed_by_place: false,
             })
         };
         for class in [Class::ProcMacro, Class::BuildScript, Class::Program] {
@@ -1318,6 +1325,7 @@ mod tests {
                 unkeyed: &[],
                 native_cpu: false,
                 toolchain_in_output: false,
+                keyed_by_place: false,
             })
         };
         // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
@@ -1347,6 +1355,7 @@ mod tests {
             unkeyed: &[],
             native_cpu: false,
             toolchain_in_output: false,
+            keyed_by_place: false,
         });
         assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
@@ -1503,6 +1512,7 @@ mod tests {
             unkeyed: &unkeyed,
             native_cpu: false,
             toolchain_in_output: false,
+            keyed_by_place: false,
         });
         assert!(!p.portable);
         assert_eq!(p.reasons, vec![Reason::UnkeyedValue]);

@@ -230,6 +230,7 @@ pub fn call(ports: &mut dyn Ports, err: &mut dyn Write, argv: &[OsString]) -> i3
         view: None,
         bundle: false,
         clear_bundle: false,
+        keyed_by_place: false,
         keys: std::cell::RefCell::new(KeyLine::default()),
         asked: None,
         native_cpu: false,
@@ -322,6 +323,9 @@ struct Call<'a> {
     /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
     /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
     clear_bundle: bool,
+    /// A movable program whose output folder lies outside the workspace (B-9): its first key
+    /// holds that folder as this machine has it, so the block is tied to its place (B-24).
+    keyed_by_place: bool,
     /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
     keys: std::cell::RefCell<KeyLine>,
     /// The first key's parts, once computed: what decides whether the block may leave the
@@ -835,6 +839,29 @@ impl Call<'_> {
             },
             None => None,
         };
+        // B-9: a program that gets a debug bundle sees the toolchain through a link beside its
+        // outputs, one per toolchain, so that the linker names the standard library's objects
+        // from the output folder and not by where this machine keeps the toolchain.
+        let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
+        let mut place = None;
+        let mut view = view;
+        if class != Class::Library {
+            self.apple = apple;
+            self.clear_bundle = bundled(inv, apple);
+            self.bundle = self.clear_bundle
+                && self.current.programs == Programs::Movable
+                && identity.sysroot.is_some();
+        }
+        if self.bundle
+            && let Some(sysroot) = &identity.sysroot
+        {
+            let leads_to = view.clone().unwrap_or_else(|| sysroot.clone());
+            match compiler::sysroot_link(&self.out_dir(), &identity.digest, &leads_to) {
+                Ok(link) => view = Some(link),
+                Err(_) => return self.pass(PassedThrough::Compiler),
+            }
+            place = Some(program_place(inv.cwd(), &self.out_dir()));
+        }
         self.hide_sources = view.as_ref().map(|view| {
             let mut arg = OsString::from("--sysroot=");
             arg.push(view);
@@ -900,11 +927,7 @@ impl Call<'_> {
             unstorable = unstorable.or(Some(NotStored::NativeOutside));
         }
         if class != Class::Library {
-            let apple = inv.target().unwrap_or(&identity.host).contains("-apple-");
-            self.apple = apple;
-            self.clear_bundle = bundled(inv, apple);
-            self.bundle = self.clear_bundle && self.current.programs == Programs::Movable;
-            self.link_extra = linked_args(inv, apple, self.bundle);
+            self.link_extra = linked_args(inv, apple, place.as_ref());
             // Debug info packed beside a proc macro or a build script, or beside a program the
             // wrapper leaves as it is, is not something a block carries.
             if inv.debug().split.as_deref() == Some("packed") && !self.bundle {
@@ -932,6 +955,20 @@ impl Call<'_> {
         else {
             return self.pass(PassedThrough::NotUtf8);
         };
+        // Where the output folder lies for the linker is in a movable program's UUID (B-9):
+        // from the workspace when it is inside, which every checkout shares, else as this
+        // machine has it.
+        let mut added = added;
+        match &place {
+            Some(ProgramPlace::Inside { rest, .. }) => {
+                added.push(format!("hushrun:out-dir-in-workspace={rest}"));
+            }
+            Some(ProgramPlace::Outside(path)) => {
+                added.push(format!("hushrun:out-dir={path}"));
+                self.keyed_by_place = true;
+            }
+            None => {}
+        }
         let asked = Asked {
             compiler: identity.digest,
             args: inv
@@ -1756,6 +1793,7 @@ impl Call<'_> {
             unkeyed: &unkeyed,
             native_cpu: self.native_cpu,
             toolchain_in_output,
+            keyed_by_place: self.keyed_by_place,
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:
@@ -2721,37 +2759,67 @@ fn bundled(inv: &Invocation, apple: bool) -> bool {
         && matches!(debug.strip.as_deref(), None | Some("none"))
 }
 
+/// Where a movable program's output folder lies, as the linker is told it (B-9). Apple's `ld`
+/// names each object by the path it was given, and the program's UUID is a hash over those
+/// names, taken before the debug map is stripped; `-oso_prefix` takes one prefix off them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProgramPlace {
+    /// Under the workspace: `prefix` is the workspace in the form the output folder is written
+    /// with (as cargo gave it, or resolved), and `rest` the folder from there. The names then
+    /// start at the workspace on every machine.
+    Inside { prefix: String, rest: String },
+    /// Anywhere else (or under a workspace whose path holds a comma, which `-Wl,` can't
+    /// carry): the names hold the folder as this machine has it.
+    Outside(String),
+}
+
+/// [`ProgramPlace`] of `out_dir` for a compile whose working directory is `cwd`.
+pub(crate) fn program_place(cwd: &str, out_dir: &Path) -> ProgramPlace {
+    let out = crate::roots::clean_path(&out_dir.to_string_lossy());
+    let given = crate::roots::clean_path(cwd);
+    let resolved = crate::roots::resolve_on_disk(cwd).map(|path| crate::roots::clean_path(&path));
+    for form in std::iter::once(given).chain(resolved) {
+        if form.contains(',') || form == "/" {
+            continue;
+        }
+        if let Some(rest) = out
+            .strip_prefix(form.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return ProgramPlace::Inside {
+                prefix: form,
+                rest: rest.to_owned(),
+            };
+        }
+    }
+    ProgramPlace::Outside(out)
+}
+
 /// What a linked output's compile gets besides the remaps: `--print=link-args` for its link
-/// inputs (B-18) and, on Apple targets (B-9), an install name and debug-map prefix that don't
-/// hold the folder it was linked in for a proc macro and a build script, and for a program that
-/// gets a debug bundle ([`bundled`]): `-C split-debuginfo=packed`, so rustc runs dsymutil and
+/// inputs (B-18) and, on Apple targets (B-9): for a proc macro an install name that doesn't
+/// hold its folder; for a proc macro and a build script no debug map at all (`-Wl,-S`), since
+/// nobody debugs those and the map names every object, the standard library's among them, by
+/// where this machine has it; and for a program that gets a debug bundle ([`bundled`], `place`
+/// says where its output folder lies): `-C split-debuginfo=packed`, so rustc runs dsymutil and
 /// writes `<program>.dSYM` with the DWARF of every object; `-C strip=debuginfo`, so the program
 /// keeps no debug map naming those objects by path (the bundle has what it pointed at); and
 /// `-oso_prefix` for the workspace, so the program's UUID, which the linker computes before the
-/// strip, holds no path when the target folder is inside it.
-fn linked_args(inv: &Invocation, apple: bool, bundle: bool) -> Vec<OsString> {
+/// strip, holds no path when the output folder is inside it.
+fn linked_args(inv: &Invocation, apple: bool, place: Option<&ProgramPlace>) -> Vec<OsString> {
     let mut out = vec![OsString::from("--print=link-args")];
     if !apple {
         return out;
     }
     let class = inv.class();
-    if bundle {
+    if place.is_some() {
         for arg in ["split-debuginfo=packed", "strip=debuginfo"] {
             out.push("-C".into());
             out.push(arg.into());
         }
-        // The linker names objects by their real path. A comma would split `-Wl,`.
-        let workspace = crate::roots::resolve_on_disk(inv.cwd()).unwrap_or(inv.cwd().to_string());
-        if !workspace.contains(',') {
-            out.push("-C".into());
-            out.push(
-                format!(
-                    "link-arg=-Wl,-oso_prefix,{}/",
-                    workspace.trim_end_matches('/')
-                )
-                .into(),
-            );
-        }
+    }
+    if let Some(ProgramPlace::Inside { prefix, .. }) = place {
+        out.push("-C".into());
+        out.push(format!("link-arg=-Wl,-oso_prefix,{prefix}/").into());
     }
     if class == Class::ProcMacro {
         out.push("-C".into());
@@ -2763,11 +2831,9 @@ fn linked_args(inv: &Invocation, apple: bool, bundle: bool) -> Vec<OsString> {
             .into(),
         );
     }
-    if matches!(class, Class::ProcMacro | Class::BuildScript)
-        && let Some(deps) = inv.dependency_dirs().next()
-    {
+    if matches!(class, Class::ProcMacro | Class::BuildScript) {
         out.push("-C".into());
-        out.push(format!("link-arg=-Wl,-oso_prefix,{}/", deps.trim_end_matches('/')).into());
+        out.push("link-arg=-Wl,-S".into());
     }
     out
 }

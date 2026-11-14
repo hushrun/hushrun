@@ -923,24 +923,85 @@ fn a_real_links_environment_is_known_and_lists_what_answered() {
 // covers: B-24, B-10, B-37
 #[test]
 fn a_real_proc_macro_leaves_the_machine_where_its_environment_is_known_and_its_bytes_name_none() {
-    // Linux: the system's gcc and a toolchain whose path no output holds, so the proc macro may
-    // leave. macOS: its debug map names the standard library's objects by the toolchain's path
-    // until the link drops it (`-Wl,-S`), so it stays, for that reason alone.
+    // The system's own driver (gcc on Linux, Apple's clang on macOS) and a toolchain whose
+    // path no output holds: on macOS because the link drops the debug map (`-Wl,-S`), which
+    // named the standard library's objects by it.
     let w = world();
     let ws = w.checkout("ws");
     let entry = proc_macro_with(&w, &ws, &[], &[]);
     assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
     let portable = entry.portable.clone().unwrap();
-    assert!(
-        !portable.reasons.contains(&Reason::LinkEnvironmentUnknown),
-        "{portable:?}"
-    );
-    if cfg!(target_os = "macos") {
-        assert!(
-            portable.reasons.contains(&Reason::ToolchainInOutput),
-            "{portable:?}"
+    assert!(portable.portable, "{portable:?}");
+}
+
+// covers: B-9, B-16
+#[cfg(target_os = "macos")]
+#[test]
+fn a_toolchain_installed_elsewhere_links_the_same_program_proc_macro_and_build_script() {
+    // The same toolchain at another path (another user's rustup home, another machine): what it
+    // links must be byte for byte what the first one linked, or a block could not go from one
+    // to the other. In `observe` every block found is compiled anyway and compared (B-16).
+    let mut w = world_in(Mode::Observe);
+    let real = real_rustc();
+    let sysroot = real.parent().unwrap().parent().unwrap();
+    let build = |w: &World, ws: &Path| {
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        write(&ws.join("m/lib.rs"), PROC_MACRO);
+        write(
+            &ws.join("b/build.rs"),
+            "fn main() { println!(\"cargo:rerun-if-changed=x\"); }\n",
         );
-    } else {
-        assert!(portable.portable, "{portable:?}");
+        // As cargo's dev profile asks on macOS.
+        let debug = ["-C", "debuginfo=2", "-C", "split-debuginfo=unpacked"];
+        let (out, program) = w.call_as(ws, "p", "p/main.rs", "bin", &debug, &[]);
+        ok(&out);
+        let (out, proc_macro) = w.call_as(
+            ws,
+            "m",
+            "m/lib.rs",
+            "proc-macro",
+            &[
+                "-C",
+                "debuginfo=2",
+                "-C",
+                "split-debuginfo=unpacked",
+                "--extern",
+                "proc_macro",
+            ],
+            &[],
+        );
+        ok(&out);
+        let (out, script) = w.call_as(
+            ws,
+            "build_script_build",
+            "b/build.rs",
+            "bin",
+            &debug,
+            &[("CARGO_PKG_NAME", "b")],
+        );
+        ok(&out);
+        [program, proc_macro, script]
+    };
+    let one = w.checkout("one");
+    for entry in build(&w, &one) {
+        assert_eq!(entry.outcome, Outcome::BuiltAndStored, "{entry:?}");
+        let portable = entry.portable.clone().unwrap();
+        assert!(portable.portable, "{entry:?}");
+    }
+    // The toolchain again, in this test's folder: rustc and its driver library are copies (it
+    // takes its sysroot from where that library really lies), the rest links to the real one.
+    let own = w.dir.path().join("another-home/toolchains/copy");
+    mirror(
+        &sysroot.join("lib"),
+        &own.join("lib"),
+        Path::new("/nonexistent"),
+    );
+    fs::create_dir_all(own.join("bin")).unwrap();
+    fs::copy(&real, own.join("bin/rustc")).unwrap();
+    w.rustc = own.join("bin/rustc");
+    let two = w.checkout("a-second/longer-checkout");
+    for entry in build(&w, &two) {
+        assert!(entry.found, "the same key: {entry:?}");
+        assert!(!entry.differed, "the same bytes: {entry:?}");
     }
 }
