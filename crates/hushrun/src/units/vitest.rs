@@ -32,7 +32,7 @@ pub const WORKER: &str = "vitest-worker";
 pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
 /// The variable the config line loads the plugin from.
 pub const VARIABLE: &str = "HUSHRUN_VITEST";
-/// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0081, amended\] A
+/// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0084, amended\] A
 /// conditional, not `process.env.HUSHRUN_VITEST && …`: that one is `"" | Promise<any> |
 /// undefined`, which a config that type-checks itself refuses as a `PluginOption`. A config with
 /// either form names [`VARIABLE`], which is what the adapter looks for.
@@ -229,7 +229,7 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
                 return None;
             }
             let name = config.file_name()?.to_string_lossy().into_owned();
-            // \[ADR 0081, amended\] Where the adapter would observe nothing, the line would add
+            // \[ADR 0084, amended\] Where the adapter would observe nothing, the line would add
             // nothing: say so, so that "not here" isn't read as "nothing to do".
             if let Some(why) = unobservable(&text) {
                 return Some(format!(
@@ -246,7 +246,7 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
     }
 }
 
-/// \[ADR 0081, amended\] What in a Vitest config's text keeps the adapter from observing any test
+/// \[ADR 0084, amended\] What in a Vitest config's text keeps the adapter from observing any test
 /// file, as the plugin finds it when Vitest runs (`typecheck`, `isolate: false`, the browser): the
 /// words for init's line, or `None`. Read from the text, without whitespace: what it misses, the
 /// run says when it observes nothing.
@@ -341,13 +341,13 @@ struct WorkerSaw {
     /// Directories it listed, from the root.
     dirs: BTreeSet<String>,
     not_followed: BTreeSet<NotFollowed>,
-    /// \[ADR 0081\] Its tests, by id, when every worker that ran it told them (C-43).
+    /// \[ADR 0084\] Its tests, by id, when every worker that ran it told them (C-43).
     tests: Option<BTreeMap<String, MergedTest>>,
-    /// \[ADR 0081\] A worker that ran it told no tests: none of them can be told.
+    /// \[ADR 0084\] A worker that ran it told no tests: none of them can be told.
     untold: bool,
 }
 
-/// \[ADR 0081\] Adds what one worker told of a test file's tests to what others did. A file that
+/// \[ADR 0084\] Adds what one worker told of a test file's tests to what others did. A file that
 /// two projects run runs each of its tests in each: a test finished only where every worker that
 /// told it finished it, failed where any failed it, was left out where every one left it out, and
 /// what it read is known only where every one said it.
@@ -503,7 +503,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     let mut seen_by: BTreeMap<String, WorkerSaw> = BTreeMap::new();
     for worker in &workers {
         for unit in &worker.units {
-            // \[ADR 0081\] A worker that tells tests names its unit from the root.
+            // \[ADR 0084\] A worker that tells tests names its unit from the root.
             let path = Path::new(&unit.unit);
             let path = if path.is_relative() {
                 root.join(path)
@@ -541,7 +541,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             entry
                 .not_followed
                 .extend(unit.not_followed.iter().map(NotFollowed::from));
-            // \[ADR 0081\] Its tests, one by one, when the worker told them (C-43).
+            // \[ADR 0084\] Its tests, one by one, when the worker told them (C-43).
             match &unit.tests {
                 Some(tests) if !entry.untold => {
                     merge_tests(entry.tests.get_or_insert_with(BTreeMap::new), worker, tests);
@@ -695,7 +695,7 @@ impl Adapter for Recognized {
         Hints::Kinds(SOURCE_KINDS)
     }
 
-    /// \[ADR 0081\] Its setup file names each test, leaves out those `reuseTests` lists, says how
+    /// \[ADR 0084\] Its setup file names each test, leaves out those `reuseTests` lists, says how
     /// each ended, and watches what each read (C-43).
     fn tests(&self) -> KnowsTests {
         KnowsTests {

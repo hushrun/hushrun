@@ -6469,7 +6469,7 @@ fn init_proposes_the_line_vitest_needs_for_a_check_that_looks_at_its_test_files(
     assert!(!out.stdout.contains("HUSHRUN_VITEST"), "{}", out.stdout);
 }
 
-// covers: C-15, C-35 (ADR 0081: where its config keeps Vitest from being observed, init says so in
+// covers: C-15, C-35 (ADR 0084: where its config keeps Vitest from being observed, init says so in
 // one line instead of proposing a line that would add nothing)
 #[test]
 fn init_says_when_vitests_config_keeps_its_test_files_from_being_observed() {
@@ -6530,7 +6530,7 @@ fn init_says_when_vitests_config_keeps_its_test_files_from_being_observed() {
     );
 }
 
-// covers: C-15, C-44 (ADR 0082: init proposes the line Jest's config needs where a script replaces
+// covers: C-15, C-44 (ADR 0085: init proposes the line Jest's config needs where a script replaces
 // NODE_OPTIONS, and writes none)
 #[test]
 fn init_proposes_the_line_jest_needs_where_a_script_replaces_node_options() {

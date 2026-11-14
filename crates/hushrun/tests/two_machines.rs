@@ -191,7 +191,7 @@ fn observe_line(stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// \[C-33, ADR 0077 amended\] The fresh machine's `observe` line says what the copied store's does,
+/// \[C-33, ADR 0080 amended\] The fresh machine's `observe` line says what the copied store's does,
 /// count for count. Its saving it may not say: that is bounded by the longest a run of the check
 /// took here reusing nothing, which this machine's store keeps and a hint doesn't, and on its
 /// first run there is none, so it says the counts without a time; the copy says one when its

@@ -10,10 +10,10 @@
 //!
 //! Four adapters: pytest and \[ADR 0071\] Vitest, observed (a plugin inside the runner); Cargo and
 //! \[ADR 0070\] `go test`, compiler-given (the toolchain says what a test binary is built from).
-//! \[ADR 0077\] Each is one module behind one trait ([`adapter::Adapter`]), and the code here is
+//! \[ADR 0080\] Each is one module behind one trait ([`adapter::Adapter`]), and the code here is
 //! the same for every one.
 //!
-//! \[ADR 0077\] With `tests.unit: test`, a test is a second, finer unit (C-39): the plan asks each
+//! \[ADR 0080\] With `tests.unit: test`, a test is a second, finer unit (C-39): the plan asks each
 //! test file's own key, then the tests of each that didn't pass (`plan_tests`); a run records a
 //! test file that passed whole as before, and each test that ran of one that didn't.
 //!
@@ -69,7 +69,7 @@ pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
     pub duration_ms: u64,
-    /// \[ADR 0077\] Its tests, as the adapter told them, merged over its processes; `None` when it
+    /// \[ADR 0080\] Its tests, as the adapter told them, merged over its processes; `None` when it
     /// told none (C-39).
     pub tests: Option<BTreeMap<String, facts::MergedTest>>,
 }
@@ -122,7 +122,7 @@ pub struct Session {
     plan_notes: Vec<String>,
 }
 
-/// \[C-39, ADR 0077\] What a check whose `tests` are `tests` reuses one by one with `adapter`, and
+/// \[C-39, ADR 0080\] What a check whose `tests` are `tests` reuses one by one with `adapter`, and
 /// what a test is taken to have read; with the lines that say, once, where the adapter can't do
 /// what the check asks (RFC 0004 §1.2): it then reuses by test file, or takes each test to have
 /// read what its test file read.
@@ -193,7 +193,7 @@ struct TestPassed {
     list: shared::TestList,
 }
 
-/// \[C-39, ADR 0077\] What a plan decided of tests one by one: each that may be reused, by name,
+/// \[C-39, ADR 0080\] What a plan decided of tests one by one: each that may be reused, by name,
 /// and of those the audited, which run anyway.
 #[derive(Debug, Default)]
 struct PlannedTests {
@@ -322,7 +322,7 @@ fn tests_known(
         .collect()
 }
 
-/// \[C-39, ADR 0077\] The second tier of a plan (RFC 0004 §3.3): for each test file the first tier
+/// \[C-39, ADR 0080\] The second tier of a plan (RFC 0004 §3.3): for each test file the first tier
 /// didn't reuse whole whose lists are known, each of its tests this machine saw run (not one that
 /// wasn't followed then) and \[C-41\] each a hint holds, keyed by its lists with its id; the one
 /// rule decides; and 2% of those that may be reused, at least one, run anyway. A lookup that fails
@@ -1717,10 +1717,10 @@ struct Listed {
     extras: RunExtras,
     /// \[ADR 0069\] The reused test binaries.
     binaries: Vec<facts::Binary>,
-    /// \[ADR 0077\] What the run reuses one by one, and what a test is taken to have read.
+    /// \[ADR 0080\] What the run reuses one by one, and what a test is taken to have read.
     unit: Unit,
     reads: Reads,
-    /// \[ADR 0077\] Tests an adapter may deselect one by one, by unit, each by its id.
+    /// \[ADR 0080\] Tests an adapter may deselect one by one, by unit, each by its id.
     reuse_tests: BTreeMap<String, Vec<String>>,
     /// \[C-46\] The test files the check's store knows, when the run says.
     known: Option<Vec<String>>,
@@ -1803,7 +1803,7 @@ pub struct Finish<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counts {
-    /// Test files, as before: \[ADR 0077\] one is reused when none of its tests ran.
+    /// Test files, as before: \[ADR 0080\] one is reused when none of its tests ran.
     pub total: u64,
     pub ran: u64,
     pub reused: u64,
@@ -1814,13 +1814,13 @@ pub struct Counts {
     /// saved. Never in `observe`, which saved nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_ms: Option<u64>,
-    /// \[ADR 0077\] In a run with `tests.unit: test` whose adapter told its tests, the same three
+    /// \[ADR 0080\] In a run with `tests.unit: test` whose adapter told its tests, the same three
     /// numbers for tests (C-10, C-39).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<TestCounts>,
 }
 
-/// \[ADR 0077\] `units.tests`: a run's tests, how many it had, ran and reused (C-10).
+/// \[ADR 0080\] `units.tests`: a run's tests, how many it had, ran and reused (C-10).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TestCounts {
     pub total: u64,
@@ -2098,7 +2098,7 @@ impl Observed {
         said
     }
 
-    /// \[C-41, ADR 0079\] The tests this run's hint holds of the test files it sends (`units`),
+    /// \[C-41, ADR 0082\] The tests this run's hint holds of the test files it sends (`units`),
     /// from this machine's store (`map`), each that has a key: one it saw pass or fail, never one
     /// not followed or not run. With `reads: test`, each with its own list, or `None` when it read
     /// its test file's. With `reads: file`, ids alone, and only of test files that didn't pass

@@ -180,7 +180,7 @@ fn unit_keys_match_the_golden_vectors() {
             counts_from: base.get("counts_from").cloned(),
         };
         let unit = vector["unit"].as_str().unwrap();
-        // \[ADR 0077\] A vector that names a test is a test's key (C-39); the others, a unit's.
+        // \[ADR 0080\] A vector that names a test is a test's key (C-39); the others, a unit's.
         let key = match vector.get("test").and_then(Value::as_str) {
             Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape).unwrap(),
             None => unit_key(&key_base, unit, &reads, &rest, &shape).unwrap(),

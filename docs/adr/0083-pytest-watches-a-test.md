@@ -1,12 +1,12 @@
-# 0080. pytest watches a test
+# 0083. pytest watches a test
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-42; relies on C-32, C-39, C-40, ADR 0068, 0077, 0078, RFC 0004
+- **Rules:** C-42; relies on C-32, C-39, C-40, ADR 0068, 0080, 0081, RFC 0004
 
 ## Context
 
-`tests.reads: test` (ADR 0078) needs an adapter to report what each test touched. For pytest that is
+`tests.reads: test` (ADR 0081) needs an adapter to report what each test touched. For pytest that is
 the code each test ran, the files it opened and the directories it listed, and what its fixtures did
 for it. Python 3.12's `sys.monitoring` (PEP 669) gives a cheap event when a function starts; Python's
 audit hook (PEP 578) already gives the plugin each open (ADR 0068).
@@ -33,7 +33,7 @@ audit hook (PEP 578) already gives the plugin each open (ADR 0068).
    `-p app.ext`) is every test's.
 6. **Below 3.12** there is no `sys.monitoring`: the plugin says why in `settings.watch` (`Python
    3.11 has no sys.monitoring, which watching a test needs (3.12 or later)`), every test reads its
-   test file's list, and the run says so once (ADR 0078).
+   test file's list, and the run says so once (ADR 0081).
 7. **xdist.** Each worker watches the tests it runs and writes its own facts; the controller
    watches nothing. Facts merge across processes as before: a test's lists are known only when
    every process that reported it said them.
@@ -126,4 +126,4 @@ test that failed first.
   the fixture, so `hushrun why` says the fixture's end kept it, not that it didn't finish.
 - **A pytest a test starts.** It makes no `.started` file: the session sets
   `HUSHRUN_PYTEST_SESSION` in its own environment, and a pytest that inherits it is a test's
-  doing (ADR 0077, Amendment 11).
+  doing (ADR 0080, Amendment 11).

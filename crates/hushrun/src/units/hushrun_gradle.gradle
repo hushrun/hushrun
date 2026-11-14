@@ -1,4 +1,4 @@
-// [ADR 0084] hushrun's Gradle adapter. hushrun writes this file to its cache directory and names
+// [ADR 0087] hushrun's Gradle adapter. hushrun writes this file to its cache directory and names
 // it in HUSHRUN_GRADLE; the build's settings file applies it with one line, which `hushrun init`
 // proposes and never writes:
 //   settings.gradle:     if (System.getenv("HUSHRUN_GRADLE")) apply from: System.getenv("HUSHRUN_GRADLE")
@@ -401,7 +401,7 @@ class HushrunSelection {
     }
 }
 
-/** A test class's name for people, by one rule (ADR 0084). */
+/** A test class's name for people, by one rule (ADR 0087). */
 class HushrunNames {
     static void of(HushrunSelection s) {
         Map<String, List<File>> byName = [:].withDefault { [] }
@@ -678,7 +678,7 @@ class HushrunTaskListener implements TestListener, Action<Task>, Serializable {
         }
         suiteFailures.each { if (it.c) outers << HushrunRun.outerOf(it.c as String) }
         HushrunReport.addNames(report, s, outers)
-        // [ADR 0084, Amendment 15] What a plan needs to count only what a JUnit 4 task leaves out:
+        // [ADR 0087, Amendment 15] What a plan needs to count only what a JUnit 4 task leaves out:
         // at most this many of its tests, taken in the order of their ids.
         if (framework == "junit4") report.leaveOutAtMost = [most: HushrunRun.MOST_PATTERN_TESTS, units: new ArrayList(report.names.values()).sort()]
         if (framework == null) report.notFollowed << [why: "test-framework", detail: "a test framework hushrun doesn't know"]

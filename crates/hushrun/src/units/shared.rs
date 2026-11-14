@@ -318,7 +318,7 @@ pub struct TestList {
     pub own: bool,
 }
 
-/// \[C-40, C-41, ADR 0078, 0079\] The lists a test's key may be made from, which the plan,
+/// \[C-40, C-41, ADR 0081, 0082\] The lists a test's key may be made from, which the plan,
 /// `observe`, `hushrun ready` and `hushrun why` all ask. With `reads: file`, its test file's
 /// (`file_lists`, from [`lists`], which hold the hints' lists of it). With `reads: test`: the list
 /// this machine's row for it holds, every file now below a directory it listed included, or its

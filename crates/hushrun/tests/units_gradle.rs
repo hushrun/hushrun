@@ -1,4 +1,4 @@
-//! \[ADR 0084\] Test classes with Gradle (C-30 to C-34, C-39, C-46): a unit is a test class, named
+//! \[ADR 0087\] Test classes with Gradle (C-30 to C-34, C-39, C-46): a unit is a test class, named
 //! by its source file, a test is one of its methods, and what a class read is every source file
 //! below its project and each project its classpath is built from.
 //!
@@ -431,7 +431,7 @@ fn test_classes_are_observed_then_reused_and_a_change_runs_the_classes_that_read
             PRICE,
         ]
     );
-    // A project is read as its source directories (ADR 0084).
+    // A project is read as its source directories (ADR 0087).
     assert_eq!(
         map["units"][CART]["dirs"],
         json!([
@@ -512,7 +512,7 @@ fn junit5_tests_are_reused_one_by_one_and_a_class_whose_setup_failed_reruns() {
     }
     let gradle = gradle();
     // lib keeps no test here: a task whose list didn't change is up to date, and Gradle wouldn't
-    // run an audited class of it (ADR 0084).
+    // run an audited class of it (ADR 0087).
     let mut files = shop("{mode: reuse, unit: test}");
     files.retain(|(path, _)| path != PRICE);
     files.push(file(
@@ -861,7 +861,7 @@ fn an_android_librarys_local_unit_tests_are_reused_one_by_one() {
         // Missing, it fails under HUSHRUN_TEST_TOOLS=required, as every tool does, unless the
         // run opts out of it by name: HUSHRUN_TEST_ANDROID=skip.
         if std::env::var("HUSHRUN_TEST_ANDROID").as_deref() == Ok("skip") {
-            eprintln!("note: skipping: HUSHRUN_TEST_ANDROID=skip (ADR 0084)");
+            eprintln!("note: skipping: HUSHRUN_TEST_ANDROID=skip (ADR 0087)");
             return;
         }
         tools(

@@ -1,4 +1,4 @@
-//! \[ADR 0087\] What `ctest --output-junit` (CMake 3.21 and later) says each test came to, read so
+//! \[ADR 0090\] What `ctest --output-junit` (CMake 3.21 and later) says each test came to, read so
 //! that nothing absent, unreadable or ambiguous ever reads as a pass.
 //!
 //! - The file must exist, parse, and hold as many `<testcase>` as its `<testsuite>`'s `tests`

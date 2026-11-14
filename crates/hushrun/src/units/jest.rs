@@ -1,4 +1,4 @@
-//! \[ADR 0082\] The Jest adapter, observed (C-30, C-32, C-39, C-44): a unit is a test file, as
+//! \[ADR 0085\] The Jest adapter, observed (C-30, C-32, C-39, C-44): a unit is a test file, as
 //! Jest's own matcher names it in every project; what it read is what Jest compiled and what it
 //! opened while it ran, with the files every test file reads; and each test is told on its own,
 //! with what it ran and opened when the check asks for `reads: test`.
@@ -39,11 +39,11 @@ pub const SOURCE_KINDS: &[&str] = &[
 /// The variable the config line loads the adapter from.
 pub const VARIABLE: &str = "HUSHRUN_JEST";
 /// The line a CommonJS Jest config needs at its top, where a script replaces `NODE_OPTIONS`.
-/// \[ADR 0082, amended\] A statement, not `process.env.HUSHRUN_JEST && require(…);`, which
+/// \[ADR 0085, amended\] A statement, not `process.env.HUSHRUN_JEST && require(…);`, which
 /// ESLint's `no-unused-expressions` refuses in a config a project lints. A config with either form
 /// names [`VARIABLE`], which is what the adapter looks for.
 pub const CJS_LINE: &str = "if (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);";
-/// \[ADR 0082, amended\] The line a TypeScript Jest config that compiles to CommonJS needs: no
+/// \[ADR 0085, amended\] The line a TypeScript Jest config that compiles to CommonJS needs: no
 /// `require()` call, which typescript-eslint's `no-require-imports` refuses in a TypeScript file.
 pub const TS_LINE: &str = "import { createRequire } from 'node:module'; if (process.env.HUSHRUN_JEST) createRequire(__filename)(process.env.HUSHRUN_JEST);";
 /// The line an ES module Jest config needs at its top.
@@ -345,7 +345,7 @@ pub fn replaces_node_options(script: &str) -> bool {
     false
 }
 
-/// \[ADR 0082\] What `hushrun init` proposes, in its "Change by hand" list, for a repository at
+/// \[ADR 0085\] What `hushrun init` proposes, in its "Change by hand" list, for a repository at
 /// `root` that runs Jest, when `checks` look at their test files: where a script that runs Jest
 /// replaces `NODE_OPTIONS`, the one line at the top of Jest's config that loads hushrun's adapter
 /// anyway, or, with no config file of its own, to keep what `NODE_OPTIONS` had. `None` when
@@ -626,7 +626,7 @@ pub fn observe(
                 duration_ms = seen.duration_ms;
             }
         }
-        // \[ADR 0082\] ts-jest checking types read every file of code, for every test file.
+        // \[ADR 0085\] ts-jest checking types read every file of code, for every test file.
         if type_aware.contains(&unit) {
             reads.extend(code.iter().cloned());
         }
@@ -653,7 +653,7 @@ pub fn observe(
     Ok(out)
 }
 
-/// \[ADR 0082\] The Jest adapter for a COMMAND that starts one run of Jest 29 or 30; `None` for
+/// \[ADR 0085\] The Jest adapter for a COMMAND that starts one run of Jest 29 or 30; `None` for
 /// any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let mut recognized = match recognize(command)? {
@@ -979,7 +979,7 @@ mod tests {
         std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         assert_eq!(line_for(&dir.path().join("jest.config.js")), CJS_LINE);
         assert_eq!(line_for(&dir.path().join("jest.config.mjs")), ESM_LINE);
-        // \[ADR 0082, amended\] A TypeScript config that compiles to CommonJS calls no `require`.
+        // \[ADR 0085, amended\] A TypeScript config that compiles to CommonJS calls no `require`.
         assert_eq!(line_for(&dir.path().join("jest.config.ts")), TS_LINE);
         assert_eq!(line_for(&dir.path().join("jest.config.cts")), TS_LINE);
         // Each line is a statement, never an expression: a lint's `no-unused-expressions`.

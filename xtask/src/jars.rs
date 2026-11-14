@@ -1,4 +1,4 @@
-//! `cargo xtask jars [--check]`: builds the small JVM jars hushrun embeds (ADR 0085) from their
+//! `cargo xtask jars [--check]`: builds the small JVM jars hushrun embeds (ADR 0088) from their
 //! Java sources in this repository, byte for byte the same on every machine.
 //!
 //! Each jar's classes are compiled by `javac` [`JDK`] (from `JAVA_HOME`, else `PATH`) with

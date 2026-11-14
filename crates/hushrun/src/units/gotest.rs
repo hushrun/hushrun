@@ -58,7 +58,7 @@ pub struct Recognized {
     pub build: Vec<String>,
     /// The packages, as COMMAND names them; none is the package in the directory.
     pub packages: Vec<String>,
-    /// \[ADR 0083\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
+    /// \[ADR 0086\] COMMAND's own `-run` or `-skip`, by its flag: which tests ran is then Go's
     /// matching, and its tests are reused by package.
     pub chooses: Option<&'static str>,
 }
@@ -146,7 +146,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     while let Some(word) = words.next() {
         let was_first = std::mem::replace(&mut first, false);
         if word == "-args" || word == "--args" {
-            // \[ADR 0083\] What follows goes to each test binary as it is: its own `-test.run`.
+            // \[ADR 0086\] What follows goes to each test binary as it is: its own `-test.run`.
             for word in words.by_ref() {
                 let name = word.trim_start_matches('-');
                 let name = name.split_once('=').map_or(name, |(name, _)| name);
@@ -666,7 +666,7 @@ fn read_list(packages: Vec<Package>, root: &Path) -> Listed {
     out
 }
 
-/// \[ADR 0083, amended\] The sets of a Go check: its test files, and its sources, as `go list`
+/// \[ADR 0086, amended\] The sets of a Go check: its test files, and its sources, as `go list`
 /// named them (`unit_files`, `named`) under COMMAND's tags and environment; any other file of the
 /// tree, a file with a build tag the tags leave out included, is in the rest set. The run, its plan
 /// and `hushrun why` all ask this one function.
@@ -970,15 +970,15 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// \[ADR 0083\] The longest a test binary's line may be, read as it goes by: past it, what the
+/// \[ADR 0086\] The longest a test binary's line may be, read as it goes by: past it, what the
 /// binary printed can't be read, and no test of it records a pass.
 const MOST_LINE: usize = 1 << 20;
-/// \[ADR 0083\] The longest `-test.skip` pattern hushrun writes: past it, it leaves out no test.
+/// \[ADR 0086\] The longest `-test.skip` pattern hushrun writes: past it, it leaves out no test.
 const MOST_SKIP: usize = 64 << 10;
-/// \[ADR 0083\] The most a binary's `-test.list` may print.
+/// \[ADR 0086\] The most a binary's `-test.list` may print.
 const MOST_LIST: usize = 16 << 20;
 
-/// \[ADR 0083\] What a test binary's own arguments, as `go test` gave them, say of its tests.
+/// \[ADR 0086\] What a test binary's own arguments, as `go test` gave them, say of its tests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BinaryFlags {
     /// COMMAND chose tests itself (`-run`, `-skip`, `-list`, `-fuzz`, or a `-count` that isn't a
@@ -986,7 +986,7 @@ pub struct BinaryFlags {
     pub chooses: bool,
     /// `-test.v=test2json`, which `go test -json` asks for: Go marks its own lines.
     pub json: bool,
-    /// \[ADR 0083, amended\] `-test.v`, true or `test2json` (`go test -v`, `-json`): Go prints a
+    /// \[ADR 0086, amended\] `-test.v`, true or `test2json` (`go test -v`, `-json`): Go prints a
     /// line for each test's outcome, a skip's included.
     pub names_each: bool,
     pub failfast: bool,
@@ -1005,7 +1005,7 @@ fn go_bool(value: Option<&str>) -> Option<bool> {
     }
 }
 
-/// \[ADR 0083\] What `args`, a test binary's arguments, say of its tests. Every argument is read,
+/// \[ADR 0086\] What `args`, a test binary's arguments, say of its tests. Every argument is read,
 /// those past the first that isn't a flag too, which `flag` wouldn't parse: a selection anywhere
 /// is a selection.
 pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
@@ -1047,7 +1047,7 @@ pub fn binary_flags(args: &[OsString]) -> BinaryFlags {
     out
 }
 
-/// \[ADR 0083\] Whether the test binary at `path` has a `TestMain`: the name of the function Go's
+/// \[ADR 0086\] Whether the test binary at `path` has a `TestMain`: the name of the function Go's
 /// test main calls, `<package>.TestMain`, which the binary's own table of function names holds
 /// even when it is stripped. `None` when the binary can't be read. Seen where there is none, it
 /// only costs the package its tests one by one.
@@ -1057,7 +1057,7 @@ pub fn has_test_main(path: &Path) -> Option<bool> {
     Some(bytes.windows(needle.len()).any(|w| w == needle))
 }
 
-/// \[ADR 0083\] The names a test binary's `-test.list=.` printed, in order: tests, benchmarks,
+/// \[ADR 0086\] The names a test binary's `-test.list=.` printed, in order: tests, benchmarks,
 /// fuzz targets, examples. `None` when any line isn't a Go identifier: a package's `init` printed
 /// something, and the list can't be told from it.
 pub fn read_listed(stdout: &[u8]) -> Option<Vec<String>> {
@@ -1073,7 +1073,7 @@ pub fn read_listed(stdout: &[u8]) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// \[ADR 0083\] Whether a listed name is a test, as RFC 0004 counts them: a top-level `Test…`,
+/// \[ADR 0086\] Whether a listed name is a test, as RFC 0004 counts them: a top-level `Test…`,
 /// `Example…` or `Fuzz…` function. Benchmarks aren't.
 pub fn is_test(name: &str) -> bool {
     ["Test", "Example", "Fuzz"]
@@ -1081,7 +1081,7 @@ pub fn is_test(name: &str) -> bool {
         .any(|prefix| name.starts_with(prefix))
 }
 
-/// \[ADR 0083\] `-test.skip`'s value that leaves out exactly `names`, top-level tests: one
+/// \[ADR 0086\] `-test.skip`'s value that leaves out exactly `names`, top-level tests: one
 /// element (no `/`), so Go matches it against top-level names alone, anchored at both ends, each
 /// name quoted as Go's `regexp.QuoteMeta` does.
 pub fn skip_pattern<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
@@ -1101,7 +1101,7 @@ pub fn skip_pattern<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     format!("^({})$", quoted.join("|"))
 }
 
-/// \[ADR 0083\] What the runner knows of a test binary's tests before it starts it.
+/// \[ADR 0086\] What the runner knows of a test binary's tests before it starts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestsAt {
     /// The package, by its directory from the root.
@@ -1127,7 +1127,7 @@ impl TestsAt {
     }
 }
 
-/// \[ADR 0083\] Prepares a start of the test binary at `binary`, of the package `unit`, with
+/// \[ADR 0086\] Prepares a start of the test binary at `binary`, of the package `unit`, with
 /// `args`, test by test: `None` when its tests can't be told one by one, and it runs as a package.
 /// `reuse` is what `hushrun.json`'s `reuseTests` lists for the package. `list(extra)` starts the
 /// binary as the run would, with `extra` for arguments, and gives what it printed when it exited
@@ -1176,14 +1176,14 @@ pub fn prepare(
     })
 }
 
-/// \[ADR 0083\] Go's own summary line, `PASS` or `FAIL`.
+/// \[ADR 0086\] Go's own summary line, `PASS` or `FAIL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Summary {
     Pass,
     Fail,
 }
 
-/// \[ADR 0083\] A test binary's output, read as it goes by: what it named failed, the times it
+/// \[ADR 0086\] A test binary's output, read as it goes by: what it named failed, the times it
 /// gave, and whether it ended on Go's own summary.
 #[derive(Debug, Clone, Default)]
 pub struct Output {
@@ -1334,7 +1334,7 @@ fn top_level(name: &str) -> String {
         .collect()
 }
 
-/// \[ADR 0083\] How a test binary ended.
+/// \[ADR 0086\] How a test binary ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ended {
     pub exit: Option<i32>,
@@ -1347,7 +1347,7 @@ pub struct Ended {
     pub returned: bool,
 }
 
-/// \[ADR 0083\] Whether a test binary's run ended normally, as Go's test main ends one, so that
+/// \[ADR 0086\] Whether a test binary's run ended normally, as Go's test main ends one, so that
 /// every test it ran and didn't name failed passed: `None` when it did; else \[C-37\] why not, in
 /// people's words, which each test it left without a result keeps in this machine's store for
 /// `hushrun why`. Normally: `M.Run` [returned](Ended::returned), its output was read to the end and
@@ -1383,12 +1383,12 @@ pub const FAILFAST: &str = "its package failed under -failfast, which leaves tes
 /// \[C-37\] Why no test of a binary whose output hushrun couldn't read as Go's kept a result.
 pub const UNREAD: &str = "hushrun couldn't read its package's test output to Go's own summary, so no test of it that didn't fail kept a result";
 
-/// \[ADR 0083\] Each test of a start, as its facts say it (C-39): failed when the output named it
+/// \[ADR 0086\] Each test of a start, as its facts say it (C-39): failed when the output named it
 /// failed; finished when the run [ended normally](not_normal) and hushrun didn't leave it out;
 /// deselected when hushrun left it out. Its time is the one Go gave it, or 0: without `-v` Go times
 /// only the tests that failed.
 ///
-/// \[ADR 0083, amended\] A binary whose run failed while its output named only the tests that
+/// \[ADR 0086, amended\] A binary whose run failed while its output named only the tests that
 /// failed (no `-test.v`): a test that passed can't be told from one that skipped, perhaps because
 /// another failed, so no test it didn't name failed finished, and [`UNNAMED`] says why.
 pub fn outcome(
@@ -1425,7 +1425,7 @@ pub fn outcome(
     (tests, unnamed.then_some(UNNAMED))
 }
 
-/// \[ADR 0083, amended\] Why a package that failed kept no pass of its other tests, which the run
+/// \[ADR 0086, amended\] Why a package that failed kept no pass of its other tests, which the run
 /// says once and `hushrun why` says for each such test, from its row.
 pub const UNNAMED: &str = "a package that failed keeps its other tests' results only when go test names each one: add -v to keep them";
 
@@ -1451,7 +1451,7 @@ impl Adapter for Recognized {
         "package"
     }
 
-    /// \[ADR 0083\] Each test one by one, unless COMMAND chooses its tests itself; what each read is
+    /// \[ADR 0086\] Each test one by one, unless COMMAND chooses its tests itself; what each read is
     /// its package's.
     fn tests(&self) -> KnowsTests {
         KnowsTests {
@@ -1501,7 +1501,7 @@ impl Adapter for Recognized {
             return Ok(None);
         }
         let mut observed = observe(self, at.files, at.root, at.cwd, at.tree, at.assigned)?;
-        // \[ADR 0083\] Tests one by one, as the runner told them (C-39). A package of which the
+        // \[ADR 0086\] Tests one by one, as the runner told them (C-39). A package of which the
         // runner left a test out didn't run whole. One it didn't start, reused whole, tells none:
         // the core counts the tests this machine knows of it (C-39).
         let told = super::facts::merged(at.files, ADAPTER);
@@ -1830,7 +1830,7 @@ mod tests {
             assert!(binary_flags(&os(chooses)).chooses, "{chooses}");
         }
         assert!(!binary_flags(&os("-test.count 3")).chooses);
-        // \[ADR 0083, amended\] Go names each test's outcome with -v and -json, not without.
+        // \[ADR 0086, amended\] Go names each test's outcome with -v and -json, not without.
         assert!(binary_flags(&os("-test.v=true")).names_each);
         assert!(!binary_flags(&os("-test.v=false")).names_each);
         assert!(!binary_flags(&os("-test.paniconexit0")).names_each);
@@ -2051,7 +2051,7 @@ mod tests {
                 row("TestC", false, false, true)
             ]
         );
-        // \[ADR 0083, amended\] Where Go names only what failed (no -v), a run that failed
+        // \[ADR 0086, amended\] Where Go names only what failed (no -v), a run that failed
         // finishes only what it named, and says why; one that passed is as before.
         let unnamed = TestsAt {
             flags: BinaryFlags {

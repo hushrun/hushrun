@@ -1,4 +1,4 @@
-//! \[ADR 0086\] Test targets and tests with `swift test` (C-48): a unit is a test target, named by
+//! \[ADR 0089\] Test targets and tests with `swift test` (C-48): a unit is a test target, named by
 //! its directory, what it read is what `swift package describe` says it is built from, a test is
 //! its XCTest `Class/method` or its Swift Testing function, and reuse never misses a failure.
 //!

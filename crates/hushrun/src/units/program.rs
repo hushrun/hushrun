@@ -1,4 +1,4 @@
-//! \[ADR 0077\] Programs on COMMAND's `PATH` that are hushrun itself (RFC 0004 §4.7, §4.8): how an
+//! \[ADR 0080\] Programs on COMMAND's `PATH` that are hushrun itself (RFC 0004 §4.7, §4.8): how an
 //! adapter gets inside a runner that takes nothing from the environment, as hushrun's target
 //! runner gets inside Cargo ([`super::runner`]), with COMMAND byte for byte as written.
 //!
@@ -46,7 +46,7 @@ pub trait Program: Sync {
         let _ = (call, args, exit);
     }
 
-    /// \[ADR 0086\] Runs the real program itself, for an adapter that needs more than changed
+    /// \[ADR 0089\] Runs the real program itself, for an adapter that needs more than changed
     /// arguments: its output as it goes by ([`run_copying_stdout`]), or the real program started
     /// again after it ([`real_command`]). The exit code this program on `PATH` ends with; `None`,
     /// the default, leaves the start to [`Program::args`] and [`Program::ended`]. Asked only in a
@@ -57,14 +57,14 @@ pub trait Program: Sync {
     }
 }
 
-/// \[ADR 0077\] The programs adapters put on `PATH`, by name. A new one is one entry here.
+/// \[ADR 0080\] The programs adapters put on `PATH`, by name. A new one is one entry here.
 pub const PROGRAMS: &[&dyn Program] = &[
     &super::ctest::Ctest,
     &super::swift::SWIFT,
     &super::swift::SWIFT_TEST,
 ];
 
-/// \[ADR 0086\] A command that starts the real program `real` as a program on `PATH` starts it:
+/// \[ADR 0089\] A command that starts the real program `real` as a program on `PATH` starts it:
 /// with `PATH` as COMMAND's environment had it and neither of this module's variables, so that
 /// nothing it starts reaches a program of hushrun's.
 pub fn real_command(real: &Path) -> Command {
@@ -88,7 +88,7 @@ pub fn as_command_had(command: &mut Command) {
     command.env_remove(DIR_VAR).env_remove(PATH_WAS);
 }
 
-/// \[ADR 0086\] How a real program run by [`run_copying_stdout`] ended, and what it wrote on its
+/// \[ADR 0089\] How a real program run by [`run_copying_stdout`] ended, and what it wrote on its
 /// standard output.
 #[derive(Debug, Default)]
 pub struct Copied {
@@ -101,7 +101,7 @@ pub struct Copied {
     pub stdout: Vec<u8>,
     /// How many bytes those lines came to, kept or not.
     pub wanted: u64,
-    /// \[ADR 0086\] Something it started still held its standard output after it ended: what it
+    /// \[ADR 0089\] Something it started still held its standard output after it ended: what it
     /// printed can't be read whole, so no pass of it is recorded. What comes later is passed on
     /// all the same, by a forwarder of its own ([`FORWARD`]).
     pub held: bool,
@@ -110,14 +110,14 @@ pub struct Copied {
     pub cut: bool,
 }
 
-/// \[ADR 0086\] The most of a program's output [`run_copying_stdout`] keeps to read.
+/// \[ADR 0089\] The most of a program's output [`run_copying_stdout`] keeps to read.
 pub const KEEP_MOST: usize = 16 << 20;
 
-/// \[ADR 0086\] The longest line [`run_copying_stdout`] keeps whole: what follows on that line
+/// \[ADR 0089\] The longest line [`run_copying_stdout`] keeps whole: what follows on that line
 /// isn't kept.
 const LINE_MOST: usize = 64 << 10;
 
-/// \[ADR 0086\] What [`run_copying_stdout`] keeps of a program's output, as it goes by: each line
+/// \[ADR 0089\] What [`run_copying_stdout`] keeps of a program's output, as it goes by: each line
 /// `wanted` takes, whole with its ending (`\n` or `\r`), up to [`KEEP_MOST`] in all.
 struct Lines {
     wanted: fn(&[u8]) -> bool,
@@ -173,7 +173,7 @@ impl Lines {
     }
 }
 
-/// \[ADR 0086\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
+/// \[ADR 0089\] How long output must stay quiet after the program ended for [`run_copying_stdout`]
 /// to tell "still held open by a program it left running" from "closing now": what its last
 /// writers flush as they exit comes within milliseconds, so a quarter second is ample.
 pub const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
@@ -182,7 +182,7 @@ pub const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// it reads to the end.
 #[cfg(unix)]
 pub const MOST_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
-/// \[ADR 0086\] The hidden subcommand of the forwarder [`run_copying_stdout`] hands held output
+/// \[ADR 0089\] The hidden subcommand of the forwarder [`run_copying_stdout`] hands held output
 /// to: hushrun copying its standard input to its standard output until the end. Never typed.
 pub const FORWARD: &str = "__hushrun-forward";
 
@@ -194,7 +194,7 @@ impl Copied {
     }
 }
 
-/// \[ADR 0086\] Runs `command` with its standard output copied, byte for byte, to this process's
+/// \[ADR 0089\] Runs `command` with its standard output copied, byte for byte, to this process's
 /// as it goes by, and its lines `wanted` takes kept, as they go by ([`Copied::stdout`]), so that
 /// a program that prints much besides is still read: through a pseudo-terminal in raw mode, with the window's size, when
 /// this process's standard output is a terminal (a program that colors only on one, Swift Testing,
@@ -245,7 +245,7 @@ pub fn run_copying_stdout(
     })
 }
 
-/// \[ADR 0083, 0086\] The one copy of a program's output for a stand-in (hushrun's `ctest` and
+/// \[ADR 0086, 0089\] The one copy of a program's output for a stand-in (hushrun's `ctest` and
 /// `swift` on `PATH`, and the runner of Go's test binaries): what comes from `from` goes on to
 /// this process's standard output as it comes, and to `sink`, until it ends, or, once `child`
 /// ended, until it has been quiet for [`QUIET`] (at most [`MOST_AFTER`]). How the child ended,
@@ -689,7 +689,7 @@ fn run_with(
         real: &real,
         units,
     };
-    // \[ADR 0086\] A program that runs the real one itself.
+    // \[ADR 0089\] A program that runs the real one itself.
     if let (Some(program), Some(_)) = (program, units)
         && let Some(code) = program.run(&call)
     {

@@ -1,4 +1,4 @@
-//! \[ADR 0087\] hushrun's `ctest`: the program first on COMMAND's `PATH` ([`super::super::program`])
+//! \[ADR 0090\] hushrun's `ctest`: the program first on COMMAND's `PATH` ([`super::super::program`])
 //! that every `ctest` started by name reaches. For a test run it lists the tests with the real
 //! `ctest`, leaves out those `hushrun.json` lets it (each checked again here), adds a JUnit file
 //! of its own unless one is named, starts the real `ctest` with stdio, signals and the exit status
@@ -250,7 +250,7 @@ impl Kept {
     }
 }
 
-/// \[ADR 0087\] A listing kept in a run's directory, for the same `ctest`, words and directory: the
+/// \[ADR 0090\] A listing kept in a run's directory, for the same `ctest`, words and directory: the
 /// plan's, made just before COMMAND `ctest …` starts, which hushrun's `ctest` then needn't make
 /// again (a listing runs the project's discovery scripts, `TEST_INCLUDE_FILES`). Only the plan
 /// writes it, only for COMMAND `ctest …` itself, and hushrun's `ctest` reads it once and removes
@@ -426,7 +426,7 @@ pub fn walk(
                 merge(&mut out, &test.unit, built);
             }
         }
-        // \[ADR 0087\] What runs before it for it: the setup and cleanup of each fixture it
+        // \[ADR 0090\] What runs before it for it: the setup and cleanup of each fixture it
         // requires, followed through the fixtures they require, and each test it DEPENDS on. What
         // their programs are built from, and what they name, the test reads too.
         for h in helpers(tests, i) {
@@ -660,7 +660,7 @@ fn plan_file(units: &Path) -> Option<(PlanFile, SystemTime)> {
     })
 }
 
-/// \[ADR 0087\] Whether a unit the plan lists may be left out, checked here, when `ctest` runs:
+/// \[ADR 0090\] Whether a unit the plan lists may be left out, checked here, when `ctest` runs:
 /// what stands in for binding a reused test program to its bytes, which the plan can't know
 /// before COMMAND builds them. Every one of its tests' programs is built here and up to date, none
 /// was built again after the plan, and the C and C++ files of the scope it is built from now are

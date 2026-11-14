@@ -1,4 +1,4 @@
-//! \[ADR 0087\] Test programs with CTest (C-30 to C-34, C-39, C-49): a unit is a test program, a
+//! \[ADR 0090\] Test programs with CTest (C-30 to C-34, C-39, C-49): a unit is a test program, a
 //! test one CTest test, what a program read is what its build directory says it is built from,
 //! and hushrun's `ctest` on `PATH` leaves out only what it was told, after checking it again.
 //!
@@ -2828,7 +2828,7 @@ fn the_forms_that_bypass_path_say_so_and_a_shell_line_is_observed() {
         &[],
     );
     assert_eq!(stale.code, 0, "{}", stale.stderr);
-    // \[ADR 0087, amended\] Its pass proves nothing of the files now: nothing is recorded, the
+    // \[ADR 0090, amended\] Its pass proves nothing of the files now: nothing is recorded, the
     // check's pass included, and the run says why.
     assert!(
         stale.stderr.contains(

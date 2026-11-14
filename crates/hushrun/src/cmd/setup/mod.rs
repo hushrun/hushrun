@@ -387,9 +387,9 @@ struct Look {
     turbo: turbo::Edit,
     /// \[ADR 0071\] The line Vitest's config needs for a check whose `tests` are on.
     vitest_line: Option<String>,
-    /// \[ADR 0084\] The line Gradle's settings file needs for a check whose `tests` are on.
+    /// \[ADR 0087\] The line Gradle's settings file needs for a check whose `tests` are on.
     gradle_line: Option<String>,
-    /// \[ADR 0082\] The line Jest's config needs where a script replaces NODE_OPTIONS.
+    /// \[ADR 0085\] The line Jest's config needs where a script replaces NODE_OPTIONS.
     jest_line: Option<String>,
     /// \[C-38\] Some check of hushrun.yaml has `tests` on (`observe` or `reuse`).
     tests_on: bool,
@@ -466,7 +466,7 @@ impl Look {
                     .collect();
                 crate::units::vitest::proposal(root, &checks)
             });
-        // \[ADR 0084\] And in Gradle's settings file.
+        // \[ADR 0087\] And in Gradle's settings file.
         let gradle_line = policy.as_ref().and_then(|p| {
             let checks: Vec<String> = p
                 .tests
@@ -476,7 +476,7 @@ impl Look {
                 .collect();
             crate::units::gradle::proposal(root, &checks)
         });
-        // \[ADR 0082\] And in Jest's config, where a script replaces NODE_OPTIONS.
+        // \[ADR 0085\] And in Jest's config, where a script replaces NODE_OPTIONS.
         let jest_line = policy.as_ref().and_then(|p| {
             let checks: Vec<String> = p
                 .tests

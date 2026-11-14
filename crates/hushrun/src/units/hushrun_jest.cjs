@@ -1,5 +1,5 @@
 'use strict';
-// [ADR 0082] hushrun's Jest adapter, loaded into every Node process of COMMAND with
+// [ADR 0085] hushrun's Jest adapter, loaded into every Node process of COMMAND with
 //
 //   NODE_OPTIONS="<what it had> --require <this file>"
 //
@@ -99,7 +99,7 @@ function install(S) {
     // Whether reads outside a session are kept for the next: in a worker of the run from its start,
     // in the main process once the run starts.
     buffering: !!process.env.HUSHRUN_JEST_RUN,
-    // [ADR 0082] ts-jest checks types with a language service: what a test file read can't be
+    // [ADR 0085] ts-jest checks types with a language service: what a test file read can't be
     // told from what it ran.
     typeAware: false,
     tsJest: false,
@@ -406,7 +406,7 @@ function install(S) {
   // ---------------------------------------------------------------- why a test isn't watched
   const V8_COVERAGE = "Jest's own V8 coverage is on, and it takes the counters watching a test needs";
   const TYPE_AWARE = 'ts-jest checks types with a language service, which reads every file of code for every test file';
-  // [ADR 0082, amended] The repository files whose code is on the stack, nearest first: each may
+  // [ADR 0085, amended] The repository files whose code is on the stack, nearest first: each may
   // keep what was opened (a cache in a module above the one that read, or in the test file).
   function openers() {
     const limit = Error.stackTraceLimit;
@@ -475,7 +475,7 @@ function install(S) {
       this.reads = new Set();
       this.dirs = new Set();
       this.edges = new Map();
-      // [ADR 0082, amended] Imports that re-export: by the importer's text, or its exports holding
+      // [ADR 0085, amended] Imports that re-export: by the importer's text, or its exports holding
       // the imported module's own objects (a CommonJS barrel); and what each user require returned.
       this.reexportEdges = new Map();
       this.exportsOf = new Map();
@@ -492,7 +492,7 @@ function install(S) {
       this.fileBucket = bucket('file');
       this.current = this.fileBucket;
       this.hooks = [];
-      // [ADR 0082, amended] What failed outside every test: the describe blocks whose afterAll
+      // [ADR 0085, amended] What failed outside every test: the describe blocks whose afterAll
       // failed, the errors jest-circus took as theirs, and errors it couldn't attribute (an
       // uncaught exception, an unhandled rejection: Jest 29 charges one to whatever test runs
       // when it arrives, which may not be the test that caused it).
@@ -580,7 +580,7 @@ function install(S) {
     reexport(from, to) {
       this.reexportEdges.set(`${from}\0${to}`, [from, to]);
     }
-    // [ADR 0082, amended] An import whose module's own objects reappear in the importer's exports
+    // [ADR 0085, amended] An import whose module's own objects reappear in the importer's exports
     // re-exports it (`module.exports = require(…)`, `exports.x = require(…).x`): a wider list is
     // safe, a narrower one isn't. Getters aren't called: that would run code of the repository's.
     reexportsByValue() {
@@ -743,7 +743,7 @@ function install(S) {
         default:
       }
     }
-    // [ADR 0082, amended] Each test's outcome as the file ended, not as its test_done said: an
+    // [ADR 0085, amended] Each test's outcome as the file ended, not as its test_done said: an
     // error jest-circus attached to a test after its end (Jest 30 charges a late one to the test
     // whose code raised it), a failing afterAll above it, and an error no test can be charged with,
     // after which no test of the file is told as finished.
@@ -965,7 +965,7 @@ function install(S) {
     }
     return out;
   }
-  // [ADR 0082, amended] The specifiers a repository file re-exports from, by its own text, before
+  // [ADR 0085, amended] The specifiers a repository file re-exports from, by its own text, before
   // any transform: `export * from`, `export { x } from`, and CommonJS's `module.exports =
   // require(…)`, `__exportStar(require(…))`, `...require(…)` and `Object.assign(exports, require(…))`.
   // Text that only looks like one (a string, a comment) only widens a test's list.
@@ -1037,7 +1037,7 @@ function install(S) {
     S.frames = [];
     return s;
   }
-  // [ADR 0082] How a runtime resolves a module name, for the direct imports: Jest 30.5's
+  // [ADR 0085] How a runtime resolves a module name, for the direct imports: Jest 30.5's
   // `_resolution.resolveCjs`, Jest 29's `_resolveCjsModule`. Where neither is there, imports
   // can't be told, and no test's list is sent.
   function canResolve(rt) {
@@ -1164,7 +1164,7 @@ function install(S) {
       } }.teardown, teardown);
     }
   }
-  // [ADR 0082] ts-jest's compiler: a language service means type checking.
+  // [ADR 0085] ts-jest's compiler: a language service means type checking.
   const TS_DONE = Symbol.for('hushrun.jest.ts-compiler');
   function patchTsCompiler(C) {
     const proto = C.prototype;
@@ -1327,7 +1327,7 @@ function install(S) {
     if (g.collectCoverage) issues.push("Jest's coverage is on, and a partial run's coverage would read as a drop");
     for (const c of configs) {
       if (!/jest-circus/.test(String(c.testRunner))) {
-        // [ADR 0082] Without jest-circus's events, nothing of a test file is told.
+        // [ADR 0085] Without jest-circus's events, nothing of a test file is told.
         S.global.notFollowed.push({ why: 'runner', detail: String(c.testRunner).slice(0, 200) });
       }
     }

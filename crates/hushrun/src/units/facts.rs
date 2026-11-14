@@ -4,12 +4,12 @@
 //! - `hushrun.json`, hushrun's, written before COMMAND starts: `{"schema": "hushrun.units/v0",
 //!   "root": <the repository's root>, "reuse": [<units the plan lets adapters deselect>]}`, and
 //!   \[ADR 0069\] what an adapter checks before it deselects any: `pythonFiles`, pytest's unit rule
-//!   as hushrun read it, and `binaries`, each reused test binary's path and SHA-256; \[ADR 0077\]
+//!   as hushrun read it, and `binaries`, each reused test binary's path and SHA-256; \[ADR 0080\]
 //!   with `unit`, `reads` and `reuseTests`, the tests it may deselect one by one (C-39). An adapter
 //!   that reads none of these three deselects only whole units, which runs more and never less.
 //! - `<anything>.json`, an adapter's, one per process: `{"schema": "hushrun.unit-facts/v0", …}`,
 //!   [`FactsFile`]. A name that starts with `.` is a file being written, and is never read.
-//!   \[ADR 0077\] Or `hushrun.unit-facts/v1`, which adds to each unit its `tests` ([`TestFacts`]),
+//!   \[ADR 0080\] Or `hushrun.unit-facts/v1`, which adds to each unit its `tests` ([`TestFacts`]),
 //!   what loading it ran and opened (`loaded`), and what shared setups ran and opened for which of
 //!   its tests (`shared`); and to the file one `paths` table, which `ran`, `opened`, `dirs` and
 //!   `imports` index, with `imports`, each file's direct imports (C-39). A `v0` file reads as it
@@ -27,7 +27,7 @@ use hushrun_core::units::NotFollowed;
 pub const RUN_SCHEMA: &str = "hushrun.units/v0";
 /// The schema of an adapter's file.
 pub const FACTS_SCHEMA: &str = "hushrun.unit-facts/v0";
-/// \[ADR 0077\] The schema of an adapter's file that reports tests one by one (C-39).
+/// \[ADR 0080\] The schema of an adapter's file that reports tests one by one (C-39).
 pub const FACTS_SCHEMA_V1: &str = "hushrun.unit-facts/v1";
 /// hushrun's own file in the directory.
 pub const RUN_FILE: &str = "hushrun.json";
@@ -55,14 +55,14 @@ pub struct RunFile {
     /// deselects nothing when its own list isn't this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_files: Option<Vec<String>>,
-    /// \[ADR 0077\] What the run reuses one by one, `file` or `test` (C-39): an adapter that knows
+    /// \[ADR 0080\] What the run reuses one by one, `file` or `test` (C-39): an adapter that knows
     /// tests reports each of them with `test`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
-    /// \[ADR 0077\] What a test is taken to have read, `file` or `test`.
+    /// \[ADR 0080\] What a test is taken to have read, `file` or `test`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reads: Option<String>,
-    /// \[ADR 0077\] Tests the plan lets an adapter deselect one by one, by their unit, each by its
+    /// \[ADR 0080\] Tests the plan lets an adapter deselect one by one, by their unit, each by its
     /// id: those whose newest result that counts here passed on the files they read, but the
     /// audited ones (C-39). A unit `reuse` lists isn't here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -135,15 +135,15 @@ pub struct FactsFile {
     /// `kind` `import`, `open` or `read`: what `hushrun why` shows a path with, never a key.
     #[serde(default, deserialize_with = "edges")]
     pub edges: Vec<(String, String, String)>,
-    /// \[ADR 0077\] The paths, from the repository root, that this file's `ran`, `opened`, `dirs`
+    /// \[ADR 0080\] The paths, from the repository root, that this file's `ran`, `opened`, `dirs`
     /// and `imports` name by their index.
     #[serde(default)]
     pub paths: Vec<String>,
-    /// \[ADR 0077\] Each file's direct imports: the index of a file, as a string, to the indices
+    /// \[ADR 0080\] Each file's direct imports: the index of a file, as a string, to the indices
     /// of the files it imports.
     #[serde(default)]
     pub imports: BTreeMap<String, Vec<usize>>,
-    /// \[ADR 0078\] The files each module opened from its own code: the index of a module, as a
+    /// \[ADR 0081\] The files each module opened from its own code: the index of a module, as a
     /// string, to the indices of the files. What a module read once and kept reaches each test
     /// that ran its code (RFC 0003 §3.3, C-40).
     #[serde(default)]
@@ -175,7 +175,7 @@ pub struct FactsFile {
 }
 
 impl FactsFile {
-    /// \[ADR 0077\] The paths `indices` name in this file's table; `None` when one names none,
+    /// \[ADR 0080\] The paths `indices` name in this file's table; `None` when one names none,
     /// and then the list can't be told.
     pub fn resolve(&self, indices: &[usize]) -> Option<BTreeSet<String>> {
         indices
@@ -240,18 +240,18 @@ pub struct UnitFacts {
     /// file below each.
     #[serde(default)]
     pub dirs: Vec<String>,
-    /// \[ADR 0077\] Its tests, each on its own: present in a `v1` file whose run's `unit` is
+    /// \[ADR 0080\] Its tests, each on its own: present in a `v1` file whose run's `unit` is
     /// `test` (C-39). Absent, the adapter told nothing of its tests.
     #[serde(default)]
     pub tests: Option<Vec<TestFacts>>,
-    /// \[ADR 0077\] What loading it ran and opened, outside any test's window.
+    /// \[ADR 0080\] What loading it ran and opened, outside any test's window.
     #[serde(default)]
     pub loaded: Option<Touched>,
-    /// \[ADR 0077\] What each shared setup ran and opened (a fixture of module, class or session
+    /// \[ADR 0080\] What each shared setup ran and opened (a fixture of module, class or session
     /// scope, a `beforeAll`), with the tests it served, by their index in `tests`.
     #[serde(default)]
     pub shared: Vec<SharedSetup>,
-    /// \[ADR 0078\] What the runner loads for every test of it, by index into `paths`, as files
+    /// \[ADR 0081\] What the runner loads for every test of it, by index into `paths`, as files
     /// whose code ran: pytest's `conftest.py` files above it (C-40).
     #[serde(default)]
     pub every_test: Vec<usize>,
@@ -261,7 +261,7 @@ pub struct UnitFacts {
     pub skipped: u64,
 }
 
-/// \[ADR 0077\] What an adapter saw of one test in one process (C-39). An adapter that knows tests
+/// \[ADR 0080\] What an adapter saw of one test in one process (C-39). An adapter that knows tests
 /// and not what each read sends `id`, `finished`, `failed`, `deselected` and `durationMs` only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -305,7 +305,7 @@ pub struct TestFacts {
     pub not_kept: Option<String>,
 }
 
-/// \[ADR 0077\] Files that ran and files opened, by index into the file's `paths`.
+/// \[ADR 0080\] Files that ran and files opened, by index into the file's `paths`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Touched {
     #[serde(default)]
@@ -314,7 +314,7 @@ pub struct Touched {
     pub opened: Vec<usize>,
 }
 
-/// \[ADR 0077\] A shared setup: the tests it served, by index into its unit's `tests`, and what it
+/// \[ADR 0080\] A shared setup: the tests it served, by index into its unit's `tests`, and what it
 /// ran and opened.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SharedSetup {
@@ -412,20 +412,20 @@ pub struct Merged {
     pub failures_by_unit: bool,
     /// \[C-32\] How many of its finished tests were skipped, over its processes.
     pub skipped: u64,
-    /// \[ADR 0077\] Its tests, merged across the processes that reported them, by id; `None` when
+    /// \[ADR 0080\] Its tests, merged across the processes that reported them, by id; `None` when
     /// no process told its tests (C-39).
     pub tests: Option<BTreeMap<String, MergedTest>>,
-    /// \[ADR 0077\] What loading it ran and opened, from every process that said; `None` when
+    /// \[ADR 0080\] What loading it ran and opened, from every process that said; `None` when
     /// none did, or `loaded_broken`.
     pub loaded: Option<(BTreeSet<String>, BTreeSet<String>)>,
-    /// \[ADR 0077\] A process sent a `loaded` that can't be read: what loading it touched can't
+    /// \[ADR 0080\] A process sent a `loaded` that can't be read: what loading it touched can't
     /// be told.
     pub loaded_broken: bool,
-    /// \[ADR 0077\] Each shared setup: the ids of the tests it served, what it ran and opened.
+    /// \[ADR 0080\] Each shared setup: the ids of the tests it served, what it ran and opened.
     pub shared: Vec<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>,
 }
 
-/// \[ADR 0077\] What every process saw of one test: it finished or failed in any; deselected only
+/// \[ADR 0080\] What every process saw of one test: it finished or failed in any; deselected only
 /// when every process that reported it deselected it, as a unit is; the union of the rest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[allow(
@@ -451,7 +451,7 @@ pub struct MergedTest {
     pub dirs: Option<BTreeSet<String>>,
 }
 
-/// \[ADR 0077\] Each file's direct imports in `adapter`'s files, from the root, over its processes.
+/// \[ADR 0080\] Each file's direct imports in `adapter`'s files, from the root, over its processes.
 /// A file whose table names nothing for an index adds nothing.
 #[allow(dead_code, reason = "`watches` reads every adapter's")]
 pub fn imports(files: &[FactsFile], adapter: &str) -> BTreeMap<String, BTreeSet<String>> {
@@ -478,7 +478,7 @@ fn edges_by_index(
     out
 }
 
-/// \[ADR 0078\] What every adapter file of a run says of what its tests read beyond each test:
+/// \[ADR 0081\] What every adapter file of a run says of what its tests read beyond each test:
 /// each file's direct imports and opens, and per unit what loading it touched, what the runner
 /// loads for each of its tests, and its shared setups. Read from every file of the run's directory
 /// whatever adapter wrote it, so that no adapter has to give it (C-40).
@@ -491,7 +491,7 @@ pub struct Watches {
     pub units: BTreeMap<String, UnitWatch>,
 }
 
-/// \[ADR 0078\] What one unit's processes said of it beyond its tests.
+/// \[ADR 0081\] What one unit's processes said of it beyond its tests.
 #[derive(Debug, Clone, Default)]
 pub struct UnitWatch {
     /// What loading it ran and opened; `None` when a process didn't say, or said something of it
@@ -501,7 +501,7 @@ pub struct UnitWatch {
     pub shared: Vec<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>,
 }
 
-/// \[ADR 0078\] [`Watches`] of `files`.
+/// \[ADR 0081\] [`Watches`] of `files`.
 pub fn watches(files: &[FactsFile]) -> Watches {
     let all: Vec<&FactsFile> = files.iter().collect();
     let mut out = Watches {
@@ -558,7 +558,7 @@ pub fn watches(files: &[FactsFile]) -> Watches {
     out
 }
 
-/// \[ADR 0077\] Merges one process's tests of a unit into `into`. `running` holds the ids of the
+/// \[ADR 0080\] Merges one process's tests of a unit into `into`. `running` holds the ids of the
 /// tests a process before this one reported without deselecting them.
 fn merge_tests(
     into: &mut BTreeMap<String, MergedTest>,
@@ -659,7 +659,7 @@ pub fn merged(files: &[FactsFile], adapter: &str) -> BTreeMap<String, Merged> {
                 .extend(unit.not_followed.iter().map(NotFollowed::from));
             merged.not_followed.extend(whole.iter().cloned());
             merged.failures_by_unit &= file.failures_by_unit;
-            // \[ADR 0077\] Tests, and what loading it and its shared setups touched (C-39).
+            // \[ADR 0080\] Tests, and what loading it and its shared setups touched (C-39).
             if let Some(tests) = &unit.tests {
                 merge_tests(
                     merged.tests.get_or_insert_with(BTreeMap::new),

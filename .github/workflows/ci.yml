@@ -107,13 +107,13 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
-      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
+      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
-      # The runner's own Swift for the tests of the swift test adapter (ADR 0086).
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
-      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0085), which run Maven
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
       # offline against a local repository: filled here once by running those tests online.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -129,7 +129,7 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
-      # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
+      # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
       # published checksum, and a Gradle user home filled here once by running those tests online,
       # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
       # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
@@ -156,7 +156,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
             cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
-      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0082), with ts-jest for its type check.
+      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |
           npm install --prefix "$RUNNER_TEMP/jest29" --no-audit --no-fund --ignore-scripts jest@29.7.0 ts-jest@29.4.15 typescript@5.9.3
@@ -247,13 +247,13 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
-      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0087).
+      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
       - name: Name CMake for the test-program tests
         run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
-      # The runner's own Swift for the tests of the swift test adapter (ADR 0086).
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
       - name: Name Swift for the test-target tests
         run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
-      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0085), which run Maven
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
       # offline against a local repository: filled here once by running those tests online.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -269,7 +269,7 @@ jobs:
           echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
           HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
             cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
-      # Gradle for the tests of the Gradle adapter (ADR 0084), pinned and checked against Gradle's
+      # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
       # published checksum, and a Gradle user home filled here once by running those tests online,
       # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
       # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
@@ -296,7 +296,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
             cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
-      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0082), with ts-jest for its type check.
+      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
       - name: Install Jest for the test-file tests
         run: |
           npm install --prefix "$RUNNER_TEMP/jest29" --no-audit --no-fund --ignore-scripts jest@29.7.0 ts-jest@29.4.15 typescript@5.9.3
@@ -513,7 +513,7 @@ jobs:
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run trace -- cargo xtask trace
 
-  # The JVM jars hushrun embeds (ADR 0085) are what their Java sources build: built again with the
+  # The JVM jars hushrun embeds (ADR 0088) are what their Java sources build: built again with the
   # JDK they were built with, against the API jars pinned by SHA-256, and compared byte for byte.
   jars:
     name: JVM jars

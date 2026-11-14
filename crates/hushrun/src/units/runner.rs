@@ -89,7 +89,7 @@ fn run(args: &[OsString]) -> ExitCode {
             .map_or(0, |d| d.as_nanos());
         dir.join(format!("go-{}-{nanos}.testlog", std::process::id()))
     });
-    // \[ADR 0083\] Tests one by one: the binary's tests listed, those `reuseTests` names left out,
+    // \[ADR 0086\] Tests one by one: the binary's tests listed, those `reuseTests` names left out,
     // and its output read as it passes through. Its output can only be read through a pipe of
     // hushrun's, made before anything is left out: without one, nothing is.
     let watch = if go && !reuse {
@@ -169,7 +169,7 @@ fn run(args: &[OsString]) -> ExitCode {
         }
     };
     let forwarding = forward_signals(child.id());
-    // \[ADR 0083\] The binary's output, read as it passes through to `go test`.
+    // \[ADR 0086\] The binary's output, read as it passes through to `go test`.
     let mut watched = watch.map(|(at, reader)| {
         let output = super::gotest::Output::new(at.flags.json);
         (at, super::program::pipe_file(reader), output)
@@ -194,7 +194,7 @@ fn run(args: &[OsString]) -> ExitCode {
         }
         let _ = stdout.flush();
     }
-    // \[ADR 0083, amended\] Copied until it ends, or until it is still held open once the binary
+    // \[ADR 0086, amended\] Copied until it ends, or until it is still held open once the binary
     // ended: then the rest is handed to a forwarder below, and `go test` sees what it sees without
     // hushrun, the binary gone and its output open, and its own WaitDelay decides.
     let (status, held) = match watched.as_mut() {
@@ -218,7 +218,7 @@ fn run(args: &[OsString]) -> ExitCode {
         Some(status) => (status.code(), signal_of(status)),
         None => (None, None),
     };
-    // \[ADR 0083\] What each test came to, from what the binary printed and how it ended.
+    // \[ADR 0086\] What each test came to, from what the binary printed and how it ended.
     let mut held_open = None;
     let tests = match watched {
         Some((at, from, mut out)) => {
@@ -278,7 +278,7 @@ fn run(args: &[OsString]) -> ExitCode {
             tests,
         );
     }
-    // \[ADR 0083, amended\] What a program the test left running still prints goes on to `go
+    // \[ADR 0086, amended\] What a program the test left running still prints goes on to `go
     // test` through a forwarder hushrun doesn't wait for, as it would without hushrun between them.
     if let Some(from) = held_open {
         super::program::hand_over(from);
@@ -398,10 +398,10 @@ fn package_at(run: &facts::RunFile, here: &Path) -> Option<String> {
     })
 }
 
-/// \[ADR 0083\] The longest hushrun waits for a test binary to list its tests.
+/// \[ADR 0086\] The longest hushrun waits for a test binary to list its tests.
 const LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// \[ADR 0083\] With `unit: test` (C-39), what the Go package in `here` runs test by test: its
+/// \[ADR 0086\] With `unit: test` (C-39), what the Go package in `here` runs test by test: its
 /// tests listed, and those `hushrun.json`'s `reuseTests` names to be left out. `None` with
 /// anything that can't be told, and the package runs as a package.
 fn tests_here(dir: &Path, here: &Path, told: &Told) -> Option<super::gotest::TestsAt> {
@@ -434,7 +434,7 @@ fn tests_here(dir: &Path, here: &Path, told: &Told) -> Option<super::gotest::Tes
     )
 }
 
-/// \[ADR 0083\] What `told`'s binary prints with `extra` for its arguments, as the run would start
+/// \[ADR 0086\] What `told`'s binary prints with `extra` for its arguments, as the run would start
 /// it, when it exits 0 within [`LIST_BUDGET`]; `None` otherwise. A binary built with `-cover`
 /// writes what listing covered into the run's directory `dir`, not COMMAND's.
 fn list_binary(told: &Told, extra: &[&str], dir: &Path) -> Option<Vec<u8>> {
@@ -470,7 +470,7 @@ fn list_binary(told: &Told, extra: &[&str], dir: &Path) -> Option<Vec<u8>> {
     status.success().then_some(bytes)
 }
 
-/// \[ADR 0083\] A pipe the test binary's output goes through: its standard output, and its
+/// \[ADR 0086\] A pipe the test binary's output goes through: its standard output, and its
 /// standard error too when the runner's are one file, as `go test` makes them, so that what it
 /// prints keeps its order.
 struct Watch {
@@ -585,7 +585,7 @@ fn terse_list(bytes: &[u8]) -> Vec<String> {
 
 /// Writes one start's facts, whole, under a name no other start of this run has. A file that
 /// can't be written changes nothing for the test: hushrun then knows less, and records less.
-/// \[ADR 0083\] With `tests`, a Go package's tests one by one, the file is `v1`.
+/// \[ADR 0086\] With `tests`, a Go package's tests one by one, the file is `v1`.
 fn record(
     dir: &std::path::Path,
     invocation: Invocation,
@@ -602,7 +602,7 @@ fn record(
     } else {
         facts::FACTS_SCHEMA
     };
-    // \[ADR 0083, amended\] Why no test of it but those that failed finished, which the run says.
+    // \[ADR 0086, amended\] Why no test of it but those that failed finished, which the run says.
     let note = tests.as_ref().and_then(|(_, _, note)| *note);
     let units = tests
         .map(|(unit, tests, _)| facts::UnitFacts {
@@ -707,7 +707,7 @@ pub(super) fn forward_signals(child: u32) -> Option<Forwarding> {
 }
 
 /// While it lives, signals go on to the test; once dropped, a signal does what it would without
-/// hushrun (\[ADR 0086\]: a stand-in that lists or reads after its program ended stops on it).
+/// hushrun (\[ADR 0089\]: a stand-in that lists or reads after its program ended stops on it).
 #[cfg(unix)]
 pub(super) struct Forwarding(
     std::sync::Arc<std::sync::atomic::AtomicBool>,

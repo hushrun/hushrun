@@ -1,4 +1,4 @@
-//! \[ADR 0077\] A test as the unit (C-5, C-39): with `tests.unit: test`, each test of a test file
+//! \[ADR 0080\] A test as the unit (C-5, C-39): with `tests.unit: test`, each test of a test file
 //! is reused on its own, beside its test files, in two tiers; a test that wasn't followed costs
 //! only itself; an audited test that fails runs once more, alone.
 //!
@@ -207,7 +207,7 @@ fn has_pytest() -> bool {
 }
 
 /// Whether the Python the tests run has `sys.monitoring` (3.12 and later), with which pytest's
-/// adapter watches each test (ADR 0080).
+/// adapter watches each test (ADR 0083).
 fn watches() -> bool {
     Command::new(python())
         .args([
@@ -1025,7 +1025,7 @@ fn observe_says_what_reusing_tests_would_have_done_and_test_files_stay_as_they_w
         r.newest_result()["units"]["tests"],
         json!({"total": 13, "ran": 13, "reused": 0})
     );
-    // \[ADR 0080\] `reads: test`: pytest watches each test on Python 3.12 and later, and says
+    // \[ADR 0083\] `reads: test`: pytest watches each test on Python 3.12 and later, and says
     // nothing; below, it says once why each test is taken to have read its test file's list.
     r.write(
         "hushrun.yaml",

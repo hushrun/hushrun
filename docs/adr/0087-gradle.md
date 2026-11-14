@@ -1,9 +1,9 @@
-# 0084. Gradle's test classes and their methods
+# 0087. Gradle's test classes and their methods
 
 - **Status:** accepted
 - **Date:** 2026-11-12
 - **Rules:** C-15, C-30, C-32, C-39, C-46; relies on C-31, C-34, C-38, ADR 0069, 0070, 0071,
-  0077, 0085, RFC 0004
+  0080, 0088, RFC 0004
 
 ## Context
 
@@ -25,7 +25,7 @@ and C-46 hold over §4.5.
    code into a build: Gradle reads no init script from a variable, `ORG_GRADLE_PROJECT_*` only sets
    properties, and `JAVA_TOOL_OPTIONS` reaches the client and the test JVM, never a daemon already
    running. hushrun writes its Groovy script to `<cache dir>/adapters/gradle-<hash>/` and names it
-   in `HUSHRUN_GRADLE`, and the test-JVM hook's jar (ADR 0085) in `HUSHRUN_GRADLE_HOOK`. Groovy,
+   in `HUSHRUN_GRADLE`, and the test-JVM hook's jar (ADR 0088) in `HUSHRUN_GRADLE_HOOK`. Groovy,
    since `apply from:` takes it from either DSL with no Kotlin compile, and it reaches Android's and
    Kotlin's extensions without compiling against them. A settings file without the line, or none,
    loads nothing, and the run says so once with the line.
@@ -128,7 +128,7 @@ Item 8 let a skipped test finish unless its own class failed, or under TestNG he
 test. A reviewer showed TestNG skipping every test of the suite after another class's
 `@BeforeSuite` failed: the skipped classes were recorded as passed and left out next time.
 
-The decision: each skipped test, and its class, is told `skipped` (ADR 0077, Amendment 2), so a
+The decision: each skipped test, and its class, is told `skipped` (ADR 0080, Amendment 2), so a
 run whose COMMAND failed records nothing of them. And a skipped test finishes only when nothing of
 the run failed (a task, a test, a suite): else it didn't, and its class didn't run whole.
 
@@ -166,10 +166,10 @@ class of the default package, `CalcTest.add`, start with an upper-case letter, w
 a simple class name: `p.CalcTest.add` was left out too.
 
 The decision: the hook matches a method's whole name, and a Vintage test's `name[…]` only under the
-JUnit Vintage engine (ADR 0085, Amendment 2); each test it leaves out is told with the entry that
+JUnit Vintage engine (ADR 0088, Amendment 2); each test it leaves out is told with the entry that
 listed it. The report holds the hook's list, and the adapter holds the events to it: a test left
 out that no entry names exactly, or an entry that was neither left out nor seen run in a class that
-ran, makes the run start COMMAND once more with nothing left out (`Read.left_out`, ADR 0077,
+ran, makes the run start COMMAND once more with nothing left out (`Read.left_out`, ADR 0080,
 Amendment 4). A JUnit 4 class of the default package, or whose name starts upper-case, gets no
 pattern: its listed tests run.
 
@@ -178,7 +178,7 @@ pattern: its listed tests run.
 A task's facts file was named by the task, so a `gradlew` script that starts Gradle again after a
 failure overwrote the first start's report: a test that failed and then passed was recorded as
 passed. The decision: the build service, one instance a build, keeps each task's report as its
-start's own file, with `start` (ADR 0077, Amendment 1), and the adapter holds every start's word as
+start's own file, with `start` (ADR 0080, Amendment 1), and the adapter holds every start's word as
 it holds two tasks': a test failed when any start failed it, and finished, and its class ran whole,
 only when every start and task that ran it did. A retry that passed after a failure in the same
 start (the test-retry plugin) stays a failure (item 9). `--continue` and `--rerun-tasks` change
@@ -333,11 +333,11 @@ written within the two seconds of slack the report search allows. The decisions:
   script's build service writes, at the end of the build, one facts file with no task and a note:
   `Gradle ran no test: :a:test and :b:test were up to date, so nothing ran and nothing was learned
   of their test classes; `--rerun-tasks` once, or a change to what they read, makes Gradle run
-  them`, and `ranNothing`, the tasks. The run says the note once, as any note. (ADR 0077's
+  them`, and `ranNothing`, the tasks. The run says the note once, as any note. (ADR 0080's
   Amendment 16: the store keeps it, and the next plan goes by it; the snapshot above is taken.)
 - [Replaced by Amendment 16 for a task nothing was learned of.] hushrun doesn't force the tasks
   itself (`--rerun-tasks`, or an `upToDateWhen` it adds): COMMAND
-  stays as written and the build as it was (ADR 0084's first rule). Gradle's up to date is its own
+  stays as written and the build as it was (ADR 0087's first rule). Gradle's up to date is its own
   reuse, proven on the same inputs; running the tests anyway costs the person the time hushrun is
   there to save, changes what the build cache holds, and would make a hushrun run differ from a
   plain one in what it executes. Saying it once, with the way to make Gradle run them, leaves the
@@ -353,7 +353,7 @@ script tells, in each JUnit 4 task's facts, `settings.leaveOutAtMost` (`most`, 2
 the task's test classes), and that it attempts the listed tests in the order of their ids and skips
 a class of the default package or of a package named with a capital, which Gradle's patterns would
 match by simple name. The plan is to keep what the last run here said and list at most `most`
-of a group's tests, in that order, counting the others as run (done: ADR 0077's Amendment 16).
+of a group's tests, in that order, counting the others as run (done: ADR 0080's Amendment 16).
 
 ## Amendment 16: a test task nothing was learned of executes (2026-11-13)
 

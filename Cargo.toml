@@ -40,7 +40,7 @@ hushrun-build = { path = "crates/hushrun-build" }
 
 anyhow = "1.0.100"
 base64 = "0.23"
-# [ADR 0079] Seals the ids of tests in a hint (XChaCha20-Poly1305): RustCrypto, pure Rust.
+# [ADR 0082] Seals the ids of tests in a hint (XChaCha20-Poly1305): RustCrypto, pure Rust.
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 dirs = "6"

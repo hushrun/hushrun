@@ -60,7 +60,7 @@
 //!
 //! # Tests, sealed (version 1)
 //!
-//! \[C-41, ADR 0079\] A hint that holds tests is `hushrun.unit-hints/v1`: the content above, with
+//! \[C-41, ADR 0082\] A hint that holds tests is `hushrun.unit-hints/v1`: the content above, with
 //! that first line, and after its units:
 //!
 //! ```text
@@ -116,25 +116,25 @@ pub const SCHEMA: &str = "hushrun.unit-hints/v0";
 /// The domain string a hint's key is derived under: HMAC-SHA-256's key.
 pub const KEY_DOMAIN: &str = "hushrun.unit-hints-key/v0";
 
-/// \[ADR 0079\] The schema of a hint's content that holds tests.
+/// \[ADR 0082\] The schema of a hint's content that holds tests.
 pub const SCHEMA_V1: &str = "hushrun.unit-hints/v1";
 
-/// \[ADR 0079\] The domain string a hint's seal key is derived under.
+/// \[ADR 0082\] The domain string a hint's seal key is derived under.
 pub const SEAL_DOMAIN: &str = "hushrun.unit-hints-seal/v1";
 
-/// \[ADR 0079\] What a seal's nonce is derived from first.
+/// \[ADR 0082\] What a seal's nonce is derived from first.
 pub const NONCE_DOMAIN: &str = "hushrun.unit-hints-nonce/v1";
 
-/// \[ADR 0079\] The most tests a hint holds, as many as a check reuses one by one (C-39).
+/// \[ADR 0082\] The most tests a hint holds, as many as a check reuses one by one (C-39).
 pub use crate::units::MOST_TESTS;
 
-/// \[ADR 0079\] The longest id of a test a hint holds, in bytes.
+/// \[ADR 0082\] The longest id of a test a hint holds, in bytes.
 pub const MOST_ID: usize = 4096;
 
 /// A test's list index that names none: it read its test file's list.
 const NO_LIST: u32 = u32::MAX;
 
-/// \[ADR 0079\] What seals tests for associated data, or opens them: the key's, or a test's.
+/// \[ADR 0082\] What seals tests for associated data, or opens them: the key's, or a test's.
 type Sealer<'a> = dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + 'a;
 
 /// The schema of a hint's address.
@@ -257,7 +257,7 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 pub struct Key {
     bytes: [u8; 32],
     mac: Mac,
-    /// \[ADR 0079\] The seal key, under [`SEAL_DOMAIN`].
+    /// \[ADR 0082\] The seal key, under [`SEAL_DOMAIN`].
     seal: [u8; 32],
 }
 
@@ -279,12 +279,12 @@ impl Key {
         &self.bytes
     }
 
-    /// \[ADR 0079\] The seal key's 32 bytes, for test vectors.
+    /// \[ADR 0082\] The seal key's 32 bytes, for test vectors.
     pub fn seal_bytes(&self) -> &[u8; 32] {
         &self.seal
     }
 
-    /// \[ADR 0079\] `plaintext` sealed for `aad`: the nonce derived from both, then the
+    /// \[ADR 0082\] `plaintext` sealed for `aad`: the nonce derived from both, then the
     /// ciphertext and its tag.
     fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Option<Vec<u8>> {
         let mut message = NONCE_DOMAIN.as_bytes().to_vec();
@@ -308,7 +308,7 @@ impl Key {
         Some(out)
     }
 
-    /// \[ADR 0079\] What `sealed` holds for `aad`, when it opens under this key.
+    /// \[ADR 0082\] What `sealed` holds for `aad`, when it opens under this key.
     fn open(&self, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
         if sealed.len() < 24 + 16 {
             return None;
@@ -391,12 +391,12 @@ pub struct Hint {
     /// \[ADR 0071\] The test files the runner listed, for an adapter whose unit rule is its
     /// runner's own list (Vitest's); empty for the others.
     pub unit_files: BTreeSet<String>,
-    /// \[ADR 0079\] Each unit's tests, by id: with `reads: test` its own list, `None` for its
+    /// \[ADR 0082\] Each unit's tests, by id: with `reads: test` its own list, `None` for its
     /// test file's. Sealed in the bytes; empty, the hint is `hushrun.unit-hints/v0`.
     pub tests: BTreeMap<String, BTreeMap<String, Option<Unit>>>,
 }
 
-/// \[ADR 0079\] What a writer left out of a hint to fit its bounds (C-41).
+/// \[ADR 0082\] What a writer left out of a hint to fit its bounds (C-41).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trimmed {
     /// Nothing.
@@ -477,7 +477,7 @@ pub fn content(hint: &Hint, key: &Key) -> Result<Vec<u8>, Unwritable> {
     })
 }
 
-/// [`content`] with paths made tokens by `token`, and \[ADR 0079\] its tests sealed by `seal`.
+/// [`content`] with paths made tokens by `token`, and \[ADR 0082\] its tests sealed by `seal`.
 fn encode(
     hint: &Hint,
     token: &dyn Fn(&str) -> Token,
@@ -510,7 +510,7 @@ fn encode(
             .or_insert_with(|| (tokens_of(&unit.reads), tokens_of(&unit.dirs)));
         kept_path.entry(token(own)).or_insert(own);
     }
-    // \[ADR 0079\] Each kept unit's tests, by its token, and each own list as tokens.
+    // \[ADR 0082\] Each kept unit's tests, by its token, and each own list as tokens.
     type TokenList = (BTreeSet<Token>, BTreeSet<Token>);
     let mut tests_of: BTreeMap<Token, BTreeMap<&str, Option<TokenList>>> = BTreeMap::new();
     let mut test_count = 0usize;
@@ -558,7 +558,7 @@ fn encode(
         .iter()
         .map(|(own, (reads, dirs))| (position(own), indices(reads), indices(dirs)))
         .collect();
-    // \[ADR 0079\] The lists, sorted and once, and the plaintext the seal holds.
+    // \[ADR 0082\] The lists, sorted and once, and the plaintext the seal holds.
     let tests_part = (!tests_of.is_empty()).then(|| {
         let lists: Vec<(Vec<u32>, Vec<u32>)> = tests_of
             .values()
@@ -641,7 +641,7 @@ pub fn write(hint: &Hint, key: &Key) -> Result<Written, Unwritable> {
     })
 }
 
-/// \[C-41, ADR 0079\] [`write()`], and when the hint is too large with its tests, tests' own lists
+/// \[C-41, ADR 0082\] [`write()`], and when the hint is too large with its tests, tests' own lists
 /// left out first, then tests: what fits, and what was left out. Past its bounds without tests, it
 /// is [`Unwritable::TooLarge`].
 pub fn write_fitting(hint: &Hint, key: &Key) -> Result<(Written, Trimmed), Unwritable> {
@@ -749,7 +749,7 @@ fn decode<'a>(
         };
         hint.units.insert(path.to_string(), Unit { reads, dirs });
     }
-    // \[ADR 0079\] Tests, when the seal opens and what it holds reads: else none, and the units
+    // \[ADR 0082\] Tests, when the seal opens and what it holds reads: else none, and the units
     // stand.
     if let Some((aad_end, sealed)) = parsed.sealed
         && let Some(plaintext) = open(&content[..aad_end], sealed)
@@ -799,13 +799,13 @@ struct Parsed<'c> {
     tokens: Vec<Token>,
     unit_files: Vec<u32>,
     units: Vec<ParsedUnit>,
-    /// \[ADR 0079\] Tests' own lists.
+    /// \[ADR 0082\] Tests' own lists.
     lists: Vec<(Vec<u32>, Vec<u32>)>,
-    /// \[ADR 0079\] Where the associated data ends, and the sealed bytes.
+    /// \[ADR 0082\] Where the associated data ends, and the sealed bytes.
     sealed: Option<(usize, &'c [u8])>,
 }
 
-/// \[ADR 0079\] The tests a seal's plaintext holds, by unit position, each with its list's
+/// \[ADR 0082\] The tests a seal's plaintext holds, by unit position, each with its list's
 /// index: `None` when it isn't the one canonical plaintext for `units` units and `lists` lists.
 #[allow(clippy::type_complexity)]
 fn sealed_tests(
@@ -914,7 +914,7 @@ fn resolve<'a>(
 fn parse(content: &[u8]) -> Result<Parsed<'_>, Unread> {
     let mut r = Reader { rest: content };
     let header = r.take(SCHEMA.len() + 1).ok_or(Unread::Schema)?;
-    // \[ADR 0079\] Both schemas have the same length.
+    // \[ADR 0082\] Both schemas have the same length.
     let v1 = &header[..SCHEMA_V1.len()] == SCHEMA_V1.as_bytes();
     if (&header[..SCHEMA.len()] != SCHEMA.as_bytes() && !v1) || header[SCHEMA.len()] != b'\n' {
         return Err(Unread::Schema);
@@ -953,7 +953,7 @@ fn parse(content: &[u8]) -> Result<Parsed<'_>, Unread> {
         let dirs = r.list(MOST_TOKENS, &mut used, &mut entries)?;
         units.push(ParsedUnit { own, reads, dirs });
     }
-    // \[ADR 0079\] Tests' lists, and their seal: what follows the units, to the end. Damaged, it
+    // \[ADR 0082\] Tests' lists, and their seal: what follows the units, to the end. Damaged, it
     // is left out whole and the units stand, a hint with no tests (C-41): a reader drops only the
     // tests. A token only its lists named is then named by no index, which reads.
     let (lists, sealed) = if v1 {

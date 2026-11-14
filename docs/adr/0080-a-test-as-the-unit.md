@@ -1,4 +1,4 @@
-# 0077. A test as the unit: the core, and pytest
+# 0080. A test as the unit: the core, and pytest
 
 - **Status:** accepted
 - **Date:** 2026-11-11
@@ -70,7 +70,7 @@ tests are later decisions; this one leaves them their seams.
 10. **Where an adapter can't** (RFC 0004 §1.2). One that knows no test keeps working with
     `unit: test`: it reuses by test file and says so once, `its tests are reused by test binary:
     cargo's tests can't be reused one by one yet`. One that can't watch a test answers
-    `reads: test` with `reads: file`, and says so once. pytest watches a test (ADR 0080) while no
+    `reads: test` with `reads: file`, and says so once. pytest watches a test (ADR 0083) while no
     other tool uses `sys.monitoring`.
 11. **The limit** (C-39). A check with more than 50,000 tests reuses by test file for that run, and
     says so.
@@ -99,7 +99,7 @@ tests are later decisions; this one leaves them their seams.
   never wrong.
 - A test whose id changes (a renamed parameter) is a new test, and runs.
 - Results grow with tests where test files don't pass whole. A run sends at most 50,000, failures
-  first, in at most 8 MiB, and an older server keeps the first 5,000 (ADR 0078, item 9).
+  first, in at most 8 MiB, and an older server keeps the first 5,000 (ADR 0081, item 9).
 
 ## Alternatives considered
 
@@ -233,7 +233,7 @@ edit. `hushrun ready` and `hushrun why`, which write nothing, never import.
 ## Amendment 10: what the second review ran (2026-11-12)
 
 A second review ran the core on pytest 8.4.2 and 9.2. Each item is fixed with a test that failed
-first; the plugin's are in ADR 0080's Amendment 2.
+first; the plugin's are in ADR 0083's Amendment 2.
 
 - **A start that died.** A start of the runner that died before writing its facts was invisible:
   `pytest tests; CRASH=1 pytest tests` recorded the file passed whole from the first start in a
@@ -280,15 +280,15 @@ first; the plugin's are in ADR 0080's Amendment 2.
   without its tests and decided `not run` still keeps no row, as before: `why` says it never ran
   here. A stale build in a run that failed now keeps every pass out too: before, a test file or
   test whose failures the adapter reports by unit recorded its pass.
-- **Corrections.** Item 10 said pytest can't watch a test "in this version": it does, by ADR 0080,
+- **Corrections.** Item 10 said pytest can't watch a test "in this version": it does, by ADR 0083,
   while no other tool uses `sys.monitoring`. The Consequences said more than 5,000 results in a run
   record none: a run sends 50,000 at most, failures first, and an older server keeps the first
-  5,000 (ADR 0078, item 9 and Amendment 4).
+  5,000 (ADR 0081, item 9 and Amendment 4).
 
 ## Amendment 11: what the third review ran (2026-11-12)
 
 A third review ran what Amendment 10 added, on pytest 8.4.2 and 9.2. Each item is fixed with a
-test that failed first; the plugin's are in ADR 0080's Amendment 3.
+test that failed first; the plugin's are in ADR 0083's Amendment 3.
 
 - **A pytest a test starts.** A passing test that started a pytest of its own and stopped it left
   that pytest's `.started` file, since it inherits the run's variables: every run of the check

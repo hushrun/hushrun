@@ -1,4 +1,4 @@
-//! \[ADR 0077\] What an adapter is to the rest of test by test: one trait, [`Adapter`], and one list
+//! \[ADR 0080\] What an adapter is to the rest of test by test: one trait, [`Adapter`], and one list
 //! of the adapters a COMMAND may get, [`RECOGNIZED`].
 //!
 //! An adapter reports facts and decides nothing (RFC 0003 §2). The plan, the reading of what it
@@ -261,7 +261,7 @@ pub struct WhyAt<'a> {
 /// Why a plan from files alone can't be made for an adapter whose units a build names.
 pub const BUILT: &str = "its test files are known from a build, which this doesn't make";
 
-/// \[ADR 0077\] One runner's adapter. Every method but the first five has the answer most adapters
+/// \[ADR 0080\] One runner's adapter. Every method but the first five has the answer most adapters
 /// give.
 pub trait Adapter: std::fmt::Debug {
     /// The word its facts files, this machine's store and a hint name it by: 1 to 32 of `a-z`,

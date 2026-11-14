@@ -1,6 +1,6 @@
 //! \[ADR 0072\] This machine's store of what test files read: one SQLite file per repository,
 //! `<cache dir>/units/<repository id>.v2.sqlite`, in WAL mode, opened by any number of hushrun
-//! processes at once (C-36). \[ADR 0077\] Schema 2 adds each test file's tests; a `v1` file is left
+//! processes at once (C-36). \[ADR 0080\] Schema 2 adds each test file's tests; a `v1` file is left
 //! for an older hushrun, and read by none.
 //!
 //! It holds the map and what explains it, and nothing that decides:
@@ -14,7 +14,7 @@
 //! - **the audit**: each test file that would have been reused and failed;
 //! - \[C-38\] **hints known**: the content id of each hint this machine sent or received, by its
 //!   address and system, so that the same hint isn't sent twice;
-//! - \[ADR 0077\] **tests**: for a check with `tests.unit: test`, each test of a test file that ran
+//! - \[ADR 0080\] **tests**: for a check with `tests.unit: test`, each test of a test file that ran
 //!   here, by its id, with its last state and duration and what wasn't followed inside it; and, for
 //!   `reads: test`, a list it read, one row per distinct list, which tests share (C-39).
 //!
@@ -82,7 +82,7 @@ CREATE TABLE checks (
     command    TEXT NOT NULL CHECK (json_valid(command) AND json_type(command) = 'array'),
     cwd        TEXT NOT NULL,
     scope      TEXT NOT NULL CHECK (scope <> ''),
-    -- [ADR 0077] The adapter's word: 1 to 32 of a-z, 0-9 and -, so that a new adapter needs no
+    -- [ADR 0080] The adapter's word: 1 to 32 of a-z, 0-9 and -, so that a new adapter needs no
     -- new schema.
     adapter    TEXT NOT NULL CHECK (length(adapter) BETWEEN 1 AND 32
                                     AND adapter NOT GLOB '*[^a-z0-9-]*'),
@@ -179,7 +179,7 @@ CREATE TABLE hint_known (
     PRIMARY KEY (check_ref, address, os, content_id)
 ) STRICT, WITHOUT ROWID;
 
--- [ADR 0077] What a test read with `reads: test`: one row per distinct list, which any number of
+-- [ADR 0080] What a test read with `reads: test`: one row per distinct list, which any number of
 -- tests share, by the SHA-256 of its paths and their versions.
 CREATE TABLE test_list (
     id     INTEGER PRIMARY KEY,
@@ -196,7 +196,7 @@ CREATE TABLE test_list_dir (
     PRIMARY KEY (list_ref, path_ref)
 ) STRICT, WITHOUT ROWID;
 
--- [ADR 0077] Each test of a test file, as it last ran here (C-39): its id, its last state (a test
+-- [ADR 0080] Each test of a test file, as it last ran here (C-39): its id, its last state (a test
 -- reused keeps the row of the run it stands on), its duration, and with `reads: test` the list it
 -- read; none with `reads: file`, where it read what its test file read.
 CREATE TABLE test (
@@ -797,7 +797,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             mapped.dirs.insert(dir);
         }
     }
-    // \[ADR 0077\] Each test file's tests, as they last ran here.
+    // \[ADR 0080\] Each test file's tests, as they last ran here.
     let mut tests = conn.prepare(
         "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms, t.list_ref, t.not_kept
          FROM test t JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
@@ -863,7 +863,7 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             row.not_followed.insert(NotFollowed { why, detail });
         }
     }
-    // \[ADR 0078\] Each test's own list, a set tests share.
+    // \[ADR 0081\] Each test's own list, a set tests share.
     let mut found: HashMap<i64, TestListRow> = HashMap::new();
     let mut list_reads = conn.prepare(
         "SELECT DISTINCT r.list_ref, p.path, v.entry FROM test_list_read r
@@ -953,7 +953,7 @@ pub type Edge = (String, String, EdgeKind);
 pub struct Write<'a> {
     pub check_id: Digest,
     pub base: &'a KeyBase,
-    /// \[ADR 0077\] The adapter's word ([`super::adapter::Adapter::word`]).
+    /// \[ADR 0080\] The adapter's word ([`super::adapter::Adapter::word`]).
     pub adapter: &'static str,
     /// Each test file that ran, with what the map keeps of it.
     pub seen: &'a BTreeMap<String, Mapped>,
@@ -1068,7 +1068,7 @@ impl Ids<'_> {
         Ok(id)
     }
 
-    /// \[ADR 0078\] The row of a test's list, made with its reads and directories when no test
+    /// \[ADR 0081\] The row of a test's list, made with its reads and directories when no test
     /// has it yet.
     fn list(&mut self, list: &TestListRow) -> rusqlite::Result<i64> {
         let digest = list.digest().hex();
@@ -1216,7 +1216,7 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 params![unit, dir],
             )?;
         }
-        // \[ADR 0077\] Its tests; \[ADR 0078\] with `reads: test`, each with its own list, a row
+        // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row
         // tests with the same list share.
         for (id, row) in &mapped.tests {
             let list = match &row.list {

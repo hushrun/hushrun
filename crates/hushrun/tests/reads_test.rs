@@ -1,4 +1,4 @@
-//! \[ADR 0078, 0080\] What a test read, with `tests.reads: test` (C-40, C-42): fixtures that pin
+//! \[ADR 0081, 0083\] What a test read, with `tests.reads: test` (C-40, C-42): fixtures that pin
 //! the heuristic. Each changes one file so that one test, `test_target`, fails, and asks `observe`
 //! whether that test would have been reused: never with `reads: file`, whose list is its test
 //! file's; not with `reads: test` where the rule follows the change; and, for the three shapes

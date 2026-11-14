@@ -53,7 +53,7 @@ fn main() -> ExitCode {
     if let Some(code) = units::runner::from_args(&args) {
         return code;
     }
-    // \[ADR 0077\] As a program an adapter put on COMMAND's PATH, likewise: it starts the real one.
+    // \[ADR 0080\] As a program an adapter put on COMMAND's PATH, likewise: it starts the real one.
     if let Some(code) = units::program::from_args(&args) {
         return code;
     }

@@ -1,4 +1,4 @@
-//! \[ADR 0085\] The JVM jars this binary embeds, for the adapters of JVM build tools, and what
+//! \[ADR 0088\] The JVM jars this binary embeds, for the adapters of JVM build tools, and what
 //! they read and write.
 //!
 //! Each jar is built from Java sources in this repository by `cargo xtask jars`, from pinned

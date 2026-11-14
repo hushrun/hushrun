@@ -889,7 +889,7 @@ fn a_checks_tests_are_a_mode_or_a_mode_with_globs() {
     assert_error(&check("\n      mode: maybe\n"), 6, "maybe");
 }
 
-// covers: C-5, C-39 (ADR 0077: a test as the unit, and what a test read)
+// covers: C-5, C-39 (ADR 0080: a test as the unit, and what a test read)
 #[test]
 fn a_checks_tests_name_their_unit_and_what_a_test_read() {
     use crate::units::{Mode, Reads, Unit};

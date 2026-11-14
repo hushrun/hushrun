@@ -1,14 +1,14 @@
-# 0086. `swift test`'s test targets and tests
+# 0089. `swift test`'s test targets and tests
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-48; relies on C-30, C-31, C-32, C-34, C-36, C-38, C-39, ADR 0060, 0070, 0077
+- **Rules:** C-48; relies on C-30, C-31, C-32, C-34, C-36, C-38, C-39, ADR 0060, 0070, 0080
 
 ## Context
 
-RFC 0004 adds a test as a unit beside the test file (ADR 0077) and new adapters, one of them for
+RFC 0004 adds a test as a unit beside the test file (ADR 0080) and new adapters, one of them for
 `swift test`: SwiftPM's tests, in XCTest and in Swift Testing. SwiftPM takes nothing from the
-environment that would let hushrun inside it, so hushrun gets in the way ADR 0077 built for it: a
+environment that would let hushrun inside it, so hushrun gets in the way ADR 0080 built for it: a
 program named `swift` first on COMMAND's `PATH` that is hushrun. A spike on Swift 6.4.2, on macOS
 and on Linux, found what can be relied on and what can't; this decision is what was built from it.
 
@@ -59,7 +59,7 @@ and on Linux, found what can be relied on and what can't; this decision is what 
      run time*: not followed, as no adapter follows the machine. A test that reads another
      target's sources at run time is the audit's case (C-34).
 5. **Loading.** `swift`, and `swift-test` where COMMAND's `PATH` has one (Linux), are hushrun's
-   programs on `PATH` (ADR 0077). They catch `swift test` typed, or started by a script, a
+   programs on `PATH` (ADR 0080). They catch `swift test` typed, or started by a script, a
    Makefile, `sh -c` or `env`. `xcrun swift test` and a path to `swift` go round them: COMMAND in
    either form is refused, said once, and a script that does it writes nothing, which the run says
    once (`swift test wrote nothing for hushrun: no swift test reached hushrun's swift on PATH`). Every other subcommand, and
@@ -184,17 +184,17 @@ The decision:
 - A pass or a skip counts only as the end of a start the console said, once; a failure counts
   whatever came before it.
 - When the list after the run fails and the run left something out, the facts file says so as left
-  out but not listed (ADR 0077 Amendment 4): COMMAND starts once more with nothing left out.
-- XCTSkip, and Swift Testing's disabled tests and conditions, are told as skipped (ADR 0077
+  out but not listed (ADR 0080 Amendment 4): COMMAND starts once more with nothing left out.
+- XCTSkip, and Swift Testing's disabled tests and conditions, are told as skipped (ADR 0080
   Amendment 2). Under `--parallel` the xunit file reads an XCTSkip as a pass, which can't be told
   apart: in a run that failed, each XCTest pass read there is told as possibly skipped, so none
   records a pass; in a run that passed nothing changes.
 - Output a program `swift test` started still holds 5 seconds after it ended is no longer waited
   for: hushrun's `swift` stops passing it on then, as hushrun's target runner does for a test
-  binary (ADR 0083), and records no pass of that run (its failures stand). It used to wait for the
+  binary (ADR 0086), and records no pass of that run (its failures stand). It used to wait for the
   end of output, for ever if a program left running kept it open.
 - Each hushrun `swift` names a start of its own in its facts file, and the plan's `describe` and
-  `dump-package` get COMMAND's own `env NAME=value` assignments (ADR 0077 Amendment 7): a manifest
+  `dump-package` get COMMAND's own `env NAME=value` assignments (ADR 0080 Amendment 7): a manifest
   can read the environment, so `env WITH_EXTRA=1 swift test` may build a target with a dependency
   only it names.
 - The real `swift` is the one a shell would start: an empty `PATH` entry is the current directory
@@ -239,11 +239,11 @@ read whole, so no pass of it is recorded, its failures stand, and the facts say 
 was never copied, and isn't touched. Should the forwarder not start, hushrun's `swift` copies the
 rest itself, to its end.
 
-hushrun's target runner for `go test` (ADR 0083) differs on purpose: `go test` itself waits for a
+hushrun's target runner for `go test` (ADR 0086) differs on purpose: `go test` itself waits for a
 test binary's output to end (up to its `WaitDelay`), so there the runner forwards to the end within
 the same process, as the command without hushrun would. hushrun's `ctest` never copies output: the
 real `ctest` gets hushrun's standard output itself, so a program a test left running prints there
-directly (ADR 0087).
+directly (ADR 0090).
 
 ## Amendment 4: a cap on what is kept, and signals after the end (2026-11-12)
 

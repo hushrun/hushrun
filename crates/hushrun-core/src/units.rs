@@ -1,14 +1,14 @@
 //! \[ADR 0068\] Test by test: a check's test files, which RFC 0003 and the spec call units.
 //!
-//! - `checks.<name>.tests` in `hushrun.yaml` (C-5): [`Tests`], with \[ADR 0077\] the unit a
+//! - `checks.<name>.tests` in `hushrun.yaml` (C-5): [`Tests`], with \[ADR 0080\] the unit a
 //!   check reuses by ([`Unit`]) and what a test is taken to have read ([`Reads`]).
 //! - The four sets every file of a check's scope falls in, by one function, [`classify`] (C-30).
 //! - A unit's key, by one function, [`unit_key`], with [`shape`] and [`Tree::digest`] for the
-//!   digests it holds (C-31); \[ADR 0077\] a test's, by one function beside it, [`test_key`]
+//!   digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
 //!   (C-39), and a test's name, by [`test_name`].
-//! - \[ADR 0078\] What a test read, by one function, [`test_list`] (C-40).
+//! - \[ADR 0081\] What a test read, by one function, [`test_list`] (C-40).
 //! - A unit's state in a run, decided once, by [`state`], from the facts an adapter reported
-//!   (C-32, ADR 0060): a test file's, and \[ADR 0077\] a test's, from its own facts.
+//!   (C-32, ADR 0060): a test file's, and \[ADR 0080\] a test's, from its own facts.
 //!
 //! Like the rest of this crate it reads no file: what a run observed is passed in.
 
@@ -25,11 +25,11 @@ use crate::names::{CheckName, ScopeName};
 /// result counts.
 pub const UNIT_KEY_SCHEMA: &str = "hushrun.unit-key/v0";
 
-/// \[ADR 0077\] The schema of a test's key (C-39). A test file's key stays [`UNIT_KEY_SCHEMA`], so
+/// \[ADR 0080\] The schema of a test's key (C-39). A test file's key stays [`UNIT_KEY_SCHEMA`], so
 /// every result recorded before tests were a unit counts as it did.
 pub const TEST_KEY_SCHEMA: &str = "hushrun.unit-key/v1";
 
-/// \[ADR 0077\] What joins a test's unit and its id in its name (C-39).
+/// \[ADR 0080\] What joins a test's unit and its id in its name (C-39).
 pub const TEST_SEPARATOR: &str = "::";
 
 /// `checks.<name>.tests`'s mode (C-5).
@@ -66,7 +66,7 @@ impl Mode {
     }
 }
 
-/// \[ADR 0077\] `checks.<name>.tests.unit` (C-5): what a check reuses one by one.
+/// \[ADR 0080\] `checks.<name>.tests.unit` (C-5): what a check reuses one by one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Unit {
     /// The default: a test file, as RFC 0003 has it.
@@ -95,7 +95,7 @@ impl Unit {
     }
 }
 
-/// \[ADR 0077\] `checks.<name>.tests.reads` (C-5): what a test is taken to have read.
+/// \[ADR 0080\] `checks.<name>.tests.reads` (C-5): what a test is taken to have read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Reads {
     /// The default: everything its test file read. As safe as a test file.
@@ -125,15 +125,15 @@ impl Reads {
     }
 }
 
-/// `checks.<name>.tests` (C-5): its mode, \[ADR 0077\] its unit and what a test read, the files no
+/// `checks.<name>.tests` (C-5): its mode, \[ADR 0080\] its unit and what a test read, the files no
 /// test reads (`ignore`) and the test files that always run (`always`). Not part of the check's
 /// definition (E-6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tests {
     pub mode: Mode,
-    /// \[ADR 0077\] What the check reuses one by one: test files, the default, or tests.
+    /// \[ADR 0080\] What the check reuses one by one: test files, the default, or tests.
     pub unit: Unit,
-    /// \[ADR 0077\] What a test is taken to have read; `test` only with `unit: test`, which
+    /// \[ADR 0080\] What a test is taken to have read; `test` only with `unit: test`, which
     /// `hushrun.yaml`'s validation holds to (C-8).
     pub reads: Reads,
     /// Globs from the repository root: files in the ignored set (C-30).
@@ -253,7 +253,7 @@ pub fn classify<'p>(
 /// past it, nothing is reused (results-v0 §3).
 pub const MOST_UNITS: usize = 5_000;
 
-/// \[ADR 0077\] The most tests a check reuses one by one (C-39): past it, the check reuses by test
+/// \[ADR 0080\] The most tests a check reuses one by one (C-39): past it, the check reuses by test
 /// file for that run, and says so.
 pub const MOST_TESTS: usize = 50_000;
 
@@ -368,7 +368,7 @@ pub fn unit_key(
     key_of(UNIT_KEY_SCHEMA, base, unit, None, reads, rest, shape)
 }
 
-/// \[C-39, ADR 0077\] The one function for a test's key: [`unit_key`]'s fields, computed the same
+/// \[C-39, ADR 0080\] The one function for a test's key: [`unit_key`]'s fields, computed the same
 /// way, under [`TEST_KEY_SCHEMA`], with `test`, the test's id within its unit. `reads` digests the
 /// test's list (RFC 0004 §3.2).
 pub fn test_key(
@@ -382,7 +382,7 @@ pub fn test_key(
     key_of(TEST_KEY_SCHEMA, base, unit, Some(test), reads, rest, shape)
 }
 
-/// \[ADR 0077\] A test's name, everywhere a person reads it: its unit, `::`, and its id (C-39).
+/// \[ADR 0080\] A test's name, everywhere a person reads it: its unit, `::`, and its id (C-39).
 pub fn test_name(unit: &str, test: &str) -> String {
     format!("{unit}{TEST_SEPARATOR}{test}")
 }
@@ -419,7 +419,7 @@ fn key_of(
     jcs::digest(&input)
 }
 
-/// \[C-40, ADR 0078\] What an adapter saw of one test file for what its tests read, as paths from
+/// \[C-40, ADR 0081\] What an adapter saw of one test file for what its tests read, as paths from
 /// the repository root (`hushrun.unit-facts/v1`, C-32).
 #[derive(Debug, Clone, Copy)]
 pub struct FileWatch<'a> {
@@ -469,7 +469,7 @@ pub struct TestList {
     pub own: bool,
 }
 
-/// \[C-40, ADR 0078\] The one function for what a test read, which every reader calls: the plan,
+/// \[C-40, ADR 0081\] The one function for what a test read, which every reader calls: the plan,
 /// the record, `observe`, `ready` and `why`.
 ///
 /// With `reads: file`, or for a test the adapter didn't watch alone, or a test file whose loading
@@ -558,7 +558,7 @@ pub struct Facts {
     pub not_followed: BTreeSet<NotFollowed>,
     /// The adapter deselected it, as the plan listed it: every process that collected it did.
     pub deselected: bool,
-    /// \[ADR 0077\] Of a test file: some of its tests were reused one by one, so this run didn't
+    /// \[ADR 0080\] Of a test file: some of its tests were reused one by one, so this run didn't
     /// execute all of it, and it didn't pass whole (C-39).
     pub tests_reused: bool,
     /// \[C-32, C-39\] Of a test: it finished without its body running (skipped, disabled, an
@@ -595,7 +595,7 @@ pub struct RunFacts {
     pub planned: bool,
 }
 
-/// A unit's state in a run (RFC 0003 §3.5, C-32), and \[ADR 0077\] a test's (C-39).
+/// A unit's state in a run (RFC 0003 §3.5, C-32), and \[ADR 0080\] a test's (C-39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
     /// The plan listed it and the adapter deselected it: nothing is recorded, as reuse never
@@ -744,7 +744,7 @@ pub fn state(facts: &Facts, run: &RunFacts) -> State {
 /// `not run`; one with something the adapter couldn't follow is `not observed`; and a pass holds
 /// only when COMMAND passed or the adapter reports each failure by unit.
 ///
-/// \[ADR 0077\] A test is decided here too, from its own facts: `complete` that it finished,
+/// \[ADR 0080\] A test is decided here too, from its own facts: `complete` that it finished,
 /// `not_followed` what wasn't followed inside its window and outside every window of its file. A
 /// test file some of whose tests were reused one by one didn't run whole: `not run`, so it records
 /// no pass of its own (C-39).

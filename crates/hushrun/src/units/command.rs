@@ -173,7 +173,7 @@ pub fn wrapper_starts(command: &[String], cwd: &Path, runner: Runner) -> bool {
             .all(|other| !other.started_by(&words))
 }
 
-/// \[ADR 0086, 0087\] The path a wrapper COMMAND's text starts `runner` by, when it starts it by
+/// \[ADR 0089, 0090\] The path a wrapper COMMAND's text starts `runner` by, when it starts it by
 /// a path and never by its name, and no other runner: it goes round the program hushrun puts on
 /// `PATH`, as a COMMAND that starts it by its path does.
 pub fn wrapper_starts_by_path(command: &[String], cwd: &Path, runner: Runner) -> Option<String> {

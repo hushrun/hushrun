@@ -847,7 +847,7 @@ pub struct Mapped {
     pub dirs: BTreeSet<String>,
     /// \[C-38\] Whether it ran here, or another machine saw it read these files.
     pub origin: Origin,
-    /// \[ADR 0077\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:
+    /// \[ADR 0080\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:
     /// the ids a plan keys before COMMAND (C-39).
     pub tests: BTreeMap<String, TestRow>,
     /// \[C-37\] Why it kept no result of its own when it last ran here, as the run decided it
@@ -855,7 +855,7 @@ pub struct Mapped {
     pub not_kept: Option<String>,
 }
 
-/// \[ADR 0077\] One test as it last ran here (C-39).
+/// \[ADR 0080\] One test as it last ran here (C-39).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestRow {
     /// Its state then: never `reused`, since a test reused keeps the row of the run it stands on.
@@ -867,12 +867,12 @@ pub struct TestRow {
     /// pass ([`hushrun_core::units::Decision`]): its adapter's words for one that didn't finish,
     /// else the rule's. What `hushrun why` says. `None` in any other state.
     pub not_kept: Option<String>,
-    /// \[ADR 0078\] With `reads: test`, what it read then (C-40): its own list; `None` when it
+    /// \[ADR 0081\] With `reads: test`, what it read then (C-40): its own list; `None` when it
     /// read its test file's.
     pub list: Option<TestListRow>,
 }
 
-/// \[ADR 0078\] A test's own list as the store keeps it, a set tests share: the files its key
+/// \[ADR 0081\] A test's own list as the store keeps it, a set tests share: the files its key
 /// held, each with its kind and content hash then, and the directories it listed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestListRow {

@@ -41,7 +41,7 @@ everything left was deselected by it, pytest's "no tests collected" (exit 5) wou
 a fail, so that process's exit status becomes 0, and only then: any failure or error gives pytest
 another status first.
 
-Tests one by one (ADR 0077): when `hushrun.json`'s `unit` is `test`, it reports each test of each
+Tests one by one (ADR 0080): when `hushrun.json`'s `unit` is `test`, it reports each test of each
 test file, its id being its node id after `<path>::`: whether it finished, failed or was deselected,
 and how long it took. It deselects, besides the test files `reuse` lists, the tests `reuseTests`
 lists, by their file and id, under the same rules. What it couldn't follow inside one test's window
@@ -49,7 +49,7 @@ lists, by their file and id, under the same rules. What it couldn't follow insid
 fixture of module, class or session scope, a teardown that may end one) it is the test file's.
 Its file is then `hushrun.unit-facts/v1`. It decides nothing of tests either.
 
-Watching a test (ADR 0080): when `reads` is `test` too, and on Python 3.12 or later, it reports
+Watching a test (ADR 0083): when `reads` is `test` too, and on Python 3.12 or later, it reports
 what each test touched, and hushrun makes each test's list from it (C-40). Through
 `sys.monitoring`, every file a function of which started while the test's setup, body or teardown
 ran: a module's top-level code or a class body running is no function, since that is what an
@@ -176,7 +176,7 @@ class Observer(object):
         self._import_seen = set()
         self._scanned = 0
         self.unit_roots = {}          # unit -> the files it read directly, as results() found them
-        self.paths = []               # [ADR 0080] the file's table of paths
+        self.paths = []               # [ADR 0083] the file's table of paths
         self.path_index = {}
         self.by_test = False          # hushrun.json's unit is test: tests are reported one by one
         self.reuse_tests = {}         # unit -> frozenset(ids) hushrun.json lets this run deselect
@@ -186,7 +186,7 @@ class Observer(object):
         self.shared_depth = 0         # >0 while a fixture of a wider scope than a test sets up
         self.shared_teardown = False  # a teardown that may end fixtures of a wider scope
         self.test_not_followed = {}   # (unit, id) -> {reason: set(details)}
-        self.watching = False         # [ADR 0080] each test's code, opens and listings are watched
+        self.watching = False         # [ADR 0083] each test's code, opens and listings are watched
         self.watch_reason = None      # why tests aren't watched, when reads is test
         self.clock = 0                # ticks at each test and shared setup's start and end
         self.test_ran = {}            # (unit, id) -> set(files a function of which started)
@@ -206,7 +206,7 @@ class Observer(object):
         self.finished_ids = {}        # node id -> (unit, test id) of each test that finished
         self.served = {}              # node id -> (fixture names, fixture def ids) it was served
         self.failed_wide = []         # (name, def id) of each wider fixture whose end raised
-        self.session_ran = set()      # [ADR 0080] files a function of which started outside every
+        self.session_ran = set()      # [ADR 0083] files a function of which started outside every
         self.session_opened = set()   # window, and files opened there: every test reads them
         self.shared_finishing = 0     # >0 while a fixture of a wider scope than a test is ended
 
@@ -347,7 +347,7 @@ class Observer(object):
         for n in names:
             if n not in self.mod_files:
                 self.note_module(n)
-        # [ADR 0080] A module imported while a test or a shared setup runs is read by it.
+        # [ADR 0083] A module imported while a test or a shared setup runs is read by it.
         if self.watching and self.active and (self.active_test is not None or self.setup_stack):
             self.touched("ran", self.resolve(names))
         if importer:
@@ -387,7 +387,7 @@ class Observer(object):
         if req_file.replace(os.sep, "/").endswith(TRANSIENT_IMPORTERS):
             if self.active:
                 self.add_root(self.active, name=fullname)
-                # [ADR 0080] Loaded for the test running now, through a helper outside the
+                # [ADR 0083] Loaded for the test running now, through a helper outside the
                 # repository that keeps nothing: the test read it.
                 if self.watching and self.active_test is not None:
                     self.test_names.setdefault((self.active, self.active_test), set()).add(fullname)
@@ -440,7 +440,7 @@ class Observer(object):
             self.add_root(self.active, f=r)
             self.touched("opened", {r})
         else:
-            # [ADR 0080] Opened while no window is open: every test of the session reads it.
+            # [ADR 0083] Opened while no window is open: every test of the session reads it.
             self.touched("opened", {r})
             if owner != "repo":
                 self.make_ambient(f=r, why="opened outside any test file by code outside the repository")
@@ -505,7 +505,7 @@ class Observer(object):
             return self.test_not_followed.setdefault((self.active, self.active_test), {})
         return self.not_followed.setdefault(self.active, {})
 
-    # --- watching a test [ADR 0080] -------------------------------------------------------
+    # --- watching a test [ADR 0083] -------------------------------------------------------
 
     def code_file(self, filename):
         f = self.code_files.get(filename, False)
@@ -577,7 +577,7 @@ class Observer(object):
         self.rewatch()
 
     def rewatch(self):
-        """[ADR 0080] A window starts or ends: functions are watched anew, so that each one is seen
+        """[ADR 0083] A window starts or ends: functions are watched anew, so that each one is seen
         in every window that calls it. Only while no other tool uses sys.monitoring: restarting
         events re-arms every tool's, and one that appeared stops the watching for the rest of the
         process, said once."""
@@ -590,7 +590,7 @@ class Observer(object):
         _restart_watch()
 
     def stop_watching(self, why):
-        """[ADR 0080] Stops watching for the rest of the process and releases the tool id: this
+        """[ADR 0083] Stops watching for the rest of the process and releases the tool id: this
         process watched no test then, and each reads its test file's list."""
         _stop_watching()
         self.watching = False
@@ -743,7 +743,7 @@ class Observer(object):
         return sorted(self.index(p) for p in paths)
 
     def watch_results(self, unit, entry):
-        """[ADR 0080] What each test of `unit` touched, and what its loading, its shared setups and
+        """[ADR 0083] What each test of `unit` touched, and what its loading, its shared setups and
         the runner did for all of them, by index into the file's `paths`."""
         ambient = self.ambient
         order = self.test_order.get(unit, [])
@@ -800,7 +800,7 @@ class Observer(object):
         entry["shared"] = shared
 
     def watch_tables(self):
-        """[ADR 0080] Each file's direct imports and the files each module opened, by index."""
+        """[ADR 0083] Each file's direct imports and the files each module opened, by index."""
         imports = {}
         for f, names in self.name_edges.items():
             targets = {t for t in self.resolve(names) if t != f}
@@ -885,7 +885,7 @@ class Observer(object):
         return found
 
     def test_results(self, unit):
-        """[ADR 0077] Each test of `unit` this process ran or deselected, in that order."""
+        """[ADR 0080] Each test of `unit` this process ran or deselected, in that order."""
         out = []
         tests = self.tests.get(unit, {})
         for test_id in self.test_order.get(unit, []):
@@ -1038,7 +1038,7 @@ def _restart_watch():
 
 
 def _on_py_start(code, offset):
-    """[ADR 0080] A function started: its file, once a test or a shared setup, is touched. A
+    """[ADR 0083] A function started: its file, once a test or a shared setup, is touched. A
     module's top-level code or a class body (not optimized code) is no function."""
     obs = OBSERVER
     try:
@@ -1057,7 +1057,7 @@ _ORIG_USE_TOOL_ID = None
 
 
 def _other_tool():
-    """[ADR 0080] The name of a tool other than hushrun's that holds a sys.monitoring tool id (a
+    """[ADR 0083] The name of a tool other than hushrun's that holds a sys.monitoring tool id (a
     debugger, coverage.py's sysmon core, a profiler, a repository's own), or None."""
     monitoring = getattr(sys, "monitoring", None)
     if monitoring is None:
@@ -1075,7 +1075,7 @@ def _other_tool():
 
 
 def _use_tool_id(tool_id, name):
-    """[ADR 0080] sys.monitoring.use_tool_id, which another tool calls: hushrun gives way first, and
+    """[ADR 0083] sys.monitoring.use_tool_id, which another tool calls: hushrun gives way first, and
     watches no more in this process, so that the tool gets its id and its events stay its own."""
     obs = OBSERVER
     if WATCH_TOOL is not None and obs is not None:
@@ -1084,7 +1084,7 @@ def _use_tool_id(tool_id, name):
 
 
 def _start_watching(observer):
-    """[ADR 0080] Watches each test's functions with sys.monitoring, Python 3.12 or later, while no
+    """[ADR 0083] Watches each test's functions with sys.monitoring, Python 3.12 or later, while no
     other tool uses it: why not, or None."""
     global WATCH_TOOL, _ORIG_USE_TOOL_ID
     monitoring = getattr(sys, "monitoring", None)
@@ -1136,7 +1136,7 @@ def _shared_finishing(obs, step):
 
 
 def _wrap_fixture_finish():
-    """[ADR 0077] A fixture of a wider scope than one test ends where pytest says, which for a
+    """[ADR 0080] A fixture of a wider scope than one test ends where pytest says, which for a
     parametrized one switching its value is inside the next test's setup: what isn't followed
     while it ends is the test file's, as a teardown that may end one is, never that test's."""
     try:
@@ -1184,7 +1184,7 @@ def _install():
     python_files = run.get("pythonFiles")
     if isinstance(python_files, list) and all(isinstance(p, str) for p in python_files):
         observer.python_files = list(python_files)
-    # [ADR 0077] Tests one by one, and the tests the plan lets this run deselect.
+    # [ADR 0080] Tests one by one, and the tests the plan lets this run deselect.
     observer.by_test = run.get("unit") == "test"
     wants_watch = observer.by_test and run.get("reads") == "test"
     reuse_tests = run.get("reuseTests") or {}
@@ -1235,7 +1235,7 @@ def _unit_of(node):
 
 
 def _test_id(nodeid):
-    """[ADR 0077] A test's id: its node id after its file's path and `::`; None when it has none."""
+    """[ADR 0080] A test's id: its node id after its file's path and `::`; None when it has none."""
     if not isinstance(nodeid, str) or "::" not in nodeid:
         return None
     return nodeid.split("::", 1)[1] or None
@@ -1348,7 +1348,7 @@ def _protocol_start(obs, unit, test_id, fixtures):
 
 
 def _served(obs, unit, test_id, fixtures):
-    """[ADR 0080] The fixtures a test was served, as its request has them once it ran: those it
+    """[ADR 0083] The fixtures a test was served, as its request has them once it ran: those it
     requested and those it asked for at run time (`request.getfixturevalue`)."""
     window = obs.test_window.get((unit, test_id))
     if window is not None and fixtures:
@@ -1405,7 +1405,7 @@ def _modifyitems(obs, config, items):
             if test_id is not None:
                 tests_gone.append((unit, test_id))
         elif unit is not None and test_id is not None and test_id in obs.reuse_tests.get(unit, ()):
-            # [ADR 0077] A test the plan lists one by one: its file runs, without it.
+            # [ADR 0080] A test the plan lists one by one: its file runs, without it.
             gone.append(item)
             tests_gone.append((unit, test_id))
         else:
@@ -1524,8 +1524,8 @@ def pytest_runtest_protocol(item, nextitem):
 
 
 def _shared_setup(obs, fixturedef, step):
-    """[ADR 0077] A fixture of a wider scope than one test sets up: what happens meanwhile serves
-    every test that requests it, and is the test file's. [ADR 0080] What it runs and opens is a
+    """[ADR 0080] A fixture of a wider scope than one test sets up: what happens meanwhile serves
+    every test that requests it, and is the test file's. [ADR 0083] What it runs and opens is a
     shared setup's."""
     if getattr(fixturedef, "scope", "function") == "function":
         return
@@ -1547,7 +1547,7 @@ def _shared_setup(obs, fixturedef, step):
 
 
 def _shared_finalized(obs, fixturedef):
-    """[ADR 0080] pytest no longer keeps a shared fixture's value: tests after this don't read it."""
+    """[ADR 0083] pytest no longer keeps a shared fixture's value: tests after this don't read it."""
     if not obs.watching or getattr(fixturedef, "scope", "function") == "function":
         return
     for setup in reversed(obs.setups):
@@ -1570,7 +1570,7 @@ def pytest_fixture_setup(fixturedef, request):
 
 
 def _teardown_shares(obs, item, nextitem):
-    """[ADR 0077] A teardown that may end fixtures of a wider scope: the last test of its file or
+    """[ADR 0080] A teardown that may end fixtures of a wider scope: the last test of its file or
     class, or of the session. What happens meanwhile is the test file's."""
     obs.shared_teardown = nextitem is None or getattr(nextitem, "parent", None) is not \
         getattr(item, "parent", None)

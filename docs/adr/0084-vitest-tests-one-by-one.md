@@ -1,12 +1,12 @@
-# 0081. Vitest's tests, one by one
+# 0084. Vitest's tests, one by one
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-43, C-35; relies on C-32, C-39, ADR 0071, 0077, RFC 0004
+- **Rules:** C-43, C-35; relies on C-32, C-39, ADR 0071, 0080, RFC 0004
 
 ## Context
 
-ADR 0077 made a single test a unit beside its test file, with pytest as the adapter that knows
+ADR 0080 made a single test a unit beside its test file, with pytest as the adapter that knows
 tests. RFC 0004 §4.2 names Vitest next: its id is its suites' names and its own, it is left out in
 the worker after collection, and with `reads: test` it is watched through V8's precise coverage.
 This decision is that adapter's half: the setup file and plugin of ADR 0071, extended. It was built
@@ -164,7 +164,7 @@ no function of the way. Each stands under audit runs, as RFC 0004 §3.2 has it.
 Each test the file skips (`test.skip`, `describe.skip`, `test.todo`, `test.skipIf`) and each that
 skipped itself (`ctx.skip()`) is told `skipped`, and the main process's file counts each test file's
 skipped tests (`skipped`), so that in a run whose COMMAND failed none of them, and no file with one,
-records a pass (ADR 0077 Amendment 2). The plugin names the start of Vitest that claimed the run
+records a pass (ADR 0080 Amendment 2). The plugin names the start of Vitest that claimed the run
 (`start`, in its file and, through `HUSHRUN_VITEST_START`, in each worker's); only that start writes,
 so a second Vitest in one COMMAND adds nothing. Its own merge keeps C-32's rules: a test file ran
 whole only when it did in every project that ran it, and a test finished only where every worker

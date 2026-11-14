@@ -1,4 +1,4 @@
-//! \[ADR 0084\] The Gradle adapter, observed (C-30, C-32, C-46): for Java, Kotlin and Android's
+//! \[ADR 0087\] The Gradle adapter, observed (C-30, C-32, C-46): for Java, Kotlin and Android's
 //! local unit tests, a unit is a test class, named by its source file, and a test is one of its
 //! methods. What a test class read is every source file below the directory of its project and of
 //! each project its test classpath is built from.
@@ -167,7 +167,7 @@ pub fn unloadable(recognized: &Recognized, cwd: &Path) -> Option<String> {
     ))
 }
 
-/// \[ADR 0084\] What `hushrun init` proposes, in its "Change by hand" list, for a repository at
+/// \[ADR 0087\] What `hushrun init` proposes, in its "Change by hand" list, for a repository at
 /// `root` with a Gradle build, when `checks` look at their test files: the one line in the
 /// settings file that loads hushrun's adapter. `None` when there is no Gradle build at the root,
 /// or the line is there.
@@ -353,7 +353,7 @@ fn is_class_suite(name: &str, class: &str) -> bool {
     name == class || name == simple || name == inner
 }
 
-/// \[ADR 0084\] A test's id: `<its class as Gradle names it>.<its method>`, every invocation of a
+/// \[ADR 0087\] A test's id: `<its class as Gradle names it>.<its method>`, every invocation of a
 /// method one test. The method is Gradle's name, or for an invocation under a method's own suite of
 /// the same class (a parametrized, repeated or factory method, a Spock unrolled feature), the
 /// topmost such suite's; then `(args)`, `[n]` and `[n](x)` go. `None` without a class.
@@ -935,7 +935,7 @@ fn coordinates_of(path: &str) -> Option<String> {
     })
 }
 
-/// \[ADR 0084\] One sentence, for `hushrun why`, in place of every `local-maven-repository` entry:
+/// \[ADR 0087\] One sentence, for `hushrun why`, in place of every `local-maven-repository` entry:
 /// the jars, at most three named and how many more, and what a person can do.
 fn one_local_repository_reason(not_followed: BTreeSet<NotFollowed>) -> BTreeSet<NotFollowed> {
     let (local, mut out): (BTreeSet<NotFollowed>, BTreeSet<NotFollowed>) = not_followed
@@ -958,7 +958,7 @@ fn one_local_repository_reason(not_followed: BTreeSet<NotFollowed>) -> BTreeSet<
     out
 }
 
-/// \[C-30, ADR 0084\] The sources: every file of a JVM kind below one of `dirs`, the directories
+/// \[C-30, ADR 0087\] The sources: every file of a JVM kind below one of `dirs`, the directories
 /// test classes read, but below build logic: a `buildSrc`, or a directory with a settings file of
 /// its own (a build it includes for its plugins), between that directory and the file.
 pub fn sources_below(tree: &Tree, dirs: &BTreeSet<String>) -> BTreeSet<String> {
@@ -1067,7 +1067,7 @@ fn known(
     (files, unnamed, dirs)
 }
 
-/// \[ADR 0084\] The Gradle adapter for a COMMAND that starts Gradle, whose settings file loads it
+/// \[ADR 0087\] The Gradle adapter for a COMMAND that starts Gradle, whose settings file loads it
 /// (C-46); `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     let recognized = match recognize(command)? {

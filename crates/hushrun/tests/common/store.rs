@@ -82,7 +82,7 @@ pub fn map(cache: &Path) -> Value {
             .unwrap()
             .push(json!(dir));
     }
-    // \[ADR 0077\] Each test of a test file, by id, with its last state, when it has any.
+    // \[ADR 0080\] Each test of a test file, by id, with its last state, when it has any.
     let mut tests = conn
         .prepare(
             "SELECT p.path, t.test_id, t.state FROM test t JOIN unit u ON u.id = t.unit_ref

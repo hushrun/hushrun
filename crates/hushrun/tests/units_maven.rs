@@ -1,4 +1,4 @@
-//! \[ADR 0085\] Test classes with Maven (C-47): a unit is a test class of a reactor's module, what
+//! \[ADR 0088\] Test classes with Maven (C-47): a unit is a test class of a reactor's module, what
 //! it read is every source below the roots of its module and of the modules it depends on, as
 //! Maven's own model says, and reuse never misses a failure.
 //!

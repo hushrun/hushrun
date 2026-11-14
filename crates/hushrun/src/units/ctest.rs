@@ -1,4 +1,4 @@
-//! \[ADR 0087\] The CTest adapter, compiler-given (C-30, C-32, C-49): for C and C++ projects built
+//! \[ADR 0090\] The CTest adapter, compiler-given (C-30, C-32, C-49): for C and C++ projects built
 //! with CMake, a unit is a test program, the program a CTest test starts, and a test is one CTest
 //! test. What a test program read is what its build directory says it is built from.
 //!
@@ -69,7 +69,7 @@ pub struct Recognized {
     dir: OnceLock<PathBuf>,
 }
 
-/// \[ADR 0087\] The CTest adapter for a COMMAND that starts `ctest` by name (C-49): `ctest …`
+/// \[ADR 0090\] The CTest adapter for a COMMAND that starts `ctest` by name (C-49): `ctest …`
 /// itself, or a wrapper whose text starts `ctest` and no other runner
 /// ([`command::wrapper_starts`]); never a Makefile CMake wrote. `Some(Err)` for `ctest` started by its path and for CMake's own `test` targets,
 /// which bypass `PATH`. `None` for any other COMMAND.
@@ -124,7 +124,7 @@ fn wrapped(command: &[String], cwd: &Path) -> Option<Result<Option<Vec<String>>,
     if command::wrapper_starts(command, cwd, command::Runner::Ctest) {
         return Some(Ok(None));
     }
-    // \[ADR 0087, amended\] One whose text starts ctest by its path goes round hushrun's ctest.
+    // \[ADR 0090, amended\] One whose text starts ctest by its path goes round hushrun's ctest.
     command::wrapper_starts_by_path(command, cwd, command::Runner::Ctest).map(|path| {
         Err(format!(
             "COMMAND starts ctest by its path ({path}), which hushrun's ctest on PATH can't stand in for: start it as `ctest`"
@@ -390,7 +390,7 @@ impl Adapter for Recognized {
         }
         let all_sources = every_source(at.tree);
         let merged = facts::merged(at.files, ADAPTER);
-        // \[ADR 0087\] An in-source build: said once in the run. When every program is of one,
+        // \[ADR 0090\] An in-source build: said once in the run. When every program is of one,
         // nothing of it can be observed, and the run says so; else each such program isn't.
         let in_source = |m: &facts::Merged| {
             m.not_followed
@@ -567,7 +567,7 @@ mod tests {
         ));
         assert!(recognize(&sh("ctest && pytest"), cwd).is_none());
         assert!(recognize(&sh("cmake --build build"), cwd).is_none());
-        // \[ADR 0087, amended\] A shell line that starts ctest by its path goes round hushrun's
+        // \[ADR 0090, amended\] A shell line that starts ctest by its path goes round hushrun's
         // ctest, and says so in the words COMMAND would.
         assert_eq!(
             recognize(&sh("/opt/cmake/bin/ctest --test-dir build -j3"), cwd)

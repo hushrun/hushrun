@@ -1,4 +1,4 @@
-//! \[ADR 0085\] The Maven adapter (C-47): a unit is a test class of a reactor's module, run by
+//! \[ADR 0088\] The Maven adapter (C-47): a unit is a test class of a reactor's module, run by
 //! Surefire or Failsafe, for Java, Kotlin, Groovy and Scala, and what it read is every source file
 //! below the source roots of its module and of each module of the reactor it depends on, as
 //! Maven's own model says.
@@ -112,7 +112,7 @@ pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
     }))
 }
 
-/// \[ADR 0085\] The Maven adapter for `mvn …` and `./mvnw …` (C-47); `None` for any other COMMAND.
+/// \[ADR 0088\] The Maven adapter for `mvn …` and `./mvnw …` (C-47); `None` for any other COMMAND.
 pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
     Some(recognize(command)?.map(|r| Box::new(r) as Box<dyn Adapter>))
 }

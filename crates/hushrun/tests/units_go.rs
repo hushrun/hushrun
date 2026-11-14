@@ -1098,7 +1098,7 @@ fn with_tests_off_go_test_gets_nothing_new() {
     assert!(!r.cache.join("units").exists());
 }
 
-// \[ADR 0083\] Tests one by one (C-45): a Go test is a top-level `Test…`, `Example…` or `Fuzz…`
+// \[ADR 0086\] Tests one by one (C-45): a Go test is a top-level `Test…`, `Example…` or `Fuzz…`
 // function of a package, its id its name.
 
 /// A Go test's body that writes its name to `$RAN_LOG`, outside the repository, so that what ran
@@ -1176,7 +1176,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
         "",
     ));
     // With -v, so that Go names each test's outcome: without it, a package that failed keeps no
-    // pass of its other tests (ADR 0083 Amendment 3). The first run, with TestFlip failing: every
+    // pass of its other tests (ADR 0086 Amendment 3). The first run, with TestFlip failing: every
     // test runs; the package didn't pass, so each test is recorded on its own.
     let (first, ran) = r.go_tests(&["-v"], &[("FAIL", "1")]);
     assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);

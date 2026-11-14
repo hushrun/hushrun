@@ -1,9 +1,9 @@
-# 0085. Maven's test classes, and two jars built here
+# 0088. Maven's test classes, and two jars built here
 
 - **Status:** accepted
 - **Date:** 2026-11-12
 - **Rules:** C-47; changes C-32 and C-39; relies on C-30, C-31, C-33, C-34, C-38, ADR 0068, 0069,
-  0070, 0071, 0075, 0077, RFC 0004
+  0070, 0071, 0075, 0080, RFC 0004
 
 ## Context
 
@@ -103,7 +103,7 @@ have.
 Item 5 let a skipped test pass in a class where nothing failed. A reviewer showed TestNG, after
 another class's `@BeforeSuite` failed, skipping every test of the suite: the reports held the
 failure under that class only, the skipped classes were recorded as passed, and the next run left
-out a test that fails. The decision: each skipped test, and its class, is told `skipped` (ADR 0077,
+out a test that fails. The decision: each skipped test, and its class, is told `skipped` (ADR 0080,
 Amendment 2), a class Surefire's report says was skipped whole too, so a run whose COMMAND failed
 records nothing of them; and a skipped test finishes only when nothing of the run failed, else its
 class didn't run whole either.
@@ -126,12 +126,12 @@ TestNG's interceptor matches the class a method runs as a test of, its instance'
 inherited from a concrete base class is a test of each subclass, which the base class's entry no
 longer leaves out, and a subclass's entry does. The adapter holds the events to the list of each
 module: a test left out that no entry names exactly, or an entry neither left out nor seen run in
-a class that ran, makes the run start COMMAND once more with nothing left out (ADR 0077,
+a class that ran, makes the run start COMMAND once more with nothing left out (ADR 0080,
 Amendment 4).
 
 ## Amendment 3: starts, and forks that die (2026-11-12)
 
-The extension's file names its start, `start` (ADR 0077, Amendment 1): every fork and module of one
+The extension's file names its start, `start` (ADR 0080, Amendment 1): every fork and module of one
 Maven build is one start. Two files, a script that starts Maven twice, still record nothing, said
 once. Within the start a test finished only when every JVM that reported it finished it, and a
 class or test one of them left open is open. A rerun that passed after a failure
@@ -141,11 +141,11 @@ it open: the class records nothing, which a test checks.
 
 Known, and left as it is: Maven names a test `<method>` under a unit that is its class, and Gradle
 `<class>.<method>` under its source file, so the same test has another id under each adapter (ADR
-0084, Amendment 5).
+0087, Amendment 5).
 
 ## Amendment 4: a JVM file no module owns is the rest (2026-11-12)
 
-The rule Gradle's adapter gained (ADR 0084, Amendment 6) holds here already, and tests now show
+The rule Gradle's adapter gained (ADR 0087, Amendment 6) holds here already, and tests now show
 it: a module is read as its source roots, from Maven's model, so a file of a JVM kind in none of
 them (a module the reactor leaves out, one in a profile that isn't active, a tool beside a module's
 sources) is below no directory a unit read, and is the rest; a change to one runs everything. Only
@@ -230,7 +230,7 @@ each of its tests), so it keeps no pass of its own, runs every time, and a plan 
 its failures are its own, so a failed run keeps the other classes' passes. A case run by a suite
 whose class is a test file of the module (`@SuiteClasses`) stays that file's. A test or failure
 for which neither says a class still makes the run's passes hold only when COMMAND passed, and the
-adapter says so (`notKept`, for `hushrun why`; ADR 0077's Amendment 16 has the run say it once).
+adapter says so (`notKept`, for `hushrun why`; ADR 0080's Amendment 16 has the run say it once).
 
 ## Amendment 10: what a file is doesn't depend on the executions a run reached (2026-11-13)
 

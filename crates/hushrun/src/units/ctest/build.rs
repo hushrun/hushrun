@@ -1,4 +1,4 @@
-//! \[ADR 0087\] What a test program is built from, as its build directory records it, and whether
+//! \[ADR 0090\] What a test program is built from, as its build directory records it, and whether
 //! it is up to date.
 //!
 //! - **Ninja:** the build graph, walked from the program with `ninja -t query` (Ninja 1.10 has no
@@ -63,7 +63,7 @@ pub struct Built {
     pub starts: BTreeSet<String>,
 }
 
-/// \[ADR 0087\] Why a test program isn't known to be up to date.
+/// \[ADR 0090\] Why a test program isn't known to be up to date.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stale {
     /// It is older than something it is built from: the build would make it again, and its tests
@@ -214,10 +214,10 @@ impl<'a> Walker<'a> {
             _ => None,
         };
         let mut built = read.unwrap_or_else(|| self.every_source(program));
-        // \[ADR 0087\] A tree older than its own configuration: every program of it is old.
+        // \[ADR 0090\] A tree older than its own configuration: every program of it is old.
         let tree = self.tree(build);
         built.stale = Stale::either(tree, built.stale.take());
-        // \[ADR 0087\] A program or module it may start: what that is built from, it reads too.
+        // \[ADR 0090\] A program or module it may start: what that is built from, it reads too.
         self.walking.insert(program.to_path_buf());
         for start in std::mem::take(&mut built.starts) {
             let path = build.join(&start);
@@ -645,7 +645,7 @@ impl<'a> Walker<'a> {
             }
             out.reads.extend(configure);
         }
-        // \[ADR 0087\] What it waits for, through phony edges, that is a program or a module,
+        // \[ADR 0090\] What it waits for, through phony edges, that is a program or a module,
         // and what its objects' compile commands name of those.
         let extras = self.extras.get(build).cloned().unwrap_or_default();
         let mut phony_seen: BTreeSet<String> = BTreeSet::new();
@@ -821,7 +821,7 @@ impl<'a> Walker<'a> {
             let configure = configure_inputs_make(build, self);
             out.reads.extend(configure);
         }
-        // \[ADR 0087\] The targets its own waits for (`CMakeFiles/Makefile2`) that link a
+        // \[ADR 0090\] The targets its own waits for (`CMakeFiles/Makefile2`) that link a
         // program or a module, and those its compile flags name.
         let own_dir = graph
             .get(target)
@@ -982,7 +982,7 @@ fn deps(
     Some(out)
 }
 
-/// \[ADR 0087\] The outputs whose command line changed since Ninja's log recorded them, of what
+/// \[ADR 0090\] The outputs whose command line changed since Ninja's log recorded them, of what
 /// building `target` would do, as `ninja -n -d explain` says (`command line changed for <output>`):
 /// `None` when it doesn't answer. Nothing is built: it is a dry run.
 fn explained(
@@ -1081,7 +1081,7 @@ pub fn make_graph(build: &Path) -> BTreeMap<String, Vec<String>> {
     graph
 }
 
-/// \[ADR 0087\] The outputs of `build.ninja`'s edges that set a `depfile` of their own: a custom
+/// \[ADR 0090\] The outputs of `build.ninja`'s edges that set a `depfile` of their own: a custom
 /// command's `DEPFILE`, whose inputs are in Ninja's record of the output (`deps = gcc`).
 fn ninja_depfiled(build: &Path) -> BTreeSet<String> {
     let text = std::fs::read(build.join("build.ninja")).unwrap_or_default();
@@ -1135,7 +1135,7 @@ fn ninja_outputs(rest: &str) -> Vec<String> {
         .collect()
 }
 
-/// \[ADR 0087\] A Makefile build's custom commands with a `DEPFILE`: each output, to its depfile,
+/// \[ADR 0090\] A Makefile build's custom commands with a `DEPFILE`: each output, to its depfile,
 /// from every `CMakeFiles/<target>.dir/DependInfo.cmake`'s `CMAKE_DEPENDS_DEPENDENCY_FILES`
 /// (`"" "<output>" "custom" "<depfile>"`).
 fn make_custom_depfiles(build: &Path) -> BTreeMap<String, String> {
@@ -1359,7 +1359,7 @@ enum Newer {
     SameSecond,
 }
 
-/// \[ADR 0087\] Whether `a` is later than `b`, strictly, at the coarser of the two times' own
+/// \[ADR 0090\] Whether `a` is later than `b`, strictly, at the coarser of the two times' own
 /// resolutions, read from the times themselves: no fraction of a second and an even second is
 /// FAT's two seconds, no fraction one second, whole hundredths exFAT's, whole microseconds a
 /// microsecond. Two files written in the same tick of the coarser clock are never one newer than
@@ -1387,7 +1387,7 @@ fn newer(a: SystemTime, b: SystemTime) -> Newer {
     }
 }
 
-/// \[ADR 0087\] What one build says of the files it makes, for [`Walker::judge`].
+/// \[ADR 0090\] What one build says of the files it makes, for [`Walker::judge`].
 struct Made<'g> {
     /// Each made file's inputs as its rule names them (Ninja's edge inputs, a Makefile rule's
     /// prerequisites), from the top of the build directory or absolute.
@@ -1411,7 +1411,7 @@ struct Made<'g> {
 /// through, when it came through one (the nearest to that something).
 type Tracked = BTreeMap<String, Option<String>>;
 
-/// \[ADR 0087\] What tells whether the command that would make a file now is the one that made
+/// \[ADR 0090\] What tells whether the command that would make a file now is the one that made
 /// it: a flag or a link option configured since, and not built.
 enum Commands {
     /// Makefiles: each made file's file that holds its command (an object's target's
@@ -1434,7 +1434,7 @@ impl Walker<'_> {
             .or_insert_with(|| std::fs::metadata(path).and_then(|m| m.modified()).ok())
     }
 
-    /// \[ADR 0087\] Whether the program `target` of `build` ran old code, the one rule for both
+    /// \[ADR 0090\] Whether the program `target` of `build` ran old code, the one rule for both
     /// generators: it is old when a file of the repository one of its objects was built from is
     /// newer than that object, or one of its objects (or a library it links) is newer than it.
     /// A file a rule writes is never the newer side itself: it stands for the repository's files
@@ -1600,7 +1600,7 @@ impl Walker<'_> {
                 }
                 Place::Build(rel) if (g.made)(&rel) => {
                     let more = self.tracked(build, &rel, g, memo);
-                    // \[ADR 0087\] Ninja's log says when the rule that writes it last ran (for a
+                    // \[ADR 0090\] Ninja's log says when the rule that writes it last ran (for a
                     // rule that leaves its output as it was, the time of its newest input then):
                     // run after every file it was made from, it is current whatever its own
                     // time, and nothing it was made from makes anything old on its account.
@@ -1632,7 +1632,7 @@ impl Walker<'_> {
         }
     }
 
-    /// \[ADR 0087\] When Ninja's log says each output of `build` was last made: its recorded
+    /// \[ADR 0090\] When Ninja's log says each output of `build` was last made: its recorded
     /// time (for a rule that leaves its output as it was, its newest input's then), by the
     /// output's path from the top of the build directory. Empty when there is no log.
     fn ninja_log(&mut self, build: &Path) -> BTreeMap<String, SystemTime> {
@@ -1667,7 +1667,7 @@ impl Walker<'_> {
         out
     }
 
-    /// \[ADR 0087\] Whether the build tree in `build` is older than its own configuration: a file
+    /// \[ADR 0090\] Whether the build tree in `build` is older than its own configuration: a file
     /// of the repository configuring read (what the build re-runs CMake for: the regeneration
     /// rule's inputs in `build.ninja`, `CMAKE_MAKEFILE_DEPENDS` on Makefiles) newer than its last
     /// configure (`CMakeFiles/cmake.check_cache`, which every configure writes again). Then every

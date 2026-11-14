@@ -915,7 +915,7 @@ def hint_parse(content):
         units.append((own, lst(HINT_MOST_TOKENS), lst(HINT_MOST_TOKENS)))
     lists, sealed = [], None
     if v1:
-        # [ADR 0079] What follows the units is the tests' part: damaged, it is left out whole and
+        # [ADR 0082] What follows the units is the tests' part: damaged, it is left out whole and
         # the units stand, a hint with no tests. Its tokens may then be named by no index.
         try:
             for _ in range(count(HINT_MOST_TESTS, 8)):

@@ -10,7 +10,7 @@
 //   listed, for code that calls them after this file ran.
 // - What it can't follow: a child process, a worker thread or a native addon.
 //
-// [ADR 0081] With tests one by one (`unit: test`, which the plugin hands over in `vitest-tests`
+// [ADR 0084] With tests one by one (`unit: test`, which the plugin hands over in `vitest-tests`
 // once Vitest's own list of test files is the one hushrun planned from), it also:
 //
 // - names each test by its suites' names and its own, joined with ` > `, ` [2]`, ` [3]` after a
@@ -37,7 +37,7 @@ import { afterAll, expect, TestRunner } from 'vitest';
 const SCHEMA = 'hushrun.unit-facts/v0';
 const SCHEMA_V1 = 'hushrun.unit-facts/v1';
 const STATE = Symbol.for('hushrun.vitest.worker');
-// [ADR 0081] Where the plugin hands over tests one by one (no `.json`: it isn't a facts file).
+// [ADR 0084] Where the plugin hands over tests one by one (no `.json`: it isn't a facts file).
 const TESTS = 'vitest-tests';
 // Vitest's module evaluator wraps each module in `'use strict';async (…)=>{{`: the function at
 // this offset, like the script's own at 0, is the module's top-level code.
@@ -103,7 +103,7 @@ function install() {
     unattributed: [],
     errors: [],
     written: 0,
-    // [ADR 0081] The test file being run, when tests are told one by one.
+    // [ADR 0084] The test file being run, when tests are told one by one.
     file: null,
   };
   const note = (what, fn) => {
@@ -113,7 +113,7 @@ function install() {
       state.errors.push(`${what}: ${message(err)}`.slice(0, 500));
     }
   };
-  // [ADR 0081] What is happening now, for the test, suite or loading it is part of.
+  // [ADR 0084] What is happening now, for the test, suite or loading it is part of.
   const bucket = () => (state.file && state.file.current) || null;
   const read = (value) => note('read', () => {
     const p = pathOf(value);
@@ -123,7 +123,7 @@ function install() {
       if (state.file && state.file.watch) keptBy(state.file, p);
     }
   });
-  // [ADR 0081] A path `fs.realpath.native` resolves is a read of the test file alone, never of a
+  // [ADR 0084] A path `fs.realpath.native` resolves is a read of the test file alone, never of a
   // test, a suite or loading: Vite's resolver resolves through it each module it loads, which with
   // `reads: test` would make every test read every module the file imports.
   const resolved = (value) => note('read', () => {
@@ -246,7 +246,7 @@ function writeFacts(value) {
 
 afterAll(() => {
   if (!dir || typeof file !== 'string') return;
-  // [ADR 0081] Tests one by one are written when the run's files end, after every hook.
+  // [ADR 0084] Tests one by one are written when the run's files end, after every hook.
   if (state.file && state.file.live) return;
   try {
     writeFacts({ schema: SCHEMA, adapter: 'vitest-worker', ...startOf(), units: [wholeFile()], errors: state.errors });
@@ -256,7 +256,7 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// [ADR 0081] Tests one by one.
+// [ADR 0084] Tests one by one.
 
 function readTests() {
   if (!dir) return null;
@@ -636,7 +636,7 @@ function testsOf(task, out = []) {
   return out;
 }
 
-// [ADR 0081] Each test's id: its suites' names and its own, joined with ` > `; the k-th test of
+// [ADR 0084] Each test's id: its suites' names and its own, joined with ` > `; the k-th test of
 // the file with a name it already had gets ` [k]`. Names that join to one id from different
 // suites, or an id that is still another's, make those tests ambiguous: never left out, never told.
 function name(F) {
@@ -864,7 +864,7 @@ function testsFacts(F) {
     unit.everyTest = many(F.every);
     unit.shared = shared;
     facts.imports = imports(at, many);
-    // [ADR 0081, amended] What each module re-exports from, as the plugin read it: a test that
+    // [ADR 0084, amended] What each module re-exports from, as the plugin read it: a test that
     // reads a barrel reads what it re-exports, to the end.
     facts.reexports = {};
     for (const [id, targets] of Object.entries(globalThis.__hushrun_vitest_reexports || {})) {

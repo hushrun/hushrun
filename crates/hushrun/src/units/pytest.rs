@@ -290,7 +290,7 @@ fn fnmatch(pattern: &str, name: &str) -> bool {
     go(&p, &n)
 }
 
-/// \[ADR 0068, 0077\] The pytest adapter, which any COMMAND no other adapter takes gets: it does
+/// \[ADR 0068, 0080\] The pytest adapter, which any COMMAND no other adapter takes gets: it does
 /// nothing where pytest never starts.
 #[derive(Debug, Clone, Copy)]
 pub struct Pytest;
@@ -322,7 +322,7 @@ impl Adapter for Pytest {
     }
 
     fn tests(&self) -> KnowsTests {
-        // \[ADR 0080\] It watches each test on Python 3.12 or later, and below says why it
+        // \[ADR 0083\] It watches each test on Python 3.12 or later, and below says why it
         // doesn't (`settings.watch`), each test then reading its test file's list.
         KnowsTests {
             unit: true,

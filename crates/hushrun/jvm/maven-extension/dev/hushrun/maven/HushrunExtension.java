@@ -30,7 +30,7 @@ import org.codehaus.plexus.util.xml.Xpp3Dom;
 
 /**
  * hushrun's Maven core extension, loaded with {@code -Dmaven.ext.class.path=<this jar>} when the
- * variable {@code HUSHRUN_UNITS} names hushrun's directory for the run (ADR 0085). After Maven has
+ * variable {@code HUSHRUN_UNITS} names hushrun's directory for the run (ADR 0088). After Maven has
  * read the reactor, before any plugin runs, it:
  *
  * <ul>

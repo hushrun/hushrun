@@ -1,4 +1,4 @@
-//! \[ADR 0086\] The `swift test` adapter (C-48), for SwiftPM's tests, XCTest and Swift Testing: a
+//! \[ADR 0089\] The `swift test` adapter (C-48), for SwiftPM's tests, XCTest and Swift Testing: a
 //! unit is a test target, named by its directory from the repository root, and a test is its
 //! XCTest `Class/method` or its Swift Testing `Suite/func(labels:)`, as `swift test list` prints
 //! them after the target.
@@ -117,7 +117,7 @@ impl Swift {
     }
 }
 
-/// \[ADR 0086\] The adapter for `swift test …`, `swift-test …`, or, in a directory that holds a
+/// \[ADR 0089\] The adapter for `swift test …`, `swift-test …`, or, in a directory that holds a
 /// `Package.swift`, a wrapper whose text starts `swift test` or `swift-test` and no other runner
 /// ([`command::wrapper_starts`]); `None` for any other COMMAND.
 pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
@@ -170,7 +170,7 @@ pub fn recognize(command: &[String], cwd: &Path) -> Option<Result<Swift, String>
         }
         return Some(Ok(Swift::new(real(cwd))));
     }
-    // \[ADR 0086, amended\] One whose text starts swift by its path goes round hushrun's swift.
+    // \[ADR 0089, amended\] One whose text starts swift by its path goes round hushrun's swift.
     if cwd.join("Package.swift").is_file()
         && command::wrapper_starts_by_path(command, cwd, command::Runner::SwiftTest).is_some()
     {
@@ -1626,7 +1626,7 @@ impl Adapter for Swift {
     }
 }
 
-/// \[ADR 0086\] hushrun's `swift` (and `swift-test`) on COMMAND's `PATH`.
+/// \[ADR 0089\] hushrun's `swift` (and `swift-test`) on COMMAND's `PATH`.
 #[derive(Debug)]
 pub struct SwiftProgram(&'static str);
 
@@ -2325,7 +2325,7 @@ mod tests {
         assert!(recognize(&words("make test"), cwd).is_none());
         std::fs::write(cwd.join("Package.swift"), "// swift-tools-version: 6.0\n").unwrap();
         assert!(recognize(&words("make test"), cwd).unwrap().is_ok());
-        // \[ADR 0086, amended\] A shell line that starts swift by its path says so, as COMMAND
+        // \[ADR 0089, amended\] A shell line that starts swift by its path says so, as COMMAND
         // would.
         let sh = |line: &str| vec!["sh".to_string(), "-c".to_string(), line.to_string()];
         assert_eq!(
@@ -2895,7 +2895,7 @@ mod tests {
                 "Shop/Sources/CHelpers/helpers.c",
                 "Shop/Sources/CHelpers/include/helpers.h",
                 "Shop/Sources/Core/Core.swift",
-                // Executables any test target may start (ADR 0086 Amendment 2).
+                // Executables any test target may start (ADR 0089 Amendment 2).
                 "Shop/Sources/gen-tool/main.swift",
                 "Shop/Sources/shop-cli/main.swift",
                 "Shop/Tests/CoreTests/CoreTests.swift",

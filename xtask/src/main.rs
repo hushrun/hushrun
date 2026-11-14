@@ -37,7 +37,7 @@ commands:
       recipes/gitlab/install-hushrun.sh.
   jars [--check]
       Build the JVM jars hushrun embeds from their Java sources with javac 21.0.11, against API
-      jars fetched from Maven Central and checked by SHA-256 (ADR 0085). --check fails when a
+      jars fetched from Maven Central and checked by SHA-256 (ADR 0088). --check fails when a
       checked-in jar isn't what its sources build.
   notices [--check]
       Write THIRD-PARTY-NOTICES.md: the crates the release binaries are built with, for

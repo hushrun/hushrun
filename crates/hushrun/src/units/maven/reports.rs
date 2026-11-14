@@ -1,4 +1,4 @@
-//! \[ADR 0085\] Surefire's and Failsafe's XML reports, read test by test (C-47).
+//! \[ADR 0088\] Surefire's and Failsafe's XML reports, read test by test (C-47).
 //!
 //! A report is read whole or not at all: one that doesn't parse to its end, with every element
 //! closed, holds nothing. Its counts are never read (Surefire 3.0 to 3.5 writes `tests="0"` on a

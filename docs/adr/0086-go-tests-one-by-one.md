@@ -1,12 +1,12 @@
-# 0083. `go test`'s tests one by one
+# 0086. `go test`'s tests one by one
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-45, C-35; relies on C-32, C-34, C-39, ADR 0070, 0077, RFC 0004
+- **Rules:** C-45, C-35; relies on C-32, C-34, C-39, ADR 0070, 0080, RFC 0004
 
 ## Context
 
-ADR 0070 reuses a Go package's tests as one unit. ADR 0077 adds the test as a second, finer unit
+ADR 0070 reuses a Go package's tests as one unit. ADR 0080 adds the test as a second, finer unit
 (`tests.unit: test`), with pytest as the adapter that knows tests, and leaves Go saying once that
 it reuses by package. RFC 0004 §4.4 asks Go to know tests: by name, left out by hushrun's runner
 with `-test.skip`, their outcomes read from the binary's own output, with no flag that changes
@@ -147,7 +147,7 @@ it without hushrun.
 ## Amendment 2: skips and starts (2026-11-12)
 
 A test whose own `--- SKIP` line, or a subtest's, the output holds is told `skipped`, so that in a
-run whose COMMAND failed it records no pass (ADR 0077 Amendment 2). Go prints those lines with `-v`
+run whose COMMAND failed it records no pass (ADR 0080 Amendment 2). Go prints those lines with `-v`
 and `-json` only; without them a skip can't be told from a pass, which Amendment 3 decides. Each
 runner's facts name the start
 of `go test` that started it, by that process (`start`), so that one `go test` testing several
@@ -198,7 +198,7 @@ waits on the runner; a runner that exited only at the output's end turned that f
 and the check recorded a pass (a reviewer: plain `FAIL … exit 1` against `ok … unit passed`). The
 runner that exited after 5 s before Amendment 1 turned it into `ok` too.
 
-The decision: the runner reads the binary's output as hushrun's `swift` does (ADR 0086 Amendment
+The decision: the runner reads the binary's output as hushrun's `swift` does (ADR 0089 Amendment
 3), with the one function both use: once the binary exited, until the output ends or has been quiet
 for 250 ms (at most 1 s). Output still open then: no test of the start passes (the reason as
 before), the runner writes its facts, hands the open pipe to a forwarder it starts and doesn't wait

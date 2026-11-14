@@ -1,4 +1,4 @@
-//! \[ADR 0087\] The tests a `ctest` command line runs, as `--show-only=json-v1` lists them; each
+//! \[ADR 0090\] The tests a `ctest` command line runs, as `--show-only=json-v1` lists them; each
 //! test's test program and id; which of the tests the plan lists can be left out; and how, on
 //! the command line, so that `ctest` leaves out exactly those.
 
@@ -158,7 +158,7 @@ pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
             }
         }
     }
-    // \[ADR 0087\] A relative path is from where the test runs: its WORKING_DIRECTORY, else its
+    // \[ADR 0090\] A relative path is from where the test runs: its WORKING_DIRECTORY, else its
     // own directory, which the listing doesn't give: the program's, and its build directory's.
     let mut bases: Vec<PathBuf> = listed
         .words("WORKING_DIRECTORY")
@@ -216,7 +216,7 @@ pub fn named(listed: &Listed, program: &Path, root: &Path) -> Vec<Named> {
     out
 }
 
-/// \[ADR 0087\] What a test whose program isn't built here (`cmake -E`, `sh`, a script) names,
+/// \[ADR 0090\] What a test whose program isn't built here (`cmake -E`, `sh`, a script) names,
 /// for a test it runs before: its program when that is a file of the repository (a script it
 /// runs), and what its arguments and environment name ([`named`]). A program of the system
 /// (`cmake -E`, `sh -c`, `rm`) names nothing itself.

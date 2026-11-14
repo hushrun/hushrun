@@ -1,5 +1,5 @@
 'use strict';
-// [ADR 0082] The reporter hushrun's Jest adapter adds to Jest's reporters, in the process that
+// [ADR 0085] The reporter hushrun's Jest adapter adds to Jest's reporters, in the process that
 // claimed the run (Jest's public Reporter API): when the run starts (the globalSetup window ends),
 // how each test file ended as Jest's main process saw it, and the main process's file when the run
 // ends. It decides nothing, and never throws into Jest.

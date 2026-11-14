@@ -213,7 +213,7 @@ export default function hushrun() {
     },
     async transform(code, id) {
       if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
-      // [ADR 0081, amended] The files it re-exports from (`export * from`, `export { x } from`):
+      // [ADR 0084, amended] The files it re-exports from (`export * from`, `export { x } from`):
       // Vite runs `export *` through getters of its own, so no function of a barrel runs when a
       // test reads through it, and a test's list follows these instead, to the end.
       let reexports = [];
@@ -238,7 +238,7 @@ export default function hushrun() {
   };
 }
 
-// [ADR 0081, amended] The specifiers a module re-exports from, by its syntax tree when it parses
+// [ADR 0084, amended] The specifiers a module re-exports from, by its syntax tree when it parses
 // and by its text always: a re-export read where there is none only widens a test's list.
 const REEXPORT = /export\s*(?:type\s+)?(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*(['"])([^'"]+)\1/g;
 async function reexported(context, code, id) {
@@ -362,7 +362,7 @@ async function deselect(state, vitest, sorted) {
   const refused = coverage
     ? "Vitest's coverage is on, and a partial run's coverage would read as a drop"
     : !same ? "Vitest's test files aren't the ones hushrun planned from" : null;
-  // [ADR 0081] Tests one by one, handed to the workers before any starts: the tests they may
+  // [ADR 0084] Tests one by one, handed to the workers before any starts: the tests they may
   // leave out only where test files may be, and watching each test only without Vitest's own
   // coverage, which shares V8's counters.
   if (run.unit === 'test') {
@@ -478,7 +478,7 @@ function report(state, vitest, modules, errors, reason) {
       version: String(vitest.version || ''),
       refused: state.refused,
       unhandled: state.unhandled,
-      // [ADR 0081] Why no test was watched, when `reads: test` asked and none could be.
+      // [ADR 0084] Why no test was watched, when `reads: test` asked and none could be.
       ...(state.watch ? { watch: state.watch } : {}),
     },
     notFollowed: state.whole,

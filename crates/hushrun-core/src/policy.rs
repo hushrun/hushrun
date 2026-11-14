@@ -810,7 +810,7 @@ fn validate_reports(name: &CheckName, raw: &RawReports, errors: &mut Errors) -> 
 
 /// \[ADR 0068\] A check's `tests` (C-5): a mode, short, or `{mode, unit, reads, ignore, always}`,
 /// with globs from the repository root. `None` when it is absent or `off`, or written wrongly,
-/// which `errors` says. \[ADR 0077\] `reads: test` needs `unit: test`.
+/// which `errors` says. \[ADR 0080\] `reads: test` needs `unit: test`.
 fn validate_tests(
     name: &CheckName,
     node: &Spanned<Raw>,
@@ -897,7 +897,7 @@ fn validate_tests(
                     ),
                 }
             }
-            // \[ADR 0077\] What a test read is a question only for a check whose unit is a test.
+            // \[ADR 0080\] What a test read is a question only for a check whose unit is a test.
             if tests.reads == Reads::Test && tests.unit == Unit::File {
                 let pos = keys.get("reads").map_or(node.pos, |value| value.pos);
                 errors.push(

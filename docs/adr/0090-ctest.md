@@ -1,16 +1,16 @@
-# 0087. CTest's test programs, and each CTest test
+# 0090. CTest's test programs, and each CTest test
 
 - **Status:** accepted
 - **Date:** 2026-11-12
 - **Rules:** C-49; relies on C-22, C-30, C-31, C-32, C-33, C-34, C-38, C-39, ADR 0068, 0069, 0070,
-  0077, RFC 0004
+  0080, RFC 0004
 
 ## Context
 
 RFC 0004 asks for C and C++ among the languages a check reuses test by test. CMake projects run
 their tests with CTest, which takes nothing from the environment that would let hushrun inside, and
 whose tests are programs the build makes: what a test read is what its program is built from, as
-for Rust's test binaries and Go's packages (ADR 0069, 0070). ADR 0077 gave adapters a way in through
+for Rust's test binaries and Go's packages (ADR 0069, 0070). ADR 0080 gave adapters a way in through
 `PATH`: a program of hushrun's named as the runner. This decision is CTest's adapter, the first to
 use it, for both units, as a spike proved it on CTest 3.22.1 and 4.4.5, on macOS and Linux.
 
@@ -170,7 +170,7 @@ The decision:
 
 ## Amendment 2: one start per `ctest`, and presets (2026-11-12)
 
-Decision 7 counted every `ctest` of a COMMAND as one start, and ADR 0077 Amendment 1 showed two
+Decision 7 counted every `ctest` of a COMMAND as one start, and ADR 0080 Amendment 1 showed two
 starts adding up to a program that ran whole. Decision 3 read only the command line for what a
 test preset can say too: a preset's `execution.repeat` of `until-pass` recorded a pass that came
 after a failure, its `filter.include.index` picks tests by their position, and its
@@ -194,13 +194,13 @@ The decision:
 ## Amendment 3: skips, each test's program, and COMMAND's assignments (2026-11-12)
 
 - CTest's skips (`SKIP_RETURN_CODE`, `SKIP_REGULAR_EXPRESSION`) and disabled tests are told as
-  skipped (ADR 0077 Amendment 2), and counted for a program told without its tests: in a run that
+  skipped (ADR 0080 Amendment 2), and counted for a program told without its tests: in a run that
   failed they record no pass. They used to read as passed.
 - `not built here` is each test's own: a unit whose name two programs share (one built here, one
   found on `PATH`, when the build names no configuration) used to miss it when the built one came
   first.
 - The plan's listing and walk start `ctest` and `ninja` with COMMAND's own `env NAME=value`
-  assignments (ADR 0077 Amendment 7), so that `env CTEST_CONFIGURATION_TYPE=Release ctest` lists
+  assignments (ADR 0080 Amendment 7), so that `env CTEST_CONFIGURATION_TYPE=Release ctest` lists
   what its `ctest` will.
 - The real `ctest` is the one a shell would start: an empty `PATH` entry is the current directory
   and a relative one is from it, and a link into a directory of hushrun's programs is passed over.
@@ -227,7 +227,7 @@ is how a person says a tree isn't read by any test.
 hushrun's `ctest` starts the real one with its own standard output and error, and copies neither:
 it returns when `ctest` does, with its code, and what a program a test left running prints later
 reaches the same output directly, as without hushrun. Nothing is held, unlike hushrun's `swift`,
-which copies standard output to read it (ADR 0086 Amendment 3).
+which copies standard output to read it (ADR 0089 Amendment 3).
 
 ## Amendment 6: what a second review found the walk missed (2026-11-12)
 
@@ -436,7 +436,7 @@ A wrapper whose text starts `ctest` by a path, and never by its name nor another
 what a COMMAND that does says: `test files aren't observed: COMMAND starts ctest by its path
 (/opt/cmake/bin/ctest), which hushrun's ctest on PATH can't stand in for: start it as `ctest``.
 `swift` started by its path in a wrapper's text, where a package is, says the same as COMMAND's
-(ADR 0086).
+(ADR 0089).
 
 ## Amendment 17: what the first real runs measured (2026-11-13)
 

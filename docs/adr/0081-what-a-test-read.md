@@ -1,13 +1,13 @@
-# 0078. What a test read: one function
+# 0081. What a test read: one function
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-40; amends C-12, C-22, C-32, C-36, C-37, C-39; relies on C-31, C-34, C-38, ADR 0077,
+- **Rules:** C-40; amends C-12, C-22, C-32, C-36, C-37, C-39; relies on C-31, C-34, C-38, ADR 0080,
   RFC 0004
 
 ## Context
 
-ADR 0077 made the test a unit, and took each test to have read what its test file read. RFC 0004
+ADR 0080 made the test a unit, and took each test to have read what its test file read. RFC 0004
 §3.2 adds `tests.reads: test`: each test is keyed by what it touched, so a change to a file only
 some tests read runs those tests and no others. What a test read is a derived state, and every
 reader needs the same answer: the plan that keys it, the record that keys its result, `observe`

@@ -1,8 +1,8 @@
-# 0079. Hints with tests, their ids sealed
+# 0082. Hints with tests, their ids sealed
 
 - **Status:** accepted
 - **Date:** 2026-11-12
-- **Rules:** C-41; amends C-38; relies on C-39, C-40, ADR 0075, 0077, 0078, RFC 0004
+- **Rules:** C-41; amends C-38; relies on C-39, C-40, ADR 0075, 0080, 0081, RFC 0004
 
 ## Context
 

@@ -207,7 +207,7 @@ impl Repo {
         store::map(&self.cache)
     }
 
-    /// \[ADR 0081\] The newest run result this machine recorded.
+    /// \[ADR 0084\] The newest run result this machine recorded.
     fn newest_result(&self) -> Value {
         fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -959,7 +959,7 @@ fn vitest_hazards_miss_no_failure() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// [ADR 0081] Tests one by one (C-39, C-43).
+// [ADR 0084] Tests one by one (C-39, C-43).
 
 /// The plugin and its setup file, as hushrun writes them.
 const PLUGIN: &str = include_str!("../src/units/hushrun_vitest.mjs");
@@ -1113,7 +1113,7 @@ fn tests_vitest(
             continue;
         }
         let facts: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        // A worker that tells tests names its unit from the root (ADR 0081).
+        // A worker that tells tests names its unit from the root (ADR 0084).
         let unit = facts["units"][0]["unit"].as_str().unwrap().to_string();
         assert!(!Path::new(&unit).is_absolute(), "{unit}");
         workers.insert(unit, facts);
@@ -1738,7 +1738,7 @@ fn with_vitests_coverage_on_no_test_is_left_out_or_watched() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// [ADR 0081] `reads: test` through `hushrun run` (C-40, C-43): what a watched test's own list
+// [ADR 0084] `reads: test` through `hushrun run` (C-40, C-43): what a watched test's own list
 // catches, and what Vitest makes of the two misses RFC 0004 §3.2 names.
 
 /// A repository for `reads`, with `files` and a test file every change runs.
@@ -1980,7 +1980,7 @@ fn vitest_two_imports_away() -> Vec<(&'static str, &'static str)> {
 fn vitest_catches_a_value_two_imports_away_which_reads_test_may_miss_elsewhere() {
     // RFC 0004 §3.2's first miss doesn't happen with Vitest: settings.ts read RATE through
     // defaults.ts's export getter while the file loaded, a function of defaults.ts, so every test
-    // of the file has it (ADR 0081).
+    // of the file has it (ADR 0084).
     caught_by_vitest(
         &vitest_two_imports_away(),
         ("src/defaults.ts", "export const RATE = 4\n"),

@@ -472,11 +472,11 @@ fn impossible_rows_cant_be_written() {
     for bad in [
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES ('x', 'a', '[]', '', 'default', 'pytest', 0)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '\"pytest\"', '', 'default', 'pytest', 0)",
-        // [ADR 0077] An adapter's word is 1 to 32 of a-z, 0-9 and -, whichever adapter it is.
+        // [ADR 0080] An adapter's word is 1 to 32 of a-z, 0-9 and -, whichever adapter it is.
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'Jest', 0)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', '', 0)",
         "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at) VALUES (printf('%064d', 1), 'a', '[]', '', 'default', 'swift test', 0)",
-        // [ADR 0077] A test has an id, a state a run records, and no negative duration.
+        // [ADR 0080] A test has an id, a state a run records, and no negative duration.
         "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, '', 'passed', 0)",
         "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, 'test_a', 'reused', 0)",
         "INSERT INTO test (unit_ref, test_id, state, duration_ms) VALUES (1, 'test_a', 'passed', -1)",

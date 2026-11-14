@@ -1173,7 +1173,7 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
-                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10). \[ADR 0077\] A
+                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10). \[ADR 0080\] A
                 // server from before tests as the unit refuses `savedMs` with no test file
                 // reused: the result goes again without it, so that it is never lost to that.
                 let mut result = std::borrow::Cow::Borrowed(result);
