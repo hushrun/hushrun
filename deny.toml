@@ -49,7 +49,8 @@ allow-wildcard-paths = true
 highlight = "all"
 # The only C code allowed is the TLS crypto provider (ring), the allocator (mimalloc) and, by
 # ADR 0072, SQLite's amalgamation (libsqlite3-sys, bundled) for the local store of what test files
-# read. Anything else needs an ADR first (plan §0.2).
+# read, and, by ADR 0078, zstd (zstd-sys) for the pack a build block travels in between machines,
+# behind hushrun-core's `pack` feature. Anything else needs an ADR first (plan §0.2).
 deny = [
   { crate = "openssl-sys", reason = "C code; use rustls with ring" },
   { crate = "openssl", reason = "C code; use rustls with ring" },
@@ -61,7 +62,6 @@ deny = [
   { crate = "git2", reason = "C code; use gix and the git CLI" },
   { crate = "libssh2-sys", reason = "C code" },
   { crate = "curl-sys", reason = "C code" },
-  { crate = "zstd-sys", reason = "C code" },
   { crate = "bzip2-sys", reason = "C code" },
   { crate = "lzma-sys", reason = "C code" },
 ]

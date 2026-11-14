@@ -15,7 +15,7 @@ use hushrun_build::session;
 use hushrun_build::settings::{self, Overrides, SettingsError};
 use hushrun_build::store::{Status, Store};
 
-use crate::cli::{BuildArgs, BuildCommand, GlobalOpts};
+use crate::cli::{BuildArgs, BuildCommand, GlobalOpts, ShareWord};
 use crate::context;
 use crate::credentials::Credentials;
 use crate::exit::{CmdResult, Exit, Failure};
@@ -23,12 +23,262 @@ use crate::output::{self, Format};
 
 pub fn run(global: &GlobalOpts, args: &BuildArgs) -> CmdResult {
     let place = Place::read()?;
-    match args.command.unwrap_or(BuildCommand::Status) {
+    match args.command.clone().unwrap_or(BuildCommand::Status) {
         BuildCommand::On => set(global, &place, Mode::On),
         BuildCommand::Observe => set(global, &place, Mode::Observe),
         BuildCommand::Off => set(global, &place, Mode::Off),
         BuildCommand::Status => status(global, &place),
         BuildCommand::Clean => clean(global, &place),
+        BuildCommand::Fetch(fetch_args) => fetch(global, &place, &fetch_args.checks),
+        BuildCommand::Share(share) => set_share(
+            global,
+            &place,
+            match share.mode {
+                ShareWord::On => Mode::On,
+                ShareWord::Observe => Mode::Observe,
+                ShareWord::Off => Mode::Off,
+            },
+        ),
+    }
+}
+
+/// `hushrun build fetch [CHECK]...` (B-36): for a sandbox's setup phase, which has the network
+/// and a token that later phases don't. The relay sends `open` for this repository and platform,
+/// once for each check named (by its id, as `hushrun run` names it), or once naming none, which
+/// asks for the repository's newest manifest; downloads what the manifests name that the store
+/// lacks; and saves the sealed packs, the sealed hints, the policy and the rows into the store's
+/// `prefetched/`, good for 24 hours. Nothing is uploaded or closed, and no token or link is
+/// written.
+fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
+    use crate::context::{Content, Source};
+    let failed = |why: String| Failure::new(Exit::Unexpected, anyhow!("build fetch: {why}"));
+    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    // B-31: in CI the fetch goes into the job's own store, which a later step of the job reads,
+    // never the cache directory, which outlives the job.
+    let store = if in_ci {
+        crate::cmd::build_session::ci_job_store(&|name| hushrun_ci::var_os(name)).ok_or_else(
+            || {
+                failed(
+                    "in CI a fetch is kept in the job's own store, under RUNNER_TEMP, which a GitHub Actions job with an ID token has (`permissions: id-token: write`)"
+                        .into(),
+                )
+            },
+        )?
+    } else {
+        place
+            .store
+            .clone()
+            .ok_or_else(|| failed("hushrun has no cache directory to keep crates in".into()))?
+    };
+    let content = Content::open(global, Source::Repo(hushrun_vcs::Snapshot::Worktree))
+        .map_err(|f| f.error)
+        .map_err(|err| failed(format!("{err:#}")))?;
+    let repository = hushrun_ci::context(&hushrun_ci::Env::from_process())
+        .repository
+        .or_else(|| crate::cmd::wrap::repository_of(&content));
+    let root = std::env::current_dir().ok();
+    let access = match crate::results::Backend::select(root.as_deref()) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_access(),
+        _ => None,
+    }
+    .filter(|access| access.credential.is_some())
+    // An agent's token is read from `HUSHRUN_AGENT` (the string `hushrun token create --agent`
+    // prints, which the docs name) and, as an `hra_` token, from `HUSHRUN_TOKEN`.
+    .ok_or_else(|| {
+        failed(
+            "no backend is signed in to. `hushrun build fetch` takes an agent token in HUSHRUN_AGENT (in a sandbox, set HUSHRUN_AGENT for this phase to the string `hushrun token create --agent` printed), an agent or a personal token in HUSHRUN_TOKEN, a person's sign-in (`hushrun login`), or in GitHub Actions the job's ID token"
+                .into(),
+        )
+    })?;
+    let config = crate::cmd::build_relay::Config {
+        store: Store::new(&store),
+        caller: crate::cmd::build_session::caller(Some(&access), in_ci),
+        access,
+        repository,
+        commit: None,
+        platform: crate::cmd::build_session::platform(),
+        compiler: std::env::current_dir()
+            .ok()
+            .map(|folder| (std::ffi::OsString::from("rustc"), folder)),
+        local: Mode::On,
+        own: Mode::On,
+        min_free_gb: if in_ci {
+            session::CI_MIN_FREE_GB
+        } else {
+            settings::MIN_FREE_GB
+        },
+        keep_days: hushrun_build::KEEP_DAYS,
+        tuning: crate::cmd::build_relay::Tuning::default(),
+        saved: None,
+        open_decides: false,
+    };
+    let checks: Vec<Option<hushrun_core::blocks::Hex32>> = if checks.is_empty() {
+        vec![None]
+    } else {
+        checks
+            .iter()
+            .map(|name| {
+                Some(crate::cmd::build_session::check_id(
+                    config.repository.as_deref(),
+                    name,
+                ))
+            })
+            .collect()
+    };
+    let relay = std::sync::Arc::new(crate::cmd::build_relay::Relay::start(config).map_err(failed)?);
+    let fetched = relay.fetch_for_later(&checks);
+    // What the relay said on the way, such as a store's host it couldn't reach (B-26).
+    if global.quiet == 0 {
+        for line in relay.take_lines() {
+            eprintln!("hushrun: {line}");
+        }
+    }
+    let fetched = fetched.map_err(failed)?;
+    if global.format == Format::Json {
+        output::print_json(&json!({
+            "blocks": fetched.blocks,
+            "bytes": fetched.bytes,
+            "hints": fetched.hints,
+            "store": store,
+            "good_for_hours": 24,
+        }))?;
+        return Ok(Exit::Ok);
+    }
+    if global.quiet == 0 {
+        output::print(&format!(
+            "Fetched {} compiled {} ({}) and {} {} for later runs here, good for 24 hours. No token was kept.\n",
+            fetched.blocks,
+            if fetched.blocks == 1 {
+                "crate"
+            } else {
+                "crates"
+            },
+            size(fetched.bytes),
+            fetched.hints,
+            if fetched.hints == 1 { "hint" } else { "hints" },
+        ))?;
+    }
+    Ok(Exit::Ok)
+}
+
+/// `hushrun build share on|observe|off` (B-33): saves the share setting, under the settings
+/// file's lock.
+fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
+    let mut before = None;
+    let saved = settings::update(&place.settings, |settings| {
+        before = Some(settings.share);
+        settings.share = mode;
+    })
+    .map_err(settings_failure)?;
+    let changed = before != Some(mode);
+    let overridden = place
+        .overrides()
+        .and_then(|o| o.share)
+        .filter(|share| *share != saved.share);
+    if global.format == Format::Json {
+        output::print_json(&json!({
+            "share": saved.share.as_str(),
+            "changed": changed,
+            "settings": place.settings,
+            "overridden_by": overridden.map(|_| "HUSHRUN_BUILD_SHARE"),
+        }))?;
+        return Ok(Exit::Ok);
+    }
+    if global.quiet > 0 {
+        return Ok(Exit::Ok);
+    }
+    let already = if changed { "" } else { "already " };
+    let mut text = match mode {
+        Mode::On => format!(
+            "Sharing is {already}on here: when the org shares compiled crates, this machine shares as the org's mode says.\n"
+        ),
+        Mode::Observe => format!(
+            "Sharing is {already}in observe here: this machine uploads what it builds and compares what it downloads, and reuses no download.\n"
+        ),
+        Mode::Off => format!(
+            "Sharing is {already}off here: nothing goes to or comes from the org's shared store. Reuse on this machine is as the mode says.\n"
+        ),
+    };
+    if let Some(other) = overridden {
+        let _ = writeln!(
+            text,
+            "HUSHRUN_BUILD_SHARE={} overrides it for commands run from this shell.",
+            other.as_str()
+        );
+    }
+    output::print(&text)?;
+    Ok(Exit::Ok)
+}
+
+/// What a `hushrun run NAME -- COMMAND` from this shell does (B-25), as far as this machine can
+/// tell without asking the backend: the one function's answer, the org taken as sharing at the
+/// most it can. A CI job with no backend to ask has nothing to share with.
+fn run_here(place: &Place, effective: &settings::Settings) -> hushrun_build::share::Does {
+    use hushrun_build::share::{Caller, Does, Off, Org, Sharing, what_a_run_does};
+    let root = std::env::current_dir().ok();
+    let access = match crate::results::Backend::select(root.as_deref()) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_access(),
+        _ => None,
+    };
+    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    if in_ci && access.is_none() {
+        return Does {
+            local: Mode::Off,
+            sharing: Sharing::Off(Off::SignedOut),
+            uploads: false,
+        };
+    }
+    let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
+    // In a sandbox nobody chose a mode: reuse is on unless the settings file says `off`, and
+    // `HUSHRUN_BUILD` sets this shell's over either, as the run reads them.
+    let local = match caller {
+        Caller::Agent { sandbox: true } => place
+            .overrides()
+            .and_then(|o| o.mode)
+            .or_else(|| settings::sandbox_mode(&place.settings).ok())
+            .unwrap_or(Mode::Off),
+        _ => effective.mode,
+    };
+    what_a_run_does(caller, local, effective.share, Org::Shares(None))
+}
+
+/// The `ci` line of `hushrun build status` (B-2, B-31): what `hushrun run` does in this CI job,
+/// and why, from [`run_here`].
+fn ci_here(place: &Place, effective: &settings::Settings) -> String {
+    use hushrun_build::share::{Off, Sharing};
+    let does = run_here(place, effective);
+    match (does.local, does.sharing) {
+        (Mode::Off, Sharing::Off(off)) => {
+            let hint = match off {
+                Off::NoIdToken => " (give the job `permissions: id-token: write`)",
+                _ => "",
+            };
+            format!(
+                "this is CI, where `hushrun run` reuses nothing here: {}{hint}",
+                off.reason()
+            )
+        }
+        _ if !does.uploads => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions); no person's settings are read".to_string(),
+        _ => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, and shares as the org's mode says; no person's settings are read".to_string(),
+    }
+}
+
+/// What sharing does here, as far as this machine can tell without asking the backend (B-25):
+/// the word, and why.
+fn sharing_here(place: &Place, effective: &settings::Settings) -> (&'static str, String) {
+    use hushrun_build::share::Sharing;
+    let does = run_here(place, effective);
+    match does.sharing {
+        Sharing::Off(off) => ("off", off.reason().to_string()),
+        Sharing::Observe => (
+            "observe",
+            "at most: uploads what it builds and compares what it downloads, when the org shares"
+                .to_string(),
+        ),
+        Sharing::On => (
+            "on",
+            "at most: the org's mode decides, observe or on, when the org shares".to_string(),
+        ),
     }
 }
 
@@ -85,7 +335,7 @@ fn set(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
     let mut before = None;
     let saved = settings::update(&place.settings, |settings| {
         before = Some(settings.mode);
-        settings.mode = mode;
+        settings.choose(mode);
     })
     .map_err(settings_failure)?;
     let changed = before != Some(mode);
@@ -199,6 +449,11 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
             "store": place.store,
             "keep_days": effective.as_ref().map(|s| s.keep_days),
             "programs": effective.as_ref().map(|s| s.programs.as_str()),
+            "share": effective.as_ref().map(|s| s.share.as_str()),
+            "sharing": effective.as_ref().map(|s| {
+                let (word, why) = sharing_here(place, s);
+                json!({"mode": word, "why": why})
+            }),
             "in_ci": in_ci,
             "rustc_wrapper_set": wrapper.is_some(),
             "held": held.as_ref().map(held_json),
@@ -239,9 +494,14 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
         );
     }
     if in_ci {
+        // No person's settings are read in CI: what applies there is the job's, whatever the
+        // file here says.
         line(
             "ci",
-            "this is CI, where `hushrun run` reuses nothing".to_string(),
+            ci_here(
+                place,
+                effective.as_ref().unwrap_or(&settings::Settings::default()),
+            ),
         );
     }
     if let Some(value) = &wrapper {
@@ -290,6 +550,19 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
                 )
             ),
         );
+        let (word, why) = sharing_here(place, effective);
+        line(
+            "share",
+            format!(
+                "{} on this machine{}",
+                effective.share.as_str(),
+                named(
+                    place.overrides().is_some_and(|o| o.share.is_some()),
+                    "HUSHRUN_BUILD_SHARE"
+                )
+            ),
+        );
+        line("sharing", format!("{word}: {why}"));
         line(
             "programs",
             match effective.programs {
@@ -423,7 +696,7 @@ fn blocks(n: u64) -> String {
 }
 
 /// A size as people read it: bytes, KB, MB, GB or TB, in thousands as file managers count.
-fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if bytes < 1000 {
         return format!("{bytes} bytes");

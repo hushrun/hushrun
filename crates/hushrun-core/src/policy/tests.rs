@@ -936,3 +936,32 @@ fn a_checks_tests_name_their_unit_and_what_a_test_read() {
         "file or test",
     );
 }
+
+// covers: B-35
+#[test]
+fn build_env_names_variables_every_compile_is_keyed_by() {
+    let fixture = Policy::parse("hushrun.yaml", &fixture("build-env.yaml")).unwrap();
+    assert_eq!(fixture.build_env, ["APP_FLAVOR"]);
+    let yaml = "checks:\n  unit:\n    run: cargo test\nbuild:\n  env: [MY_SECRET, APP_FLAVOR]\n";
+    let policy = Policy::parse("hushrun.yaml", format!("{HEAD}{yaml}").as_bytes()).unwrap();
+    assert_eq!(policy.build_env, ["APP_FLAVOR", "MY_SECRET"]);
+    // No check's definition changes with it.
+    let plain = Policy::parse(
+        "hushrun.yaml",
+        format!("{HEAD}checks:\n  unit:\n    run: cargo test\n").as_bytes(),
+    )
+    .unwrap();
+    assert!(plain.build_env.is_empty());
+    let unit = CheckName::new("unit").unwrap();
+    assert_eq!(
+        policy.checks[&unit].definition_digest,
+        plain.checks[&unit].definition_digest
+    );
+    assert_error(
+        &format!("{HEAD}build:\n  env: [\"not a name\"]\n"),
+        4,
+        "not an environment variable name",
+    );
+    assert_error(&format!("{HEAD}build:\n  env: [A, A]\n"), 4, "twice");
+    assert_error(&format!("{HEAD}build:\n  envs: [A]\n"), 4, "envs");
+}

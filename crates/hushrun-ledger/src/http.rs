@@ -90,6 +90,14 @@ pub struct HttpLedger {
     tuning: Tuning,
     /// \[M18\] The transparency log, as this command checks it (L-11).
     log: Mutex<log::State>,
+    /// An answer to one of hushrun's other requests carried `Hushrun-Build: on`: the org shares
+    /// build blocks (the build protocol).
+    build_sharing: std::sync::atomic::AtomicBool,
+    /// A server gave an HTTP response to one of this ledger's requests, whatever its status and
+    /// whatever became of its body, or refused the credential a request needed. Set where a
+    /// response's status line arrives ([`read`]) and where the credential is asked for
+    /// (`auth::Oidc`), nowhere else: the one definition of "a server answered" (B-34).
+    answered: std::sync::atomic::AtomicBool,
 }
 
 impl fmt::Debug for HttpLedger {
@@ -189,6 +197,8 @@ struct Answer {
     authorized: bool,
     /// Why the retries stopped early, such as a `Retry-After` beyond the budget.
     gave_up: Option<String>,
+    /// It carried `Hushrun-Build: on`.
+    build_sharing: bool,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +253,8 @@ impl HttpLedger {
             base,
             tuning,
             log: Mutex::new(log::State::default()),
+            build_sharing: std::sync::atomic::AtomicBool::new(false),
+            answered: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -300,6 +312,17 @@ impl HttpLedger {
     /// A GET of `path` with a query, already encoded, as [`HttpLedger::json_request`] sends one.
     pub fn json_get_query(&self, path: &str, query: &str) -> Result<(u16, Vec<u8>), LedgerError> {
         self.json_call(Method::GET, path, Some(query.to_string()), None, None)
+    }
+
+    /// A GET of `path`, with a query when there is one, and one more header: a results lookup
+    /// that says it comes from CI (the build protocol's `Hushrun-Ci`).
+    pub fn json_get_with(
+        &self,
+        path: &str,
+        query: Option<&str>,
+        header: Option<(&'static str, String)>,
+    ) -> Result<(u16, Vec<u8>), LedgerError> {
+        self.json_call(Method::GET, path, query.map(str::to_string), None, header)
     }
 
     /// [`HttpLedger::json_request`] with one more header, such as a result's machine signature
@@ -366,6 +389,22 @@ impl HttpLedger {
         })
     }
 
+    /// Whether an answer to one of hushrun's other requests (a results lookup) carried
+    /// `Hushrun-Build: on`: the org shares build blocks, so asking `open` is worth a request.
+    pub fn build_sharing_seen(&self) -> bool {
+        self.build_sharing
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether a server gave any HTTP response to a request of this ledger: any status, a
+    /// redirect it didn't follow among them, with a body that was cut, empty or not what was
+    /// asked for; or a credential request a server answered with a refusal. False only when no
+    /// response came at all: the connection couldn't be made, or timed out or was cut before a
+    /// status line, or the credential couldn't be had because nothing answered (B-34).
+    pub fn answered_any(&self) -> bool {
+        self.answered.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Whether `path` is a path under the base, which a request to another endpoint may name.
     fn check_path(&self, path: &str) -> Result<(), LedgerError> {
         if path.contains(['?', '#', '\\'])
@@ -413,6 +452,10 @@ impl HttpLedger {
             if answer.status.is_redirection() {
                 return Err(self.failure(&answer, path));
             }
+            if answer.build_sharing {
+                self.build_sharing
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok((answer.status.as_u16(), answer.body))
         })
     }
@@ -436,7 +479,10 @@ impl HttpLedger {
         let url = self.url(call);
         let mut attempt = 1;
         loop {
-            let token = self.auth.token(&self.client, &self.tuning).await?;
+            let token = self
+                .auth
+                .token(&self.client, &self.tuning, &self.answered)
+                .await?;
             let mut request = self.client.request(call.method.clone(), &url);
             if let Some((body, content_type)) = call.body {
                 request = request
@@ -454,7 +500,7 @@ impl HttpLedger {
                 request = request.bearer_auth(token.expose());
             }
             tracing::debug!("{} {url}", call.method);
-            let wait = match read(request, call.limit).await {
+            let wait = match read(request, call.limit, &self.answered).await {
                 Ok(mut answer) => {
                     answer.authorized = token.is_some();
                     let retryable = answer.status == StatusCode::TOO_MANY_REQUESTS
@@ -986,8 +1032,16 @@ fn client(tuning: &Tuning) -> Result<reqwest::Client, LedgerError> {
 }
 
 /// Sends `request` and reads at most `limit` bytes of the answer.
-async fn read(request: reqwest::RequestBuilder, limit: usize) -> Result<Answer, reqwest::Error> {
+/// Sends `request` and reads its answer, at most `limit` bytes of body. `answered` is set as
+/// soon as the status line and the headers are here, before the body is read: a body that is
+/// then cut is still a server's answer.
+async fn read(
+    request: reqwest::RequestBuilder,
+    limit: usize,
+    answered: &std::sync::atomic::AtomicBool,
+) -> Result<Answer, reqwest::Error> {
     let mut response = request.send().await?;
+    answered.store(true, std::sync::atomic::Ordering::Relaxed);
     let status = response.status();
     let headers = response.headers().clone();
     let mut body = Vec::new();
@@ -1009,6 +1063,10 @@ async fn read(request: reqwest::RequestBuilder, limit: usize) -> Result<Answer, 
         date: header_text(&headers, header::DATE),
         authorized: false,
         gave_up: None,
+        build_sharing: headers
+            .get("hushrun-build")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
     })
 }
 

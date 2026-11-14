@@ -137,6 +137,7 @@ impl World {
             exe: &exe,
             in_ci: false,
             repository: Some("test/e2e"),
+            repository_env: &[],
             env: &env,
             now: SystemTime::now(),
         })
@@ -1878,4 +1879,293 @@ fn mode_off_checks_and_removes_nothing() {
     let run = hushrun_run(&w, &ws);
     assert_eq!(run.checked.rebuilt.len(), 1, "{:?}", run.checked);
     assert_eq!(app_says(&ws), "one;two;");
+}
+
+// Two machines, for real: other users with other homes, cargo homes, rustup homes, toolchain
+// names and checkout paths, each with a store of its own. The registry crate comes from each
+// machine's own cargo home, unpacked there by cargo from a copy of the crates.io package this
+// repository already uses; the toolchain is the one running these tests, seen through each
+// machine's own rustup home.
+
+#[cfg(unix)]
+mod two_machines {
+    use super::*;
+
+    /// The registry package both machines build: in this repository's lockfile, so its package and
+    /// index entry are in the cargo home of any machine that built the repository.
+    const REGISTRY_CRATE: (&str, &str) = ("cfg-if", "1.0.5");
+    const INDEX_DIR: &str = "index.crates.io-1949cf8c6b5b557f";
+
+    const TWO_MACHINES: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"app\", \"m\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ncfg-if = \"=1.0.5\"\nm = { path = \"../m\" }\n",
+        ),
+        (
+            "app/build.rs",
+            "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), \"pub const GEN: u32 = 3;\\n\").unwrap();\n}\n",
+        ),
+        (
+            "app/src/lib.rs",
+            "cfg_if::cfg_if! {\n    if #[cfg(unix)] {\n        pub fn os() -> &'static str { \"unix\" }\n    } else {\n        pub fn os() -> &'static str { \"other\" }\n    }\n}\nm::make!();\ninclude!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n\npub fn checked(values: &[u32], i: usize) -> u32 {\n    values[i]\n}\n",
+        ),
+        (
+            "m/Cargo.toml",
+            "[package]\nname = \"m\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+        ),
+        (
+            "m/src/lib.rs",
+            "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn make(_: TokenStream) -> TokenStream {\n    \"pub fn made() -> u32 { 7 }\".parse().unwrap()\n}\n",
+        ),
+    ];
+
+    /// The cargo home this test runs with, where the registry package lies.
+    fn real_cargo_home() -> PathBuf {
+        std::env::var_os("CARGO_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cargo"))
+    }
+
+    /// The toolchain running this test: its sysroot.
+    fn real_sysroot() -> PathBuf {
+        let out = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+    }
+
+    /// One machine: its home, its toolchain's name, its store, its key log.
+    struct OneMachine {
+        root: PathBuf,
+        home: PathBuf,
+        toolchain: String,
+        key_log: PathBuf,
+    }
+
+    impl OneMachine {
+        fn new(w: &World, rest: &str, user: &str, toolchain: &str) -> OneMachine {
+            let root = w.path(rest);
+            let home = root.join("home").join(user);
+            // The cargo home: the registry's index entry and package, as a download leaves them.
+            let real = real_cargo_home().join("registry");
+            let cargo = home.join(".cargo/registry");
+            let (name, version) = REGISTRY_CRATE;
+            let entry = format!("{}/{}/{name}", &name[..2], &name[2..4]);
+            for rest in [
+                format!("index/{INDEX_DIR}/config.json"),
+                format!("index/{INDEX_DIR}/.cache/{entry}"),
+                format!("cache/{INDEX_DIR}/{name}-{version}.crate"),
+            ] {
+                let from = real.join(&rest);
+                assert!(
+                    from.is_file(),
+                    "{} is missing: this test copies {name} {version} from the cargo home, where \
+                     building this repository puts it (run `cargo fetch`)",
+                    from.display()
+                );
+                let to = cargo.join(&rest);
+                fs::create_dir_all(to.parent().unwrap()).unwrap();
+                fs::copy(&from, &to).unwrap();
+            }
+            // The rustup home: the toolchain under this machine's own name.
+            let toolchains = home.join(".rustup/toolchains");
+            fs::create_dir_all(&toolchains).unwrap();
+            std::os::unix::fs::symlink(real_sysroot(), toolchains.join(toolchain)).unwrap();
+            OneMachine {
+                key_log: root.join("keys.jsonl"),
+                root,
+                home,
+                toolchain: toolchain.to_string(),
+            }
+        }
+
+        fn checkout(&self, rest: &str) -> PathBuf {
+            let ws = self.root.join(rest);
+            for (file, text) in TWO_MACHINES {
+                let path = ws.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, text).unwrap();
+            }
+            ws
+        }
+
+        fn begin(&self) -> Session {
+            let settings = self.root.join("build.json");
+            settings::update(&settings, |s| {
+                s.mode = Mode::On;
+                s.min_free_gb = 0;
+            })
+            .unwrap();
+            let vars = self.vars();
+            let key_log = self.key_log.clone();
+            let env = move |name: &str| {
+                if name == session::KEY_LOG {
+                    return Some(key_log.clone().into_os_string());
+                }
+                vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+            };
+            session::begin(&Start {
+                settings: &settings,
+                cache_dir: Some(&self.root.join("cache")),
+                exe: &wrapper_exe(),
+                in_ci: false,
+                repository: Some("test/two-machines"),
+                repository_env: &[],
+                env: &env,
+                now: SystemTime::now(),
+            })
+            .unwrap()
+        }
+
+        /// What this machine's cargo and rustup set: its homes, its toolchain by its own name.
+        fn vars(&self) -> Vec<(OsString, OsString)> {
+            let rustup = self.home.join(".rustup");
+            let rustc = rustup
+                .join("toolchains")
+                .join(&self.toolchain)
+                .join("bin/rustc");
+            vec![
+                ("HOME".into(), self.home.clone().into()),
+                ("CARGO_HOME".into(), self.home.join(".cargo").into()),
+                ("RUSTUP_HOME".into(), rustup.into()),
+                ("RUSTUP_TOOLCHAIN".into(), self.toolchain.clone().into()),
+                ("RUSTC".into(), rustc.into()),
+            ]
+        }
+
+        fn build(&self, ws: &Path, session: &Session) {
+            let mut env = session.env();
+            env.extend(self.vars());
+            let out = cargo(ws, &["build"], &env);
+            assert!(
+                out.status.success(),
+                "cargo build in {} failed:\n{}",
+                ws.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        /// The key log's last line for each crate and class.
+        fn keys(&self) -> BTreeMap<(String, String), serde_json::Value> {
+            fs::read_to_string(&self.key_log)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .map(|v| {
+                    let key = (
+                        v["crate_name"].as_str().unwrap().to_string(),
+                        v["class"].as_str().unwrap_or("").to_string(),
+                    );
+                    (key, v)
+                })
+                .collect()
+        }
+    }
+
+    /// Every library file in a checkout's output folder, by name.
+    fn library_outputs(ws: &Path) -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(ws.join("target/debug/deps"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rlib" || e == "rmeta"))
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_str().unwrap().to_string(),
+                    fs::read(&p).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    // covers: B-5, B-6, B-8, B-9, B-17
+    #[test]
+    fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_library_bytes() {
+        let w = World::new();
+        let a = OneMachine::new(&w, "machine-a", "dev", "stable-host");
+        let b = OneMachine::new(&w, "machine-b", "someone-else", "1.94.0-host");
+        let ws_a = a.checkout("work/app");
+        let ws_b = b.checkout("srv/builds/a-checkout-at-a-longer-path");
+        for (m, ws) in [(&a, &ws_a), (&b, &ws_b)] {
+            let session = m.begin();
+            m.build(ws, &session);
+            session.finish(SystemTime::now());
+        }
+        let (keys_a, keys_b) = (a.keys(), b.keys());
+        assert_eq!(
+            keys_a.keys().collect::<Vec<_>>(),
+            keys_b.keys().collect::<Vec<_>>()
+        );
+        for ((name, class), line_a) in &keys_a {
+            let line_b = &keys_b[&(name.clone(), class.clone())];
+            // Every first key is equal; every library's second key too.
+            assert_eq!(
+                line_a["keys"]["step"], line_b["keys"]["step"],
+                "{name} ({class}):\n{}\n{}",
+                line_a["keys"]["first"], line_b["keys"]["first"]
+            );
+            assert!(line_a["keys"]["step"].is_string(), "{line_a}");
+            if class == "library" {
+                assert_eq!(
+                    line_a["keys"]["block"], line_b["keys"]["block"],
+                    "{name}:\n{}\n{}",
+                    line_a["keys"]["second_parts"], line_b["keys"]["second_parts"]
+                );
+                assert_eq!(
+                    line_a["portable"]["portable"], true,
+                    "{name}: {}",
+                    line_a["portable"]
+                );
+                assert_eq!(line_b["portable"], line_a["portable"]);
+            }
+        }
+        for name in ["cfg_if", "app"] {
+            assert!(keys_a.contains_key(&(name.to_string(), "library".to_string())));
+        }
+        // And the libraries are the same bytes.
+        let (out_a, out_b) = (library_outputs(&ws_a), library_outputs(&ws_b));
+        assert_eq!(
+            out_a.keys().collect::<Vec<_>>(),
+            out_b.keys().collect::<Vec<_>>()
+        );
+        assert!(out_a.len() >= 4, "{:?}", out_a.keys());
+        for (name, bytes) in &out_a {
+            assert!(*bytes == out_b[name], "{name} differs between the machines");
+            let home = a.home.to_str().unwrap().as_bytes();
+            assert!(
+                !bytes.windows(home.len()).any(|w| w == home),
+                "{name} holds the home folder"
+            );
+        }
+
+        // A third machine with machine A's blocks in its store reuses them.
+        let c = OneMachine::new(&w, "machine-c", "third-user", "nightly-host");
+        let ws_c = c.checkout("x");
+        let from = a.root.join("cache/build");
+        let to = c.root.join("cache/build");
+        for part in ["blocks", "steps"] {
+            for file in walk(&from.join(part)) {
+                let dest = to.join(file.strip_prefix(&from).unwrap());
+                fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                fs::copy(&file, &dest).unwrap();
+            }
+        }
+        let session = c.begin();
+        c.build(&ws_c, &session);
+        let entries = entries(&session);
+        session.finish(SystemTime::now());
+        for name in ["cfg_if", "app"] {
+            assert!(
+                reused(&last(&entries, name, Class::Library)),
+                "{name}: {entries:#?}"
+            );
+        }
+        assert_eq!(library_outputs(&ws_c), out_a);
+    }
 }

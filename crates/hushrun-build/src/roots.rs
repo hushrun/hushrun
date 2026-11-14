@@ -10,6 +10,14 @@
 //! a resolved form, with symlinks resolved (`/tmp` is `/private/tmp` on macOS, and some macros
 //! canonicalize). A path under either form is recorded as the root's name and the rest.
 //!
+//! Two more folders are **bases**: the cargo home and the toolchain. A path under one is recorded
+//! from it as from a root (`{hushrun:cargo-home}/registry/src/…`), so that keys and hints name no
+//! machine's folder, and a registry or git crate's compile has the cargo home remapped to a fixed
+//! stand-in. Unlike a root, a base is the same for every checkout on a machine: it never ties a
+//! block and is not what B-10 searches for to decide its place. Together with the rustup home
+//! and the home folder, the bases are what an output is searched for to decide whether the block
+//! may leave the machine ([`Roots::machine_needles`]).
+//!
 //! The constructor is the one place this module touches the file system: it resolves each root
 //! once, through a resolver the caller passes, so tests pass their own.
 
@@ -18,7 +26,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::invocation::{Invocation, SearchKind};
-use crate::model::{Located, RootName, Rooted};
+use crate::model::{Folder, Located, RootName, Rooted};
 
 /// What a placeholder starts with. A placeholder is `{hushrun:<root name>}`; `{hushrun:}` is
 /// the text `{hushrun:` itself, so text that already looks like a placeholder stays distinct.
@@ -41,7 +49,28 @@ pub fn stand_in(root: RootName, package_id: &str) -> String {
         RootName::BuildTargetDir => "/hushrun/build-target-dir".to_string(),
         RootName::TargetTmp => "/hushrun/target-tmpdir".to_string(),
         RootName::BinExe(i) => format!("/hushrun/bin-exe/{i}"),
+        RootName::CargoHome => "/hushrun/cargo".to_string(),
+        RootName::Toolchain => "/hushrun/toolchain".to_string(),
     }
+}
+
+/// The folders that name this machine. The cargo home and the toolchain are bases (recorded
+/// like roots); all four are searched for in outputs, in both forms, to decide whether a block
+/// may leave the machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Machine {
+    /// The cargo home: `CARGO_HOME`, else `~/.cargo`.
+    pub cargo_home: Option<String>,
+    /// The toolchain's folder: the compiler's sysroot (B-17).
+    pub toolchain: Option<String>,
+    /// The sysroot without sources compiles are given (B-9, B-17): its links lead into the
+    /// toolchain, so a path under it is recorded as one under the toolchain, and recorded paths
+    /// are looked up under the toolchain itself.
+    pub toolchain_view: Option<String>,
+    /// The rustup home: `RUSTUP_HOME`, else `~/.rustup`. Not a base: only searched for.
+    pub rustup_home: Option<String>,
+    /// The home folder, `HOME`. Not a base: only searched for.
+    pub home: Option<String>,
 }
 
 /// Why the roots of a call can't be used.
@@ -143,8 +172,13 @@ pub struct Roots {
     /// The working directory's given form, root or not: relative paths start here.
     workspace: String,
     roots: Vec<Root>,
-    /// Each distinct text of a root's forms with the one root it stands for, longest first.
+    /// The bases: the cargo home and the toolchain, when known.
+    bases: Vec<Root>,
+    /// Each distinct text of a root's or base's forms with the one it stands for, longest
+    /// first.
     forms: Vec<(String, RootName)>,
+    /// The folders that name this machine, each in its distinct forms (B-10).
+    machine: Vec<(Folder, String)>,
     /// The shared folders in both forms, longest first.
     shared: Vec<String>,
     package_id: String,
@@ -163,11 +197,13 @@ pub fn resolve_on_disk(path: &str) -> Option<String> {
 impl Roots {
     /// The roots of a call. `shared` are the folders that are the same for every checkout on
     /// this machine: cargo home, rustup home, the sysroot, system folders. The workspace and
-    /// the package are roots only when they are not under one. `resolve` gives a folder's
+    /// the package are roots only when they are not under one, or under a base. `machine`
+    /// names the bases and what else outputs are searched for. `resolve` gives a folder's
     /// resolved form; [`resolve_on_disk`] is the real one.
     pub fn new(
         paths: &RootPaths,
         shared: &[String],
+        machine: &Machine,
         resolve: impl Fn(&str) -> Option<String>,
     ) -> Result<Roots, RootsError> {
         let workspace = clean(&paths.workspace);
@@ -201,7 +237,46 @@ impl Roots {
         }
         sort_longest_first(&mut shared_forms);
         shared_forms.dedup();
-        let is_shared = |path: &str| shared_forms.iter().any(|f| under(path, f).is_some());
+        // A base must be absolute and not `/`; any other is left out, never an error.
+        let usable = |path: &Option<String>| -> Option<(String, String)> {
+            let path = path.as_deref().filter(|p| p.starts_with('/'))?;
+            both(path).ok()
+        };
+        let mut bases = Vec::new();
+        // The view comes after the toolchain: a placeholder is resolved under the first base of
+        // its name.
+        for (name, path) in [
+            (RootName::CargoHome, &machine.cargo_home),
+            (RootName::Toolchain, &machine.toolchain),
+            (RootName::Toolchain, &machine.toolchain_view),
+        ] {
+            if let Some((given, resolved)) = usable(path) {
+                bases.push(Root {
+                    name,
+                    given,
+                    resolved,
+                });
+            }
+        }
+        let mut machine_forms = Vec::new();
+        for (folder, path) in [
+            (Folder::CargoHome, &machine.cargo_home),
+            (Folder::RustupHome, &machine.rustup_home),
+            (Folder::Home, &machine.home),
+        ] {
+            if let Some((given, resolved)) = usable(path) {
+                machine_forms.push((folder, given));
+                machine_forms.push((folder, resolved));
+            }
+        }
+        machine_forms.sort();
+        machine_forms.dedup();
+        let is_shared = |path: &str| {
+            shared_forms.iter().any(|f| under(path, f).is_some())
+                || bases.iter().any(|base| {
+                    under(path, &base.given).is_some() || under(path, &base.resolved).is_some()
+                })
+        };
 
         let mut candidates = vec![(RootName::Workspace, paths.workspace.as_str())];
         if let Some(package) = &paths.package {
@@ -254,7 +329,7 @@ impl Roots {
         }
 
         let mut by_text: BTreeMap<String, RootName> = BTreeMap::new();
-        for root in &roots {
+        for root in roots.iter().chain(&bases) {
             for text in [&root.given, &root.resolved] {
                 let entry = by_text.entry(text.clone()).or_insert(root.name);
                 if precedence(root.name) > precedence(*entry) {
@@ -268,14 +343,16 @@ impl Roots {
         Ok(Roots {
             workspace,
             roots,
+            bases,
             forms,
+            machine: machine_forms,
             shared: shared_forms,
             package_id: paths.package_id.clone(),
         })
     }
 
-    /// Where `path` lies: under a root in either form (the longest wins) → `Rooted`; under a
-    /// shared folder → `Shared`; otherwise `Outside`. A relative path starts from the working
+    /// Where `path` lies: under a root or a base in either form (the longest wins) → `Rooted`;
+    /// under another shared folder → `Shared`; otherwise `Outside`. A relative path starts from the working
     /// directory. A path with a `..` in it is `Outside`: its rest could leave the root.
     pub fn locate(&self, path: &str) -> Located {
         let absolute = if path.starts_with('/') {
@@ -376,14 +453,21 @@ impl Roots {
         Ok(out)
     }
 
-    /// The remaps of the measured recipe (B-9), in the order rustc is given them: the workspace
-    /// as `.`, when the working directory is a root (not under a shared folder), then the build
-    /// script's output as its stand-in; each in its given and, when it differs, its resolved
-    /// form. rustc applies remaps last to first, so the general one comes first. Nothing else is
-    /// remapped: the search of the outputs decides what may move (B-10).
+    /// The remaps of the measured recipe (B-9), in the order rustc is given them: the cargo
+    /// home as `/hushrun/cargo`, when it is known, so that a registry or git crate's paths name
+    /// no machine; the workspace as `.`, when the working directory is a root (not under a
+    /// shared folder); the build script's output as its stand-in; each in its given and, when it
+    /// differs, its resolved form. rustc applies the last remap that holds a path, so they are
+    /// ordered by length, shortest first: of two folders that hold a path, the inner one wins,
+    /// as [`Roots::locate`] decides. Nothing else is remapped: the search of the outputs decides
+    /// what may move (B-10).
     pub fn remaps(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for name in [RootName::Workspace, RootName::ScriptOut] {
+        for name in [
+            RootName::CargoHome,
+            RootName::Workspace,
+            RootName::ScriptOut,
+        ] {
             if let Some(root) = self.root(name) {
                 let to = stand_in(name, &self.package_id);
                 out.push((root.given.clone(), to.clone()));
@@ -392,6 +476,7 @@ impl Roots {
                 }
             }
         }
+        out.sort_by_key(|(from, _)| from.len());
         out
     }
 
@@ -425,12 +510,74 @@ impl Roots {
 
     /// What outputs are searched for (B-10): every root in every distinct form, as raw bytes.
     /// The target folder a variable names is a root, so a macro that read it without telling
-    /// rustc and wrote it into an output leaves the block tied.
+    /// rustc and wrote it into an output leaves the block tied. Bases are not searched for here:
+    /// they are the same for every checkout on the machine.
     pub fn needles(&self) -> Vec<Vec<u8>> {
         self.forms
             .iter()
+            .filter(|(_, name)| !name.is_base())
             .map(|(text, _)| text.as_bytes().to_vec())
             .collect()
+    }
+
+    /// The folders that name this machine, each in its distinct forms: the cargo home, the
+    /// rustup home and the home folder. An output that holds one may still move between
+    /// folders here, but not leave the machine.
+    pub fn machine_needles(&self) -> &[(Folder, String)] {
+        &self.machine
+    }
+
+    /// Each of these folders of the machine with its forms here, sorted; no form when this
+    /// machine doesn't have it. What a block that holds them is keyed by (B-10).
+    pub fn bound(&self, names: &[crate::key::Bound]) -> Vec<(crate::key::Bound, Vec<String>)> {
+        use crate::key::Bound;
+        let mut out: Vec<(Bound, Vec<String>)> = names
+            .iter()
+            .map(|name| {
+                let mut forms: Vec<String> = match name {
+                    Bound::Toolchain => self
+                        .bases
+                        .iter()
+                        .filter(|base| base.name == RootName::Toolchain)
+                        .flat_map(|base| [base.given.clone(), base.resolved.clone()])
+                        .collect(),
+                    folder => {
+                        let folder = match folder {
+                            Bound::CargoHome => Folder::CargoHome,
+                            Bound::RustupHome => Folder::RustupHome,
+                            _ => Folder::Home,
+                        };
+                        self.machine
+                            .iter()
+                            .filter(|(f, _)| *f == folder)
+                            .map(|(_, form)| form.clone())
+                            .collect()
+                    }
+                };
+                forms.sort();
+                forms.dedup();
+                (*name, forms)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The roots and bases a text names, by its placeholders once replaced.
+    pub fn named(&self, text: &str) -> Vec<RootName> {
+        let replaced = self.to_placeholders(text);
+        let mut out = Vec::new();
+        let mut rest = replaced.as_str();
+        while let Some(at) = rest.find(OPEN) {
+            let after = &rest[at + OPEN.len()..];
+            let Some(end) = after.find('}') else { break };
+            if let Some(name) = RootName::parse(&after[..end]) {
+                out.push(name);
+            }
+            rest = &after[end + 1..];
+        }
+        out
     }
 
     /// The roots as they are, for a block that may not move (B-10): each root's given form and,
@@ -453,26 +600,32 @@ impl Roots {
     }
 
     fn root(&self, name: RootName) -> Option<&Root> {
-        self.roots.iter().find(|root| root.name == name)
+        self.roots
+            .iter()
+            .chain(&self.bases)
+            .find(|root| root.name == name)
     }
 }
 
-/// Which root a text stands for when two roots share it: the more specific one.
+/// Which root a text stands for when two roots share it: the more specific one. A root of the
+/// checkout wins over a base.
 fn precedence(name: RootName) -> (u8, u16) {
     match name {
-        RootName::Workspace => (0, 0),
-        RootName::Package => (1, 0),
+        RootName::CargoHome => (0, 0),
+        RootName::Toolchain => (0, 1),
+        RootName::Workspace => (1, 0),
+        RootName::Package => (2, 0),
         // The person's target folder, then cargo's folders under it.
-        RootName::BuildTargetDir => (2, 0),
-        RootName::TargetDir => (3, 0),
-        RootName::BinExe(i) => (4, 255 - u16::from(i)),
-        RootName::TargetTmp => (5, 0),
+        RootName::BuildTargetDir => (3, 0),
+        RootName::TargetDir => (4, 0),
+        RootName::BinExe(i) => (5, 255 - u16::from(i)),
+        RootName::TargetTmp => (6, 0),
         // The first folder of a kind wins over a later one with the same text.
-        RootName::Native(i) => (6, 255 - u16::from(i)),
-        RootName::Deps(i) => (7, 255 - u16::from(i)),
-        RootName::OutDir => (8, 0),
+        RootName::Native(i) => (7, 255 - u16::from(i)),
+        RootName::Deps(i) => (8, 255 - u16::from(i)),
+        RootName::OutDir => (9, 0),
         // A package's own output named as a native folder too is its output (B-6 `generated`).
-        RootName::ScriptOut => (9, 0),
+        RootName::ScriptOut => (10, 0),
     }
 }
 
@@ -558,7 +711,7 @@ mod tests {
     }
 
     fn roots(ws: &str) -> Roots {
-        Roots::new(&paths(ws), &shared(), with_r).unwrap()
+        Roots::new(&paths(ws), &shared(), &Machine::default(), with_r).unwrap()
     }
 
     fn rooted(root: RootName, rest: &str) -> Located {
@@ -657,6 +810,7 @@ mod tests {
                 ..paths("/w/ws")
             },
             &shared(),
+            &Machine::default(),
             with_r,
         )
         .unwrap();
@@ -690,7 +844,7 @@ mod tests {
             target_tmpdir: None,
             bin_exe_dirs: vec![],
         };
-        let roots = Roots::new(&paths, &shared(), |_| None).unwrap();
+        let roots = Roots::new(&paths, &shared(), &Machine::default(), |_| None).unwrap();
         assert!(!roots.has(RootName::Workspace));
         assert!(!roots.has(RootName::Package));
         assert_eq!(
@@ -713,7 +867,7 @@ mod tests {
             package: None,
             ..paths.clone()
         };
-        let roots = Roots::new(&linked, &shared(), |p: &str| {
+        let roots = Roots::new(&linked, &shared(), &Machine::default(), |p: &str| {
             (p == "/link/to/registry").then(|| registry.to_string())
         })
         .unwrap();
@@ -750,6 +904,7 @@ mod tests {
                 ..paths("/w/ws")
             },
             &shared(),
+            &Machine::default(),
             with_r,
         )
         .unwrap();
@@ -818,8 +973,13 @@ mod tests {
     #[test]
     fn placeholders_round_trip_and_never_collide() {
         // Plain, and with cargo's target folder and its test folders as roots too (B-5).
-        let with_target =
-            Roots::new(&test_paths("/w/ws", "/w/ws/target"), &shared(), with_r).unwrap();
+        let with_target = Roots::new(
+            &test_paths("/w/ws", "/w/ws/target"),
+            &shared(),
+            &Machine::default(),
+            with_r,
+        )
+        .unwrap();
         for (roots, extra) in [
             (roots("/w/ws"), &[][..]),
             (
@@ -920,7 +1080,8 @@ mod tests {
         );
         assert_eq!(roots.remapped("/w/ws"), ".");
         assert_eq!(roots.remapped("/w/ws2/x"), "/w/ws2/x");
-        let one_form = Roots::new(&paths("/w/ws"), &shared(), |_| None).unwrap();
+        let one_form =
+            Roots::new(&paths("/w/ws"), &shared(), &Machine::default(), |_| None).unwrap();
         assert_eq!(one_form.remap_args().len(), 2);
         // No script output: only the workspace.
         let plain = Roots::new(
@@ -929,6 +1090,7 @@ mod tests {
                 ..paths("/w/ws")
             },
             &shared(),
+            &Machine::default(),
             |_| None,
         )
         .unwrap();
@@ -973,10 +1135,17 @@ mod tests {
     // covers: B-5, B-8, B-10
     #[test]
     fn the_locations_cargo_hands_a_compile_are_roots_wherever_the_target_folder_is() {
-        let a = Roots::new(&test_paths("/w/ws", "/t/one"), &shared(), with_r).unwrap();
+        let a = Roots::new(
+            &test_paths("/w/ws", "/t/one"),
+            &shared(),
+            &Machine::default(),
+            with_r,
+        )
+        .unwrap();
         let b = Roots::new(
             &test_paths("/elsewhere/checkout-2", "/other/targets/the-second-one"),
             &shared(),
+            &Machine::default(),
             with_r,
         )
         .unwrap();
@@ -1023,7 +1192,13 @@ mod tests {
             rooted(RootName::OutDir, "liba.rlib")
         );
         // Inside the workspace too, the more specific root names them.
-        let inside = Roots::new(&test_paths("/w/ws", "/w/ws/target"), &shared(), with_r).unwrap();
+        let inside = Roots::new(
+            &test_paths("/w/ws", "/w/ws/target"),
+            &shared(),
+            &Machine::default(),
+            with_r,
+        )
+        .unwrap();
         assert_eq!(
             inside.to_placeholders("/w/ws/target/tmp /w/ws/src"),
             "{hushrun:target-tmpdir} {hushrun:workspace}/src"
@@ -1036,7 +1211,7 @@ mod tests {
         let mut many = test_paths("/w/ws", "/t/one");
         many.bin_exe_dirs = (0..300).map(|i| format!("/t/one/{i}")).collect();
         assert_eq!(
-            Roots::new(&many, &[], |_| None),
+            Roots::new(&many, &[], &Machine::default(), |_| None),
             Err(RootsError::TooManyBinFolders)
         );
     }
@@ -1065,7 +1240,7 @@ mod tests {
             ],
             ..paths("/w/ws")
         };
-        let roots = Roots::new(&p, &shared(), |_| None).unwrap();
+        let roots = Roots::new(&p, &shared(), &Machine::default(), |_| None).unwrap();
         assert_eq!(
             roots.locate("/elsewhere/target/debug/build/z-1/out/libz.a"),
             rooted(RootName::Native(2), "libz.a")
@@ -1091,9 +1266,224 @@ mod tests {
         let mut far = paths("/w/ws");
         far.native = vec![(300, "/x".into())];
         assert_eq!(
-            Roots::new(&far, &[], |_| None),
+            Roots::new(&far, &[], &Machine::default(), |_| None),
             Err(RootsError::TooManySearchFolders)
         );
+    }
+
+    /// The folders of a machine whose home is `home`, its toolchain installed as `toolchain`.
+    fn machine(home: &str, toolchain: &str) -> Machine {
+        Machine {
+            cargo_home: Some(format!("{home}/.cargo")),
+            toolchain: Some(format!("{home}/.rustup/toolchains/{toolchain}")),
+            toolchain_view: None,
+            rustup_home: Some(format!("{home}/.rustup")),
+            home: Some(home.to_string()),
+        }
+    }
+
+    /// A registry crate's call on a machine: its sources under the cargo home, the workspace
+    /// at `ws`.
+    fn registry_paths(home: &str, ws: &str) -> RootPaths {
+        RootPaths {
+            package: Some(format!(
+                "{home}/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.0"
+            )),
+            ..paths(ws)
+        }
+    }
+
+    // covers: B-8
+    #[test]
+    fn the_cargo_home_and_the_toolchain_are_bases_named_alike_on_every_machine() {
+        let shared = |home: &str| vec![format!("{home}/.cargo"), format!("{home}/.rustup")];
+        let a = Roots::new(
+            &registry_paths("/home/dev", "/home/dev/ws"),
+            &shared("/home/dev"),
+            &machine("/home/dev", "stable-x"),
+            |_| None,
+        )
+        .unwrap();
+        let b = Roots::new(
+            &registry_paths("/home/someone-else", "/srv/build/checkout"),
+            &shared("/home/someone-else"),
+            &machine("/home/someone-else", "1.94.0-x"),
+            |_| None,
+        )
+        .unwrap();
+        let index = "registry/src/index.crates.io-1949cf8c6b5b557f";
+        let source_a = format!("/home/dev/.cargo/{index}/serde-1.0.0/src/lib.rs");
+        let source_b = format!("/home/someone-else/.cargo/{index}/serde-1.0.0/src/lib.rs");
+        let named = rooted(
+            RootName::CargoHome,
+            &format!("{index}/serde-1.0.0/src/lib.rs"),
+        );
+        assert_eq!(a.locate(&source_a), named);
+        assert_eq!(b.locate(&source_b), named);
+        let Located::Rooted(record) = named else {
+            unreachable!()
+        };
+        assert_eq!(b.resolve(&record).unwrap(), PathBuf::from(&source_b));
+        // In arguments and values too, and back.
+        let text_a = format!("--extern x {source_a} CARGO_MANIFEST_DIR=/home/dev/.cargo/{index}");
+        let text_b =
+            format!("--extern x {source_b} CARGO_MANIFEST_DIR=/home/someone-else/.cargo/{index}");
+        assert_eq!(a.to_placeholders(&text_a), b.to_placeholders(&text_b));
+        assert!(
+            a.to_placeholders(&text_a)
+                .contains("{hushrun:cargo-home}/registry/src/")
+        );
+        assert_eq!(
+            b.from_placeholders(&a.to_placeholders(&text_a)).unwrap(),
+            text_b
+        );
+        let std_a = "/home/dev/.rustup/toolchains/stable-x/lib/rustlib/x/lib/libstd.rlib";
+        let std_b = "/home/someone-else/.rustup/toolchains/1.94.0-x/lib/rustlib/x/lib/libstd.rlib";
+        assert_eq!(a.to_placeholders(std_a), b.to_placeholders(std_b));
+        assert_eq!(
+            a.to_placeholders(std_a),
+            "{hushrun:toolchain}/lib/rustlib/x/lib/libstd.rlib"
+        );
+        // The rest of the rustup home is a shared folder, as before: its path is the machine's.
+        assert_eq!(
+            a.locate("/home/dev/.rustup/settings.toml"),
+            Located::Shared("/home/dev/.rustup/settings.toml".into())
+        );
+        // A base never ties a block, and is not what B-10 searches for to decide its place.
+        assert_eq!(a.tied(), roots_without_bases(&a));
+        assert!(
+            !a.needles()
+                .iter()
+                .any(|n| n.starts_with(b"/home/dev/.cargo") || n.starts_with(b"/home/dev/.rustup"))
+        );
+        assert_eq!(a.named(&text_a), [RootName::CargoHome, RootName::CargoHome]);
+        assert_eq!(
+            a.named("/home/dev/ws/src {hushrun:toolchain}"),
+            [RootName::Workspace]
+        );
+        // What decides whether the block may leave the machine is searched for instead.
+        let needles: Vec<(Folder, &str)> = a
+            .machine_needles()
+            .iter()
+            .map(|(f, t)| (*f, t.as_str()))
+            .collect();
+        assert_eq!(
+            needles,
+            [
+                (Folder::CargoHome, "/home/dev/.cargo"),
+                (Folder::RustupHome, "/home/dev/.rustup"),
+                (Folder::Home, "/home/dev"),
+            ]
+        );
+    }
+
+    /// The tied roots of a call, recomputed without its bases.
+    fn roots_without_bases(roots: &Roots) -> Vec<(RootName, String)> {
+        roots
+            .tied()
+            .into_iter()
+            .filter(|(name, _)| !name.is_base())
+            .collect()
+    }
+
+    // covers: B-9
+    #[test]
+    fn the_cargo_home_is_remapped_and_the_inner_folder_wins() {
+        let a = Roots::new(
+            &registry_paths("/home/dev", "/w/ws"),
+            &[],
+            &machine("/home/dev", "stable-x"),
+            with_r,
+        )
+        .unwrap();
+        let remaps: Vec<String> = a
+            .remap_args()
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            remaps,
+            [
+                "--remap-path-prefix=/w/ws=.",
+                "--remap-path-prefix=/R/w/ws=.",
+                "--remap-path-prefix=/home/dev/.cargo=/hushrun/cargo",
+                "--remap-path-prefix=/R/home/dev/.cargo=/hushrun/cargo",
+                "--remap-path-prefix=/w/ws/target/debug/build/app-1/out=/hushrun/out/app-0.1.0",
+                "--remap-path-prefix=/R/w/ws/target/debug/build/app-1/out=/hushrun/out/app-0.1.0",
+            ]
+        );
+        assert_eq!(
+            a.remapped("/home/dev/.cargo/registry/src/i/serde-1.0.0/src/lib.rs"),
+            "/hushrun/cargo/registry/src/i/serde-1.0.0/src/lib.rs"
+        );
+        // A cargo home inside the checkout (some CI jobs keep it there): the cargo home is the
+        // inner folder, and wins for what lies in it, as `locate` decides.
+        let inside = Roots::new(
+            &RootPaths {
+                package: Some("/w/ws/.cargo/registry/src/i/serde-1.0.0".into()),
+                ..paths("/w/ws")
+            },
+            &[],
+            &Machine {
+                cargo_home: Some("/w/ws/.cargo".into()),
+                ..Machine::default()
+            },
+            |_| None,
+        )
+        .unwrap();
+        let path = "/w/ws/.cargo/registry/src/i/serde-1.0.0/src/lib.rs";
+        assert_eq!(
+            inside.remapped(path),
+            "/hushrun/cargo/registry/src/i/serde-1.0.0/src/lib.rs"
+        );
+        assert_eq!(
+            inside.locate(path),
+            rooted(RootName::CargoHome, "registry/src/i/serde-1.0.0/src/lib.rs")
+        );
+        assert_eq!(inside.remapped("/w/ws/src/lib.rs"), "./src/lib.rs");
+        // The package in the cargo home is not a root; the workspace still is.
+        assert!(!inside.has(RootName::Package));
+        assert!(inside.has(RootName::Workspace));
+        // No cargo home known: no remap for it, and its paths are where they are.
+        let unknown = Roots::new(
+            &registry_paths("/home/dev", "/w/ws"),
+            &[],
+            &Machine::default(),
+            |_| None,
+        )
+        .unwrap();
+        assert!(
+            !unknown
+                .remap_args()
+                .iter()
+                .any(|arg| arg.to_str().unwrap().contains("/hushrun/cargo"))
+        );
+        assert_eq!(
+            unknown.locate("/home/dev/.cargo/x"),
+            Located::Outside("/home/dev/.cargo/x".into())
+        );
+    }
+
+    // covers: B-8
+    #[test]
+    fn a_base_of_the_file_systems_root_or_relative_is_left_out() {
+        let roots = Roots::new(
+            &paths("/w/ws"),
+            &[],
+            &Machine {
+                cargo_home: Some("/".into()),
+                toolchain: Some("relative/toolchain".into()),
+                toolchain_view: None,
+                rustup_home: Some(String::new()),
+                home: Some("/".into()),
+            },
+            |_| None,
+        )
+        .unwrap();
+        assert!(!roots.has(RootName::CargoHome));
+        assert!(!roots.has(RootName::Toolchain));
+        assert!(roots.machine_needles().is_empty());
+        assert_eq!(roots.locate("/etc/x"), Located::Outside("/etc/x".into()));
     }
 
     #[test]
@@ -1101,22 +1491,25 @@ mod tests {
         let mut p = paths("/w/ws");
         p.workspace = "relative".into();
         assert!(matches!(
-            Roots::new(&p, &[], |_| None),
+            Roots::new(&p, &[], &Machine::default(), |_| None),
             Err(RootsError::RelativeWorkspace(_))
         ));
         let mut p = paths("/w/ws");
         p.out_dir = "/".into();
         assert!(matches!(
-            Roots::new(&p, &[], |_| None),
+            Roots::new(&p, &[], &Machine::default(), |_| None),
             Err(RootsError::TooBroad(_))
         ));
         let mut p = paths("/w/ws");
         p.deps = (0..300).map(|i| format!("/d/{i}")).collect();
-        assert_eq!(Roots::new(&p, &[], |_| None), Err(RootsError::TooManyDeps));
+        assert_eq!(
+            Roots::new(&p, &[], &Machine::default(), |_| None),
+            Err(RootsError::TooManyDeps)
+        );
         // A relative out dir starts from the working directory.
         let mut p = paths("/w/ws");
         p.out_dir = "target/other".into();
-        let roots = Roots::new(&p, &[], |_| None).unwrap();
+        let roots = Roots::new(&p, &[], &Machine::default(), |_| None).unwrap();
         assert_eq!(
             roots.locate("/w/ws/target/other/x"),
             rooted(RootName::OutDir, "x")
@@ -1146,7 +1539,7 @@ mod tests {
             target_tmpdir: None,
             bin_exe_dirs: vec![],
         };
-        let roots = Roots::new(&p, &[], resolve_on_disk).unwrap();
+        let roots = Roots::new(&p, &[], &Machine::default(), resolve_on_disk).unwrap();
         assert_eq!(
             roots.locate(&format!("{real}/src/lib.rs")),
             rooted(RootName::Workspace, "src/lib.rs")

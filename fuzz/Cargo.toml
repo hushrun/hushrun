@@ -12,7 +12,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 hushrun-attest = { path = "../crates/hushrun-attest" }
-hushrun-core = { path = "../crates/hushrun-core" }
+hushrun-core = { path = "../crates/hushrun-core", features = ["pack"] }
+# The block pack target zstd-compresses what it fuzzes, as a writer would.
+zstd = { version = "0.13.3", default-features = false }
 hushrun-reports = { path = "../crates/hushrun-reports" }
 serde_json = "1"
 
@@ -59,3 +61,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "block_pack"
+path = "fuzz_targets/block_pack.rs"
+test = false
+doc = false
+bench = false

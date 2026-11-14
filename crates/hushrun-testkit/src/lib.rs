@@ -4,6 +4,7 @@
 #[cfg(unix)]
 pub mod container;
 pub mod env;
+pub mod fake_build;
 pub mod fake_forge;
 pub mod fake_github;
 pub mod fake_gitlab;

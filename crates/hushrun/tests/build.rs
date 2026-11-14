@@ -561,6 +561,59 @@ fn run_check_sets_the_wrapper_only_when_reuse_is_on_here() {
     assert_eq!(one.lines_with("build reuse"), 0, "{}", one.stderr);
 }
 
+// covers: B-25
+#[cfg(unix)]
+#[test]
+fn run_check_that_compiles_rust_says_once_that_only_the_command_form_uses_the_shared_store() {
+    use hushrun_testkit::fake_build::{FakeBuild, route};
+    let compiles = "{run: 'cd tiny && cargo build --offline'}".to_string();
+    let w = with_checks(&[
+        ("c", compiles.clone()),
+        ("d", compiles),
+        ("plain", "{run: 'true'}".to_string()),
+    ]);
+    w.write(
+        "tiny/Cargo.toml",
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    w.write("tiny/src/lib.rs", "pub fn two() -> u32 {\n    1 + 1\n}\n");
+    w.write(".gitignore", "target/\ntiny/Cargo.lock\n");
+    w.commit("tiny");
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let fake = FakeBuild::start();
+    let target = w.root.join("target");
+    let run = |checks: &[&str]| {
+        let _ = std::fs::remove_dir_all(&target);
+        let mut cmd = member(&w);
+        cmd.env("HUSHRUN_BACKEND", fake.url())
+            .env("HUSHRUN_TOKEN", FakeBuild::TOKEN)
+            .env("HUSHRUN_BUILD_AUDIT", "none")
+            .env("CARGO_TARGET_DIR", &target)
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env("CARGO_TERM_COLOR", "never");
+        let (ran, _) = run_checks(&mut cmd, checks);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        ran
+    };
+    let line = "only `hushrun run NAME -- COMMAND` uses the org's shared store";
+    // Two checks compile, in an org that shares: one line, and nothing asked about blocks.
+    let ran = run(&["c", "d"]);
+    assert_eq!(ran.lines_with(line), 1, "{}", ran.stderr);
+    assert_eq!(fake.count(route::OPEN), 0);
+    // A check that compiles nothing: no line, and the backend isn't asked whether it shares.
+    let asked = fake.count(route::RESULTS);
+    let ran = run(&["plain"]);
+    assert_eq!(ran.lines_with(line), 0, "{}", ran.stderr);
+    assert_eq!(fake.count(route::RESULTS), asked);
+    // An org that doesn't share: nothing said.
+    fake.set_sharing(false);
+    let ran = run(&["c"]);
+    assert_eq!(ran.lines_with(line), 0, "{}", ran.stderr);
+    assert!(ran.lines_with("build:") >= 1, "{}", ran.stderr);
+}
+
 // covers: B-2, B-19
 #[cfg(unix)]
 #[test]
@@ -644,4 +697,43 @@ fn an_isolated_check_never_gets_the_wrapper() {
     assert_eq!(runs.len(), 1);
     // The check declares no variables, so none goes in.
     assert!(!runs[0].iter().any(|a| a == "--env"), "{:?}", runs[0]);
+}
+
+// covers: B-25, B-33
+#[test]
+fn build_share_saves_the_share_setting_and_status_says_what_applies() {
+    let w = World::new("acme-api.yaml");
+    assert_eq!(build(&w, &["on"]).code, 0);
+    let saved = build(&w, &["share", "observe"]);
+    assert_eq!(saved.code, 0, "{}", saved.stderr);
+    assert!(
+        saved.stdout.contains("Sharing is in observe here"),
+        "{}",
+        saved.stdout
+    );
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(settings(&w)).unwrap()).unwrap();
+    assert_eq!(file["share"], "observe");
+    assert_eq!(file["mode"], "on", "the local mode stays");
+    let status = status_json(&w);
+    assert_eq!(status["share"], "observe");
+    // Nothing here signs in to a backend: sharing is off, and says why.
+    assert_eq!(status["sharing"]["mode"], "off");
+    assert_eq!(status["sharing"]["why"], "no backend is signed in to");
+    // HUSHRUN_BUILD_SHARE lowers it for one command; the file keeps its own.
+    let shell = Ran::of(
+        hushrun(&w)
+            .env("HUSHRUN_BUILD_SHARE", "off")
+            .args(["build"]),
+    );
+    assert!(
+        shell
+            .stdout
+            .contains("share     off on this machine (HUSHRUN_BUILD_SHARE)"),
+        "{}",
+        shell.stdout
+    );
+    let again: Value =
+        serde_json::from_str(&std::fs::read_to_string(settings(&w)).unwrap()).unwrap();
+    assert_eq!(again["share"], "observe");
 }

@@ -24,7 +24,12 @@ use crate::known::{self, Where};
 use crate::model::{Class, Located, NotStored, RootName};
 use crate::roots::Roots;
 use crate::script::{self, Script};
+use crate::store::Store;
 use crate::{link, memo, regular, shape, sidecar};
+
+/// Every `--extern` as the key holds it, and each proc macro's crate name with whether another
+/// machine names it the same way.
+pub type Externs = (Vec<ExternInput>, Vec<(String, bool)>);
 
 /// What every gathering needs: the call, its roots and variables, and the build script's
 /// saved output when it has one.
@@ -42,6 +47,17 @@ pub struct Context<'a> {
     /// The run's session folder, where digests of files in folders the wrapper doesn't own are
     /// remembered for the run ([`crate::memo`]); `None` hashes them each time.
     pub run_memo: Option<&'a Path>,
+    /// The run's own store, which confirms what an extern's record says of its block
+    /// ([`sidecar::vouched`]); `None` believes no record: every extern is named by its bytes.
+    pub store: Option<&'a Store>,
+    /// The store's seal ([`Store::seal`]): only a record sealed with it answers for a file
+    /// without a read; `None` hashes every file in an output folder.
+    pub seal: Option<sidecar::Seal>,
+    /// Asks the C driver and `ld` which `ld` a link runs and where it looks for libraries
+    /// (B-18), again before every lookup; `None` follows no hint of a linked output.
+    pub ask: Option<&'a link::Ask<'a>>,
+    /// The call's target is Apple's ([`link::Query::apple`]).
+    pub apple: bool,
 }
 
 /// One file hashed before the compile, with how it was then. After the compile it must be the
@@ -139,6 +155,9 @@ fn links_changed_from(
 pub struct Common {
     /// Every `--extern`.
     pub externs: Vec<ExternInput>,
+    /// Each proc macro among the externs by crate name, and whether another machine names it the
+    /// same way.
+    pub externs_portable: Vec<(String, bool)>,
     /// Each place a library named with `-l` may be in the `-L` folders (B-6).
     pub native: Vec<Read>,
     /// For a library compile, every `-L native=`, `all=` and bare folder: its names and static
@@ -271,19 +290,45 @@ impl Context<'_> {
         })
     }
 
-    /// Every `--extern`, by content, or by the block that produced it for a proc macro whose
-    /// record names one (B-6).
-    pub fn externs(&self) -> Result<Vec<ExternInput>, NotStored> {
+    /// Every `--extern`, by content, or by what it was built from for a proc macro whose
+    /// record names it and the run's own store confirms that record (B-6); with, for each proc
+    /// macro, whether another machine names it the same way (the store's block says so). A proc
+    /// macro whose record the store can't confirm (a `target/` restored from a cache, copied
+    /// from elsewhere, or whose block has gone) is named by its bytes and is not named portably,
+    /// so nothing built against it leaves the machine for that reason. A proc macro's record is
+    /// written before cargo starts any dependent; a library's may not be yet (cargo starts a
+    /// dependent once the `.rmeta` is written), and it is keyed by its bytes anyway.
+    ///
+    /// Cost: one store lookup per proc macro whose record claims a name or portability.
+    pub fn externs(&self) -> Result<Externs, NotStored> {
         let mut out = Vec::with_capacity(self.invocation.externs().len());
+        let mut portable = Vec::with_capacity(self.invocation.externs().len());
         for ext in self.invocation.externs() {
             let by = match &ext.path {
                 None => ExternBy::Builtin,
                 Some(path) => {
                     let path = self.absolute(path);
-                    let known = sidecar::lookup(&path).map_err(|_| NotStored::Hash)?;
-                    match known.produced_by {
-                        Some(origin) if is_linked_library(&path) => ExternBy::ProducedBy(origin),
-                        _ => ExternBy::Content(known.sha256),
+                    let known =
+                        sidecar::lookup(&path, self.seal.as_ref()).map_err(|_| NotStored::Hash)?;
+                    if is_linked_library(&path) {
+                        let claims = known.produced_by.is_some() || known.portable;
+                        let vouched = self
+                            .store
+                            .filter(|_| claims)
+                            .and_then(|store| sidecar::vouched(store, &path, &known));
+                        portable.push((ext.name.clone(), vouched.is_some_and(|v| v.portable)));
+                        match vouched.and_then(|v| v.produced_by) {
+                            Some(origin) => ExternBy::ProducedBy(origin),
+                            None => ExternBy::Content(known.sha256),
+                        }
+                    } else {
+                        if sidecar::made_as_asked(&path) {
+                            // A library compiled as asked, without the remaps (B-19): its bytes
+                            // are this machine's alone, so a dependent on another machine names
+                            // it otherwise and this block is no use there (the review's B6).
+                            portable.push((ext.name.clone(), false));
+                        }
+                        ExternBy::Content(known.sha256)
                     }
                 }
             };
@@ -293,7 +338,7 @@ impl Context<'_> {
                 by,
             });
         }
-        Ok(out)
+        Ok((out, portable))
     }
 
     /// The parts that don't depend on the dep-info. Hashed now, checked again after the compile.
@@ -313,8 +358,10 @@ impl Context<'_> {
         } else {
             Vec::new()
         };
+        let (externs, externs_portable) = self.externs()?;
         Ok(Common {
-            externs: self.externs()?,
+            externs,
+            externs_portable,
             native,
             native_dirs,
             generated,
@@ -469,13 +516,16 @@ impl Context<'_> {
     }
 
     /// An upward search for the file `name` from the folder `from` (B-6 `declared`), as a macro
-    /// that reads the first one it finds walking up does it. Each place under a root or a shared
-    /// folder goes into `files`, read where it lies as any other. From the first folder above
-    /// them all, one entry goes into `above`: the first file of that name found walking on up
-    /// from there, by its bytes, or none. That holds no folder outside the roots, so it doesn't
-    /// tie the block (B-8), and it is computed from this call's own folders, so it never opens
-    /// another checkout's path. Every place it looked at is watched, so a file that appears,
-    /// goes or changes there while compiling is caught (B-11).
+    /// that reads the first one it finds walking up does it. Each place under a root or a base
+    /// goes into `files`, read where it lies as any other; so does each place under a shared
+    /// folder when the search starts there. From the first folder above them all, one entry goes
+    /// into `above`: the first file of that name found walking on up from there, by its bytes,
+    /// or none. A shared folder above a root or a base (`/opt` above a cargo home in
+    /// `/opt/tools/cargo`) is the machine's own layout, like the home folder above `~/.cargo`,
+    /// and is in that entry too, never read where it lies. The entry holds no folder outside the
+    /// roots, so it doesn't tie the block (B-8), and it is computed from this call's own folders,
+    /// so it never opens another checkout's path. Every place it looked at is watched, so a file
+    /// that appears, goes or changes there while compiling is caught (B-11).
     ///
     /// Cost: one `stat` per folder above the roots, up to the first file found.
     fn upward(
@@ -487,9 +537,17 @@ impl Context<'_> {
         watched: &mut Vec<Watched>,
     ) -> Result<(), NotStored> {
         let mut below = None;
+        let mut rooted = false;
         for dir in from.ancestors() {
             let candidate = dir.join(name);
-            if !matches!(self.located(&candidate)?, Located::Outside(_)) {
+            let at = self.located(&candidate)?;
+            let read_here = match at {
+                Located::Rooted(_) => true,
+                Located::Shared(_) => !rooted,
+                Located::Outside(_) => false,
+            };
+            if read_here {
+                rooted |= matches!(at, Located::Rooted(_));
                 files.push(candidate);
                 below = Some(self.located(dir)?);
                 continue;
@@ -514,7 +572,7 @@ impl Context<'_> {
     /// the linker search for it (`-L native=`, `all=` and bare; `framework=` for a framework),
     /// in order, present (by content, through the record where one exists) or absent. A file
     /// under the build script's output is in `generated` already. A name found in none of them
-    /// is a system library: the SDK and the linker cover it.
+    /// reaches only a link, whose `link` part keys where the linker takes it from (B-18).
     ///
     /// Cost: one stat per candidate, six names per folder, only for calls that have `-l`.
     fn native(
@@ -565,12 +623,14 @@ impl Context<'_> {
 
     /// B-6's `native_dirs`: each `-L native=`, `all=` and bare folder, by where it lies, the
     /// names of its entries, and the bytes of each static library directly in it (`*.a`,
-    /// `*.lib`), which a `#[link(kind = "static")]` in the source would bundle. These are
+    /// `*.lib`, and any other file that is an archive), which a `#[link(kind = "static")]` in
+    /// the source would bundle. These are
     /// usually other packages' build-script outputs: each is a root of its own (B-8) and no
     /// record is written there; digests are remembered for the run instead ([`crate::memo`]).
     ///
-    /// Cost: one `readdir` per folder, and per static library one `stat` and a small read once
-    /// it was hashed in this run.
+    /// Cost: one `readdir` per folder, an 8-byte read of each entry not named as a static
+    /// library, and per static library one `stat` and a small read once it was hashed in this
+    /// run.
     fn native_dirs(
         &self,
         generated: bool,
@@ -602,11 +662,13 @@ impl Context<'_> {
             });
             let mut archives = Vec::new();
             for name in names.iter().flatten() {
-                if !(name.ends_with(".a") || name.ends_with(".lib")) {
-                    continue;
-                }
                 let path = dir.join(name);
-                if fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                // A static library by its name, or any archive, whatever its name: a
+                // `#[link(..., modifiers = "+verbatim")]` bundles one as it is named.
+                let named = name.ends_with(".a") || name.ends_with(".lib");
+                if fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    || !(named || crate::rlib::is_archive(&path))
+                {
                     continue;
                 }
                 let (sha, stat) =
@@ -631,7 +693,7 @@ impl Context<'_> {
     /// records in (an output folder), else remembered for the run ([`crate::memo`]).
     pub fn digest(&self, path: &Path) -> io::Result<Digest> {
         if in_record_folder(path) {
-            return sidecar::lookup(path).map(|known| known.sha256);
+            return sidecar::lookup(path, self.seal.as_ref()).map(|known| known.sha256);
         }
         memo::digest(self.run_memo, path).map(|(sha, _)| sha)
     }
@@ -683,6 +745,22 @@ impl Context<'_> {
             skip.push(self.absolute(out));
         }
         skip
+    }
+
+    /// How many bytes the files `hint` names hold now, before any is hashed: what a downloaded
+    /// hint is held to (B-30). `None` when the hint can't be followed here. Only stats.
+    pub fn hint_bytes(&self, hint: &ReadList) -> Option<u64> {
+        if hint.place == PlaceKind::Tied && hint.roots != Some(roots_digest(&self.roots.tied())) {
+            return None;
+        }
+        let mut total = 0u64;
+        for at in &hint.reads {
+            let path = self.open_at(at)?;
+            if let Ok(meta) = fs::metadata(&path) {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        Some(total)
     }
 
     /// The second key's parts from a hint, with every file as it is now (B-7), and the stats
@@ -744,6 +822,8 @@ impl Context<'_> {
             externs: common.externs.clone(),
             native: common.native.clone(),
             native_dirs: common.native_dirs.clone(),
+            bundles_nothing: hint.bundles_nothing,
+            bound: self.roots.bound(&hint.bound),
             shape: shapes,
             generated: common.generated.clone(),
             declared: common.declared.clone(),
@@ -779,11 +859,13 @@ impl Context<'_> {
                 state: self.state_now(at, watched)?,
             });
         }
-        let linker = self.open_at(&list.linker)?;
-        let ld = match &list.ld {
-            Some(at) => Some((at, self.open_at(at)?)),
-            None => None,
-        };
+        let mut system = Vec::with_capacity(list.system.len());
+        for at in &list.system {
+            system.push(Read {
+                at: at.clone(),
+                state: self.state_now(at, watched)?,
+            });
+        }
         let sdk = match &list.sdk {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
@@ -792,19 +874,68 @@ impl Context<'_> {
             Some(at) => Some((at, self.open_at(at)?)),
             None => None,
         };
+        // Which driver and which `ld` run now, and where that `ld` looks: asked again, never
+        // taken from the hint (B-18).
+        let query = list.query.as_ref()?;
+        let ask = self.ask?;
+        let from = |text: &str| self.roots.from_placeholders(text).ok();
+        let before = query
+            .path_before
+            .iter()
+            .map(|entry| from(entry).map(PathBuf::from))
+            .collect::<Option<Vec<_>>>()?;
+        let path = link::link_path(&before, query.path_inherits, self.env.get("PATH"));
+        let cwd = PathBuf::from(self.invocation.cwd());
+        let (linker_at, linker) = match &query.program {
+            Some(name) => {
+                let found = link::linker(name, path.as_deref(), &cwd)?.path;
+                (self.located(&found).ok()?, found)
+            }
+            None => (list.linker.clone(), self.open_at(&list.linker)?),
+        };
+        let asked = link::Query {
+            driver: linker.clone(),
+            flags: query
+                .flags
+                .iter()
+                .map(|flag| from(flag))
+                .collect::<Option<Vec<_>>>()?,
+            ld_sysroot: match &query.ld_sysroot {
+                Some(root) => Some(from(root)?),
+                None => None,
+            },
+            path: path.unwrap_or_default(),
+            cwd,
+            apple: self.apple,
+            sdk: sdk.as_ref().map(|(_, path)| path.clone()),
+            library_path: self
+                .env
+                .get("LIBRARY_PATH")
+                .map(std::ffi::OsStr::to_os_string),
+        };
+        let environment = link::environment(&asked, ask).ok()?;
+        let ld_at = self.located(&environment.ld).ok()?;
+        let folders = environment
+            .folders
+            .iter()
+            .map(|dir| self.located(dir).ok())
+            .collect::<Option<Vec<_>>>()?;
         Some(Link {
             libraries,
             files,
             linker: linkers_text(
-                (&list.linker, &linker),
-                ld.as_ref().map(|(at, p)| (*at, p.as_path())),
+                (&linker_at, &linker),
+                Some((&ld_at, &environment.ld)),
                 dsymutil.as_ref().map(|(at, p)| (*at, p.as_path())),
             )?,
             sdk: sdk_text(sdk.as_ref().map(|(at, p)| (*at, p.as_path()))),
-            linker_path: list.linker.clone(),
-            ld_path: list.ld.clone(),
+            linker_path: linker_at,
+            ld_path: Some(ld_at),
             sdk_path: list.sdk.clone(),
             dsymutil_path: list.dsymutil.clone(),
+            folders,
+            system,
+            query: Some(query.clone()),
         })
     }
 
@@ -893,6 +1024,8 @@ impl Context<'_> {
                 externs: common.externs.clone(),
                 native: common.native.clone(),
                 native_dirs: common.native_dirs.clone(),
+                bundles_nothing: false,
+                bound: Vec::new(),
                 shape: shapes,
                 generated: common.generated.clone(),
                 declared: common.declared.clone(),
@@ -949,7 +1082,7 @@ fn resolve_dots(path: &Path) -> Result<PathBuf, NotStored> {
 }
 
 /// Whether a file is a linked library a proc macro can be: never an `.rlib` or `.rmeta`.
-fn is_linked_library(path: &Path) -> bool {
+pub(crate) fn is_linked_library(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("dylib" | "so" | "dll")
@@ -1047,12 +1180,13 @@ fn located_text(at: &Located) -> Option<String> {
     serde_json::to_string(at).ok()
 }
 
-/// The linker's identity as one text (B-18): where it lies (B-8) and, for one under a root (a
-/// script in the repository, another file in each checkout), its SHA-256; for any other, its
-/// size and modification time. `None` when it can't be read.
+/// The linker's identity as one text (B-18): where it lies (B-8) and, for one under a root of
+/// the checkout (a script in the repository, another file in each checkout), its SHA-256; for
+/// any other, the toolchain's `rust-lld` among them, its size and modification time. `None`
+/// when it can't be read.
 pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
     let place = located_text(at)?;
-    if matches!(at, Located::Rooted(_)) {
+    if matches!(at, Located::Rooted(rooted) if !rooted.root.is_base()) {
         let (sha, _) = regular::hash_steady(path).ok()?;
         return Some(format!("{place} {}", sha.hex()));
     }
@@ -1061,9 +1195,22 @@ pub fn linker_text(at: &Located, path: &Path) -> Option<String> {
     Some(format!("{place} {} {}", stat.size, stat.mtime_ns))
 }
 
+/// The identity of the `ld` a C driver runs (B-18): as [`linker_text`], and for one not under a
+/// root of the checkout also its change time and inode, so that a file put in its place with the
+/// same size and modification time (a package that keeps dates, a link retargeted to a copy) is
+/// another `ld`. `None` when it can't be read.
+pub fn ld_text(at: &Located, path: &Path) -> Option<String> {
+    let text = linker_text(at, path)?;
+    if matches!(at, Located::Rooted(rooted) if !rooted.root.is_base()) {
+        return Some(text);
+    }
+    let stat = Stat::of(&fs::metadata(path).ok()?);
+    Some(format!("{text} {} {}", stat.ctime_ns, stat.inode))
+}
+
 /// The identity of the linkers a link ran: the driver's ([`linker_text`]) and, on a line of
-/// its own, the one `-fuse-ld` named; then, on a line that says what it is, the `dsymutil` that
-/// wrote a program's debug bundle (B-9). `None` when one can't be read.
+/// its own, the `ld` it runs ([`ld_text`]); then, on a line that says what it is, the
+/// `dsymutil` that wrote a program's debug bundle (B-9). `None` when one can't be read.
 pub fn linkers_text(
     driver: (&Located, &Path),
     ld: Option<(&Located, &Path)>,
@@ -1072,7 +1219,7 @@ pub fn linkers_text(
     let mut text = linker_text(driver.0, driver.1)?;
     if let Some((at, path)) = ld {
         text.push('\n');
-        text.push_str(&linker_text(at, path)?);
+        text.push_str(&ld_text(at, path)?);
     }
     if let Some((at, path)) = dsymutil {
         text.push_str("\ndsymutil ");

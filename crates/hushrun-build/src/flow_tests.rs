@@ -28,6 +28,9 @@ struct Plan {
     env_reads: Vec<String>,
     /// A variable whose raw value is written into the outputs (a path kept for run time).
     embed_var: Option<String>,
+    /// A variable whose raw value is written into the outputs without the dep-info naming it,
+    /// as a proc macro that reads the environment while it expands does.
+    leak_var: Option<String>,
     /// A variable naming a folder and a file in it that is included, as
     /// `include!(concat!(env!("OUT_DIR"), "/gen.rs"))` does.
     include_var: Option<(String, String)>,
@@ -46,6 +49,14 @@ struct Plan {
     /// Write the output folder's path into the debug bundle's DWARF file, as debug info that
     /// names a file under a root does.
     bundle_root: bool,
+    /// For a proc macro: what the linker writes around the metadata, such as its own version.
+    link_salt: Option<String>,
+    /// For a proc macro: something more in its metadata, as a crate hash that moved does.
+    metadata_salt: Option<String>,
+    /// For a library: its `.rlib` as an `ar` archive with these members (`lib.rmeta` holds
+    /// what the compile read), as rustc writes one; a bundled static library's objects are
+    /// members of their own.
+    rlib_members: Option<Vec<String>>,
 }
 
 type During = Box<dyn FnMut()>;
@@ -57,6 +68,8 @@ struct Seen {
     execs: Vec<Vec<String>>,
     /// What the wrapper wrote to its stdout.
     stdout: Vec<u8>,
+    /// How many times the audit was asked about a downloaded library's first reuse here.
+    first_audits: usize,
 }
 
 struct Fake {
@@ -69,6 +82,57 @@ struct Fake {
     audit: bool,
     /// Runs when the lookup found a block: between the lookup and the compile.
     on_found: RefCell<Option<During>>,
+    /// What the compiler says `native` is (B-5), shared between calls to count the asks; none:
+    /// it can't be asked.
+    native: Option<Rc<RefCell<NativeStandIn>>>,
+    /// The run's relay (B-26), shared between calls; none: the real client, which finds no
+    /// socket and misses.
+    relay: Option<Rc<RefCell<RelayStandIn>>>,
+}
+
+type Answering = Box<dyn FnMut(&crate::relay::Request) -> Option<crate::relay::Answer>>;
+
+/// A relay that answers as a test says and keeps what it was asked.
+struct RelayStandIn {
+    answer: Answering,
+    asked: Vec<crate::relay::Request>,
+}
+
+fn relay_answering(
+    answer: impl FnMut(&crate::relay::Request) -> Option<crate::relay::Answer> + 'static,
+) -> Rc<RefCell<RelayStandIn>> {
+    Rc::new(RefCell::new(RelayStandIn {
+        answer: Box::new(answer),
+        asked: Vec::new(),
+    }))
+}
+
+/// A compiler's answer to what `-C target-cpu=native` is, and how often it was asked.
+#[derive(Default)]
+struct NativeStandIn {
+    /// What `--print target-cpus` and `--print cfg -C target-cpu=native` print; none: they fail.
+    answer: Option<(String, String)>,
+    asked: usize,
+}
+
+/// A stand-in whose `native` is `cpu`, with `features`.
+fn native_answer(cpu: &str, features: &[&str]) -> Rc<RefCell<NativeStandIn>> {
+    let cfg: String = std::iter::once("target_arch=\"aarch64\"\n".to_string())
+        .chain(
+            features
+                .iter()
+                .map(|feature| format!("target_feature=\"{feature}\"\n")),
+        )
+        .collect();
+    Rc::new(RefCell::new(NativeStandIn {
+        answer: Some((
+            format!(
+                "Available CPUs for this target:\n    native - Select the CPU of the current host (currently {cpu}).\n    generic\n"
+            ),
+            cfg,
+        )),
+        asked: 0,
+    }))
 }
 
 /// Applies `--remap-path-prefix` pairs as rustc does: the last one that holds the path wins.
@@ -110,6 +174,7 @@ impl Fake {
         let mut remaps = Vec::new();
         let mut externs = Vec::new();
         let mut packed = false;
+        let mut crate_type = String::new();
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
@@ -120,7 +185,8 @@ impl Fake {
             match arg {
                 "--crate-name" => crate_name = value(),
                 "--out-dir" => out_dir = value(),
-                "--crate-type" | "-L" | "-l" | "--json" | "--color" | "--target" => {
+                "--crate-type" => crate_type = value(),
+                "-L" | "-l" | "--json" | "--color" | "--target" => {
                     value();
                 }
                 "-C" => {
@@ -203,6 +269,10 @@ impl Fake {
             content.push_str(&format!("embedded {value}\n"));
             env_deps.push((name.clone(), Some(value)));
         }
+        if let Some(name) = &plan.leak_var {
+            let value = self.var(name, env).unwrap_or_default();
+            content.push_str(&format!("leaked {value}\n"));
+        }
         if let Some((name, file)) = &plan.include_var {
             let value = self.var(name, env).unwrap_or_default();
             let path = format!("{value}/{file}");
@@ -226,11 +296,55 @@ impl Fake {
                 "dep-info" => (out.join(format!("{stem}.d")), None),
                 "metadata" => (
                     out.join(format!("lib{stem}.rmeta")),
-                    Some(format!("rmeta\n{content}")),
+                    Some(format!("rmeta\n{content}").into_bytes()),
                 ),
+                // A proc macro: a linked library, its metadata in a section of its own between
+                // what the linker wrote (`metadata`).
+                _ if crate_type == "proc-macro" => {
+                    let mut inner = b"rust\0\0\0\x0a".to_vec();
+                    inner.extend_from_slice(content.as_bytes());
+                    inner.extend_from_slice(plan.metadata_salt.as_deref().unwrap_or("").as_bytes());
+                    let mut bytes = format!("linked by {:?}\n", plan.link_salt).into_bytes();
+                    bytes.extend_from_slice(b"rust\0\0\0\x0a");
+                    bytes.extend_from_slice(&(inner.len() as u64).to_le_bytes());
+                    bytes.extend_from_slice(&inner);
+                    bytes.extend_from_slice(b"\nsymbols");
+                    let name = format!("lib{stem}.{}", std::env::consts::DLL_EXTENSION);
+                    (out.join(name), Some(bytes))
+                }
+                _ if plan.rlib_members.is_some() => {
+                    let path = out.join(format!("lib{stem}.rlib"));
+                    let rlib = format!("rlib\n{content}");
+                    // `lib.rmeta` holds the crate's metadata after rustc's header; a member
+                    // written `name<path` holds that file's bytes, as a bundled object does.
+                    let mut meta = b"rust\0\0\0\x0a".to_vec();
+                    let mut inner = b"rust\0\0\0\x0a".to_vec();
+                    inner.extend_from_slice(rlib.as_bytes());
+                    meta.extend_from_slice(&(inner.len() as u64).to_le_bytes());
+                    meta.extend_from_slice(&inner);
+                    let members: Vec<(String, Vec<u8>)> = plan
+                        .rlib_members
+                        .iter()
+                        .flatten()
+                        .map(|spec| match spec.split_once('<') {
+                            Some((name, from)) => (name.to_string(), fs::read(from).unwrap()),
+                            None if spec == "lib.rmeta" => (spec.clone(), meta.clone()),
+                            None => (spec.clone(), rlib.as_bytes().to_vec()),
+                        })
+                        .collect();
+                    let members: Vec<(&str, &[u8])> = members
+                        .iter()
+                        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                        .collect();
+                    let temp = out.join(format!(".{stem}.ar"));
+                    crate::rlib::write_gnu(&temp, &members).unwrap();
+                    let bytes = fs::read(&temp).unwrap();
+                    fs::remove_file(&temp).unwrap();
+                    (path, Some(bytes))
+                }
                 _ => (
                     out.join(format!("lib{stem}.rlib")),
-                    Some(format!("rlib\n{content}")),
+                    Some(format!("rlib\n{content}").into_bytes()),
                 ),
             };
             if let Some(bytes) = bytes {
@@ -300,7 +414,20 @@ impl Fake {
         let Some(text) = plans.get(&name).and_then(|p| p.stdout.clone()) else {
             return Vec::new();
         };
+        // The sysroot rustc uses: the one `--sysroot` names, else the toolchain's.
+        let sysroot = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--sysroot=").map(str::to_string))
+            .or_else(|| {
+                Some(format!(
+                    "{}/toolchains/{}",
+                    self.vars.get("RUSTUP_HOME")?,
+                    self.vars.get("RUSTUP_TOOLCHAIN")?
+                ))
+            })
+            .unwrap_or_default();
         text.replace("{ws}", self.cwd.to_str().unwrap())
+            .replace("{sysroot}", &sysroot)
             .into_bytes()
     }
 }
@@ -349,6 +476,18 @@ impl Ports for Fake {
         Ok("aarch64-apple-darwin\naarch64-apple-ios\nx86_64-unknown-linux-gnu\n".into())
     }
 
+    fn rustc_native(&self, _rustc: &Path, _target: Option<&str>) -> io::Result<(String, String)> {
+        let Some(native) = &self.native else {
+            return Err(io::Error::other("no such print request"));
+        };
+        let mut native = native.borrow_mut();
+        native.asked += 1;
+        native
+            .answer
+            .clone()
+            .ok_or_else(|| io::Error::other("no such print request"))
+    }
+
     fn stdout(&mut self, bytes: &[u8]) {
         self.seen.borrow_mut().stdout.extend_from_slice(bytes);
     }
@@ -384,6 +523,50 @@ impl Ports for Fake {
             found();
         }
         self.audit
+    }
+
+    fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
+        self.seen.borrow_mut().first_audits += 1;
+        self.audited(key, started_ms)
+    }
+
+    fn relay(
+        &self,
+        socket: &Path,
+        request: &crate::relay::Request,
+        wait: Duration,
+    ) -> Option<crate::relay::Answer> {
+        let Some(relay) = &self.relay else {
+            return crate::relay::ask(socket, request, wait);
+        };
+        let mut relay = relay.borrow_mut();
+        relay.asked.push(request.clone());
+        (relay.answer)(request)
+    }
+
+    /// A C driver that says its `ld` is `FAKE_LD` (a path, or a name looked up as `collect2`
+    /// does), or else itself, with `FAKE_LIBRARIES` as its library folders; an `ld` with no
+    /// such options as `--verbose`.
+    fn asker(&self) -> Box<crate::link::Ask<'static>> {
+        let ld = self.vars.get("FAKE_LD").cloned();
+        let libraries = self.vars.get("FAKE_LIBRARIES").cloned().unwrap_or_default();
+        Box::new(move |program: &Path, args: &[String], _path: &OsStr| {
+            let last = args.last().map(String::as_str).unwrap_or_default();
+            if last.starts_with("-print-prog-name=") {
+                let said = ld.clone().unwrap_or_else(|| program.display().to_string());
+                return Some(crate::link::Answer {
+                    success: true,
+                    stdout: format!("{said}\n"),
+                });
+            }
+            if last == "-print-search-dirs" {
+                return Some(crate::link::Answer {
+                    success: true,
+                    stdout: format!("install: /x/\nprograms: =\nlibraries: ={libraries}\n"),
+                });
+            }
+            Some(crate::link::Answer::default())
+        })
     }
 }
 
@@ -431,6 +614,7 @@ fn world_with(mode: Mode, change: impl FnOnce(&mut settings::Settings)) -> World
         exe: &exe,
         in_ci: false,
         repository: Some("test/repo"),
+        repository_env: &[],
         env: &|_| None,
         now: SystemTime::now(),
     })
@@ -452,6 +636,28 @@ fn settle() {
 }
 
 impl World {
+    /// Gives the run a relay (B-26): `session.json` names one, run by `org` on a fake host.
+    fn share(&mut self, org: &str) {
+        let socket = self.dir.path().join("no-relay.sock");
+        self.session
+            .set_share(session::Share {
+                socket,
+                run: "1-1".into(),
+                by: crate::origin::Identity {
+                    host: "https://api.example.com".into(),
+                    org: org.into(),
+                    credential: crate::origin::fingerprint("hru_test"),
+                },
+                repository: "test/repo".into(),
+            })
+            .unwrap();
+    }
+
+    /// The run would share, and its backend couldn't be reached (B-34).
+    fn unreached(&mut self) {
+        self.session.set_unreached().unwrap();
+    }
+
     fn store(&self) -> Store {
         Store::new(&self.session.current().store)
     }
@@ -551,6 +757,8 @@ impl World {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
+            relay: None,
         };
         change(&mut fake);
         let before = self.session.current().entries().len();
@@ -633,6 +841,8 @@ fn probes_pass_through_before_anything_and_are_not_logged() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
+        relay: None,
     };
     // The session's file is gone: a probe must not need it.
     fs::remove_file(w.session.current().folder.join("session.json")).unwrap();
@@ -683,6 +893,44 @@ fn a_package_never_stored_runs_as_asked() {
         Outcome::PassedThrough(PassedThrough::NeverStore)
     );
     assert_eq!(w.blocks(), 0);
+}
+
+// covers: B-19, B-24
+#[test]
+fn a_dependent_of_a_crate_compiled_as_asked_stays_on_this_machine() {
+    // `a` runs as asked, without the remaps (here: never stored); its bytes hold this machine's
+    // folders, so a dependent's key names bytes no other machine makes, and uploading it is
+    // waste (the review's B6: 13 such blocks went up).
+    let w = world_with(Mode::On, |s| s.never_store = vec!["a".into()]);
+    let ws = w.checkout("ws");
+    let r = w.call(&ws, "a", &[]);
+    assert_eq!(
+        r.outcome(),
+        Outcome::PassedThrough(PassedThrough::NeverStore)
+    );
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    settle();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let r = w.call(&ws, "b", &["--extern", &ext]);
+    assert_eq!(r.outcome(), STORED);
+    let portable = r.entry.as_ref().unwrap().portable.clone().unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert_eq!(portable.externs, ["a"]);
+    // Once `a` is compiled with the wrapper's changes, its dependents may go again.
+    let w2 = world(Mode::On);
+    let ws2 = w2.checkout("ws");
+    settle();
+    assert_eq!(w2.call(&ws2, "a", &[]).outcome(), STORED);
+    fs::create_dir_all(ws2.join("b/src")).unwrap();
+    fs::write(ws2.join("b/src/lib.rs"), "").unwrap();
+    settle();
+    let rmeta = ws2.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let r = w2.call(&ws2, "b", &["--extern", &ext]);
+    assert_eq!(r.outcome(), STORED);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
 }
 
 // covers: B-1, B-8, B-9, B-12, B-13
@@ -739,7 +987,7 @@ fn a_block_built_in_one_checkout_is_reused_in_another() {
     let entry = second.entry.unwrap();
     assert!(entry.found);
     // The record beside it says a reuse put it there.
-    let known = crate::sidecar::lookup(&w.rlib(&two, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&two, "a"), None).unwrap();
     assert!(known.reused && known.step.is_some());
 }
 
@@ -995,6 +1243,7 @@ fn a_kill_between_the_copy_and_the_rename_leaves_nothing_taken_for_a_block() {
     let roots = crate::roots::Roots::new(
         &crate::roots::RootPaths::of(&inv),
         &[],
+        &crate::roots::Machine::default(),
         crate::roots::resolve_on_disk,
     )
     .unwrap();
@@ -1005,6 +1254,7 @@ fn a_kill_between_the_copy_and_the_rename_leaves_nothing_taken_for_a_block() {
         roots: &roots,
         start: SystemTime::now(),
         pid: 7,
+        seal: None,
     }
     .prepare()
     .unwrap();
@@ -1123,7 +1373,7 @@ fn a_truncated_block_compiles() {
 
 // covers: B-12, B-19
 #[test]
-fn a_block_that_cant_be_put_in_place_runs_rustc_as_asked() {
+fn a_block_that_cant_be_put_in_place_compiles_with_the_remaps_and_stores_nothing() {
     let w = world(Mode::On);
     let one = w.checkout("one");
     let two = w.checkout("two");
@@ -1140,9 +1390,22 @@ fn a_block_that_cant_be_put_in_place_runs_rustc_as_asked() {
     fs::set_permissions(&json, perms).unwrap();
     let text = fs::read_to_string(&json).unwrap();
     fs::write(&json, text.replace("{hushrun:out-dir}", "{hushrun:deps-9}")).unwrap();
+    let blocks = w.blocks();
     let r = w.call(&two, "a", &[]);
     assert_eq!(r.outcome(), not_stored(NotStored::Restore));
-    ran_as_asked(&r);
+    // rustc ran once, with the wrapper's changes: as asked, without the remaps, the outputs
+    // would hold this checkout's folders and every dependent would get a key no other machine
+    // computes (the review's B6).
+    assert!(r.seen.execs.is_empty(), "{:?}", r.seen.execs);
+    assert_eq!(r.seen.compiles.len(), 1, "{:?}", r.seen.compiles);
+    assert!(
+        r.seen.compiles[0]
+            .iter()
+            .any(|a| *a == format!("--remap-path-prefix={}=.", two.display())),
+        "{:?}",
+        r.seen.compiles[0]
+    );
+    assert_eq!(w.blocks(), blocks, "nothing stored");
     assert!(!r.stderr.contains("hushrun:"));
 }
 
@@ -1478,6 +1741,8 @@ fn a_linked_output_whose_link_inputs_cant_be_read_is_built_and_not_stored() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
+        relay: None,
     };
     let code = call(&mut fake, &mut Vec::new(), &args);
     assert_eq!(code, 0);
@@ -1508,7 +1773,8 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
         fs::write(ws.join("tools/cc"), b"driver").unwrap();
         fs::write(ws.join("tools/ld.fake"), b"linker one").unwrap();
         fs::create_dir_all(ws.join("vendor")).unwrap();
-        fs::write(ws.join("vendor/libfoo.a"), b"foo one").unwrap();
+        // An archive, as the linker reads it (a text file would be a linker script).
+        fs::write(ws.join("vendor/libfoo.a"), b"!<arch>\nfoo one").unwrap();
         fs::write(ws.join("script.ld"), b"SECTIONS { }").unwrap();
         ws
     };
@@ -1537,6 +1803,8 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &as_proc_macro(&w, ws));
         w.session.current().entries().last().unwrap().outcome
@@ -1547,13 +1815,13 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     assert_eq!(run(&two), REUSED, "the same inputs elsewhere");
 
     let lib = setup("lib");
-    fs::write(lib.join("vendor/libfoo.a"), b"foo two").unwrap();
+    fs::write(lib.join("vendor/libfoo.a"), b"!<arch>\nfoo two").unwrap();
     assert_eq!(run(&lib), STORED, "a library found through -L changed");
 
     let earlier = setup("earlier");
     fs::write(
         earlier.join("vendor/libfoo.dylib"),
-        b"a dylib the linker prefers",
+        b"\xcf\xfa\xed\xfea dylib the linker prefers",
     )
     .unwrap();
     assert_eq!(
@@ -1569,6 +1837,174 @@ fn files_the_linker_finds_through_its_search_folders_are_keyed() {
     let linker = setup("linker");
     fs::write(linker.join("tools/ld.fake"), b"linker two").unwrap();
     assert_eq!(run(&linker), STORED, "the linker -fuse-ld names changed");
+}
+
+/// Links crate `a` of `ws` as a proc macro whose link line is `line` (`{ws}` stands for the
+/// checkout), with `vars` added to the call's variables and `more` arguments.
+fn link_proc_macro(
+    w: &World,
+    ws: &Path,
+    line: &str,
+    vars: &[(&str, &str)],
+    more: &[&str],
+) -> Outcome {
+    w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    settle();
+    let mut args = w.args(ws, "a", more);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    w.call_args(ws, "a", args, |fake| {
+        for (name, value) in vars {
+            fake.vars.insert((*name).to_string(), (*value).to_string());
+        }
+    })
+    .outcome()
+}
+
+/// Makes `path` an executable file holding `text`.
+#[cfg(unix)]
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _ = fs::remove_file(path);
+    fs::write(path, text).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: B-18
+#[cfg(unix)]
+#[test]
+fn another_ld_earlier_on_path_is_another_link() {
+    // A gcc driver says only `ld`: `collect2` takes the first on `PATH`. The driver, the line
+    // and every file rustc names stay the same.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    let early = w.dir.path().join("early");
+    let bin = w.dir.path().join("bin");
+    fs::create_dir_all(&early).unwrap();
+    executable(&bin.join("ld"), "ld one");
+    let path = std::env::join_paths([&early, &bin]).unwrap();
+    let path = path.to_str().unwrap();
+    let vars = [("PATH", path), ("FAKE_LD", "ld")];
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    let link = || link_proc_macro(&w, &ws, line, &vars, &[]);
+    assert_eq!(link(), STORED);
+    assert_eq!(link(), REUSED);
+    executable(&early.join("ld"), "ld two");
+    assert_eq!(link(), STORED, "another ld runs now");
+    assert_eq!(link(), REUSED);
+    // The same `ld` put back by a package that keeps its size and date: another file.
+    let meta = fs::metadata(early.join("ld")).unwrap();
+    executable(&early.join("ld"), "ld 3x");
+    let file = fs::File::options()
+        .write(true)
+        .open(early.join("ld"))
+        .unwrap();
+    file.set_modified(meta.modified().unwrap()).unwrap();
+    drop(file);
+    assert_eq!(link(), STORED, "the ld was replaced in place");
+    // The driver can't say which `ld` it runs, or it is found nowhere: nothing is stored.
+    let nowhere = [("PATH", "/nonexistent"), ("FAKE_LD", "ld")];
+    assert_eq!(
+        link_proc_macro(&w, &ws, line, &nowhere, &[]),
+        not_stored(NotStored::LinkInputs)
+    );
+}
+
+// covers: B-18
+#[cfg(unix)]
+#[test]
+fn a_specs_or_configuration_file_is_built_and_not_stored_and_ld_path_is_the_linker() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/my.specs"), b"*link: -fuse-ld=lld").unwrap();
+    for option in [
+        r#""-specs={ws}/tools/my.specs""#,
+        r#""--specs={ws}/tools/my.specs""#,
+        r#""--specs" "{ws}/tools/my.specs""#,
+        r#""--config" "{ws}/tools/my.cfg""#,
+        r#""--config={ws}/tools/my.cfg""#,
+    ] {
+        let line = format!(
+            r#""{{ws}}/tools/cc" "{{ws}}/target/debug/deps/x.o" {option} "-o" "{{ws}}/target/debug/deps/liba-xa.dylib""#
+        );
+        assert_eq!(
+            link_proc_macro(&w, &ws, &line, &[], &[]),
+            not_stored(NotStored::LinkInputs),
+            "{option}"
+        );
+    }
+    // clang's `--ld-path=` names the linker, whatever `-fuse-ld` says.
+    fs::write(ws.join("tools/ld.mine"), b"one").unwrap();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-fuse-ld=lld" "--ld-path={ws}/tools/ld.mine" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), STORED);
+    assert_eq!(link_proc_macro(&w, &ws, line, &[], &[]), REUSED);
+    fs::write(ws.join("tools/ld.mine"), b"two").unwrap();
+    assert_eq!(
+        link_proc_macro(&w, &ws, line, &[], &[]),
+        STORED,
+        "the linker --ld-path names changed"
+    );
+}
+
+// covers: B-6
+#[cfg(unix)]
+#[test]
+fn a_library_found_in_the_drivers_folders_is_keyed_and_its_scripts_followed() {
+    // On Linux a `-l` that none of rustc's folders holds is found in the folders the driver
+    // reports (`-print-search-dirs`), which the key now names place by place.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    fs::write(ws.join("tools/ld"), b"ld").unwrap();
+    let sys = w.dir.path().join("sys");
+    fs::create_dir_all(&sys).unwrap();
+    fs::write(sys.join("libz.so"), b"\x7fELF zlib one").unwrap();
+    let ld = format!("{}/tools/ld", ws.display());
+    let libraries = format!("{}/", sys.display());
+    let vars = [
+        ("FAKE_LD", ld.as_str()),
+        ("FAKE_LIBRARIES", libraries.as_str()),
+    ];
+    let target = ["--target", "x86_64-unknown-linux-gnu"];
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-lz" "-lc" "-o" "{ws}/target/debug/deps/liba-xa.so""#;
+    let link = || link_proc_macro(&w, &ws, line, &vars, &target);
+    assert_eq!(link(), STORED);
+    assert_eq!(link(), REUSED);
+    fs::write(sys.join("libz.so"), b"\x7fELF zlib two").unwrap();
+    assert_eq!(link(), STORED, "the library -lz finds changed");
+    assert_eq!(link(), REUSED);
+    // glibc's way: `libc.so` is a script that names the library.
+    fs::write(sys.join("libc.so.6"), b"\x7fELF libc one").unwrap();
+    fs::write(
+        sys.join("libc.so"),
+        format!(
+            "/* GNU ld script */\nOUTPUT_FORMAT(elf64-x86-64)\nGROUP ( {}/libc.so.6 AS_NEEDED ( libmissing.so.1 ) )\n",
+            sys.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(link(), STORED, "a script appeared where -lc is found");
+    assert_eq!(link(), REUSED);
+    fs::write(sys.join("libc.so.6"), b"\x7fELF libc two").unwrap();
+    assert_eq!(link(), STORED, "the library the script names changed");
+    // A name the script gives that wasn't there appears beside it.
+    fs::write(sys.join("libmissing.so.1"), b"\x7fELF more").unwrap();
+    assert_eq!(link(), STORED, "a file the script names appeared");
+    // A script that does more than name files can't be followed.
+    fs::write(sys.join("libc.so"), b"SECTIONS { .text : { *(.text) } }").unwrap();
+    assert_eq!(link(), not_stored(NotStored::LinkInputs));
 }
 
 // covers: B-4
@@ -1619,6 +2055,8 @@ fn what_a_linked_compile_prints_goes_on_but_the_linker_command() {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
+        relay: None,
     };
     assert_eq!(call(&mut fake, &mut Vec::new(), &args), 0);
     assert_eq!(
@@ -1868,13 +2306,13 @@ fn only_a_block_that_may_move_names_its_origin_to_dependents() {
     let ws = w.checkout("ws");
     settle();
     assert_eq!(w.call(&ws, "a", &[]).outcome(), STORED);
-    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a"), None).unwrap();
     assert_eq!(known.produced_by, None, "a tied block named by its origin");
     assert!(known.step.is_some());
     // Reused in place: still not named by its origin.
     fs::remove_file(w.rlib(&ws, "a")).unwrap();
     assert_eq!(w.call(&ws, "a", &[]).outcome(), REUSED);
-    let known = crate::sidecar::lookup(&w.rlib(&ws, "a")).unwrap();
+    let known = crate::sidecar::lookup(&w.rlib(&ws, "a"), None).unwrap();
     assert_eq!(known.produced_by, None, "a tied block named by its origin");
     assert!(known.reused);
 
@@ -1885,14 +2323,14 @@ fn only_a_block_that_may_move_names_its_origin_to_dependents() {
     settle();
     assert_eq!(w.call(&one, "a", &[]).outcome(), STORED);
     assert!(
-        crate::sidecar::lookup(&w.rlib(&one, "a"))
+        crate::sidecar::lookup(&w.rlib(&one, "a"), None)
             .unwrap()
             .produced_by
             .is_some()
     );
     assert_eq!(w.call(&two, "a", &[]).outcome(), REUSED);
     assert!(
-        crate::sidecar::lookup(&w.rlib(&two, "a"))
+        crate::sidecar::lookup(&w.rlib(&two, "a"), None)
             .unwrap()
             .produced_by
             .is_some()
@@ -2138,7 +2576,8 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
         assert!(r.entry.unwrap().note.is_some(), "{name}");
     }
 
-    // Built as asked: b's own block can't be put in place.
+    // b's own block can't be put in place: b compiles (with the wrapper's changes, B-19) and
+    // fails to load a, which heals a as any compile does.
     let w = world(Mode::On);
     let (two, a, _) = two_reused(&w);
     let one = two.parent().unwrap().join("one");
@@ -2171,7 +2610,7 @@ fn every_pass_through_after_the_arguments_were_read_heals_a_rejected_reused_bloc
     let ext_two = externs(&two);
     let ext_two: Vec<&str> = ext_two.iter().map(String::as_str).collect();
     let r = w.call(&two, "b", &ext_two);
-    assert_eq!(r.outcome(), not_stored(NotStored::Restore));
+    assert_eq!(r.outcome(), not_stored(NotStored::RustcFailed));
     assert!(r.seen.execs.is_empty());
     assert_eq!(r.seen.compiles.len(), 1);
     assert!(w.store().suspended(&a).is_some());
@@ -2342,6 +2781,7 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
         let roots = crate::roots::Roots::new(
             &crate::roots::RootPaths::of(&inv),
             &[],
+            &crate::roots::Machine::default(),
             crate::roots::resolve_on_disk,
         )
         .unwrap();
@@ -2352,6 +2792,10 @@ fn a_tied_hint_from_another_checkout_is_skipped_before_anything_is_opened() {
             step,
             script: None,
             run_memo: None,
+            store: None,
+            seal: None,
+            ask: None,
+            apple: true,
         };
         let common = cx.common().unwrap();
         hints
@@ -2387,6 +2831,8 @@ fn linked_in(w: &World, ws: &Path) -> Outcome {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
+        relay: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -2532,6 +2978,8 @@ fn a_link_input_replaced_during_the_compile_is_not_stored() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         let outcome = w.session.current().entries().last().unwrap().outcome;
@@ -2571,6 +3019,8 @@ fn a_linker_outside_every_root_ties_the_block() {
             version_fails: false,
             audit: false,
             on_found: RefCell::new(None),
+            native: None,
+            relay: None,
         };
         call(&mut fake, &mut Vec::new(), &args);
         w.session.current().entries().last().unwrap().outcome
@@ -2581,7 +3031,8 @@ fn a_linker_outside_every_root_ties_the_block() {
     assert_eq!(run(&one), STORED);
     assert_eq!(run(&two), STORED, "a block tied to its linker moved");
     // In its own checkout it is reused.
-    fs::remove_file(one.join("target/debug/deps/liba-xa.rlib")).unwrap();
+    let dll = std::env::consts::DLL_EXTENSION;
+    fs::remove_file(one.join(format!("target/debug/deps/liba-xa.{dll}"))).unwrap();
     assert_eq!(run(&one), REUSED);
 }
 
@@ -2644,6 +3095,123 @@ fn a_native_folder_is_an_input_and_a_root_of_its_own() {
     assert_eq!(run(&w, &setup(&w, "three", &outside, b"x two")), STORED);
 }
 
+// covers: B-6
+#[test]
+fn a_library_that_bundled_nothing_is_not_keyed_by_the_static_libraries_beside_it() {
+    // `ring` builds `libring_core.a` with the cargo home's path in its objects, and cargo hands
+    // its folder (`-L native=`) to every crate above it. Those that bundle nothing from it
+    // (their `.rlib` holds only rustc's own members) don't hold its bytes: another machine's
+    // `libring_core.a` must not give them another key. One that bundles it still does.
+    for (members, other_bytes_reuse) in [
+        (vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o"], true),
+        (
+            vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o", "1f2e-curve25519.o"],
+            false,
+        ),
+        // A bundled object named as rustc names its own (a build script's `inner.rcgu.o`), and
+        // a bundled Rust static library's objects (another crate's prefix): bundled, whatever
+        // the suffix.
+        (
+            vec!["lib.rmeta", "a-xa.a.1-cgu.0.rcgu.o", "inner.rcgu.o"],
+            false,
+        ),
+        (
+            vec![
+                "lib.rmeta",
+                "a-xa.a.1-cgu.0.rcgu.o",
+                "std-5f49f7b3.std.2c1a-cgu.0.rcgu.o",
+            ],
+            false,
+        ),
+    ] {
+        let w = world(Mode::On);
+        w.plan(
+            "a",
+            Plan {
+                rlib_members: Some(members.iter().map(|m| m.to_string()).collect()),
+                ..Plan::default()
+            },
+        );
+        let setup = |name: &str, bytes: &[u8]| {
+            let ws = w.checkout(name);
+            let dir = ws.join("target/debug/build/ring-1/out");
+            fs::create_dir_all(&dir).unwrap();
+            crate::rlib::write_gnu(&dir.join("libring_core.a"), &[("curve25519.o", bytes)])
+                .unwrap();
+            let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
+            (ws, format!("native={dir}"))
+        };
+        let run = |(ws, native): &(PathBuf, String)| {
+            settle();
+            w.call(ws, "a", &["-L", native]).outcome()
+        };
+        assert_eq!(
+            run(&setup("one", b"objects naming /home/runner/.cargo")),
+            STORED
+        );
+        let other = run(&setup("two", b"objects naming /opt/tools/cargo"));
+        let expected = if other_bytes_reuse { REUSED } else { STORED };
+        assert_eq!(other, expected, "members {members:?}");
+        // A static library that appears, or a folder's names that change, still count.
+        let ws = setup("three", b"objects naming /home/runner/.cargo");
+        fs::write(ws.0.join("target/debug/build/ring-1/out/new.txt"), b"").unwrap();
+        assert_eq!(run(&ws), STORED, "the folder's names changed");
+    }
+}
+
+// covers: B-6
+#[test]
+fn a_bundled_object_under_rustcs_own_names_is_found_by_its_bytes() {
+    // A build script's C object bundled as a second `lib.rmeta`, or named with the dependent's
+    // own prefix (which a build script can read from `target/debug/.fingerprint/`): the names
+    // look like rustc's, the bytes are the static library's. A changed C file must not reuse
+    // the library built from the old one.
+    // The third: the archive under a name of its own (`inner.archive`), which a
+    // `#[link(..., modifiers = "+verbatim")]` bundles as it is named.
+    for (forged, archive) in [
+        ("lib.rmeta", "libinner.a"),
+        ("a-xa.inner.rcgu.o", "libinner.a"),
+        ("a-xa.inner.rcgu.o", "inner.archive"),
+    ] {
+        let w = world(Mode::On);
+        let setup = |name: &str, object: &[u8]| {
+            let ws = w.checkout(name);
+            let dir = ws.join("target/debug/build/u-1/out");
+            fs::create_dir_all(&dir).unwrap();
+            crate::rlib::write_gnu(&dir.join(archive), &[("inner.o", object)]).unwrap();
+            fs::write(ws.join("inner.o"), object).unwrap();
+            let dir = crate::roots::resolve_on_disk(dir.to_str().unwrap()).unwrap();
+            (ws, format!("native={dir}"))
+        };
+        let run = |(ws, native): &(PathBuf, String)| {
+            w.plan(
+                "a",
+                Plan {
+                    rlib_members: Some(vec![
+                        "lib.rmeta".into(),
+                        "a-xa.a.1-cgu.0.rcgu.o".into(),
+                        format!("{forged}<{}", ws.join("inner.o").display()),
+                    ]),
+                    ..Plan::default()
+                },
+            );
+            settle();
+            w.call(ws, "a", &["-L", native]).outcome()
+        };
+        assert_eq!(run(&setup("one", b"inner_value returns 1")), STORED);
+        assert_eq!(
+            run(&setup("two", b"inner_value returns 2")),
+            STORED,
+            "{forged} in {archive}: the C changed"
+        );
+        assert_eq!(
+            run(&setup("three", b"inner_value returns 1")),
+            REUSED,
+            "{forged} in {archive}: the same C"
+        );
+    }
+}
+
 // covers: B-11
 #[test]
 fn a_native_library_replaced_during_the_compile_is_not_stored() {
@@ -2695,6 +3263,8 @@ fn linked_with(w: &World, ws: &Path, line: &str) -> Outcome {
         version_fails: false,
         audit: false,
         on_found: RefCell::new(None),
+        native: None,
+        relay: None,
     };
     call(&mut fake, &mut Vec::new(), &args);
     w.session.current().entries().last().unwrap().outcome
@@ -2824,6 +3394,7 @@ fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
         exe: &exe,
         in_ci: false,
         repository: Some("test/repo"),
+        repository_env: &[],
         env: &|_| None,
         now: SystemTime::now(),
     })
@@ -3022,6 +3593,7 @@ fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whol
         let roots = crate::roots::Roots::new(
             &crate::roots::RootPaths::of(&inv),
             &[],
+            &crate::roots::Machine::default(),
             crate::roots::resolve_on_disk,
         )
         .unwrap();
@@ -3032,6 +3604,7 @@ fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whol
             roots: &roots,
             start: SystemTime::now(),
             pid: 7,
+            seal: None,
         }
         .prepare()
         .unwrap();
@@ -3147,4 +3720,1886 @@ fn every_call_leaves_a_record_of_its_unit_or_none() {
     assert_eq!(w.call(&ws, "a", &[]).code, 1);
     assert!(!unit_record(&ws).exists());
     assert_eq!(w.store().out_dirs().len(), 1);
+}
+
+// Two machines: other users, other homes (so other cargo and rustup homes), the toolchain
+// installed under another name, the checkout at another path, each with its own store.
+
+/// The index folder crates.io's packages are unpacked under in every cargo home.
+const INDEX: &str = "registry/src/index.crates.io-1949cf8c6b5b557f";
+
+/// One machine: a [`World`] whose session knows `home`, a toolchain at
+/// `<home>/.rustup/toolchains/<toolchain>` with the same bytes on every machine, and a key log.
+struct Box2 {
+    w: World,
+    home: PathBuf,
+    /// `CARGO_HOME`, or `<home>/.cargo`.
+    cargo_home: PathBuf,
+    /// `RUSTUP_HOME`, or `<home>/.rustup`.
+    rustup_home: PathBuf,
+    toolchain: String,
+    key_log: PathBuf,
+}
+
+fn a_machine(user: &str, toolchain: &str) -> Box2 {
+    a_machine_with(user, toolchain, None)
+}
+
+/// [`a_machine`], with `CARGO_HOME` and `RUSTUP_HOME` set to these folders under the machine's
+/// root, as an image that installs Rust under a system folder does.
+fn a_machine_with(user: &str, toolchain: &str, homes: Option<(&str, &str)>) -> Box2 {
+    a_machine_on(user, toolchain, homes, None)
+}
+
+/// [`a_machine`], another user of a machine whose store is `store` (`HUSHRUN_BUILD_DIR`), as a
+/// group-writable store two people share.
+fn a_user_of(user: &str, toolchain: &str, store: &Path) -> Box2 {
+    a_machine_on(user, toolchain, None, Some(store.to_path_buf()))
+}
+
+fn a_machine_on(
+    user: &str,
+    toolchain: &str,
+    homes: Option<(&str, &str)>,
+    store: Option<PathBuf>,
+) -> Box2 {
+    let dir = tempfile::tempdir().unwrap();
+    let root = PathBuf::from(crate::roots::resolve_on_disk(dir.path().to_str().unwrap()).unwrap());
+    let home = root.join("home").join(user);
+    let (cargo_home, rustup_home) = match homes {
+        Some((cargo, rustup)) => (root.join(cargo), root.join(rustup)),
+        None => (home.join(".cargo"), home.join(".rustup")),
+    };
+    let key_log = root.join("keys.jsonl");
+    let settings = root.join("build.json");
+    settings::update(&settings, |s| {
+        s.mode = Mode::On;
+        s.min_free_gb = 0;
+    })
+    .unwrap();
+    let exe = root.join("hushrun");
+    fs::write(&exe, b"binary").unwrap();
+    let env = {
+        let home = home.clone();
+        let key_log = key_log.clone();
+        let set = homes.map(|_| (cargo_home.clone(), rustup_home.clone()));
+        move |name: &str| match name {
+            "HOME" => Some(home.clone().into_os_string()),
+            session::KEY_LOG => Some(key_log.clone().into_os_string()),
+            "CARGO_HOME" => set.as_ref().map(|s| s.0.clone().into_os_string()),
+            "RUSTUP_HOME" => set.as_ref().map(|s| s.1.clone().into_os_string()),
+            "HUSHRUN_BUILD_DIR" => store.clone().map(PathBuf::into_os_string),
+            _ => None,
+        }
+    };
+    let session = session::begin(&Start {
+        settings: &settings,
+        cache_dir: Some(&root.join("cache")),
+        exe: &exe,
+        in_ci: false,
+        repository: Some("test/repo"),
+        repository_env: &[],
+        env: &env,
+        now: SystemTime::now(),
+    })
+    .unwrap();
+    // The same toolchain, installed under this machine's own name.
+    let sysroot = rustup_home.join("toolchains").join(toolchain);
+    let rustc = sysroot.join("bin/rustc");
+    for (rest, bytes) in [
+        ("bin/rustc", &b"fake rustc"[..]),
+        ("lib/librustc_driver-1.dylib", b"driver"),
+        ("lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib", b"std"),
+    ] {
+        fs::create_dir_all(sysroot.join(rest).parent().unwrap()).unwrap();
+        fs::write(sysroot.join(rest), bytes).unwrap();
+    }
+    // A registry package unpacked in this machine's cargo home.
+    let package = cargo_home.join(INDEX).join("reg-1.0.0");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(package.join("src/lib.rs"), "mod util;\n").unwrap();
+    fs::write(package.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    fs::write(package.join("data.txt"), "data\n").unwrap();
+    Box2 {
+        w: World {
+            dir,
+            session,
+            rustc,
+            plans: Rc::default(),
+        },
+        home,
+        cargo_home,
+        rustup_home,
+        toolchain: toolchain.to_string(),
+        key_log,
+    }
+}
+
+impl Box2 {
+    fn package(&self) -> PathBuf {
+        self.cargo_home.join(INDEX).join("reg-1.0.0")
+    }
+
+    /// The variables cargo and rustup hand every compile on this machine.
+    fn toolchain_vars(&self, fake: &mut Fake) {
+        fake.vars.insert(
+            "RUSTUP_HOME".into(),
+            self.rustup_home.to_str().unwrap().into(),
+        );
+        fake.vars
+            .insert("RUSTUP_TOOLCHAIN".into(), self.toolchain.clone());
+    }
+
+    /// The registry crate `reg`, built in the checkout `ws`.
+    fn call_reg(&self, ws: &Path) -> Result {
+        let source = self.package().join("src/lib.rs");
+        let args: Vec<OsString> = self
+            .w
+            .args(ws, "reg", &[])
+            .into_iter()
+            .map(|arg| {
+                if arg == "reg/src/lib.rs" {
+                    source.clone().into_os_string()
+                } else {
+                    arg
+                }
+            })
+            .collect();
+        self.w.call_args(ws, "reg", args, |fake| {
+            self.toolchain_vars(fake);
+            fake.vars.insert(
+                "CARGO_MANIFEST_DIR".into(),
+                self.package().to_str().unwrap().into(),
+            );
+            fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+        })
+    }
+
+    /// The workspace crate `a`, which depends on `reg`.
+    fn call_a(&self, ws: &Path) -> Result {
+        let reg = ws.join("target/debug/deps/libreg-xreg.rlib");
+        let extern_reg = format!("reg={}", reg.display());
+        self.w
+            .call_with(ws, "a", &["--extern", &extern_reg], |fake| {
+                self.toolchain_vars(fake)
+            })
+    }
+
+    /// The key log's lines, by crate name: the last one of each.
+    fn keys(&self) -> BTreeMap<String, serde_json::Value> {
+        let text = fs::read_to_string(&self.key_log).unwrap_or_default();
+        text.lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .map(|line| (line["crate_name"].as_str().unwrap().to_string(), line))
+            .collect()
+    }
+}
+
+/// The library files a crate's compile left in `ws`'s output folder.
+fn library_files(ws: &Path, crate_name: &str) -> Vec<(String, Vec<u8>)> {
+    let deps = ws.join("target/debug/deps");
+    ["rlib", "rmeta"]
+        .iter()
+        .map(|ext| {
+            let name = format!("lib{crate_name}-x{crate_name}.{ext}");
+            let bytes = fs::read(deps.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+// covers: B-5, B-6, B-8, B-9, B-17
+#[test]
+fn a_crate_graph_built_on_two_machines_has_the_same_keys_and_bytes_and_moves_between_them() {
+    let a = a_machine("dev", "stable-aarch64-apple-darwin");
+    let b = a_machine("someone-else", "1.94.0-aarch64-apple-darwin");
+    let plan = |m: &Box2| {
+        m.w.plan(
+            "reg",
+            Plan {
+                reads: vec![m.package().join("src/util.rs").to_str().unwrap().into()],
+                env_reads: vec!["CARGO_PKG_VERSION".into()],
+                ..Plan::default()
+            },
+        );
+        m.w.plan(
+            "a",
+            Plan {
+                reads: vec!["a/src/foo.rs".into()],
+                ..Plan::default()
+            },
+        );
+    };
+    plan(&a);
+    plan(&b);
+    let ws_a = a.w.checkout("ws");
+    let ws_b = b.w.checkout("a-checkout-at-a-longer-path");
+    settle();
+    for (m, ws) in [(&a, &ws_a), (&b, &ws_b)] {
+        let reg = m.call_reg(ws);
+        assert_eq!(reg.outcome(), STORED, "{}", reg.stderr);
+        // The cargo home was remapped like the workspace.
+        let args = &reg.seen.compiles[0];
+        let cargo_home = m.cargo_home.clone();
+        assert!(
+            args.contains(&format!(
+                "--remap-path-prefix={}=/hushrun/cargo",
+                cargo_home.display()
+            )),
+            "{args:?}"
+        );
+        let a_crate = m.call_a(ws);
+        assert_eq!(a_crate.outcome(), STORED, "{}", a_crate.stderr);
+        for name in ["reg", "a"] {
+            let portable = m.keys()[name]["portable"].clone();
+            assert_eq!(portable["portable"], true, "{name}: {portable}");
+        }
+    }
+    // Equal first keys, equal second keys, the same bytes.
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    // Each line says how many compiles the run audited (B-16).
+    assert_eq!(keys_a["reg"]["audit"], "one-in");
+    for name in ["reg", "a"] {
+        assert_eq!(
+            keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"],
+            "{name}: {} / {}",
+            keys_a[name]["keys"]["first"], keys_b[name]["keys"]["first"]
+        );
+        assert_eq!(
+            keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"],
+            "{name}: {} / {}",
+            keys_a[name]["keys"]["second_parts"], keys_b[name]["keys"]["second_parts"]
+        );
+        assert!(keys_a[name]["keys"]["step"].is_string());
+        assert_eq!(library_files(&ws_a, name), library_files(&ws_b, name));
+    }
+    let rlib = String::from_utf8(library_files(&ws_a, "reg")[0].1.clone()).unwrap();
+    assert!(
+        rlib.contains(&format!(
+            "source /hushrun/cargo/{INDEX}/reg-1.0.0/src/lib.rs"
+        )),
+        "{rlib}"
+    );
+    assert!(!rlib.contains(a.home.to_str().unwrap()), "{rlib}");
+
+    // A third machine with machine A's blocks in its store: both are reused there, and what is
+    // put in place names the third machine's own folders.
+    let c = a_machine("third", "nightly-aarch64-apple-darwin");
+    plan(&c);
+    let ws_c = c.w.checkout("elsewhere");
+    let store_a = &a.w.session.current().store;
+    let store_c = &c.w.session.current().store;
+    for part in ["blocks", "steps"] {
+        copy_tree(&store_a.join(part), &store_c.join(part));
+    }
+    settle();
+    let reg = c.call_reg(&ws_c);
+    assert_eq!(reg.outcome(), REUSED, "{}", reg.stderr);
+    assert_eq!(c.call_a(&ws_c).outcome(), REUSED);
+    assert_eq!(library_files(&ws_a, "reg"), library_files(&ws_c, "reg"));
+    assert_eq!(library_files(&ws_a, "a"), library_files(&ws_c, "a"));
+    let dep_info = fs::read_to_string(ws_c.join("target/debug/deps/reg-xreg.d")).unwrap();
+    assert!(
+        dep_info.contains(c.package().join("src/util.rs").to_str().unwrap()),
+        "{dep_info}"
+    );
+    assert!(!dep_info.contains(a.home.to_str().unwrap()), "{dep_info}");
+    assert_eq!(c.keys()["reg"]["portable"]["portable"], true);
+}
+
+/// Gives machine `m`'s toolchain the standard library's sources, as rustup's `rust-src` does.
+fn with_rust_src(m: &Box2) {
+    let sysroot = m.rustup_home.join("toolchains").join(&m.toolchain);
+    for rest in [
+        "lib/rustlib/src/rust/library/std/src/lib.rs",
+        "lib/rustlib/src/rust/library/core/src/macros/mod.rs",
+    ] {
+        fs::create_dir_all(sysroot.join(rest).parent().unwrap()).unwrap();
+        fs::write(sysroot.join(rest), "// the source").unwrap();
+    }
+    fs::write(sysroot.join("lib/rustlib/manifest-rust-src"), "file:x\n").unwrap();
+}
+
+/// The `--sysroot` a compile was given, if any.
+fn sysroot_arg(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .find_map(|a| a.strip_prefix("--sysroot=").map(PathBuf::from))
+}
+
+// covers: B-5, B-9, B-17
+#[test]
+fn a_machine_with_the_standard_librarys_sources_compiles_as_one_without_them() {
+    // rustc reads a standard library macro's text from `lib/rustlib/src` when it is there, and
+    // a crate that expands `unreachable!("…")` gets another crate hash: on two machines, one
+    // with rust-src and one without, one key would name two different libraries. Every compile
+    // gets a sysroot without the sources instead, and the keys stay equal.
+    let a = a_machine("runner", "stable-aarch64-apple-darwin");
+    let b = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&b);
+    for m in [&a, &b] {
+        m.w.plan(
+            "reg",
+            Plan {
+                reads: vec![m.package().join("src/util.rs").to_str().unwrap().into()],
+                ..Plan::default()
+            },
+        );
+        m.w.plan("a", Plan::default());
+    }
+    let ws_a = a.w.checkout("ws");
+    let ws_b = b.w.checkout("another/ws");
+    settle();
+    let (reg_a, reg_b) = (a.call_reg(&ws_a), b.call_reg(&ws_b));
+    assert_eq!((reg_a.outcome(), reg_b.outcome()), (STORED, STORED));
+    assert_eq!(
+        sysroot_arg(&reg_a.seen.compiles[0]),
+        None,
+        "nothing to hide"
+    );
+    let view = sysroot_arg(&reg_b.seen.compiles[0]).expect("a sysroot without the sources");
+    let toolchain_b = b.rustup_home.join("toolchains").join(&b.toolchain);
+    assert!(toolchain_b.join("lib/rustlib/src").is_dir());
+    assert!(!view.join("lib/rustlib/src").exists(), "{}", view.display());
+    assert_eq!(
+        fs::read(view.join("lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib")).unwrap(),
+        b"std"
+    );
+    assert!(!view.starts_with(&toolchain_b));
+    // What was asked and what was read are the same on both machines.
+    let (a_crate, b_crate) = (a.call_a(&ws_a), b.call_a(&ws_b));
+    assert_eq!((a_crate.outcome(), b_crate.outcome()), (STORED, STORED));
+    assert!(sysroot_arg(&b_crate.seen.compiles[0]).is_some());
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    for name in ["reg", "a"] {
+        assert_eq!(
+            keys_a[name]["keys"]["step"], keys_b[name]["keys"]["step"],
+            "{name}"
+        );
+        assert_eq!(
+            keys_a[name]["keys"]["block"], keys_b[name]["keys"]["block"],
+            "{name}"
+        );
+        assert_eq!(library_files(&ws_a, name), library_files(&ws_b, name));
+    }
+}
+
+// covers: B-8, B-9, B-18
+#[test]
+fn a_proc_macro_linked_through_the_sysroot_without_sources_names_the_toolchain_and_moves() {
+    // The link line names the standard library under the sysroot the compile was given. Those
+    // paths are the toolchain's: the block is not tied by them, and moves between checkouts.
+    let m = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&m);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "{sysroot}/lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let call = |ws: &Path| {
+        let mut args = m.w.args(ws, "a", &[]);
+        let at = args.iter().position(|a| a == "lib").unwrap();
+        args[at] = "proc-macro".into();
+        m.w.call_args(ws, "a", args, |fake| m.toolchain_vars(fake))
+    };
+    let checkout = |name: &str| {
+        let ws = m.w.checkout(name);
+        fs::create_dir_all(ws.join("tools")).unwrap();
+        fs::write(ws.join("tools/cc"), b"driver").unwrap();
+        ws
+    };
+    let (one, two) = (checkout("one"), checkout("two-longer"));
+    settle();
+    let first = call(&one);
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    assert!(sysroot_arg(&first.seen.compiles[0]).is_some());
+    let portable = first.entry.unwrap().portable.unwrap();
+    assert!(
+        !portable.reasons.contains(&crate::portable::Reason::Tied),
+        "{portable:?}"
+    );
+    assert_eq!(call(&two).outcome(), REUSED);
+}
+
+// covers: B-6, B-8, B-18
+#[test]
+fn a_proc_macro_linked_by_the_compilers_own_lld_is_named_as_on_any_machine() {
+    // On x86-64 Linux rustc links with its own lld: it hands the C driver the toolchain's
+    // `gcc-ld` folder as one argument, `-B<folder>`. What the hint keeps of that names the
+    // toolchain, not where this machine has it, so a dependent on another machine names the
+    // macro the same way and its block may leave this one.
+    let m = a_machine("runner", "1.94.0-x86_64-unknown-linux-gnu");
+    let sysroot = m.rustup_home.join("toolchains").join(&m.toolchain);
+    fs::create_dir_all(sysroot.join("lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld")).unwrap();
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-B{sysroot}/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let ws = m.w.checkout("ws");
+    with_tools(&ws);
+    settle();
+    let mut args = m.w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let built = m.w.call_args(&ws, "a", args, |fake| m.toolchain_vars(fake));
+    assert_eq!(built.outcome(), STORED, "{}", built.stderr);
+    let portable = built.entry.unwrap().portable.unwrap();
+    assert!(
+        portable.named_portably(crate::model::Class::ProcMacro),
+        "{portable:?}"
+    );
+    // The hint keeps the flag to ask the driver again, with the root it names.
+    let flag = "-B{hushrun:toolchain}/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld";
+    let hints: Vec<String> = walk(&m.w.session.current().store.join("steps"))
+        .iter()
+        .map(|file| String::from_utf8_lossy(&fs::read(file).unwrap()).into_owned())
+        .collect();
+    assert!(hints.iter().any(|hint| hint.contains(flag)), "{hints:?}");
+    // And follows it: another checkout's compile reuses the block.
+    let two = m.w.checkout("two-longer");
+    with_tools(&two);
+    settle();
+    let mut args = m.w.args(&two, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let again =
+        m.w.call_args(&two, "a", args, |fake| m.toolchain_vars(fake));
+    assert_eq!(again.outcome(), REUSED, "{}", again.stderr);
+}
+
+// covers: B-6, B-15
+#[test]
+fn a_dependent_of_a_proc_macro_whose_metadata_differs_elsewhere_is_built_not_reused() {
+    // Machine B builds the proc macro itself (another linker: another key), and the library
+    // that uses it could come from machine A. When B's macro has A's metadata, it does; when the
+    // metadata differs (a crate hash that moved, whatever the reason), what A's library was
+    // compiled against is not what B has, and reusing it would fail to load (E0463).
+    for (metadata_differs, expected) in [(false, REUSED), (true, STORED)] {
+        let a = a_machine("runner", "stable-aarch64-apple-darwin");
+        let b = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+        let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/libm-xm.so""#;
+        let setup = |m: &Box2, linker: &str, salt: Option<&str>| {
+            m.w.plan(
+                "m",
+                Plan {
+                    stdout: Some(format!("{line}\n")),
+                    link_salt: Some(linker.into()),
+                    metadata_salt: salt.map(str::to_string),
+                    ..Plan::default()
+                },
+            );
+            m.w.plan("a", Plan::default());
+            let ws = m.w.checkout(&format!("ws-{linker}"));
+            fs::create_dir_all(ws.join("tools")).unwrap();
+            fs::write(ws.join("tools/cc"), linker).unwrap();
+            fs::create_dir_all(ws.join("m/src")).unwrap();
+            fs::write(ws.join("m/src/lib.rs"), "// the macro\n").unwrap();
+            ws
+        };
+        let call_m = |m: &Box2, ws: &Path| {
+            let mut args = m.w.args(ws, "m", &[]);
+            let at = args.iter().position(|a| a == "lib").unwrap();
+            args[at] = "proc-macro".into();
+            m.w.call_args(ws, "m", args, |fake| m.toolchain_vars(fake))
+        };
+        let call_a = |m: &Box2, ws: &Path| {
+            let so = ws.join(format!(
+                "target/debug/deps/libm-xm.{}",
+                std::env::consts::DLL_EXTENSION
+            ));
+            let ext = format!("m={}", so.display());
+            m.w.call_with(ws, "a", &["--extern", &ext], |fake| m.toolchain_vars(fake))
+        };
+        let ws_a = setup(&a, "linker one", None);
+        settle();
+        assert_eq!(call_m(&a, &ws_a).outcome(), STORED);
+        assert_eq!(call_a(&a, &ws_a).outcome(), STORED);
+        // The macro's block records the digest of its metadata from the bytes it stored: what
+        // a reuse names the file by, with no second read.
+        let so = ws_a.join(format!(
+            "target/debug/deps/libm-xm.{}",
+            std::env::consts::DLL_EXTENSION
+        ));
+        let recorded = crate::metadata::of(&so).unwrap().to_string();
+        let store_blocks = walk(&a.w.session.current().store.join("blocks"));
+        assert!(
+            store_blocks
+                .iter()
+                .any(|f| f.ends_with("block.json")
+                    && fs::read_to_string(f).unwrap().contains(&recorded)),
+            "no block records {recorded}"
+        );
+        // A's blocks in B's store.
+        let (store_a, store_b) = (&a.w.session.current().store, &b.w.session.current().store);
+        for part in ["blocks", "steps"] {
+            copy_tree(&store_a.join(part), &store_b.join(part));
+        }
+        let ws_b = setup(&b, "linker two", metadata_differs.then_some("moved"));
+        settle();
+        let macro_b = call_m(&b, &ws_b);
+        assert_eq!(macro_b.outcome(), STORED, "another linker, another key");
+        let dependent = call_a(&b, &ws_b);
+        assert_eq!(
+            dependent.outcome(),
+            expected,
+            "metadata differs: {metadata_differs}"
+        );
+        assert_eq!(dependent.entry.unwrap().found, !metadata_differs);
+        // The name is the same on both machines exactly when the metadata is.
+        let named = |m: &Box2| m.keys()["a"]["keys"]["externs"][0]["by"].clone();
+        assert_eq!(named(&a) == named(&b), !metadata_differs);
+        assert!(named(&b)["produced-by"].is_string(), "{}", named(&b));
+    }
+}
+
+// covers: B-6, B-8
+#[test]
+fn a_dotenv_search_above_a_cargo_home_in_a_shared_folder_is_keyed_as_above_a_home() {
+    // One machine keeps the cargo home in its home folder, the other under a shared folder (the
+    // rustup home here; `/opt/tools/cargo` or the official image's `/usr/local/cargo` for
+    // real). A macro that reads the first `.env` walking up from a registry package must give
+    // the same key on both: the shared folders above the cargo home are that machine's layout,
+    // not places the block was read from.
+    let a = a_machine("runner", "stable-aarch64-apple-darwin");
+    let b = a_machine_with(
+        "agent",
+        "1.94.0-aarch64-apple-darwin",
+        Some(("opt/tools/cargo", "opt/tools")),
+    );
+    assert!(b.cargo_home.starts_with(&b.rustup_home));
+    let call = |m: &Box2, ws: &Path| {
+        let sqlx = ws.join("target/debug/deps/libsqlx-s.rlib");
+        fs::write(&sqlx, "the same sqlx").unwrap();
+        let source = m.package().join("src/lib.rs");
+        let ext = format!("sqlx={}", sqlx.display());
+        let args: Vec<OsString> =
+            m.w.args(ws, "reg", &["--extern", &ext])
+                .into_iter()
+                .map(|arg| {
+                    if arg == "reg/src/lib.rs" {
+                        source.clone().into_os_string()
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+        m.w.call_args(ws, "reg", args, |fake| {
+            m.toolchain_vars(fake);
+            fake.vars.insert(
+                "CARGO_MANIFEST_DIR".into(),
+                m.package().to_str().unwrap().into(),
+            );
+            fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+        })
+    };
+    for m in [&a, &b] {
+        m.w.plan("reg", Plan::default());
+    }
+    let (ws_a, ws_b) = (a.w.checkout("ws"), b.w.checkout("workspace/project"));
+    settle();
+    for (m, ws) in [(&a, &ws_a), (&b, &ws_b)] {
+        let r = call(m, ws);
+        assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+        let portable = r.entry.unwrap().portable.unwrap();
+        assert!(portable.portable, "{portable:?}");
+    }
+    let (keys_a, keys_b) = (a.keys(), b.keys());
+    assert_eq!(keys_a["reg"]["keys"]["step"], keys_b["reg"]["keys"]["step"]);
+    assert_eq!(
+        keys_a["reg"]["keys"]["block"], keys_b["reg"]["keys"]["block"],
+        "{}\n{}",
+        keys_a["reg"]["keys"]["second_parts"], keys_b["reg"]["keys"]["second_parts"]
+    );
+    // A `.env` in the shared folder above B's cargo home is what the search finds there: another
+    // key, by its bytes.
+    fs::write(b.rustup_home.join(".env"), "DATABASE_URL=postgres://x\n").unwrap();
+    settle();
+    let r = call(&b, &ws_b);
+    assert_eq!(r.outcome(), STORED);
+    assert!(!r.entry.unwrap().found);
+}
+
+// covers: B-9, B-11, B-18
+#[test]
+fn a_link_through_the_sysroot_without_sources_is_judged_by_the_toolchains_files() {
+    // The view's links are new whenever a run made them, possibly in the very tick a linked
+    // compile starts (build scripts start together on a cold build). What a link through them
+    // reads is the toolchain's file, which the compiler's identity holds by content: links made
+    // during the compile don't make it "changed while compiling".
+    let m = a_machine("agent", "1.94.0-aarch64-apple-darwin");
+    with_rust_src(&m);
+    let line = r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "{sysroot}/lib/rustlib/aarch64-apple-darwin/lib/libstd-1.rlib" "-o" "{ws}/target/debug/deps/liba-xa.dylib""#;
+    m.w.plan(
+        "a",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    let ws = m.w.checkout("ws");
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), b"driver").unwrap();
+    settle();
+    let sysroots = m.w.session.current().store.join("compilers/sysroots");
+    let mut args = m.w.args(&ws, "a", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    let r = m.w.call_args(&ws, "a", args, |fake| {
+        m.toolchain_vars(fake);
+        // While it compiles, the view's links are made again (the same targets).
+        fake.during = Some(Box::new(move || {
+            for view in fs::read_dir(&sysroots).unwrap().flatten() {
+                let rustlib = view.path().join("lib/rustlib");
+                let Ok(entries) = fs::read_dir(&rustlib) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let link = entry.path();
+                    let target = fs::read_link(&link).unwrap();
+                    fs::remove_file(&link).unwrap();
+                    std::os::unix::fs::symlink(&target, &link).unwrap();
+                }
+            }
+        }));
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(sysroot_arg(&r.seen.compiles[0]).is_some());
+}
+
+/// Copies every file under `from` to the same place under `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    for file in walk(from) {
+        let dest = to.join(file.strip_prefix(from).unwrap());
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::copy(&file, &dest).unwrap();
+    }
+}
+
+// covers: B-8, B-10
+#[test]
+fn a_registry_crate_whose_output_holds_the_cargo_home_is_reused_here_but_stays_here() {
+    let m = a_machine("dev", "stable-aarch64-apple-darwin");
+    m.w.plan(
+        "reg",
+        Plan {
+            embed_var: Some("CARGO_MANIFEST_DIR".into()),
+            ..Plan::default()
+        },
+    );
+    let one = m.w.checkout("one");
+    let two = m.w.checkout("two");
+    settle();
+    let first = m.call_reg(&one);
+    assert_eq!(first.outcome(), STORED);
+    let portable = &first.entry.as_ref().unwrap().portable.as_ref().unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::CargoHomeInOutput)
+    );
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::HomeInOutput)
+    );
+    assert!(!portable.reasons.contains(&crate::portable::Reason::Tied));
+    // The cargo home is the same for every checkout here: reused in another, as before.
+    let second = m.call_reg(&two);
+    assert_eq!(second.outcome(), REUSED);
+    assert_eq!(second.entry.unwrap().portable.unwrap(), **portable);
+    // A dependent keys it by its bytes: elsewhere they differ, and so does the dependent's key,
+    // which is no reason of the dependent's own.
+    let dependent = m.call_a(&two);
+    assert_eq!(dependent.outcome(), STORED);
+    assert!(dependent.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-10
+#[test]
+fn a_variable_naming_the_cargo_home_is_proved_before_a_block_may_leave() {
+    for (hash_var, portable) in [(false, true), (true, false)] {
+        let m = a_machine("dev", "stable-aarch64-apple-darwin");
+        // `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/data.txt"))`: the path is remapped
+        // where it lands, unless the macro also hashes it.
+        m.w.plan(
+            "reg",
+            Plan {
+                include_var: Some(("CARGO_MANIFEST_DIR".into(), "data.txt".into())),
+                hash_var,
+                ..Plan::default()
+            },
+        );
+        let one = m.w.checkout("one");
+        let two = m.w.checkout("two");
+        settle();
+        let first = m.call_reg(&one);
+        assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+        // A second compile with the variable pointing elsewhere decided it.
+        assert_eq!(first.seen.compiles.len(), 2);
+        let found = first.entry.unwrap().portable.unwrap();
+        assert_eq!(found.portable, portable, "{found:?}");
+        assert_eq!(
+            found
+                .reasons
+                .contains(&crate::portable::Reason::VariableNamesBase),
+            !portable
+        );
+        // Either way it moves between checkouts here, and the proof is not made again.
+        let second = m.call_reg(&two);
+        assert_eq!(second.outcome(), REUSED);
+        assert_eq!(second.entry.unwrap().portable.unwrap(), found);
+    }
+}
+
+// covers: B-10, B-24
+#[test]
+fn a_block_that_holds_one_users_cargo_home_is_not_another_users_on_a_shared_store() {
+    // Two people on one machine share a store; each has a cargo home of their own, and a
+    // library writes the cargo home into its bytes (`env!("CARGO_HOME")`, kept for run time).
+    let one = a_machine("dev", "stable-aarch64-apple-darwin");
+    let store = one.w.session.current().store.clone();
+    let two = a_user_of("dev2", "stable-aarch64-apple-darwin", &store);
+    assert_eq!(two.w.session.current().store, store);
+    let call = |m: &Box2, ws: &Path| {
+        m.w.plan(
+            "a",
+            Plan {
+                embed_var: Some("CARGO_HOME".into()),
+                ..Plan::default()
+            },
+        );
+        m.w.call_with(ws, "a", &[], |fake| {
+            m.toolchain_vars(fake);
+            fake.vars
+                .insert("CARGO_HOME".into(), m.cargo_home.to_str().unwrap().into());
+        })
+    };
+    let embedded = |ws: &Path| {
+        let rlib = fs::read_to_string(ws.join("target/debug/deps/liba-xa.rlib")).unwrap();
+        rlib.lines()
+            .find_map(|line| line.strip_prefix("embedded ").map(str::to_string))
+            .unwrap()
+    };
+    let ws1 = one.w.checkout("ws");
+    let ws2 = two.w.checkout("ws");
+    settle();
+    let first = call(&one, &ws1);
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    assert!(
+        !first
+            .entry
+            .as_ref()
+            .unwrap()
+            .portable
+            .as_ref()
+            .unwrap()
+            .portable,
+        "the block holds the cargo home"
+    );
+    // The other user's compile is not the first user's block: it holds their own cargo home.
+    let second = call(&two, &ws2);
+    assert_eq!(second.outcome(), STORED, "{}", second.stderr);
+    assert_eq!(embedded(&ws2), two.cargo_home.to_str().unwrap());
+    // And each finds their own block from then on.
+    for ws in [&ws1, &ws2] {
+        fs::remove_dir_all(ws.join("target")).unwrap();
+        fs::create_dir_all(ws.join("target/debug/deps")).unwrap();
+    }
+    assert_eq!(call(&one, &ws1).outcome(), REUSED);
+    assert_eq!(embedded(&ws1), one.cargo_home.to_str().unwrap());
+    assert_eq!(call(&two, &ws2).outcome(), REUSED);
+    assert_eq!(embedded(&ws2), two.cargo_home.to_str().unwrap());
+}
+
+/// One compile of library `a` whose output holds `name`'s value, `value`, without the dep-info
+/// naming it (`leak`), or named by it (`env!`, tracked).
+fn with_value_in_output(name: &str, value: &str, tracked: bool) -> (World, Result) {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    let plan = if tracked {
+        Plan {
+            env_reads: vec![name.into()],
+            ..Plan::default()
+        }
+    } else {
+        Plan {
+            leak_var: Some(name.into()),
+            ..Plan::default()
+        }
+    };
+    w.plan("a", plan);
+    settle();
+    let r = w.call_with(&ws, "a", &[], |fake| {
+        from_a_registry(fake);
+        fake.vars.insert(name.into(), value.into());
+        // A GitHub Actions job's, and a GitLab job's, among others.
+        for (name, value) in [
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_SERVER_URL", "https://github.com"),
+            ("GITLAB_CI", "true"),
+            ("TF_BUILD", "True"),
+        ] {
+            fake.vars.entry(name.into()).or_insert_with(|| value.into());
+        }
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    (w, r)
+}
+
+// covers: B-24
+#[test]
+fn a_projects_own_value_under_a_ci_prefix_holds_its_block_back_in_ci() {
+    // Fourteen bytes of a project's own setting, in a job of each system whose prefix it has.
+    for name in [
+        "BUILD_ENV",
+        "CI_REGION",
+        "AGENT_POOL",
+        "GITHUB_DEPLOY_TARGET",
+    ] {
+        let (_, r) = with_value_in_output(name, "prod-eu-west-1", false);
+        let portable = r.entry.unwrap().portable.unwrap();
+        assert!(!portable.portable, "{name}: {portable:?}");
+        assert_eq!(portable.variables, [name], "{portable:?}");
+    }
+    // A value of the shell's own never does.
+    let (_, r) = with_value_in_output("OLDPWD", "/srv/deploy/prod-eu-west-1", false);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-24
+#[test]
+fn an_output_holding_an_unkeyed_secret_stays_here_and_only_its_name_is_written() {
+    let value = "s3cr3t-value-1234";
+    let (w, r) = with_value_in_output("FOO_TOKEN", value, false);
+    let portable = r.entry.as_ref().unwrap().portable.clone().unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::UnkeyedValue)
+    );
+    assert_eq!(portable.variables, ["FOO_TOKEN"]);
+    // The output holds the value, as the compile wrote it; nothing hushrun writes does.
+    let mut written = fs::read_to_string(w.session.current().folder.join("log.jsonl")).unwrap();
+    for (_, dir) in w.store().stored() {
+        written.push_str(&fs::read_to_string(dir.join("block.json")).unwrap());
+    }
+    assert!(written.contains("FOO_TOKEN"));
+    assert!(!written.contains(value));
+    let counts = session::Counts::of(Mode::On, 0, &w.session.current().entries());
+    assert_eq!(counts.unkeyed, 1);
+    assert_eq!(counts.unkeyed_variables, ["FOO_TOKEN"]);
+}
+
+// covers: B-24
+#[test]
+fn a_long_value_no_ci_set_holds_its_block_back_and_ci_values_and_keyed_ones_dont() {
+    let (_, r) = with_value_in_output("LICENSE_SERVER", "licence.example.internal", false);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert_eq!(portable.variables, ["LICENSE_SERVER"], "{portable:?}");
+    // GitHub's own variable, in every step of a job, and in the doc comments of half the
+    // libraries: the block may leave.
+    let (_, r) = with_value_in_output("GITHUB_SERVER_URL", "https://github.com", false);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // A secret's value the dep-info names is in the second key: another value is another block.
+    let (_, r) = with_value_in_output("FOO_TOKEN", "s3cr3t-value-1234", true);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.portable, "{portable:?}");
+    // Too short to search for.
+    let (_, r) = with_value_in_output("FOO_TOKEN", "short", false);
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-35, B-5
+#[test]
+fn a_variable_the_repository_names_in_build_env_is_in_every_key() {
+    let mut w = world(Mode::On);
+    let settings = w.dir.path().join("build.json");
+    let exe = w.dir.path().join("hushrun");
+    let cache = w.dir.path().join("cache");
+    let named = ["APP_FLAVOR".to_string()];
+    w.session = session::begin(&Start {
+        settings: &settings,
+        cache_dir: Some(&cache),
+        exe: &exe,
+        in_ci: false,
+        repository: Some("test/repo"),
+        repository_env: &named,
+        env: &|_| None,
+        now: SystemTime::now(),
+    })
+    .unwrap();
+    // A build that reads it without telling the compiler: the dep-info doesn't name it.
+    w.plan(
+        "a",
+        Plan {
+            leak_var: Some("APP_FLAVOR".into()),
+            ..Plan::default()
+        },
+    );
+    let ws = w.checkout("ws");
+    settle();
+    let with = |value: &'static str| {
+        move |fake: &mut Fake| {
+            from_a_registry(fake);
+            fake.vars.insert("APP_FLAVOR".into(), value.into());
+        }
+    };
+    let first = w.call_with(&ws, "a", &[], with("one-flavour-of-it"));
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    // Keyed, its value in the output keeps nothing here.
+    assert!(first.entry.unwrap().portable.unwrap().portable);
+    let other = w.call_with(&ws, "a", &[], with("another-flavour-of-it"));
+    assert_eq!(other.outcome(), STORED, "{}", other.stderr);
+    assert!(!other.entry.unwrap().found);
+    let again = w.call_with(&ws, "a", &[], with("one-flavour-of-it"));
+    assert_eq!(again.outcome(), REUSED, "{}", again.stderr);
+}
+
+/// Library `a` compiled for `-C target-cpu=native` in a fresh world, with `native` as the
+/// compiler's answer.
+fn native_compile(native: &Rc<RefCell<NativeStandIn>>) -> (World, Result) {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    let native = native.clone();
+    let r = w.call_with(&ws, "a", &["-C", "target-cpu=native"], move |fake| {
+        from_a_registry(fake);
+        fake.native = Some(native);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    (w, r)
+}
+
+// covers: B-5, B-24
+#[test]
+fn target_cpu_native_is_keyed_by_what_it_means_on_the_machine() {
+    let (m4, _) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
+    let (m4_again, r) = native_compile(&native_answer("apple-m4", &["neon", "sme"]));
+    // Answered or not, it never leaves the machine: the printed features are not all of them.
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::NativeCpu)
+    );
+    let (m1, _) = native_compile(&native_answer("apple-m1", &["neon"]));
+    let (same_name, _) = native_compile(&native_answer("apple-m4", &["neon"]));
+    // One CPU gives one local key; another CPU, or the same name with other features (a store
+    // carried to another machine), another: the flag's text alone would give one.
+    assert_eq!(only_step(&m4), only_step(&m4_again));
+    assert_ne!(only_step(&m4), only_step(&m1));
+    assert_ne!(only_step(&m4), only_step(&same_name));
+}
+
+// covers: B-5
+#[test]
+fn what_native_means_is_asked_once_per_compiler_not_once_per_compile() {
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    for name in ["b", "c"] {
+        fs::create_dir_all(ws.join(format!("{name}/src"))).unwrap();
+        fs::write(ws.join(format!("{name}/src/lib.rs")), "pub fn f() {}\n").unwrap();
+    }
+    settle();
+    let native = native_answer("apple-m4", &["neon"]);
+    for name in ["a", "b", "c", "a"] {
+        let native = native.clone();
+        let r = w.call_with(&ws, name, &["-C", "target-cpu=native"], move |fake| {
+            from_a_registry(fake);
+            fake.native = Some(native);
+        });
+        assert!(matches!(r.outcome(), STORED | REUSED), "{}", r.stderr);
+    }
+    assert_eq!(native.borrow().asked, 1);
+    // A call without the flag never asks.
+    let r = w.call_with(&ws, "b", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED);
+    assert_eq!(native.borrow().asked, 1);
+}
+
+// covers: B-5, B-24
+#[test]
+fn a_compiler_that_cant_say_what_native_is_keeps_its_block_here_keyed_by_the_text() {
+    let unanswered = Rc::new(RefCell::new(NativeStandIn::default()));
+    let (w, r) = native_compile(&unanswered);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(!portable.portable);
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::NativeCpu)
+    );
+    assert_eq!(unanswered.borrow().asked, 1);
+    // Keyed by the text: the same in every such world, and other than any answer's key.
+    let (again, _) = native_compile(&Rc::new(RefCell::new(NativeStandIn::default())));
+    assert_eq!(only_step(&w), only_step(&again));
+    let (answered, _) = native_compile(&native_answer("apple-m4", &["neon"]));
+    assert_ne!(only_step(&w), only_step(&answered));
+    // A later `-C target-cpu` wins, as in rustc: nothing is asked.
+    let unasked = Rc::new(RefCell::new(NativeStandIn::default()));
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    let stand_in = unasked.clone();
+    let r = w.call_with(
+        &ws,
+        "a",
+        &["-C", "target-cpu=native", "-C", "target-cpu=apple-m1"],
+        move |fake| {
+            from_a_registry(fake);
+            fake.native = Some(stand_in);
+        },
+    );
+    assert!(r.entry.unwrap().portable.unwrap().portable);
+    assert_eq!(unasked.borrow().asked, 0);
+}
+
+// --- sharing through a relay (B-26, B-30, B-32, B-34) -------------------------------------
+
+use crate::origin::{Origin, Vouch};
+use crate::relay::{Answer, Problem, Request};
+
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn vouch(date_ms: u64) -> Vouch {
+    Vouch {
+        host: "https://api.example.com".into(),
+        org: "acme".into(),
+        repository: "test/repo".into(),
+        scope: "person/2".into(),
+        outputs: hushrun_core::blocks::Hex32([0; 32]),
+        date_ms,
+        word: crate::origin::Word::Served,
+    }
+}
+
+/// Copies the block under `key` from `from` into `to` as a download vouched for at `date_ms`.
+fn download(from: &Store, to: &Store, key: &Digest, date_ms: u64) -> bool {
+    let Ok(Some(block)) = from.block(key) else {
+        return false;
+    };
+    let files: Vec<crate::store::NewFile> = block
+        .files
+        .iter()
+        .map(|f| crate::store::NewFile {
+            name: f.name.clone(),
+            source: f.path.clone(),
+        })
+        .collect();
+    to.publish_with_origin(
+        key,
+        &block.description,
+        &files,
+        &Origin::downloaded(vouch(date_ms)),
+        SystemTime::now(),
+    )
+    .is_ok()
+}
+
+/// Gives `to` the hints compiles in `from` wrote, as its own: what a machine that once compiled
+/// those crates itself holds, and what a run with no relay finds a downloaded block by.
+fn hint_as_own(from: &Store, to: &Store) {
+    for step in from.steps() {
+        for hint in from.hints(&step) {
+            to.add_hint(&step, &hint, SystemTime::now()).unwrap();
+        }
+    }
+}
+
+/// A relay that serves what `from` holds, publishing into `to`, and answers `vouch` to a
+/// vouch request.
+fn serving(from: Store, to: Store, vouched: Option<Answer>) -> Rc<RefCell<RelayStandIn>> {
+    relay_answering(move |request| match request {
+        Request::Hints { step } => {
+            let hints = from.hints(step);
+            for hint in &hints {
+                to.add_shared_hint(step, hint, SystemTime::now()).unwrap();
+            }
+            Some(Answer::Hints {
+                count: hints.len() as u32,
+            })
+        }
+        Request::Fetch { keys, .. } => Some(
+            keys.iter()
+                .find(|key| download(&from, &to, key, now_ms()))
+                .map_or(Answer::None, |key| Answer::Ready { key: *key }),
+        ),
+        Request::Vouch { .. } => vouched.clone(),
+        _ => Some(Answer::Ok),
+    })
+}
+
+/// Another machine's store, with library `a` built there.
+fn built_elsewhere() -> (World, Digest) {
+    let other = world(Mode::On);
+    let ws = other.checkout("ws");
+    settle();
+    let r = other.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let key = r.entry.unwrap().key.unwrap();
+    (other, key)
+}
+
+// covers: B-26, B-30, B-32, B-34
+#[test]
+fn a_block_the_relay_fetched_is_reused_recorded_as_downloaded_and_audited_one_in_ten_at_first() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert!(entry.downloaded);
+    assert_eq!(entry.key, Some(key));
+    // The first reuse of a downloaded library asks the one-in-ten audit, and is noted.
+    assert_eq!(r.seen.first_audits, 1);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.downloaded_only() && origin.reused);
+    assert!(matches!(
+        relay.borrow().asked[..],
+        [Request::Hints { .. }, Request::Fetch { .. }]
+    ));
+    // A second reuse is audited as any block is, and asks no server: the entry is fresh, and
+    // the relay is asked only whether the run still shares.
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(!r.entry.unwrap().downloaded);
+    assert_eq!(r.seen.first_audits, 0);
+    assert!(
+        matches!(
+            relay.borrow().asked[..],
+            [
+                Request::Hints { .. },
+                Request::Fetch { .. },
+                Request::Sharing
+            ]
+        ),
+        "{:?}",
+        relay.borrow().asked
+    );
+}
+
+// covers: B-34
+#[test]
+fn a_downloaded_block_is_reused_without_asking_for_a_day_then_only_while_a_server_vouches() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let run = |answer: Option<Answer>| {
+        let relay = serving(other.store(), w.store(), answer);
+        let stand_in = relay.clone();
+        let _ = fs::remove_file(w.rlib(&ws, "a"));
+        let r = w.call_with(&ws, "a", &[], move |fake| {
+            from_a_registry(fake);
+            fake.relay = Some(stand_in);
+        });
+        let asked_vouch = relay
+            .borrow()
+            .asked
+            .iter()
+            .any(|r| matches!(r, Request::Vouch { .. }));
+        (r, asked_vouch)
+    };
+    let set_date = |date_ms: u64| {
+        w.store()
+            .update_origin(&key, |o| {
+                let mut o = o?;
+                o.vouched = vec![vouch(date_ms)];
+                Some(o)
+            })
+            .unwrap();
+    };
+    // Fetched in this run: reused.
+    assert_eq!(run(None).0.outcome(), REUSED);
+    // Under a day old: reused, nothing asked.
+    set_date(now_ms() - DAY_MS / 2);
+    let (r, asked) = run(None);
+    assert_eq!(r.outcome(), REUSED);
+    assert!(!asked);
+    // A day old: asked. Served, or no server reachable in this run: reused.
+    set_date(now_ms() - DAY_MS - 1);
+    let (r, asked) = run(Some(Answer::Served));
+    assert_eq!((r.outcome(), asked), (REUSED, true));
+    let (r, _) = run(Some(Answer::Offline));
+    assert_eq!(r.outcome(), REUSED);
+    // Anything else: a miss. rustc runs, and its block takes the downloaded one's place.
+    let (r, asked) = run(Some(Answer::None));
+    assert!(asked);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.built.is_some() && origin.vouched.is_empty());
+    // A block built here is never asked about.
+    let (r, asked) = run(Some(Answer::None));
+    assert_eq!((r.outcome(), asked), (REUSED, false));
+}
+
+// covers: B-34
+#[test]
+fn a_run_that_is_not_sharing_reuses_no_block_it_only_downloaded_and_builds_it_once() {
+    let (other, key) = built_elsewhere();
+    // No relay, by a decision (the org doesn't share, `share off`, signed out): a download of
+    // any age, fetched a moment ago too, is a miss. rustc runs, and its block takes the place.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let origin = w.store().origin(&key).unwrap();
+    assert!(origin.built.is_some() && origin.vouched.is_empty());
+    // From then on it is built here, and reused as any block is.
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+}
+
+// covers: B-34
+#[test]
+fn a_run_whose_backend_couldnt_be_reached_reuses_a_download_of_any_age() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.unreached();
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(
+        &other.store(),
+        &w.store(),
+        &key,
+        now_ms() - 3 * DAY_MS
+    ));
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(w.store().origin(&key).unwrap().downloaded_only());
+    // A "no" a server said once still holds.
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.renew(Vouch {
+                word: crate::origin::Word::Withdrawn,
+                ..vouch(now_ms())
+            });
+            Some(o)
+        })
+        .unwrap();
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+}
+
+// covers: B-34
+#[test]
+fn a_fresh_download_is_not_reused_once_the_runs_relay_says_sharing_stopped_by_a_decision() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    hint_as_own(&other.store(), &w.store());
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    let run = |sharing: Option<Answer>| {
+        let relay = relay_answering(move |request| match request {
+            Request::Sharing => sharing.clone(),
+            _ => Some(Answer::Ok),
+        });
+        let stand_in = relay.clone();
+        let _ = fs::remove_file(w.rlib(&ws, "a"));
+        let r = w.call_with(&ws, "a", &[], move |fake| {
+            from_a_registry(fake);
+            fake.relay = Some(stand_in);
+        });
+        let asked = relay.borrow().asked.clone();
+        (r, asked)
+    };
+    // Sharing, opening, or a server that can't be reached: reused, and no server is asked.
+    let (r, asked) = run(Some(Answer::Ok));
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert!(
+        !asked.iter().any(|r| matches!(r, Request::Vouch { .. })),
+        "{asked:?}"
+    );
+    // A relay that doesn't answer is no decision.
+    let (r, _) = run(None);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    // `open` said the org doesn't share, or refused the caller: a miss, and the compile's block
+    // takes the download's place.
+    let (r, _) = run(Some(Answer::None));
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(w.store().origin(&key).unwrap().built.is_some());
+}
+
+// covers: B-34
+#[test]
+fn a_block_a_server_said_no_to_is_never_reused_as_a_download_whatever_the_network_does() {
+    let (other, key) = built_elsewhere();
+    let withdrawn = |date_ms: u64| Vouch {
+        word: crate::origin::Word::Withdrawn,
+        ..vouch(date_ms)
+    };
+    // The run's server is down (the relay answers that none can be reached), and the entry is
+    // fresh: the "no" a server said once still holds, and nothing is asked.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.renew(withdrawn(now_ms()));
+            Some(o)
+        })
+        .unwrap();
+    let relay = serving(other.store(), w.store(), Some(Answer::Offline));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(
+        !relay
+            .borrow()
+            .asked
+            .iter()
+            .any(|r| matches!(r, Request::Vouch { .. }))
+    );
+    // A run with no relay at all, which asks nothing, doesn't reuse it either.
+    let w = world(Mode::On);
+    let ws = w.checkout("ws");
+    settle();
+    assert!(download(&other.store(), &w.store(), &key, now_ms()));
+    w.store()
+        .update_origin(&key, |o| {
+            let mut o = o?;
+            o.vouched = vec![withdrawn(now_ms())];
+            Some(o)
+        })
+        .unwrap();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+}
+
+// covers: B-26, B-29
+#[test]
+fn a_compile_tells_the_relay_what_it_built_and_with_no_relay_it_is_a_plain_compile() {
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    // No socket and no stand-in: every request misses, and the compile goes on as without one.
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let key = r.entry.as_ref().unwrap().key.unwrap();
+    let origin = w.store().origin(&key).unwrap();
+    let built = origin.built.unwrap();
+    assert_eq!(built.run, "1-1");
+    assert_eq!(built.by.unwrap().org, "acme");
+    // With a relay: it hears of the block, portable and with its cost.
+    let w = {
+        let mut w = world(Mode::On);
+        w.share("acme");
+        w
+    };
+    let ws = w.checkout("ws");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED);
+    let asked = relay.borrow().asked.clone();
+    let built: Vec<&Request> = asked
+        .iter()
+        .filter(|r| matches!(r, Request::Built { .. }))
+        .collect();
+    assert!(
+        matches!(built[..], [Request::Built { key: k, portable: true, class: crate::model::Class::Library, .. }] if *k == key),
+        "{asked:?}"
+    );
+    // A run without a relay records a build with no backend.
+    let plain = world(Mode::On);
+    let ws = plain.checkout("ws");
+    settle();
+    let r = plain.call_with(&ws, "a", &[], from_a_registry);
+    let origin = plain
+        .store()
+        .origin(&r.entry.unwrap().key.unwrap())
+        .unwrap();
+    assert!(origin.built.unwrap().by.is_none());
+}
+
+// covers: B-32
+#[test]
+fn a_compile_whose_publish_finds_a_downloaded_block_with_other_bytes_takes_its_place() {
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let r = w.call_with(&ws, "a", &[], from_a_registry);
+    let entry = r.entry.unwrap();
+    let (key, step) = (entry.key.unwrap(), entry.step.unwrap());
+    let block = w.store().block(&key).unwrap().unwrap();
+    let ours = fs::read(&block.files[0].path).unwrap();
+    // Gone from the store; the hint stays, so the next compile asks the relay for that key.
+    w.store().discard(&key).unwrap();
+    fs::remove_file(w.rlib(&ws, "a")).unwrap();
+    let elsewhere = w.dir.path().join("elsewhere.rlib");
+    fs::write(&elsewhere, b"other bytes").unwrap();
+    let store = w.store();
+    let description = block.description.clone();
+    let name = block.files[0].name.clone();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+        // While it compiles, a download of the same key with other bytes lands.
+        fake.during = Some(Box::new(move || {
+            let files = [crate::store::NewFile {
+                name: name.clone(),
+                source: elsewhere.clone(),
+            }];
+            store
+                .publish_with_origin(
+                    &key,
+                    &description,
+                    &files,
+                    &Origin::downloaded(vouch(now_ms())),
+                    SystemTime::now(),
+                )
+                .unwrap();
+        }));
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let block = w.store().block(&key).unwrap().unwrap();
+    assert_eq!(fs::read(&block.files[0].path).unwrap(), ours);
+    assert!(w.store().origin(&key).unwrap().built.is_some());
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Differs } if *k == key)
+        ),
+        "{:?}",
+        relay.borrow().asked
+    );
+    // C2, B-34: the difference suspends the first key for the kept days, as an audit's does.
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
+    );
+}
+
+// covers: B-16, B-34
+#[test]
+fn an_audit_of_a_downloaded_block_that_differs_reports_it_and_suspends_for_the_kept_days() {
+    let (other, key) = built_elsewhere();
+    // The other machine's block, with other bytes than a compile here makes.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let block = other.store().block(&key).unwrap().unwrap();
+    let wrong = w.dir.path().join("wrong.rlib");
+    fs::write(&wrong, b"not what rustc makes").unwrap();
+    let mut files: Vec<crate::store::NewFile> = block
+        .files
+        .iter()
+        .map(|f| crate::store::NewFile {
+            name: f.name.clone(),
+            source: f.path.clone(),
+        })
+        .collect();
+    let rlib = files
+        .iter_mut()
+        .find(|f| f.name.ends_with(".rlib"))
+        .unwrap();
+    rlib.source = wrong;
+    w.store()
+        .publish_with_origin(
+            &key,
+            &block.description,
+            &files,
+            &Origin::downloaded(vouch(now_ms())),
+            SystemTime::now(),
+        )
+        .unwrap();
+    for hint in other.store().hints(&only_step(&other)) {
+        w.store()
+            .add_shared_hint(&only_step(&other), &hint, SystemTime::now())
+            .unwrap();
+    }
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+        fake.audit = true;
+    });
+    assert_eq!(r.outcome(), not_stored(NotStored::Differed), "{}", r.stderr);
+    assert_eq!(r.seen.first_audits, 1);
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Differs } if *k == key)
+        )
+    );
+    let step = only_step(&other);
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none(),
+        "a downloaded block's suspension lasts the kept days"
+    );
+}
+
+// covers: B-15, B-34
+#[test]
+fn a_dependent_that_cant_load_a_downloaded_block_reports_it_rejected() {
+    let (other, key) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let step = only_step(&other);
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `core` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    let ext = format!("a={}", rmeta.display());
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "b", &["--extern", &ext], move |fake| {
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.code, 1);
+    assert!(
+        relay.borrow().asked.iter().any(
+            |r| matches!(r, Request::Report { key: k, problem: Problem::Rejected } if *k == key)
+        )
+    );
+    let now = SystemTime::now();
+    assert!(w.store().suspended_at(&step, now).is_some());
+    assert!(
+        w.store()
+            .suspended_at(&step, now + Duration::from_secs(16 * 86_400))
+            .is_none()
+    );
+}
+
+/// Machine `m`'s plans for the proc macro `m` and the library `a` that uses it.
+fn macro_plans(m: &Box2) {
+    let line =
+        r#""{ws}/tools/cc" "{ws}/target/debug/deps/x.o" "-o" "{ws}/target/debug/deps/libm-xm.so""#;
+    m.w.plan(
+        "m",
+        Plan {
+            stdout: Some(format!("{line}\n")),
+            ..Plan::default()
+        },
+    );
+    m.w.plan("a", Plan::default());
+}
+
+/// A checkout on machine `m` with the proc macro `m` beside the library `a`.
+fn macro_checkout(m: &Box2, name: &str) -> PathBuf {
+    let ws = m.w.checkout(name);
+    fs::create_dir_all(ws.join("tools")).unwrap();
+    fs::write(ws.join("tools/cc"), "linker").unwrap();
+    fs::create_dir_all(ws.join("m/src")).unwrap();
+    fs::write(ws.join("m/src/lib.rs"), "// the macro\n").unwrap();
+    ws
+}
+
+/// The proc macro's file in `ws`'s output folder.
+fn macro_file(ws: &Path) -> PathBuf {
+    ws.join(format!(
+        "target/debug/deps/libm-xm.{}",
+        std::env::consts::DLL_EXTENSION
+    ))
+}
+
+fn call_macro(m: &Box2, ws: &Path) -> Result {
+    let mut args = m.w.args(ws, "m", &[]);
+    let at = args.iter().position(|a| a == "lib").unwrap();
+    args[at] = "proc-macro".into();
+    m.w.call_args(ws, "m", args, |fake| m.toolchain_vars(fake))
+}
+
+/// The library `a`, with the proc macro as its extern, telling `relay` what it built.
+fn call_user(m: &Box2, ws: &Path, relay: &Rc<RefCell<RelayStandIn>>) -> Result {
+    let ext = format!("m={}", macro_file(ws).display());
+    let relay = relay.clone();
+    m.w.call_with(ws, "a", &["--extern", &ext], move |fake| {
+        m.toolchain_vars(fake);
+        fake.relay = Some(relay);
+    })
+}
+
+/// Whether the relay heard that a block it could send was built: the outbox marker's cause.
+fn told_portable(relay: &Rc<RefCell<RelayStandIn>>) -> Option<bool> {
+    relay.borrow().asked.iter().rev().find_map(|r| match r {
+        Request::Built { portable, .. } => Some(*portable),
+        _ => None,
+    })
+}
+
+// covers: B-6, B-24
+#[test]
+fn a_restored_proc_macro_whose_record_the_store_cant_confirm_is_named_by_its_bytes() {
+    let mut m = a_machine("dev", "stable-aarch64-apple-darwin");
+    m.w.share("acme");
+    macro_plans(&m);
+    let honest = macro_checkout(&m, "honest");
+    settle();
+    assert_eq!(call_macro(&m, &honest).outcome(), STORED);
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&m, &honest, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let honest_key = r.entry.unwrap().key.unwrap();
+    assert!(
+        m.keys()["a"]["keys"]["externs"][0]["by"]["produced-by"].is_string(),
+        "{}",
+        m.keys()["a"]
+    );
+    assert_eq!(told_portable(&relay), Some(true));
+
+    // Another checkout whose `target/` came back from a cache: the macro doctored, and its record
+    // rewritten to match the doctored bytes while it names the honest macro.
+    let restored = macro_checkout(&m, "restored");
+    copy_tree(&honest.join("target"), &restored.join("target"));
+    let so = macro_file(&restored);
+    let mut doctored = fs::read(&so).unwrap();
+    doctored.extend_from_slice(b"\ndoctored expansion");
+    fs::write(&so, &doctored).unwrap();
+    let record = crate::sidecar::record_path(&so).unwrap();
+    let mut text: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert!(text["produced_by"].is_string(), "{text}");
+    text["sha256"] = serde_json::to_value(Digest::of(&doctored)).unwrap();
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&m, &restored, &relay);
+    // Built against the doctored macro, under a key of its own, and kept on this machine.
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let entry = r.entry.unwrap();
+    assert_ne!(entry.key, Some(honest_key));
+    assert_eq!(
+        m.keys()["a"]["keys"]["externs"][0]["by"]["content"],
+        serde_json::to_value(Digest::of(&doctored)).unwrap()
+    );
+    let portable = entry.portable.unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert!(portable.reasons.contains(&crate::portable::Reason::Extern));
+    assert_eq!(portable.externs, ["m"]);
+    assert_eq!(told_portable(&relay), Some(false), "no outbox marker");
+    // Still reused here, by its bytes.
+    fs::remove_file(m.w.rlib(&restored, "a")).unwrap();
+    assert_eq!(call_user(&m, &restored, &relay).outcome(), REUSED);
+
+    // A CI job's store is its own and starts empty: even the honest `target/` proves nothing there.
+    let ci = a_machine("runner", "stable-aarch64-apple-darwin");
+    macro_plans(&ci);
+    let job = macro_checkout(&ci, "job");
+    copy_tree(&honest.join("target"), &job.join("target"));
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    let r = call_user(&ci, &job, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(ci.keys()["a"]["keys"]["externs"][0]["by"]["content"].is_string());
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(portable.reasons.contains(&crate::portable::Reason::Extern));
+}
+
+// covers: B-6, B-12
+#[test]
+fn a_proc_macro_whose_record_the_store_confirms_keeps_its_name_and_reuse_across_checkouts() {
+    let m = a_machine("dev", "stable-aarch64-apple-darwin");
+    macro_plans(&m);
+    let (one, two, three) = (
+        macro_checkout(&m, "one"),
+        macro_checkout(&m, "two-longer"),
+        macro_checkout(&m, "three"),
+    );
+    settle();
+    let relay = relay_answering(|_| Some(Answer::None));
+    assert_eq!(call_macro(&m, &one).outcome(), STORED);
+    let r = call_user(&m, &one, &relay);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(r.entry_portable());
+    let key = r.entry.unwrap().key.unwrap();
+    let by = m.keys()["a"]["keys"]["externs"][0]["by"].clone();
+    assert!(by["produced-by"].is_string(), "{by}");
+    // Another checkout reuses the macro, then its dependent under the same key.
+    assert_eq!(call_macro(&m, &two).outcome(), REUSED);
+    let r = call_user(&m, &two, &relay);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(r.entry.unwrap().key, Some(key));
+    // A copy of the first checkout's `target/` on this machine: its records name blocks this
+    // store holds, with the same bytes.
+    copy_tree(&one.join("target"), &three.join("target"));
+    fs::remove_file(m.w.rlib(&three, "a")).unwrap();
+    settle();
+    let r = call_user(&m, &three, &relay);
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    assert_eq!(r.entry.unwrap().key, Some(key));
+}
+
+impl Result {
+    /// Whether the call's block may leave the machine.
+    fn entry_portable(&self) -> bool {
+        self.entry
+            .as_ref()
+            .and_then(|e| e.portable.as_ref())
+            .is_some_and(|p| p.portable)
+    }
+}
+
+// covers: B-15, B-34
+#[test]
+fn a_record_the_store_cant_confirm_suspends_and_reports_nothing_when_a_dependent_cant_load_it() {
+    // This store holds a downloaded block of `a`. Another checkout's `target/` came from
+    // elsewhere with other bytes for `a` and a record that claims they are that block, reused.
+    let (other, _) = built_elsewhere();
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = serving(other.store(), w.store(), None);
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &[], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
+    let step = only_step(&other);
+    let restored = w.checkout("restored");
+    let rmeta = restored.join("target/debug/deps/liba-xa.rmeta");
+    fs::write(&rmeta, b"other bytes").unwrap();
+    let honest = crate::sidecar::record_path(&ws.join("target/debug/deps/liba-xa.rmeta")).unwrap();
+    let mut text: serde_json::Value = serde_json::from_slice(&fs::read(honest).unwrap()).unwrap();
+    assert_eq!(text["reused"], true, "{text}");
+    text["sha256"] = serde_json::to_value(Digest::of(b"other bytes")).unwrap();
+    let record = crate::sidecar::record_path(&rmeta).unwrap();
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    w.plan(
+        "b",
+        Plan {
+            fail: Some("E0463"),
+            fail_message: Some("can't find crate for `core` which `a` depends on".into()),
+            ..Plan::default()
+        },
+    );
+    fs::create_dir_all(restored.join("b/src")).unwrap();
+    fs::write(restored.join("b/src/lib.rs"), "").unwrap();
+    let ext = format!("a={}", rmeta.display());
+    let asked = relay.borrow().asked.len();
+    let stand_in = relay.clone();
+    let r = w.call_with(&restored, "b", &["--extern", &ext], move |fake| {
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.code, 1);
+    // The download is not reported, and its first key is not suspended.
+    assert!(
+        !relay.borrow().asked[asked..]
+            .iter()
+            .any(|r| matches!(r, Request::Report { .. })),
+        "{:?}",
+        relay.borrow().asked
+    );
+    assert!(w.store().suspended_at(&step, SystemTime::now()).is_none());
+    // The file is still removed, so cargo builds `a` there.
+    assert!(!rmeta.exists());
+    assert!(r.entry.unwrap().note.is_some());
+}
+
+// covers: B-6
+#[test]
+fn a_restored_record_with_the_files_own_stat_does_not_answer_for_its_bytes() {
+    // A target folder from elsewhere, whose record for a library holds the stat the restored
+    // file has here and the SHA-256 of other bytes: as a cache restore whose inode was foreseen.
+    let m = a_machine("runner", "stable-aarch64-apple-darwin");
+    m.w.plan("b", Plan::default());
+    let ws = m.w.checkout("ws");
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/lib.rs"), "").unwrap();
+    let rmeta = ws.join("target/debug/deps/liba-xa.rmeta");
+    fs::write(&rmeta, b"doctored").unwrap();
+    let stat = hushrun_digest::cache::Stat::of(&fs::metadata(&rmeta).unwrap());
+    let record = crate::sidecar::record_path(&rmeta).unwrap();
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let text = serde_json::json!({
+        "schema": "hushrun.build.sidecar/3",
+        "size": stat.size,
+        "mtime_ns": stat.mtime_ns,
+        "ctime_ns": stat.ctime_ns,
+        "inode": stat.inode,
+        "device": stat.device,
+        "mode": stat.mode,
+        "sha256": Digest::of(b"honest"),
+        "produced_by": null,
+        "reused": false,
+        "portable": false,
+    });
+    fs::write(&record, serde_json::to_vec(&text).unwrap()).unwrap();
+    settle();
+    let ext = format!("a={}", rmeta.display());
+    let r =
+        m.w.call_with(&ws, "b", &["--extern", &ext], |fake| m.toolchain_vars(fake));
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert_eq!(
+        m.keys()["b"]["keys"]["externs"][0]["by"]["content"],
+        serde_json::to_value(Digest::of(b"doctored")).unwrap()
+    );
 }

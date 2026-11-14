@@ -54,6 +54,67 @@ struct Answer {
     free: Option<Vec<Share>>,
     #[serde(default)]
     dashboard: Option<String>,
+    /// The org's shared store of build blocks (B-25): what it holds of its allowance. `null` for
+    /// an org that never shared and holds nothing; a server from before the field leaves it out.
+    #[serde(default)]
+    shared_store: Option<SharedStore>,
+}
+
+/// `shared_store` in the usage answer: bytes held, of the allowance in force, and, when a smaller
+/// allowance is coming and the store holds more than it, `trimming` and the day it starts.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SharedStore {
+    #[serde(default)]
+    held_bytes: u64,
+    #[serde(default)]
+    allowance_bytes: u64,
+    /// What plan, contract and bonus give today: the allowance from `smaller_from` on.
+    #[serde(default)]
+    today_bytes: Option<u64>,
+    /// The day the allowance in force falls to `today_bytes`, when it will (`YYYY-MM-DD`).
+    #[serde(default)]
+    smaller_from: Option<String>,
+    /// `ok`, `over` (more than the allowance, being brought down) or `trimming`.
+    #[serde(default)]
+    state: Option<String>,
+    /// Whether the org shares: `off`, `observe` or `on`.
+    #[serde(default)]
+    sharing: Option<String>,
+    /// Why the allowance is 0, in `open`'s word, when the server says: the plan includes no
+    /// shared store, or sets its storage by contract alone and none is set yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<hushrun_core::blocks::OffReason>,
+}
+
+impl SharedStore {
+    /// The line `hushrun repository usage` writes: `3.2 GB held, of 10 GB`, and why it shrinks.
+    /// With no allowance there is nothing to hold it against: the line says why there is none,
+    /// in the server's word when it gave one, never `0 of 0`.
+    fn line(&self) -> String {
+        use hushrun_core::blocks::OffReason;
+        let size = crate::cmd::build::size;
+        let held = match self.held_bytes {
+            0 => "nothing held".to_string(),
+            bytes => format!("{} held", size(bytes)),
+        };
+        let mut line = match (self.allowance_bytes, self.reason) {
+            (0, Some(OffReason::Contract)) => {
+                format!("{held}: the plan sets its storage by contract, and none is set yet")
+            }
+            (0, Some(OffReason::Plan)) => format!("{held}: the plan includes no shared storage"),
+            (0, Some(OffReason::Unknown) | None) => format!("{held}: no storage is set for it"),
+            (allowance, _) => format!("{} held, of {}", size(self.held_bytes), size(allowance)),
+        };
+        match (self.state.as_deref(), self.today_bytes, &self.smaller_from) {
+            (Some("trimming"), Some(today), Some(from)) => {
+                let _ = write!(line, ": being trimmed to {} from {from}", size(today));
+            }
+            (Some("trimming"), _, _) => line.push_str(": being trimmed"),
+            (Some("over"), _, _) => line.push_str(": over, and being brought down"),
+            _ => {}
+        }
+        line
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -286,6 +347,10 @@ fn text(report: &Report, now: i64) -> String {
             ),
         );
     }
+    // Only when the server says it, so an org that never shared sees what it always did.
+    if let Some(store) = &usage.shared_store {
+        line("shared", store.line());
+    }
     if let Some(dashboard) = &usage.dashboard {
         line("dashboard", dashboard.clone());
     }
@@ -321,6 +386,9 @@ fn json_of(report: &Report) -> Value {
         // doesn't say, so an older server's output stays what it was.
         if let Some(free) = &usage.free {
             answer["free"] = json!(free);
+        }
+        if let Some(store) = &usage.shared_store {
+            answer["shared_store"] = json!(store);
         }
         answer
     });
@@ -416,10 +484,14 @@ mod tests {
         // Neither is `repositories`' number.
         assert_eq!(answer.share("github.com/acme/oss"), 0);
 
-        // An older server leaves it out; `null` reads the same.
-        for answer in [json!({"used": 1}), json!({"used": 1, "free": null})] {
+        // An older server leaves it out; `null` reads the same. So with the shared store.
+        for answer in [
+            json!({"used": 1}),
+            json!({"used": 1, "free": null, "shared_store": null}),
+        ] {
             let answer: Answer = serde_json::from_value(answer).unwrap();
             assert!(answer.free.is_none());
+            assert!(answer.shared_store.is_none());
             assert_eq!(answer.free_share("github.com/acme/oss"), 0);
             assert_eq!(answer.free_total(), 0);
         }

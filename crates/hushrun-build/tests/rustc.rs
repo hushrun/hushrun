@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use std::time::SystemTime;
 
 use hushrun_build::model::{Mode, Outcome, PassedThrough};
+use hushrun_build::portable::Reason;
 use hushrun_build::session::{self, Entry, Session, Start};
 use hushrun_build::settings;
 
@@ -66,6 +67,7 @@ fn world_in(mode: Mode) -> World {
         exe: &wrapper_exe(),
         in_ci: false,
         repository: None,
+        repository_env: &[],
         env: &env,
         now: SystemTime::now(),
     })
@@ -386,5 +388,461 @@ fn a_linked_output_compiled_again_from_the_same_inputs_has_the_same_key() {
         blocks(&w),
         1,
         "the second compile's key differs from the first's"
+    );
+}
+
+// covers: B-6
+#[test]
+fn a_proc_macros_metadata_is_found_and_is_the_same_whichever_way_it_was_linked() {
+    // What a dependent names a movable proc macro by includes the crate metadata in it
+    // (`hushrun_build::metadata`): it must be found in what rustc and the platform's linker
+    // really write, stay the same when only the link changes, and change with the crate.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("m.rs");
+    let compile = |name: &str, text: &str, link_arg: Option<&str>| -> PathBuf {
+        write(&src, text);
+        let out = dir.path().join(name);
+        fs::create_dir_all(&out).unwrap();
+        let mut command = Command::new(real_rustc());
+        command
+            .args([
+                "--crate-name",
+                "m",
+                "--edition=2021",
+                "--crate-type",
+                "proc-macro",
+            ])
+            .args(["--extern", "proc_macro", "-C", "prefer-dynamic"])
+            .arg(&src)
+            .arg("--out-dir")
+            .arg(&out);
+        if let Some(arg) = link_arg {
+            command.arg(format!("-Clink-arg={arg}"));
+        }
+        ok(&command.output().unwrap());
+        out.join(format!("libm.{}", std::env::consts::DLL_EXTENSION))
+    };
+    const MACRO: &str = "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(_: TokenStream) -> TokenStream {\n    unreachable!(\"never {}\", 1)\n}\n";
+    // A link option that changes the library's bytes, and no crate hash: another linker's work.
+    let other_link = if cfg!(target_os = "macos") {
+        "-Wl,-headerpad,0x4000"
+    } else {
+        "-Wl,--hash-style=sysv"
+    };
+    let one = compile("one", MACRO, None);
+    let two = compile("two", MACRO, Some(other_link));
+    assert_ne!(fs::read(&one).unwrap(), fs::read(&two).unwrap());
+    let meta = hushrun_build::metadata::of(&one).expect("the metadata of a real proc macro");
+    assert_eq!(hushrun_build::metadata::of(&two), Some(meta));
+    let other = compile("other", &MACRO.replace("never", "not ever"), None);
+    assert_ne!(hushrun_build::metadata::of(&other), Some(meta));
+}
+
+// covers: B-5, B-24
+#[test]
+fn target_cpu_native_is_resolved_by_the_real_compiler_and_still_reused() {
+    let w = world();
+    let call = |ws: &Path| {
+        write(&ws.join("n.rs"), "pub fn n() -> u32 { 7 }\n");
+        w.call(ws, "n", "n.rs", &["-C", "target-cpu=native"], &[])
+    };
+    let one = w.checkout("one");
+    let (out, first) = call(&one);
+    ok(&out);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    // Stored and reused here, never portable: rustc gives the code generator more of the CPU
+    // than it prints (B-24 `native-cpu`).
+    let portable = first.portable.unwrap();
+    assert!(!portable.portable, "{portable:?}");
+    assert_eq!(portable.reasons, [Reason::NativeCpu], "{portable:?}");
+    // What `native` is here was asked once and kept, with a CPU's name in it.
+    let memos = w.session.current().store.join("compilers");
+    let native: Vec<String> = fs::read_dir(&memos)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("native-"))
+        .map(|e| fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(native.len(), 1, "{native:?}");
+    let memo: serde_json::Value = serde_json::from_str(&native[0]).unwrap();
+    assert!(
+        !memo["native"]["cpu"].as_str().unwrap().is_empty(),
+        "{memo}"
+    );
+    let two = w.checkout("two-longer");
+    let (out, second) = call(&two);
+    ok(&out);
+    assert!(reused(&second), "{second:?}");
+}
+
+/// Links `m` in `ws` as a proc macro (or, with `program`, as a program) through the wrapper,
+/// with `env`, and gives the log entry and the linked file's bytes.
+#[cfg(target_os = "macos")]
+fn linked_with(w: &World, ws: &Path, program: bool, env: &[(&str, &str)]) -> (Entry, Vec<u8>) {
+    let (kind, source, file, args): (_, _, _, &[&str]) = if program {
+        ("bin", "fn main() { println!(\"hi\"); }\n", "out/m-x", &[])
+    } else {
+        (
+            "proc-macro",
+            "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n",
+            "out/libm-x.dylib",
+            &["--extern", "proc_macro"],
+        )
+    };
+    write(&ws.join("m/main.rs"), source);
+    let (out, entry) = w.call_as(ws, "m", "m/main.rs", kind, args, env);
+    ok(&out);
+    (entry, fs::read(ws.join(file)).unwrap())
+}
+
+// covers: B-5
+#[cfg(target_os = "macos")]
+#[test]
+fn a_variable_apples_linker_reads_by_itself_changes_a_linked_outputs_key() {
+    // Apple's `ld` reads `LD_APPLICATION_EXTENSION_SAFE` (a dynamic library's header flag) and
+    // `RC_UUID_SALT` (every output's UUID) from its own environment; nothing on the link line
+    // says so.
+    for (program, name, value) in [
+        (false, "LD_APPLICATION_EXTENSION_SAFE", "1"),
+        (true, "RC_UUID_SALT", "hello"),
+    ] {
+        let w = world();
+        let ws = w.checkout("ws");
+        let (first, plain) = linked_with(&w, &ws, program, &[]);
+        assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+        let (second, with) = linked_with(&w, &ws, program, &[(name, value)]);
+        assert_ne!(plain, with, "{name} changes the linker's output");
+        assert!(!second.found, "{name}: the key must differ: {second:?}");
+        assert_eq!(second.outcome, Outcome::BuiltAndStored, "{second:?}");
+        assert_eq!(blocks(&w), 2, "{name}");
+        // Without it again: the first block.
+        let (third, again) = linked_with(&w, &ws, program, &[]);
+        assert!(reused(&third), "{name}: {third:?}");
+        assert_eq!(again, plain, "{name}");
+    }
+}
+
+const PROC_MACRO: &str = "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n";
+
+/// A proc macro `m` linked in `ws` through the wrapper with `more` arguments and `env`: the log
+/// entry.
+fn proc_macro_with(w: &World, ws: &Path, more: &[&str], env: &[(&str, &str)]) -> Entry {
+    write(&ws.join("m/lib.rs"), PROC_MACRO);
+    let mut args = vec!["--extern", "proc_macro"];
+    args.extend(more);
+    let (out, entry) = w.call_as(ws, "m", "m/lib.rs", "proc-macro", &args, env);
+    ok(&out);
+    entry
+}
+
+/// The first `name` on `PATH`.
+fn on_path(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no {name} on PATH"))
+}
+
+/// The folder of its own that `rustc` hands the C driver to take programs from (`-B`), when it
+/// links a proc macro with `more`: where rustc links with its own lld (x86-64 Linux since 1.90)
+/// that is the toolchain's `gcc-ld`, and the driver takes the `ld` from there whatever `PATH`
+/// says. Read from the link's own line, never told from the target.
+fn own_ld_folder(rustc: &Path, more: &[&str]) -> Option<PathBuf> {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("m.rs"), PROC_MACRO);
+    let out = Command::new(rustc)
+        .args(["--crate-name", "m", "--edition=2021", "m.rs"])
+        .args(["--crate-type", "proc-macro", "--extern", "proc_macro"])
+        .args(["--out-dir", "out", "--print=link-args"])
+        .args(more)
+        .current_dir(dir.path())
+        // As the wrapper's calls here: cargo's library folders would hand a copied rustc the
+        // real toolchain's driver library, and its sysroot with it.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    ok(&out);
+    let line = hushrun_build::link::parse(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    line.inputs(dir.path()).prefixes.into_iter().next()
+}
+
+/// A program at `path` that leaves `marker` and then runs `real` with what it was handed.
+fn runs_and_marks(path: &Path, real: &Path, marker: &Path) {
+    write(
+        path,
+        &format!(
+            "#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n",
+            marker.display(),
+            real.display()
+        ),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// `PATH` with `first` before everything it holds.
+fn path_after(first: &Path) -> String {
+    let path = std::env::join_paths(
+        std::iter::once(first.to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+/// Puts in `dir` an `ld` and an `ld.lld` that leave `marker` and run the real `ld`.
+fn put_an_ld(dir: &Path, marker: &Path) {
+    let real = on_path("ld");
+    for name in ["ld", "ld.lld"] {
+        runs_and_marks(&dir.join(name), &real, marker);
+    }
+}
+
+/// Whether an `ld` first on `PATH` is the one that runs when `rustc` links a proc macro with
+/// `more`: seen from a link by rustc alone, no wrapper, with a marking `ld` put there. It is not
+/// where rustc hands the driver its own folder, nor where the driver has its `ld` built in
+/// (a gcc configured with one, as Ubuntu's since 26.04) or in a folder of its own.
+fn the_ld_on_path_runs(rustc: &Path, more: &[&str]) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    let early = dir.path().join("early");
+    fs::create_dir_all(&early).unwrap();
+    let marker = dir.path().join("ran");
+    put_an_ld(&early, &marker);
+    write(&dir.path().join("m.rs"), PROC_MACRO);
+    let out = Command::new(rustc)
+        .args(["--crate-name", "m", "--edition=2021", "m.rs"])
+        .args(["--crate-type", "proc-macro", "--extern", "proc_macro"])
+        .args(["--out-dir", "out"])
+        .args(more)
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", path_after(&early))
+        .output()
+        .unwrap();
+    ok(&out);
+    marker.exists()
+}
+
+/// Links the proc macro with `more` twice with an empty folder first on `PATH`, puts there an
+/// `ld` (and an `ld.lld`) that runs the real `ld`, and links again: that last link's entry, and
+/// whether a program put there ran.
+fn linked_after_an_ld_is_put_first_on_path(more: &[&str]) -> (Entry, bool) {
+    let w = world();
+    let ws = w.checkout("ws");
+    let early = w.dir.path().join("early");
+    fs::create_dir_all(&early).unwrap();
+    let path = path_after(&early);
+    let first = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let again = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
+    assert!(reused(&again), "{again:?}");
+    let marker = w.dir.path().join("ran");
+    put_an_ld(&early, &marker);
+    let after = proc_macro_with(&w, &ws, more, &[("PATH", &path)]);
+    (after, marker.exists())
+}
+
+/// An `ld` put first on `PATH` between two links with `more` is another link exactly where
+/// that `ld` is the one that runs (`from_path`); where it is not, the block is reused.
+fn the_ld_on_path_counts_only_where_it_runs(more: &[&str], from_path: bool) {
+    let (after, ran) = linked_after_an_ld_is_put_first_on_path(more);
+    if from_path {
+        assert!(!after.found, "the ld on PATH changed: {after:?}");
+        assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+        assert!(ran, "the ld on PATH never ran");
+    } else {
+        assert!(reused(&after), "the ld on PATH never runs: {after:?}");
+        assert!(!ran, "the ld on PATH ran");
+    }
+}
+
+// covers: B-18
+#[test]
+fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path() {
+    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc has none built in and its own
+    // folders have none: an `ld` put earlier on `PATH` (here a script that runs the real one) is
+    // another linker, with the same driver, line and files. Apple's driver runs the selected
+    // Xcode's `ld` whatever `PATH` says; where rustc links with its own lld the driver takes it
+    // from the folder rustc hands it; a gcc configured with its `ld` runs that one. There the
+    // `ld` on `PATH` never runs and the block is still reused. Which it is here is seen from a
+    // link, never told from the system.
+    let from_path = !cfg!(target_os = "macos") && the_ld_on_path_runs(&real_rustc(), &[]);
+    the_ld_on_path_counts_only_where_it_runs(&[], from_path);
+}
+
+// covers: B-18
+#[test]
+fn with_rustcs_own_lld_turned_off_the_ld_on_path_counts_where_the_driver_takes_it_from_path() {
+    // `-C linker-features=-lld` is how a build asks for the system's linker where rustc would
+    // link with its own: the line has no folder of rustc's then, and the driver decides as it
+    // does for any other link.
+    const OFF: &[&str] = &["-C", "linker-features=-lld"];
+    let rustc = real_rustc();
+    if own_ld_folder(&rustc, &[]).is_none() {
+        // Nothing to turn off here, and a rustc that has none refuses the option.
+        return;
+    }
+    assert_eq!(own_ld_folder(&rustc, OFF), None);
+    assert!(!the_ld_on_path_runs(&rustc, &[]), "rustc's own lld is on");
+    the_ld_on_path_counts_only_where_it_runs(OFF, the_ld_on_path_runs(&rustc, OFF));
+}
+
+/// `from`, a folder of a toolchain, again at `to`: every file a link to the real one, but
+/// rustc's driver library and the files of `own`, which are copies.
+fn mirror(from: &Path, to: &Path, own: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let (path, dest) = (entry.path(), to.join(entry.file_name()));
+        if own.starts_with(&path) {
+            mirror(&path, &dest, own);
+        } else if from == own
+            || entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("librustc_driver")
+        {
+            fs::copy(&path, &dest).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&path, &dest).unwrap();
+        }
+    }
+}
+
+// covers: B-18
+#[test]
+fn an_ld_put_in_the_folder_rustc_hands_the_driver_is_another_link() {
+    // The counterpart of the `ld` on `PATH`, where rustc links with its own lld: the linker that
+    // runs is the one in the toolchain's folder, so another one there is another link.
+    let real = real_rustc();
+    let Some(real_folder) = own_ld_folder(&real, &[]) else {
+        return;
+    };
+    // A toolchain of this test's own, the real one but for that folder. rustc takes its sysroot
+    // from where its driver library really lies, so that file and rustc are copies.
+    let mut w = world();
+    let sysroot = real.parent().unwrap().parent().unwrap();
+    let own = w.dir.path().join("toolchain");
+    mirror(&sysroot.join("lib"), &own.join("lib"), &real_folder);
+    fs::create_dir_all(own.join("bin")).unwrap();
+    fs::copy(&real, own.join("bin/rustc")).unwrap();
+    w.rustc = own.join("bin/rustc");
+    let folder = own_ld_folder(&w.rustc, &[]).expect("a folder of the copied toolchain");
+    assert!(folder.starts_with(&own), "{}", folder.display());
+
+    let ws = w.checkout("ws");
+    let first = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let again = proc_macro_with(&w, &ws, &[], &[]);
+    assert!(reused(&again), "{again:?}");
+    // rustc's `ld.lld` runs the `rust-lld` one folder up from its own: the real one is kept
+    // beside the folder, under its name.
+    let kept = folder.parent().unwrap().join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    fs::rename(folder.join("ld.lld"), kept.join("ld.lld")).unwrap();
+    let marker = w.dir.path().join("ran");
+    runs_and_marks(&folder.join("ld.lld"), &kept.join("ld.lld"), &marker);
+    let after = proc_macro_with(&w, &ws, &[], &[]);
+    assert!(!after.found, "the toolchain's ld changed: {after:?}");
+    assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+    assert!(marker.exists(), "the ld put there never ran");
+}
+
+/// `<dir>/libhrq` as a shared library whose `hrq()` returns `value`, named `version` inside
+/// (its soname, or its install name on macOS), under the file name `file`.
+fn shared_library(dir: &Path, file: &str, value: u32, version: u32) {
+    fs::create_dir_all(dir).unwrap();
+    write(
+        &dir.join("hrq.c"),
+        &format!("int hrq(void) {{ return {value}; }}\n"),
+    );
+    let name = if cfg!(target_os = "macos") {
+        format!("-Wl,-install_name,@rpath/libhrq.{version}.dylib")
+    } else {
+        format!("-Wl,-soname,libhrq.so.{version}")
+    };
+    let made = Command::new("cc")
+        .args(["-shared", "-fPIC", "hrq.c", &name, "-o", file])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(made.success());
+}
+
+// covers: B-6, B-18
+#[test]
+fn a_library_found_in_a_folder_the_driver_hands_ld_is_keyed_by_its_bytes() {
+    // `LIBRARY_PATH`'s text is keyed, but not what its folders hold: a `-l` found there (and in
+    // the system's folders the same way) was keyed by nothing.
+    let w = world();
+    let ws = w.checkout("ws");
+    let lib = w.dir.path().join("lp");
+    let file = if cfg!(target_os = "macos") {
+        "libhrq.dylib"
+    } else {
+        "libhrq.so"
+    };
+    shared_library(&lib, file, 1, 1);
+    write(
+        &ws.join("p/main.rs"),
+        "#[link(name = \"hrq\")]\nunsafe extern \"C\" { fn hrq() -> i32; }\n\
+         fn main() { println!(\"{}\", unsafe { hrq() }); }\n",
+    );
+    let lib_text = lib.to_str().unwrap().to_owned();
+    let link = || {
+        let (out, entry) = w.call_as(
+            &ws,
+            "p",
+            "p/main.rs",
+            "bin",
+            &[],
+            &[("LIBRARY_PATH", &lib_text)],
+        );
+        ok(&out);
+        (entry, fs::read(ws.join("out/p-x")).unwrap())
+    };
+    let (first, before) = link();
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let (again, _) = link();
+    assert!(reused(&again), "{again:?}");
+    // Another library under the same name: the program the linker writes is another.
+    shared_library(&lib, file, 2, 2);
+    let (swapped, after) = link();
+    assert!(before != after, "the program names the other library");
+    assert!(
+        !swapped.found,
+        "the library -lhrq finds changed: {swapped:?}"
+    );
+    assert_eq!(swapped.outcome, Outcome::BuiltAndStored, "{swapped:?}");
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    // GNU `ld` reads a text file there as a linker script, and takes the files it names.
+    fs::remove_file(lib.join(file)).unwrap();
+    shared_library(&lib, "libhrq_impl.so", 3, 3);
+    write(
+        &lib.join(file),
+        &format!(
+            "/* GNU ld script */\nGROUP ( {}/libhrq_impl.so )\n",
+            lib.display()
+        ),
+    );
+    let (scripted, _) = link();
+    assert_eq!(scripted.outcome, Outcome::BuiltAndStored, "{scripted:?}");
+    let (again, _) = link();
+    assert!(reused(&again), "{again:?}");
+    shared_library(&lib, "libhrq_impl.so", 4, 4);
+    let (named, _) = link();
+    assert!(!named.found, "the file the script names changed: {named:?}");
+    // A script that does more than name files: built, not stored.
+    write(
+        &lib.join(file),
+        &format!("SEARCH_DIR({})\nINPUT ( libhrq_impl.so )\n", lib.display()),
+    );
+    let (other, _) = link();
+    assert_eq!(
+        other.outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::LinkInputs),
+        "{other:?}"
     );
 }

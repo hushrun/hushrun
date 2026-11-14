@@ -204,6 +204,11 @@ fn report(failure: Failure) -> ExitCode {
     exit.into()
 }
 
+/// The log filter with no `-v`, `-q` or `HUSHRUN_LOG`: warnings, and none from the HTTP client's
+/// internals, which a person can't act on (hyper's `tcp set_nodelay error` reached a person's
+/// terminal); what a request's failure means is said by the code that sent it.
+const QUIET: &str = "warn,hyper=off,hyper_util=off,h2=off,reqwest=off,rustls=off,tokio_rustls=off";
+
 fn init_logging(global: &GlobalOpts) {
     let level = match (global.verbose, global.quiet) {
         (0, 0) => None,
@@ -212,10 +217,7 @@ fn init_logging(global: &GlobalOpts) {
         (2, _) => Some("debug"),
         _ => Some("trace"),
     };
-    let filter = match level.or(global.log.as_deref()) {
-        Some(filter) => EnvFilter::new(filter),
-        None => EnvFilter::new("warn"),
-    };
+    let filter = EnvFilter::new(level.or(global.log.as_deref()).unwrap_or(QUIET));
     let ansi = match global.color {
         ColorWhen::Always => true,
         ColorWhen::Never => false,
@@ -230,4 +232,49 @@ fn init_logging(global: &GlobalOpts) {
         .with_target(false)
         .without_time()
         .try_init();
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use std::sync::{Arc, Mutex};
+
+    /// What a subscriber with `filter` writes when the HTTP client's connector and hushrun each
+    /// warn once.
+    fn written(filter: &str) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Buffer::default();
+        let out = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(move || out.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: "hyper_util::client::legacy::connect::http",
+                "tcp set_nodelay error: Invalid argument (os error 22)"
+            );
+            tracing::warn!(target: "hushrun::cmd::wrap", "a warning of hushrun's own");
+        });
+        String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn nothing_from_the_http_client_s_internals_reaches_a_person_s_terminal() {
+        let quiet = written(super::QUIET);
+        assert!(!quiet.contains("set_nodelay"), "{quiet}");
+        assert!(quiet.contains("a warning of hushrun's own"), "{quiet}");
+        // Asked for, as with `-v` or `HUSHRUN_LOG`, it is shown.
+        assert!(written("debug").contains("set_nodelay"));
+    }
 }

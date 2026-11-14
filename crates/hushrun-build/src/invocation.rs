@@ -228,6 +228,8 @@ pub struct Invocation {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    native_cpu: bool,
+    native_in_llvm_args: bool,
     debug: DebugFlags,
     message_form: String,
     form: crate::messages::Form,
@@ -283,6 +285,39 @@ const OTHER_KEYED: [&str; 16] = [
     "GCC_EXEC_PREFIX",
     "SOURCE_DATE_EPOCH",
 ];
+
+/// The variables of [`OTHER_KEYED`] that only the C driver (`cc`) and the linker read, or that
+/// rustc reads only to link (the SDK: `SDKROOT`, `DEVELOPER_DIR`). A library's compile links
+/// nothing (rustc writes the `.rlib` and `.rmeta` itself), so they are keyed for linked outputs
+/// only: on macOS a library's bytes are the same under two SDKs and both developer folders.
+const LINKER_ONLY: [&str; 6] = [
+    "LIBRARY_PATH",
+    "LD_RUN_PATH",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+    "SDKROOT",
+    "DEVELOPER_DIR",
+];
+
+/// The prefixes of the variables the linker reads from its own environment, keyed for a linked
+/// output (B-5): Apple's `ld` reads `LD_*` and `RC_*` ones it documents nowhere (Xcode 27.2:
+/// `RC_UUID_SALT` changes every output's UUID, `LD_APPLICATION_EXTENSION_SAFE` and
+/// `LD_NO_ENCRYPT` a dynamic library's header), GNU `ld` `LD_*` ones and `collect2` its
+/// `COLLECT_*` ones. A prefix, since a linker update can add a variable without saying so.
+const LINKER_READS_PREFIXES: [&str; 3] = ["LD_", "RC_", "COLLECT_"];
+
+/// The other variables GNU `ld` reads from its own environment (B-5): the default emulation and
+/// object format.
+const LINKER_READS: [&str; 2] = ["LDEMULATION", "GNUTARGET"];
+
+/// Whether the linker may read a variable from its own environment ([`LINKER_READS_PREFIXES`],
+/// [`LINKER_READS`]).
+fn linker_reads(name: &str) -> bool {
+    LINKER_READS.contains(&name)
+        || LINKER_READS_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 
 /// The `-Z` flags a call may carry and still be handled: each reads no file, and its text is
 /// keyed. Every other `-Z` passes through (B-4).
@@ -347,7 +382,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         seen.emits.push(Emit::Link);
     }
 
-    let (keyed_env, package) = read_env(env)?;
+    let (keyed_env, package) = read_env(env, class)?;
     let form = crate::messages::Form::new(
         seen.error_format.as_deref(),
         (!seen.json.is_empty())
@@ -385,6 +420,8 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         incremental: seen.incremental,
         target: seen.target,
         searchable: seen.searchable,
+        native_cpu: seen.native_cpu,
+        native_in_llvm_args: seen.native_in_llvm_args,
         debug: seen.debug,
         message_form,
         form,
@@ -492,6 +529,18 @@ impl Invocation {
     /// `-C linker-plugin-lto`, `-C embed-bitcode=yes` or compressed debug sections.
     pub fn searchable(&self) -> bool {
         self.searchable
+    }
+
+    /// Whether the CPU the call compiles for is this machine's: its last `-C target-cpu` is
+    /// `native` (B-5).
+    pub fn native_cpu(&self) -> bool {
+        self.native_cpu
+    }
+
+    /// Whether a `-C llvm-args` names `native` as a value (`-mcpu=native`, `-mattr=native`): a
+    /// choice of this machine's CPU that the compiler can't be asked to resolve (B-5).
+    pub fn native_in_llvm_args(&self) -> bool {
+        self.native_in_llvm_args
     }
 
     /// What the call says about debug info (B-9).
@@ -780,6 +829,8 @@ struct Seen {
     incremental: Option<String>,
     target: Option<String>,
     searchable: bool,
+    native_cpu: bool,
+    native_in_llvm_args: bool,
     debug: DebugFlags,
     error_format: Option<String>,
     json: Vec<String>,
@@ -804,6 +855,8 @@ impl Default for Seen {
             incremental: None,
             target: None,
             searchable: true,
+            native_cpu: false,
+            native_in_llvm_args: false,
             debug: DebugFlags::default(),
             error_format: None,
             json: Vec::new(),
@@ -932,6 +985,15 @@ impl Seen {
                         if compresses_debug(setting.unwrap_or_default(), name == "link-args") {
                             self.searchable = false;
                         }
+                    }
+                    // The last one wins, as in rustc.
+                    "target-cpu" => self.native_cpu = setting == Some("native"),
+                    "llvm-args" => {
+                        self.native_in_llvm_args |= setting.is_some_and(|words| {
+                            words
+                                .split_whitespace()
+                                .any(|word| word.ends_with("=native"))
+                        });
                     }
                     "debuginfo" => self.debug.debuginfo = setting.map(str::to_string),
                     "split-debuginfo" => self.debug.split = setting.map(str::to_string),
@@ -1128,13 +1190,18 @@ fn classify(name: &str, crate_type: Option<&String>, test: bool) -> Result<Class
     }
 }
 
-fn read_env(env: &Env) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
+fn read_env(env: &Env, class: Class) -> Result<(BTreeMap<String, String>, Package), PassedThrough> {
     if env.unreadable_cargo_name {
         return Err(PassedThrough::NotUtf8);
     }
     let mut keyed = BTreeMap::new();
     for (name, value) in &env.vars {
-        if cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) {
+        // A library is written by rustc itself: no C driver or linker runs for it, so what only
+        // they read is not its input, and would tie its key to how this machine is set up.
+        let linker_only = class == Class::Library && LINKER_ONLY.contains(&name.as_str());
+        // A linked output: every variable the linker reads from its own environment.
+        let linker = class != Class::Library && linker_reads(name);
+        if (cargo_keyed(name) || OTHER_KEYED.contains(&name.as_str()) || linker) && !linker_only {
             keyed.insert(name.clone(), utf8(value)?);
         }
     }
@@ -1441,7 +1508,8 @@ pub(crate) mod tests {
     #[test]
     fn key_env_keeps_cargo_variables_but_the_named_ones() {
         let (argv, mut env) = workspace_lib();
-        env.vars.insert("SDKROOT".into(), "/sdk".into());
+        env.vars
+            .insert("MACOSX_DEPLOYMENT_TARGET".into(), "11.0".into());
         env.vars.insert("RUSTC_BOOTSTRAP".into(), "1".into());
         env.vars.insert("CARGO_SBOM_PATH".into(), "/x".into());
         env.vars
@@ -1457,8 +1525,8 @@ pub(crate) mod tests {
                 "CARGO_MANIFEST_PATH",
                 "CARGO_PKG_NAME",
                 "CARGO_PKG_VERSION",
+                "MACOSX_DEPLOYMENT_TARGET",
                 "RUSTC_BOOTSTRAP",
-                "SDKROOT",
             ]
         );
         let with = inv
@@ -1466,6 +1534,37 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(with.get("MY_FLAG").map(String::as_str), Some("on"));
         assert!(!with.contains_key("UNSET_ONE"));
+    }
+
+    // covers: B-5
+    #[test]
+    fn target_cpu_native_is_seen_in_every_spelling_and_the_last_one_wins() {
+        for given in [
+            "-C target-cpu=native",
+            "-Ctarget-cpu=native",
+            "--codegen target-cpu=native",
+            "--codegen=target-cpu=native",
+            "-C target-cpu=apple-m1 -C target-cpu=native",
+        ] {
+            let inv = handled(&argv(&minimal(given)), &Env::default());
+            assert!(inv.native_cpu(), "{given}");
+            assert!(
+                inv.key_args()
+                    .iter()
+                    .any(|arg| arg == "-Ctarget-cpu=native")
+            );
+        }
+        for given in [
+            "",
+            "-C target-cpu=apple-m1",
+            "-C target-cpu=native -C target-cpu=apple-m1",
+            "-C target-feature=+neon",
+        ] {
+            assert!(
+                !handled(&argv(&minimal(given)), &Env::default()).native_cpu(),
+                "{given}"
+            );
+        }
     }
 
     // covers: B-5
@@ -1916,14 +2015,87 @@ pub(crate) mod tests {
             "GCC_EXEC_PREFIX",
             "SOURCE_DATE_EPOCH",
         ];
+        let program = minimal("").replace("--crate-type lib", "--crate-type bin");
         for name in read {
             let env = Env::from_vars([(name, "x")]);
-            let inv = handled(&argv(&minimal("")), &env);
+            let inv = handled(&argv(&program), &env);
             assert_eq!(
                 inv.key_env().get(name).map(String::as_str),
                 Some("x"),
                 "{name}"
             );
+            // A library runs no C driver or linker: what only they read is not its input.
+            let library = handled(&argv(&minimal("")), &env);
+            // rustc reads the SDK (`SDKROOT`, `DEVELOPER_DIR`) only to link: a library's bytes
+            // are the same with any of them (two SDKs and both developer folders tried).
+            let linker_only = matches!(
+                name,
+                "LIBRARY_PATH"
+                    | "LD_RUN_PATH"
+                    | "COMPILER_PATH"
+                    | "GCC_EXEC_PREFIX"
+                    | "SDKROOT"
+                    | "DEVELOPER_DIR"
+            );
+            assert_eq!(
+                library.key_env().get(name).map(String::as_str),
+                (!linker_only).then_some("x"),
+                "{name}"
+            );
+        }
+    }
+
+    // covers: B-5
+    #[test]
+    fn variables_the_linker_reads_by_itself_are_keyed_for_a_linked_output() {
+        // Apple's `ld` reads `LD_*` and `RC_*` variables it documents nowhere, GNU `ld` its
+        // emulation and `collect2` its own: keyed by prefix for every linked output, never for
+        // a library, which links nothing.
+        let keyed = [
+            "LD_APPLICATION_EXTENSION_SAFE",
+            "LD_NO_ENCRYPT",
+            "RC_UUID_SALT",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "LDEMULATION",
+            "GNUTARGET",
+            "COLLECT_NO_DEMANGLE",
+        ];
+        let not_keyed = [
+            "LDFLAGS",
+            "XLD_FOO",
+            "MY_LD_X",
+            "RCX",
+            "GNUTARGETS",
+            "COLLECT",
+        ];
+        let program = minimal("").replace("--crate-type lib", "--crate-type bin");
+        let proc_macro = minimal("").replace("--crate-type lib", "--crate-type proc-macro");
+        let build_script = program.replace("--crate-name x", "--crate-name build_script_build");
+        for line in [&program, &proc_macro, &build_script] {
+            let class = handled(&argv(line), &Env::default()).class();
+            assert_ne!(class, Class::Library, "{line}");
+            for name in keyed {
+                let env = Env::from_vars([(name, "1")]);
+                let inv = handled(&argv(line), &env);
+                assert_eq!(
+                    inv.key_env().get(name).map(String::as_str),
+                    Some("1"),
+                    "{name} for {class:?}"
+                );
+            }
+            for name in not_keyed {
+                let env = Env::from_vars([(name, "1")]);
+                let inv = handled(&argv(line), &env);
+                assert_eq!(inv.key_env().get(name), None, "{name} for {class:?}");
+            }
+        }
+        for name in keyed {
+            let env = Env::from_vars([(name, "1")]);
+            let library = handled(&argv(&minimal("")), &env);
+            assert_eq!(library.class(), Class::Library);
+            assert_eq!(library.key_env().get(name), None, "{name} for a library");
         }
     }
 
@@ -1953,6 +2125,33 @@ pub(crate) mod tests {
         assert_ne!(unset, one);
         assert_ne!(one, two);
         assert_eq!(one, key(Some("1700000000")));
+    }
+
+    // covers: B-5
+    #[test]
+    fn source_date_epoch_is_in_the_first_key_of_a_library_whose_macros_come_through_another() {
+        // A derive re-exported by a library (`serde` with `derive`, `pub use pmd::stamp;`)
+        // reaches rustc through `-L dependency=`, not as an `--extern`: the command line of a
+        // library that expands one looks like that of one that expands none. A macro that reads
+        // the variable puts it in the bytes, so every library keys it.
+        let key = |value: Option<&str>| {
+            let env = match value {
+                Some(value) => Env::from_vars([("SOURCE_DATE_EPOCH", value)]),
+                None => Env::default(),
+            };
+            let line = minimal("--extern reexp=/o/libreexp-1.rmeta -L dependency=/o");
+            let inv = handled(&argv(&line), &env);
+            crate::key::Asked {
+                compiler: hushrun_core::Digest::of(b"rustc"),
+                args: inv.key_args(),
+                env: inv.key_env().clone(),
+                added: Vec::new(),
+            }
+            .key()
+            .unwrap()
+        };
+        assert_ne!(key(Some("1")), key(Some("2")));
+        assert_ne!(key(None), key(Some("1")));
     }
 
     // covers: B-5

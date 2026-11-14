@@ -295,6 +295,13 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         .clone()
         .or_else(|| wrap::repository_of(&content));
     let mut said_off = false;
+    let mut asked_whether_shared = false;
+    // B-36: the backend a saved fetch must be from, found only when the store holds one; a
+    // check asks it nothing.
+    let place = || match crate::results::Backend::select(Some(content.vcs.root())) {
+        Ok(crate::results::Selection::On(backend)) => backend.build_place(),
+        _ => None,
+    };
     for Prepared {
         name,
         why,
@@ -318,12 +325,16 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         let timeout = args.timeout.or(def.timeout);
         // B-2: a check run here compiles through the wrapper, in one session for all its
         // attempts. An isolated one never begins a session: its container has neither the link
-        // nor the store.
+        // nor the store. B-25: no backend is handed to share through, so a check shares nothing,
+        // and in CI gets no session.
         let build = match isolation {
             Some(_) => None,
             None => match build_session::begin(
                 system_time(wrap::now(app.global)),
                 repository.as_deref(),
+                &policy.build_env,
+                None,
+                &place,
             ) {
                 Ok(session) => Some(session),
                 Err(why) => {
@@ -389,7 +400,24 @@ pub fn run(app: &App<'_>, args: &RunArgs) -> CmdResult {
         }
         let duration = started.elapsed();
         // B-20: what its compiles came to, whatever its exit code.
-        finish(app, build);
+        let compiled = finish(app, build);
+        // B-25: this form shares nothing. Where a check compiled and the org shares, that is
+        // worth one line a run: the backend is asked whether it does only then, and once.
+        if compiled && !asked_whether_shared {
+            asked_whether_shared = true;
+            let shares = crate::results::ledger_check_key(&name, &subject.scope, &subject.digest)
+                .ok()
+                .zip(
+                    match crate::results::Backend::select(Some(content.vcs.root())) {
+                        Ok(crate::results::Selection::On(backend)) => Some(backend),
+                        _ => None,
+                    },
+                )
+                .is_some_and(|(key, backend)| backend.org_shares_blocks(&key));
+            if shares {
+                say(app, ONLY_THE_COMMAND_FORM_SHARES);
+            }
+        }
         let finished_at = Time::from_timestamp(jiff::Timestamp::now());
         let result = if exit_code == Some(0) {
             Outcome::Pass
@@ -514,13 +542,21 @@ fn say(app: &App<'_>, line: &str) {
     }
 }
 
+/// B-25: what a run of hushrun.yaml's checks says once when a check compiled Rust and the org
+/// shares build blocks.
+const ONLY_THE_COMMAND_FORM_SHARES: &str = "build: only `hushrun run NAME -- COMMAND` uses the org's shared store: this run's crates were neither downloaded from it nor uploaded to it";
+
 /// Ends a check's build session, if it had one, and says what its compiles came to (B-20).
-fn finish(app: &App<'_>, build: Option<Session>) {
-    if let Some(session) = build {
-        for line in session.finish(system_time(wrap::now(app.global))).lines() {
-            say(app, line);
-        }
+/// Whether the check compiled anything through the wrapper.
+fn finish(app: &App<'_>, build: Option<Session>) -> bool {
+    let Some(session) = build else {
+        return false;
+    };
+    let summary = build_session::finish(session, system_time(wrap::now(app.global)));
+    for line in summary.lines() {
+        say(app, line);
     }
+    summary.counts().compiles > 0
 }
 
 /// The subject's scope in this checkout.

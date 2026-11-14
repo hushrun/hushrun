@@ -52,6 +52,10 @@ pub struct Policy {
     pub transparency_log: Option<LedgerLog>,
     /// \[ADR 0062\] Keys this release reads past without using them, in the order written.
     pub retired: Vec<Retired>,
+    /// `build: env:`: variables every compile of the repository's build blocks is keyed by, in
+    /// both forms of `hushrun run`, sorted and once each (B-35). Not part of any check's
+    /// definition (E-6).
+    pub build_env: Vec<String>,
     /// The file name used in error messages.
     pub file: String,
     /// The file's text, for `plan --explain-json`.
@@ -224,6 +228,16 @@ struct RawPolicy {
     transparency_log: Option<Spanned<RawLedgerLog>>,
     #[serde(default = "counts_from::absent")]
     counts_from: Spanned<Raw>,
+    #[serde(default)]
+    build: Option<RawBuild>,
+}
+
+/// `build`: what the build blocks of every machine's runs take from the repository (B-35).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBuild {
+    #[serde(default)]
+    env: Vec<Spanned<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -583,6 +597,22 @@ impl Policy {
             .as_ref()
             .and_then(|log| parse_ledger_log(&log.value, &mut errors));
 
+        // B-35
+        let mut build_env: Vec<String> = Vec::new();
+        for var in raw.build.iter().flat_map(|build| &build.env) {
+            if !is_env_name(&var.value) {
+                errors.push(
+                    var.pos,
+                    format!("{:?} is not an environment variable name", var.value),
+                );
+            } else if build_env.contains(&var.value) {
+                errors.push(var.pos, format!("`build.env` names {} twice", var.value));
+            } else {
+                build_env.push(var.value.clone());
+            }
+        }
+        build_env.sort();
+
         retired.sort_by_key(|r| (r.pos.line, r.pos.column));
         errors.finish(Policy {
             repository: raw.repository.value.clone(),
@@ -598,6 +628,7 @@ impl Policy {
             digest: Digest::of(bytes),
             transparency_log,
             retired,
+            build_env,
             file: file.to_string(),
             text: String::from_utf8_lossy(bytes).into_owned(),
         })

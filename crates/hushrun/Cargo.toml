@@ -38,7 +38,8 @@ anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 mimalloc.workspace = true
-hushrun-core.workspace = true
+# \[B-28\] With the pack, which the relay writes and reads.
+hushrun-core = { workspace = true, features = ["pack"] }
 hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
@@ -63,6 +64,9 @@ semver.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+# A PUT of a build block's pack streams it from its file (B-29): the stream reqwest's body takes.
+# Already part of the binary's build through the ledger's HTTP client.
+futures-util.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

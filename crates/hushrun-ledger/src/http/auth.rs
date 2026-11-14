@@ -10,6 +10,7 @@
 //! All of them come from the environment only, never from the repository (T-4). Tokens are
 //! secrets: nothing here logs them, and only the ledger's origin receives one.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -72,11 +73,13 @@ impl Auth {
         }
     }
 
-    /// The token for the next request, if any.
+    /// The token for the next request, if any. `answered` is set when the token couldn't be
+    /// had and a server answered the request for it.
     pub(crate) async fn token(
         &self,
         client: &reqwest::Client,
         tuning: &Tuning,
+        answered: &AtomicBool,
     ) -> Result<Option<Secret>, LedgerError> {
         let token = match self {
             Auth::None => None,
@@ -87,7 +90,7 @@ impl Auth {
                     .await
                     .map_err(|e| LedgerError::Denied(e.0))?,
             )),
-            Auth::Oidc(oidc) => Some(oidc.token(client, tuning).await?),
+            Auth::Oidc(oidc) => Some(oidc.token(client, tuning, answered).await?),
         };
         // \[ADR 0046\] A `HUSHRUN_AGENT` string holds a private key, so it never goes in a header,
         // wherever a token came from and whatever is around it. Every request's token comes
@@ -110,6 +113,7 @@ impl Oidc {
         &self,
         client: &reqwest::Client,
         tuning: &Tuning,
+        answered: &AtomicBool,
     ) -> Result<Secret, LedgerError> {
         let mut cache = self.cache.lock().await;
         if let Some((token, renew_at)) = cache.as_ref()
@@ -117,7 +121,14 @@ impl Oidc {
         {
             return Ok(token.clone());
         }
-        let token = self.request(client, tuning).await?;
+        // A request for the token that failed after a server answered it (a refusal, an answer
+        // with no token in it) is a server's answer; one nothing answered is not.
+        let mut heard = false;
+        let token = self.request(client, tuning, &mut heard).await;
+        if token.is_err() && heard {
+            answered.store(true, Ordering::Relaxed);
+        }
+        let token = token?;
         let lifetime = match expiry(token.expose()) {
             Some(expires) => expires
                 .duration_since(SystemTime::now())
@@ -130,11 +141,13 @@ impl Oidc {
     }
 
     /// Asks GitHub for an ID token, retrying like ledger requests (L-4). Errors name the
-    /// endpoint's host only: its URL and the request token stay out of messages.
+    /// endpoint's host only: its URL and the request token stay out of messages. `heard` is
+    /// set once the endpoint gave any HTTP response.
     async fn request(
         &self,
         client: &reqwest::Client,
         tuning: &Tuning,
+        heard: &mut bool,
     ) -> Result<Secret, LedgerError> {
         let url = reqwest::Url::parse(&self.endpoint.url).map_err(|_| {
             LedgerError::Denied("ACTIONS_ID_TOKEN_REQUEST_URL is not a URL".to_string())
@@ -167,6 +180,7 @@ impl Oidc {
                 .await;
             let retryable = match sent {
                 Ok(response) => {
+                    *heard = true;
                     let status = response.status();
                     if status.is_success() {
                         let body = response.bytes().await.map_err(|e| {

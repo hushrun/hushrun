@@ -28,7 +28,7 @@
 //! rustc's working directory. The objects include rustc's own temporary files (`rustcXXXX/`) and
 //! the compile's own `.rcgu.o` outputs, which are gone after the link.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// The linker command rustc printed.
@@ -463,26 +463,136 @@ impl LinkArgs {
     /// The C driver's own `-B` folders, from its arguments (never from `-Wl,`, where `-Bstatic`
     /// and `-Bdynamic` are the linker's).
     fn prefixes(&self, cwd: &Path) -> Vec<PathBuf> {
+        prefixes(&self.args, cwd)
+    }
+
+    /// Whether the line hands the C driver a file of options this list can't read (B-18): a
+    /// gcc specs file (`-specs=`, `--specs=`, `--specs`) or a clang configuration file
+    /// (`--config`, and the folders it is looked for in). Either can change which `ld` runs and
+    /// what it is handed.
+    pub fn driver_reads_options(&self) -> bool {
+        self.args.iter().any(|arg| {
+            ["-specs", "--specs", "--config"]
+                .iter()
+                .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
+                || arg.starts_with("--config-system-dir")
+                || arg.starts_with("--config-user-dir")
+        })
+    }
+
+    /// The C driver's options that change which `ld` it runs or where it looks for a library,
+    /// in order (B-18): `-B`, `-fuse-ld=`, `--ld-path=`, `--sysroot`, the target and the
+    /// multilib options (`-m*`), the GCC installation clang takes, and the kind of output
+    /// (`-shared`, `-static`, `-pie`, …). They are handed to every question asked of the driver,
+    /// so its answers are the link's. `-Wl,` and `-Xlinker` values are the linker's, never here.
+    pub fn driver_flags(&self) -> Vec<String> {
+        const ALONE: &[&str] = &[
+            "-shared",
+            "-static",
+            "-static-pie",
+            "-pie",
+            "-no-pie",
+            "-nostdlib",
+            "-nodefaultlibs",
+            "-nostartfiles",
+        ];
+        const JOINED: &[&str] = &[
+            "-fuse-ld=",
+            "--ld-path=",
+            "--sysroot=",
+            "--target=",
+            "--gcc-toolchain=",
+            "--gcc-install-dir=",
+            "-rtlib=",
+            "--rtlib=",
+            "-stdlib=",
+        ];
+        const WITH_VALUE: &[&str] = &["-B", "--sysroot", "-target"];
         let mut out = Vec::new();
+        // rustc runs `rust-lld` as the linker itself, no C driver, with `-flavor` first.
+        if let [flag, flavor, ..] = self.args.as_slice()
+            && flag == "-flavor"
+        {
+            return vec![flag.clone(), flavor.clone()];
+        }
         let mut iter = self.args.iter();
         while let Some(arg) = iter.next() {
-            let value = match arg.strip_prefix("-B") {
-                Some("") => iter.next().map(String::as_str),
-                Some(rest)
-                    if !rest.starts_with("static")
-                        && !rest.starts_with("dynamic")
-                        && !rest.starts_with("symbolic") =>
-                {
-                    Some(rest)
+            if arg == "-Xlinker" {
+                iter.next();
+                continue;
+            }
+            if WITH_VALUE.contains(&arg.as_str()) {
+                if let Some(value) = iter.next() {
+                    out.push(arg.clone());
+                    out.push(value.clone());
                 }
-                _ => None,
-            };
-            if let Some(value) = value {
-                push_once(&mut out, cwd.join(value));
+                continue;
+            }
+            if ALONE.contains(&arg.as_str())
+                || JOINED.iter().any(|flag| arg.starts_with(flag))
+                || joined_prefix(arg).is_some()
+                || (arg.starts_with("-m") && arg.len() > 2)
+            {
+                out.push(arg.clone());
             }
         }
         out
     }
+
+    /// The sysroot the line gives `ld`: the last `--sysroot`, whether the driver's (which passes
+    /// it on) or one of `-Wl,` (B-6).
+    pub fn ld_sysroot(&self) -> Option<String> {
+        let tokens = flatten(&self.args);
+        let mut found = None;
+        let mut i = 0;
+        while i < tokens.len() {
+            if tokens[i] == "--sysroot" {
+                found = tokens.get(i + 1).map(|v| (*v).to_owned());
+                i += 1;
+            } else if let Some(value) = tokens[i].strip_prefix("--sysroot=") {
+                found = Some(value.to_owned());
+            }
+            i += 1;
+        }
+        found
+    }
+}
+
+/// What follows `-B` in a C driver's `-B<folder>`: the folder, or nothing when it is the next
+/// argument. `None` for any other argument, the linker's `-Bstatic`, `-Bdynamic` and
+/// `-Bsymbolic` among them.
+fn joined_prefix(arg: &str) -> Option<&str> {
+    arg.strip_prefix("-B").filter(|rest| {
+        !rest.starts_with("static") && !rest.starts_with("dynamic") && !rest.starts_with("symbolic")
+    })
+}
+
+/// A driver flag ([`LinkArgs::driver_flags`]) with the paths it holds rewritten by `path`, which
+/// replaces a root where one starts a path (B-8). The folder of a joined `-B<folder>` is handed
+/// over alone: after the letter it would not start a path, and rustc names its own linker that
+/// way (`-B<sysroot>/lib/rustlib/<target>/bin/gcc-ld`), so the toolchain's folder would stay in
+/// what a hint keeps as this machine wrote it.
+pub fn flag_with_paths(flag: &str, path: impl Fn(&str) -> String) -> String {
+    match joined_prefix(flag) {
+        Some(folder) if !folder.is_empty() => format!("-B{}", path(folder)),
+        _ => path(flag),
+    }
+}
+
+/// The C driver's `-B` folders among `args`, joined to `cwd`, each once.
+fn prefixes(args: &[String], cwd: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let value = match joined_prefix(arg) {
+            Some("") => iter.next().map(String::as_str),
+            joined => joined,
+        };
+        if let Some(value) = value {
+            push_once(&mut out, cwd.join(value));
+        }
+    }
+    out
 }
 
 /// The arguments as the linker sees them: `-Wl,a,b` gives `a` and `b`, `-Xlinker a` gives `a`.
@@ -629,40 +739,614 @@ pub fn linker(program: &str, path: Option<&OsStr>, cwd: &Path) -> Option<Linker>
     std::env::split_paths(path?).find_map(|dir| stat(cwd.join(dir).join(program), true))
 }
 
-/// Finds the linker `-fuse-ld=<name>` makes the C driver run, as gcc and clang look for it: a
-/// value with a `/` is a path; a name is `ld.<name>`, then `<name>`, first in each `-B` folder
-/// and then on `path`. `None` when it can't be found: the link can't be keyed (B-18).
-///
-/// Apple's `/usr/bin/cc` is a shim that runs the selected Xcode's driver; its identity is the
-/// shim's. The SDK's identity (its path and the date of its settings file) changes with an Xcode
-/// update in practice, so the shim is left as it is.
-pub fn fuse_linker(
-    name: &str,
-    prefixes: &[PathBuf],
-    path: Option<&OsStr>,
-    cwd: &Path,
-) -> Option<Linker> {
-    if name.is_empty() {
-        return None;
+/// The link command's `PATH` in two parts (B-18): the entries rustc put before the one it
+/// inherited (`inherited`, the wrapper's own), and whether the rest is that one. rustc puts the
+/// toolchain's own `bin` first; with no `PATH` printed, the command inherited it whole.
+pub fn path_parts(printed: Option<&str>, inherited: Option<&OsStr>) -> (Vec<PathBuf>, bool) {
+    let Some(printed) = printed else {
+        return (Vec::new(), true);
+    };
+    let entries: Vec<PathBuf> = std::env::split_paths(printed).collect();
+    let inherited: Vec<PathBuf> = inherited
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    if inherited.is_empty() {
+        return (entries, true);
     }
-    if name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
-        return stat(cwd.join(name), false);
+    match entries.strip_suffix(inherited.as_slice()) {
+        Some(before) => (before.to_vec(), true),
+        None => (entries, false),
     }
-    let names = [format!("ld.{name}"), name.to_owned()];
-    for program in &names {
-        if let Some(found) = prefixes
-            .iter()
-            .find_map(|dir| stat(cwd.join(dir).join(program), true))
-        {
-            return Some(found);
-        }
-    }
-    names.iter().find_map(|program| linker(program, path, cwd))
 }
 
-/// The files the linker may take a library named with `-l` (or `-framework`) from: every
-/// candidate name in every search folder, in order (B-6). A name the linker finds elsewhere is
-/// a system library, keyed by name with the SDK and the linker. `-l:file` names the file itself.
+/// The link command's `PATH` from its two parts ([`path_parts`]) and the `PATH` it inherits now;
+/// `None` when it has no entry.
+pub fn link_path(
+    before: &[PathBuf],
+    inherits: bool,
+    inherited: Option<&OsStr>,
+) -> Option<OsString> {
+    let mut entries = before.to_vec();
+    if inherits && let Some(path) = inherited {
+        entries.extend(std::env::split_paths(path));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    std::env::join_paths(entries).ok()
+}
+
+/// What a program the wrapper asked answered.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Answer {
+    /// Whether it exited with success.
+    pub success: bool,
+    /// What it wrote on stdout.
+    pub stdout: String,
+}
+
+/// Asks a program (the C driver, `ld`) one question: runs it with these arguments, the link's
+/// `PATH` and `LC_ALL=C`, nothing on stdin, and the wrapper's other variables. `None` when it
+/// can't be started.
+pub type Ask<'a> = dyn Fn(&Path, &[String], &OsStr) -> Option<Answer> + 'a;
+
+/// What decides which `ld` a C driver runs and where that `ld` looks for a library named with
+/// `-l` (B-6, B-18): asked again at every link and before every lookup, never remembered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query {
+    /// The C driver, as found.
+    pub driver: PathBuf,
+    /// Its options that change the answers ([`LinkArgs::driver_flags`]).
+    pub flags: Vec<String>,
+    /// The sysroot the line gives `ld` ([`LinkArgs::ld_sysroot`]).
+    pub ld_sysroot: Option<String>,
+    /// The link command's `PATH`.
+    pub path: OsString,
+    /// rustc's working directory.
+    pub cwd: PathBuf,
+    /// The target is Apple's: its linker is Apple's `ld`, which searches the SDK.
+    pub apple: bool,
+    /// The SDK the link names, if any.
+    pub sdk: Option<PathBuf>,
+    /// The `LIBRARY_PATH` the driver reads: gcc and clang hand `ld` each of its folders.
+    pub library_path: Option<OsString>,
+}
+
+/// Which `ld` a link runs and where it looks for libraries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Environment {
+    /// The `ld` the driver runs, as found.
+    pub ld: PathBuf,
+    /// The folders the driver hands `ld` and those `ld` searches by itself, after rustc's own,
+    /// in order, each once, resolved on disk: where a `-l` found in none of rustc's folders is.
+    pub folders: Vec<PathBuf>,
+    /// The framework folders Apple's `ld` searches after `-F` ones.
+    pub frameworks: Vec<PathBuf>,
+    /// The sysroot `ld` resolves a linker script's absolute names under, when it is not `/`.
+    pub sysroot: Option<String>,
+}
+
+/// Why a link's environment can't be told: the link is `built, not stored` (B-18).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Unknown {
+    /// The driver couldn't be asked, or its answer can't be read.
+    #[error("the C driver can't be asked which ld it runs")]
+    Driver,
+    /// The `ld` it runs is found nowhere.
+    #[error("the ld the C driver runs is found nowhere")]
+    NoLd,
+}
+
+/// How the driver picks its `ld`.
+enum Choice {
+    /// A path: `--ld-path=` (clang's, which wins), or a `-fuse-ld=` that holds a `/`.
+    Path(String),
+    /// A name it looks for: `ld`, or `ld.<name>` for `-fuse-ld=<name>`.
+    Named(String),
+    /// No C driver: rustc runs `rust-lld` itself (`-flavor` first), which is the `ld`.
+    Itself,
+}
+
+fn choice(flags: &[String]) -> Choice {
+    if flags.first().is_some_and(|flag| flag == "-flavor") {
+        return Choice::Itself;
+    }
+    let mut fuse = None;
+    let mut ld_path = None;
+    for flag in flags {
+        if let Some(value) = flag.strip_prefix("--ld-path=") {
+            ld_path = Some(value.to_owned());
+        } else if let Some(value) = flag.strip_prefix("-fuse-ld=") {
+            fuse = Some(value.to_owned());
+        }
+    }
+    match (ld_path, fuse) {
+        (Some(path), _) => Choice::Path(path),
+        (None, Some(value)) if value.contains('/') => Choice::Path(value),
+        (None, Some(value)) if !value.is_empty() => Choice::Named(format!("ld.{value}")),
+        _ => Choice::Named("ld".to_owned()),
+    }
+}
+
+/// gcc's and clang's `-print-search-dirs`: the program folders `collect2` looks for `ld` in
+/// before `PATH`, and the library folders the driver hands the linker.
+#[derive(Debug, Clone, Default)]
+struct SearchDirs {
+    programs: Vec<String>,
+    libraries: Vec<String>,
+}
+
+fn search_dirs(query: &Query, ask: &Ask<'_>) -> Result<SearchDirs, Unknown> {
+    let mut args = query.flags.clone();
+    args.push("-print-search-dirs".to_owned());
+    let answer = ask(&query.driver, &args, &query.path).ok_or(Unknown::Driver)?;
+    if !answer.success {
+        return Err(Unknown::Driver);
+    }
+    let mut dirs = SearchDirs::default();
+    let list = |rest: &str| -> Vec<String> {
+        let rest = rest.strip_prefix('=').unwrap_or(rest);
+        rest.split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    for line in answer.stdout.lines() {
+        if let Some(rest) = line.strip_prefix("programs: ") {
+            dirs.programs = list(rest);
+        } else if let Some(rest) = line.strip_prefix("libraries: ") {
+            dirs.libraries = list(rest);
+        }
+    }
+    Ok(dirs)
+}
+
+/// Which `ld` the driver runs (B-18). `--ld-path=` (clang's) or a `-fuse-ld=` path is it.
+/// Otherwise the driver is asked `-print-prog-name=ld` (`ld.<name>` for `-fuse-ld=<name>`: gcc
+/// asked with `-fuse-ld=lld -print-prog-name=ld` still says `ld`). A path in the answer is it
+/// (clang searches `PATH` itself; Apple's driver names the selected Xcode's `ld`), unless the
+/// driver links through `collect2` and found that path on `PATH` (gcc 15 names a
+/// `<target>-ld` there): asked again without any `PATH` it says a bare name. A bare name is
+/// looked up as `collect2` does: `real-ld`, `collect-ld`, then the name in the `-B` folders
+/// and the driver's program folders, then the name on the link's `PATH`.
+fn which_ld(
+    query: &Query,
+    ask: &Ask<'_>,
+    dirs: &mut Option<SearchDirs>,
+) -> Result<PathBuf, Unknown> {
+    let name = match choice(&query.flags) {
+        Choice::Itself => return Ok(query.driver.clone()),
+        Choice::Path(path) => {
+            let path = query.cwd.join(path);
+            return match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_file() => Ok(path),
+                _ => Err(Unknown::NoLd),
+            };
+        }
+        Choice::Named(name) => name,
+    };
+    let mut args = query.flags.clone();
+    args.push(format!("-print-prog-name={name}"));
+    let said = prog_name(query, ask, &args, &query.path)?;
+    let is_file = |path: PathBuf| match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => Ok(path),
+        _ => Err(Unknown::NoLd),
+    };
+    if query.apple && said.contains('/') {
+        return is_file(query.cwd.join(said));
+    }
+    if dirs.is_none() {
+        *dirs = Some(search_dirs(query, ask)?);
+    }
+    let programs: Vec<PathBuf> = dirs
+        .as_ref()
+        .map(|d| d.programs.iter().map(|dir| query.cwd.join(dir)).collect())
+        .unwrap_or_default();
+    let mut compiler_path = prefixes(&query.flags, &query.cwd);
+    for dir in &programs {
+        push_once(&mut compiler_path, dir.clone());
+    }
+    if said.contains('/') {
+        let path = query.cwd.join(&said);
+        // A driver that links through `collect2` (gcc) runs the `ld` that program finds, and
+        // gcc 15 names here a `<target>-ld` it found on `PATH`, where `collect2` never looks
+        // for that name. A path it says without any `PATH` is its own: in a `-B` folder or a
+        // program folder, or built in.
+        let through_collect2 = programs.iter().any(|dir| dir.join("collect2").is_file());
+        let its_own = !through_collect2
+            || compiler_path.iter().any(|dir| path.parent() == Some(dir))
+            || prog_name(query, ask, &args, OsStr::new(""))? == said;
+        if its_own {
+            return is_file(path);
+        }
+    }
+    for program in ["real-ld", "collect-ld", name.as_str()] {
+        if let Some(found) = compiler_path
+            .iter()
+            .find_map(|dir| stat(dir.join(program), true))
+        {
+            return Ok(found.path);
+        }
+    }
+    linker(&name, Some(&query.path), &query.cwd)
+        .map(|found| found.path)
+        .ok_or(Unknown::NoLd)
+}
+
+/// The driver's answer to a `-print-prog-name=` question asked with `path` as its `PATH`: the
+/// first line that says something.
+fn prog_name(
+    query: &Query,
+    ask: &Ask<'_>,
+    args: &[String],
+    path: &OsStr,
+) -> Result<String, Unknown> {
+    let answer = ask(&query.driver, args, path).ok_or(Unknown::Driver)?;
+    let said = answer
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if !answer.success || said.is_empty() {
+        return Err(Unknown::Driver);
+    }
+    Ok(said.to_owned())
+}
+
+/// Which `ld` a link runs and every folder it may take a `-l` from after rustc's own (B-6,
+/// B-18). First `LIBRARY_PATH`'s folders, which gcc and clang hand `ld` as `-L`. Then, on
+/// Apple's targets: the SDK's `usr/lib` and `usr/local/lib`, and `/usr/local/lib` (Apple's `ld`
+/// takes a folder under the SDK when there is one, else the folder itself), and the SDK's
+/// framework folders. Elsewhere: the driver's library folders (`-print-search-dirs`, which for
+/// clang are the other `-L` folders it hands `ld`), then `ld`'s own
+/// `SEARCH_DIR`s (`ld --verbose`; none where `ld` has no such option, as `lld`), those that
+/// start with `=` under `ld --print-sysroot`. Cost: one question on Apple's targets, four
+/// elsewhere (a gcc driver answers in under a millisecond each, clang in about 15).
+pub fn environment(query: &Query, ask: &Ask<'_>) -> Result<Environment, Unknown> {
+    let mut dirs = None;
+    let ld = which_ld(query, ask, &mut dirs)?;
+    let mut folders = Vec::new();
+    let mut frameworks = Vec::new();
+    let mut sysroot = None;
+    // `LIBRARY_PATH`'s folders, which both drivers hand `ld` as `-L` (gcc lists them among its
+    // library folders too; clang doesn't).
+    let library_path: Vec<PathBuf> = query
+        .library_path
+        .as_deref()
+        .map(|path| {
+            std::env::split_paths(path)
+                .map(|dir| query.cwd.join(dir))
+                .collect()
+        })
+        .unwrap_or_default();
+    if query.apple {
+        let root = query.sdk.as_deref().map(|sdk| query.cwd.join(sdk));
+        let under = |dir: &str| root.as_ref().map(|root| root.join(dir));
+        let push = |list: &mut Vec<PathBuf>, path: PathBuf| push_once(list, resolve_folder(&path));
+        // Apple's `ld` takes each `-L` folder under the SDK when there is one there.
+        for dir in &library_path {
+            if let (Some(root), Ok(rest)) = (&root, dir.strip_prefix("/")) {
+                push(&mut folders, root.join(rest));
+            }
+            push(&mut folders, dir.clone());
+        }
+        match &root {
+            Some(_) => {
+                for dir in ["usr/lib", "usr/local/lib"] {
+                    push(&mut folders, under(dir).unwrap_or_default());
+                }
+                push(&mut folders, PathBuf::from("/usr/local/lib"));
+                for dir in ["Library/Frameworks", "System/Library/Frameworks"] {
+                    push(&mut frameworks, under(dir).unwrap_or_default());
+                }
+                push(&mut frameworks, PathBuf::from("/Library/Frameworks"));
+            }
+            None => {
+                for dir in ["/usr/lib", "/usr/local/lib"] {
+                    push(&mut folders, PathBuf::from(dir));
+                }
+                for dir in ["/Library/Frameworks", "/System/Library/Frameworks"] {
+                    push(&mut frameworks, PathBuf::from(dir));
+                }
+            }
+        }
+    } else if matches!(choice(&query.flags), Choice::Itself) {
+        // `rust-lld` adds no folder of its own, and reads no `LIBRARY_PATH`.
+        folders.clear();
+    } else {
+        if dirs.is_none() {
+            dirs = Some(search_dirs(query, ask)?);
+        }
+        for dir in &library_path {
+            push_once(&mut folders, resolve_folder(dir));
+        }
+        for dir in dirs.map(|d| d.libraries).unwrap_or_default() {
+            push_once(&mut folders, resolve_folder(&query.cwd.join(dir)));
+        }
+        let mut args = Vec::new();
+        if let Some(root) = &query.ld_sysroot {
+            args.push(format!("--sysroot={root}"));
+        }
+        args.push("--print-sysroot".to_owned());
+        let said = match ask(&ld, &args, &query.path) {
+            Some(answer) if answer.success => answer.stdout.trim().to_owned(),
+            // No such option (`lld`): the line's own, if any.
+            _ => query.ld_sysroot.clone().unwrap_or_default(),
+        };
+        sysroot = (!said.is_empty() && Path::new(&said) != Path::new("/")).then_some(said);
+        if let Some(answer) = ask(&ld, &["--verbose".to_owned()], &query.path)
+            && answer.success
+        {
+            for dir in search_dir_entries(&answer.stdout) {
+                let dir = match dir.strip_prefix('=') {
+                    Some(rest) => match &sysroot {
+                        Some(root) => format!(
+                            "{}/{}",
+                            root.trim_end_matches('/'),
+                            rest.trim_start_matches('/')
+                        ),
+                        None => rest.to_owned(),
+                    },
+                    None => dir,
+                };
+                push_once(&mut folders, resolve_folder(&query.cwd.join(dir)));
+            }
+        }
+    }
+    Ok(Environment {
+        ld,
+        folders,
+        frameworks,
+        sysroot,
+    })
+}
+
+/// The folders of `SEARCH_DIR("…")` in `ld --verbose`'s default script, in order.
+fn search_dir_entries(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("SEARCH_DIR(") {
+        rest = &rest[at + "SEARCH_DIR(".len()..];
+        let Some(end) = rest.find(')') else {
+            break;
+        };
+        let dir = rest[..end].trim().trim_matches('"');
+        if !dir.is_empty() {
+            out.push(dir.to_owned());
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// A folder as the kernel finds it: the longest part of it that exists, resolved on disk, and
+/// the rest after it with `.` and `..` taken away by name (a part that doesn't exist is no link).
+/// A driver names its folders with `..` (`/usr/lib/gcc/<target>/14/../../../../lib/`), and two
+/// of its names are often one folder.
+pub fn resolve_folder(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let parts: Vec<Component<'_>> = path.components().collect();
+    for end in (1..=parts.len()).rev() {
+        let head: PathBuf = parts[..end].iter().collect();
+        if let Ok(mut out) = std::fs::canonicalize(&head) {
+            for part in &parts[end..] {
+                match part {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::CurDir => {}
+                    other => out.push(other),
+                }
+            }
+            return out;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// The C runtime the standard library asks the linker for (`-lc`, `-lm`, …, `-lSystem`): where
+/// it is found in the driver's and `ld`'s folders is keyed, and left out of what a dependent
+/// names a proc macro by, like the linker and the SDK (B-6).
+pub const C_RUNTIME: &[&str] = &[
+    "c", "m", "rt", "pthread", "dl", "util", "gcc_s", "gcc", "gcc_eh", "System",
+];
+
+/// The places in `folders` a library named with `-l` (`name`) may be, or a framework
+/// (`<name>.framework`) in `frameworks`, in order.
+pub fn places_in(name: &str, folders: &[PathBuf], frameworks: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(framework) = name.strip_suffix(".framework") {
+        for dir in frameworks {
+            for file in framework_files(framework) {
+                push_once(&mut out, dir.join(file));
+            }
+        }
+        return out;
+    }
+    let files = match name.strip_prefix(':') {
+        Some(file) => vec![file.to_owned()],
+        None => library_files(name),
+    };
+    for dir in folders {
+        for file in &files {
+            push_once(&mut out, dir.join(file));
+        }
+    }
+    out
+}
+
+/// A name a GNU linker script hands the linker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptName {
+    /// A file, as written.
+    File(String),
+    /// `-l<name>`: a library searched for like one on the line.
+    Library(String),
+}
+
+/// Why a linker script can't be followed: the link is `built, not stored` (B-6).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScriptError {
+    /// A command other than `GROUP`, `INPUT`, `AS_NEEDED` and `OUTPUT_FORMAT`.
+    #[error("a linker script command other than GROUP, INPUT, AS_NEEDED and OUTPUT_FORMAT")]
+    Command,
+    /// A name under the sysroot (`=…`, `$SYSROOT…`).
+    #[error("a linker script names a file under the sysroot")]
+    Sysroot,
+    /// Text that doesn't read as such a script.
+    #[error("a linker script that can't be read")]
+    Malformed,
+}
+
+/// Whether the start of a file the linker takes for a library is a GNU linker script: text,
+/// not an object, an archive, a Mach-O file or Apple's text stub (`.tbd`).
+pub fn is_script(path: &Path, head: &[u8]) -> bool {
+    const MAGIC: &[&[u8]] = &[
+        b"\x7fELF",
+        b"!<arch>\n",
+        b"!<thin>\n",
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"BC\xc0\xde",
+        b"\xde\xc0\x17\x0b",
+        b"---",
+    ];
+    path.extension().is_none_or(|ext| ext != "tbd")
+        && !MAGIC.iter().any(|magic| head.starts_with(magic))
+        && !head.contains(&0)
+}
+
+/// The names a GNU linker script hands the linker, when it holds nothing but `GROUP`, `INPUT`,
+/// `AS_NEEDED` and `OUTPUT_FORMAT` (comments allowed), as glibc's `libc.so` and gcc's
+/// `libgcc_s.so` do. Any other command, or a name under the sysroot, is an error.
+pub fn script_names(text: &[u8]) -> Result<Vec<ScriptName>, ScriptError> {
+    let text = std::str::from_utf8(text).map_err(|_| ScriptError::Malformed)?;
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = rest.strip_prefix("/*") {
+            let end = after.find("*/").ok_or(ScriptError::Malformed)?;
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix(['(', ')']) {
+            tokens.push(&rest[..1]);
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('"') {
+            let end = after.find('"').ok_or(ScriptError::Malformed)?;
+            tokens.push(&after[..end]);
+            rest = &after[end + 1..];
+            continue;
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '"'))
+            .unwrap_or(rest.len());
+        tokens.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let command = tokens[i];
+        if tokens.get(i + 1) != Some(&"(") {
+            return Err(ScriptError::Command);
+        }
+        let close = matching(&tokens, i + 1).ok_or(ScriptError::Malformed)?;
+        match command {
+            "OUTPUT_FORMAT" => {}
+            "GROUP" | "INPUT" => names_in(&tokens[i + 2..close], &mut names)?,
+            _ => return Err(ScriptError::Command),
+        }
+        i = close + 1;
+    }
+    Ok(names)
+}
+
+/// The index of the `)` that closes the `(` at `open`.
+fn matching(tokens: &[&str], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, token) in tokens.iter().enumerate().skip(open) {
+        match *token {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The names inside `GROUP ( … )` or `INPUT ( … )`, with `AS_NEEDED ( … )` inside them.
+fn names_in(tokens: &[&str], names: &mut Vec<ScriptName>) -> Result<(), ScriptError> {
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        if token == "AS_NEEDED" && tokens.get(i + 1) == Some(&"(") {
+            let close = matching(tokens, i + 1).ok_or(ScriptError::Malformed)?;
+            names_in(&tokens[i + 2..close], names)?;
+            i = close + 1;
+            continue;
+        }
+        if matches!(token, "(" | ")") || token.is_empty() {
+            return Err(ScriptError::Malformed);
+        }
+        if token.starts_with('=') || token.starts_with("$SYSROOT") {
+            return Err(ScriptError::Sysroot);
+        }
+        names.push(match token.strip_prefix("-l") {
+            Some(name) if !name.is_empty() => ScriptName::Library(name.to_owned()),
+            _ => ScriptName::File(token.to_owned()),
+        });
+        i += 1;
+    }
+    Ok(())
+}
+
+/// The places `ld` may take a name a linker script hands it from (B-6): an absolute name as it
+/// is; a relative one in the script's folder, then rustc's working directory, then each search
+/// folder; `-l<name>` as a library named on the line, in the search folders.
+pub fn script_places(
+    name: &ScriptName,
+    script: &Path,
+    cwd: &Path,
+    search: &[PathBuf],
+) -> Vec<PathBuf> {
+    match name {
+        ScriptName::Library(library) => places_in(library, search, &[]),
+        ScriptName::File(file) if Path::new(file).is_absolute() => vec![PathBuf::from(file)],
+        ScriptName::File(file) => {
+            let mut out = Vec::new();
+            if let Some(dir) = script.parent() {
+                push_once(&mut out, dir.join(file));
+            }
+            push_once(&mut out, cwd.join(file));
+            for dir in search {
+                push_once(&mut out, dir.join(file));
+            }
+            out
+        }
+    }
+}
+
+/// The files the linker may take a library named with `-l` (or `-framework`) from in the
+/// line's own `-L` and `-F` folders: every candidate name in every one, in order (B-6). The
+/// folders the driver and `ld` add are [`environment`]'s, their places [`places_in`]'s.
+/// `-l:file` names the file itself.
 pub fn library_places(inputs: &Inputs) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for named in &inputs.named {
@@ -1013,38 +1697,522 @@ mod tests {
         assert!(!script_names_files(b"SECTIONS { .text : { *(.text) } }"));
     }
 
+    /// Makes `path` an executable shell script that runs `body`.
+    #[cfg(unix)]
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The questions asked, and a real run of each.
+    #[cfg(unix)]
+    struct Asked {
+        seen: std::cell::RefCell<Vec<(PathBuf, Vec<String>)>>,
+    }
+
+    #[cfg(unix)]
+    impl Asked {
+        fn new() -> Asked {
+            Asked {
+                seen: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn ask(&self) -> impl Fn(&Path, &[String], &OsStr) -> Option<Answer> + '_ {
+            |program, args, path| {
+                self.seen
+                    .borrow_mut()
+                    .push((program.to_path_buf(), args.to_vec()));
+                let out = std::process::Command::new(program)
+                    .args(args)
+                    .env("PATH", path)
+                    .output()
+                    .ok()?;
+                Some(Answer {
+                    success: out.status.success(),
+                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                })
+            }
+        }
+    }
+
+    /// A gcc-like driver at `<root>/cc`: it answers `-print-prog-name` with the bare name and
+    /// `-print-search-dirs` with `programs` and `libraries`, and fails at anything else.
+    #[cfg(unix)]
+    fn gcc(root: &Path, programs: &str, libraries: &str) -> PathBuf {
+        let driver = root.join("cc");
+        script(
+            &driver,
+            &format!(
+                "for a in \"$@\"; do case \"$a\" in\n\
+                 -print-prog-name=*) echo \"${{a#-print-prog-name=}}\"; exit 0;;\n\
+                 -print-search-dirs) printf 'install: /x/\\nprograms: ={programs}\\nlibraries: ={libraries}\\n'; exit 0;;\n\
+                 esac; done; exit 1"
+            ),
+        );
+        driver
+    }
+
+    #[cfg(unix)]
+    fn query(root: &Path, driver: &Path, flags: &[&str], path: &[&Path]) -> Query {
+        Query {
+            driver: driver.to_path_buf(),
+            flags: flags.iter().map(|f| (*f).to_owned()).collect(),
+            ld_sysroot: None,
+            path: std::env::join_paths(path).unwrap(),
+            cwd: root.to_path_buf(),
+            apple: false,
+            sdk: None,
+            library_path: None,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     // covers: B-18
-    fn the_linker_fuse_ld_names_is_found_like_the_driver_finds_it() {
-        use std::os::unix::fs::PermissionsExt;
+    fn the_ld_a_gcc_driver_runs_is_looked_up_as_collect2_does() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let exec = |path: &Path| {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = &resolve_folder(dir.path());
+        let progs = root.join("progs");
+        let driver = gcc(
+            root,
+            &format!("{}/:{}/missing/", progs.display(), root.display()),
+            "",
+        );
+        let early = root.join("early");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&early).unwrap();
+        script(&bin.join("ld"), "exit 1");
+        let asked = Asked::new();
+        let ld = |flags: &[&str]| {
+            environment(&query(root, &driver, flags, &[&early, &bin]), &asked.ask()).map(|e| e.ld)
         };
-        exec(&root.join("gcc-ld/ld.lld"));
-        exec(&root.join("bin/ld.lld"));
-        exec(&root.join("bin/mold"));
-        let path = root.join("bin");
-        let prefixes = [root.join("gcc-ld")];
-        let found = fuse_linker("lld", &prefixes, Some(path.as_os_str()), root).unwrap();
-        assert_eq!(found.path, root.join("gcc-ld/ld.lld"));
-        let found = fuse_linker("lld", &[], Some(path.as_os_str()), root).unwrap();
-        assert_eq!(found.path, root.join("bin/ld.lld"));
-        let found = fuse_linker("mold", &[], Some(path.as_os_str()), root).unwrap();
-        assert_eq!(found.path, root.join("bin/mold"));
-        let found = fuse_linker("bin/mold", &[], None, root).unwrap();
-        assert_eq!(found.path, root.join("bin/mold"));
+        // Found on `PATH`, after the driver said only `ld`.
+        assert_eq!(ld(&[]), Ok(bin.join("ld")));
+        // Another `ld` appears earlier on `PATH`: that one runs now.
+        script(&early.join("ld"), "exit 1");
+        assert_eq!(ld(&[]), Ok(early.join("ld")));
+        // Not executable: passed over, as `collect2` passes it over.
+        std::fs::remove_file(early.join("ld")).unwrap();
+        std::fs::write(early.join("ld"), "not a program").unwrap();
+        assert_eq!(ld(&[]), Ok(bin.join("ld")));
+        // The driver's program folders come before `PATH`, `-B` folders before them, and
+        // `real-ld` before `ld` in either.
+        script(&progs.join("ld"), "exit 1");
+        assert_eq!(ld(&[]), Ok(progs.join("ld")));
+        script(&root.join("b/ld"), "exit 1");
+        assert_eq!(ld(&["-B", "b"]), Ok(root.join("b/ld")));
+        assert_eq!(ld(&["-Bb"]), Ok(root.join("b/ld")));
+        script(&progs.join("real-ld"), "exit 1");
+        assert_eq!(ld(&[]), Ok(progs.join("real-ld")));
+        std::fs::remove_file(progs.join("real-ld")).unwrap();
+        // `-fuse-ld=lld`: gcc is asked for `ld.lld`, which `collect2` looks for the same way.
+        asked.seen.borrow_mut().clear();
+        assert_eq!(ld(&["-fuse-ld=lld"]), Err(Unknown::NoLd));
+        assert!(
+            asked
+                .seen
+                .borrow()
+                .iter()
+                .any(|(program, args)| program == &driver
+                    && args == &["-fuse-ld=lld", "-print-prog-name=ld.lld"]),
+            "{:?}",
+            asked.seen.borrow()
+        );
+        script(&bin.join("ld.lld"), "exit 1");
+        assert_eq!(ld(&["-fuse-ld=lld"]), Ok(bin.join("ld.lld")));
+        // A path is the linker, asked nothing: clang's `--ld-path=`, which wins, or a path given
+        // to `-fuse-ld=`.
+        std::fs::write(root.join("myld"), "x").unwrap();
+        asked.seen.borrow_mut().clear();
+        let path_only = query(root, &driver, &["-fuse-ld=lld", "--ld-path=myld"], &[&bin]);
+        let mut chosen = None;
+        which_ld(&path_only, &asked.ask(), &mut chosen).unwrap();
+        assert!(asked.seen.borrow().is_empty());
         assert_eq!(
-            fuse_linker("gold", &prefixes, Some(path.as_os_str()), root),
-            None
+            which_ld(&path_only, &asked.ask(), &mut chosen),
+            Ok(root.join("myld"))
         );
         assert_eq!(
-            fuse_linker("", &prefixes, Some(path.as_os_str()), root),
-            None
+            ld(&[&format!("-fuse-ld={}/myld", root.display())]),
+            Ok(root.join("myld"))
+        );
+        assert_eq!(ld(&["--ld-path=nothing-here"]), Err(Unknown::NoLd));
+        // No C driver: rustc runs `rust-lld` itself, which is the `ld`, asked nothing.
+        asked.seen.borrow_mut().clear();
+        let lld = environment(
+            &query(root, &driver, &["-flavor", "gnu"], &[&bin]),
+            &asked.ask(),
+        )
+        .unwrap();
+        assert_eq!(lld.ld, driver);
+        assert!(lld.folders.is_empty());
+        assert!(asked.seen.borrow().is_empty());
+        let line = parse(r#""rust-lld" "-flavor" "wasm" "-L" "/x" "--fake-flag""#).unwrap();
+        assert_eq!(line.driver_flags(), ["-flavor", "wasm"]);
+        // Nothing by that name anywhere; a driver that can't answer.
+        std::fs::remove_file(progs.join("ld")).unwrap();
+        std::fs::remove_file(bin.join("ld")).unwrap();
+        assert_eq!(ld(&[]), Err(Unknown::NoLd));
+        script(&driver, "exit 1");
+        assert_eq!(ld(&[]), Err(Unknown::Driver));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // covers: B-18
+    fn a_path_a_gcc_driver_found_on_path_is_not_the_ld_collect2_runs() {
+        // gcc 15 answers `-print-prog-name=ld` with the `<target>-ld` it finds on `PATH`, where
+        // `collect2` never looks for that name: it still runs the first `ld` there.
+        let dir = tempfile::tempdir().unwrap();
+        let root = &resolve_folder(dir.path());
+        let progs = root.join("progs");
+        let driver = root.join("cc");
+        let answers = |built_in: &str| {
+            format!(
+                "for a in \"$@\"; do case \"$a\" in\n\
+                 -print-prog-name=ld) [ -n '{built_in}' ] && {{ echo '{built_in}'; exit 0; }}\n\
+                 IFS=:; for d in $PATH; do [ -x \"$d/x86_64-linux-gnu-ld\" ] && {{ echo \"$d/x86_64-linux-gnu-ld\"; exit 0; }}; done\n\
+                 echo ld; exit 0;;\n\
+                 -print-search-dirs) printf 'install: /x/\\nprograms: ={}/\\nlibraries: =\\n'; exit 0;;\n\
+                 esac; done; exit 1",
+                progs.display()
+            )
+        };
+        script(&driver, &answers(""));
+        script(&progs.join("collect2"), "exit 1");
+        let early = root.join("early");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&early).unwrap();
+        script(&bin.join("ld"), "exit 1");
+        script(&bin.join("x86_64-linux-gnu-ld"), "exit 1");
+        let asked = Asked::new();
+        let ld =
+            || environment(&query(root, &driver, &[], &[&early, &bin]), &asked.ask()).map(|e| e.ld);
+        assert_eq!(ld(), Ok(bin.join("ld")));
+        // Another `ld` earlier on `PATH` runs now, whatever the driver goes on saying.
+        script(&early.join("ld"), "exit 1");
+        assert_eq!(ld(), Ok(early.join("ld")));
+        // A path the driver says without any `PATH` is its own (a gcc configured with its
+        // `ld`): `collect2` runs that one.
+        let built_in = root.join("built-in/ld");
+        script(&built_in, "exit 1");
+        script(&driver, &answers(built_in.to_str().unwrap()));
+        assert_eq!(ld(), Ok(built_in));
+        // A driver with no `collect2` runs the `ld` it names (clang, which searches `PATH`).
+        script(&driver, &answers(""));
+        std::fs::remove_file(progs.join("collect2")).unwrap();
+        assert_eq!(ld(), Ok(bin.join("x86_64-linux-gnu-ld")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // covers: B-18
+    fn a_driver_that_answers_a_path_names_its_ld() {
+        // clang searches `PATH` itself, and Apple's driver names the selected Xcode's `ld`.
+        let dir = tempfile::tempdir().unwrap();
+        let root = &resolve_folder(dir.path());
+        let chosen = root.join("xcode/usr/bin/ld");
+        script(&chosen, "exit 1");
+        let driver = root.join("clang");
+        script(
+            &driver,
+            &format!(
+                "case \"$1\" in -print-prog-name=ld) echo {};; *) exit 1;; esac",
+                chosen.display()
+            ),
+        );
+        let asked = Asked::new();
+        let mut q = query(root, &driver, &[], &[]);
+        q.apple = true;
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(found.ld, chosen);
+        // On Apple's targets that is the only question.
+        assert_eq!(asked.seen.borrow().len(), 1);
+        // Without an SDK, Apple's `ld` searches its two folders and two framework folders.
+        assert_eq!(
+            found.folders,
+            [
+                PathBuf::from("/usr/lib"),
+                resolve_folder(Path::new("/usr/local/lib"))
+            ]
+        );
+        assert_eq!(found.frameworks.len(), 2);
+        // With one, the SDK's first.
+        q.sdk = Some(root.join("sdk"));
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(
+            found.folders[..2],
+            [root.join("sdk/usr/lib"), root.join("sdk/usr/local/lib")]
+        );
+        assert_eq!(
+            found.frameworks[1],
+            root.join("sdk/System/Library/Frameworks")
+        );
+        // Each `LIBRARY_PATH` folder under the SDK, then as it is, before the SDK's own.
+        q.library_path = Some(OsString::from("/opt/lp"));
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(
+            found.folders[..3],
+            [
+                root.join("sdk/opt/lp"),
+                PathBuf::from("/opt/lp"),
+                root.join("sdk/usr/lib")
+            ]
+        );
+        // An answer that names nothing there.
+        std::fs::remove_file(&chosen).unwrap();
+        assert_eq!(environment(&q, &asked.ask()), Err(Unknown::NoLd));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // covers: B-6
+    fn the_folders_ld_searches_come_from_the_driver_then_from_ld() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &resolve_folder(dir.path());
+        for folder in ["gcc/14", "lib", "usr/lib", "sr/usr/lib"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let r = root.display();
+        // The driver names one folder twice, once through `..`, and one that doesn't exist.
+        let driver = gcc(
+            root,
+            "",
+            &format!("{r}/gcc/14/:{r}/gcc/14/../../lib/:{r}/lib/:{r}/no/../gone/"),
+        );
+        let bin = root.join("bin");
+        script(
+            &bin.join("ld"),
+            &format!(
+                "case \"$1\" in\n\
+                 --verbose) echo 'SEARCH_DIR(\"={r}/usr/lib\"); SEARCH_DIR(\"{r}/lib\"); SEARCH_DIR(\"=/usr/lib\");';;\n\
+                 --print-sysroot) echo;;\n\
+                 --sysroot=*) echo \"${{1#--sysroot=}}\";;\n\
+                 *) exit 1;; esac"
+            ),
+        );
+        let asked = Asked::new();
+        let q = query(root, &driver, &[], &[&bin]);
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(found.ld, bin.join("ld"));
+        assert_eq!(found.sysroot, None);
+        assert_eq!(
+            found.folders,
+            [
+                root.join("gcc/14"),
+                root.join("lib"),
+                root.join("gone"),
+                root.join("usr/lib"),
+                resolve_folder(Path::new("/usr/lib")),
+            ]
+        );
+        // `ld --print-sysroot` with the line's `--sysroot`: `=` folders are under it.
+        let mut q = q;
+        q.ld_sysroot = Some(format!("{r}/sr"));
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(found.sysroot, Some(format!("{r}/sr")));
+        assert!(
+            found.folders.contains(&root.join(format!("sr{r}/usr/lib"))),
+            "{:?}",
+            found.folders
+        );
+        assert!(
+            found.folders.contains(&root.join("sr/usr/lib")),
+            "{:?}",
+            found.folders
+        );
+        // An `ld` with neither option (`lld`): the driver's folders alone.
+        script(&bin.join("ld"), "exit 1");
+        q.ld_sysroot = None;
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(found.folders.len(), 3);
+        assert_eq!(found.sysroot, None);
+        // `LIBRARY_PATH`'s folders come first: clang hands them to `ld` without listing them.
+        q.library_path = Some(OsString::from(format!("{r}/lp:rel")));
+        let found = environment(&q, &asked.ask()).unwrap();
+        assert_eq!(found.folders[..2], [root.join("lp"), root.join("rel")]);
+    }
+
+    #[test]
+    // covers: B-6
+    fn linker_scripts_that_only_name_files_are_read() {
+        let libc = b"/* GNU ld script\n   Use the shared library, but some functions are only in\n   the static library, so try that secondarily.  */\nOUTPUT_FORMAT(elf64-littleaarch64)\nGROUP ( /lib/aarch64-linux-gnu/libc.so.6 /usr/lib/aarch64-linux-gnu/libc_nonshared.a  AS_NEEDED ( /lib/ld-linux-aarch64.so.1 ) )\n";
+        assert_eq!(
+            script_names(libc),
+            Ok(vec![
+                ScriptName::File("/lib/aarch64-linux-gnu/libc.so.6".into()),
+                ScriptName::File("/usr/lib/aarch64-linux-gnu/libc_nonshared.a".into()),
+                ScriptName::File("/lib/ld-linux-aarch64.so.1".into()),
+            ])
+        );
+        let libgcc_s = b"/* GNU ld script\n   Use the shared library, but some functions are only in\n   the static library.  */\nGROUP ( libgcc_s.so.1 -lgcc )\n";
+        assert_eq!(
+            script_names(libgcc_s),
+            Ok(vec![
+                ScriptName::File("libgcc_s.so.1".into()),
+                ScriptName::Library("gcc".into()),
+            ])
+        );
+        assert_eq!(
+            script_names(b"INPUT(\"a b.o\", c.o)\nOUTPUT_FORMAT(\"elf64-x86-64\", \"elf64-x86-64\", \"elf64-x86-64\")"),
+            Ok(vec![ScriptName::File("a b.o".into()), ScriptName::File("c.o".into())])
+        );
+        assert_eq!(script_names(b""), Ok(vec![]));
+        for (text, why) in [
+            (
+                &b"SECTIONS { .text : { *(.text) } }"[..],
+                ScriptError::Command,
+            ),
+            (
+                b"GROUP ( libc.so.6 )\nSEARCH_DIR(/opt/lib)",
+                ScriptError::Command,
+            ),
+            (b"INCLUDE other.ld", ScriptError::Command),
+            (b"GROUP ( =/usr/lib/libc.so.6 )", ScriptError::Sysroot),
+            (b"GROUP ( $SYSROOT/lib/libc.so.6 )", ScriptError::Sysroot),
+            (b"GROUP ( a.so", ScriptError::Malformed),
+            (b"/* unterminated", ScriptError::Malformed),
+        ] {
+            assert_eq!(
+                script_names(text),
+                Err(why),
+                "{}",
+                String::from_utf8_lossy(text)
+            );
+        }
+        let at = Path::new("/l/libx.so");
+        assert!(is_script(at, b"/* GNU ld script */ GROUP ( x )"));
+        assert!(!is_script(at, b"\x7fELF\x02\x01"));
+        assert!(!is_script(at, b"!<arch>\nmember"));
+        assert!(!is_script(Path::new("/l/libx.dylib"), b"\xcf\xfa\xed\xfe"));
+        assert!(!is_script(
+            Path::new("/sdk/usr/lib/libSystem.tbd"),
+            b"--- !tapi-tbd\n"
+        ));
+        assert!(!is_script(at, b"text\0with a nul"));
+        // Where each name is looked for.
+        let search = [PathBuf::from("/s1"), PathBuf::from("/s2")];
+        let cwd = Path::new("/w");
+        assert_eq!(
+            script_places(&ScriptName::File("/abs/libc.so.6".into()), at, cwd, &search),
+            [PathBuf::from("/abs/libc.so.6")]
+        );
+        assert_eq!(
+            script_places(&ScriptName::File("libgcc_s.so.1".into()), at, cwd, &search),
+            [
+                PathBuf::from("/l/libgcc_s.so.1"),
+                PathBuf::from("/w/libgcc_s.so.1"),
+                PathBuf::from("/s1/libgcc_s.so.1"),
+                PathBuf::from("/s2/libgcc_s.so.1"),
+            ]
+        );
+        let gcc = script_places(&ScriptName::Library("gcc".into()), at, cwd, &search);
+        assert_eq!(gcc[0], PathBuf::from("/s1/libgcc.a"));
+        assert!(gcc.contains(&PathBuf::from("/s2/libgcc.so")));
+    }
+
+    #[test]
+    // covers: B-18
+    fn the_driver_options_that_change_its_answers_are_kept() {
+        let line = r#"PATH="/t/bin:/usr/bin" "cc" "-m64" "x.o" "-B" "/t/gcc-ld" "-B/t/two" "-Wl,-Bstatic" "-Bdynamic" "-fuse-ld=lld" "--target=x86_64-unknown-linux-gnu" "-Xlinker" "-m" "-Xlinker" "--sysroot=/ld-only" "-Wl,--sysroot,/later" "-nodefaultlibs" "-lc" "-L/x" "-o" "out""#;
+        let args = parse(line).unwrap();
+        assert_eq!(
+            args.driver_flags(),
+            [
+                "-m64",
+                "-B",
+                "/t/gcc-ld",
+                "-B/t/two",
+                "-fuse-ld=lld",
+                "--target=x86_64-unknown-linux-gnu",
+                "-nodefaultlibs",
+            ]
+        );
+        assert_eq!(args.ld_sysroot().as_deref(), Some("/later"));
+        assert!(!args.driver_reads_options());
+        // B-8: each flag's path is handed to what replaces roots as a path of its own, the
+        // folder of a joined `-B` too.
+        let seen = |flag: &str| flag_with_paths(flag, |path| format!("<{path}>"));
+        assert_eq!(seen("-B/t/two"), "-B</t/two>");
+        assert_eq!(seen("-B"), "<-B>");
+        assert_eq!(seen("/t/gcc-ld"), "</t/gcc-ld>");
+        assert_eq!(seen("--sysroot=/s"), "<--sysroot=/s>");
+        assert_eq!(seen("-Bstatic"), "<-Bstatic>");
+        for option in [
+            r#""-specs=lld.specs""#,
+            r#""--specs=x""#,
+            r#""--specs" "x""#,
+            r#""-specs" "x""#,
+            r#""--config" "x.cfg""#,
+            r#""--config=x.cfg""#,
+            r#""--config-user-dir=/c""#,
+        ] {
+            let args = parse(&format!(r#""cc" "x.o" {option}"#)).unwrap();
+            assert!(args.driver_reads_options(), "{option}");
+        }
+        let args = parse(r#""cc" "-Wl,--specs=not-the-drivers""#).unwrap();
+        assert!(!args.driver_reads_options());
+    }
+
+    #[test]
+    // covers: B-18
+    fn the_link_path_is_rustcs_entries_then_the_inherited_one() {
+        let inherited = OsStr::new("/home/dev/bin:/usr/bin");
+        let (before, inherits) = path_parts(
+            Some("/t/lib/rustlib/x/bin:/home/dev/bin:/usr/bin"),
+            Some(inherited),
+        );
+        assert_eq!(before, [PathBuf::from("/t/lib/rustlib/x/bin")]);
+        assert!(inherits);
+        // The lookup takes the inherited part from its own variables.
+        assert_eq!(
+            link_path(&before, inherits, Some(OsStr::new("/early:/usr/bin"))),
+            Some(OsString::from("/t/lib/rustlib/x/bin:/early:/usr/bin"))
+        );
+        // A `PATH` that doesn't end with the inherited one is kept whole.
+        let (before, inherits) = path_parts(Some("/a:/b"), Some(inherited));
+        assert_eq!(before.len(), 2);
+        assert!(!inherits);
+        assert_eq!(
+            link_path(&before, inherits, Some(inherited)),
+            Some(OsString::from("/a:/b"))
+        );
+        // None printed: the inherited one.
+        assert_eq!(path_parts(None, Some(inherited)), (vec![], true));
+        assert_eq!(
+            link_path(&[], true, Some(inherited)),
+            Some(inherited.to_os_string())
+        );
+        assert_eq!(link_path(&[], true, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_is_resolved_as_the_kernel_finds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &resolve_folder(dir.path());
+        std::fs::create_dir_all(root.join("usr/lib/gcc/14")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", root.join("lib")).unwrap();
+        assert_eq!(
+            resolve_folder(&root.join("usr/lib/gcc/14/../../")),
+            root.join("usr/lib")
+        );
+        // Through a link, `..` is the link's target's parent, as for the kernel.
+        assert_eq!(
+            resolve_folder(&root.join("lib/../lib/")),
+            root.join("usr/lib")
+        );
+        assert_eq!(
+            resolve_folder(&root.join("lib/gcc/14/../../../x")),
+            root.join("usr/x")
+        );
+        // A part that doesn't exist is taken by name.
+        assert_eq!(
+            resolve_folder(&root.join("usr/lib/none/../more")),
+            root.join("usr/lib/more")
         );
     }
 

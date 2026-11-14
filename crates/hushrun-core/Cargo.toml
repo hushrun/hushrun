@@ -23,6 +23,14 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 zlib-rs.workspace = true
+# \[B-27, B-28\] Sealing and packing a build block (`blocks::pack`): ring's HKDF, HMAC and
+# ChaCha20-Poly1305, and zstd. Off by default: the backend uses this crate's wire types and never
+# opens a pack.
+ring = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+
+[features]
+pack = ["dep:ring", "dep:zstd"]
 
 [dev-dependencies]
 proptest.workspace = true
