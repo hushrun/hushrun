@@ -142,17 +142,21 @@ impl Portability {
     /// has dependents.
     /// Whether the only things that keep the block on its machine are folders whose values
     /// its keys hold (B-24): a folder of the checkout or of the machine in an output or a
-    /// record, a variable that names a base, a program keyed by its target folder. Another
-    /// machine computes those keys only where each such folder is the same text, so there the
-    /// block is as right as it is here. Never when the outputs can't be searched, a read lies
-    /// outside the roots and bases, the link environment is unknown, a value no key holds is
-    /// in the bytes, the CPU is this machine's, or an extern is named by this machine alone.
+    /// record, a variable that names a base, a program keyed by its target folder, and a read
+    /// in a shared folder (a library a crate asks for with `-l`, found in the system's or the
+    /// SDK's folder), which the second key holds by its path and its content. Another machine
+    /// computes those keys only where each such folder is the same text, so there the block is
+    /// as right as it is here. Never when the outputs can't be searched, a read lies outside
+    /// every root, base and shared folder, the link environment is unknown, a value no key
+    /// holds is in the bytes, the CPU is this machine's, or an extern is named by this machine
+    /// alone.
     pub fn bound_only(&self) -> bool {
         !self.portable
             && self.reasons.iter().all(|reason| {
                 matches!(
                     reason,
                     Reason::Tied
+                        | Reason::ReadInSharedFolder
                         | Reason::ToolchainInOutput
                         | Reason::CargoHomeInOutput
                         | Reason::RustupHomeInOutput
@@ -1584,6 +1588,7 @@ mod tests {
             Reason::RustupHomeInRecord,
             Reason::HomeInRecord,
             Reason::VariableNamesBase,
+            Reason::ReadInSharedFolder,
         ];
         for reason in held {
             assert!(with(&[reason]).bound_only(), "{reason:?}");
@@ -1594,7 +1599,6 @@ mod tests {
             Reason::LinkEnvironmentUnknown,
             Reason::Unsearchable,
             Reason::ReadOutside,
-            Reason::ReadInSharedFolder,
             Reason::Extern,
             Reason::UnkeyedValue,
             Reason::NativeCpu,

@@ -906,7 +906,9 @@ that catches it, by compiling a reused block again and comparing. The reasons:
 only folders whose values the block's keys hold: `tied` (its place, B-10, or the target folder
 of a movable macOS program, B-9), the `…-in-output` and `…-in-record` reasons with
 `toolchain-in-output`, and `variable-names-base`, whose folders are in the second key as
-`bound`. A block whose reasons are all of those is **bound**: another machine computes its
+`bound`; and `read-in-shared-folder`, whose read is in the second key by its path and its
+content (a library a crate asks for with `-l`, found in the system's or the SDK's folder, as
+`-liconv` and every framework are on macOS). A block whose reasons are all of those is **bound**: another machine computes its
 keys only where every such folder is the same text, and there the block is as right as on the
 machine that built it. One function says so (`Portability::bound_only`), and the wrapper tells
 the relay of a block it built both answers, portable and bound. A bound block is offered for
