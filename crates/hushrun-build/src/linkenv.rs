@@ -9,8 +9,8 @@
 //!
 //! 1. the dry run's whole text, normalized (rustc's temporary folders, gcc's temporary files,
 //!    roots and bases replaced by their names): every flag the link passes and every file and
-//!    folder the driver adds, which is what holds `-C rpath`'s relative paths and the loader's
-//!    path;
+//!    folder the driver adds, the loader's path among them (not `-C rpath`'s relative paths:
+//!    a lookup asks a hint's line, the linking checkout's, so B-9 keys those folders);
 //! 2. the driver as found on the link's `PATH` (on Apple's targets too, where `/usr/bin/cc` is
 //!    a small program that runs the selected Xcode's clang: a `cc` that is another file, a
 //!    script of the workspace or one earlier on `PATH`, may hand the linker what its dry run of
@@ -1628,7 +1628,7 @@ mod tests {
         let other = Setup::new(dir.path());
         script(&other.root.join("bin/ld"), &ld_script("two"));
         assert_ne!(other.digest(), digest, "ld changed");
-        // A flag of the line, even one that names no file (`-C rpath`'s relative paths).
+        // A flag of the line, even one that names no file (a run path given as text).
         let dir = tempfile::tempdir().unwrap();
         let mut other = Setup::new(dir.path());
         other.args.push("-Wl,-rpath,$ORIGIN/../../lib".into());

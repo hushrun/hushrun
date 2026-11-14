@@ -1163,3 +1163,48 @@ fn a_file_the_link_line_names_is_keyed_by_its_content_and_a_response_file_is_nev
         "{entry:?}"
     );
 }
+
+// covers: B-9, B-24
+#[test]
+fn a_program_with_rustcs_rpath_is_reused_only_where_its_folders_are_the_same() {
+    // `-C rpath` writes the way from the output folder to the toolchain's libraries into the
+    // program, as a path relative to the program (`$ORIGIN/../../…`, `@loader_path/../../…`):
+    // a checkout at another depth links other bytes, and no search of the outputs finds a
+    // folder's name in them.
+    for mode in [Mode::Observe, Mode::On] {
+        let w = world_in(mode);
+        let build = |ws: &Path| {
+            write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+            let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &["-C", "rpath"], &[]);
+            ok(&out);
+            (entry, fs::read(ws.join("out/p-x")).unwrap())
+        };
+        let (one, two) = (w.checkout("one"), w.checkout("another/longer-checkout"));
+        let (first, a) = build(&one);
+        assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+        let (second, b) = build(&two);
+        assert!(!second.found, "{mode:?}: {second:?}");
+        // Its key holds its folders, which is what `tied` says: it travels only where they
+        // are the same (from CI, B-24).
+        let portable = first.portable.clone().unwrap();
+        assert!(!portable.portable, "{portable:?}");
+        assert!(portable.reasons.contains(&Reason::Tied), "{portable:?}");
+        assert!(portable.bound_only(), "{portable:?}");
+        assert_ne!(first.step, second.step);
+        assert_ne!(a, b, "the two programs do differ");
+        // In the same folders it is the same compile.
+        let (again, c) = build(&one);
+        assert!(again.found && !again.differed, "{mode:?}: {again:?}");
+        assert_eq!(a, c);
+        // Switched off again, the last one wins and the program moves as any other.
+        let off = |ws: &Path| {
+            let args = ["-C", "rpath", "-C", "rpath=no"];
+            let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &args, &[]);
+            ok(&out);
+            entry
+        };
+        off(&one);
+        let moved = off(&two);
+        assert!(moved.found && !moved.differed, "{mode:?}: {moved:?}");
+    }
+}

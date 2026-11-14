@@ -325,8 +325,9 @@ struct Call<'a> {
     /// A program whose flags allow a bundle (B-9): a bundle an earlier compile left beside it
     /// is removed first, whether this compile makes one (`movable`) or not (`tied`, B-21).
     clear_bundle: bool,
-    /// A movable program whose output folder lies outside the workspace (B-9): its first key
-    /// holds that folder as this machine has it, so the block is tied to its place (B-24).
+    /// A movable program whose output folder lies outside the workspace, or a linked output
+    /// with rustc's own run paths (`-C rpath`) (B-9): its first key holds those folders as this
+    /// machine has them, so the block is tied to its place (B-24).
     keyed_by_place: bool,
     /// What the key log says of this call, filled in as the call goes ([`Current::key_log`]).
     keys: std::cell::RefCell<KeyLine>,
@@ -976,6 +977,30 @@ impl Call<'_> {
                 self.keyed_by_place = true;
             }
             None => {}
+        }
+        // B-9: `-C rpath` makes rustc write the way from the output folder to the toolchain's
+        // and the dependencies' folders into a linked output, relative to the output
+        // (`$ORIGIN/../../…`, `@loader_path/../../…`). No root's name is in such a path and no
+        // search of the outputs finds one, so the first key holds every folder it is made
+        // from as this machine has it: the block is reused only where they are the same.
+        if class != Class::Library && inv.rpath() {
+            let cwd = Path::new(inv.cwd());
+            let folders = std::iter::once(inv.out_dir()).chain(inv.dependency_dirs());
+            for folder in folders {
+                let folder = cwd.join(folder).to_string_lossy().into_owned();
+                added.push(format!("hushrun:rpath-from={folder}"));
+                if let Some(resolved) = resolve_on_disk(&folder)
+                    && resolved != folder
+                {
+                    added.push(format!("hushrun:rpath-from={resolved}"));
+                }
+            }
+            let toolchain = identity.sysroot.as_ref().map(|path| path.to_string_lossy());
+            added.push(format!(
+                "hushrun:rpath-to={}",
+                toolchain.as_deref().unwrap_or("unknown")
+            ));
+            self.keyed_by_place = true;
         }
         let asked = Asked {
             compiler: identity.digest,

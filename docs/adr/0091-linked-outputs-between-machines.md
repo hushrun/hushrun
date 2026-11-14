@@ -62,6 +62,11 @@ replaced, a variable Apple's linker reads by itself.
 - A block whose outputs can't be searched (`unsearchable`): it may hold a folder nobody saw.
 - A program on macOS whose target folder lies outside its workspace is tied to that folder: its
   UUID is a hash over names that hold the folder's path.
+- A linked output compiled with rustc's own run paths (`-C rpath`) is tied to its output
+  folder, its dependency folders and the toolchain's folder: rustc writes the way between them
+  into it, relative to itself, and that differs with a checkout's depth while no folder's name
+  is in the bytes. Its first key holds those folders (B-9), so it is reused where they are the
+  same and travels only as a bound block.
 - A person's blocks that hold a folder: the folder's text holds their user name.
 - Everything B-24 kept before: a read outside the roots, a value no key holds, this machine's
   CPU, an extern only this machine names.

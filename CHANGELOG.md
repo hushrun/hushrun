@@ -93,6 +93,13 @@ where that folder is the same. Every linked output's key changes once.
   order file, a symbol list, a linker script) was and stays in the key by content, and a link
   with a response file (`@file`) is never stored.
 
+- **A program, proc macro or build script compiled with `-C rpath` is reused only where its
+  folders are the same** (B-9): rustc writes the way from the output folder to the toolchain
+  into it, relative to itself, so two checkouts at another depth link other bytes. Before, the
+  second checkout reused the first one's program. Its first key now holds the output folder,
+  the dependency folders and the toolchain's folder, and the block is `tied`: it travels only
+  from CI, to jobs with the same paths.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

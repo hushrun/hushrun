@@ -333,7 +333,18 @@ and renames it into place, before the compile; paths under it are paths under th
 hashes, so it is in the first key: its path from the workspace when it is inside, and when it
 is outside (`CARGO_TARGET_DIR` elsewhere, a workspace whose path holds a comma) the folder as
 this machine has it, which ties the program to its place (`tied`, B-24): two target folders
-build one program each. *Rests on:* Apple's `ld` naming an input by the path it was given
+build one program each. On every target, a linked output compiled with rustc's own run paths
+(`-C rpath`, the last one not switched off) holds the way from its output folder to the
+toolchain's and its dependencies' folders, written relative to itself (`$ORIGIN/../../…`,
+`@loader_path/../../…`): no root's name is in it, the search of the outputs (B-10) can't see
+it, and it differs between two checkouts at another depth. Its first key therefore holds the
+output folder, each `-L dependency=` folder (each as given and as it resolves) and the
+toolchain's folder as this machine has them, and it is `tied`: reused only where those are the
+same text, on this machine or, from CI, on another (B-24's `bound`). Keying the folders was
+chosen over keeping such a block out of the store: two checkouts on one machine must not share
+it either, and CI jobs, whose paths are the same, still do. A run path the link line gives as
+text (`-C link-arg=-Wl,-rpath,…`) is an argument like any other, in the first key as written.
+*Rests on:* Apple's `ld` naming an input by the path it was given
 (shown: a toolchain copied to another path links the same program, bundle and UUID through the
 link, and other ones without it). *Breaks if:* a later `ld` resolved links in the names. Before such a
 compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one; it
@@ -618,9 +629,11 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    the line set (`SDKROOT`, `LC_ALL`, …). Its **whole text**, every word, with rustc's temporary
    folder names (`rustcXXXXXX`) and gcc's temporary files (`ccXXXXXX.res`) made fixed and roots
    and bases replaced by their names, also after an option's letters (`-L{…}`). The text holds
-   every flag the link passes, not only the files it names: `-C rpath` writes the checkout's
-   depth into a program as a relative `RUNPATH` (`$ORIGIN/../../…`), which no search of the
-   outputs can see and which the text carries; so does the loader's path the driver adds;
+   every flag the link passes, not only the files it names, and the loader's path the driver
+   adds. What it does **not** carry is a path rustc computes from where a checkout lies:
+   `-C rpath` writes the way from the output folder to the toolchain as a relative `RUNPATH`
+   (`$ORIGIN/../../…`), and a lookup asks the dry run of the line a hint kept, which is the
+   line of the checkout that linked. That is B-9's to key, in the first key;
 2. the driver by SHA-256, as found on the link's `PATH`, on every target. A driver is a file
    that decides what the linker is handed, and its dry run of a line without inputs need not
    show what it does when it is given objects: a script of the workspace named with
@@ -852,7 +865,8 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   changes keep it out of proc macros, build scripts and movable programs; a program set to
   `tied`, or one the wrapper leaves as it is, still names the standard library by it.
 - `tied`: its place is its roots (B-10), or it is a movable macOS program whose output folder
-  lies outside its workspace, whose first key holds that folder (B-9).
+  lies outside its workspace, or a linked output with rustc's own run paths (`-C rpath`),
+  whose first key holds those folders (B-9).
 - `unsearchable`: its outputs can't be searched for folders (B-10): it is `tied` as well, and
   never travels.
 - `read-outside`: a read lies outside every root, base and shared folder.

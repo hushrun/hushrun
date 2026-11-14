@@ -229,6 +229,7 @@ pub struct Invocation {
     target: Option<String>,
     searchable: bool,
     link_lto: bool,
+    rpath: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -422,6 +423,7 @@ fn parse_inner(argv: &[OsString], env: &Env, cwd: &Path) -> Result<Invocation, P
         target: seen.target,
         searchable: seen.searchable,
         link_lto: seen.link_lto,
+        rpath: seen.rpath,
         native_cpu: seen.native_cpu,
         native_in_llvm_args: seen.native_in_llvm_args,
         debug: seen.debug,
@@ -537,6 +539,13 @@ impl Invocation {
     /// not switched off. Its link environment can't be told (B-37).
     pub fn link_lto(&self) -> bool {
         self.link_lto
+    }
+
+    /// Whether rustc writes run paths itself: its last `-C rpath` is not switched off. They
+    /// lead from the output folder to the toolchain's and the dependencies' folders, relative
+    /// to the output (B-9).
+    pub fn rpath(&self) -> bool {
+        self.rpath
     }
 
     /// Whether the CPU the call compiles for is this machine's: its last `-C target-cpu` is
@@ -838,6 +847,7 @@ struct Seen {
     target: Option<String>,
     searchable: bool,
     link_lto: bool,
+    rpath: bool,
     native_cpu: bool,
     native_in_llvm_args: bool,
     debug: DebugFlags,
@@ -865,6 +875,7 @@ impl Default for Seen {
             target: None,
             searchable: true,
             link_lto: false,
+            rpath: false,
             native_cpu: false,
             native_in_llvm_args: false,
             debug: DebugFlags::default(),
@@ -1001,6 +1012,7 @@ impl Seen {
                         }
                     }
                     // The last one wins, as in rustc.
+                    "rpath" => self.rpath = !switched_off(setting),
                     "target-cpu" => self.native_cpu = setting == Some("native"),
                     "llvm-args" => {
                         self.native_in_llvm_args |= setting.is_some_and(|words| {
@@ -1955,6 +1967,23 @@ pub(crate) mod tests {
             parse(&good, &Env::default(), Path::new(&cwd)),
             Parsed::PassedThrough(PassedThrough::NotUtf8)
         ));
+    }
+
+    // covers: B-9
+    #[test]
+    fn rustcs_own_run_paths_are_on_when_the_last_rpath_is_not_switched_off() {
+        for (extra, on) in [
+            ("", false),
+            ("-C rpath", true),
+            ("-Crpath=yes", true),
+            ("-C rpath=no", false),
+            ("-C rpath -C rpath=off", false),
+            ("-C rpath=no -C rpath", true),
+            ("-C link-arg=-Wl,-rpath,$ORIGIN/lib", false),
+        ] {
+            let inv = handled(&argv(&minimal(extra)), &Env::default());
+            assert_eq!(inv.rpath(), on, "{extra}");
+        }
     }
 
     // covers: B-10
