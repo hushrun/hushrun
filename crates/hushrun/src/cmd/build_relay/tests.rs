@@ -173,6 +173,7 @@ fn built(key: Digest, step: Digest) -> Request {
         step,
         class: LocalClass::Library,
         portable: true,
+        bound: false,
         cost_ms: 1000,
     }
 }
@@ -1342,6 +1343,7 @@ fn a_linked_output_the_trusted_copy_disagrees_with_stays_and_its_key_is_kept_her
                 step,
                 class,
                 portable: true,
+                bound: false,
                 cost_ms: 1000,
             },
         );
@@ -1669,6 +1671,7 @@ fn a_block_that_may_not_leave_the_machine_gets_no_marker() {
             step,
             class: LocalClass::Library,
             portable: false,
+            bound: false,
             cost_ms: 1000,
         },
     );
@@ -2261,6 +2264,7 @@ fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
         step,
         class: LocalClass::Library,
         portable: true,
+        bound: false,
         cost_ms,
     }
 }
@@ -2268,6 +2272,66 @@ fn built_costing(key: Digest, step: Digest, cost_ms: u64) -> Request {
 fn job_identity(fake: &FakeBuild, relay: &Arc<Relay>) -> Identity {
     let _ = fake;
     relay.by.clone()
+}
+
+// covers: B-24, B-29
+#[test]
+fn a_block_bound_to_folders_goes_up_from_a_ci_job_and_from_no_person() {
+    // Bound: not portable only because it holds folders whose values its keys hold. Every job
+    // of a repository has the same paths, and they name nobody; a person's hold a user name.
+    let bound = |key, step| Request::Built {
+        key,
+        step,
+        class: LocalClass::Program,
+        portable: false,
+        bound: true,
+        cost_ms: 1000,
+    };
+    // A person's run: no marker.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let (key, step) = block(&m.store, 71, 5_000, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty());
+    assert_eq!(fake.count(route::BEGIN), 0);
+    // A CI job: it goes up.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, with_id_token(&fake));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 72, 5_000, Some(by));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::COMMIT), 1, "it went up");
+    // Neither portable nor bound: it stays, in CI too.
+    let fake2 = FakeBuild::start();
+    let m2 = machine();
+    let relay2 = start(&fake2, &m2, with_id_token(&fake2));
+    begin(&relay2, &m2);
+    until("open", || answering(&relay2));
+    let (key, step) = block(&m2.store, 74, 5_000, Some(job_identity(&fake2, &relay2)));
+    assert_eq!(
+        ask(
+            &relay2,
+            Request::Built {
+                key,
+                step,
+                class: LocalClass::Program,
+                portable: false,
+                bound: false,
+                cost_ms: 1000,
+            }
+        ),
+        Answer::Ok
+    );
+    relay2.end_check(&[]);
+    assert_eq!(fake2.count(route::BEGIN), 0);
 }
 
 // covers: B-31

@@ -364,7 +364,8 @@ asked. A first build there is compiled without `-C incremental` and stored.
 **B-10 Place.** After a compile, every output is searched for each root as raw bytes, in its
 given and resolved forms, each file of a program's debug bundle among them. None found: the block's place is `anywhere`. Any found, or an output
 that can't be searched (`-C lto`, `-C linker-plugin-lto`, `-C embed-bitcode=yes`, compressed debug
-sections): the place is the roots, and the block is reused only where they are the same. A
+sections): the place is the roots, and the block is reused only where they are the same. One
+that can't be searched also never leaves its machine (`unsearchable`, B-24). A
 compile that read a root through a variable (an `env-dep` whose value holds a root) is `anywhere`
 only if a second compile, with that variable naming a link to the same folder, gives the same
 bytes. In the same pass every output is searched for the folders that name the machine: the cargo
@@ -813,8 +814,9 @@ wrapper answers by content as usual. Nothing is asked of the person.
   name added to a watched folder that a fresh compile would also see as an input (an editor's
   swap file beside a source) rebuilds the crate, as its key says.
 
-**B-24 Portable.** A block is **portable**, and is the only kind that may ever leave the machine
-that built it, when nothing in its keys, its hint, its record or its bytes names that machine.
+**B-24 Portable.** A block is **portable** when nothing in its keys, its hint, its record or its
+bytes names the machine that built it. A portable block may leave that machine; so may, from a
+CI job, one that is only bound to folders (below); nothing else ever does.
 One function decides it, from the compile's facts, and records the answer with every reason
 that holds in the block's description and in the run's log. On its own machine a block is
 reused whatever the answer, with one condition: a block that holds one of the machine's folders
@@ -897,6 +899,34 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   words (`--print target-cpus`, `--print cfg`) show; so no key can say what `native` meant, and
   a machine that agrees with them could still be given instructions it can't run. *Breaks if:*
   a compile reaches the host's CPU through something other than its arguments.
+
+**A block bound to folders travels where those folders are the same.** Some reasons name
+only folders whose values the block's keys hold: `tied` (its place, B-10, or the target folder
+of a movable macOS program, B-9), the `…-in-output` and `…-in-record` reasons with
+`toolchain-in-output`, and `variable-names-base`, whose folders are in the second key as
+`bound`. A block whose reasons are all of those is **bound**: another machine computes its
+keys only where every such folder is the same text, and there the block is as right as on the
+machine that built it. One function says so (`Portability::bound_only`), and the wrapper tells
+the relay of a block it built both answers, portable and bound. A bound block is offered for
+upload **only by a CI job** (B-29): every job of a repository has the same paths, which is
+where such a block is of use (a program that holds the cargo home through a C library's debug
+info, a test binary that bakes `CARGO_MANIFEST_DIR`, a library that bundles C code), and a
+CI path names nobody, where a person's folders hold their user name, which everyone the scope
+serves could read in the block's bytes. Nothing changes for the machine that looks one up: its
+hint names which folders and never their values (B-7), the lookup fills in this machine's, and
+a machine with another value finds another key. What never travels, bound or not: a block
+whose outputs can't be searched (`unsearchable`, which comes with `tied`: it may hold a folder
+nobody saw), and one with any other reason below. A tied test binary reused where its checkout
+is the same reads, when it runs, the files of the machine that runs it, as one built there
+would. *Rests on:* the search and the proofs finding every folder a block holds, so that
+every one is in a key (B-10's *can't see* applies: a folder written in another form is in no
+key, and travels with a block marked portable today as well). *Breaks if:* two machines have a
+folder of the same text and other content that the keys don't hold: the cargo home's files are
+keyed by content where a compile reads them, and a path a program only names is read when it
+runs, so this is the case of any tied block on one machine whose folder's content changed.
+
+- `unsearchable`: its outputs can't be searched for folders (B-10): it is `tied` as well, and
+  never travels.
 
 A library among its externs is not a reason: it is named by its bytes, so a dependency that isn't
 portable gives the block another key on another machine, never a wrong block. A proc macro whose
@@ -1086,7 +1116,8 @@ zstd giving the same stream for one version of it, so two versions of hushrun ma
 of one block, which costs a wait and nothing else.
 
 **B-29 Uploads and the outbox.** A block gets a marker in the store's `outbox/` only when it was
-built in this run, it is portable (B-24), the policy `open` returned says the caller writes,
+built in this run, it is portable or, in a CI job, bound to folders (B-24), the policy `open`
+returned says the caller writes,
 sharing is `observe` or `on`, and the store's record says this run's host, org and credential
 built it (B-32). A marker an earlier run left goes up only from a run with the same host, org and
 credential. A downloaded block, and one with no record, never goes up. An upload's state is where

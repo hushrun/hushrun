@@ -1860,6 +1860,7 @@ impl Relay {
             step,
             class,
             portable,
+            bound,
             cost_ms,
         } = request
         else {
@@ -1874,6 +1875,7 @@ impl Relay {
                     step,
                     class,
                     portable,
+                    bound,
                     cost_ms,
                 });
                 return;
@@ -1894,7 +1896,13 @@ impl Relay {
             return;
         }
         let shares = matches!(sharing, Sharing::Observe | Sharing::On);
-        if portable && writes && shares {
+        // B-24, B-29: a portable block may go up from any run that writes. One bound to
+        // folders its keys hold the values of goes up from a CI job only: every job of a
+        // repository has the same paths, which is where such a block is of use, and a CI
+        // path names nobody, where a person's folders hold their user name and would be
+        // readable, in the block's bytes, by everyone their scope serves.
+        let in_ci = matches!(self.config.caller, Caller::Ci { .. });
+        if (portable || (bound && in_ci)) && writes && shares {
             let built_by_us = self
                 .config
                 .store

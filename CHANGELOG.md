@@ -59,6 +59,15 @@ codes, environment variables, event formats, the ledger layout) are listed first
   have run a build script that can't start, and failed every build until the target folder was
   cleaned.
 
+- **A block that holds a machine's folder travels to machines where that folder is the same**
+  (B-24): such a block's keys already hold the folder's value (`tied`, the `…-in-output` and
+  `…-in-record` reasons, `toolchain-in-output`, `variable-names-base`), so another machine
+  computes them only where the folder is the same text. A CI job now offers such a block for
+  upload, and only a CI job does: every job of a repository has the same paths, and they name
+  nobody. This is what shares CI's programs, its test binaries and the libraries that bundle C
+  code between jobs. The wrapper tells the relay `bound` beside `portable`; a block whose
+  outputs can't be searched has the new reason `unsearchable` and never travels.
+
 - **The link environment names the linker that really runs** (B-18, B-37): it takes the `ld`
   from the one rule that says which `ld` a driver runs (the one `collect2` finds; a gcc 15
   driver's own answer only where that rule believes it) and searches for none itself, and where

@@ -1717,6 +1717,10 @@ impl Call<'_> {
             // A key kept on this machine goes nowhere, whatever its block holds.
             let portable =
                 log.portable.as_ref().is_some_and(|p| p.portable) && !self.kept_local.get();
+            // B-24: one that holds folders its keys hold the values of may go where those
+            // folders are the same; who may send such a block is the relay's to say.
+            let bound =
+                log.portable.as_ref().is_some_and(|p| p.bound_only()) && !self.kept_local.get();
             let _ = self.ports.relay(
                 &share.socket,
                 &Request::Built {
@@ -1724,6 +1728,7 @@ impl Call<'_> {
                     step: cx.step,
                     class: inv.class(),
                     portable,
+                    bound,
                     cost_ms: rustc_ms,
                 },
                 NOTICE_WAIT,
@@ -1878,6 +1883,7 @@ impl Call<'_> {
             native_cpu: self.native_cpu,
             toolchain_in_output,
             keyed_by_place: self.keyed_by_place,
+            searchable: inv.searchable(),
         });
         // B-10: a block that holds a folder of this machine holds its value here. One store can
         // serve people with other homes, and one person can move a cargo home or a toolchain:

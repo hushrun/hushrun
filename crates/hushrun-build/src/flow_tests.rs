@@ -4330,6 +4330,11 @@ impl Box2 {
 
     /// The registry crate `reg`, built in the checkout `ws`.
     fn call_reg(&self, ws: &Path) -> Result {
+        self.call_reg_with(ws, None)
+    }
+
+    /// [`Box2::call_reg`], in a run whose relay is `relay`.
+    fn call_reg_with(&self, ws: &Path, relay: Option<Rc<RefCell<RelayStandIn>>>) -> Result {
         let source = self.package().join("src/lib.rs");
         let args: Vec<OsString> = self
             .w
@@ -4350,6 +4355,7 @@ impl Box2 {
                 self.package().to_str().unwrap().into(),
             );
             fake.vars.insert("CARGO_PKG_VERSION".into(), "1.0.0".into());
+            fake.relay = relay;
         })
     }
 
@@ -4897,6 +4903,117 @@ fn a_registry_crate_whose_output_holds_the_cargo_home_is_reused_here_but_stays_h
     let dependent = m.call_a(&two);
     assert_eq!(dependent.outcome(), STORED);
     assert!(dependent.entry.unwrap().portable.unwrap().portable);
+}
+
+// covers: B-24, B-29
+#[test]
+fn a_block_bound_to_a_machines_folder_is_reused_only_where_that_folder_is_the_same() {
+    // A registry crate that bakes its own path in (a C library's debug info does, and
+    // `env!("CARGO_MANIFEST_DIR")`): its bytes hold the cargo home. Its second key holds that
+    // folder's value, so a machine computes the key only where the folder is the same text,
+    // and there the block is as right as where it was built: every job of a repository in CI.
+    let embeds = || Plan {
+        embed_var: Some("CARGO_MANIFEST_DIR".into()),
+        ..Plan::default()
+    };
+    let mut m = a_machine("runner", "stable-aarch64-apple-darwin");
+    m.w.share("acme");
+    m.w.plan("reg", embeds());
+    let one = m.w.checkout("one");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let first = m.call_reg_with(&one, Some(relay.clone()));
+    assert_eq!(first.outcome(), STORED, "{}", first.stderr);
+    let entry = first.entry.unwrap();
+    let portable = entry.portable.clone().unwrap();
+    assert!(!portable.portable && portable.bound_only(), "{portable:?}");
+    // The relay is told both: not portable, and bound to folders its keys hold.
+    assert!(
+        relay.borrow().asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                bound: true,
+                ..
+            }
+        )),
+        "{:?}",
+        relay.borrow().asked
+    );
+    let key = entry.key.unwrap();
+    let step = only_step(&m.w);
+
+    // The shared store: the block and its hint, which names the folder and not its value.
+    let shared = Store::new(&m.w.dir.path().join("shared-store"));
+    assert!(download(&m.w.store(), &shared, &key, now_ms()));
+    for hint in m.w.store().hints(&step) {
+        let text = String::from_utf8_lossy(&hint).into_owned();
+        assert!(!text.contains(m.cargo_home.to_str().unwrap()), "{text}");
+        shared.add_hint(&step, &hint, SystemTime::now()).unwrap();
+    }
+
+    // Another job on a machine with the same folders and nothing of its own: the same key.
+    m.w.store().clean().unwrap();
+    let two = m.w.checkout("two");
+    settle();
+    let relay = serving(shared.clone(), m.w.store(), None);
+    let second = m.call_reg_with(&two, Some(relay));
+    assert_eq!(second.outcome(), REUSED, "{}", second.stderr);
+    let entry = second.entry.unwrap();
+    assert!(entry.downloaded);
+    assert_eq!(entry.key, Some(key));
+
+    // A machine whose cargo home lies elsewhere: the hint leads it to another key, which the
+    // shared store doesn't hold. It compiles, and stores a block of its own.
+    let mut other = a_machine("someone-else", "stable-aarch64-apple-darwin");
+    other.w.share("acme");
+    other.w.plan("reg", embeds());
+    let ws = other.w.checkout("ws");
+    settle();
+    let relay = serving(shared, other.w.store(), None);
+    let there = other.call_reg_with(&ws, Some(relay));
+    assert_eq!(there.outcome(), STORED, "{}", there.stderr);
+    let entry = there.entry.unwrap();
+    assert!(!entry.found && !entry.downloaded, "{entry:?}");
+    assert_ne!(entry.key, Some(key));
+    assert_eq!(entry.step, Some(step), "the same first key");
+}
+
+// covers: B-10, B-24
+#[test]
+fn a_block_whose_outputs_cant_be_searched_never_travels() {
+    // `-C lto` writes bitcode a search can't read: such a block may hold a folder nobody saw.
+    let mut w = world(Mode::On);
+    w.share("acme");
+    let ws = w.checkout("ws");
+    settle();
+    let relay = relay_answering(|_| Some(Answer::Ok));
+    let stand_in = relay.clone();
+    let r = w.call_with(&ws, "a", &["-C", "lto"], move |fake| {
+        from_a_registry(fake);
+        fake.relay = Some(stand_in);
+    });
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    let portable = r.entry.unwrap().portable.unwrap();
+    assert!(
+        portable
+            .reasons
+            .contains(&crate::portable::Reason::Unsearchable),
+        "{portable:?}"
+    );
+    assert!(!portable.portable && !portable.bound_only(), "{portable:?}");
+    assert!(
+        relay.borrow().asked.iter().any(|r| matches!(
+            r,
+            Request::Built {
+                portable: false,
+                bound: false,
+                ..
+            }
+        )),
+        "{:?}",
+        relay.borrow().asked
+    );
 }
 
 // covers: B-10

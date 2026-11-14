@@ -35,6 +35,10 @@ pub enum Reason {
     /// Its place is its roots (B-10): an output holds a folder of the checkout, a read lies
     /// outside every root, or the outputs can't be searched.
     Tied,
+    /// Its outputs can't be searched (B-10: `-C lto`, compressed debug sections): it may hold
+    /// a folder nobody saw, so it is `tied` too and never travels, even where every folder a
+    /// search could name is the same.
+    Unsearchable,
     /// A read lies outside every root, base and shared folder.
     ReadOutside,
     /// A read lies in a shared folder that is not a base (a system folder, the rustup home
@@ -76,6 +80,7 @@ impl Reason {
             Reason::LinkEnvironmentUnknown => "link-environment-unknown",
             Reason::ToolchainInOutput => "toolchain-in-output",
             Reason::Tied => "tied",
+            Reason::Unsearchable => "unsearchable",
             Reason::ReadOutside => "read-outside",
             Reason::ReadInSharedFolder => "read-in-shared-folder",
             Reason::CargoHomeInOutput => "cargo-home-in-output",
@@ -135,6 +140,31 @@ impl Portability {
     /// a machine's folder (a link names the standard library's), since no dependent keys them,
     /// and a folder its expansion writes into a dependent's output is found there. Nothing else
     /// has dependents.
+    /// Whether the only things that keep the block on its machine are folders whose values
+    /// its keys hold (B-24): a folder of the checkout or of the machine in an output or a
+    /// record, a variable that names a base, a program keyed by its target folder. Another
+    /// machine computes those keys only where each such folder is the same text, so there the
+    /// block is as right as it is here. Never when the outputs can't be searched, a read lies
+    /// outside the roots and bases, the link environment is unknown, a value no key holds is
+    /// in the bytes, the CPU is this machine's, or an extern is named by this machine alone.
+    pub fn bound_only(&self) -> bool {
+        !self.portable
+            && self.reasons.iter().all(|reason| {
+                matches!(
+                    reason,
+                    Reason::Tied
+                        | Reason::ToolchainInOutput
+                        | Reason::CargoHomeInOutput
+                        | Reason::RustupHomeInOutput
+                        | Reason::HomeInOutput
+                        | Reason::CargoHomeInRecord
+                        | Reason::RustupHomeInRecord
+                        | Reason::HomeInRecord
+                        | Reason::VariableNamesBase
+                )
+            })
+    }
+
     pub fn named_portably(&self, class: Class) -> bool {
         match class {
             Class::Library => self.portable,
@@ -185,6 +215,8 @@ pub struct Facts<'a> {
     /// output folder lies outside the workspace): it is reused only where that folder is the
     /// same, which is what `tied` says.
     pub keyed_by_place: bool,
+    /// The outputs can be searched for folders as raw bytes (B-10).
+    pub searchable: bool,
 }
 
 /// Whether the block may leave the machine, and every reason it may not.
@@ -211,6 +243,10 @@ pub fn portable(facts: &Facts<'_>) -> Portability {
     }
     if !matches!(facts.observed.place, Place::Anywhere) || facts.keyed_by_place {
         reasons.insert(Reason::Tied);
+    }
+    if !facts.searchable {
+        reasons.insert(Reason::Tied);
+        reasons.insert(Reason::Unsearchable);
     }
     for at in places(facts.observed) {
         match at {
@@ -1124,6 +1160,7 @@ mod tests {
             native_cpu: false,
             toolchain_in_output: false,
             keyed_by_place: false,
+            searchable: true,
         })
     }
 
@@ -1227,6 +1264,7 @@ mod tests {
             native_cpu: false,
             toolchain_in_output: false,
             keyed_by_place: false,
+            searchable: true,
         });
         assert_eq!(reasons(p), "variable-names-base");
     }
@@ -1279,6 +1317,7 @@ mod tests {
                 native_cpu: false,
                 toolchain_in_output,
                 keyed_by_place: false,
+                searchable: true,
             })
         };
         for class in [Class::ProcMacro, Class::BuildScript, Class::Program] {
@@ -1326,6 +1365,7 @@ mod tests {
                 native_cpu: false,
                 toolchain_in_output: false,
                 keyed_by_place: false,
+                searchable: true,
             })
         };
         // `/rootfs` may be a crate's own text, or this home and more: the safe side is to say
@@ -1356,6 +1396,7 @@ mod tests {
             native_cpu: false,
             toolchain_in_output: false,
             keyed_by_place: false,
+            searchable: true,
         });
         assert_eq!(p.reasons, vec![Reason::CargoHomeInRecord]);
     }
@@ -1513,6 +1554,7 @@ mod tests {
             native_cpu: false,
             toolchain_in_output: false,
             keyed_by_place: false,
+            searchable: true,
         });
         assert!(!p.portable);
         assert_eq!(p.reasons, vec![Reason::UnkeyedValue]);
@@ -1520,5 +1562,45 @@ mod tests {
         // A record from before the rule reads, and has no variables.
         let old: Portability = serde_json::from_str(r#"{"portable":true,"reasons":[]}"#).unwrap();
         assert!(old.variables.is_empty());
+    }
+    // covers: B-24
+    #[test]
+    fn only_folders_the_keys_hold_let_a_block_travel_where_they_are_the_same() {
+        let with = |reasons: &[Reason]| Portability {
+            portable: reasons.is_empty(),
+            reasons: reasons.to_vec(),
+            ..Portability::default()
+        };
+        // Portable: it travels anyway, and is not "bound".
+        assert!(!with(&[]).bound_only());
+        // Each folder a key holds the value of, alone and together.
+        let held = [
+            Reason::Tied,
+            Reason::ToolchainInOutput,
+            Reason::CargoHomeInOutput,
+            Reason::RustupHomeInOutput,
+            Reason::HomeInOutput,
+            Reason::CargoHomeInRecord,
+            Reason::RustupHomeInRecord,
+            Reason::HomeInRecord,
+            Reason::VariableNamesBase,
+        ];
+        for reason in held {
+            assert!(with(&[reason]).bound_only(), "{reason:?}");
+        }
+        assert!(with(&held).bound_only());
+        // Anything else keeps it on its machine, whatever comes with it.
+        for reason in [
+            Reason::LinkEnvironmentUnknown,
+            Reason::Unsearchable,
+            Reason::ReadOutside,
+            Reason::ReadInSharedFolder,
+            Reason::Extern,
+            Reason::UnkeyedValue,
+            Reason::NativeCpu,
+        ] {
+            assert!(!with(&[reason]).bound_only(), "{reason:?}");
+            assert!(!with(&[Reason::Tied, reason]).bound_only(), "{reason:?}");
+        }
     }
 }
