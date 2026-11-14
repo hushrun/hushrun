@@ -2092,7 +2092,12 @@ impl Call<'_> {
                 .collect(),
             ld_sysroot: query.ld_sysroot.as_deref().map(placeholders),
             name: placeholders(&args.linker),
-            dry_args: Some(dry_args.iter().map(|arg| placeholders(arg)).collect()),
+            dry_args: Some(
+                dry_args
+                    .iter()
+                    .map(|arg| link::flag_with_paths(arg, placeholders))
+                    .collect(),
+            ),
             env: set
                 .iter()
                 .map(|(name, value)| (name.clone(), value.as_deref().map(placeholders)))
