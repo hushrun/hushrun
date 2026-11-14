@@ -47,8 +47,8 @@ replaced, a variable Apple's linker reads by itself.
   its outputs, one per toolchain. A panic inside a build script or a proc macro keeps its
   message, its location and its frames' names, and loses each frame's file and line.
 - **A block bound to folders, where those folders are the same** (B-24): a block that holds a
-  folder of its checkout or its machine has that folder's value in its keys, so another machine
-  computes them only where the folder is the same text. A CI job offers such a block for
+  folder of its checkout or its machine, or reads a library from a system folder, has that
+  folder in its keys, so another machine computes them only where the folder is the same text. A CI job offers such a block for
   upload, and only a CI job: every job of a repository has the same paths, and they name
   nobody. This is what shares CI's programs, test binaries and libraries that bundle C code.
 
@@ -106,6 +106,12 @@ is as deterministic as rustc, so a difference means a key that names less than w
 
 ## Consequences
 
+- Measured on this repository's own build (368 stored blocks on Linux arm64): two machines of
+  one image with other users, homes, cargo homes, checkouts and toolchain places shared 306
+  blocks before, all of them libraries, and share 361 now: every proc macro and 35 of 36
+  build scripts as well. Two jobs with the same paths share all 368, the seven bound ones
+  among them (the libraries that bundle C code, the programs). Every block two machines keyed
+  alike had the same bytes.
 - Every linked output's key changes once, and on macOS every proc macro, build script and
   program is linked differently than before: one cold build.
 - E costs a dry run and a few questions at each link and each lookup (a few milliseconds with
