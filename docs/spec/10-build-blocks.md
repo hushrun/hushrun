@@ -346,7 +346,12 @@ library's objects from the output folder too and the UUID is the same wherever t
 installed. The link is one per toolchain, so two toolchains building into one target folder
 never share it; a call that finds it leading elsewhere makes it again under a name of its own
 and renames it into place, before the compile; paths under it are paths under the toolchain
-(B-8, B-11). Where the output folder lies from the workspace is part of every name the linker
+(B-8, B-11). The name is the wrapper's own and is only ever a link: a folder found in its place
+(a target folder copied by a tool that followed the link, something planted) would be the
+sysroot rustc reads, so it is removed with what it holds and the link made; a file there is
+replaced by the rename; and a link under a temporary name that a process left when it died
+between making and renaming it is removed, once ten minutes old, by the next call that makes
+the link. Where the output folder lies from the workspace is part of every name the linker
 hashes, so it is in the first key: its path from the workspace when it is inside, and when it
 is outside (`CARGO_TARGET_DIR` elsewhere, a workspace whose path holds a comma) the folder as
 this machine has it, which ties the program to its place (`tied`, B-24): two target folders

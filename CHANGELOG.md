@@ -128,6 +128,10 @@ where that folder is the same. Every linked output's key changes once.
   decided from the environment; it now asks its credential. A token in a job, or on a machine
   where a CI variable is set, offers no bound block.
 
+- **On macOS a folder found where a program's sysroot link belongs is replaced by the link**
+  (B-9). Before, every movable program of that output folder passed through, at every build,
+  until someone removed the folder by hand. A temporary link a crashed compile left is removed.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a
