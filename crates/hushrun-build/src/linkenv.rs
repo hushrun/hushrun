@@ -11,8 +11,10 @@
 //!    roots and bases replaced by their names): every flag the link passes and every file and
 //!    folder the driver adds, which is what holds `-C rpath`'s relative paths and the loader's
 //!    path;
-//! 2. the driver (not on Apple's targets, where `cc` is a shim that runs the selected Xcode's
-//!    clang, whose dry run is all it gives a link of objects), the program the dry run names
+//! 2. the driver as found on the link's `PATH` (on Apple's targets too, where `/usr/bin/cc` is
+//!    a small program that runs the selected Xcode's clang: a `cc` that is another file, a
+//!    script of the workspace or one earlier on `PATH`, may hand the linker what its dry run of
+//!    a line without inputs doesn't show), the program the dry run names
 //!    (`collect2`, or the `ld` clang runs), the `ld` that really runs (the one B-18 finds,
 //!    [`crate::link::environment`]: never a second search here), the toolchain's `rust-lld`
 //!    when that `ld` is rustc's own `gcc-ld` wrapper, which only runs it,
@@ -672,9 +674,9 @@ fn items(q: &Question<'_>, ask: &Ask<'_>) -> Result<Vec<Item>, Why> {
         followed: Vec::new(),
     };
     g.text("dry-run", &(q.placeholders)(q.driver_name), &dry.text);
-    if !q.apple {
-        g.program("driver", q.driver_name, q.driver)?;
-    }
+    // On every target: a driver is a file that decides what the linker is handed, and its dry
+    // run of a line without inputs need not show all it does with them.
+    g.program("driver", q.driver_name, q.driver)?;
 
     // The program the dry run names, and the `ld` it is or runs.
     let program = PathBuf::from(&dry.program[0]);

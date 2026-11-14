@@ -86,6 +86,13 @@ where that folder is the same. Every linked output's key changes once.
   `rust-lld`) is hashed by one wrapper while the others that want it at once wait and read its
   digest, so a cold build pays for it once (B-37).
 
+- **On macOS the C driver is in the link environment by content, as on Linux** (B-37). Before,
+  on Apple's targets a driver was keyed by its name and its dry run only, so a changed script
+  named with `-C linker`, or another `cc` first on `PATH`, reused the block the old driver
+  linked. Every macOS linked output's key changes once more. A list the link line names (an
+  order file, a symbol list, a linker script) was and stays in the key by content, and a link
+  with a response file (`@file`) is never stored.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

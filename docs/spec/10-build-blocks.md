@@ -621,8 +621,12 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    every flag the link passes, not only the files it names: `-C rpath` writes the checkout's
    depth into a program as a relative `RUNPATH` (`$ORIGIN/../../…`), which no search of the
    outputs can see and which the text carries; so does the loader's path the driver adds;
-2. the driver by SHA-256, except on Apple's targets, where `cc` is a shim that runs the selected
-   Xcode's clang and the dry run is all clang gives a link of objects; the program the dry run's
+2. the driver by SHA-256, as found on the link's `PATH`, on every target. A driver is a file
+   that decides what the linker is handed, and its dry run of a line without inputs need not
+   show what it does when it is given objects: a script of the workspace named with
+   `-C linker`, or another machine's `cc` first on `PATH`, is another file and another E. On
+   Apple's targets `/usr/bin/cc` is a small program that runs the selected Xcode's clang; it is
+   hashed like any driver, and what that clang hands the linker is the dry run's text; the program the dry run's
    last command names (`collect2`, or the `ld` clang runs); the `ld` that really runs, which is
    B-18's answer for this link and nothing E searches for by itself (one rule says which `ld`
    runs: the one `collect2` finds, a gcc 15 driver's own answer believed only as B-18 says);

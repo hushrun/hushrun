@@ -886,6 +886,7 @@ fn a_real_links_environment_is_known_and_lists_what_answered() {
     let want: &[&str] = if cfg!(target_os = "macos") {
         &[
             "dry-run",
+            "driver",
             "program",
             "loads",
             "library",
@@ -1034,4 +1035,131 @@ fn a_program_that_links_from_a_folder_of_its_checkout_is_reused_in_another_check
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
     let second = proc_macro_with(&w, &two, &[], &[]);
     assert!(reused(&second), "{second:?}");
+}
+
+/// Makes `path` an executable file with `text`.
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    write(path, text);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A C driver that is a script running the real one: `plain` as it is, or one that hands the
+/// linker one more option whenever it is given an object, so its dry run of a line without
+/// inputs says the same and the program it links differs.
+fn driver_script(plain: bool) -> String {
+    let real = on_path("cc");
+    let real = real.display();
+    let option = if cfg!(target_os = "macos") {
+        "-headerpad,0x8000"
+    } else {
+        "--build-id=none"
+    };
+    match plain {
+        true => format!("#!/bin/sh\nexec {real} \"$@\"\n"),
+        false => format!(
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *.o) exec {real} \"$@\" -Wl,{option};; esac; done\nexec {real} \"$@\"\n"
+        ),
+    }
+}
+
+// covers: B-37
+#[test]
+fn a_driver_that_is_a_file_of_the_workspace_is_keyed_by_its_content() {
+    // `-C linker=<workspace>/tools/mycc`: the file changes, the program it links changes, and
+    // the dry run of the line without its inputs says the same both times.
+    let w = world();
+    let ws = w.checkout("ws");
+    let cc = ws.join("tools/mycc");
+    executable(&cc, &driver_script(true));
+    write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+    let linker = format!("linker={}", cc.display());
+    let (out, first) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &linker], &[]);
+    ok(&out);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let one = fs::read(ws.join("out/p-x")).unwrap();
+    executable(&cc, &driver_script(false));
+    let (out, second) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &linker], &[]);
+    ok(&out);
+    assert!(!second.found, "another driver, another key: {second:?}");
+    assert_ne!(first.key, second.key);
+    assert_ne!(one, fs::read(ws.join("out/p-x")).unwrap());
+}
+
+// covers: B-37
+#[test]
+fn another_driver_first_on_path_is_another_key() {
+    // Another machine's `cc`: the same name, found first on `PATH`, another file.
+    let w = world();
+    let plain = std::env::var("PATH").unwrap();
+    let bin = w.dir.path().join("machine-two/bin");
+    executable(&bin.join("cc"), &driver_script(false));
+    let other = format!("{}:{plain}", bin.display());
+    let program = |ws: &Path, path: &str| {
+        write(&ws.join("p/main.rs"), "fn main() { println!(\"hi\"); }\n");
+        let (out, entry) = w.call_as(ws, "p", "p/main.rs", "bin", &[], &[("PATH", path)]);
+        ok(&out);
+        entry
+    };
+    let (one, two) = (w.checkout("one"), w.checkout("two"));
+    let first = program(&one, &plain);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = program(&two, &other);
+    assert!(!second.found, "{second:?}");
+    let first = proc_macro_with(&w, &one, &[], &[("PATH", &plain)]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = proc_macro_with(&w, &two, &[], &[("PATH", &other)]);
+    assert!(!second.found, "{second:?}");
+}
+
+// covers: B-18, B-37
+#[test]
+fn a_file_the_link_line_names_is_keyed_by_its_content_and_a_response_file_is_never_stored() {
+    // A list the linker reads (an order file on macOS, a dynamic list on Linux), in the
+    // workspace: its bytes are in the key whether or not E is known. A response file holds
+    // arguments nothing here reads, so such a link is built and never stored.
+    let w = world();
+    let ws = w.checkout("ws");
+    write(
+        &ws.join("p/main.rs"),
+        "#[unsafe(no_mangle)] pub extern \"C\" fn hrq_a() {}\n\
+         #[unsafe(no_mangle)] pub extern \"C\" fn hrq_b() {}\n\
+         fn main() { hrq_a(); hrq_b(); }\n",
+    );
+    let list = ws.join("link/list.txt");
+    let (option, one, two) = if cfg!(target_os = "macos") {
+        ("-order_file", "_hrq_a\n_hrq_b\n", "_hrq_b\n_hrq_a\n")
+    } else {
+        ("--dynamic-list", "{ hrq_a; };\n", "{ hrq_a; hrq_b; };\n")
+    };
+    let arg = format!("link-arg=-Wl,{option},{}", list.display());
+    let link = |text: &str| {
+        write(&list, text);
+        let (out, entry) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &arg], &[]);
+        ok(&out);
+        entry
+    };
+    let first = link(one);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let second = link(two);
+    assert!(!second.found, "{second:?}");
+    assert_ne!(first.key, second.key);
+    let again = link(one);
+    assert!(reused(&again), "{again:?}");
+
+    let response = ws.join("link/more.rsp");
+    let more = if cfg!(target_os = "macos") {
+        "-dead_strip\n"
+    } else {
+        "--as-needed\n"
+    };
+    write(&response, more);
+    let arg = format!("link-arg=-Wl,@{}", response.display());
+    let (out, entry) = w.call_as(&ws, "p", "p/main.rs", "bin", &["-C", &arg], &[]);
+    ok(&out);
+    assert_eq!(
+        entry.outcome,
+        Outcome::BuiltNotStored(hushrun_build::model::NotStored::LinkInputs),
+        "{entry:?}"
+    );
 }
