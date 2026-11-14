@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-14
+
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a
 check reuses each test of a test file on its own, beside its test files, for pytest, Vitest,
 Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check asks.
