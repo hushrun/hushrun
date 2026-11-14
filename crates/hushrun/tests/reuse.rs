@@ -1255,7 +1255,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert!(
         suspended
             .plan_line()
-            .contains("every test file runs: reuse of its test files is suspended"),
+            .contains("every test binary runs: reuse of its test files is suspended"),
         "{}",
         suspended.stderr
     );
