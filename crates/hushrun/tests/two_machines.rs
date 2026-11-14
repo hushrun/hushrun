@@ -191,6 +191,26 @@ fn observe_line(stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// \[C-33, ADR 0077 amended\] The fresh machine's `observe` line says what the copied store's does,
+/// count for count. Its saving it may not say: that is bounded by the longest a run of the check
+/// took here reusing nothing, which this machine's store keeps and a hint doesn't, and on its
+/// first run there is none, so it says the counts without a time; the copy says one when its
+/// tests took a second or more, as under load they do.
+#[track_caller]
+fn says_what_the_copy_does(fresh: &str, copied: Option<&str>) {
+    let line = observe_line(fresh);
+    assert!(
+        line.as_deref()
+            .is_some_and(|l| !l.contains(", saving about ")),
+        "{fresh}"
+    );
+    assert_eq!(
+        line.as_deref().map(hushrun_testkit::lines::without_saving),
+        copied.map(hushrun_testkit::lines::without_saving),
+        "{fresh}"
+    );
+}
+
 /// One runner's scenario: a repository, its check's COMMAND, the change, and what each machine
 /// is held to.
 struct Scenario {
@@ -757,7 +777,7 @@ fn pytest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Vitest
@@ -920,7 +940,7 @@ fn vitest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Go
@@ -1130,7 +1150,7 @@ fn go_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Cargo
