@@ -5969,6 +5969,10 @@ fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_sta
     w.share("acme");
     let ws = w.checkout("ws");
     with_tools(&ws);
+    let linked = ws.join(format!(
+        "target/debug/deps/liba-xa.{}",
+        std::env::consts::DLL_EXTENSION
+    ));
     let relay = serving(other.store(), w.store(), None);
     let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), true);
     assert_eq!(r.outcome(), STORED, "{}", r.stderr);
@@ -5989,12 +5993,12 @@ fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_sta
         origin.built.is_some() && !origin.downloaded_only(),
         "{origin:?}"
     );
-    let ours = fs::read(ws.join("target/debug/deps/liba-xa.dylib")).unwrap();
+    let ours = fs::read(&linked).unwrap();
     let stored = w.store().block(&key).unwrap().unwrap();
     let file = stored
         .files
         .iter()
-        .find(|f| f.name.ends_with(".dylib"))
+        .find(|f| f.name.ends_with(std::env::consts::DLL_EXTENSION))
         .unwrap();
     assert_eq!(fs::read(&file.path).unwrap(), ours);
     // Nothing is suspended; the key is kept here for the store's kept days.
@@ -6039,15 +6043,12 @@ fn a_linked_output_that_differs_from_its_downloaded_copy_is_kept_and_its_key_sta
     }
     // From then on: this machine's own block is reused, and the shared store is asked nothing
     // of that key.
-    fs::remove_file(ws.join("target/debug/deps/liba-xa.dylib")).unwrap();
+    fs::remove_file(&linked).unwrap();
     let before = relay.borrow().asked.len();
     let r = linked_with_salt(&w, &ws, "our linker", Some(relay.clone()), false);
     assert_eq!(r.outcome(), REUSED, "{}", r.stderr);
     assert!(!r.entry.unwrap().downloaded);
-    assert_eq!(
-        fs::read(ws.join("target/debug/deps/liba-xa.dylib")).unwrap(),
-        ours
-    );
+    assert_eq!(fs::read(&linked).unwrap(), ours);
     assert_eq!(
         relay.borrow().asked.len(),
         before,
