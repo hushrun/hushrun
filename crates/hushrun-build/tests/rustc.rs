@@ -522,20 +522,15 @@ fn a_variable_apples_linker_reads_by_itself_changes_a_linked_outputs_key() {
     }
 }
 
-/// A proc macro `m` linked in `ws` through the wrapper with `env`: the log entry.
-fn proc_macro_with(w: &World, ws: &Path, env: &[(&str, &str)]) -> Entry {
-    write(
-        &ws.join("m/lib.rs"),
-        "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n",
-    );
-    let (out, entry) = w.call_as(
-        ws,
-        "m",
-        "m/lib.rs",
-        "proc-macro",
-        &["--extern", "proc_macro"],
-        env,
-    );
+const PROC_MACRO: &str = "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn m(i: TokenStream) -> TokenStream {\n    i\n}\n";
+
+/// A proc macro `m` linked in `ws` through the wrapper with `more` arguments and `env`: the log
+/// entry.
+fn proc_macro_with(w: &World, ws: &Path, more: &[&str], env: &[(&str, &str)]) -> Entry {
+    write(&ws.join("m/lib.rs"), PROC_MACRO);
+    let mut args = vec!["--extern", "proc_macro"];
+    args.extend(more);
+    let (out, entry) = w.call_as(ws, "m", "m/lib.rs", "proc-macro", &args, env);
     ok(&out);
     entry
 }
@@ -548,13 +543,48 @@ fn on_path(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no {name} on PATH"))
 }
 
-// covers: B-18
-#[test]
-fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path() {
-    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc's own folders have none: an
-    // `ld` put earlier on `PATH` (here a script that runs the real one) is another linker, with
-    // the same driver, line and files. Apple's driver runs the selected Xcode's `ld` whatever
-    // `PATH` says, so there the block is still reused.
+/// The folder of its own that `rustc` hands the C driver to take programs from (`-B`), when it
+/// links a proc macro with `more`: where rustc links with its own lld (x86-64 Linux since 1.90)
+/// that is the toolchain's `gcc-ld`, and the driver takes the `ld` from there whatever `PATH`
+/// says. Read from the link's own line, never told from the target.
+fn own_ld_folder(rustc: &Path, more: &[&str]) -> Option<PathBuf> {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("m.rs"), PROC_MACRO);
+    let out = Command::new(rustc)
+        .args(["--crate-name", "m", "--edition=2021", "m.rs"])
+        .args(["--crate-type", "proc-macro", "--extern", "proc_macro"])
+        .args(["--out-dir", "out", "--print=link-args"])
+        .args(more)
+        .current_dir(dir.path())
+        // As the wrapper's calls here: cargo's library folders would hand a copied rustc the
+        // real toolchain's driver library, and its sysroot with it.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    ok(&out);
+    let line = hushrun_build::link::parse(std::str::from_utf8(&out.stdout).unwrap()).unwrap();
+    line.inputs(dir.path()).prefixes.into_iter().next()
+}
+
+/// A program at `path` that leaves `marker` and then runs `real` with what it was handed.
+fn runs_and_marks(path: &Path, real: &Path, marker: &Path) {
+    write(
+        path,
+        &format!(
+            "#!/bin/sh\n: > '{}'\nexec '{}' \"$@\"\n",
+            marker.display(),
+            real.display()
+        ),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Links the proc macro with `more` twice with an empty folder first on `PATH`, puts there an
+/// `ld` (and an `ld.lld`) that runs the real `ld`, and links again: that last link's entry, and
+/// whether a program put there ran.
+fn linked_after_an_ld_is_put_first_on_path(more: &[&str]) -> (Entry, bool) {
     let w = world();
     let ws = w.checkout("ws");
     let early = w.dir.path().join("early");
@@ -565,24 +595,114 @@ fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path
     )
     .unwrap();
     let path = path.to_str().unwrap();
-    let first = proc_macro_with(&w, &ws, &[("PATH", path)]);
+    let first = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
     assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
-    let again = proc_macro_with(&w, &ws, &[("PATH", path)]);
+    let again = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
     assert!(reused(&again), "{again:?}");
     let real = on_path("ld");
-    write(
-        &early.join("ld"),
-        &format!("#!/bin/sh\nexec {} \"$@\"\n", real.display()),
-    );
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(early.join("ld"), fs::Permissions::from_mode(0o755)).unwrap();
-    let after = proc_macro_with(&w, &ws, &[("PATH", path)]);
-    if cfg!(target_os = "macos") {
+    let marker = w.dir.path().join("ran");
+    for name in ["ld", "ld.lld"] {
+        runs_and_marks(&early.join(name), &real, &marker);
+    }
+    let after = proc_macro_with(&w, &ws, more, &[("PATH", path)]);
+    (after, marker.exists())
+}
+
+// covers: B-18
+#[test]
+fn an_ld_put_earlier_on_path_is_another_link_where_the_driver_takes_it_from_path() {
+    // gcc runs `collect2`, which takes `ld` from `PATH` when gcc's own folders have none: an
+    // `ld` put earlier on `PATH` (here a script that runs the real one) is another linker, with
+    // the same driver, line and files. Apple's driver runs the selected Xcode's `ld` whatever
+    // `PATH` says, and where rustc links with its own lld the driver takes it from the folder
+    // rustc hands it: there the `ld` on `PATH` never runs and the block is still reused.
+    let (after, ran) = linked_after_an_ld_is_put_first_on_path(&[]);
+    if cfg!(target_os = "macos") || own_ld_folder(&real_rustc(), &[]).is_some() {
         assert!(reused(&after), "{after:?}");
+        assert!(!ran, "the ld on PATH ran");
     } else {
         assert!(!after.found, "the ld on PATH changed: {after:?}");
         assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+        assert!(ran, "the ld on PATH never ran");
     }
+}
+
+// covers: B-18
+#[test]
+fn with_rustcs_own_lld_turned_off_the_ld_on_path_is_another_link_again() {
+    // `-C linker-features=-lld` is how a build asks for the system's linker where rustc would
+    // link with its own: the line has no folder of rustc's then, and `PATH` decides again.
+    const OFF: &[&str] = &["-C", "linker-features=-lld"];
+    let rustc = real_rustc();
+    if own_ld_folder(&rustc, &[]).is_none() {
+        // Nothing to turn off here, and a rustc that has none refuses the option.
+        return;
+    }
+    assert_eq!(own_ld_folder(&rustc, OFF), None);
+    let (after, ran) = linked_after_an_ld_is_put_first_on_path(OFF);
+    assert!(!after.found, "the ld on PATH changed: {after:?}");
+    assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+    assert!(ran, "the ld on PATH never ran");
+}
+
+/// `from`, a folder of a toolchain, again at `to`: every file a link to the real one, but
+/// rustc's driver library and the files of `own`, which are copies.
+fn mirror(from: &Path, to: &Path, own: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let (path, dest) = (entry.path(), to.join(entry.file_name()));
+        if own.starts_with(&path) {
+            mirror(&path, &dest, own);
+        } else if from == own
+            || entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("librustc_driver")
+        {
+            fs::copy(&path, &dest).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&path, &dest).unwrap();
+        }
+    }
+}
+
+// covers: B-18
+#[test]
+fn an_ld_put_in_the_folder_rustc_hands_the_driver_is_another_link() {
+    // The counterpart of the `ld` on `PATH`, where rustc links with its own lld: the linker that
+    // runs is the one in the toolchain's folder, so another one there is another link.
+    let real = real_rustc();
+    let Some(real_folder) = own_ld_folder(&real, &[]) else {
+        return;
+    };
+    // A toolchain of this test's own, the real one but for that folder. rustc takes its sysroot
+    // from where its driver library really lies, so that file and rustc are copies.
+    let mut w = world();
+    let sysroot = real.parent().unwrap().parent().unwrap();
+    let own = w.dir.path().join("toolchain");
+    mirror(&sysroot.join("lib"), &own.join("lib"), &real_folder);
+    fs::create_dir_all(own.join("bin")).unwrap();
+    fs::copy(&real, own.join("bin/rustc")).unwrap();
+    w.rustc = own.join("bin/rustc");
+    let folder = own_ld_folder(&w.rustc, &[]).expect("a folder of the copied toolchain");
+    assert!(folder.starts_with(&own), "{}", folder.display());
+
+    let ws = w.checkout("ws");
+    let first = proc_macro_with(&w, &ws, &[], &[]);
+    assert_eq!(first.outcome, Outcome::BuiltAndStored, "{first:?}");
+    let again = proc_macro_with(&w, &ws, &[], &[]);
+    assert!(reused(&again), "{again:?}");
+    // rustc's `ld.lld` runs the `rust-lld` one folder up from its own: the real one is kept
+    // beside the folder, under its name.
+    let kept = folder.parent().unwrap().join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    fs::rename(folder.join("ld.lld"), kept.join("ld.lld")).unwrap();
+    let marker = w.dir.path().join("ran");
+    runs_and_marks(&folder.join("ld.lld"), &kept.join("ld.lld"), &marker);
+    let after = proc_macro_with(&w, &ws, &[], &[]);
+    assert!(!after.found, "the toolchain's ld changed: {after:?}");
+    assert_eq!(after.outcome, Outcome::BuiltAndStored, "{after:?}");
+    assert!(marker.exists(), "the ld put there never ran");
 }
 
 /// `<dir>/libhrq` as a shared library whose `hrq()` returns `value`, named `version` inside
