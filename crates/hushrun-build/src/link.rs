@@ -904,8 +904,10 @@ fn search_dirs(query: &Query, ask: &Ask<'_>) -> Result<SearchDirs, Unknown> {
 /// Which `ld` the driver runs (B-18). `--ld-path=` (clang's) or a `-fuse-ld=` path is it.
 /// Otherwise the driver is asked `-print-prog-name=ld` (`ld.<name>` for `-fuse-ld=<name>`: gcc
 /// asked with `-fuse-ld=lld -print-prog-name=ld` still says `ld`). A path in the answer is it
-/// (clang searches `PATH` itself; Apple's driver names the selected Xcode's `ld`). A bare name
-/// is looked up as `collect2` does: `real-ld`, `collect-ld`, then the name in the `-B` folders
+/// (clang searches `PATH` itself; Apple's driver names the selected Xcode's `ld`), unless the
+/// driver links through `collect2` and found that path on `PATH` (gcc 15 names a
+/// `<target>-ld` there): asked again without any `PATH` it says a bare name. A bare name is
+/// looked up as `collect2` does: `real-ld`, `collect-ld`, then the name in the `-B` folders
 /// and the driver's program folders, then the name on the link's `PATH`.
 fn which_ld(
     query: &Query,
@@ -925,7 +927,61 @@ fn which_ld(
     };
     let mut args = query.flags.clone();
     args.push(format!("-print-prog-name={name}"));
-    let answer = ask(&query.driver, &args, &query.path).ok_or(Unknown::Driver)?;
+    let said = prog_name(query, ask, &args, &query.path)?;
+    let is_file = |path: PathBuf| match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => Ok(path),
+        _ => Err(Unknown::NoLd),
+    };
+    if query.apple && said.contains('/') {
+        return is_file(query.cwd.join(said));
+    }
+    if dirs.is_none() {
+        *dirs = Some(search_dirs(query, ask)?);
+    }
+    let programs: Vec<PathBuf> = dirs
+        .as_ref()
+        .map(|d| d.programs.iter().map(|dir| query.cwd.join(dir)).collect())
+        .unwrap_or_default();
+    let mut compiler_path = prefixes(&query.flags, &query.cwd);
+    for dir in &programs {
+        push_once(&mut compiler_path, dir.clone());
+    }
+    if said.contains('/') {
+        let path = query.cwd.join(&said);
+        // A driver that links through `collect2` (gcc) runs the `ld` that program finds, and
+        // gcc 15 names here a `<target>-ld` it found on `PATH`, where `collect2` never looks
+        // for that name. A path it says without any `PATH` is its own: in a `-B` folder or a
+        // program folder, or built in.
+        let through_collect2 = programs.iter().any(|dir| dir.join("collect2").is_file());
+        let its_own = !through_collect2
+            || compiler_path.iter().any(|dir| path.parent() == Some(dir))
+            || prog_name(query, ask, &args, OsStr::new(""))? == said;
+        if its_own {
+            return is_file(path);
+        }
+    }
+    for program in ["real-ld", "collect-ld", name.as_str()] {
+        if let Some(found) = compiler_path
+            .iter()
+            .find_map(|dir| stat(dir.join(program), true))
+        {
+            return Ok(found.path);
+        }
+    }
+    linker(&name, Some(&query.path), &query.cwd)
+        .map(|found| found.path)
+        .ok_or(Unknown::NoLd)
+}
+
+/// The driver's answer to a `-print-prog-name=` question asked with `path` as its `PATH`: the
+/// first line that says something.
+fn prog_name(
+    query: &Query,
+    ask: &Ask<'_>,
+    args: &[String],
+    path: &OsStr,
+) -> Result<String, Unknown> {
+    let answer = ask(&query.driver, args, path).ok_or(Unknown::Driver)?;
     let said = answer
         .stdout
         .lines()
@@ -935,35 +991,7 @@ fn which_ld(
     if !answer.success || said.is_empty() {
         return Err(Unknown::Driver);
     }
-    if said.contains('/') {
-        let path = query.cwd.join(said);
-        return match std::fs::metadata(&path) {
-            Ok(meta) if meta.is_file() => Ok(path),
-            _ => Err(Unknown::NoLd),
-        };
-    }
-    if dirs.is_none() {
-        *dirs = Some(search_dirs(query, ask)?);
-    }
-    let programs = dirs
-        .as_ref()
-        .map(|d| d.programs.clone())
-        .unwrap_or_default();
-    let mut compiler_path = prefixes(&query.flags, &query.cwd);
-    for dir in programs {
-        push_once(&mut compiler_path, query.cwd.join(dir));
-    }
-    for program in ["real-ld", "collect-ld", said] {
-        if let Some(found) = compiler_path
-            .iter()
-            .find_map(|dir| stat(dir.join(program), true))
-        {
-            return Ok(found.path);
-        }
-    }
-    linker(said, Some(&query.path), &query.cwd)
-        .map(|found| found.path)
-        .ok_or(Unknown::NoLd)
+    Ok(said.to_owned())
 }
 
 /// Which `ld` a link runs and every folder it may take a `-l` from after rustc's own (B-6,
@@ -1830,6 +1858,53 @@ mod tests {
         assert_eq!(ld(&[]), Err(Unknown::NoLd));
         script(&driver, "exit 1");
         assert_eq!(ld(&[]), Err(Unknown::Driver));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // covers: B-18
+    fn a_path_a_gcc_driver_found_on_path_is_not_the_ld_collect2_runs() {
+        // gcc 15 answers `-print-prog-name=ld` with the `<target>-ld` it finds on `PATH`, where
+        // `collect2` never looks for that name: it still runs the first `ld` there.
+        let dir = tempfile::tempdir().unwrap();
+        let root = &resolve_folder(dir.path());
+        let progs = root.join("progs");
+        let driver = root.join("cc");
+        let answers = |built_in: &str| {
+            format!(
+                "for a in \"$@\"; do case \"$a\" in\n\
+                 -print-prog-name=ld) [ -n '{built_in}' ] && {{ echo '{built_in}'; exit 0; }}\n\
+                 IFS=:; for d in $PATH; do [ -x \"$d/x86_64-linux-gnu-ld\" ] && {{ echo \"$d/x86_64-linux-gnu-ld\"; exit 0; }}; done\n\
+                 echo ld; exit 0;;\n\
+                 -print-search-dirs) printf 'install: /x/\\nprograms: ={}/\\nlibraries: =\\n'; exit 0;;\n\
+                 esac; done; exit 1",
+                progs.display()
+            )
+        };
+        script(&driver, &answers(""));
+        script(&progs.join("collect2"), "exit 1");
+        let early = root.join("early");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&early).unwrap();
+        script(&bin.join("ld"), "exit 1");
+        script(&bin.join("x86_64-linux-gnu-ld"), "exit 1");
+        let asked = Asked::new();
+        let ld =
+            || environment(&query(root, &driver, &[], &[&early, &bin]), &asked.ask()).map(|e| e.ld);
+        assert_eq!(ld(), Ok(bin.join("ld")));
+        // Another `ld` earlier on `PATH` runs now, whatever the driver goes on saying.
+        script(&early.join("ld"), "exit 1");
+        assert_eq!(ld(), Ok(early.join("ld")));
+        // A path the driver says without any `PATH` is its own (a gcc configured with its
+        // `ld`): `collect2` runs that one.
+        let built_in = root.join("built-in/ld");
+        script(&built_in, "exit 1");
+        script(&driver, &answers(built_in.to_str().unwrap()));
+        assert_eq!(ld(), Ok(built_in));
+        // A driver with no `collect2` runs the `ld` it names (clang, which searches `PATH`).
+        script(&driver, &answers(""));
+        std::fs::remove_file(progs.join("collect2")).unwrap();
+        assert_eq!(ld(), Ok(bin.join("x86_64-linux-gnu-ld")));
     }
 
     #[cfg(unix)]

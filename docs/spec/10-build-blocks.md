@@ -492,7 +492,12 @@ the line's options that change its answers (`-B`, `-fuse-ld=`, `--ld-path=`, `--
 target, `-m*`, the GCC installation clang takes, the kind of output), the link command's `PATH`
 and `LC_ALL=C`. A path in the answer is the `ld`: clang searches `PATH` itself, and Apple's driver
 names the selected Xcode's `ld`, so the key follows `xcode-select` and `DEVELOPER_DIR` and not
-`PATH`. A bare name is looked up as gcc's `collect2` does: `real-ld`, `collect-ld`, then the name,
+`PATH`. A driver that links through `collect2` (one lies in its program folders) is the
+exception: gcc 15 answers with a `<target>-ld` it found on `PATH`, where `collect2` never looks
+for that name. Its path is the `ld` only when it lies in a `-B` folder or a program folder, or
+when the driver says it again asked with an empty `PATH` (an `ld` built into gcc); a driver that
+can't answer that is one that can't be asked. Otherwise the name asked for is looked up like a
+bare one. A bare name is looked up as gcc's `collect2` does: `real-ld`, `collect-ld`, then the name,
 each in the `-B` folders and the driver's program folders (`-print-search-dirs`, `programs:`),
 then the name on the link command's `PATH`. That `PATH` is rustc's own entries (the toolchain's
 `bin`) and then the one rustc inherited, which a lookup takes from its own variables; the hint

@@ -148,6 +148,13 @@ offline.
   so the macro counted as one another machine would name differently, and every crate compiled
   against it stayed on the machine, with no line that said so. The kept flag now names the
   toolchain, as the rest of the block does.
+- Build blocks: **with gcc 15, a program or proc macro linked by another `ld` earlier on `PATH`
+  is no longer reused.** gcc 15 answers `-print-prog-name=ld` with the `<target>-ld` it finds on
+  `PATH` (`/usr/bin/x86_64-linux-gnu-ld` on Ubuntu 26.04), but its `collect2` still runs the
+  first `ld` on `PATH`; the key named the first. Now a path from a driver that links through
+  `collect2` counts only when the driver says it without any `PATH` too (its own folder, a `-B`
+  folder, or an `ld` built in); otherwise the `ld` is looked up as `collect2` does. One more
+  question per link in that case, none with rustc's own lld, clang or older gcc.
 - Build blocks: a run that passes through because `RUSTC_WRAPPER` is set already (sccache, for
   one) says so where its org shares build blocks: `build reuse is off for this run: another
   compiler wrapper is set (RUSTC_WRAPPER)`. Before, it said nothing, and the shared store was
