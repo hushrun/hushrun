@@ -82,6 +82,12 @@ impl Client {
         self.in_ci && matches!(self.credential, super::credential::Credential::Token(_))
     }
 
+    /// Whether the run's credential is a CI job's own ID token (B-31): what a server trusts
+    /// a job by, and what a block bound to a job's folders is offered on (B-24).
+    pub(crate) fn is_a_jobs_id_token(&self) -> bool {
+        self.credential.is_a_jobs_id_token()
+    }
+
     /// What tells this client's credential apart, never the secret.
     pub(crate) fn fingerprint(&self) -> String {
         self.credential.fingerprint()

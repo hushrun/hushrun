@@ -123,6 +123,11 @@ where that folder is the same. Every linked output's key changes once.
   (`hushrun build share off`), or name the package under `never_store` in the build settings.
   The two ways of linking have different keys.
 
+- **A block bound to a machine's folders is offered for upload only by a run whose credential
+  is a CI job's ID token** (B-24, B-29). The relay asked whether the run was "in CI", which is
+  decided from the environment; it now asks its credential. A token in a job, or on a machine
+  where a CI variable is set, offers no bound block.
+
 ## [0.16.0] - 2026-11-14
 
 A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a

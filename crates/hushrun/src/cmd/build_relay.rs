@@ -1900,9 +1900,11 @@ impl Relay {
         // folders its keys hold the values of goes up from a CI job only: every job of a
         // repository has the same paths, which is where such a block is of use, and a CI
         // path names nobody, where a person's folders hold their user name and would be
-        // readable, in the block's bytes, by everyone their scope serves.
-        let in_ci = matches!(self.config.caller, Caller::Ci { .. });
-        if (portable || (bound && in_ci)) && writes && shares {
+        // readable, in the block's bytes, by everyone their scope serves. What makes a run a
+        // CI job here is its credential, the job's own ID token, which is what the server
+        // trusts it by: never the environment, which says CI wherever a variable is set.
+        let from_a_job = self.client.is_a_jobs_id_token();
+        if (portable || (bound && from_a_job)) && writes && shares {
             let built_by_us = self
                 .config
                 .store

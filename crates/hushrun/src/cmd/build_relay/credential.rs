@@ -114,6 +114,11 @@ impl Credential {
         }
     }
 
+    /// Whether it is a CI job's own ID token, minted by the CI system for this job.
+    pub(crate) fn is_a_jobs_id_token(&self) -> bool {
+        matches!(self, Credential::GithubOidc(_))
+    }
+
     /// Whether a 401 is worth a fresh token and one more try.
     pub(crate) fn renews(&self) -> bool {
         matches!(self, Credential::GithubOidc(_))

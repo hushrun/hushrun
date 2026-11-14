@@ -51,7 +51,8 @@ replaced, a variable Apple's linker reads by itself.
 - **A block bound to folders, where those folders are the same** (B-24): a block that holds a
   folder of its checkout or its machine, or reads a library from a system folder, has that
   folder in its keys, so another machine computes them only where the folder is the same text. A CI job offers such a block for
-  upload, and only a CI job: every job of a repository has the same paths, and they name
+  upload, and only a CI job, known by its credential (the job's own ID token) and never by the
+  environment: every job of a repository has the same paths, and they name
   nobody. This is what shares CI's programs, test binaries and libraries that bundle C code.
 
 **What stays on the machine**

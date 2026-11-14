@@ -2309,6 +2309,41 @@ fn a_block_bound_to_folders_goes_up_from_a_ci_job_and_from_no_person() {
     assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
     relay.end_check(&[]);
     assert_eq!(fake.count(route::COMMIT), 1, "it went up");
+    // A run taken for a CI job by anything but its credential (the environment says CI on a
+    // laptop, a token pasted into a job): its credential is a token, no job's ID token, so its
+    // bound block, which holds that machine's folders, is not offered. What it built that is
+    // portable still goes up.
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 75, 5_000, Some(by.clone()));
+    assert_eq!(ask(&relay, bound(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert!(waiting(&m).is_empty(), "a bound block is not offered");
+    assert_eq!(fake.count(route::BEGIN), 0);
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |c| {
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
+    });
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let by = job_identity(&fake, &relay);
+    let (key, step) = block(&m.store, 76, 5_000, Some(by));
+    assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+    relay.end_check(&[]);
+    assert_eq!(fake.count(route::COMMIT), 1, "a portable one went up");
     // Neither portable nor bound: it stays, in CI too.
     let fake2 = FakeBuild::start();
     let m2 = machine();

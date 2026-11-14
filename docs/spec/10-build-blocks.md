@@ -949,7 +949,10 @@ content (a library a crate asks for with `-l`, found in the system's or the SDK'
 keys only where every such folder is the same text, and there the block is as right as on the
 machine that built it. One function says so (`Portability::bound_only`), and the wrapper tells
 the relay of a block it built both answers, portable and bound. A bound block is offered for
-upload **only by a CI job** (B-29): every job of a repository has the same paths, which is
+upload **only by a CI job, which is a run whose credential is the job's own ID token** (B-29,
+B-31): the credential the server trusts a job by, never the environment, which says CI on any
+machine where a variable is set. A person's or an agent's token offers none, in CI or out of
+it. Every job of a repository has the same paths, which is
 where such a block is of use (a program that holds the cargo home through a C library's debug
 info, a test binary that bakes `CARGO_MANIFEST_DIR`, a library that bundles C code), and a
 CI path names nobody, where a person's folders hold their user name, which everyone the scope
@@ -1154,7 +1157,8 @@ zstd giving the same stream for one version of it, so two versions of hushrun ma
 of one block, which costs a wait and nothing else.
 
 **B-29 Uploads and the outbox.** A block gets a marker in the store's `outbox/` only when it was
-built in this run, it is portable or, in a CI job, bound to folders (B-24), the policy `open`
+built in this run, it is portable or, in a run whose credential is a CI job's ID token, bound
+to folders (B-24), the policy `open`
 returned says the caller writes,
 sharing is `observe` or `on`, and the store's record says this run's host, org and credential
 built it (B-32). A marker an earlier run left goes up only from a run with the same host, org and
