@@ -457,6 +457,11 @@ fn skip_or_run(
     // \[ADR 0069\] With `tests: reuse`, the plan: which test files already passed on the files they
     // read, and aren't run again (C-34); or why every test file runs.
     let mut units_anyway: Option<String> = None;
+    // \[C-46\] In every mode, what the check's store knows, for an adapter whose runner reuses on
+    // its own: a plan in `reuse` says it again with its lists.
+    if let (Some(session), Some(code)) = (session.as_deref(), code) {
+        session.learned(&key_base(code, command), code.repository_here().as_deref());
+    }
     if let (Some(session), Some(code), Some(backend)) = (session.as_deref_mut(), code, backend)
         && code.tests.as_ref().is_some_and(|t| t.mode == Mode::Reuse)
     {
@@ -481,7 +486,8 @@ fn skip_or_run(
         };
         match why_not {
             Some((why, word)) => {
-                say.line(format_args!("{check}: every test file runs: {why}"));
+                let noun = session.test_file();
+                say.line(format_args!("{check}: every {noun} runs: {why}"));
                 units_anyway = Some(word.to_string());
             }
             None => match plan_units(
@@ -494,10 +500,18 @@ fn skip_or_run(
                 job.as_deref(),
                 started_at,
             ) {
-                Some(units::Planned::Plan(line)) if line.is_empty() => {}
-                Some(units::Planned::Plan(line)) => say.line(format_args!("{line}")),
+                Some(units::Planned::Plan(line)) => {
+                    // \[C-39\] What the plan says once, before its line: past the limit of tests.
+                    for note in session.plan_notes() {
+                        say.line(format_args!("{note}"));
+                    }
+                    if !line.is_empty() {
+                        say.line(format_args!("{line}"));
+                    }
+                }
                 Some(units::Planned::Everything(why)) => {
-                    say.line(format_args!("{check}: every test file runs: {why}"));
+                    let noun = session.test_file();
+                    say.line(format_args!("{check}: every {noun} runs: {why}"));
                     if why.contains("suspended") {
                         units_anyway = Some("suspended".to_string());
                     }
@@ -507,50 +521,111 @@ fn skip_or_run(
         }
     }
 
-    let clock = Instant::now();
-    let started = SystemTime::now();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut child = Command::new(program(&command[0], dir, &path));
-    child
-        .args(&command[1..])
-        .current_dir(dir)
-        .env(variants::INSIDE_A_RUN, "1");
-    build.apply(&mut child);
-    if let Some(session) = &session {
-        session.apply(&mut child);
-    }
-    let status = child.status();
-    let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let status = match status {
-        Ok(status) => status,
-        Err(err) => {
-            eprintln!("hushrun: can't start {}: {err}", command[0]);
-            // As shells report it: 127, not found; 126, found but not runnable.
-            let code = if err.kind() == std::io::ErrorKind::NotFound {
-                127
-            } else {
-                126
-            };
-            return ExitCode::from(code);
+    let runner = Runner::from_process(global);
+    // \[C-32\] COMMAND starts once, or twice when its adapter left out what the plan didn't list:
+    // the second start leaves nothing out, and alone decides the run (RFC 0003 principle 5).
+    let mut starts = 0;
+    let (status, duration_ms, started, mut observed, before) = loop {
+        starts += 1;
+        // \[C-27\] The report files as they are before COMMAND starts: one it leaves as it was
+        // is none of its own, however recent.
+        let before = code.map(|code| code.reports_before(dir, command, reader_paths));
+        let clock = Instant::now();
+        let started = SystemTime::now();
+        let mut child = Command::new(program(&command[0], dir, &path));
+        child
+            .args(&command[1..])
+            .current_dir(dir)
+            .env(variants::INSIDE_A_RUN, "1");
+        build.apply(&mut child);
+        if let Some(session) = &session {
+            session.apply(&mut child);
         }
+        let status = child.status();
+        let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = match status {
+            Ok(status) => status,
+            Err(err) => {
+                eprintln!("hushrun: can't start {}: {err}", command[0]);
+                // As shells report it: 127, not found; 126, found but not runnable.
+                let code = if err.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                };
+                return ExitCode::from(code);
+            }
+        };
+        if signaled(&status) {
+            if code.is_some() && backend.is_some() {
+                say.line(format_args!(
+                    "{check} stopped by a signal; nothing recorded"
+                ));
+            }
+            return ExitCode::from(exit_code(&status));
+        }
+        let (Some(code), Some(backend)) = (code, backend) else {
+            break (status, duration_ms, started, None, before);
+        };
+        // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done;
+        // none when the files aren't the ones the run's key is for.
+        let observed = session.as_ref().and_then(|session| {
+            observed(
+                global,
+                session,
+                code,
+                backend,
+                command,
+                dir,
+                status.success(),
+                job.as_deref(),
+            )
+        });
+        let Some(why) = observed.as_ref().and_then(|(o, _)| o.left_out.clone()) else {
+            break (status, duration_ms, started, observed, before);
+        };
+        let set_up = match session.as_deref_mut() {
+            Some(session) if starts == 1 => session.whole_again().map_err(Some),
+            _ => Err(None),
+        };
+        let not_recorded = match set_up {
+            Ok(()) => {
+                say.line(format_args!(
+                    "{check}: running it once more with nothing left out: its adapter left out what the plan didn't list ({why})"
+                ));
+                continue;
+            }
+            Err(Some(err)) => format!(
+                "its adapter left out what the plan didn't list ({why}), and it couldn't run again with nothing left out ({err})"
+            ),
+            Err(None) => {
+                // \[C-37\] What the run decided of each test file and test, `not run` with why,
+                // is kept with what each read, so that `hushrun why` says it; no result is.
+                if let Some((o, tree)) = &observed {
+                    o.keep(&code.key, tree, now(global), duration_ms);
+                }
+                format!(
+                    "run again with nothing left out, its adapter still left out what the plan didn't list ({why})"
+                )
+            }
+        };
+        // Nothing this run did can be told from a run that left out what no plan listed: nothing
+        // is recorded, for the check or any unit, and the run fails.
+        say.line(format_args!("{check} wasn't recorded: {not_recorded}"));
+        let _ = results::ran_here(&code.key, Ended::Failed);
+        write_outputs(&runner, Verdict::Fail, None);
+        let exit = exit_code(&status);
+        return ExitCode::from(if exit == 0 { 1 } else { exit });
     };
     let exit = exit_code(&status);
     // G13: a verdict the result that decided here didn't have.
     let flaky = flaky(decided.as_ref(), status.success());
-    if signaled(&status) {
-        if code.is_some() && backend.is_some() {
-            say.line(format_args!(
-                "{check} stopped by a signal; nothing recorded"
-            ));
-        }
-        return ExitCode::from(exit);
-    }
     let verdict = if status.success() {
         Verdict::Pass
     } else {
         Verdict::Fail
     };
-    let runner = Runner::from_process(global);
     let (Some(code), Some(backend)) = (code, backend) else {
         write_outputs(&runner, verdict, None);
         return ExitCode::from(exit);
@@ -560,45 +635,45 @@ fn skip_or_run(
     if verdict == Verdict::Fail {
         let _ = results::ran_here(&code.key, Ended::Failed);
     }
-    // \[ADR 0068\] What the adapter saw, decided, and what `tests: reuse` would have done; none
-    // when the files aren't the ones the run's key is for.
-    let mut observed = session.as_ref().and_then(|session| {
-        observed(
-            global,
-            session,
-            code,
-            backend,
-            command,
-            dir,
-            status.success(),
-            job.as_deref(),
-        )
-    });
     let reused = observed
         .as_ref()
         .and_then(|(o, _)| o.counts.as_ref())
         .map_or(0, |c| c.reused);
     // \[ADR 0048\] What the reports this run wrote say, read after it, pass or fail (C-27).
-    let mut reports = code.reports_of(dir, started, command, reader_paths);
+    let before = before.unwrap_or_default();
+    let mut reports = code.reports_of(dir, started, command, reader_paths, &before);
+    // \[C-39\] Tests reused one by one, whose test files may all have run in part.
+    let reused_tests = observed
+        .as_ref()
+        .and_then(|(o, _)| Some(o.counts.as_ref()?.tests.as_ref()?.reused))
+        .unwrap_or(0);
     // \[ADR 0069\] Coverage of the test files that ran isn't the check's: a partial figure would
-    // read as a drop (C-27).
-    if reused > 0
+    // read as a drop (C-27); \[C-39\] nor of the tests that ran.
+    if (reused > 0 || reused_tests > 0)
         && let Some(reports) = reports.as_mut()
     {
         reports.coverage = None;
     }
     write_outputs(&runner, verdict, reports.as_ref());
     let mut summary = said(reports.as_ref());
-    // \[ADR 0069\] What reuse saved, from the reused test files' recorded durations.
-    if reused > 0 {
+    // \[ADR 0069\] What reuse saved, from the reused test files' recorded durations; \[C-39\] with
+    // tests one by one, the reused tests'.
+    if reused > 0 || reused_tests > 0 {
         let saved = observed
             .as_ref()
             .and_then(|(o, _)| o.counts.as_ref()?.saved_ms)
             .unwrap_or(0);
-        let files = if reused == 1 {
-            "1 test file".to_string()
-        } else {
-            format!("{reused} test files")
+        // \[C-39\] In the adapter's word: `test programs`, `test targets`, `packages`.
+        let noun = observed
+            .as_ref()
+            .map(|(o, _)| o.noun)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("test file");
+        let files = match (reused_tests, reused) {
+            (0, 1) => format!("1 {noun}"),
+            (0, reused) => format!("{reused} {}", crate::units::plural(noun)),
+            (1, _) => "1 test".to_string(),
+            (tests, _) => format!("{} tests", crate::cmd::usage::thousands(tests)),
         };
         if saved >= 1000 {
             summary.push_str(&format!("; reusing {files} saved about {}", took(saved)));
@@ -718,6 +793,21 @@ fn skip_or_run(
         }
     }
 
+    // \[C-32\] The runner ran what was built before these files: a pass proves nothing of them,
+    // and nothing is recorded, for the check or any unit. A failure is recorded as usual.
+    if verdict == Verdict::Pass
+        && let Some(why) = observed.as_ref().and_then(|(o, _)| o.stale_build.as_ref())
+    {
+        say.line(format_args!(
+            "{check} passed, but it isn't recorded: {why}{flaky}"
+        ));
+        // \[C-37\] What the run decided, `not run` with why, is kept with what each test file
+        // read, so that `hushrun why` says it; no result is.
+        if let Some((o, tree)) = &observed {
+            o.keep(&code.key, tree, now(global), duration_ms);
+        }
+        return ExitCode::from(exit);
+    }
     if let Some((o, _)) = &observed {
         for line in &o.lines {
             say.line(format_args!("{line}"));
@@ -781,12 +871,24 @@ fn skip_or_run(
         backend
             .record_with_units(&code.key, &result, unit_records)
             .map(|kept| {
-                units_kept = kept;
-                if !kept {
+                units_kept = kept.kept;
+                if !kept.kept {
                     say.line(format_args!(
                         "{check}: test files' results weren't kept: {} {}",
                         backend.org().unwrap_or_default(),
                         "doesn't keep them yet, so no test file is reused"
+                    ));
+                } else if kept.dropped > 0 {
+                    // \[RFC 0004 §3.8\] Past what the server takes in one run: what was cut is
+                    // passes only, which the next run of those tests records again.
+                    say.line(format_args!(
+                        "{check}: {} of its {} results of test files and tests weren't kept: {} keeps {} a run",
+                        crate::cmd::usage::thousands(kept.dropped as u64),
+                        crate::cmd::usage::thousands(unit_records.len() as u64),
+                        backend.org().unwrap_or_default(),
+                        crate::cmd::usage::thousands(
+                            (unit_records.len() - kept.dropped) as u64
+                        ),
                     ));
                 }
             })
@@ -794,7 +896,7 @@ fn skip_or_run(
         backend.record(&code.key, &result)
     };
     if let Some((o, tree)) = &observed {
-        o.keep(&code.key, tree, now(global));
+        o.keep(&code.key, tree, now(global), duration_ms);
         if recorded.is_ok()
             && !backend.is_server()
             && let Some(store) =
@@ -1549,6 +1651,7 @@ impl Code {
         started: SystemTime,
         command: &[String],
         readers: &[String],
+        before: &hushrun_reports::Before,
     ) -> Option<Reports> {
         let query = hushrun_reports::Query {
             root: &self.root,
@@ -1558,8 +1661,26 @@ impl Code {
             declared: &self.reports_files,
             readers,
         };
-        let search = hushrun_reports::find(&query)?;
+        let search = hushrun_reports::find_changed(&query, before)?;
         hushrun_reports::record(&search, &hushrun_reports::Limits::default())
+    }
+
+    /// \[C-27\] The report files the run's search reaches before COMMAND starts, as they are:
+    /// what [`Code::reports_of`] leaves out when COMMAND left it as it was.
+    fn reports_before(
+        &self,
+        dir: &Path,
+        command: &[String],
+        readers: &[String],
+    ) -> hushrun_reports::Before {
+        hushrun_reports::before(&hushrun_reports::Query {
+            root: &self.root,
+            cwd: dir,
+            started: SystemTime::now(),
+            command,
+            declared: &self.reports_files,
+            readers,
+        })
     }
 
     /// Whether the files are still the ones the command started on.
@@ -1588,14 +1709,28 @@ fn observe_tests(
         ));
         return None;
     }
-    let session = match units::Session::start(Some(tests), command, &code.root, dir) {
-        units::Start::Off => return None,
-        units::Start::Not(why) => {
-            say.line(format_args!("{check}: test files aren't observed: {why}"));
-            return None;
-        }
-        units::Start::On(session) => session,
-    };
+    // \[C-36\] A store an older hushrun kept, when there is none of this schema: imported once,
+    // and said in CI, whose cache step may name the older file.
+    let in_ci = hushrun_ci::context(&Env::from_process()).in_ci;
+    if let Some(line) = units::upgrade_store(check, code.repository_here().as_deref(), in_ci) {
+        say.line(format_args!("{line}"));
+    }
+    // \[C-32\] The adapter that last reported this check's test files here: a COMMAND pytest
+    // reported stays pytest's.
+    let stored = units::stored_adapter(&key_base(code, command), code.repository_here().as_deref());
+    let session =
+        match units::Session::start(Some(tests), command, &code.root, dir, stored.as_deref()) {
+            units::Start::Off => return None,
+            units::Start::Not(why) => {
+                say.line(format_args!("{check}: test files aren't observed: {why}"));
+                return None;
+            }
+            units::Start::On(session) => session,
+        };
+    // \[C-39\] Where its adapter can't do what the check asks: once a run.
+    for note in session.notes() {
+        say.line(format_args!("{check}: {note}"));
+    }
     Some(session)
 }
 

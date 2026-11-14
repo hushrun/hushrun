@@ -3,8 +3,18 @@
 //! its unit rule, pytest's `python_files`, read from the repository's configuration before any
 //! test runs (C-30).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use hushrun_core::units::{self, Facts, Set, Sets, Sources};
+
+use super::Seen;
+use super::adapter::{
+    Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
+use super::shared::Shared;
+use super::store::Map;
 
 /// The plugin pytest loads: any Python parses it, and on 3.8 or later it loads the adapter.
 const SHIM: &str = include_str!("hushrun_pytest.py");
@@ -12,6 +22,8 @@ const SHIM: &str = include_str!("hushrun_pytest.py");
 const ADAPTER: &str = include_str!("hushrun_pytest_impl.py");
 /// The module `-p` names.
 pub const MODULE: &str = "hushrun_pytest";
+/// The adapter's word (C-36).
+pub const WORD: &str = "pytest";
 /// What pytest collects as test files when its configuration says nothing.
 pub const DEFAULT_PYTHON_FILES: [&str; 2] = ["test_*.py", "*_test.py"];
 /// The kinds of files the adapter observes being read: its sources (C-30).
@@ -65,13 +77,11 @@ pub fn variables(
 /// to its environments and not others, so in either the plugin pytest is told to load could be
 /// missing, and pytest would stop.
 pub fn unsafe_for(command: &[String]) -> Option<&'static str> {
-    let python = |word: &str| {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        file.starts_with("python")
-    };
+    let python = |word: &str| super::command::program_name(word).starts_with("python");
     let mut after_python = false;
     for word in command {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        let file = super::command::program_name(word);
+        let file = &*file;
         if file == "tox" || file.starts_with("tox.") || file == "nox" {
             return Some("tox and nox choose what reaches their environments");
         }
@@ -278,6 +288,189 @@ fn fnmatch(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
     go(&p, &n)
+}
+
+/// \[ADR 0068, 0080\] The pytest adapter, which any COMMAND no other adapter takes gets: it does
+/// nothing where pytest never starts.
+#[derive(Debug, Clone, Copy)]
+pub struct Pytest;
+
+/// The adapter any COMMAND gets that no other takes (C-32); `Err` why it can't load safely.
+pub fn any_other(command: &[String]) -> Result<Box<dyn Adapter>, String> {
+    match unsafe_for(command) {
+        Some(why) => Err(why.into()),
+        None => Ok(Box::new(Pytest)),
+    }
+}
+
+/// \[ADR 0074\] Whether a plan, and `hushrun ready`, say anything of a check's test files before
+/// it runs: for pytest, which any COMMAND gets, only once pytest reported this check's test files
+/// here, as its map says, or \[C-38\] on another machine, as a hint read says. A check that runs
+/// `npm test` or `make test` never started pytest, and its Python-looking files are no test files
+/// of it.
+fn speaks_of_test_files(map: &Map, shared: &Shared) -> bool {
+    map.reported() || shared.names_any()
+}
+
+impl Adapter for Pytest {
+    fn word(&self) -> &'static str {
+        "pytest"
+    }
+
+    fn runner(&self) -> &'static str {
+        "pytest"
+    }
+
+    fn tests(&self) -> KnowsTests {
+        // \[ADR 0083\] It watches each test on Python 3.12 or later, and below says why it
+        // doesn't (`settings.watch`), each test then reading its test file's list.
+        KnowsTests {
+            unit: true,
+            reads: true,
+        }
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        install(at.cache)
+            .map(|dir| variables(&dir, (at.env)("PYTHONPATH"), (at.env)("PYTEST_ADDOPTS")))
+            .map_err(|err| format!("can't write its pytest plugin: {err}"))
+    }
+
+    fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        let found = python_files(at.root, at.cwd);
+        if is_test_file(&found, "x.py").is_none() {
+            if !speaks_of_test_files(at.map, &Shared::default()) {
+                return Ok(None);
+            }
+            return Err(
+                "pytest's python_files names a directory, which this version doesn't read".into(),
+            );
+        }
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| is_test_file(&found, path) == Some(true),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        if !speaks_of_test_files(at.map, &shared) {
+            return Ok(None);
+        }
+        let known = sets
+            .files(Set::Units)
+            .map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                (unit.to_string(), lists)
+            })
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            received: shared.received,
+            extras: RunExtras {
+                python_files: Some(found),
+                test_files: None,
+            },
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        let merged = super::facts::merged(at.files, "pytest");
+        if merged.is_empty() {
+            return Ok(None);
+        }
+        let patterns = python_files(at.root, at.cwd);
+        let told = super::facts::setting(at.files, "pytest", "pythonFiles");
+        let readable = is_test_file(&patterns, "x.py").is_some();
+        let agrees = matches!(&told, Ok(Some(list)) if *list == patterns);
+        let guard = (!readable || !agrees).then(|| units::NotFollowed {
+            why: "python-files".into(),
+            detail: "pytest's python_files isn't what hushrun read of its configuration".into(),
+        });
+        let failures_by_unit = merged.values().all(|m| m.failures_by_unit);
+        // \[C-30\] A unit is a test file of python_files, as the plan counts them: a file pytest
+        // collected for another reason (its doctest plugin's `test*.txt`) is none, here or there.
+        // Where python_files can't be read, every file pytest reported stays, not followed.
+        let seen: BTreeMap<String, Seen> = merged
+            .into_iter()
+            .filter(|(unit, _)| guard.is_some() || is_test_file(&patterns, unit) == Some(true))
+            .map(|(unit, m)| {
+                let mut not_followed = m.not_followed;
+                not_followed.extend(guard.clone());
+                let facts = Facts {
+                    complete: m.complete,
+                    failed: m.failed,
+                    not_followed,
+                    deselected: m.deselected,
+                    skipped: m.skipped > 0,
+                    ..Facts::default()
+                };
+                let seen = Seen {
+                    facts,
+                    reads: m.reads,
+                    duration_ms: m.duration_ms,
+                    tests: m.tests,
+                };
+                (unit, seen)
+            })
+            .collect();
+        let is_unit = |path: &str| readable && is_test_file(&patterns, path) == Some(true);
+        let sets = units::classify(
+            at.tree.paths(),
+            &is_unit,
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        let planned = seen
+            .keys()
+            .filter_map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                Some((unit.clone(), lists))
+            })
+            .collect();
+        Ok(Some(Read {
+            seen,
+            failures_by_unit,
+            sets,
+            planned,
+            edges: super::facts::edges_of(at.files, "pytest"),
+            received: shared.received,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, root: &Path, cwd: &Path, _: &BTreeSet<String>) -> RunExtras {
+        RunExtras {
+            python_files: Some(python_files(root, cwd)),
+            test_files: None,
+        }
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        let found = python_files(at.root, at.cwd);
+        units::classify(
+            at.tree.paths(),
+            &|p| is_test_file(&found, p) == Some(true),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_not_a_unit(&self, at: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        if !at.map.reported() && at.shared.hints.is_empty() {
+            return format!(
+                "{unit} isn't a test file of {check} as far as this machine knows: no run of {check} here has had pytest report its test files"
+            );
+        }
+        format!(
+            "{unit} isn't a test file of {check}: pytest's python_files ({}) doesn't name it",
+            python_files(at.root, at.cwd).join(", ")
+        )
+    }
 }
 
 #[cfg(test)]

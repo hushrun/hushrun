@@ -16,9 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use hushrun_core::units::{Facts, NotFollowed, Tree};
+use hushrun_core::units::{self, Facts, NotFollowed, Set, Sets, Sources, Tree};
 
-use super::facts::{FactsFile, Unfollowed};
+use super::adapter::{
+    Adapter, Hints, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+};
+use super::facts::{FactsFile, MergedTest, TestFacts, Unfollowed};
 
 /// The adapter's name in its main process's facts file.
 pub const ADAPTER: &str = "vitest";
@@ -29,8 +32,11 @@ pub const WORKER: &str = "vitest-worker";
 pub const SOURCE_KINDS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
 /// The variable the config line loads the plugin from.
 pub const VARIABLE: &str = "HUSHRUN_VITEST";
-/// The line a repository's Vitest config needs, in its `plugins`.
-pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]";
+/// The line a repository's Vitest config needs, in its `plugins`. \[ADR 0084, amended\] A
+/// conditional, not `process.env.HUSHRUN_VITEST && …`: that one is `"" | Promise<any> |
+/// undefined`, which a config that type-checks itself refuses as a `PluginOption`. A config with
+/// either form names [`VARIABLE`], which is what the adapter looks for.
+pub const CONFIG_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]";
 /// The plugin, in Vitest's own process.
 const PLUGIN: &str = include_str!("hushrun_vitest.mjs");
 /// The setup file the plugin puts first, in each worker.
@@ -75,13 +81,7 @@ const LAUNCHERS: &[(&str, &[&str])] = &[
 /// What `command` is for the Vitest adapter: `None` when it doesn't start Vitest; `Some(Err(why))`
 /// when it does, in a way hushrun doesn't observe, which the run says.
 pub fn recognize(command: &[String]) -> Option<Result<Recognized, String>> {
-    let name = |word: &str| {
-        let file = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        file.strip_suffix(".cmd")
-            .or_else(|| file.strip_suffix(".exe"))
-            .unwrap_or(file)
-            .to_string()
-    };
+    let name = |word: &str| super::command::program_name(word).to_string();
     let mut rest = command;
     loop {
         let first = name(rest.first()?);
@@ -229,6 +229,13 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
                 return None;
             }
             let name = config.file_name()?.to_string_lossy().into_owned();
+            // \[ADR 0084, amended\] Where the adapter would observe nothing, the line would add
+            // nothing: say so, so that "not here" isn't read as "nothing to do".
+            if let Some(why) = unobservable(&text) {
+                return Some(format!(
+                    "{name}: nothing to add: its config {why}, and hushrun can't look at Vitest's test files there, so {names} (tests in hushrun.yaml) runs every test file each time"
+                ));
+            }
             Some(format!(
                 "{name}: add `{CONFIG_LINE}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml); without HUSHRUN_VITEST, which hushrun sets, it adds nothing"
             ))
@@ -236,6 +243,45 @@ pub fn proposal(root: &Path, checks: &[String]) -> Option<String> {
         None => Some(format!(
             "vitest.config.ts: write `export default {{ {CONFIG_LINE} }}`, so that hushrun can look at Vitest's test files for {names} (tests in hushrun.yaml)"
         )),
+    }
+}
+
+/// \[ADR 0084, amended\] What in a Vitest config's text keeps the adapter from observing any test
+/// file, as the plugin finds it when Vitest runs (`typecheck`, `isolate: false`, the browser): the
+/// words for init's line, or `None`. Read from the text, without whitespace: what it misses, the
+/// run says when it observes nothing.
+fn unobservable(text: &str) -> Option<&'static str> {
+    let flat: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\'' && *c != '"')
+        .collect();
+    // Whether the object after `key:{` holds `enabled:true`.
+    let enables = |key: &str| {
+        let open = format!("{key}:{{");
+        flat.match_indices(&open).any(|(at, _)| {
+            let mut depth = 0usize;
+            let body: String = flat[at + open.len() - 1..]
+                .chars()
+                .take_while(|c| {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    depth > 0
+                })
+                .collect();
+            body.contains("enabled:true")
+        })
+    };
+    if enables("typecheck") {
+        Some("turns on typecheck, which runs the type checker outside Vitest's workers")
+    } else if flat.contains("isolate:false") {
+        Some("sets isolate: false, so test files share a worker")
+    } else if enables("browser") {
+        Some("runs tests in a browser")
+    } else {
+        None
     }
 }
 
@@ -283,6 +329,8 @@ pub struct Observed {
     pub refused: Option<String>,
     /// \[ADR 0072\] Which module imports which, from the root, for `hushrun why`.
     pub edges: BTreeSet<super::db::Edge>,
+    /// \[C-37\] Why no pass of the run is kept: an error no test owns, which fails the run whole.
+    pub not_kept: Option<String>,
 }
 
 /// What the workers that ran one test file saw of it.
@@ -293,6 +341,60 @@ struct WorkerSaw {
     /// Directories it listed, from the root.
     dirs: BTreeSet<String>,
     not_followed: BTreeSet<NotFollowed>,
+    /// \[ADR 0084\] Its tests, by id, when every worker that ran it told them (C-43).
+    tests: Option<BTreeMap<String, MergedTest>>,
+    /// \[ADR 0084\] A worker that ran it told no tests: none of them can be told.
+    untold: bool,
+}
+
+/// \[ADR 0084\] Adds what one worker told of a test file's tests to what others did. A file that
+/// two projects run runs each of its tests in each: a test finished only where every worker that
+/// told it finished it, failed where any failed it, was left out where every one left it out, and
+/// what it read is known only where every one said it.
+fn merge_tests(into: &mut BTreeMap<String, MergedTest>, worker: &FactsFile, tests: &[TestFacts]) {
+    let list = |indices: &Option<Vec<usize>>| indices.as_ref().and_then(|i| worker.resolve(i));
+    for test in tests {
+        let told = MergedTest {
+            finished: test.finished,
+            failed: test.failed,
+            deselected: test.deselected,
+            duration_ms: test.duration_ms,
+            not_followed: test.not_followed.iter().map(NotFollowed::from).collect(),
+            ran: list(&test.ran),
+            opened: list(&test.opened),
+            dirs: list(&test.dirs),
+            never_left_out: test.never_left_out,
+            skipped: test.skipped,
+            not_kept: test.not_kept.clone(),
+        };
+        let Some(had) = into.get_mut(&test.id) else {
+            into.insert(test.id.clone(), told);
+            continue;
+        };
+        had.finished &= told.finished;
+        had.failed |= told.failed;
+        had.skipped |= told.skipped && !told.deselected;
+        had.deselected &= told.deselected;
+        had.never_left_out |= told.never_left_out;
+        if had.not_kept.is_none() {
+            had.not_kept = told.not_kept;
+        }
+        had.duration_ms = had.duration_ms.saturating_add(told.duration_ms);
+        had.not_followed.extend(told.not_followed);
+        for (had, told) in [
+            (&mut had.ran, told.ran),
+            (&mut had.opened, told.opened),
+            (&mut had.dirs, told.dirs),
+        ] {
+            *had = match (had.take(), told) {
+                (Some(mut had), Some(told)) => {
+                    had.extend(told);
+                    Some(had)
+                }
+                _ => None,
+            };
+        }
+    }
 }
 
 /// How one test file ended, by Vitest's main process, over the projects that ran it.
@@ -300,6 +402,7 @@ struct WorkerSaw {
 struct Ended {
     selected: u64,
     finished: u64,
+    skipped: u64,
     failed: bool,
     deselected: bool,
     duration_ms: u64,
@@ -329,6 +432,35 @@ fn module_path(id: &str) -> Result<Option<PathBuf>, String> {
         return Err(id.trim_start_matches('\0').chars().take(200).collect());
     }
     Ok(Some(path.to_path_buf()))
+}
+
+/// \[C-37\] Why no pass of a run is kept when Vitest reported an error no test owns: the first
+/// such error's test file, from the root, and its first line when it is short; `None` when there
+/// was none.
+fn unowned_error(main: &FactsFile, root: &Path) -> Option<String> {
+    let first = main
+        .settings
+        .get("unhandled")
+        .and_then(|v| v.as_array())?
+        .first()?
+        .clone();
+    let file = first
+        .get("file")
+        .and_then(|v| v.as_str())
+        .and_then(|f| relative(root, Path::new(f)));
+    let message = first
+        .get("message")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty() && m.chars().count() <= 120);
+    let from = match (file, message) {
+        (Some(file), Some(message)) => format!(" (in {file}: {message})"),
+        (Some(file), None) => format!(" (in {file})"),
+        (None, Some(message)) => format!(" ({message})"),
+        (None, None) => String::new(),
+    };
+    Some(format!(
+        "Vitest reported an error no test owns{from}, so no pass of that run is kept"
+    ))
 }
 
 /// Reads what the Vitest adapter wrote in a run's directory, for the repository at `root` whose
@@ -371,7 +503,14 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
     let mut seen_by: BTreeMap<String, WorkerSaw> = BTreeMap::new();
     for worker in &workers {
         for unit in &worker.units {
-            let Some(name) = relative(&root, Path::new(&unit.unit)) else {
+            // \[ADR 0084\] A worker that tells tests names its unit from the root.
+            let path = Path::new(&unit.unit);
+            let path = if path.is_relative() {
+                root.join(path)
+            } else {
+                path.to_path_buf()
+            };
+            let Some(name) = relative(&root, &path) else {
                 continue;
             };
             let entry = seen_by.entry(name).or_default();
@@ -402,6 +541,16 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             entry
                 .not_followed
                 .extend(unit.not_followed.iter().map(NotFollowed::from));
+            // \[ADR 0084\] Its tests, one by one, when the worker told them (C-43).
+            match &unit.tests {
+                Some(tests) if !entry.untold => {
+                    merge_tests(entry.tests.get_or_insert_with(BTreeMap::new), worker, tests);
+                }
+                _ => {
+                    entry.untold = true;
+                    entry.tests = None;
+                }
+            }
             if let Some(error) = worker.errors.first() {
                 entry.not_followed.insert(NotFollowed {
                     why: "adapter-error".into(),
@@ -410,7 +559,11 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             }
         }
     }
+    // \[C-37\] An error no test owns: no pass of the run is kept (its facts say so by
+    // `failuresByUnit`), and each test that didn't fail says why, with the file it came from.
+    let unowned = unowned_error(main, &root);
     let mut out = Observed {
+        not_kept: unowned.clone(),
         failures_by_unit: main.failures_by_unit,
         unit_files,
         refused: main
@@ -437,12 +590,18 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let Some(name) = relative(&root, Path::new(&unit.unit)) else {
             continue;
         };
+        // \[C-30\] A test file is one of Vitest's list, as a plan counts them: a file only its
+        // typecheck runs (a `*.test-d.ts`, with tsc, outside its workers) is none, here or there.
+        if !out.unit_files.is_empty() && !out.unit_files.contains(&name) {
+            continue;
+        }
         let entry = ended.entry(name).or_insert_with(|| Ended {
             deselected: true,
             ..Ended::default()
         });
         entry.selected = entry.selected.saturating_add(unit.selected);
         entry.finished = entry.finished.saturating_add(unit.finished);
+        entry.skipped = entry.skipped.saturating_add(unit.skipped);
         entry.failed |= unit.failed;
         entry.deselected &= unit.deselected;
         entry.duration_ms = entry.duration_ms.saturating_add(unit.duration_ms);
@@ -454,6 +613,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let Ended {
             selected,
             finished,
+            skipped,
             failed,
             deselected,
             duration_ms,
@@ -464,11 +624,19 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
         let mut reads: BTreeSet<String> = config_files.clone();
         reads.insert(unit.clone());
         let mut dirs = BTreeSet::new();
+        let mut tests = None;
         match seen_by.remove(&unit) {
             Some(saw) => {
                 reads.extend(saw.files);
                 not_followed.extend(saw.not_followed);
                 dirs = saw.dirs;
+                tests = saw.tests;
+                if let (Some(why), Some(tests)) = (&unowned, &mut tests) {
+                    for test in tests.values_mut().filter(|t| !t.failed && !t.deselected) {
+                        test.finished = false;
+                        test.not_kept = Some(why.clone());
+                    }
+                }
             }
             None if !deselected => {
                 not_followed.insert(NotFollowed {
@@ -488,13 +656,166 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
                     failed,
                     not_followed,
                     deselected,
+                    // \[C-32\] A test of it Vitest skipped: in a run that failed, no pass.
+                    skipped: skipped > 0,
+                    ..Facts::default()
                 },
                 reads,
                 duration_ms,
+                tests,
             },
         );
     }
     Ok(Some(out))
+}
+
+/// \[ADR 0071\] The Vitest adapter for a COMMAND that starts one run of Vitest, whose config
+/// loads it (C-35); `None` for any other COMMAND.
+pub fn recognized(command: &[String], cwd: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    let recognized = match recognize(command)? {
+        Ok(recognized) => recognized,
+        Err(why) => return Some(Err(why)),
+    };
+    if let Some(why) = unloadable(&recognized, cwd) {
+        return Some(Err(why));
+    }
+    Some(Ok(Box::new(recognized)))
+}
+
+impl Adapter for Recognized {
+    fn word(&self) -> &'static str {
+        ADAPTER
+    }
+
+    fn runner(&self) -> &'static str {
+        "Vitest"
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::Kinds(SOURCE_KINDS)
+    }
+
+    /// \[ADR 0084\] Its setup file names each test, leaves out those `reuseTests` lists, says how
+    /// each ended, and watches what each read (C-43).
+    fn tests(&self) -> KnowsTests {
+        KnowsTests {
+            unit: true,
+            reads: true,
+        }
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        install(at.cache)
+            .map(|dir| variables(&dir))
+            .map_err(|err| format!("can't write its Vitest plugin: {err}"))
+    }
+
+    fn plan_from_files(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        if self.coverage {
+            return Err(
+                "Vitest's coverage is on, and a partial run's coverage would read as a drop".into(),
+            );
+        }
+        let shared = super::fetch(at.asker, self.hints(), &Sets::default(), at.tree, at.ignore);
+        let mut listed: BTreeSet<String> = at
+            .map
+            .unit_files
+            .iter()
+            .filter(|f| at.tree.contains(f))
+            .cloned()
+            .collect();
+        if listed.is_empty() {
+            listed = shared.unit_files();
+        }
+        if listed.is_empty() {
+            return Err("no run here has listed Vitest's test files yet".into());
+        }
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| listed.contains(path),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let known = sets
+            .files(Set::Units)
+            .map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                (unit.to_string(), lists)
+            })
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            received: shared.received,
+            extras: RunExtras {
+                python_files: None,
+                test_files: Some(listed.into_iter().collect()),
+            },
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        let Some(observed) = observe(at.files, at.root, at.tree)? else {
+            return Ok(None);
+        };
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| observed.unit_files.contains(path),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        );
+        let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
+        let planned = observed
+            .units
+            .keys()
+            .filter_map(|unit| {
+                let lists =
+                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                Some((unit.clone(), lists))
+            })
+            .collect();
+        Ok(Some(Read {
+            seen: observed.units,
+            failures_by_unit: observed.failures_by_unit,
+            sets,
+            planned,
+            dirs: observed.dirs,
+            unit_files: Some(observed.unit_files),
+            refused: observed.refused,
+            edges: observed.edges,
+            received: shared.received,
+            not_kept: observed.not_kept,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, _: &Path, _: &Path, unit_files: &BTreeSet<String>) -> RunExtras {
+        RunExtras {
+            python_files: None,
+            test_files: Some(unit_files.iter().cloned().collect()),
+        }
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        units::classify(
+            at.tree.paths(),
+            &|p| at.listed.contains(p),
+            Sources::Kinds(SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_not_a_unit(&self, _: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        format!(
+            "{unit} isn't a test file of {check} as far as this machine knows: Vitest didn't list it in its last run here"
+        )
+    }
+
+    fn why_known_from(&self) -> Option<&'static str> {
+        Some("Vitest's list of test files is the one of its last run here")
+    }
 }
 
 #[cfg(test)]
@@ -597,5 +918,113 @@ mod tests {
         assert!(module_path("\0virtual:routes").is_err());
         assert!(module_path("virtual:routes").is_err());
         assert!(module_path("src/relative.ts").is_err());
+    }
+
+    fn told(id: &str, finished: bool, failed: bool, ran: Option<Vec<usize>>) -> TestFacts {
+        TestFacts {
+            id: id.into(),
+            finished,
+            failed,
+            ran,
+            opened: Some(vec![]),
+            dirs: Some(vec![]),
+            ..TestFacts::default()
+        }
+    }
+
+    // covers: C-37, C-43
+    #[test]
+    fn an_error_no_test_owns_tells_each_test_that_didnt_fail_why_it_kept_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        for f in ["test/a.test.ts", "test/bad.test.ts"] {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let tree = Tree::default();
+        let abs = |f: &str| root.join(f).display().to_string();
+        let main: FactsFile = serde_json::from_value(serde_json::json!({
+            "schema": "hushrun.unit-facts/v0", "adapter": ADAPTER, "failuresByUnit": false,
+            "settings": {"testFiles": [abs("test/a.test.ts"), abs("test/bad.test.ts")],
+                         "unhandled": [{"file": abs("test/bad.test.ts"), "message": "late timer"}]},
+            "units": [
+                {"unit": abs("test/a.test.ts"), "selected": 1, "finished": 1},
+                {"unit": abs("test/bad.test.ts"), "selected": 2, "finished": 2, "failed": true},
+            ],
+        }))
+        .unwrap();
+        let worker = |unit: &str, tests: serde_json::Value| -> FactsFile {
+            serde_json::from_value(serde_json::json!({
+                "schema": "hushrun.unit-facts/v1", "adapter": WORKER,
+                "units": [{"unit": unit, "tests": tests}],
+            }))
+            .unwrap()
+        };
+        let files = [
+            main,
+            worker(
+                "test/a.test.ts",
+                serde_json::json!([{"id": "a1", "finished": true}]),
+            ),
+            worker(
+                "test/bad.test.ts",
+                serde_json::json!([{"id": "leaks", "finished": true},
+                                   {"id": "waits", "finished": true, "failed": true}]),
+            ),
+        ];
+        let seen = observe(&files, &root, &tree).unwrap().unwrap();
+        let why = "Vitest reported an error no test owns (in test/bad.test.ts: late timer), so no pass of that run is kept";
+        let a1 = &seen.units["test/a.test.ts"].tests.as_ref().unwrap()["a1"];
+        assert!(!a1.finished);
+        assert_eq!(a1.not_kept.as_deref(), Some(why));
+        let bad = seen.units["test/bad.test.ts"].tests.as_ref().unwrap();
+        assert_eq!(bad["leaks"].not_kept.as_deref(), Some(why));
+        // A test that failed is a failure, and says nothing more.
+        assert!(bad["waits"].failed && bad["waits"].not_kept.is_none());
+    }
+
+    // covers: C-43
+    #[test]
+    fn a_test_two_projects_ran_finished_only_where_both_finished_it() {
+        let worker = |paths: &[&str]| FactsFile {
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            ..FactsFile::default()
+        };
+        let a = worker(&["test/a.test.ts", "src/x.ts"]);
+        let b = worker(&["src/y.ts", "test/a.test.ts"]);
+        let mut tests = BTreeMap::new();
+        merge_tests(
+            &mut tests,
+            &a,
+            &[
+                told("t", true, false, Some(vec![0, 1])),
+                told("u", true, false, Some(vec![0])),
+                told("v", true, false, Some(vec![0])),
+            ],
+        );
+        merge_tests(
+            &mut tests,
+            &b,
+            &[
+                told("t", true, false, Some(vec![0, 1])),
+                told("u", false, false, Some(vec![1])),
+                told("v", true, true, None),
+            ],
+        );
+        // Each worker's indices are its own table's.
+        assert_eq!(
+            tests["t"].ran,
+            Some(BTreeSet::from([
+                "test/a.test.ts".to_string(),
+                "src/x.ts".to_string(),
+                "src/y.ts".to_string()
+            ]))
+        );
+        assert!(tests["t"].finished && !tests["t"].failed);
+        // Unfinished in one project: unfinished.
+        assert!(!tests["u"].finished);
+        // Failed in one: failed; and not watched alone in one: not watched.
+        assert!(tests["v"].failed);
+        assert_eq!(tests["v"].ran, None);
     }
 }

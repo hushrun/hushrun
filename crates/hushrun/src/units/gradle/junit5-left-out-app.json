@@ -1,0 +1,257 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit-platform",
+   "gradle": "8.14.5",
+   "invocations": [
+    {
+     "c": "ex.app.BeforeAllFailTest",
+     "f": "java.lang.IllegalStateException: beforeAll failed",
+     "ms": 1,
+     "n": "initializationError",
+     "p": [
+      [
+       "ex.app.BeforeAllFailTest",
+       "ex.app.BeforeAllFailTest"
+      ]
+     ],
+     "r": "FAILURE"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 15,
+     "n": "overloaded()",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 2,
+     "n": "overloaded(TestInfo)",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 1,
+     "n": "passes()",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "d": "repetition 1 of 2",
+     "ms": 1,
+     "n": "repeated()[1]",
+     "p": [
+      [
+       "repeated()",
+       "ex.app.CalcTest"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "d": "repetition 2 of 2",
+     "ms": 1,
+     "n": "repeated()[2]",
+     "p": [
+      [
+       "repeated()",
+       "ex.app.CalcTest"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 0,
+     "n": "disabled()",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "d": "custom a",
+     "ms": 3,
+     "n": "paramNamed(String)[1]",
+     "p": [
+      [
+       "paramNamed(String)",
+       "ex.app.CalcTest"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "d": "custom b",
+     "ms": 0,
+     "n": "paramNamed(String)[2]",
+     "p": [
+      [
+       "paramNamed(String)",
+       "ex.app.CalcTest"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "ms": 8,
+     "n": "abortedByAssumption()",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SKIPPED"
+    },
+    {
+     "c": "ex.app.CalcTest",
+     "d": "a nice display name",
+     "ms": 0,
+     "n": "displayNamed()",
+     "p": [
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest$Inner",
+     "ms": 0,
+     "n": "innerPasses()",
+     "p": [
+      [
+       "ex.app.CalcTest$Inner",
+       "ex.app.CalcTest$Inner"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.CalcTest$Inner$Deeper",
+     "ms": 1,
+     "n": "deep()",
+     "p": [
+      [
+       "ex.app.CalcTest$Inner$Deeper",
+       "ex.app.CalcTest$Inner$Deeper"
+      ],
+      [
+       "ex.app.CalcTest$Inner",
+       "ex.app.CalcTest$Inner"
+      ],
+      [
+       "ex.app.CalcTest",
+       "ex.app.CalcTest"
+      ]
+     ],
+     "r": "SUCCESS"
+    },
+    {
+     "c": "ex.app.StaticInitFailTest",
+     "f": "java.lang.ExceptionInInitializerError: ",
+     "ms": 6,
+     "n": "t()",
+     "p": [
+      [
+       "ex.app.StaticInitFailTest",
+       "ex.app.StaticInitFailTest"
+      ]
+     ],
+     "r": "FAILURE"
+    }
+   ],
+   "leftOut": {
+    "classes": [
+     "ex.app.FirstExtraTest",
+     "ex.app.SecondExtraTest"
+    ],
+    "how": "hook",
+    "notAttempted": [],
+    "tests": [
+     "ex.app.CalcTest$Inner.innerFails",
+     "ex.app.CalcTest.fails",
+     "ex.app.CalcTest.param",
+     "ex.app.CalcTest.dynamic"
+    ]
+   },
+   "names": {
+    "ex.app.BeforeAllFailTest": "app/src/test/java/ex/app/BeforeAllFailTest.java",
+    "ex.app.CalcTest": "app/src/test/java/ex/app/CalcTest.java",
+    "ex.app.FirstExtraTest": "app/src/test/java/ex/app/Extras.java",
+    "ex.app.SecondExtraTest": "app/src/test/java/ex/app/Extras.java",
+    "ex.app.StaticInitFailTest": "app/src/test/java/ex/app/StaticInitFailTest.java"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "executed",
+   "projectDir": "app",
+   "reads": {
+    "dirs": [
+     "app",
+     "lib"
+    ],
+    "paths": []
+   },
+   "rootDone": true,
+   "rootResult": "FAILURE",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":app:test",
+   "taskFailed": true
+  }
+ },
+ "units": []
+}

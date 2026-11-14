@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Unit key vectors (C-31). Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
+  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
   "vectors": [
     {
       "name": "pytest-unit",
@@ -262,6 +262,134 @@
         "shape": "sha256:7baf000fc1f953b9d78d7616b282046399188bbd46027c439e1c659101600e82",
         "key": "sha256:46a344ecdd295e9179f9a514591c823a9d6ac3ccd91057cef4dba5e6d660f851"
       }
+    },
+    {
+      "name": "pytest-test",
+      "covers": [
+        "C-39"
+      ],
+      "description": "A test of the first vector's test file, with `reads: file`: the same files as its test file, and its id. Only `schema` and `test` differ from that test file's key.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "pytest"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "tests/test_cart.py",
+      "files": [
+        {
+          "path": "shop/__init__.py",
+          "kind": "f",
+          "text": ""
+        },
+        {
+          "path": "shop/cart.py",
+          "kind": "f",
+          "text": "from shop.pricing import price\n"
+        },
+        {
+          "path": "shop/pricing.py",
+          "kind": "f",
+          "text": "def price():\n    return 3\n"
+        },
+        {
+          "path": "tests/test_cart.py",
+          "kind": "f",
+          "text": "from shop import cart\n"
+        },
+        {
+          "path": "uv.lock",
+          "kind": "f",
+          "text": "version = 1\n"
+        }
+      ],
+      "units": [
+        "tests/test_cart.py"
+      ],
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py"
+      ],
+      "rest": [
+        "uv.lock"
+      ],
+      "reads": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/test_cart.py"
+      ],
+      "expect": {
+        "reads": "sha256:f9ff6a0b6c0010a2e5de57c58f0b4486a0860ceaaf568ad9b7d5e484b9bb7f55",
+        "rest": "sha256:0e5dd440aedb46c67c94ada9bb16a1ab071611b9d309798387b00287cafcecbc",
+        "shape": "sha256:bc9bfee412d783a547d7a117a5c8f0c6ca2bf2a10a75ed71ee934f07149dc8e5",
+        "key": "sha256:d2c00aa274d56d0f6585b9deb5dae46bf49fd8d4799abdb9a3758f67dedd16a0"
+      },
+      "test": "TestCart::test_total[eur]"
+    },
+    {
+      "name": "non-ascii-test-id",
+      "covers": [
+        "C-39"
+      ],
+      "description": "A test whose id holds non-ASCII text and a space, as a parametrized case may: JCS writes it as UTF-8, unescaped.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "pytest",
+          "tests/"
+        ],
+        "cwd": "app",
+        "scope": "default"
+      },
+      "unit": "tests/test_é.py",
+      "files": [
+        {
+          "path": "Z.py",
+          "kind": "f",
+          "text": "z = 1\n"
+        },
+        {
+          "path": "a.py",
+          "kind": "f",
+          "text": "a = 1\n"
+        },
+        {
+          "path": "tests/test_é.py",
+          "kind": "f",
+          "text": "import a, Z, é\n"
+        },
+        {
+          "path": "é.py",
+          "kind": "f",
+          "text": "e = 1\n"
+        }
+      ],
+      "units": [
+        "tests/test_é.py"
+      ],
+      "sources": [
+        "é.py",
+        "a.py",
+        "Z.py"
+      ],
+      "rest": [],
+      "reads": [
+        "tests/test_é.py",
+        "é.py",
+        "a.py",
+        "Z.py"
+      ],
+      "expect": {
+        "reads": "sha256:e0c2af0123ac06d1d7f3e9c4fdc50fd6bd0461aae2a80455f92293d494c90cde",
+        "rest": "sha256:0bc5283b0122b17c7afdfc307dd1ff1f27206b60b07097e1652bfa3e5b008a2d",
+        "shape": "sha256:7baf000fc1f953b9d78d7616b282046399188bbd46027c439e1c659101600e82",
+        "key": "sha256:1bee80c94def519f7f82d587371e67902624f65f771a226d4431741aa517f9f2"
+      },
+      "test": "test_prix[déjà vu]"
     }
   ]
 }

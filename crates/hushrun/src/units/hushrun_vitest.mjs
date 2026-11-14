@@ -1,6 +1,6 @@
 // [ADR 0071] hushrun's Vitest adapter: the Vite plugin a repository's Vitest config loads with
 //
-//   plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]
+//   plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]
 //
 // which `hushrun init` proposes. Without HUSHRUN_VITEST (hushrun sets it only for a check whose
 // `tests` aren't off), the line adds nothing. With it, and HUSHRUN_UNITS naming the run's
@@ -55,7 +55,12 @@ function readRun(dir) {
   }
 }
 
-// The run's directory for this process, once claimed: the first Vitest that starts with it.
+// [C-32] What a claim reads once the start that held it ran no test file.
+const RELEASED = 'released:';
+
+// The run's directory for this process, once claimed: the first Vitest that starts with it, or
+// one after a start that claimed it and ran no test file (`vitest list`, `vitest related` with
+// nothing related, a run that found no test file), whose file it removes.
 function claim(dir) {
   const file = path.join(dir, 'vitest-claim');
   try {
@@ -65,11 +70,68 @@ function claim(dir) {
     return true;
   } catch {
     try {
+      const held = fs.readFileSync(file, 'utf8').trim();
+      if (held.startsWith(RELEASED)) {
+        try {
+          fs.unlinkSync(path.join(dir, `vitest-${held.slice(RELEASED.length)}.json`));
+        } catch {
+          // It wrote nothing.
+        }
+        const temp = path.join(dir, `.vitest-claim.${process.pid}.tmp`);
+        fs.writeFileSync(temp, String(process.pid));
+        fs.renameSync(temp, file);
+      }
       return fs.readFileSync(file, 'utf8').trim() === String(process.pid);
     } catch {
       return false;
     }
   }
+}
+
+// [C-32] Gives the claim up, for a start after this one in COMMAND that runs the tests: this one
+// ran no test file. With no such start, what it wrote stands.
+function release(dir) {
+  try {
+    const temp = path.join(dir, `.vitest-claim.${process.pid}.tmp`);
+    fs.writeFileSync(temp, `${RELEASED}${process.pid}`);
+    fs.renameSync(temp, path.join(dir, 'vitest-claim'));
+  } catch {
+    // Kept: a start after it is then a second start, and keeps the run's passes out.
+  }
+}
+
+// [C-32] Another start of Vitest beside the one that claimed the run (a script's `vitest run a &&
+// vitest run b`), which no claimer above it named: once it is about to run test files, what it
+// runs isn't observed, so it leaves a `.started` file saying why, never removed, and no pass of
+// the run is kept. A start that runs none leaves nothing.
+function secondStart(dir) {
+  return {
+    name: 'hushrun',
+    configureVitest({ vitest }) {
+      try {
+        if (vitest.__hushrunSecond) return;
+        vitest.__hushrunSecond = true;
+        // A run's start with test files: `vitest list` sorts its files, and starts no run.
+        vitest.config.reporters.push({
+          onTestRunStart(specifications) {
+            if (!Array.isArray(specifications) || !specifications.length) return;
+            try {
+              fs.writeFileSync(
+                path.join(dir, `vitest-second-${process.pid}.started`),
+                JSON.stringify({
+                  why: "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told",
+                }),
+              );
+            } catch {
+              // Unwritable: the run's own facts still say what the first start saw.
+            }
+          },
+        });
+      } catch {
+        // Its reporters can't be told: nothing is said of it.
+      }
+    },
+  };
 }
 
 function realOrSelf(p) {
@@ -88,9 +150,19 @@ function relativeTo(root, file) {
 
 export default function hushrun() {
   const dir = process.env.HUSHRUN_UNITS;
-  if (!dir || !fs.existsSync(dir) || !claim(dir)) return noop();
+  if (!dir || !fs.existsSync(dir)) return noop();
+  if (!claim(dir)) {
+    // A Vitest a test starts inherits the claimer's start, and adds nothing.
+    return process.env.HUSHRUN_VITEST_START ? noop() : secondStart(dir);
+  }
+  // [C-32] One id for this start of Vitest and every worker of it, whatever its projects or
+  // --shard: only the start that claimed the run writes.
+  process.env.HUSHRUN_VITEST_START ??= `vitest-${process.pid}-${Date.now()}`;
   const state = (globalThis[STATE] ??= {
     dir,
+    start: process.env.HUSHRUN_VITEST_START,
+    units: new Map(),
+    failuresByUnit: true,
     errors: [],
     whole: [],
     projects: new Map(),
@@ -99,7 +171,17 @@ export default function hushrun() {
     refused: null,
     installed: false,
     testFiles: null,
+    ran: false,
   });
+  // A start whose reporter never heard a run end with a test file run or left out (`vitest list`,
+  // which sorts its files and runs none, `vitest related` with nothing related, a run that found
+  // no test file) gives the claim up as it ends.
+  if (!state.exitHooked) {
+    state.exitHooked = true;
+    process.on('exit', () => {
+      if (!state.ran) release(dir);
+    });
+  }
   const guard = (what, fn) => {
     try {
       return fn();
@@ -129,11 +211,23 @@ export default function hushrun() {
         state.projects.set(resolved.root, { plugins: unknown });
       });
     },
-    transform(code, id) {
+    async transform(code, id) {
+      if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
+      // [ADR 0084, amended] The files it re-exports from (`export * from`, `export { x } from`):
+      // Vite runs `export *` through getters of its own, so no function of a barrel runs when a
+      // test reads through it, and a test's list follows these instead, to the end.
+      let reexports = [];
+      try {
+        reexports = await reexported(this, code, id);
+      } catch (err) {
+        state.errors.push(`reexports: ${err && err.message ? err.message : String(err)}`.slice(0, 500));
+      }
       return guard('transform', () => {
-        if (id.includes('/node_modules/') || id.includes('\\node_modules\\')) return null;
+        const told = reexports.length
+          ? `;(globalThis.__hushrun_vitest_reexports ||= {})[${JSON.stringify(id)}] = ${JSON.stringify(reexports)};`
+          : '';
         return {
-          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});`,
+          code: `${code}\n;(globalThis.__hushrun_vitest_seen ||= []).push(${JSON.stringify(id)});${told}`,
           map: null,
         };
       });
@@ -142,6 +236,39 @@ export default function hushrun() {
       guard('configureVitest', () => configure(state, vitest, project, guard));
     },
   };
+}
+
+// [ADR 0084, amended] The specifiers a module re-exports from, by its syntax tree when it parses
+// and by its text always: a re-export read where there is none only widens a test's list.
+const REEXPORT = /export\s*(?:type\s+)?(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*(['"])([^'"]+)\1/g;
+async function reexported(context, code, id) {
+  const specifiers = new Set();
+  for (const m of code.matchAll(REEXPORT)) specifiers.add(m[2]);
+  try {
+    const ast = context.parse(code);
+    for (const node of ast.body || []) {
+      if ((node.type === 'ExportAllDeclaration' || node.type === 'ExportNamedDeclaration')
+        && node.source && typeof node.source.value === 'string') {
+        specifiers.add(node.source.value);
+      }
+    }
+  } catch {
+    // Text the parser doesn't take: what its text says stands.
+  }
+  const out = [];
+  for (const specifier of specifiers) {
+    // One that doesn't resolve is text that only looks like a re-export (a string, a comment):
+    // a real one would fail the module's own import.
+    let resolved = null;
+    try {
+      resolved = await context.resolve(specifier, id);
+    } catch {
+      resolved = null;
+    }
+    const file = resolved && typeof resolved.id === 'string' ? resolved.id.split('?')[0] : null;
+    if (file && path.isAbsolute(file) && !out.includes(file)) out.push(file);
+  }
+  return out;
 }
 
 // What a project's configuration keeps from being observed, each as `{why, detail}`.
@@ -226,16 +353,38 @@ async function allTestFiles(vitest) {
 async function deselect(state, vitest, sorted) {
   state.testFiles = await allTestFiles(vitest);
   const run = readRun(state.dir);
-  if (!run || !Array.isArray(run.reuse) || run.reuse.length === 0) return sorted;
+  if (!run) return sorted;
   const root = realOrSelf(run.root);
-  if (vitest.config.coverage && vitest.config.coverage.enabled) {
-    state.refused = "Vitest's coverage is on, and a partial run's coverage would read as a drop";
-    return sorted;
-  }
+  const coverage = Boolean(vitest.config.coverage && vitest.config.coverage.enabled);
   const mine = [...state.testFiles].map((f) => relativeTo(root, f)).filter(Boolean).sort();
   const planned = [...(run.testFiles || [])].sort();
-  if (mine.length !== planned.length || mine.some((f, i) => f !== planned[i])) {
-    state.refused = "Vitest's test files aren't the ones hushrun planned from";
+  const same = mine.length === planned.length && mine.every((f, i) => f === planned[i]);
+  const refused = coverage
+    ? "Vitest's coverage is on, and a partial run's coverage would read as a drop"
+    : !same ? "Vitest's test files aren't the ones hushrun planned from" : null;
+  // [ADR 0084] Tests one by one, handed to the workers before any starts: the tests they may
+  // leave out only where test files may be, and watching each test only without Vitest's own
+  // coverage, which shares V8's counters.
+  if (run.unit === 'test') {
+    const reuseTests = refused === null && run.reuseTests && typeof run.reuseTests === 'object'
+      ? run.reuseTests : {};
+    if (refused !== null && run.reuseTests && Object.keys(run.reuseTests).length) {
+      state.refused = refused;
+    }
+    if (run.reads === 'test' && coverage) {
+      state.watch = "Vitest's coverage is on, and it shares V8's counters with watching a test";
+    }
+    writeWhole(path.join(state.dir, 'vitest-tests'), {
+      unit: 'test',
+      watch: run.reads === 'test' && !coverage,
+      root,
+      reuseTests,
+      configFiles: [...state.configFiles],
+    });
+  }
+  if (!Array.isArray(run.reuse) || run.reuse.length === 0) return sorted;
+  if (refused !== null) {
+    state.refused = refused;
     return sorted;
   }
   const reuse = new Set(run.reuse);
@@ -253,8 +402,12 @@ async function deselect(state, vitest, sorted) {
   return kept;
 }
 
+// The run's end, written whole each time Vitest says it ended: a run that ends more than once
+// (another set of files run in the same start) adds to what the earlier ends said, never replaces
+// it, and a file run twice ran whole only when it did each time.
 function report(state, vitest, modules, errors, reason) {
-  const units = new Map();
+  const units = state.units;
+  if (modules.length || state.removed.size) state.ran = true;
   for (const module of modules) {
     const unit = path.resolve(module.moduleId);
     const tests = [...module.children.allTests()];
@@ -268,6 +421,9 @@ function report(state, vitest, modules, errors, reason) {
       unit,
       selected: 0,
       finished: 0,
+      // [C-32] Its tests Vitest skipped (by their code, a filter, or hushrun): in a run that
+      // failed, the file records no pass.
+      skipped: 0,
       failed: false,
       deselected: false,
       durationMs: 0,
@@ -277,6 +433,7 @@ function report(state, vitest, modules, errors, reason) {
     };
     before.selected += selected;
     before.finished += finished;
+    before.skipped += states.filter((s) => s === 'skipped').length;
     before.failed ||= moduleState === 'failed' || !module.ok();
     before.durationMs += Math.round(module.diagnostic().duration || 0);
     const issues = state.issues.get(module.project.name || '') || [];
@@ -298,17 +455,31 @@ function report(state, vitest, modules, errors, reason) {
       });
     }
   }
+  // [C-37] The errors no test owns (an unhandled rejection, a timer that threw after its test),
+  // each with the test file Vitest says it came from: why no pass of the run is kept.
+  state.unhandled ??= [];
+  for (const error of errors || []) {
+    state.unhandled.push({
+      file: typeof error?.VITEST_TEST_PATH === 'string' ? error.VITEST_TEST_PATH : null,
+      message: String(error?.message ?? error).split('\n')[0].slice(0, 300),
+    });
+  }
   const bail = Number(vitest.config.bail || 0) > 0;
+  state.failuresByUnit &&= errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed');
   writeWhole(path.join(state.dir, `vitest-${process.pid}.json`), {
     edges: importEdges(vitest),
     schema: SCHEMA,
     adapter: 'vitest',
-    failuresByUnit: errors.length === 0 && reason !== 'interrupted' && !(bail && reason !== 'passed'),
+    start: state.start,
+    failuresByUnit: state.failuresByUnit,
     settings: {
       testFiles: [...(state.testFiles || [])],
       configFiles: [...state.configFiles],
       version: String(vitest.version || ''),
       refused: state.refused,
+      unhandled: state.unhandled,
+      // [ADR 0084] Why no test was watched, when `reads: test` asked and none could be.
+      ...(state.watch ? { watch: state.watch } : {}),
     },
     notFollowed: state.whole,
     units: [...units.values()],

@@ -4,7 +4,9 @@
 //!
 //! The fixtures need Node and Vitest 4.1.12, installed from npm outside the repository, with
 //! `HUSHRUN_TEST_VITEST` naming its `node_modules` (CI: `npm install --prefix <dir>
-//! vitest@4.1.12`). They say so and pass where it is missing, unless `HUSHRUN_TEST_TOOLS=required`.
+//! vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6`; TypeScript and Node's types for the test of
+//! a config that type-checks itself). They say so and pass where it is missing, unless
+//! `HUSHRUN_TEST_TOOLS=required`.
 
 #[path = "common/store.rs"]
 mod store;
@@ -69,7 +71,7 @@ const CLEARED: &[&str] = &[
 ];
 
 const NO_HOST: &str = "http://127.0.0.1:9";
-const LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())],";
+const LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined],";
 
 /// The `node_modules` with the pinned Vitest, when this machine has it.
 fn vitest_modules() -> Option<PathBuf> {
@@ -145,6 +147,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(cmd);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
@@ -203,6 +207,25 @@ impl Repo {
         store::map(&self.cache)
     }
 
+    /// \[ADR 0084\] The newest run result this machine recorded.
+    fn newest_result(&self) -> Value {
+        fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().is_some_and(|e| e == "json") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        collect(&self.cache.join("results/results/v0"), &mut files);
+        files.sort_by_key(|p| p.file_name().map(|n| n.to_owned()));
+        let newest = files.last().expect("a result");
+        serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
+    }
+
     fn reads(&self, unit: &str) -> Vec<String> {
         let map = self.map();
         map["units"][unit]["reads"]
@@ -250,8 +273,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))
@@ -388,7 +426,7 @@ fn vitest_test_files_are_observed_from_what_their_workers_ran_and_opened() {
     let changed = r.run(VITEST_RUN);
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
-        changed.observe_line(),
+        hushrun_testkit::lines::without_saving(changed.observe_line()),
         "hushrun: unit: with `tests: reuse`, 2 of 8 test files would have run; 6 already passed on the files they read"
     );
 }
@@ -406,7 +444,7 @@ fn without_the_config_line_or_one_run_vitest_is_left_alone_and_says_why() {
     let ran = r.run(VITEST_RUN);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert!(
-        ran.stderr.contains("hushrun: unit: test files aren't observed: Vitest loads hushrun's adapter from one line in vite.config.ts, which `hushrun init` proposes: `plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]`"),
+        ran.stderr.contains("hushrun: unit: test files aren't observed: Vitest loads hushrun's adapter from one line in vite.config.ts, which `hushrun init` proposes: `plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined]`"),
         "{}",
         ran.stderr
     );
@@ -423,6 +461,40 @@ fn without_the_config_line_or_one_run_vitest_is_left_alone_and_says_why() {
             .contains("test files aren't observed: vitest without run"),
         "{}",
         watching.stderr
+    );
+}
+
+// covers: C-30, C-35
+#[test]
+fn observe_counts_the_test_files_a_plan_counts_with_typecheck_on() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // Vitest's typecheck runs test/types.test-d.ts with tsc, outside its list of test files, which
+    // a plan counts: `observe` counts the same seven.
+    let mut files = shop("observe");
+    files.retain(|(path, _)| path != "vitest.config.ts");
+    files.push(file(
+        "vitest.config.ts",
+        &config("  test: { typecheck: { enabled: true } },\n"),
+    ));
+    files.push(file(
+        "tsconfig.json",
+        "{\"compilerOptions\": {\"strict\": true, \"module\": \"esnext\", \"moduleResolution\": \"bundler\", \"noEmit\": true, \"skipLibCheck\": true}, \"include\": [\"src\", \"test\"]}\n",
+    ));
+    files.push(file(
+        "test/types.test-d.ts",
+        "import { expectTypeOf, test } from 'vitest'\n\ntest('types', () => { expectTypeOf(1).toEqualTypeOf<number>() })\n",
+    ));
+    let r = Repo::new(&files);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr
+            .contains("hushrun: unit: with `tests: reuse`, all 7 test files would have run"),
+        "{}\n{}",
+        ran.stderr,
+        ran.stdout
     );
 }
 
@@ -447,7 +519,7 @@ fn vitest_reuses_what_already_passed() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 7 test files run; 4 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         plain(&second.stdout).contains("Test Files  3 passed (3)"),
@@ -455,7 +527,7 @@ fn vitest_reuses_what_already_passed() {
         second.stdout
     );
     assert!(
-        second.stderr.contains("4 test files reused"),
+        hushrun_testkit::lines::says_reused(&second.stderr, 4, "test files"),
         "{}",
         second.stderr
     );
@@ -512,7 +584,7 @@ fn an_injected_missed_dependency_in_vitest_is_caught_by_an_audit() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.plan_line(),
-        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains("unit: test/hidden.test.ts failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"),
@@ -886,6 +958,1776 @@ fn vitest_hazards_miss_no_failure() {
     assert!(reused > 0);
 }
 
+// ---------------------------------------------------------------------------------------------
+// [ADR 0084] Tests one by one (C-39, C-43).
+
+/// The plugin and its setup file, as hushrun writes them.
+const PLUGIN: &str = include_str!("../src/units/hushrun_vitest.mjs");
+const SETUP: &str = include_str!("../src/units/hushrun_vitest_setup.mjs");
+
+/// What Vitest with hushrun's plugin did, with tests told one by one.
+struct Told {
+    code: i32,
+    stdout: String,
+    /// Each test file's worker facts, by its path from the root.
+    workers: std::collections::BTreeMap<String, Value>,
+}
+
+impl Told {
+    fn unit(&self, unit: &str) -> &Value {
+        self.workers
+            .get(unit)
+            .unwrap_or_else(|| panic!("no facts for {unit}: {:#?}", self.workers.keys()))
+    }
+
+    /// Each test of `unit` that the worker told, by id.
+    fn tests(&self, unit: &str) -> std::collections::BTreeMap<String, Value> {
+        self.unit(unit)["units"][0]["tests"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{unit} told no tests: {:#}", self.unit(unit)))
+            .iter()
+            .map(|t| (t["id"].as_str().unwrap().to_string(), t.clone()))
+            .collect()
+    }
+
+    fn ids(&self, unit: &str) -> Vec<String> {
+        self.unit(unit)["units"][0]["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The paths a list of indices names in `unit`'s facts, in order; `None` for no list.
+    fn names(&self, unit: &str, indices: &Value) -> Option<Vec<String>> {
+        let paths = self.unit(unit)["paths"].as_array().unwrap();
+        let mut out: Vec<String> = indices
+            .as_array()?
+            .iter()
+            .map(|i| {
+                paths[i.as_u64().unwrap() as usize]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        out.sort();
+        Some(out)
+    }
+
+    /// What one test of `unit` ran, opened or listed (`what`).
+    fn list(&self, unit: &str, id: &str, what: &str) -> Option<Vec<String>> {
+        let tests = self.tests(unit);
+        let test = tests
+            .get(id)
+            .unwrap_or_else(|| panic!("no test {id:?} in {:?}", tests.keys()));
+        self.names(unit, &test[what])
+    }
+
+    /// Each file's direct imports in `unit`'s facts, by path.
+    fn imports(&self, unit: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let facts = self.unit(unit);
+        let paths = facts["paths"].as_array().unwrap();
+        facts["imports"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(from, to)| {
+                let from = paths[from.parse::<usize>().unwrap()].as_str().unwrap();
+                (from.to_string(), self.names(unit, to).unwrap())
+            })
+            .collect()
+    }
+}
+
+/// The test files of `r`, as Vitest's default `include` names them here.
+fn test_files(r: &Repo) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if name.ends_with(".test.ts") {
+                let rel = path.strip_prefix(root).unwrap();
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&r.repo, &r.repo, &mut out);
+    out.sort();
+    out
+}
+
+/// Vitest with hushrun's plugin and a `hushrun.json` written here, as a plan with `unit: test`
+/// would: `reads`, and the tests it may leave out.
+fn tests_vitest(
+    r: &Repo,
+    reads: &str,
+    reuse_tests: Value,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Told {
+    let units = r.root.join("units");
+    let _ = std::fs::remove_dir_all(&units);
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("hushrun.json"),
+        json!({"schema": "hushrun.units/v0", "root": r.repo, "reuse": [],
+               "testFiles": test_files(r), "unit": "test", "reads": reads,
+               "reuseTests": reuse_tests})
+        .to_string(),
+    )
+    .unwrap();
+    let adapter = r.root.join("adapter");
+    std::fs::create_dir_all(&adapter).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest.mjs"), PLUGIN).unwrap();
+    std::fs::write(adapter.join("hushrun-vitest-setup.mjs"), SETUP).unwrap();
+    let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
+    Repo::clean(&mut cmd);
+    let out = cmd
+        .arg("run")
+        .args(args)
+        .current_dir(&r.repo)
+        .env("HUSHRUN_UNITS", &units)
+        .env(
+            "HUSHRUN_VITEST",
+            format!("file://{}", adapter.join("hushrun-vitest.mjs").display()),
+        )
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let mut workers = std::collections::BTreeMap::new();
+    for path in std::fs::read_dir(&units)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+    {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !name.starts_with("vitest-worker-") || !name.ends_with(".json") {
+            continue;
+        }
+        let facts: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // A worker that tells tests names its unit from the root (ADR 0084).
+        let unit = facts["units"][0]["unit"].as_str().unwrap().to_string();
+        assert!(!Path::new(&unit).is_absolute(), "{unit}");
+        workers.insert(unit, facts);
+    }
+    Told {
+        code: out.status.code().unwrap_or(-1),
+        stdout: plain(&String::from_utf8_lossy(&out.stdout))
+            + &plain(&String::from_utf8_lossy(&out.stderr)),
+        workers,
+    }
+}
+
+/// A repository with `files` besides the config and package.json.
+fn told_repo(files: &[(&str, &str)]) -> Repo {
+    let mut all = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+    ];
+    all.extend(files.iter().map(|(p, t)| file(p, t)));
+    Repo::new(&all)
+}
+
+const NAMES: &str = "import { describe, test, expect, beforeAll } from 'vitest'
+import { writeFileSync } from 'node:fs'
+describe('cart', () => {
+  test('total', () => {})
+  test('total', () => {})
+  describe('in euros', () => {
+    beforeAll(() => { writeFileSync(process.env.MARK ?? '/dev/null', 'ran') })
+    test('rounds', () => {})
+  })
+  test.each([1, 2])('adds %i', (n) => { expect(n).toBeGreaterThan(0) })
+})
+describe('a > b', () => { test('c', () => {}) })
+describe('a', () => { describe('b', () => { test('c', () => {}) }) })
+test('top', () => {})
+test.skip('skipped', () => {})
+test.todo('later')
+";
+
+// covers: C-43, C-39
+#[test]
+fn vitest_names_each_test_by_its_suites_and_leaves_out_the_listed_ones_before_their_hooks() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("test/names.test.ts", NAMES),
+        (
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('one', () => {})\ntest('two', () => {})\n",
+        ),
+    ]);
+    let mark = r.root.join("mark");
+    let told = tests_vitest(&r, "file", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    // Suites' names and its own, ` [2]` for the second of a name, `test.each`'s cases each a test;
+    // a skipped test and a todo passed; the two that join to `a > b > c` from different suites
+    // are told once, by that id, and never left out.
+    assert_eq!(
+        told.ids("test/names.test.ts"),
+        [
+            "cart > total",
+            "cart > total [2]",
+            "cart > in euros > rounds",
+            "cart > adds 1",
+            "cart > adds 2",
+            "a > b > c",
+            "top",
+            "skipped",
+            "later",
+        ]
+    );
+    let tests = told.tests("test/names.test.ts");
+    for (id, test) in &tests {
+        assert_eq!(
+            (&test["finished"], &test["failed"], &test["deselected"]),
+            (&json!(true), &json!(false), &json!(false)),
+            "{id}"
+        );
+        // With `reads: file`, no test is watched.
+        assert!(test.get("ran").is_none(), "{id}: {test}");
+    }
+
+    // The listed tests are left out after collection: a suite all of whose tests are left out
+    // doesn't run its `beforeAll`, and what Vitest says is a pass, with the tests skipped.
+    std::fs::write(&mark, "").unwrap();
+    let listed = json!({"test/names.test.ts": ["cart > total [2]", "cart > in euros > rounds",
+                                               "cart > adds 1", "a > b > c", "skipped", "gone"]});
+    let told = tests_vitest(&r, "file", listed, &[], &[("MARK", mark.to_str().unwrap())]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    assert_eq!(std::fs::read_to_string(&mark).unwrap(), "", "beforeAll ran");
+    // Vitest counts the tests of a suite it skipped whole in its total only: it reports no
+    // result for them.
+    assert!(
+        told.stdout
+            .contains("Tests  7 passed | 3 skipped | 1 todo (12)"),
+        "{}",
+        told.stdout
+    );
+    let tests = told.tests("test/names.test.ts");
+    let left: Vec<&String> = tests
+        .iter()
+        .filter(|(_, t)| t["deselected"] == true)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        left,
+        [
+            "cart > adds 1",
+            "cart > in euros > rounds",
+            "cart > total [2]"
+        ]
+    );
+    for id in &left {
+        assert_eq!(tests[*id]["finished"], false, "{id}");
+    }
+    // A skipped test isn't left out: Vitest skips it anyway, and it passed.
+    assert_eq!(tests["skipped"]["deselected"], false);
+    assert_eq!(tests["skipped"]["finished"], true);
+    // Two tests that share an id ran, though listed, and say they are never left out.
+    assert_eq!(
+        (
+            &tests["a > b > c"]["deselected"],
+            &tests["a > b > c"]["finished"],
+            &tests["a > b > c"]["neverLeftOut"]
+        ),
+        (&json!(false), &json!(true), &json!(true))
+    );
+
+    // Every test of one file left out: the file is skipped, and the run still passes.
+    let every = json!({"test/other.test.ts": ["one", "two"]});
+    let told = tests_vitest(&r, "file", every, &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    assert!(
+        told.stdout.contains("Test Files  1 passed | 1 skipped (2)"),
+        "{}",
+        told.stdout
+    );
+    assert!(
+        told.tests("test/other.test.ts")
+            .values()
+            .all(|t| t["deselected"] == true)
+    );
+    // Every test of every file: still a pass.
+    let names: Vec<String> = told.ids("test/names.test.ts");
+    let all = json!({"test/other.test.ts": ["one", "two"], "test/names.test.ts": names});
+    let told = tests_vitest(&r, "file", all, &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+}
+
+const OUTCOMES: &str = "import { describe, test, expect, beforeAll, afterAll } from 'vitest'
+describe('opens', () => {
+  beforeAll(() => { throw new Error('no database') })
+  test('one', () => {})
+  test('two', () => {})
+})
+describe('closes', () => {
+  afterAll(() => { throw new Error('left open') })
+  test('three', () => {})
+})
+test('fails', () => { expect(1).toBe(2) })
+let tries = 0
+test('flaky', { retry: 2 }, () => { tries += 1; expect(tries).toBe(2) })
+test.fails('known bug', () => { expect(1).toBe(2) })
+test('skips itself', (ctx) => { ctx.skip() })
+test('plain', () => {})
+";
+
+// covers: C-43, C-39
+#[test]
+fn each_vitest_test_ends_as_vitest_says_and_a_filter_tells_nothing() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("test/outcomes.test.ts", OUTCOMES),
+        (
+            "test/broken.test.ts",
+            "import { test } from 'vitest'\nimport '../src/missing'\ntest('never', () => {})\n",
+        ),
+        (
+            "test/only.test.ts",
+            "import { test } from 'vitest'\ntest.only('chosen', () => {})\ntest('other', () => {})\ntest.skip('skipped', () => {})\n",
+        ),
+    ]);
+    let told = tests_vitest(&r, "test", json!({}), &[], &[]);
+    assert_eq!(told.code, 1, "{}", told.stdout);
+    let tests = told.tests("test/outcomes.test.ts");
+    let ended = |id: &str| {
+        let t = &tests[id];
+        (
+            t["finished"].as_bool().unwrap(),
+            t["failed"].as_bool().unwrap(),
+        )
+    };
+    // A failing `beforeAll` fails its file (Vitest says so of it), and its tests didn't finish.
+    assert_eq!(ended("opens > one"), (false, false));
+    assert_eq!(ended("opens > two"), (false, false));
+    // A failing `afterAll` fails the tests it ended: they don't pass, and run again.
+    assert_eq!(ended("closes > three"), (true, true));
+    assert_eq!(ended("fails"), (true, true));
+    // Retries, `test.fails` and a test that skipped itself: Vitest's word.
+    assert_eq!(ended("flaky"), (true, false));
+    assert_eq!(ended("known bug"), (true, false));
+    assert_eq!(ended("skips itself"), (true, false));
+    assert_eq!(ended("plain"), (true, false));
+    assert!(tests["plain"]["durationMs"].is_u64());
+    // A test that skipped itself ends with no `onAfterRunTask`: the tests after it are still
+    // watched alone.
+    assert!(tests["plain"]["ran"].is_array(), "{}", tests["plain"]);
+    // A file that can't be collected tells no test: hushrun's main process says it failed.
+    assert_eq!(told.ids("test/broken.test.ts"), Vec::<String>::new());
+    // `.only` leaves the others out: they aren't tests that passed, and aren't told; a skipped
+    // test is.
+    assert_eq!(told.ids("test/only.test.ts"), ["chosen", "skipped"]);
+
+    // Vitest's own name filter: what it left out isn't told either.
+    let told = tests_vitest(&r, "file", json!({}), &["-t", "plain|three"], &[]);
+    assert_eq!(
+        told.ids("test/outcomes.test.ts"),
+        ["closes > three", "plain"]
+    );
+}
+
+const WATCHED: &str =
+    "import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { readFileSync, readdirSync } from 'node:fs'
+import { used, K } from '../src/lib'
+import { connect, close } from '../src/db'
+import { hook } from '../src/each'
+import { NEAR } from '../src/near'
+import { atLoad } from '../src/load'
+const loaded = atLoad()
+describe('db', () => {
+  beforeAll(() => { connect() })
+  afterAll(() => { close() })
+  beforeEach(() => { hook() })
+  test('uses a function', () => { expect(used(2)).toBe(4) })
+  test('uses a constant', () => { expect(K).toBe(5) })
+})
+test('reads a file', () => {
+  expect(readFileSync('data/fixture.json', 'utf8')).toContain('1')
+  expect(readdirSync('data').length).toBe(1)
+})
+test('nothing else', () => { expect(loaded).toBe(1) })
+test('a constant next door', () => { expect(NEAR).toBe(2) })
+";
+
+fn watched_repo() -> Repo {
+    told_repo(&[
+        ("src/rate.ts", "export const RATE = 2\n"),
+        (
+            "src/lib.ts",
+            "import { RATE } from './rate'\nexport function used(x: number) { return x * RATE }\nexport const K = 5\n",
+        ),
+        (
+            "src/db.ts",
+            "export function connect() { return 'db' }\nexport function close() { return 'closed' }\n",
+        ),
+        ("src/each.ts", "export function hook() { return 1 }\n"),
+        ("src/far.ts", "export const FAR = 1\n"),
+        (
+            "src/near.ts",
+            "import { FAR } from './far'\nexport const NEAR = FAR + 1\n",
+        ),
+        ("src/load.ts", "export function atLoad() { return 1 }\n"),
+        ("data/fixture.json", "[1]\n"),
+        ("test/watched.test.ts", WATCHED),
+        (
+            "test/together.test.ts",
+            "import { describe, test } from 'vitest'\nimport { hook } from '../src/each'\ntest('alone', () => { hook() })\ndescribe.concurrent('at once', () => {\n  test('a', async () => { await new Promise((r) => setTimeout(r, 5)) })\n  test('b', async () => { hook() })\n})\n",
+        ),
+    ])
+}
+
+// covers: C-43
+#[test]
+fn vitest_watches_what_each_test_ran_opened_and_listed() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = watched_repo();
+    let told = tests_vitest(&r, "test", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let unit = "test/watched.test.ts";
+    let ran = |id: &str| told.list(unit, id, "ran").unwrap();
+    // The files a function of which was called while it ran, its `beforeEach` included; an
+    // import's getter is a function, so a constant read from another module counts.
+    assert_eq!(
+        ran("db > uses a function"),
+        ["src/each.ts", "src/lib.ts", "src/rate.ts", unit]
+    );
+    assert_eq!(
+        ran("db > uses a constant"),
+        ["src/each.ts", "src/lib.ts", unit]
+    );
+    // What it opened and listed.
+    assert_eq!(ran("reads a file"), [unit]);
+    assert_eq!(
+        told.list(unit, "reads a file", "opened").unwrap(),
+        ["data/fixture.json"]
+    );
+    assert_eq!(told.list(unit, "reads a file", "dirs").unwrap(), ["data"]);
+    assert_eq!(
+        told.list(unit, "nothing else", "opened").unwrap(),
+        Vec::<String>::new()
+    );
+    // A module's top-level code isn't a function called: far.ts made NEAR when it was imported.
+    assert_eq!(ran("a constant next door"), ["src/near.ts", unit]);
+    assert_eq!(ran("nothing else"), [unit]);
+    // Each module's direct imports, as the worker evaluated them.
+    let imports = told.imports(unit);
+    assert_eq!(imports["src/near.ts"], ["src/far.ts"]);
+    assert_eq!(imports["src/lib.ts"], ["src/rate.ts"]);
+    assert_eq!(
+        imports[unit],
+        [
+            "src/db.ts",
+            "src/each.ts",
+            "src/lib.ts",
+            "src/load.ts",
+            "src/near.ts"
+        ]
+    );
+    // A suite's `beforeAll` and `afterAll`, for the tests of the suite.
+    let facts = &told.unit(unit)["units"][0];
+    let shared: Vec<(Vec<u64>, Vec<String>)> = facts["shared"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| !s["ran"].as_array().unwrap().is_empty())
+        .map(|s| {
+            let tests = s["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_u64().unwrap());
+            (tests.collect(), told.names(unit, &s["ran"]).unwrap())
+        })
+        .collect();
+    let ids = told.ids(unit);
+    let at = |id: &str| ids.iter().position(|i| i == id).unwrap() as u64;
+    assert_eq!(
+        shared,
+        [(
+            vec![at("db > uses a function"), at("db > uses a constant")],
+            vec!["src/db.ts".to_string(), unit.to_string()]
+        )]
+    );
+    // What loading the file ran, for every test: a function called at import, and far.ts, whose
+    // FAR near.ts read through its getter when it was imported; and what Vitest loads for every
+    // test, the config.
+    assert_eq!(
+        told.names(unit, &facts["loaded"]["ran"]).unwrap(),
+        ["src/far.ts", "src/load.ts", unit]
+    );
+    assert_eq!(
+        told.names(unit, &facts["everyTest"]).unwrap(),
+        ["vitest.config.ts"]
+    );
+
+    // Two tests at once can't be watched alone: no test of that file says what it ran, so each
+    // gets its file's list.
+    let together = told.tests("test/together.test.ts");
+    assert_eq!(together.len(), 3);
+    for (id, test) in &together {
+        assert_eq!(test["finished"], true, "{id}");
+        assert!(test.get("ran").is_none(), "{id}: {test}");
+        assert!(test.get("opened").is_none(), "{id}: {test}");
+    }
+    // `reads: file` watches nothing.
+    let told = tests_vitest(&r, "file", json!({}), &[], &[]);
+    assert!(told.tests(unit).values().all(|t| t.get("ran").is_none()));
+    assert!(told.unit(unit)["units"][0].get("loaded").is_none());
+}
+
+// covers: C-43, C-39
+#[test]
+fn a_program_one_vitest_test_starts_is_that_tests_alone() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        (
+            "test/spawn.test.ts",
+            "import { describe, test, beforeAll } from 'vitest'\nimport { execFileSync } from 'node:child_process'\nconst node = process.execPath\ntest('spawns', () => { execFileSync(node, ['-e', '1']) })\ntest('plain', () => {})\ndescribe('served', () => {\n  beforeAll(() => { execFileSync(node, ['-e', '2']) })\n  test('one', () => {})\n})\n",
+        ),
+        (
+            "test/load.test.ts",
+            "import { test } from 'vitest'\nimport { execFileSync } from 'node:child_process'\nexecFileSync(process.execPath, ['-e', '3'])\ntest('any', () => {})\n",
+        ),
+    ]);
+    let told = tests_vitest(&r, "test", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let unit = "test/spawn.test.ts";
+    let tests = told.tests(unit);
+    let why = |id: &str| -> Vec<String> {
+        tests[id]["notFollowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["why"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Inside one test's window: its own; in a suite's `beforeAll`: the tests it serves'.
+    assert_eq!(why("spawns"), ["subprocess"]);
+    assert_eq!(why("plain"), Vec::<String>::new());
+    assert_eq!(why("served > one"), ["subprocess"]);
+    assert_eq!(told.unit(unit)["units"][0]["notFollowed"], json!([]));
+    // While the file loaded: the file's, every test's.
+    let load = &told.unit("test/load.test.ts")["units"][0];
+    assert_eq!(load["notFollowed"][0]["why"], "subprocess");
+    assert_eq!(load["tests"][0]["notFollowed"], json!([]));
+}
+
+/// A shop with tests one by one: a cart test file with a test that fails while FAIL is set, and
+/// greet test files that pass.
+fn told_shop(tests: &str) -> Vec<(String, String)> {
+    let mut files = shop(tests);
+    files.retain(|(p, _)| p != "test/cart.test.ts");
+    files.push(file(
+        "test/cart.test.ts",
+        "import { describe, test, expect } from 'vitest'\nimport { total } from '../src/cart'\n\ntest('total', () => { expect(total([1, 2])).toBe(6) })\ntest('flips', () => { expect(process.env.FAIL).toBeUndefined() })\ndescribe('more', () => { test('three', () => { expect(total([1])).toBe(2) }) })\n",
+    ));
+    files
+}
+
+// covers: C-43, C-39
+#[test]
+fn with_tests_as_the_unit_vitest_runs_again_only_the_test_that_failed() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = Repo::new(&told_shop("{mode: reuse, unit: test}"));
+    let first = r.run_env(VITEST_RUN, &[("FAIL", "1")]);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    let map = r.map();
+    assert_eq!(
+        map["units"]["test/cart.test.ts"]["tests"],
+        json!({"flips": "failed", "more > three": "passed", "total": "passed"}),
+        "{map:#}"
+    );
+    // The same files, the flip fixed: cart's own key failed, so its tests are asked one by one.
+    // Of those that passed, one runs as a check, and of the files that passed whole, one.
+    let second = r.run(VITEST_RUN);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        hushrun_testkit::lines::drawn(
+            second
+                .stderr
+                .lines()
+                .find(|l| l.contains(" tests run, in "))
+                .unwrap_or_else(|| panic!("{}", second.stderr))
+        ),
+        hushrun_testkit::lines::drawn(
+            "hushrun: unit: 2 of 9 tests run, in 1 of 7 test files; 7 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
+    );
+    // Vitest ran flips and the audited test, wherever the draw found it, and left out the reused
+    // tests: skipped in a file it loaded, or never loaded with a file reused whole.
+    let stdout = plain(&second.stdout);
+    assert!(stdout.contains("Tests  2 passed"), "{}", second.stdout);
+    let result = r.newest_result();
+    assert_eq!(result["result"], "pass");
+    // \[C-39\] The tests Vitest told, those of the two files it ran, and those this machine knows
+    // of the files reused whole: as the line counts them.
+    assert_eq!(
+        result["units"]["tests"],
+        json!({"total": 9, "ran": 2, "reused": 7})
+    );
+    // A reused test keeps the row it stands on; flips passed now.
+    let map = r.map();
+    assert_eq!(
+        map["units"]["test/cart.test.ts"]["tests"],
+        json!({"flips": "passed", "more > three": "passed", "total": "passed"}),
+        "{map:#}"
+    );
+    // The same code again: the check skips whole.
+    let again = r.run(VITEST_RUN);
+    assert!(again.stderr.contains("unit skipped"), "{}", again.stderr);
+}
+
+// covers: C-32, C-43
+#[test]
+fn a_skip_in_a_vitest_run_that_failed_records_nothing() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A skip says the body didn't run: in a run that failed that may be the failure's doing, so a
+    // skipped test and its file record no pass; in a run that passed, a skip is a pass.
+    let mut files = told_shop("{mode: reuse, unit: test}");
+    files.push(file(
+        "test/skips.test.ts",
+        "import { describe, test, expect } from 'vitest'\ntest.skip('skipped', () => {})\ndescribe.skip('box', () => { test('inner', () => {}) })\ntest.todo('later')\ntest.skipIf(true)('when', () => {})\ntest('itself', (ctx) => { ctx.skip() })\ntest('ok', () => {})\ntest('bad', () => { expect(process.env.FIXED).toBeTruthy() })\n",
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.map()["units"]["test/skips.test.ts"]["tests"],
+        json!({"skipped": "not-run", "box > inner": "not-run", "later": "not-run",
+               "when": "not-run", "itself": "not-run", "ok": "passed", "bad": "failed"})
+    );
+    let second = r.run_env(VITEST_RUN, &[("FIXED", "1")]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        r.map()["units"]["test/skips.test.ts"]["tests"],
+        json!({"skipped": "passed", "box > inner": "passed", "later": "passed",
+               "when": "passed", "itself": "passed", "ok": "passed", "bad": "passed"})
+    );
+}
+
+// covers: C-43, C-39, C-34
+#[test]
+fn an_audited_vitest_test_that_fails_again_alone_suspends_reuse() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // One test file, two tests: one fails while FAIL is set, the other while HIDDEN is, which no
+    // file says, as a missed dependency would.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/two.test.ts",
+            "import { test, expect } from 'vitest'\ntest('ok', () => { expect(process.env.HIDDEN).toBeUndefined() })\ntest('flips', () => { expect(process.env.FAIL).toBeUndefined() })\n",
+        ),
+    ];
+    let r = Repo::new(&files);
+    assert_eq!(r.run_env(VITEST_RUN, &[("FAIL", "1")]).code, 1);
+    // ok passed on these files, and is the one test that could be reused: it runs as a check,
+    // and fails. It runs once more, alone, and fails again: a disagreement.
+    let caught = r.run_env(VITEST_RUN, &[("HIDDEN", "1")]);
+    assert_eq!(caught.code, 1, "{}", caught.stderr);
+    assert!(
+        caught.stderr.contains(
+            "hushrun: unit: all 2 tests run; 1 that already passed on the files it read runs anyway, as a check"
+        ),
+        "{}",
+        caught.stderr
+    );
+    assert!(
+        caught.stderr.contains(
+            "hushrun: unit: test/two.test.ts::ok failed, though it passed before on the same files it read: running it once more"
+        ),
+        "{}",
+        caught.stderr
+    );
+    // The second run ran ok alone: flips was left out one by one.
+    assert!(
+        plain(&caught.stdout).contains("Tests  1 failed | 1 skipped (2)"),
+        "{}",
+        caught.stdout
+    );
+    assert!(
+        caught.stderr.contains(
+            "hushrun: unit: test/two.test.ts::ok failed again, though it passed before on the same files it read: reuse of unit's test files is suspended"
+        ),
+        "{}",
+        caught.stderr
+    );
+    assert_eq!(store::disagreements(&r.cache), ["test/two.test.ts::ok"]);
+}
+
+/// A coverage provider that measures nothing, so that Vitest's coverage is on with no package.
+const NO_COVERAGE: &str = "const self = new URL(import.meta.url).pathname
+export default {
+  getProvider() {
+    let options
+    return {
+      name: 'none',
+      initialize(ctx) { options = { ...ctx.config.coverage, customProviderModule: self } },
+      resolveOptions() { return options },
+      clean() {}, onAfterSuiteRun() {}, generateCoverage() { return {} }, reportCoverage() {},
+    }
+  },
+  startCoverage() {}, takeCoverage() { return {} }, stopCoverage() {},
+}
+";
+
+// covers: C-43
+#[test]
+fn with_vitests_coverage_on_no_test_is_left_out_or_watched() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("cov.mjs", NO_COVERAGE),
+        (
+            "test/two.test.ts",
+            "import { test } from 'vitest'\ntest('one', () => {})\ntest('two', () => {})\n",
+        ),
+    ]);
+    r.write(
+        "vitest.config.ts",
+        &config("  test: { coverage: { enabled: true, provider: 'custom', customProviderModule: './cov.mjs' } },\n"),
+    );
+    // Coverage shares V8's counters with watching, and a partial run's coverage would read as a
+    // drop: every test runs, and none says what it ran.
+    let told = tests_vitest(&r, "test", json!({"test/two.test.ts": ["one"]}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let tests = told.tests("test/two.test.ts");
+    for (id, test) in &tests {
+        assert_eq!(
+            (&test["finished"], &test["deselected"]),
+            (&json!(true), &json!(false)),
+            "{id}"
+        );
+        assert!(test.get("ran").is_none(), "{id}: {test}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// [ADR 0084] `reads: test` through `hushrun run` (C-40, C-43): what a watched test's own list
+// catches, and what Vitest makes of the two misses RFC 0004 §3.2 names.
+
+/// A repository for `reads`, with `files` and a test file every change runs.
+fn reads_repo(files: &[(&str, &str)], tests: &str) -> Repo {
+    let mut all = vec![
+        file("hushrun.yaml", &yaml(tests)),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('other', () => {})\n",
+        ),
+    ];
+    for (path, text) in files {
+        all.retain(|(p, _)| p != path);
+        all.push(file(path, text));
+    }
+    Repo::new(&all)
+}
+
+/// Whether `observe`, with `reads`, would have reused `target` of `test/a.test.ts` after `change`
+/// made it fail: what its disagreement line says.
+fn would_reuse_test(files: &[(&str, &str)], change: (&str, &str), reads: &str) -> bool {
+    let r = reads_repo(
+        files,
+        &format!("{{mode: observe, unit: test, reads: {reads}}}"),
+    );
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        !first.stderr.contains("each test is taken to have read"),
+        "{}",
+        first.stderr
+    );
+    r.write(change.0, change.1);
+    let second = r.run(VITEST_RUN);
+    assert_eq!(
+        second.code, 1,
+        "the change makes target fail:\n{}\n{}",
+        second.stdout, second.stderr
+    );
+    assert!(
+        plain(&second.stdout).contains("target"),
+        "{}",
+        second.stdout
+    );
+    second.stderr.contains(
+        "hushrun: unit: test/a.test.ts::target failed, though it passed before on the same files it read: with `tests: reuse` it would have been reused",
+    )
+}
+
+/// `reads: test` follows the change: neither setting would reuse the test.
+fn caught_by_vitest(files: &[(&str, &str)], change: (&str, &str)) {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    assert!(!would_reuse_test(files, change, "file"), "reads: file");
+    assert!(!would_reuse_test(files, change, "test"), "reads: test");
+}
+
+/// A known miss of `reads: test` (RFC 0004 §3.2): `reads: file` runs the test, `reads: test`
+/// would reuse it. Whoever closes the miss changes the second assertion.
+fn known_miss_of_vitest(files: &[(&str, &str)], change: (&str, &str)) {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    assert!(!would_reuse_test(files, change, "file"), "reads: file");
+    assert!(
+        would_reuse_test(files, change, "test"),
+        "reads: test: a known miss"
+    );
+}
+
+const T: &str = "import { describe, test, expect, beforeAll } from 'vitest'\n";
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_function_called() {
+    caught_by_vitest(
+        &[
+            ("src/calc.ts", "export function f() { return 1 }\n"),
+            (
+                "src/facade.ts",
+                "import { f } from './calc'\nexport function g() { return f() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ g }} from '../src/facade'\ntest('target', () => {{ expect(g()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/calc.ts", "export function f() { return 2 }\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_constant_the_code_that_ran_imports_directly() {
+    caught_by_vitest(
+        &[
+            ("src/consts.ts", "export const K = 1\n"),
+            (
+                "src/facade.ts",
+                "import { K } from './consts'\nexport function g() { return K }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ g }} from '../src/facade'\ntest('target', () => {{ expect(g()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/consts.ts", "export const K = 2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_constant_the_test_file_imports_directly() {
+    caught_by_vitest(
+        &[
+            ("src/consts.ts", "export const K = 1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ K }} from '../src/consts'\ntest('target', () => {{ expect(K).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/consts.ts", "export const K = 2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_file_opened() {
+    caught_by_vitest(
+        &[
+            ("data/value.txt", "1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ readFileSync }} from 'node:fs'\ntest('target', () => {{ expect(readFileSync('data/value.txt', 'utf8').trim()).toBe('1') }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("data/value.txt", "2\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_file_a_module_read_once_and_kept() {
+    // first opens the file through prices.ts, which keeps what it read; target, after it, gets
+    // the kept value and opens nothing.
+    caught_by_vitest(
+        &[
+            ("data/price.txt", "5\n"),
+            (
+                "src/prices.ts",
+                "import { readFileSync } from 'node:fs'\nlet kept: string | undefined\nexport function price() {\n  kept ??= readFileSync('data/price.txt', 'utf8').trim()\n  return kept\n}\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ price }} from '../src/prices'\ntest('first', () => {{ expect(price()).toBeTruthy() }})\ntest('target', () => {{ expect(price()).toBe('5') }})\n"
+                ),
+            ),
+        ],
+        ("data/price.txt", "6\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_what_a_before_all_read() {
+    caught_by_vitest(
+        &[
+            ("src/helper.ts", "export function make() { return 1 }\n"),
+            (
+                "src/fx.ts",
+                "import { make as made } from './helper'\nexport function make() { return made() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ make }} from '../src/fx'\ndescribe('served', () => {{\n  let value = 0\n  beforeAll(() => {{ value = make() }})\n  test('target', () => {{ expect(value).toBe(1) }})\n}})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/helper.ts", "export function make() { return 2 }\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_module_imported_lazily_inside_a_test() {
+    caught_by_vitest(
+        &[
+            ("src/lazy.ts", "export const K = 1\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}test('target', async () => {{\n  const lazy = await import('../src/lazy')\n  expect(lazy.K).toBe(1)\n}})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/lazy.ts", "export const K = 2\n"),
+    );
+}
+
+/// Two imports away: cart.ts ran and imports settings.ts, which built TAX from defaults.ts, with
+/// no function of either called by the test.
+fn vitest_two_imports_away() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("src/defaults.ts", "export const RATE = 3\n"),
+        (
+            "src/settings.ts",
+            "import { RATE } from './defaults'\nexport const TAX = RATE * 2\n",
+        ),
+        (
+            "src/cart.ts",
+            "import { TAX } from './settings'\nexport function total(xs: number[]) { return xs.reduce((a, b) => a + b, 0) + TAX }\n",
+        ),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport { total } from '../src/cart'\ntest('target', () => { expect(total([1])).toBe(7) })\ntest('plain', () => {})\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_catches_a_value_two_imports_away_which_reads_test_may_miss_elsewhere() {
+    // RFC 0004 §3.2's first miss doesn't happen with Vitest: settings.ts read RATE through
+    // defaults.ts's export getter while the file loaded, a function of defaults.ts, so every test
+    // of the file has it (ADR 0084).
+    caught_by_vitest(
+        &vitest_two_imports_away(),
+        ("src/defaults.ts", "export const RATE = 4\n"),
+    );
+}
+
+// covers: C-40, C-43
+#[test]
+fn vitest_reads_test_follows_a_chain_of_re_exports_to_the_end() {
+    // The test reads rate through two barrels; Vite runs `export *` through getters of its own,
+    // so no function of either barrel runs. The middle one then points at another file.
+    caught_by_vitest(
+        &[
+            ("src/index.ts", "export * from './sub/index'\n"),
+            ("src/sub/index.ts", "export * from './impl'\n"),
+            ("src/sub/impl.ts", "export function rate() { return 1 }\n"),
+            ("src/sub/impl2.ts", "export function rate() { return 2 }\n"),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ rate }} from '../src/index'\ntest('target', () => {{ expect(rate()).toBe(1) }})\ntest('plain', () => {{}})\n"
+                ),
+            ),
+        ],
+        ("src/sub/index.ts", "export * from './impl2'\n"),
+    );
+}
+
+/// A registry plugins.ts fills as boot.ts imports it: the test file imports boot.ts for that and
+/// the registry, and nothing of plugins.ts, whose code runs at import only.
+fn vitest_registry() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "src/registry.ts",
+            "export const HANDLERS: Record<string, number> = {}\n",
+        ),
+        (
+            "src/plugins.ts",
+            "import { HANDLERS } from './registry'\nHANDLERS.x = 41\n",
+        ),
+        ("src/boot.ts", "import './plugins'\n"),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport '../src/boot'\nimport { HANDLERS } from '../src/registry'\ntest('target', () => { expect(HANDLERS.x).toBe(41) })\ntest('plain', () => {})\n",
+        ),
+    ]
+}
+
+// covers: C-40, C-43
+#[test]
+fn a_known_miss_of_vitest_reads_test_a_registry_another_file_filled_at_import() {
+    known_miss_of_vitest(
+        &vitest_registry(),
+        (
+            "src/plugins.ts",
+            "import { HANDLERS } from './registry'\nHANDLERS.x = 42\n",
+        ),
+    );
+}
+
+/// The observe line's count of tests that would have run, `N of M`.
+fn would_run(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|l| l.contains("with `tests: reuse`,") && l.contains("tests would have run"))
+        .unwrap_or_else(|| panic!("no observe line for tests in:\n{stderr}"))
+        .split("reuse`, ")
+        .nth(1)
+        .unwrap()
+        .split(" tests")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+// covers: C-40, C-43
+#[test]
+fn a_concurrent_vitest_test_gets_its_files_list() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // target uses other.ts alone; plain runs calc.ts's code through facade.ts. A change to calc.ts
+    // is two imports away from target: watched alone, target would be reused; run at once with
+    // plain, it gets its file's list, and runs.
+    let files = |concurrent: &str| {
+        vec![
+            (
+                "src/calc.ts",
+                "export function f() { return 1 }\n".to_string(),
+            ),
+            (
+                "src/facade.ts",
+                "import { f } from './calc'\nexport function g() { return f() }\n".to_string(),
+            ),
+            (
+                "src/other.ts",
+                "export function h() { return 1 }\n".to_string(),
+            ),
+            (
+                "test/a.test.ts",
+                format!(
+                    "{T}import {{ g }} from '../src/facade'\nimport {{ h }} from '../src/other'\ntest{concurrent}('target', async () => {{ expect(h()).toBe(1) }})\ntest{concurrent}('plain', async () => {{ expect(g()).toBe(1) }})\n"
+                ),
+            ),
+        ]
+    };
+    let mut counts = Vec::new();
+    for concurrent in ["", ".concurrent"] {
+        let files = files(concurrent);
+        let borrowed: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+        let r = reads_repo(&borrowed, "{mode: observe, unit: test, reads: test}");
+        assert_eq!(r.run(VITEST_RUN).code, 0);
+        r.write(
+            "src/calc.ts",
+            "export function f() { return 1 } // changed\n",
+        );
+        let second = r.run(VITEST_RUN);
+        assert_eq!(second.code, 0, "{}", second.stderr);
+        counts.push(would_run(&second.stderr));
+    }
+    assert_eq!(counts, ["1 of 3", "2 of 3"]);
+}
+
+// covers: C-40, C-43
+#[test]
+fn with_vitests_coverage_on_reads_test_watches_nothing_and_says_why() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = reads_repo(
+        &[
+            ("cov.mjs", NO_COVERAGE),
+            (
+                "test/a.test.ts",
+                "import { test } from 'vitest'\ntest('one', () => {})\n",
+            ),
+        ],
+        "{mode: observe, unit: test, reads: test}",
+    );
+    r.write(
+        "vitest.config.ts",
+        &config("  test: { coverage: { enabled: true, provider: 'custom', customProviderModule: './cov.mjs' } },\n"),
+    );
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit: each test is taken to have read what its test file read: Vitest's coverage is on, and it shares V8's counters with watching a test\n"
+        ),
+        "{}",
+        ran.stderr
+    );
+}
+
+// covers: C-40, C-43, C-36
+#[test]
+fn with_vitest_reads_test_a_test_is_reused_on_its_own_list_and_its_file_records_each_test() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // One test runs a.ts's code through wa.ts, sixty others b.ts's through wb.ts; the test file
+    // imports both wrappers: a change to a.ts runs only the first test, and audits.
+    let r = reads_repo(
+        &[
+            ("src/a.ts", "export function f() { return 1 }\n"),
+            ("src/b.ts", "export function f() { return 1 }\n"),
+            (
+                "src/wa.ts",
+                "import { f } from './a'\nexport function wa() { return f() }\n",
+            ),
+            (
+                "src/wb.ts",
+                "import { f } from './b'\nexport function wb() { return f() }\n",
+            ),
+            (
+                "test/a.test.ts",
+                &format!(
+                    "{T}import {{ wa }} from '../src/wa'\nimport {{ wb }} from '../src/wb'\ntest('one', () => {{ expect(wa()).toBe(1) }})\ntest.each(Array.from({{ length: 60 }}, (_, i) => i))('two %i', () => {{ expect(wb()).toBe(1) }})\n"
+                ),
+            ),
+        ],
+        "{mode: reuse, unit: test, reads: test}",
+    );
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // A test file that passed whole records its own pass and each test's.
+    let map = r.map();
+    assert_eq!(
+        map["units"]["test/a.test.ts"]["tests"]
+            .as_object()
+            .unwrap()
+            .len(),
+        61
+    );
+    assert_eq!(unit_results(&r.cache), 2 + 61 + 1);
+    r.write("src/a.ts", "export function f() { return 1 } // changed\n");
+    let second = r.run(VITEST_RUN);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        second.stderr.lines().any(|l| hushrun_testkit::lines::drawn(l)
+            == hushrun_testkit::lines::drawn("hushrun: unit: 3 of 62 tests run, in 1 of 2 test files; 59 already passed on the files they read, and 2 more that already passed run anyway, as a check")),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(
+        r.newest_result()["units"]["tests"],
+        json!({"total": 62, "ran": 3, "reused": 59})
+    );
+}
+
+/// How many unit results this machine holds.
+fn unit_results(cache: &Path) -> usize {
+    fn count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .map(|p| {
+                if p.is_dir() {
+                    count(&p)
+                } else {
+                    usize::from(p.extension().is_some_and(|e| e == "json"))
+                }
+            })
+            .sum()
+    }
+    count(&cache.join("results/units/v0"))
+}
+
+// covers: C-40, C-43
+#[test]
+fn what_a_module_opened_is_kept_with_the_module() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = told_repo(&[
+        ("data/price.txt", "5\n"),
+        (
+            "src/prices.ts",
+            "import { readFileSync } from 'node:fs'\nlet kept: string | undefined\nexport function price() {\n  kept ??= readFileSync('data/price.txt', 'utf8').trim()\n  return kept\n}\n",
+        ),
+        (
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\nimport { price } from '../src/prices'\ntest('first', () => { expect(price()).toBeTruthy() })\ntest('target', () => { expect(price()).toBe('5') })\n",
+        ),
+    ]);
+    let told = tests_vitest(&r, "test", json!({}), &[], &[]);
+    assert_eq!(told.code, 0, "{}", told.stdout);
+    let unit = "test/a.test.ts";
+    // target opened nothing, and ran prices.ts, which keeps what it opened for first.
+    assert_eq!(
+        told.list(unit, "target", "opened").unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        told.list(unit, "target", "ran").unwrap(),
+        ["src/prices.ts", unit]
+    );
+    let facts = told.unit(unit);
+    let paths = facts["paths"].as_array().unwrap();
+    let opens: std::collections::BTreeMap<String, Vec<String>> = facts["opens"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(from, to)| {
+            let from = paths[from.parse::<usize>().unwrap()].as_str().unwrap();
+            (from.to_string(), told.names(unit, to).unwrap())
+        })
+        .collect();
+    assert_eq!(opens["src/prices.ts"], ["data/price.txt"]);
+}
+
+// covers: C-32, C-43
+#[cfg(unix)]
+#[test]
+fn a_start_of_vitest_that_runs_no_test_file_is_no_second_start() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("src/none.ts", "export const none = 1\n"),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+    ]);
+    // A script that starts Vitest for what runs no test file first, then for the tests.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let vitest = "node_modules/.bin/vitest";
+    std::fs::write(
+        bin.join("pnpm"),
+        format!(
+            "#!/bin/sh\n{vitest} --version >/dev/null; {vitest} list >/dev/null; {vitest} related src/none.ts --run >/dev/null 2>&1; {vitest} run no-such-file >/dev/null 2>&1; {vitest} run\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(!ran.stderr.contains("records a pass"), "{}", ran.stderr);
+    assert_eq!(r.map()["units"]["test/a.test.ts"]["tests"]["a1"], "passed");
+    // The other way round: the tests first, then what runs none.
+    r.write(
+        "test/a.test.ts",
+        "import { test, expect } from 'vitest'\ntest('a1', () => { expect(1).toBe(1) })\n",
+    );
+    std::fs::write(
+        bin.join("pnpm"),
+        format!(
+            "#!/bin/sh\n{vitest} run && {vitest} list >/dev/null && {vitest} --version >/dev/null\n"
+        ),
+    )
+    .unwrap();
+    let after = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(after.code, 0, "{}\n{}", after.stdout, after.stderr);
+    assert!(!after.stderr.contains("records a pass"), "{}", after.stderr);
+}
+
+// covers: C-37, C-43
+#[test]
+fn vitests_facts_say_which_file_an_error_no_test_owns_came_from() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A timer one test of bad.test.ts left throws after it: Vitest reports an error no test owns
+    // and fails the run, so no pass of it is kept, a.test.ts's included. The main process's facts
+    // say where it came from, and every test that didn't fail is told why it kept nothing.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: observe, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/bad.test.ts",
+            "import { test } from 'vitest'\ntest('leaks', () => { setTimeout(() => { throw new Error('late timer') }, 10) })\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 100)) })\n",
+        ),
+    ]);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let (code, main) = plugin_vitest(&r, &[], &[]);
+    assert_eq!(code, 1);
+    assert_eq!(main["failuresByUnit"], false, "{main:#}");
+    let unhandled = &main["settings"]["unhandled"][0];
+    assert!(
+        unhandled["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("test/bad.test.ts")),
+        "{main:#}"
+    );
+    assert_eq!(unhandled["message"], "late timer", "{main:#}");
+}
+
+// covers: C-39, C-43
+#[test]
+fn vitest_tests_whose_ids_collide_are_never_left_out_after_a_change() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // `x > y` twice, from two nestings: one id, which no plan lists. The file passes whole and
+    // stores them as passed; a change to what only `z` read then asks the file's tests one by
+    // one, and both still run.
+    let r = Repo::new(&[
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, reads: test}"),
+        ),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file("fx.txt", "1\n"),
+        file(
+            "test/c.test.ts",
+            "import { describe, test, expect } from 'vitest'\nimport fs from 'node:fs'\nconst log = (n: string) => fs.appendFileSync(process.env.RAN_LOG!, n + '\\n')\ndescribe('x', () => { test('y', () => { log('nested') }) })\ntest('x > y', () => { log('flat') })\ntest('z', () => { expect(fs.readFileSync('fx.txt', 'utf8')).toContain('1') })\n",
+        ),
+        file(
+            "test/other.test.ts",
+            "import { test } from 'vitest'\ntest('other', () => {})\n",
+        ),
+    ]);
+    let log = r.root.join("ran.log");
+    let log_text = log.display().to_string();
+    assert_eq!(r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]).code, 0);
+    r.write("fx.txt", "1 touched\n");
+    let _ = std::fs::remove_file(&log);
+    let second = r.run_env(VITEST_RUN, &[("RAN_LOG", &log_text)]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        ran.contains("nested") && ran.contains("flat"),
+        "{ran:?}\n{}",
+        second.stderr
+    );
+}
+
+/// What a run says when a second start of the runner in COMMAND wasn't observed.
+#[cfg(unix)]
+const SECOND_START: &str = "no test file or test records a pass: Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told";
+
+// covers: C-32, C-43
+#[cfg(unix)]
+#[test]
+fn a_second_start_of_vitest_in_one_command_keeps_every_pass_of_the_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // The first start runs both files, and passes; the second runs them again with FAILNOW set,
+    // and f1 fails there. Only the first start is observed.
+    let files = vec![
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/f.test.ts",
+            "import { test, expect } from 'vitest'\ntest('f1', () => { expect(process.env.FAILNOW).toBeUndefined() })\ntest('f2', () => {})\n",
+        ),
+    ];
+    let r = Repo::new(&files);
+    // As a package script does under `pnpm vitest`: a stand-in `pnpm` that starts it twice.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run && FAILNOW=1 node_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    // The second start's failure is COMMAND's.
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // No pass of that run is kept: f1 failed in the second start.
+    let map = r.map();
+    for (unit, test) in [("test/f.test.ts", "f1"), ("test/a.test.ts", "a1")] {
+        assert_ne!(
+            map["units"][unit]["tests"][test], "passed",
+            "{unit}::{test}: {map:#}"
+        );
+    }
+    // The run says why, once.
+    assert_eq!(
+        ran.stderr.matches(SECOND_START).count(),
+        1,
+        "{}",
+        ran.stderr
+    );
+    // The same COMMAND with one start: as before, its passes are kept and nothing is said.
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    let once = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(once.code, 0, "{}", once.stderr);
+    assert!(!once.stderr.contains("records a pass"), "{}", once.stderr);
+    assert_eq!(r.map()["units"]["test/f.test.ts"]["tests"]["f1"], "passed");
+}
+
+/// What `hushrun why` says, stdout and stderr, of `unit` after the runs so far.
+fn why_of(r: &Repo, unit: &str) -> String {
+    let why = r.run(&["why", "unit", unit]);
+    format!("{}\n{}", why.stdout, why.stderr)
+}
+
+// covers: C-37, C-43
+#[test]
+fn why_says_no_pass_of_a_vitest_run_is_kept_after_an_error_no_test_owns() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A timer `leaks` left throws after it: Vitest reports an error no test owns and fails the
+    // run. No pass of it is kept, a.test.ts's included, and `hushrun why` says so of each test
+    // and test file, in bad.test.ts and in a.test.ts, which passed.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/bad.test.ts",
+            "import { test } from 'vitest'\ntest('leaks', () => { setTimeout(() => { throw new Error('late timer') }, 10) })\ntest('waits', async () => { await new Promise((r) => setTimeout(r, 100)) })\n",
+        ),
+    ]);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let said = "Vitest reported an error no test owns (in test/bad.test.ts: late timer), so no pass of that run is kept";
+    for unit in [
+        "test/bad.test.ts::waits",
+        "test/bad.test.ts",
+        "test/a.test.ts::a1",
+        "test/a.test.ts",
+    ] {
+        let why = why_of(&r, unit);
+        assert!(why.contains(said), "{unit}: {why}");
+    }
+}
+
+// covers: C-37, C-43
+#[cfg(unix)]
+#[test]
+fn why_says_a_second_start_of_vitest_kept_every_pass_of_its_run_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("{mode: reuse, unit: test}")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/a.test.ts",
+            "import { test } from 'vitest'\ntest('a1', () => {})\n",
+        ),
+        file(
+            "test/f.test.ts",
+            "import { test, expect } from 'vitest'\ntest('f1', () => { expect(process.env.FAILNOW).toBeUndefined() })\n",
+        ),
+    ]);
+    // As a package script does under `pnpm vitest run`: a stand-in `pnpm` that starts it twice.
+    let bin = r.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("pnpm"),
+        "#!/bin/sh\nnode_modules/.bin/vitest run && FAILNOW=1 node_modules/.bin/vitest run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("pnpm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ran = r.run_env(
+        &["run", "unit", "--", "pnpm", "vitest", "run"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    let said = "Vitest started more than once in its command, and hushrun observes only the first start: what another start ran can't be told, so no pass of that run is kept";
+    for unit in [
+        "test/f.test.ts::f1",
+        "test/f.test.ts",
+        "test/a.test.ts::a1",
+        "test/a.test.ts",
+    ] {
+        let why = why_of(&r, unit);
+        assert!(why.contains(said), "{unit}: {why}");
+    }
+}
+
+/// The line `hushrun init` proposed before 0.14, which a config that type-checks itself refuses:
+/// `process.env.X && …` is `"" | Promise<any> | undefined`, and `""` is no `PluginOption`.
+const OLD_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())]";
+
+// covers: C-15, C-35
+#[test]
+fn the_line_init_proposes_for_vitest_passes_a_config_that_type_checks_itself() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    let modules = vitest_modules().expect("Vitest");
+    let typed = ["typescript/package.json", "@types/node/package.json"]
+        .iter()
+        .all(|p| modules.join(p).is_file());
+    if !tools(
+        "TypeScript and @types/node beside Vitest (HUSHRUN_TEST_VITEST)",
+        typed,
+    ) {
+        return;
+    }
+    // What init proposes, for a project like svgo's: Vitest 4, its test script `vitest run`.
+    let r = Repo::new(&[
+        file("hushrun.yaml", &yaml("reuse")),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\", \"scripts\": {\"test\": \"vitest run\"}, \"devDependencies\": {\"vitest\": \"4.1.12\"}}\n",
+        ),
+        file("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        file(
+            "vitest.config.ts",
+            "import { defineConfig } from 'vitest/config'\nexport default defineConfig({ test: {} })\n",
+        ),
+        file(
+            "tsconfig.json",
+            "{\"compilerOptions\": {\"strict\": true, \"noEmit\": true, \"module\": \"nodenext\", \"moduleResolution\": \"nodenext\", \"target\": \"es2022\", \"skipLibCheck\": true, \"types\": [\"node\"]}, \"include\": [\"vitest.config.ts\", \"test/**/*\"]}\n",
+        ),
+        file(
+            "test/a.test.ts",
+            "import { test, expect } from 'vitest'\ntest('one', () => { expect(1).toBe(1) })\n",
+        ),
+        file(
+            "test/a.test-d.ts",
+            "import { expectTypeOf, test } from 'vitest'\ntest('types', () => { expectTypeOf(1).toEqualTypeOf<number>() })\n",
+        ),
+    ]);
+    let init = r.run(&["init", "--local", "--dry-run"]);
+    let said = format!("{}\n{}", init.stdout, init.stderr);
+    let proposed = said
+        .split("vitest.config.ts: add `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("init proposed no line for Vitest:\n{said}"))
+        .to_string();
+    // The config type-checks itself (`typecheck.enabled`, under `strict`), in three forms.
+    let forms = |line: &str| -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "defineConfig",
+                format!(
+                    "import {{ defineConfig }} from 'vitest/config'\nexport default defineConfig({{\n  {line},\n  test: {{ typecheck: {{ enabled: true }} }},\n}})\n"
+                ),
+            ),
+            (
+                "an object of ViteUserConfig",
+                format!(
+                    "import type {{ ViteUserConfig }} from 'vitest/config'\nconst config: ViteUserConfig = {{\n  {line},\n  test: {{ typecheck: {{ enabled: true }} }},\n}}\nexport default config\n"
+                ),
+            ),
+            (
+                "a project's plugins",
+                format!(
+                    "import {{ defineConfig, defineProject }} from 'vitest/config'\nexport default defineConfig({{\n  test: {{ typecheck: {{ enabled: true }}, projects: [defineProject({{ {line}, test: {{ name: 'one', typecheck: {{ enabled: true }} }} }})] }},\n}})\n"
+                ),
+            ),
+        ]
+    };
+    // Plain Vitest, no hushrun anywhere: the project's own test command.
+    let vitest_run = || {
+        let mut cmd = Command::new(r.repo.join("node_modules/.bin/vitest"));
+        Repo::clean(&mut cmd);
+        let out = cmd.arg("run").current_dir(&r.repo).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            format!(
+                "{}{}",
+                plain(&String::from_utf8_lossy(&out.stdout)),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    for ((form, before), (_, after)) in forms(OLD_LINE).into_iter().zip(forms(&proposed)) {
+        r.write("vitest.config.ts", &before);
+        let (code, out) = vitest_run();
+        assert!(
+            code != 0 && out.contains("is not assignable to type 'PluginOption'"),
+            "{form}, the old line: {out}"
+        );
+        r.write("vitest.config.ts", &after);
+        let (code, out) = vitest_run();
+        assert_eq!(code, 0, "{form}, `{proposed}`: {out}");
+    }
+}
+
+// covers: C-35
+#[test]
+fn a_config_with_the_line_init_proposed_before_still_loads_the_adapter() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // A repository that added the line before 0.14 isn't told it is missing, and is observed.
+    let mut files = shop("observe");
+    files.retain(|(p, _)| p != "vitest.config.ts");
+    files.push(file(
+        "vitest.config.ts",
+        &format!(
+            "import {{ defineConfig }} from 'vitest/config'\n\nexport default defineConfig({{\n  {OLD_LINE},\n}})\n"
+        ),
+    ));
+    let r = Repo::new(&files);
+    let first = r.run(VITEST_RUN);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        !first.stderr.contains("aren't observed"),
+        "{}",
+        first.stderr
+    );
+    assert_eq!(
+        r.reads("test/cart.test.ts"),
+        [
+            "src/cart.ts",
+            "src/pricing.ts",
+            "test/cart.test.ts",
+            "vitest.config.ts"
+        ]
+    );
+}
+
 // covers: C-31, C-35
 #[test]
 fn wrapped_node_functions_keep_what_callers_see_and_their_promisified_forms_stay_observed() {
@@ -946,4 +2788,34 @@ fn wrapped_node_functions_keep_what_callers_see_and_their_promisified_forms_stay
             .contains(&"src/data.ts".to_string()),
         "{map:#}"
     );
+}
+
+// covers: C-35, C-43
+#[test]
+fn with_tests_one_by_one_the_runners_wrappers_keep_what_callers_see_too() {
+    if !tools(&format!("Node and Vitest {VITEST}"), has_vitest()) {
+        return;
+    }
+    // With tests one by one the setup module also wraps Vitest's runner (a suite's and a test's
+    // start and end) and the file's list of tasks: each keeps the name and length of what it wraps,
+    // as Node's functions keep theirs; and Node's keep `promisify.custom` here as well.
+    let files = vec![
+        file(
+            "hushrun.yaml",
+            &yaml("{mode: reuse, unit: test, reads: test}"),
+        ),
+        file(".gitignore", "node_modules\n"),
+        file(
+            "package.json",
+            "{\"name\": \"shop\", \"private\": true, \"type\": \"module\"}\n",
+        ),
+        file("vitest.config.ts", &config("")),
+        file(
+            "test/runner.test.ts",
+            "import { test, expect, TestRunner } from 'vitest'\nimport { promisify } from 'node:util'\nimport { execFile } from 'node:child_process'\ntest('runner', async () => {\n  const p: any = TestRunner.prototype\n  const hooks = ['onBeforeRunSuite', 'onAfterRunSuite', 'onBeforeRunTask']\n  // hushrun's own wrappers, in place\n  for (const k of hooks) expect(String(p[k])).toContain('guard(')\n  expect(hooks.map((k) => [p[k].name, p[k].length])).toEqual(hooks.map((k) => [k, 1]))\n  const tasks: any = TestRunner.getCurrentSuite().file.tasks\n  expect(Object.prototype.hasOwnProperty.call(tasks, 'push')).toBe(true)\n  expect([tasks.push.name, tasks.push.length]).toEqual(['push', 1])\n  expect(typeof (execFile as any)[promisify.custom]).toBe('function')\n  const out = await promisify(execFile)(process.execPath, ['-e', 'process.stdout.write(\"out\")'])\n  expect(out).toEqual({ stdout: 'out', stderr: '' })\n  const { Worker } = await import('node:worker_threads')\n  expect([Worker.name, Worker.length]).toEqual(['Worker', 1])\n})\n",
+        ),
+    ];
+    let r = Repo::new(&files);
+    let ran = r.run(VITEST_RUN);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
 }

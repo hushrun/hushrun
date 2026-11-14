@@ -1218,7 +1218,44 @@ impl Backend {
                     return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
                 }
                 let path = format!("v0/results/{}", key.hex());
-                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10).
+                // \[ADR 0069\] `units`, the run's counts, goes with it (C-10). \[ADR 0080\] A
+                // server from before tests as the unit refuses `savedMs` with no test file
+                // reused: the result goes again without it, so that it is never lost to that.
+                let mut result = std::borrow::Cow::Borrowed(result);
+                loop {
+                    let (status, answer) = self.post_result(server, key, &path, &result)?;
+                    if (200..300).contains(&status) {
+                        return Ok(());
+                    }
+                    if refuses_saved(status, &answer)
+                        && let Some(without) = without_saved(&result)
+                    {
+                        result = std::borrow::Cow::Owned(without);
+                        continue;
+                    }
+                    let err = server.refused(status, &answer, "recording the result");
+                    if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                        *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                            error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                        ));
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `POST {base}/{path}` with `result`, signed (ADR 0028): the status and the answer.
+    fn post_result(
+        &self,
+        server: &Server,
+        key: &Digest,
+        path: &str,
+        result: &RunResult,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        {
+            {
                 let body = serde_json::to_vec(result)?;
                 // ADR 0028: a person's or an agent's result carries this machine's signature,
                 // and without a key to sign with it isn't sent.
@@ -1232,23 +1269,89 @@ impl Backend {
                         machine.result_signature(&key.hex(), &body),
                     )
                 });
-                let (status, answer) = server
+                server
                     .ledger
-                    .json_request_with("POST", &path, Some(&body), signature)
-                    .map_err(plain)?;
-                if !(200..300).contains(&status) {
-                    let err = server.refused(status, &answer, "recording the result");
-                    if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
-                        *server.refusal.borrow_mut() = Some(Refusal::Invalid(
-                            error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
-                        ));
-                    }
-                    return Err(err);
-                }
+                    .json_request_with("POST", path, Some(&body), signature)
+                    .map_err(plain)
             }
         }
-        Ok(())
     }
+}
+
+/// \[RFC 0004 §3.8\] Whether a server refused a result's `savedMs` because no test file was
+/// reused, as one from before tests as the unit does: 400 `invalid`, its message on `units` and
+/// `savedMs`, ending `0 when none was reused`.
+fn refuses_saved(status: u16, answer: &[u8]) -> bool {
+    status == 400
+        && error_code(answer).as_deref() == Some("invalid")
+        && error_message(answer).is_some_and(|m| {
+            m.starts_with("a result's `units` is ") && m.ends_with("0 when none was reused")
+        })
+}
+
+/// `result` without `units.savedMs`, when it has one to drop.
+fn without_saved(result: &RunResult) -> Option<RunResult> {
+    let mut result = result.clone();
+    let units = result.units.as_mut()?;
+    units.saved_ms.take()?;
+    Some(result)
+}
+
+/// \[RFC 0004 §3.8\] Whether a run's results met a smaller limit than this hushrun's: any 413, since
+/// the body sent fits [`MOST_RUN_BYTES`] ([`fitting`]), so whoever answered (an older server, whose
+/// limit is 1 MiB, or a proxy in front of a server, nginx's 1 MiB by default) takes less; or an
+/// older server's 400 `invalid` for more than 5,000. The caller sends the first 5,000 once more, and
+/// a second refusal is one.
+fn older_limit(status: u16, answer: &[u8]) -> bool {
+    status == 413
+        || (status == 400
+            && error_code(answer).as_deref() == Some("invalid")
+            && error_message(answer)
+                .is_some_and(|m| m.starts_with("a run records at most 5000 test files' results")))
+}
+
+/// \[RFC 0004 §3.8\] The most results of test files and tests a run sends.
+pub const MOST_RESULTS: usize = 50_000;
+/// \[RFC 0004 §3.8\] The most a server from before tests as the unit takes.
+pub const OLDER_MOST_RESULTS: usize = 5_000;
+/// \[RFC 0004 §3.8\] The largest run's body a server takes.
+pub const MOST_RUN_BYTES: usize = 8 << 20;
+
+/// \[RFC 0004 §3.8\] How many of `units`, from the first, a run's body sends with `result`: at
+/// most [`MOST_RESULTS`], and no more than fit a body of `limit` bytes as [`Backend::post_units`]
+/// writes it. What is cut is cut from the last, tests' passes first, as past the count.
+fn fitting(result: &RunResult, units: &[crate::units::store::UnitRecord], limit: usize) -> usize {
+    let base = serde_json::to_vec(&json!({
+        "schema": RUN_UNITS_SCHEMA,
+        "result": result,
+        "units": [],
+    }))
+    .map_or(usize::MAX, |body| body.len());
+    let mut size = base;
+    let mut fit = 0;
+    for (i, unit) in units.iter().take(MOST_RESULTS).enumerate() {
+        let one = unit_json(unit).to_string().len() + usize::from(i > 0);
+        size = size.saturating_add(one);
+        if size > limit {
+            break;
+        }
+        fit = i + 1;
+    }
+    fit
+}
+
+/// One result of a test file or a test as a run's body carries it: its key as 64 lowercase hex.
+fn unit_json(unit: &crate::units::store::UnitRecord) -> serde_json::Value {
+    json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
+}
+
+/// \[RFC 0004 §3.8\] What became of a run's results of test files and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitsKept {
+    /// The server keeps them: false for one from before test files' results.
+    pub kept: bool,
+    /// How many of them weren't kept: past [`MOST_RESULTS`], or an older server's limit.
+    pub dropped: usize,
 }
 
 /// What a run's relay needs to talk to an org's shared store of build blocks (the build protocol, B-26):
@@ -1460,26 +1563,77 @@ impl Backend {
     /// result is. A server from before it (404, 405) records the result alone, as
     /// [`Backend::record`] does, and keeps no test file: `Ok(false)`. A directory records the
     /// result; the caller keeps the units beside it.
+    ///
+    /// \[RFC 0004 §3.8\] `units` come in the order whatever is cut is a pass of: failures, then
+    /// test files' results, then tests' passes. At most [`MOST_RESULTS`] go, in a body of at most
+    /// [`MOST_RUN_BYTES`], cut from the last ([`fitting`]); a server from before
+    /// tests as the unit, which takes [`OLDER_MOST_RESULTS`], gets the first of them again; one that
+    /// refuses `savedMs` with no test file reused gets the result again without it.
     pub fn record_with_units(
         &self,
         key: &Digest,
         result: &RunResult,
         units: &[crate::units::store::UnitRecord],
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<UnitsKept> {
         let server = match &self.store {
             Store::Server(server) if !units.is_empty() => server,
-            _ => return self.record(key, result).map(|()| true),
+            _ => {
+                return self.record(key, result).map(|()| UnitsKept {
+                    kept: true,
+                    dropped: 0,
+                });
+            }
         };
         if server.reads_as.is_some() {
             return Err(anyhow!("{}: not recorded: {NO_ID_TOKEN}", server.base));
         }
+        let mut sent = fitting(result, units, MOST_RUN_BYTES);
+        let mut result = std::borrow::Cow::Borrowed(result);
+        loop {
+            let (status, answer) = self.post_units(server, key, &result, &units[..sent])?;
+            if status == 404 || status == 405 {
+                return self.record(key, &result).map(|()| UnitsKept {
+                    kept: false,
+                    dropped: units.len(),
+                });
+            }
+            if (200..300).contains(&status) {
+                return Ok(UnitsKept {
+                    kept: true,
+                    dropped: units.len() - sent,
+                });
+            }
+            if sent > OLDER_MOST_RESULTS && older_limit(status, &answer) {
+                sent = OLDER_MOST_RESULTS;
+                continue;
+            }
+            if refuses_saved(status, &answer)
+                && let Some(without) = without_saved(&result)
+            {
+                result = std::borrow::Cow::Owned(without);
+                continue;
+            }
+            let err = server.refused(status, &answer, "recording the result");
+            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
+                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
+                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
+                ));
+            }
+            return Err(err);
+        }
+    }
+
+    /// `POST {base}/v0/runs/{key}` with `result` and `units`, signed (ADR 0028): the status and
+    /// the answer.
+    fn post_units(
+        &self,
+        server: &Server,
+        key: &Digest,
+        result: &RunResult,
+        units: &[crate::units::store::UnitRecord],
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
         // Keys as the protocol has them: 64 lowercase hex characters.
-        let units: Vec<serde_json::Value> = units
-            .iter()
-            .map(|unit| {
-                json!({"key": unit.key.hex(), "result": unit.result, "durationMs": unit.duration_ms})
-            })
-            .collect();
+        let units: Vec<serde_json::Value> = units.iter().map(unit_json).collect();
         let body = serde_json::to_vec(&json!({
             "schema": RUN_UNITS_SCHEMA,
             "result": result,
@@ -1495,7 +1649,7 @@ impl Backend {
                 machine.result_signature(&key.hex(), &body),
             )
         });
-        let (status, answer) = server
+        server
             .ledger
             .json_request_with(
                 "POST",
@@ -1503,20 +1657,7 @@ impl Backend {
                 Some(&body),
                 signature,
             )
-            .map_err(plain)?;
-        if status == 404 || status == 405 {
-            return self.record(key, result).map(|()| false);
-        }
-        if !(200..300).contains(&status) {
-            let err = server.refused(status, &answer, "recording the result");
-            if status == 400 && error_code(&answer).as_deref() == Some("invalid") {
-                *server.refusal.borrow_mut() = Some(Refusal::Invalid(
-                    error_message(&answer).unwrap_or_else(|| "400 invalid".to_string()),
-                ));
-            }
-            return Err(err);
-        }
-        Ok(true)
+            .map_err(plain)
     }
 }
 
@@ -2092,5 +2233,37 @@ mod tests {
             assert_eq!(same, without);
             assert_eq!(rule, None);
         }
+    }
+
+    // covers: C-12
+    #[test]
+    fn a_runs_body_sends_the_results_that_fit_its_limit_cutting_the_last() {
+        let record = |n: u8, result: &str| crate::units::store::UnitRecord {
+            key: Digest::of(&[n]),
+            result: result.into(),
+            duration_ms: 12,
+        };
+        let units: Vec<_> = (0..10)
+            .map(|n| record(n, if n < 2 { "fail" } else { "pass" }))
+            .collect();
+        let result = pass(Provider::Github, None);
+        let body = |n: usize| {
+            let units: Vec<serde_json::Value> = units[..n]
+                .iter()
+                .map(|u| json!({"key": u.key.hex(), "result": u.result, "durationMs": u.duration_ms}))
+                .collect();
+            serde_json::to_vec(
+                &json!({"schema": RUN_UNITS_SCHEMA, "result": &result, "units": units}),
+            )
+            .unwrap()
+            .len()
+        };
+        // Room for every one: all go; for six and a byte short of seven, the first six.
+        assert_eq!(fitting(&result, &units, body(10)), 10);
+        assert_eq!(fitting(&result, &units, body(7) - 1), 6);
+        assert_eq!(fitting(&result, &units, body(6)), 6);
+        // Never past the count, whatever the room.
+        assert_eq!(fitting(&result, &units, usize::MAX), 10);
+        assert_eq!(fitting(&result, &units, body(0)), 0);
     }
 }

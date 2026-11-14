@@ -14,7 +14,7 @@ pub fn stores(cache: &Path) -> Vec<PathBuf> {
             entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.to_string_lossy().ends_with(".v1.sqlite"))
+                .filter(|p| p.to_string_lossy().ends_with(".v2.sqlite"))
                 .collect()
         })
         .unwrap_or_default();
@@ -82,6 +82,27 @@ pub fn map(cache: &Path) -> Value {
             .unwrap()
             .push(json!(dir));
     }
+    // \[ADR 0080\] Each test of a test file, by id, with its last state, when it has any.
+    let mut tests = conn
+        .prepare(
+            "SELECT p.path, t.test_id, t.state FROM test t JOIN unit u ON u.id = t.unit_ref
+             JOIN path p ON p.id = u.path_ref ORDER BY t.test_id",
+        )
+        .unwrap();
+    let found: Vec<(String, String, String)> = tests
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (unit, test, state) in found {
+        let entry = units[&unit].as_object_mut().unwrap();
+        entry
+            .entry("tests")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(test, json!(state));
+    }
     let rest: Map<String, Value> = rows(
         "SELECT p.path, v.entry FROM check_rest c JOIN version v ON v.id = c.version_ref
          JOIN path p ON p.id = v.path_ref",
@@ -103,6 +124,16 @@ pub fn map(cache: &Path) -> Value {
         "sources": list("check_source"),
         "unitFiles": list("check_listed"),
     })
+}
+
+/// Forgets the list of what the runner listed that the one store in `cache` keeps for its check,
+/// as on a machine whose store holds no run's list: the rows of its test files stay.
+#[allow(dead_code)]
+pub fn forget_listed(cache: &Path) {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open(&stores[0]).expect("the store opens");
+    conn.execute("DELETE FROM check_listed", []).unwrap();
 }
 
 /// The test files of the disagreements the one store in `cache` holds, oldest first.

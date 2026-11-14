@@ -142,6 +142,8 @@ exec sh -c "$script"
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(cmd);
         match self.backend.as_str() {
             ON_THIS_MACHINE => cmd.env_remove("HUSHRUN_BACKEND"),
             SIGNED_OUT => cmd
@@ -988,6 +990,8 @@ fn a_push_of_something_else_is_left_alone() {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         cmd.current_dir(&r.repo)
             .env("HUSHRUN_BACKEND", &r.backend)
             .env("HUSHRUN_TOKEN", FakeResults::TOKEN)
@@ -1164,6 +1168,8 @@ fn prepare_never_fails_an_install() {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         for (name, value) in vars {
             cmd.env(name, value);
         }

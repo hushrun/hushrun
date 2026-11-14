@@ -84,6 +84,9 @@ struct State {
     hint_clock: u64,
     /// It answers the hint requests with this status (404 or 405), as a server from before them.
     no_hints: Option<u16>,
+    /// \[RFC 0004 §3.8\] It takes what a server from before tests took: 5,000 results a run in
+    /// 1 MiB, and no `savedMs` above 0 with `units.reused` 0.
+    older_limits: bool,
 }
 
 /// \[C-38\] One hint the fake keeps, where it is: what `PUT {base}/v0/units/hints/{sha256}` sent.
@@ -202,6 +205,14 @@ impl FakeResults {
         self.state().anonymous = Some(repository.to_string());
     }
 
+    /// \[RFC 0004 §3.8\] From now on it takes what a server from before tests as the unit took:
+    /// a run's body of 1 MiB at most (413 and a plain-text body past it) and 5,000 results (400
+    /// `invalid` past them); and a result whose `units` has `savedMs` above 0 with `reused` 0
+    /// gets 400 `invalid`, on `POST {base}/v0/runs/{key}` and `POST {base}/v0/results/{key}`.
+    pub fn take_older_limits(&self) {
+        self.state().older_limits = true;
+    }
+
     /// \[ADR 0069\] From now on it answers the requests about test files 404, as a server from
     /// before them does.
     pub fn forget_units(&self) {
@@ -214,6 +225,15 @@ impl FakeResults {
     }
 
     /// \[ADR 0069\] Every run that came with test files' results, oldest first.
+    /// How many of the test files' and tests' results it keeps are `result` (`pass` or `fail`).
+    pub fn unit_results_that(&self, result: &str) -> usize {
+        self.state()
+            .units
+            .iter()
+            .filter(|(_, r, _, _)| r == result)
+            .count()
+    }
+
     pub fn runs(&self) -> Vec<Value> {
         self.state().runs.clone()
     }
@@ -546,6 +566,9 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
                 return refused;
             }
             match serde_json::from_slice::<Value>(&request.body) {
+                Ok(result) if state.older_limits && saved_without_reuse(&result) => {
+                    error(400, "invalid", SAVED_WITHOUT_REUSE)
+                }
                 Ok(result) => {
                     state.results.entry(key).or_default().push(result);
                     Reply::Send(Response::json(201, &json!({})))
@@ -555,6 +578,16 @@ fn handle(state: &Mutex<State>, request: Request) -> Reply {
         }
         _ => error(404, "not_found", "no such endpoint"),
     }
+}
+
+/// What a server from before tests as the unit says of `savedMs` above 0 with `units.reused` 0.
+const SAVED_WITHOUT_REUSE: &str = "a result's `units` is {\"total\", \"ran\", \"reused\"}, whole numbers of its test files where ran and reused add up to at most total, with `savedMs`, the milliseconds what was reused took when it ran, 0 when none was reused";
+
+/// Whether a result's `units` has `savedMs` above 0 with `reused` 0, which a server from before
+/// tests as the unit refuses.
+fn saved_without_reuse(result: &Value) -> bool {
+    let units = &result["units"];
+    units["savedMs"].as_u64().is_some_and(|ms| ms > 0) && units["reused"].as_u64() == Some(0)
 }
 
 /// Whether a run's result counts in the job `job`, of the variant `variant` (results-v0 §3).
@@ -585,6 +618,32 @@ fn units(state: &mut State, request: &Request, path: &str, agent: Option<&Public
         }
         if body["schema"] != "hushrun.run-units/v0" {
             return error(400, "invalid", "not a run with its test files' results");
+        }
+        // \[RFC 0004 §3.8\] The limits: a server from before tests' results, or this one.
+        let count = body["units"].as_array().map_or(0, Vec::len);
+        let (most, most_bytes) = if state.older_limits {
+            (5_000, 1 << 20)
+        } else {
+            (50_000, 8 << 20)
+        };
+        if request.body.len() > most_bytes {
+            return Reply::Send(Response::bytes(
+                413,
+                "Failed to buffer the request body: length limit exceeded",
+            ));
+        }
+        if count > most {
+            let message = if state.older_limits {
+                format!("a run records at most 5000 test files' results, and this one has {count}")
+            } else {
+                format!(
+                    "a run records at most 50000 results of its test files and tests, and this one has {count}"
+                )
+            };
+            return error(400, "invalid", &message);
+        }
+        if state.older_limits && saved_without_reuse(&body["result"]) {
+            return error(400, "invalid", SAVED_WITHOUT_REUSE);
         }
         let result = body["result"].clone();
         state

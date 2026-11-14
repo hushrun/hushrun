@@ -1,6 +1,7 @@
 //! \[ADR 0072\] This machine's store of what test files read: one SQLite file per repository,
-//! `<cache dir>/units/<repository id>.v1.sqlite`, in WAL mode, opened by any number of hushrun
-//! processes at once (C-36).
+//! `<cache dir>/units/<repository id>.v2.sqlite`, in WAL mode, opened by any number of hushrun
+//! processes at once (C-36). \[ADR 0080\] Schema 2 adds each test file's tests; a `v1` file is left
+//! for an older hushrun, and read by none.
 //!
 //! It holds the map and what explains it, and nothing that decides:
 //!
@@ -12,7 +13,10 @@
 //!   walks to show a path, and no key ever reads;
 //! - **the audit**: each test file that would have been reused and failed;
 //! - \[C-38\] **hints known**: the content id of each hint this machine sent or received, by its
-//!   address and system, so that the same hint isn't sent twice.
+//!   address and system, so that the same hint isn't sent twice;
+//! - \[ADR 0080\] **tests**: for a check with `tests.unit: test`, each test of a test file that ran
+//!   here, by its id, with its last state and duration and what wasn't followed inside it; and, for
+//!   `reads: test`, a list it read, one row per distinct list, which tests share (C-39).
 //!
 //! \[C-38\] A test file's row is `seen here`, what it read when it ran here, or `shared`, a list
 //! another machine saw it read whose key had a pass that counted here, which reused it; the next
@@ -36,13 +40,13 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _, Transac
 use serde_json::json;
 
 use hushrun_core::digest::Digest;
-use hushrun_core::units::{KeyBase, NotFollowed};
+use hushrun_core::units::{KeyBase, NotFollowed, State};
 
-use super::store::{Disagreement, Map, Mapped, Origin};
+use super::store::{Disagreement, Map, Mapped, Origin, TestListRow, TestRow};
 
 /// The schema this hushrun reads and writes, in the file's name and its `user_version`. A
 /// hushrun with another schema keeps another file.
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 2;
 /// `PRAGMA application_id`: "hush".
 const APPLICATION_ID: i64 = 0x6875_7368;
 /// How long a write waits for another hushrun's transaction.
@@ -78,7 +82,23 @@ CREATE TABLE checks (
     command    TEXT NOT NULL CHECK (json_valid(command) AND json_type(command) = 'array'),
     cwd        TEXT NOT NULL,
     scope      TEXT NOT NULL CHECK (scope <> ''),
-    adapter    TEXT NOT NULL CHECK (adapter IN ('pytest', 'cargo', 'go', 'vitest')),
+    -- [ADR 0080] The adapter's word: 1 to 32 of a-z, 0-9 and -, so that a new adapter needs no
+    -- new schema.
+    adapter    TEXT NOT NULL CHECK (length(adapter) BETWEEN 1 AND 32
+                                    AND adapter NOT GLOB '*[^a-z0-9-]*'),
+    -- [C-32] Passing runs in a row, since the last that wrote the check, in which the adapter
+    -- the word kept (pytest's) reported nothing: at 2 the check is forgotten.
+    silent_runs INTEGER NOT NULL DEFAULT 0 CHECK (silent_runs BETWEEN 0 AND 1),
+    -- [C-33] The longest a run of the check that reused nothing took here, in milliseconds: what
+    -- reuse can save at most. None until one ran.
+    whole_ms   INTEGER CHECK (whole_ms IS NULL OR whole_ms >= 0),
+    -- [C-32] What the adapter said when the check's last run here executed no test (Gradle's test
+    -- tasks up to date), as it said it; none after a run that executed some.
+    ran_nothing TEXT CHECK (ran_nothing IS NULL OR length(ran_nothing) BETWEEN 1 AND 2000),
+    -- [C-46] Each Gradle JUnit 4 task's test files and the most of their tests it leaves out, as
+    -- the last run that told them said: a JSON array of {most, units}.
+    leave_out_at_most TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(leave_out_at_most)
+                                                         AND json_type(leave_out_at_most) = 'array'),
     -- When a run last wrote it, in milliseconds since 1970, by this machine's clock.
     written_at INTEGER NOT NULL
 ) STRICT;
@@ -110,6 +130,8 @@ CREATE TABLE unit (
     origin    TEXT NOT NULL CHECK (origin IN ('seen here', 'shared')),
     -- The system whose machine saw a shared list: one for `shared`, none for `seen here`.
     shared_os TEXT CHECK (shared_os IN ('linux', 'macos', 'windows')),
+    -- [C-37] Why it kept no result of its own when it last ran here, as the run decided it.
+    not_kept  TEXT CHECK (not_kept IS NULL OR (origin = 'seen here' AND not_kept <> '')),
     UNIQUE (check_ref, path_ref),
     CHECK ((origin = 'seen here') = (shared_os IS NULL))
 ) STRICT;
@@ -157,6 +179,46 @@ CREATE TABLE hint_known (
     PRIMARY KEY (check_ref, address, os, content_id)
 ) STRICT, WITHOUT ROWID;
 
+-- [ADR 0080] What a test read with `reads: test`: one row per distinct list, which any number of
+-- tests share, by the SHA-256 of its paths and their versions.
+CREATE TABLE test_list (
+    id     INTEGER PRIMARY KEY,
+    digest TEXT NOT NULL UNIQUE CHECK (length(digest) = 64)
+) STRICT;
+CREATE TABLE test_list_read (
+    list_ref    INTEGER NOT NULL REFERENCES test_list (id) ON DELETE CASCADE,
+    version_ref INTEGER NOT NULL REFERENCES version (id),
+    PRIMARY KEY (list_ref, version_ref)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE test_list_dir (
+    list_ref INTEGER NOT NULL REFERENCES test_list (id) ON DELETE CASCADE,
+    path_ref INTEGER NOT NULL REFERENCES path (id),
+    PRIMARY KEY (list_ref, path_ref)
+) STRICT, WITHOUT ROWID;
+
+-- [ADR 0080] Each test of a test file, as it last ran here (C-39): its id, its last state (a test
+-- reused keeps the row of the run it stands on), its duration, and with `reads: test` the list it
+-- read; none with `reads: file`, where it read what its test file read.
+CREATE TABLE test (
+    id          INTEGER PRIMARY KEY,
+    unit_ref    INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    test_id     TEXT NOT NULL CHECK (test_id <> ''),
+    state       TEXT NOT NULL CHECK (state IN ('passed', 'failed', 'not-observed', 'not-run')),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    list_ref    INTEGER REFERENCES test_list (id),
+    -- [C-37] Why a test the run decided `not-run`, or `passed` with no pass kept, kept no result.
+    not_kept    TEXT CHECK (not_kept IS NULL OR (state IN ('not-run', 'passed') AND not_kept <> '')),
+    UNIQUE (unit_ref, test_id)
+) STRICT;
+CREATE INDEX test_by_list ON test (list_ref);
+-- What the adapter couldn't follow inside the test's own window.
+CREATE TABLE test_not_followed (
+    test_ref INTEGER NOT NULL REFERENCES test (id) ON DELETE CASCADE,
+    why      TEXT NOT NULL CHECK (why <> ''),
+    detail   TEXT NOT NULL,
+    PRIMARY KEY (test_ref, why, detail)
+) STRICT, WITHOUT ROWID;
+
 -- [C-34] Each test file that would have been reused and failed: the newest 200 of a check.
 CREATE TABLE disagreement (
     id        INTEGER PRIMARY KEY,
@@ -168,7 +230,7 @@ CREATE TABLE disagreement (
 ) STRICT;
 ";
 
-/// Where a repository's store is: `<cache dir>/units/<id>.v1.sqlite`, the id the SHA-256 of the
+/// Where a repository's store is: `<cache dir>/units/<id>.v2.sqlite`, the id the SHA-256 of the
 /// JCS form of `{"schema": "hushrun.unit-store-id/v1", "repository"}`, the repository as the run
 /// names it (C-10), lowercase, `""` for none.
 pub fn path(cache: &Path, repository: Option<&str>) -> PathBuf {
@@ -199,6 +261,9 @@ pub enum Unread {
     Busy,
     /// It isn't a store of this schema, or SQLite says it is damaged: what it said.
     Broken(String),
+    /// \[C-36\] Something a later run may not meet: the file or its directory read-only, a full
+    /// disk, an I/O error, a permission. What it said.
+    Trouble(String),
 }
 
 impl Unread {
@@ -212,15 +277,57 @@ impl Unread {
             Unread::Broken(why) => format!(
                 "this machine's record of what its test files read can't be read ({why}), so the next run here starts it again"
             ),
+            Unread::Trouble(why) => format!(
+                "this machine's record of what its test files read can't be read now ({why})"
+            ),
         }
     }
 }
 
+/// \[C-36\] What an error of SQLite's says of a store: busy; damaged, as SQLite itself reports (not
+/// a database, corrupt or malformed), which a retry can't cure; or trouble a later run may not
+/// meet (read-only, full, I/O, permission, anything else), which changes nothing on disk.
 fn unread(err: &rusqlite::Error) -> Unread {
     match err.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => Unread::Busy,
-        _ => Unread::Broken(first_line(&err.to_string())),
+        Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => {
+            Unread::Broken(first_line(&err.to_string()))
+        }
+        _ => Unread::Trouble(first_line(&err.to_string())),
     }
+}
+
+/// What names one file on disk, whatever its name: its device and inode.
+#[cfg(unix)]
+type Identity = (u64, u64);
+/// What names one file on disk, as far as this system says: its size and modification time.
+#[cfg(not(unix))]
+type Identity = (u64, std::time::SystemTime);
+
+#[cfg(unix)]
+fn identity(path: &Path) -> Option<Identity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(path: &Path) -> Option<Identity> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// The lock beside a store, `<file>.lock`, held while a store is made or set aside.
+fn locked(path: &Path) -> Result<std::fs::File, Unread> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(name))
+        .map_err(|e| Unread::Trouble(e.to_string()))?;
+    lock.lock().map_err(|e| Unread::Trouble(e.to_string()))?;
+    Ok(lock)
 }
 
 fn first_line(text: &str) -> String {
@@ -265,7 +372,9 @@ fn ids(conn: &Connection) -> Result<(i64, i64), Unread> {
     .map_err(|e| unread(&e))
 }
 
-/// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`].
+/// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`], and \[C-36\]
+/// its tables as this build makes them, so that a store an older build of the same schema made (a
+/// test table without a column read now) reads as one that can't be read, and is set aside.
 fn check_schema(conn: &Connection) -> Result<(), Unread> {
     let (app, version) = ids(conn)?;
     if app != APPLICATION_ID || version != SCHEMA {
@@ -273,25 +382,89 @@ fn check_schema(conn: &Connection) -> Result<(), Unread> {
             "it isn't hushrun's store of schema {SCHEMA}"
         )));
     }
+    if tables_of(conn).map_err(|e| unread(&e))? != *this_builds_tables() {
+        return Err(Unread::Broken(
+            "its tables aren't the ones this hushrun makes".into(),
+        ));
+    }
     Ok(())
 }
 
-/// A store opened to write, made when there is none, and made again when the one there can't be
-/// read: `Err` when even that fails, or another hushrun held it too long.
-fn open_to_write(path: &Path) -> Result<Connection, Unread> {
-    match open_writable(path) {
+/// The `CREATE TABLE` statements of a database's tables, as SQLite keeps them.
+fn tables_of(conn: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare("SELECT sql FROM sqlite_master WHERE type = 'table'")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?.collect()
+}
+
+/// The tables [`TABLES`] makes, made once in memory.
+fn this_builds_tables() -> &'static BTreeSet<String> {
+    static MADE: std::sync::OnceLock<BTreeSet<String>> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        Connection::open_in_memory()
+            .and_then(|conn| {
+                conn.execute_batch(TABLES)?;
+                tables_of(&conn)
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// \[C-36\] The one place a store is written: `write` with the store opened to write, made when
+/// there is none. A store a retry can't cure (another schema, a table of an older build of this
+/// schema, damage SQLite reports) is set aside ([`set_aside`]) and made anew, once, so the line
+/// that says the next run starts it again is true; trouble that may pass (read-only, a full disk,
+/// I/O, a permission) changes nothing on disk. `Err` when even that fails, or another hushrun held
+/// it too long.
+fn writing<T>(
+    path: &Path,
+    write: impl Fn(&mut Connection) -> Result<T, Unread>,
+) -> Result<T, Unread> {
+    let attempt = || open_writable(path).and_then(|mut conn| write(&mut conn));
+    let tried = identity(path);
+    match attempt() {
         Err(Unread::Broken(why)) => {
-            tracing::debug!("{} is replaced: {why}", path.display());
-            remove(path);
-            open_writable(path)
+            #[cfg(test)]
+            BEFORE_SET_ASIDE.with(|hook| {
+                if let Some(hook) = hook.borrow().as_ref() {
+                    hook();
+                }
+            });
+            set_aside(path, tried, &why)?;
+            attempt()
         }
         other => other,
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test runs between a write that failed and setting the store aside, in this thread.
+    static BEFORE_SET_ASIDE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// \[C-36\] Sets a store that can't be read aside, `<file>.unread` beside it (one kept, the
+/// newest), with its WAL's files gone, so that the next write makes it anew: under the lock beside
+/// it, and only while `path` still names `tried`, the file that failed, so that a run never sets
+/// aside a store another just made.
+fn set_aside(path: &Path, tried: Option<Identity>, why: &str) -> Result<(), Unread> {
+    let _lock = locked(path)?;
+    if tried.is_none() || identity(path) != tried {
+        return Ok(());
+    }
+    tracing::debug!("{} is set aside and made anew: {why}", path.display());
+    let mut aside = path.as_os_str().to_os_string();
+    aside.push(".unread");
+    if std::fs::rename(path, PathBuf::from(aside)).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    remove(path);
+    Ok(())
+}
+
 fn open_writable(path: &Path) -> Result<Connection, Unread> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| Unread::Broken(e.to_string()))?;
+        std::fs::create_dir_all(dir).map_err(|e| Unread::Trouble(e.to_string()))?;
     }
     let conn = Connection::open(path).map_err(|e| unread(&e))?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(|e| unread(&e))?;
@@ -299,6 +472,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
         .map_err(|e| unread(&e))?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
+        check_schema(&conn)?;
         return Ok(conn);
     }
     if app != 0 || version != 0 {
@@ -309,15 +483,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     // A new file: WAL, then the tables and the version in one transaction, so that a store with a
     // version always has its tables. One hushrun makes it, holding a lock file beside it; another
     // that waited finds it made.
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(PathBuf::from(name))
-        .map_err(|e| Unread::Broken(e.to_string()))?;
-    lock.lock().map_err(|e| Unread::Broken(e.to_string()))?;
+    let _lock = locked(path)?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
         return Ok(conn);
@@ -343,6 +509,127 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     Ok(conn)
 }
 
+/// \[C-36\] The tables of schema 1, in an order their references allow: schema 2 holds them with
+/// the same columns, beside its tests' tables, and its adapter column takes any word where schema
+/// 1's took four, so every row of schema 1 is a row of schema 2.
+const TABLES_OF_SCHEMA_1: &[&str] = &[
+    "path",
+    "version",
+    "checks",
+    "check_rest",
+    "check_source",
+    "check_listed",
+    "unit",
+    "unit_read",
+    "unit_not_followed",
+    "unit_dir",
+    "edge",
+    "hint_known",
+    "disagreement",
+];
+
+/// \[C-36\] The store of schema 1 an older hushrun keeps beside `path`: `<id>.v1.sqlite`.
+pub fn older(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(&format!(".v{SCHEMA}.sqlite"))?;
+    Some(path.with_file_name(format!("{stem}.v1.sqlite")))
+}
+
+/// \[C-36\] Makes this schema's store at `path` from the store of schema 1 beside it, when there
+/// is none of this schema and that one is hushrun's of schema 1: its rows are copied into a new
+/// file in one transaction, whole or not at all, which takes `path` only when no other hushrun
+/// made one meanwhile. The older file is copied first and left as it is, for an older hushrun.
+/// The older file's name when it did; `None` when there was nothing to do, or it couldn't be done,
+/// and then the run goes on as with no store. Readers that write nothing never call it.
+pub fn upgrade(path: &Path) -> Option<String> {
+    if path.exists() {
+        return None;
+    }
+    let old = older(path).filter(|old| old.is_file())?;
+    match import(&old, path) {
+        Ok(()) => old.file_name().map(|n| n.to_string_lossy().into_owned()),
+        Err(why) => {
+            tracing::debug!("{} wasn't imported: {why}", old.display());
+            None
+        }
+    }
+}
+
+/// \[C-36\] A copy of the store of schema 1 at `old` in `dir`, with its WAL, which opening the copy
+/// recovers: the older file is never opened, so nothing is made beside it.
+fn copy_of(old: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let copy = dir.join("old.sqlite");
+    std::fs::copy(old, &copy).map_err(|err| err.to_string())?;
+    let mut wal = old.as_os_str().to_os_string();
+    wal.push("-wal");
+    if Path::new(&wal).is_file() {
+        std::fs::copy(&wal, dir.join("old.sqlite-wal")).map_err(|err| err.to_string())?;
+    }
+    Ok(copy)
+}
+
+fn import(old: &Path, path: &Path) -> Result<(), String> {
+    let dir = path.parent().ok_or("a store has a directory")?;
+    let work = tempfile::Builder::new()
+        .prefix(".import-")
+        .tempdir_in(dir)
+        .map_err(|err| err.to_string())?;
+    let copy = copy_of(old, work.path())?;
+    let made = work.path().join("new.sqlite");
+    {
+        let mut conn = Connection::open(&made).map_err(|e| e.to_string())?;
+        conn.execute("ATTACH DATABASE ?1 AS old", [copy.to_string_lossy()])
+            .map_err(|e| e.to_string())?;
+        let pragma = |name: &str| -> Result<i64, String> {
+            conn.query_row(&format!("PRAGMA old.{name}"), [], |row| row.get(0))
+                .map_err(|e| e.to_string())
+        };
+        let ids = (pragma("application_id")?, pragma("user_version")?);
+        if ids != (APPLICATION_ID, 1) {
+            return Err("it isn't hushrun's store of schema 1".into());
+        }
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute_batch(TABLES).map_err(|e| e.to_string())?;
+        for table in TABLES_OF_SCHEMA_1 {
+            let columns: Vec<String> = tx
+                .prepare(&format!("PRAGMA old.table_info({table})"))
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| row.get::<_, String>("name"))?
+                        .collect::<rusqlite::Result<Vec<String>>>()
+                })
+                .map_err(|e| e.to_string())?;
+            if columns.is_empty() {
+                return Err(format!("it has no table {table}"));
+            }
+            let columns = columns.join(", ");
+            tx.execute_batch(&format!(
+                "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM old.{table};"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute_batch(&format!(
+            "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {SCHEMA};"
+        ))
+        .map_err(|e| e.to_string())?;
+        let broken: Option<String> = tx
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(table) = broken {
+            return Err(format!("a row of {table} names one that isn't there"));
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        conn.execute_batch("DETACH DATABASE old; PRAGMA journal_mode = WAL;")
+            .map_err(|e| e.to_string())?;
+    }
+    // Whole, closed: it takes the store's name only if none is there yet.
+    std::fs::hard_link(&made, path).map_err(|err| err.to_string())
+}
+
 /// Removes a store and its WAL's files.
 fn remove(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
@@ -350,6 +637,49 @@ fn remove(path: &Path) {
         name.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(name));
     }
+}
+
+/// \[C-32\] The adapter that last reported the check `check_id`'s test files in the store at
+/// `path`, by its word: `None` when the store doesn't hold the check, or can't be read. With no
+/// store of this schema, the one of schema 1 an older hushrun keeps beside it, read only and never
+/// imported: `hushrun ready` and `hushrun why`, which write nothing, choose as the run, which
+/// imports first, does.
+pub fn adapter_of(path: &Path, check_id: &Digest) -> Option<String> {
+    if !path.exists()
+        && let Some(old) = older(path).filter(|old| old.is_file())
+    {
+        // \[C-36, ADR 0061\] From a copy outside the cache, as the import reads it: a reader that
+        // writes nothing leaves no `-shm` or `-wal` beside the older file.
+        let work = tempfile::Builder::new()
+            .prefix("hushrun-v1-")
+            .tempdir()
+            .ok()?;
+        let copy = copy_of(&old, work.path()).ok()?;
+        let conn = Connection::open_with_flags(
+            &copy,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        if ids(&conn).ok()? != (APPLICATION_ID, 1) {
+            return None;
+        }
+        return conn
+            .query_row(
+                "SELECT adapter FROM checks WHERE check_id = ?1",
+                [check_id.hex()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()?;
+    }
+    let conn = open_to_read(path).ok()??;
+    conn.query_row(
+        "SELECT adapter FROM checks WHERE check_id = ?1",
+        [check_id.hex()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()?
 }
 
 /// What reading a check's map came to: the map, empty when there is none; and why the store
@@ -378,11 +708,18 @@ pub fn load(path: &Path, check_id: &Digest) -> Loaded {
 }
 
 fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
-    let Some(check) = conn
+    let Some((check, whole_ms, ran_nothing, leave_out_at_most)) = conn
         .query_row(
-            "SELECT id FROM checks WHERE check_id = ?1",
+            "SELECT id, whole_ms, ran_nothing, leave_out_at_most FROM checks WHERE check_id = ?1",
             [check_id.hex()],
-            |row| row.get::<_, i64>(0),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .optional()?
     else {
@@ -390,19 +727,38 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     };
     let mut map = Map {
         reported: true,
+        whole_ms: whole_ms.and_then(|ms| u64::try_from(ms).ok()),
+        ran_nothing,
+        // One that doesn't read as groups limits nothing: every listed test is left out, as
+        // before the store kept them.
+        leave_out_at_most: serde_json::from_str(&leave_out_at_most).unwrap_or_default(),
         ..Map::default()
     };
     let mut names: HashMap<i64, String> = HashMap::new();
     let mut units = conn.prepare(
-        "SELECT u.id, p.path, u.origin, u.shared_os FROM unit u JOIN path p ON p.id = u.path_ref
+        "SELECT u.id, p.path, u.origin, u.shared_os, u.not_kept FROM unit u
+         JOIN path p ON p.id = u.path_ref
          WHERE u.check_ref = ?1",
     )?;
     for row in units.query_map([check], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
     })? {
-        let (id, name, origin, os): (i64, String, String, Option<String>) = row?;
+        let (id, name, origin, os, not_kept): (
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = row?;
         let mapped = Mapped {
             origin: Origin::from_row(&origin, os.as_deref()).unwrap_or_default(),
+            not_kept,
             ..Mapped::default()
         };
         map.units.insert(name.clone(), mapped);
@@ -441,6 +797,105 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             mapped.dirs.insert(dir);
         }
     }
+    // \[ADR 0080\] Each test file's tests, as they last ran here.
+    let mut tests = conn.prepare(
+        "SELECT t.id, t.unit_ref, t.test_id, t.state, t.duration_ms, t.list_ref, t.not_kept
+         FROM test t JOIN unit u ON u.id = t.unit_ref WHERE u.check_ref = ?1",
+    )?;
+    let mut test_names: HashMap<i64, (i64, String)> = HashMap::new();
+    let mut lists: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for row in tests.query_map([check], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })? {
+        #[allow(clippy::type_complexity, reason = "one row's columns")]
+        let (id, unit, test, state, duration, list, not_kept): (
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            Option<i64>,
+            Option<String>,
+        ) = row?;
+        if let Some(list) = list {
+            lists.entry(list).or_default().push((unit, test.clone()));
+        }
+        let Some(state) = TestRow::state_from_word(&state) else {
+            continue;
+        };
+        if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+            mapped.tests.insert(
+                test.clone(),
+                TestRow {
+                    state,
+                    duration_ms: u64::try_from(duration).unwrap_or_default(),
+                    not_followed: BTreeSet::new(),
+                    not_kept: not_kept.filter(|_| matches!(state, State::NotRun | State::Passed)),
+                    list: None,
+                },
+            );
+            test_names.insert(id, (unit, test));
+        }
+    }
+    let mut test_not_followed = conn.prepare(
+        "SELECT n.test_ref, n.why, n.detail FROM test_not_followed n
+         JOIN test t ON t.id = n.test_ref JOIN unit u ON u.id = t.unit_ref
+         WHERE u.check_ref = ?1",
+    )?;
+    for row in
+        test_not_followed.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+    {
+        let (test, why, detail): (i64, String, String) = row?;
+        if let Some((unit, id)) = test_names.get(&test)
+            && let Some(row) = names
+                .get(unit)
+                .and_then(|n| map.units.get_mut(n))
+                .and_then(|m| m.tests.get_mut(id))
+        {
+            row.not_followed.insert(NotFollowed { why, detail });
+        }
+    }
+    // \[ADR 0081\] Each test's own list, a set tests share.
+    let mut found: HashMap<i64, TestListRow> = HashMap::new();
+    let mut list_reads = conn.prepare(
+        "SELECT DISTINCT r.list_ref, p.path, v.entry FROM test_list_read r
+         JOIN test t ON t.list_ref = r.list_ref JOIN unit u ON u.id = t.unit_ref
+         JOIN version v ON v.id = r.version_ref JOIN path p ON p.id = v.path_ref
+         WHERE u.check_ref = ?1",
+    )?;
+    for row in list_reads.query_map([check], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))? {
+        let (list, path, entry): (i64, String, String) = row?;
+        found.entry(list).or_default().reads.insert(path, entry);
+    }
+    let mut list_dirs = conn.prepare(
+        "SELECT DISTINCT d.list_ref, p.path FROM test_list_dir d
+         JOIN test t ON t.list_ref = d.list_ref JOIN unit u ON u.id = t.unit_ref
+         JOIN path p ON p.id = d.path_ref WHERE u.check_ref = ?1",
+    )?;
+    for row in list_dirs.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (list, dir): (i64, String) = row?;
+        found.entry(list).or_default().dirs.insert(dir);
+    }
+    for (list, tests) in lists {
+        let row = found.remove(&list).unwrap_or_default();
+        for (unit, test) in tests {
+            if let Some(t) = names
+                .get(&unit)
+                .and_then(|n| map.units.get_mut(n))
+                .and_then(|m| m.tests.get_mut(&test))
+            {
+                t.list = Some(row.clone());
+            }
+        }
+    }
     let mut rest = conn.prepare(
         "SELECT p.path, v.entry FROM check_rest c JOIN version v ON v.id = c.version_ref
          JOIN path p ON p.id = v.path_ref WHERE c.check_ref = ?1",
@@ -461,26 +916,6 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
         }
     }
     Ok(map)
-}
-
-/// The adapter a check's test files are observed with, as the store names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterWord {
-    Pytest,
-    Cargo,
-    Go,
-    Vitest,
-}
-
-impl AdapterWord {
-    pub fn word(self) -> &'static str {
-        match self {
-            AdapterWord::Pytest => "pytest",
-            AdapterWord::Cargo => "cargo",
-            AdapterWord::Go => "go",
-            AdapterWord::Vitest => "vitest",
-        }
-    }
 }
 
 /// What an edge between two files is: one imports, opens or reads the other.
@@ -518,7 +953,8 @@ pub type Edge = (String, String, EdgeKind);
 pub struct Write<'a> {
     pub check_id: Digest,
     pub base: &'a KeyBase,
-    pub adapter: AdapterWord,
+    /// \[ADR 0080\] The adapter's word ([`super::adapter::Adapter::word`]).
+    pub adapter: &'static str,
     /// Each test file that ran, with what the map keeps of it.
     pub seen: &'a BTreeMap<String, Mapped>,
     /// The scope's files now: a test file the map has whose file is gone is forgotten.
@@ -527,6 +963,17 @@ pub struct Write<'a> {
     pub sources: &'a BTreeSet<String>,
     /// \[ADR 0071\] Vitest's list of test files, when this run's adapter gave one.
     pub unit_files: Option<&'a BTreeSet<String>>,
+    /// \[C-37\] Every unit this run's adapter told, run, reused or not: a unit no file of the
+    /// scope names (a CTest program, a Cargo test binary, a class of no file) is still there while
+    /// a run knows it.
+    pub known: &'a BTreeSet<String>,
+    /// \[C-33\] How long this run took, when it reused nothing: the store keeps the longest.
+    pub whole_ms: Option<u64>,
+    /// \[C-32\] What the adapter said when this run executed no test; `None` clears it.
+    pub ran_nothing: Option<&'a str>,
+    /// \[C-46\] What each JUnit 4 task leaves out at most, as this run told it; `None` keeps what
+    /// the store has (no task told).
+    pub leave_out_at_most: Option<&'a [super::store::LeaveOutAtMost]>,
     /// The edges this run saw.
     pub edges: &'a BTreeSet<Edge>,
     pub disagreements: &'a [Disagreement],
@@ -571,20 +1018,22 @@ pub fn write(path: &Path, w: &Write<'_>) -> Result<(), Unread> {
 }
 
 fn write_waiting(path: &Path, w: &Write<'_>, busy: Duration) -> Result<(), Unread> {
-    let mut conn = open_to_write(path)?;
-    conn.busy_timeout(busy).map_err(|e| unread(&e))?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| unread(&e))?;
-    write_in(&tx, w).map_err(|e| unread(&e))?;
-    tx.commit().map_err(|e| unread(&e))?;
-    checkpoint(&conn);
+    writing(path, |conn| {
+        conn.busy_timeout(busy).map_err(|e| unread(&e))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| unread(&e))?;
+        write_in(&tx, w).map_err(|e| unread(&e))?;
+        tx.commit().map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(())
+    })?;
     Ok(())
 }
 
 /// Moves what a write committed into the one file, when no reader holds the WAL: what a cache of
 /// the file alone keeps (CI's, C-15, RFC 0003 §3.11). Every write ends with it, so a run that ends
-/// leaves the store whole in `<id>.v1.sqlite`. One that can't now is done by a later write, or the
+/// leaves the store whole in `<id>.v2.sqlite`. One that can't now is done by a later write, or the
 /// last connection's close.
 fn checkpoint(conn: &Connection) {
     if let Err(err) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
@@ -619,6 +1068,41 @@ impl Ids<'_> {
         Ok(id)
     }
 
+    /// \[ADR 0081\] The row of a test's list, made with its reads and directories when no test
+    /// has it yet.
+    fn list(&mut self, list: &TestListRow) -> rusqlite::Result<i64> {
+        let digest = list.digest().hex();
+        if let Some(id) = self
+            .tx
+            .query_row(
+                "SELECT id FROM test_list WHERE digest = ?1",
+                [&digest],
+                |r| r.get(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+        self.tx
+            .execute("INSERT INTO test_list (digest) VALUES (?1)", [&digest])?;
+        let id = self.tx.last_insert_rowid();
+        for (path, entry) in &list.reads {
+            let version = self.version(path, entry)?;
+            self.tx.execute(
+                "INSERT OR IGNORE INTO test_list_read (list_ref, version_ref) VALUES (?1, ?2)",
+                params![id, version],
+            )?;
+        }
+        for dir in &list.dirs {
+            let dir = self.path(dir)?;
+            self.tx.execute(
+                "INSERT OR IGNORE INTO test_list_dir (list_ref, path_ref) VALUES (?1, ?2)",
+                params![id, dir],
+            )?;
+        }
+        Ok(id)
+    }
+
     fn version(&mut self, path: &str, entry: &str) -> rusqlite::Result<i64> {
         let path_ref = self.path(path)?;
         if let Some(id) = self
@@ -645,11 +1129,18 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     let pruned = tx.execute("DELETE FROM checks WHERE written_at < ?1", [cutoff])?;
     let command = serde_json::to_string(&w.base.command).unwrap_or_else(|_| "[]".into());
     let check: i64 = tx.query_row(
-        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO checks (check_id, name, command, cwd, scope, adapter, written_at, silent_runs,
+                             whole_ms, ran_nothing, leave_out_at_most)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, coalesce(?10, '[]'))
          ON CONFLICT (check_id) DO UPDATE SET name = excluded.name, command = excluded.command,
              cwd = excluded.cwd, scope = excluded.scope, adapter = excluded.adapter,
-             written_at = excluded.written_at
+             written_at = excluded.written_at, silent_runs = 0,
+             ran_nothing = excluded.ran_nothing,
+             leave_out_at_most = coalesce(?10, checks.leave_out_at_most),
+             whole_ms = CASE
+                 WHEN excluded.whole_ms IS NULL THEN checks.whole_ms
+                 WHEN checks.whole_ms IS NULL THEN excluded.whole_ms
+                 ELSE max(checks.whole_ms, excluded.whole_ms) END
          RETURNING id",
         params![
             w.check_id.hex(),
@@ -657,8 +1148,13 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             command,
             w.base.cwd,
             w.base.scope.as_str(),
-            w.adapter.word(),
+            w.adapter,
             w.now_ms,
+            w.whole_ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
+            w.ran_nothing
+                .map(|said| said.chars().take(2000).collect::<String>()),
+            w.leave_out_at_most
+                .map(|groups| serde_json::to_string(groups).unwrap_or_else(|_| "[]".into())),
         ],
         |row| row.get(0),
     )?;
@@ -677,21 +1173,25 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             .collect::<rusqlite::Result<_>>()?
     };
     for (id, name) in &known {
-        if !still_there(w.tree, name) || w.seen.contains_key(name) {
+        if w.seen.contains_key(name) || !(still_there(w.tree, name) || w.known.contains(name)) {
             tx.execute("DELETE FROM unit WHERE id = ?1", [id])?;
         }
     }
     for (name, mapped) in w.seen {
         let path_ref = ids.path(name)?;
         tx.execute(
-            "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO unit (check_ref, path_ref, ran_at, origin, shared_os, not_kept)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 check,
                 path_ref,
                 w.now_ms,
                 mapped.origin.word(),
-                mapped.origin.system().map(|os| os.word())
+                mapped.origin.system().map(|os| os.word()),
+                mapped
+                    .not_kept
+                    .as_deref()
+                    .filter(|why| mapped.origin.system().is_none() && !why.is_empty())
             ],
         )?;
         let unit = tx.last_insert_rowid();
@@ -715,6 +1215,37 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 "INSERT OR IGNORE INTO unit_dir (unit_ref, path_ref) VALUES (?1, ?2)",
                 params![unit, dir],
             )?;
+        }
+        // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row
+        // tests with the same list share.
+        for (id, row) in &mapped.tests {
+            let list = match &row.list {
+                Some(list) => Some(ids.list(list)?),
+                None => None,
+            };
+            tx.execute(
+                "INSERT INTO test (unit_ref, test_id, state, duration_ms, list_ref, not_kept)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    unit,
+                    id,
+                    row.state.word(),
+                    i64::try_from(row.duration_ms).unwrap_or(i64::MAX),
+                    list,
+                    row.not_kept
+                        .as_deref()
+                        .filter(|why| matches!(row.state, State::NotRun | State::Passed)
+                            && !why.is_empty())
+                ],
+            )?;
+            let test = tx.last_insert_rowid();
+            for n in &row.not_followed {
+                tx.execute(
+                    "INSERT OR IGNORE INTO test_not_followed (test_ref, why, detail)
+                     VALUES (?1, ?2, ?3)",
+                    params![test, n.why, n.detail],
+                )?;
+            }
         }
     }
     tx.execute("DELETE FROM check_rest WHERE check_ref = ?1", [check])?;
@@ -784,9 +1315,12 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
     // What no row needs any more: versions of files that changed, and the paths of files gone.
     let _ = pruned;
     tx.execute_batch(
-        "DELETE FROM version WHERE NOT EXISTS (SELECT 1 FROM unit_read r WHERE r.version_ref = version.id)
-             AND NOT EXISTS (SELECT 1 FROM check_rest c WHERE c.version_ref = version.id);
+        "DELETE FROM test_list WHERE NOT EXISTS (SELECT 1 FROM test t WHERE t.list_ref = test_list.id);
+         DELETE FROM version WHERE NOT EXISTS (SELECT 1 FROM unit_read r WHERE r.version_ref = version.id)
+             AND NOT EXISTS (SELECT 1 FROM check_rest c WHERE c.version_ref = version.id)
+             AND NOT EXISTS (SELECT 1 FROM test_list_read t WHERE t.version_ref = version.id);
          DELETE FROM path WHERE NOT EXISTS (SELECT 1 FROM version v WHERE v.path_ref = path.id)
+             AND NOT EXISTS (SELECT 1 FROM test_list_dir t WHERE t.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM unit u WHERE u.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM unit_dir d WHERE d.path_ref = path.id)
              AND NOT EXISTS (SELECT 1 FROM check_source c WHERE c.path_ref = path.id)
@@ -829,6 +1363,54 @@ fn note_in(
     Ok(())
 }
 
+/// \[C-32\] How many passing runs in a row of the check `check_id` its stored adapter (pytest's,
+/// kept by its word) reported nothing in, since the last run that wrote the check: 0 when the
+/// store doesn't hold it.
+pub fn silent_runs(path: &Path, check_id: &Digest) -> u32 {
+    let Ok(Some(conn)) = open_to_read(path) else {
+        return 0;
+    };
+    conn.query_row(
+        "SELECT silent_runs FROM checks WHERE check_id = ?1",
+        [check_id.hex()],
+        |row| row.get::<_, u32>(0),
+    )
+    .unwrap_or(0)
+}
+
+/// \[C-32\] One more passing run of the check `check_id` in which its stored adapter reported
+/// nothing: the second in a row forgets the check, word and map, so the next run chooses afresh;
+/// the first is counted, in the statement that reads the count. `Ok(true)` when it was forgotten.
+pub fn note_silent(path: &Path, check_id: &Digest) -> Result<bool, Unread> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    writing(path, |conn| {
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .map_err(|e| unread(&e))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| unread(&e))?;
+        let forgot = tx
+            .execute(
+                "DELETE FROM checks WHERE check_id = ?1 AND silent_runs >= 1",
+                [check_id.hex()],
+            )
+            .map_err(|e| unread(&e))?
+            > 0;
+        if !forgot {
+            tx.execute(
+                "UPDATE checks SET silent_runs = silent_runs + 1 WHERE check_id = ?1",
+                [check_id.hex()],
+            )
+            .map_err(|e| unread(&e))?;
+        }
+        tx.commit().map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(forgot)
+    })
+}
+
 /// \[C-38\] Notes `hints` as known for the check `check_id`, in one transaction: a hint sent.
 /// Nothing when the store doesn't hold the check, whose run wrote nothing.
 pub fn note_hints(
@@ -837,24 +1419,25 @@ pub fn note_hints(
     hints: &[HintKnown],
     now_ms: i64,
 ) -> Result<(), Unread> {
-    let mut conn = open_to_write(path)?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| unread(&e))?;
-    let check: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM checks WHERE check_id = ?1",
-            [check_id.hex()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| unread(&e))?;
-    if let Some(check) = check {
-        note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
-    }
-    tx.commit().map_err(|e| unread(&e))?;
-    checkpoint(&conn);
-    Ok(())
+    writing(path, |conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| unread(&e))?;
+        let check: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM checks WHERE check_id = ?1",
+                [check_id.hex()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| unread(&e))?;
+        if let Some(check) = check {
+            note_in(&tx, check, hints, now_ms).map_err(|e| unread(&e))?;
+        }
+        tx.commit().map_err(|e| unread(&e))?;
+        checkpoint(conn);
+        Ok(())
+    })
 }
 
 /// \[C-38\] Whether this machine sent or received the hint `content_id` at `address` for `os`, for

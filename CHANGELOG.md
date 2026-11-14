@@ -6,6 +6,397 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+A test as the unit ([ADR 0080](docs/adr/0080-a-test-as-the-unit.md)): with `tests.unit: test`, a
+check reuses each test of a test file on its own, beside its test files, for pytest, Vitest,
+Jest, Go, Gradle, Maven, `swift test` and CTest. New, and off unless a check asks.
+
+### Added
+
+- Contract: **`checks.<name>.tests.unit`** (`file`, the default, or `test`) and **`tests.reads`**
+  (`file`, the default, or `test`, which needs `unit: test`). With `unit: test`, a test file whose
+  own key didn't pass has its tests reused one by one, each under a key of its own
+  (`hushrun.unit-key/v1`); a test that starts a process costs only itself; and an audited test
+  that fails runs once more alone. pytest, Vitest, Jest, Go, Gradle, Maven, `swift test` and CTest
+  know tests; Cargo reuses by test binary and says so once. With `reads: test`, pytest on Python
+  3.12 or later, Vitest and Jest watch each test, and a test is keyed by what it read alone
+  ([ADR 0081](docs/adr/0081-what-a-test-read.md),
+  [ADR 0083](docs/adr/0083-pytest-watches-a-test.md)); below 3.12, and for the other adapters, it
+  runs as `reads: file`, and says so once.
+- Contract: **`units.tests`** in a run's result, `{total, ran, reused}`, for a run with
+  `unit: test`. A run sends its results failures first, up to 50,000 and 8 MiB; an older server's
+  5,000 gets the first 5,000 once more, said once, and one that refuses a `savedMs` with no test
+  file reused gets the run without it. `HUSHRUN_UNITS`'s `hushrun.json` gains `unit`, `reads` and
+  `reuseTests`, and an adapter's file may be `hushrun.unit-facts/v1`, with each unit's tests.
+- Contract: an adapter's facts may send each unit's `everyTest`, the file's `opens` and
+  `reexports` (followed to the end on a test's own list), `settings.watch`, and each test's
+  `neverLeftOut`.
+- Hints hold tests ([ADR 0082](docs/adr/0082-hints-with-tests.md)): `hushrun.unit-hints/v1`
+  carries a check's tests, their ids sealed with XChaCha20-Poly1305 under a key the server never
+  has, so a machine with an empty cache reuses single tests on its first run. A hint with no tests
+  is version 0, as before.
+- `hushrun why NAME UNIT::TEST` explains one test; its JSON gains `test`. `hushrun ready` counts
+  tests where tests are the unit.
+- **Vitest** ([ADR 0084](docs/adr/0084-vitest-tests-one-by-one.md)): with `unit: test`, each test,
+  named by its suites' names and its own, is reused on its own, and with `reads: test` watched
+  through V8's coverage.
+- **Jest** ([ADR 0085](docs/adr/0085-jest.md)): Jest 29 and 30 are observed through
+  `NODE_OPTIONS`, test files and, with `unit: test`, each test.
+- **Go** ([ADR 0086](docs/adr/0086-go-tests-one-by-one.md)): with `unit: test`, a package's tests
+  are listed, left out with `-test.skip` and read from the binary's own output; with COMMAND's own
+  `-run` or `-skip`, by package.
+- **Gradle** ([ADR 0087](docs/adr/0087-gradle.md)): test classes and, with `unit: test`, their
+  methods, for Java, Kotlin and Android's local unit tests, on Gradle 8.14 and 9, after one line
+  in the settings file that `hushrun init` proposes.
+- **Maven** ([ADR 0088](docs/adr/0088-maven.md)): `mvn` and `./mvnw` reuse test classes and, with
+  `unit: test`, single tests, through `MAVEN_OPTS`, with no file of the repository changed.
+- **`swift test`** ([ADR 0089](docs/adr/0089-swift-test.md)): test targets and, with `unit: test`,
+  XCTest and Swift Testing tests, through hushrun's `swift` on COMMAND's `PATH`.
+- **CTest** ([ADR 0090](docs/adr/0090-ctest.md)): C and C++ test programs built with CMake and,
+  with `unit: test`, each CTest test, through hushrun's `ctest` on COMMAND's `PATH`.
+
+### Changed
+
+- Contract: this machine's store of what test files read is now
+  `<cache directory>/units/<id>.v2.sqlite`, with each test file's tests. When only the older
+  `<id>.v1.sqlite` is there, a run imports it once and leaves it as it was, for an older hushrun.
+  A CI cache step should name `units/*.sqlite`: one that names `units/*.v1.sqlite` restores a file
+  no run updates, and a run that imported one in CI says so. The step `hushrun init` proposes now
+  names `units/*.sqlite`.
+- A skipped test in a run whose command failed records nothing, and its test file records no
+  pass: a suite setup that failed, or a runner that stopped, can skip what it hides. In a run that
+  passed, a skip is a pass, as before. An adapter's facts may say `skipped`; pytest does.
+- A test file that failed while none of its tests failed, such as a failing `afterAll`, records
+  no pass for any of its tests: the next run runs them, and what failed runs again.
+- When an adapter finds after the command that its runner left out something the plan didn't
+  list, `hushrun run` says so in one line and runs the command once more with nothing left out,
+  going by that run alone; if that can't be done, or it happens again, nothing is recorded and the
+  run fails, saying why. An adapter's facts may say `leftOutUnlisted`.
+- With `tests.unit: test`, the audit runs tests, not test files: 2% of every test the plan could
+  leave out, at least one, drawn across test files reused whole and tests reused one by one. A
+  test file reused whole that holds an audited test runs that test alone, its other tests left
+  out; one whose tests this machine doesn't know is still audited whole. One audited test file
+  could be most of a run (67% of gin's tests; 717 of the 802 tests click ran after a one-line
+  change). With `unit: file`, and past 50,000 tests, the audit still runs test files.
+
+### Fixed
+
+- With tests as the unit, a Gradle JUnit 4 task's plan counts only the tests the task will leave
+  out (250 at most, by id): a class of 300 tests that passed said "7 of 301 tests run" while 51 ran.
+- After a Gradle run whose test tasks were all up to date, the next plan no longer says `all 5
+  test classes run: none had passed here yet`: it says none of them is left out, and that the last
+  run here executed none of them. Such a run no longer bounds what reuse can save.
+- A report an earlier run wrote in the two seconds before COMMAND started, and COMMAND left as it
+  was, no longer gives the run's last line its counts: only a report the run changed is its own.
+- A Maven run that failed with a test or failure no class could be told for says once why it
+  keeps no pass (`hushrun couldn't tell which test class 1 of its tests or failures belong to,
+  …`); only `hushrun why` said it before.
+- The plan's line, `observe`'s and `hushrun ready` no longer call a file gone when it is on disk
+  and only moved between the sets (a source that is a test file now, a file `tests.ignore` names
+  now): they say what it is now, as `hushrun why` does, by the same function.
+- Two starts of a test runner in one command, such as two pytests or `ctest -L a; ctest -L b`,
+  no longer add up to a test file that ran whole: a test file's tests are counted within each
+  start, and one of whose tests never ran records no pass. An adapter's facts may say `start`;
+  pytest sends it. A test told by id finished only when every process that ran it finished it.
+- A pytest test that `pytest.exit` or an interrupt cut short no longer counts as finished: it
+  records nothing, and its test file, which didn't run whole, records no pass. Before, with
+  `tests: reuse`, the file could be recorded as passed when that test was its last.
+- A pytest fixture of a wider scope whose teardown fails keeps every test it served from a pass,
+  in every file it served: pytest reports the error on whichever test ran last, and the test that
+  caused it no longer keeps its pass.
+- A pytest test file skipped whole as it loads (`pytest.skip(allow_module_level=True)`,
+  `pytest.importorskip`) counts as skipped, so in a run whose command failed it records no pass.
+- A run whose adapter knows it ran a stale build, such as `ctest` on programs built before the
+  last change, is no longer recorded as the check's pass: it says it passed and isn't recorded,
+  and the next run runs it. Contract: an adapter's facts may say `staleBuild`.
+- A start of a test runner that dies before it says what it saw, such as a second pytest that
+  crashes, keeps every test file and test of the run from a pass. Contract: an adapter's process
+  may make `<anything>.started` in `HUSHRUN_UNITS` as it begins and remove it once its facts are
+  written; pytest's does.
+- This machine's record of what test files read is set aside and made anew only when it is damaged
+  or of another build: a read-only file, a full disk or an I/O error no longer replaces a healthy
+  one, and two runs never set aside each other's.
+- A pytest that a test of the run starts and stops no longer keeps every pass of the check out for
+  good: only a start of the runner by COMMAND says it began.
+- `hushrun why` no longer says a test file or test that just ran "has never been seen run" when
+  the run kept nothing of it (a start that died, a module skipped as it loads, a second start of
+  Jest, a failed Vitest run with an error no test owns, a stale build, what was left out twice):
+  every one the run decided keeps a row with why. Contract: an adapter's facts file may say
+  `notKept`, why no pass of a failed run whose failures aren't told by unit is kept.
+- `observe`'s count of tests it couldn't follow counts every test of a test file not followed, no
+  longer 0 when each was kept from a pass for another reason first.
+- What reuse saved is never said to be more than the check took here when it ran everything: a
+  runner with workers no longer saves many times the suite's own time.
+- `observe` and a plan count the same test files: a data file pytest's doctest plugin collects
+  (`test*.txt`) and a file only Vitest's typecheck runs are no longer counted by a run.
+- When every test file runs, the plan's line, `observe`'s and `hushrun ready` give the true
+  reason: a file every one reads changed, none was followed last time, or none kept a pass last
+  time and why; "none had passed here yet" only when that is so.
+- `hushrun ready` counts each adapter's units in its own word, as a run's lines do: `CI would run
+  all 5 test programs`.
+- The plan's line says an audit's runs plainly: `…, and 1 more that already passed runs anyway, as
+  a check`, where it said `and 1 more that did runs as a check`.
+- `hushrun why` of a test file kept out by one of its tests says which test and why, such as the
+  wider fixture whose end failed, rather than pointing at a start of the runner.
+- `hushrun why` of a test its test file doesn't have says this machine doesn't know it, rather than
+  that it would be reused with its test file.
+- `hushrun why` finds a unit no file of the scope names, such as a CTest program, by the name its
+  adapter gives it, after a run that reused it: this machine's store no longer forgets it, and a
+  Gradle or Maven class of no file (`<project directory>::<class>`) is found whole.
+- `hushrun why` says why a test or a test file kept no result the last time it ran here, as the
+  run decided it: a skip in a run that failed (such as a Go test that skips because another
+  failed), a failure no test explains, a start that died, a stale build, a test its adapter never
+  leaves out. Before, it said nothing had changed and no pass counted. A stale build in a run that
+  failed no longer records the passes of test files and tests either.
+- A run's results of test files and tests fit a server's 8 MiB body, cut from the last as past
+  50,000, and any 413, an older server's or a proxy's in front of a server, sends the first 5,000
+  again, once; a second is said as a refusal.
+- With `reads: test`, pytest's adapter follows what Python modules re-export: a package's
+  `__init__.py` that binds names from another module, `from X import *`, and a module's `__all__`.
+- pytest's adapter takes a SQLite database a test connects to as read, as it does a file it opens.
+- A pytest fixture of a wider scope whose end fails keeps the pass of a test that asked for it at
+  run time (`request.getfixturevalue`), and no longer of a test served another fixture of its name.
+- pytest's adapter no longer takes a relative path opened after a `chdir` for the file of that
+  name it saw before: a test that read `sub/data.py` as `data.py` from `sub/` now has it on its
+  list, and runs when it changes.
+- With `reads: test`, pytest's adapter takes a test to have read what a fixture it asked for at
+  run time (`request.getfixturevalue`) read as it set up, and what a shared setup that started
+  inside its window read; and what ran while no test's window was open, such as a
+  `pytest_configure` of a `conftest.py`, is every test's.
+- A process a pytest fixture of a wider scope starts as it ends, when it switches its parameter
+  inside the next test's setup, is its test file's, not that one test's.
+- pytest's adapter watches a test only while no other tool uses `sys.monitoring` (a debugger,
+  coverage.py's sysmon core, a repository's own tool): with one there it watches nothing, and when
+  one appears it stops, gives back its tool id and says why once; each test then reads its test
+  file's list.
+- `reads: test`'s known misses name a third: a value an earlier test computed and a cache kept,
+  such as a `functools.cache` wrapper, which a later test reads without its code running. The
+  audit's second run catches it, as it does the other two.
+- A `ctest`, `swift test` or wrapper COMMAND that CTest's or `swift test`'s adapter now takes,
+  which pytest's adapter took before, stays pytest's where this machine's store says pytest
+  reported its test files. Where it doesn't, such as on a CI runner whose cache doesn't hold the
+  check, CTest or `swift test` observes it, and what pytest ran under it is no longer observed.
+  A run so kept forgets pytest only after two passing runs in a row in which pytest reported
+  nothing: one that failed before pytest started, such as `ctest` without its build directory, or
+  a single one that found no test, such as `ctest` with an empty build directory, keeps it.
+- Jest's adapter fails every test under a failing `afterAll`, which jest-circus doesn't, so a file
+  with another failing test no longer keeps those tests' passes and leaves them out next time,
+  their `afterAll` with them. After an uncaught exception or an unhandled rejection, which Jest 29
+  charges to whatever test is running, no test of its file passes.
+- With `reads: test`, Jest's adapter keeps a file opened with every repository file on the stack,
+  the test file included: a cache one module above the one that read it, or in the test file,
+  reaches each later test that reads it.
+- With `reads: test`, a test that reads through a chain of barrels (`export * from`, a CommonJS
+  `module.exports = require(…)`) lists every barrel of it, for Jest and Vitest: their adapters send
+  `reexports`.
+- With `unit: test`, the Go runner passes a test binary's output on until every program the test
+  left running lets it go, as `go test` does, instead of stopping 5 seconds after the binary
+  exited; such a package's tests still record no pass.
+- Jest, Vitest and Go say which tests were skipped (`test.skip`, `describe.skip`, `test.todo`,
+  `test.skipIf`, `ctx.skip()`, and Go's `t.Skip()` under `-v` or `-json`) and which start of the
+  runner wrote each file, so a skip in a run that failed records nothing. A Jest test file that
+  two projects ran ran whole only when each of them finished it.
+- Jest and Vitest started more than once in one COMMAND, as a script's `jest a && jest b` does,
+  no longer keep the first start's passes when the second fails: the second start leaves a
+  `.started` file, no test file or test of that run records a pass, and the run says why once. A
+  `.started` file whose content is a JSON object with a `why` gives the reason the run says.
+- The line `hushrun init` proposes for Vitest's config is now `plugins:
+  [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) :
+  undefined]`: the `&&` form it proposed before failed a config that type-checks itself
+  (`typecheck.enabled`), with every test passed. For Jest's config it is now `if
+  (process.env.HUSHRUN_JEST) require(process.env.HUSHRUN_JEST);`, or a `createRequire` form for a
+  TypeScript config that compiles to CommonJS, which a lint's `no-unused-expressions` and
+  `no-require-imports` accept. A config with the line in its old form still loads the adapter.
+- `hushrun why` for a Go check decides from the same files the run does: a `_test.go` file the
+  build tags leave out of every package (testify's `dumpcgo_test.go`, `cgo && testcgo`) is no
+  longer called gone, nor does it make every test file run where the run reused them. `why` never
+  calls a file on disk gone.
+- Where a Vitest config turns on `typecheck`, sets `isolate: false` or runs in a browser, `hushrun
+  init` proposes no line for it and says that hushrun can't look at its test files there.
+- A script that starts Jest or Vitest for something that runs no test file and then for the tests
+  (`jest --clearCache && jest`, `vitest list && vitest run`) is one start again, and keeps its
+  passes: a start that ran no test file gives up its claim on the run as it ends, and a start only
+  counts as a second one once it runs test files.
+- `hushrun why` says what happened when a Jest or Vitest test kept nothing after an error no test
+  owns: Jest's error it couldn't charge to a test, or Vitest's error with the file it came from,
+  which it says of each Vitest test file of that run too, the files that passed included.
+- With `unit: test`, a Go package that failed without `-v` or `-json` keeps no pass of its other
+  tests: Go names only what failed, so a test that skipped because another failed looked passed.
+  The run says so once, and `hushrun why` says it for such a test; add `-v` to keep them.
+- A Jest test that awaits `promisify(exec)` or `promisify(execFile)` gets `{ stdout, stderr }`
+  again, `promisify(fs.exists)` resolves to a boolean instead of rejecting with it, and
+  `promisify(fs.read)` resolves to `{ bytesRead, buffer }`, on Jest 29 and 30: Jest's adapter
+  dropped `util.promisify.custom` from what it wraps. Its wrappers now keep what they wrap
+  carries, its name, length and own properties, and add none: `worker_threads.Worker` and
+  `vm.Script` have their lengths again, `process.dlopen` its name. A child process the promisified
+  form starts is still one hushrun can't follow.
+- `hushrun why` gives a test that kept no result the reason its run recorded with it in this
+  machine's store, rather than one guessed from COMMAND: a Go test that a panic or a timeout left
+  unrun is told so, not to add `-v`, and a `-v` that comes only from `GOFLAGS` is no longer asked
+  for. An adapter's facts may say a test's `notKept`; the Go runner sends it.
+- Go with `unit: test`: a package whose test leaves a program holding its output past `go test`'s
+  own wait now fails with `Test I/O incomplete`, as without hushrun. The runner hands output still
+  open after the binary exits to a forwarder and exits, rather than passing it on to its end
+  itself, which made `go test` print `ok`.
+- Maven and Gradle no longer record as passed a test TestNG skipped because another class's suite
+  setup failed: a skipped test, and a class skipped whole, is told skipped, and passes only in a
+  run where nothing failed.
+- A change to an annotation processor of the build, or to any project a module or project names
+  only to its build (`annotationProcessorPaths`, plugin dependencies, `annotationProcessor`,
+  `kapt`, `ksp`, `compileOnly`), now runs the tests of the code it generates, under Maven and
+  Gradle.
+- Gradle: a class whose test JVM died (a crash, `System.exit`, a kill) records no pass. The
+  adapter now reads the test-JVM hook's events and the task's failure.
+- The test-JVM hook matches a listed test by its whole name: Spock features, parametrized display
+  names and Kotest names that differ after a `[` are no longer all left out for one entry; and
+  TestNG's interceptor leaves out an inherited test by the subclass it runs in. A test the hook
+  left out that its list didn't name makes the run start COMMAND once more with nothing left out.
+- Gradle leaves out no JUnit 4 test of a class in the default package by a filter pattern, which
+  also left out the test of that name in every class of the same simple name.
+- Gradle: a file of a JVM kind that no project of the build compiles, such as a tool beside a
+  project's sources that a script builds and publishes to `mavenLocal()`, is now the rest, so a
+  change to it runs every test class: a project is read as its source directories, not its whole
+  directory. Maven read modules so already.
+- Gradle: a test that ends its JVM with `System.exit(0)` under JUnit 4 or TestNG, which Gradle
+  calls a success, no longer has its class recorded as passed: the test-JVM hook now also goes on
+  each test JVM as a Java agent that says how the JVM ended.
+- Maven: a test that reads another module's test classes through a third module's compile-scope
+  test-jar dependency now runs when those test classes change.
+- Maven: a module another module uses only through a plugin's configuration, such as the
+  dependency plugin's `copy` of its jar, is now read by that module's tests.
+- Gradle: a test-classpath jar from `mavenLocal()`, or from a file repository in the checkout, is
+  no longer dropped silently: one a remote repository supplied is fine, as Gradle's own cache is;
+  one a project of the build published reads that project; any other makes its class not
+  observed, and `hushrun why` says what to change.
+- A Maven run of TestNG no longer counts each test twice in its summary: a report below
+  `junitreports/` is left out when Surefire's `TEST-TestSuite.xml` beside it holds every one of
+  its cases, and only then, so another tool's reports there are still read; one that holds more,
+  or a case renamed, counts the cases it shares with Surefire's once.
+- Maven: a module named only in an assembly descriptor (a file the plugin's configuration points
+  at, an inline descriptor, or a shared one of another module of the reactor that `descriptorRefs`
+  names) is now read by that module's tests.
+- Maven: a test class that only an execution the run didn't reach would run (Failsafe's, after
+  Surefire failed) is no longer filed as a source, which made the next run at a tree that had
+  passed reuse nothing: which files are test classes is one rule, by the test plugins' includes and
+  what earlier runs learned, whatever a run reached.
+- Maven: after a build that failed and stopped the reactor, the next run no longer says a file of
+  a module the build didn't reach "is gone" and runs every test class: such a module keeps what
+  the last run that reached it learned.
+- Maven: a JUnit 4 class whose static `suite()` runs cases of classes no test file is (Guava's
+  testlib) is no longer counted as reused while it runs every time: its cases are its own, it is
+  told as never left out, and a failure of one no longer costs every other class of a failed run
+  its pass. Under Gradle such a class (with `@RunWith(AllTests.class)`) was no test class at all,
+  and its cases were dropped from the counts: now they are its own, in the same way.
+- The line that says why every test file runs uses the adapter's word, as the counts do: `every
+  test class runs: no run here has read Maven's reactor yet`, `every package runs`.
+- Gradle: a test task of which the check's store knows no test class now executes in that run,
+  never up to date nor from the build cache, so the first run through hushrun always learns, in
+  `observe` and `reuse`; the note for a run that executed no test task no longer advises another
+  command (`--rerun-tasks` is another check). `hushrun.json` gains `known`.
+- Gradle: a run in which every test task was up to date, or came from the build cache, now says
+  so in one line, with what makes Gradle run them, instead of a line that read as if tests ran.
+  The report search can tell a report the run didn't write from one it did, however new its
+  time (`hushrun_reports::before` and `find_changed`).
+- Gradle: each JUnit 4 task's facts now say how many of its tests it leaves out at most
+  (`settings.leaveOutAtMost`, 250, by filter patterns), so that a plan can count past them as run
+  rather than reused.
+- A `gradlew` script that starts Gradle again after a failure no longer has its second start's
+  pass replace the first start's failure: each start keeps its own facts.
+- `swift test --skip-build` is no longer observed: it runs an earlier build's products, whose
+  passes hushrun recorded for the files as they were.
+- `swift test`: a target built with a build-tool plugin of another package reads its package
+  whole; a console `passed` line counts only after the test's `started` line; a list after the
+  run that fails, where tests were left out, runs the command again with nothing left out;
+  XCTSkip and Swift Testing's disabled tests are told as skipped (under `--parallel`, in a run
+  that failed, an XCTest pass may be one); each hushrun `swift` is a start of its own; and the
+  plan's `swift package describe` gets a command's own `env NAME=value` assignments.
+- hushrun's `swift` no longer waits for output a program `swift test` left running holds open: it
+  returns with `swift test`, a forwarder of its own passes on what that program prints later, and
+  that run records no pass.
+- `swift test`: an executable target is read by every test target, which may start it; hushrun's
+  `swift` stops waiting a second after swift ends whatever output keeps arriving, and keeps at most
+  16 MiB of it.
+- `swift test`: what reuse saved is no longer a multiple of the run: Swift Testing runs a target's
+  tests at once, and each test's time is now its share of the moments it ran, not its wall time
+  ("reusing 317 tests saved about 2m 57s" of a 3-second suite).
+- `swift test`: hushrun keeps only XCTest's `Test Case` lines of what swift prints, as they go by,
+  so a suite that prints more than 16 MiB besides is still recorded; past 16 MiB of those lines,
+  or with output still held after swift ended, the run says once why no test is recorded, and
+  `hushrun why` says it of each test.
+- CTest: a header a program of the project writes (a generator built and run by the build) now
+  makes each test program that includes it read what the generator is built from, on Ninja and
+  Makefiles, so a change to a header the generator includes runs those programs.
+- CTest: a program or file a test names in its arguments or its `ENVIRONMENT`
+  (`add_test(NAME x COMMAND driver $<TARGET_FILE:server>)`) is read by its test program; a
+  directory of a build named there makes it read every source and not up to date.
+- CTest: each `ctest` of a command is a start of its own, so two of them never add up to a test
+  program that ran whole.
+- CTest: a test preset's `execution.repeat` of `until-pass` no longer records a pass that came
+  after a failure, its `filter.include.index` leaves nothing out, and its `execution.showOnly`
+  is not observed.
+- CTest: hushrun's own listings no longer overwrite a test preset's `outputLogFile` or
+  `outputJUnitFile`.
+- CTest: an in-source build (`cmake -B .`) is said not to be observed, rather than silently
+  reusing nothing.
+- CTest: a test whose program isn't built here is marked so whichever test of its unit comes
+  first; skipped and disabled tests are told as skipped, so in a run that failed they record no
+  pass; and the plan's listing and walk get a command's own `env NAME=value` assignments.
+- CTest: a run in which a test of a program older than what it is built from ran (a source
+  changed, nothing built) no longer records the check's pass: it says once that the pass isn't
+  recorded, naming the program, what changed, and to build before ctest, and the next run on the
+  same code runs again.
+- CTest: whether a test program is older than what it is built from is decided once, the same on
+  Ninja and Makefiles, by the files' own times at their own resolution, and `ninja -n` is no
+  longer asked: a target that writes a header on every build (`add_custom_target(… ALL …)`) no
+  longer keeps every run from recording, a file system with coarse times no longer looks old, and
+  each program the build makes in a directory a test names must be up to date. The line names the
+  file and the object, and when make compares whole seconds and a build can't help, says to touch
+  the file.
+- CTest: a fixture or a test depended on whose program isn't built here (`cmake -E
+  make_directory`, `sh -c`) no longer makes every test that needs it read every source: it adds
+  only what its command names, a script of the repository included; and a test no longer reads
+  the programs of the other tests that require the same fixture. In a project of 21 programs, a
+  change to one library ran 6 again rather than 10.
+- CTest: the plan's listing is taken once, by the `ctest` COMMAND starts, and never by a later
+  start or one under a wrapper, which list for themselves; and a failed test the listing didn't
+  name (one discovery added after it) keeps every pass of its `ctest` out.
+- CTest: a flag or a link option configured and not built makes the program old, as the build
+  sees it: on Makefiles by `flags.make` and `link.txt`, on Ninja by what its log records of each
+  command. Before, the old program's pass was recorded.
+- CTest: a build tree older than its own configuration (a `CMakeLists.txt`, a test's properties or
+  an included `.cmake` file edited, and not configured) records no pass, the check's included,
+  and says to configure and build before ctest. Before, the old programs' passes were recorded,
+  and later runs left out tests that failed once built.
+- CTest: on a stale build the run's line no longer calls a file only a stale program reads new
+  ("all 22 test files run: include/fmt/args.h is new"): a stale program's files keep their sets,
+  so the line and `hushrun why` say the same.
+- CTest and `swift test`: a shell line or script that starts `ctest` or `swift test` by its path
+  (`sh -c "/opt/cmake/bin/ctest …"`) says it isn't observed, in the words a COMMAND that does
+  says, where it said nothing.
+- The run's lines count each adapter's units in its own word: `22 test programs` (CTest),
+  `7 test targets` (`swift test`), `test binaries` (Cargo), `packages` (Go), `test classes`
+  (Gradle, Maven), where they all said `test files`.
+- CTest: a rule that leaves its output as it was when its bytes are the same (`copy_if_different`)
+  no longer keeps its program old after every build on Ninja, whose log says the rule ran; on
+  Makefiles the line says which file to touch.
+- CTest: a custom command's `DEPFILE`, the programs of the fixtures and tests a test depends on, a
+  program a test program waits for or has compiled in, and a program a test names by a relative
+  path are now read; on Makefiles a source newer than its object makes the program stale; an
+  in-source build says so in the run; and for `ctest` as the command the project's discovery runs
+  once less, the plan's listing being taken.
+- CTest and `swift test`: a file of a source kind that the build's graph gives to no test program
+  or test target (a target no test depends on, `cases/*.c` a test reads at run time, a
+  `Fixtures/` tree) is in the rest set, so a change to it runs everything. A program whose build
+  couldn't be read no longer makes every C and C++ file a source.
+- On Windows, hushrun's `ctest` and `swift` end with the real program's exit code whole, where
+  one past 255 used to end as 1.
+- On Windows, hushrun's test runner ends with a Cargo or Go test binary's exit code whole, as
+  its `ctest` and `swift` do, where one past 255 used to end as 1.
+- hushrun's `ctest` and `swift` end on a signal sent after the real program ended, rather than
+  ignoring it.
+- The real `ctest` or `swift` hushrun starts is the one a shell would: an empty `PATH` entry is
+  the current directory, a relative one is from it, and a link to one of hushrun's own programs
+  is passed over.
+
 ## [0.15.0] - 2026-11-14
 
 Sharing build blocks through a backend ([ADR 0078](docs/adr/0078-sharing-build-blocks-through-a-backend.md)):

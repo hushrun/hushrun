@@ -85,12 +85,13 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
-      # pytest and pytest-xdist for the tests of `tests: observe` (ADR 0068), which fail rather
-      # than pass without them when HUSHRUN_TEST_TOOLS is `required`; then Go and Vitest.
+      # pytest, pytest-xdist and pytest-cov for the tests of `tests: observe` (ADR 0068), which
+      # fail rather than pass without them when HUSHRUN_TEST_TOOLS is `required`; then Go and
+      # Vitest.
       - name: Install pytest for the test-file tests
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0 pytest-cov==7.1.0 coverage==7.17.2
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those
@@ -104,8 +105,64 @@ jobs:
           node-version: "20.20.2"
       - name: Install Vitest for the test-file tests
         run: |
-          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
+      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
+      - name: Name CMake for the test-program tests
+        run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
+      - name: Name Swift for the test-target tests
+        run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
+      # offline against a local repository: filled here once by running those tests online.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - name: Install Maven and fill its repository for the test-class tests
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
+          echo "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  $RUNNER_TEMP/maven.tar.gz" | shasum -a 512 -c -
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
+      # published checksum, and a Gradle user home filled here once by running those tests online,
+      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
+      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
+      # platform the test compiles for, android-36; otherwise this job opts out of it by name
+      # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
+      - name: Install Gradle and fill its user home for the test-class tests
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
+          unzip -q gradle-9.3.1-bin.zip
+          echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+          else
+            echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
+            echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID=skip
+          fi
+          cd "$GITHUB_WORKSPACE"
+          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
+      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
+      - name: Install Jest for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/jest29" --no-audit --no-fund --ignore-scripts jest@29.7.0 ts-jest@29.4.15 typescript@5.9.3
+          npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
+          echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run test -- cargo nextest run --workspace --locked --no-tests=pass
       - run: hushrun run doctest -- cargo test --workspace --doc --locked
@@ -174,7 +231,7 @@ jobs:
       - name: Install pytest for the test-file tests
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0
+          "$RUNNER_TEMP/py/bin/pip" install --quiet pytest==8.4.2 pytest-xdist==3.8.0 pytest-cov==7.1.0 coverage==7.17.2
           echo "HUSHRUN_TEST_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
           echo "HUSHRUN_TEST_TOOLS=required" >> "$GITHUB_ENV"
       # Go and Vitest for the tests of the Go and Vitest adapters (ADR 0070, 0071), pinned: those
@@ -188,8 +245,64 @@ jobs:
           node-version: "20.20.2"
       - name: Install Vitest for the test-file tests
         run: |
-          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12
+          npm install --prefix "$RUNNER_TEMP/vitest" --no-audit --no-fund --ignore-scripts vitest@4.1.12 typescript@5.9.3 @types/node@26.6.6
           echo "HUSHRUN_TEST_VITEST=$RUNNER_TEMP/vitest/node_modules" >> "$GITHUB_ENV"
+      # CMake and Ninja, which GitHub's runners have, for the CTest adapter's tests (ADR 0090).
+      - name: Name CMake for the test-program tests
+        run: echo "HUSHRUN_TEST_CMAKE=$(dirname "$(command -v cmake)"):$(dirname "$(command -v ninja)")" >> "$GITHUB_ENV"
+      # The runner's own Swift for the tests of the swift test adapter (ADR 0089).
+      - name: Name Swift for the test-target tests
+        run: echo "HUSHRUN_TEST_SWIFT=$(command -v swift)" >> "$GITHUB_ENV"
+      # A JDK and Maven, pinned, for the tests of the Maven adapter (ADR 0088), which run Maven
+      # offline against a local repository: filled here once by running those tests online.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - name: Install Maven and fill its repository for the test-class tests
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/maven.tar.gz" https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
+          echo "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  $RUNNER_TEMP/maven.tar.gz" | shasum -a 512 -c -
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          echo "HUSHRUN_TEST_MAVEN=$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_MAVEN_REPO=$RUNNER_TEMP/m2" >> "$GITHUB_ENV"
+          HUSHRUN_TEST_MAVEN="$RUNNER_TEMP/apache-maven-3.9.16/bin/mvn" HUSHRUN_TEST_MAVEN_REPO="$RUNNER_TEMP/m2" HUSHRUN_TEST_MAVEN_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_maven --locked --no-fail-fast || echo "filling Maven's repository failed: the test run says what is missing"
+      # Gradle for the tests of the Gradle adapter (ADR 0087), pinned and checked against Gradle's
+      # published checksum, and a Gradle user home filled here once by running those tests online,
+      # as Maven's repository is: what they need is their own builds (JUnit 5 and 4, TestNG, Spock,
+      # Kotest, Android's Gradle plugin), never a list beside them. The tests then run offline.
+      # The Android test runs against the runner's own SDK (`ANDROID_HOME`) when it holds the
+      # platform the test compiles for, android-36; otherwise this job opts out of it by name
+      # (`HUSHRUN_TEST_ANDROID=skip`) and says so, since under `required` a missing SDK fails it.
+      - name: Install Gradle and fill its user home for the test-class tests
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfLO https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          echo "$(curl -sSfL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)  gradle-9.3.1-bin.zip" | shasum -a 256 -c
+          unzip -q gradle-9.3.1-bin.zip
+          echo "HUSHRUN_TEST_GRADLE=$RUNNER_TEMP/gradle-9.3.1/bin/gradle" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "HUSHRUN_TEST_ANDROID_SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID_SDK="$ANDROID_HOME"
+          else
+            echo "No Android SDK with android-36 here: the Android test is skipped by name (HUSHRUN_TEST_ANDROID=skip)"
+            echo "HUSHRUN_TEST_ANDROID=skip" >> "$GITHUB_ENV"
+            export HUSHRUN_TEST_ANDROID=skip
+          fi
+          cd "$GITHUB_WORKSPACE"
+          HUSHRUN_TEST_GRADLE="$RUNNER_TEMP/gradle-9.3.1/bin/gradle" HUSHRUN_TEST_GRADLE_USER_HOME="$RUNNER_TEMP/gradle-home" HUSHRUN_TEST_GRADLE_ONLINE=1 \
+            cargo nextest run -p hushrun --test units_gradle --locked --no-fail-fast || echo "filling Gradle's user home failed: the test run says what is missing"
+      # Jest 29 and 30 for the tests of the Jest adapter (ADR 0085), with ts-jest for its type check.
+      - name: Install Jest for the test-file tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/jest29" --no-audit --no-fund --ignore-scripts jest@29.7.0 ts-jest@29.4.15 typescript@5.9.3
+          npm install --prefix "$RUNNER_TEMP/jest30" --no-audit --no-fund --ignore-scripts jest@30.5.2 ts-jest@29.4.15 typescript@5.9.3
+          echo "HUSHRUN_TEST_JEST29=$RUNNER_TEMP/jest29/node_modules" >> "$GITHUB_ENV"
+          echo "HUSHRUN_TEST_JEST30=$RUNNER_TEMP/jest30/node_modules" >> "$GITHUB_ENV"
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run clippy-macos -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: hushrun run test-macos -- cargo nextest run --workspace --locked --no-tests=pass
@@ -404,6 +517,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: hushrun/hushrun/action/setup@0d6c719855fbae11fbf7495fa2d16b29ab0d8e31 # v0.9.0
       - run: hushrun run trace -- cargo xtask trace
+
+  # The JVM jars hushrun embeds (ADR 0088) are what their Java sources build: built again with the
+  # JDK they were built with, against the API jars pinned by SHA-256, and compared byte for byte.
+  jars:
+    name: JVM jars
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo xtask jars --check
 
   # THIRD-PARTY-NOTICES.md names every crate the release binaries are built with, for every
   # release target, with its license texts: it must be what Cargo.lock gives.

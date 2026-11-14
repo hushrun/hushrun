@@ -3,6 +3,7 @@
 
 #[cfg(unix)]
 pub mod container;
+pub mod env;
 pub mod fake_build;
 pub mod fake_forge;
 pub mod fake_github;
@@ -11,6 +12,7 @@ pub mod fake_ledger;
 pub mod fake_results;
 pub mod git;
 pub mod http;
+pub mod lines;
 pub mod scenario;
 pub mod schema;
 pub mod sigstore;

@@ -1,11 +1,14 @@
 //! \[ADR 0068\] Test by test: a check's test files, which RFC 0003 and the spec call units.
 //!
-//! - `checks.<name>.tests` in `hushrun.yaml` (C-5): [`Tests`].
+//! - `checks.<name>.tests` in `hushrun.yaml` (C-5): [`Tests`], with \[ADR 0080\] the unit a
+//!   check reuses by ([`Unit`]) and what a test is taken to have read ([`Reads`]).
 //! - The four sets every file of a check's scope falls in, by one function, [`classify`] (C-30).
 //! - A unit's key, by one function, [`unit_key`], with [`shape`] and [`Tree::digest`] for the
-//!   digests it holds (C-31).
+//!   digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
+//!   (C-39), and a test's name, by [`test_name`].
+//! - \[ADR 0081\] What a test read, by one function, [`test_list`] (C-40).
 //! - A unit's state in a run, decided once, by [`state`], from the facts an adapter reported
-//!   (C-32, ADR 0060).
+//!   (C-32, ADR 0060): a test file's, and \[ADR 0080\] a test's, from its own facts.
 //!
 //! Like the rest of this crate it reads no file: what a run observed is passed in.
 
@@ -21,6 +24,13 @@ use crate::names::{CheckName, ScopeName};
 /// The schema of a unit's key (C-31). Changing it gives every unit a new key, so no earlier unit
 /// result counts.
 pub const UNIT_KEY_SCHEMA: &str = "hushrun.unit-key/v0";
+
+/// \[ADR 0080\] The schema of a test's key (C-39). A test file's key stays [`UNIT_KEY_SCHEMA`], so
+/// every result recorded before tests were a unit counts as it did.
+pub const TEST_KEY_SCHEMA: &str = "hushrun.unit-key/v1";
+
+/// \[ADR 0080\] What joins a test's unit and its id in its name (C-39).
+pub const TEST_SEPARATOR: &str = "::";
 
 /// `checks.<name>.tests`'s mode (C-5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,11 +66,76 @@ impl Mode {
     }
 }
 
-/// `checks.<name>.tests` (C-5): its mode, the files no test reads (`ignore`) and the test files
-/// that always run (`always`). Not part of the check's definition (E-6).
+/// \[ADR 0080\] `checks.<name>.tests.unit` (C-5): what a check reuses one by one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Unit {
+    /// The default: a test file, as RFC 0003 has it.
+    #[default]
+    File,
+    /// Each test of a test file on its own (C-39).
+    Test,
+}
+
+impl Unit {
+    /// The word `hushrun.yaml` and `hushrun.json` write.
+    pub fn word(self) -> &'static str {
+        match self {
+            Unit::File => "file",
+            Unit::Test => "test",
+        }
+    }
+
+    /// The unit a word names.
+    pub fn from_word(word: &str) -> Option<Unit> {
+        match word {
+            "file" => Some(Unit::File),
+            "test" => Some(Unit::Test),
+            _ => None,
+        }
+    }
+}
+
+/// \[ADR 0080\] `checks.<name>.tests.reads` (C-5): what a test is taken to have read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Reads {
+    /// The default: everything its test file read. As safe as a test file.
+    #[default]
+    File,
+    /// What ran while it ran and what that imports directly, and what it opened: finer, and a
+    /// trade a developer makes (RFC 0004 §3.2). Needs [`Unit::Test`].
+    Test,
+}
+
+impl Reads {
+    /// The word `hushrun.yaml` and `hushrun.json` write.
+    pub fn word(self) -> &'static str {
+        match self {
+            Reads::File => "file",
+            Reads::Test => "test",
+        }
+    }
+
+    /// What a word names.
+    pub fn from_word(word: &str) -> Option<Reads> {
+        match word {
+            "file" => Some(Reads::File),
+            "test" => Some(Reads::Test),
+            _ => None,
+        }
+    }
+}
+
+/// `checks.<name>.tests` (C-5): its mode, \[ADR 0080\] its unit and what a test read, the files no
+/// test reads (`ignore`) and the test files that always run (`always`). Not part of the check's
+/// definition (E-6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tests {
     pub mode: Mode,
+    /// \[ADR 0080\] What the check reuses one by one: test files, the default, or tests.
+    pub unit: Unit,
+    /// \[ADR 0080\] What a test is taken to have read; `test` only with `unit: test`, which
+    /// `hushrun.yaml`'s validation holds to (C-8).
+    pub reads: Reads,
     /// Globs from the repository root: files in the ignored set (C-30).
     pub ignore: Vec<Pattern>,
     /// Globs from the repository root: units that always run.
@@ -178,6 +253,10 @@ pub fn classify<'p>(
 /// past it, nothing is reused (results-v0 §3).
 pub const MOST_UNITS: usize = 5_000;
 
+/// \[ADR 0080\] The most tests a check reuses one by one (C-39): past it, the check reuses by test
+/// file for that run, and says so.
+pub const MOST_TESTS: usize = 50_000;
+
 /// \[C-31\] `shape`: the SHA-256 of the sources set's paths, their names and not their contents:
 /// each path's UTF-8 bytes followed by one NUL byte, sorted by bytes as D-4 sorts them.
 pub fn shape<'a>(sources: impl IntoIterator<Item = &'a str>) -> Digest {
@@ -286,8 +365,39 @@ pub fn unit_key(
     rest: &Digest,
     shape: &Digest,
 ) -> Result<Digest, JcsError> {
+    key_of(UNIT_KEY_SCHEMA, base, unit, None, reads, rest, shape)
+}
+
+/// \[C-39, ADR 0080\] The one function for a test's key: [`unit_key`]'s fields, computed the same
+/// way, under [`TEST_KEY_SCHEMA`], with `test`, the test's id within its unit. `reads` digests the
+/// test's list (RFC 0004 §3.2).
+pub fn test_key(
+    base: &KeyBase,
+    unit: &str,
+    test: &str,
+    reads: &Digest,
+    rest: &Digest,
+    shape: &Digest,
+) -> Result<Digest, JcsError> {
+    key_of(TEST_KEY_SCHEMA, base, unit, Some(test), reads, rest, shape)
+}
+
+/// \[ADR 0080\] A test's name, everywhere a person reads it: its unit, `::`, and its id (C-39).
+pub fn test_name(unit: &str, test: &str) -> String {
+    format!("{unit}{TEST_SEPARATOR}{test}")
+}
+
+fn key_of(
+    schema: &str,
+    base: &KeyBase,
+    unit: &str,
+    test: Option<&str>,
+    reads: &Digest,
+    rest: &Digest,
+    shape: &Digest,
+) -> Result<Digest, JcsError> {
     let mut input = json!({
-        "schema": UNIT_KEY_SCHEMA,
+        "schema": schema,
         "check": base.check,
         "command": base.command,
         "cwd": base.cwd,
@@ -297,6 +407,9 @@ pub fn unit_key(
         "rest": rest,
         "shape": shape,
     });
+    if let Some(test) = test {
+        input["test"] = json!(test);
+    }
     if let Some(external) = &base.external {
         input["external"] = external.clone();
     }
@@ -304,6 +417,125 @@ pub fn unit_key(
         input["counts_from"] = rule.clone();
     }
     jcs::digest(&input)
+}
+
+/// \[C-40, ADR 0081\] What an adapter saw of one test file for what its tests read, as paths from
+/// the repository root (`hushrun.unit-facts/v1`, C-32).
+#[derive(Debug, Clone, Copy)]
+pub struct FileWatch<'a> {
+    /// The test file.
+    pub unit: &'a str,
+    /// Its own list (C-31): what it imported, followed to the end, or opened.
+    pub file: &'a BTreeSet<String>,
+    /// The directories it listed.
+    pub file_dirs: &'a BTreeSet<String>,
+    /// Each file's direct imports.
+    pub imports: &'a BTreeMap<String, BTreeSet<String>>,
+    /// \[C-40\] The files each file re-exports from (`export * from`, `export { x } from`): a test
+    /// that reads a file reads what it re-exports, followed to the end through re-exports only.
+    pub reexports: &'a BTreeMap<String, BTreeSet<String>>,
+    /// The files each module opened from its own code, read once and perhaps kept (RFC 0003 §3.3).
+    pub opens: &'a BTreeMap<String, BTreeSet<String>>,
+    /// What loading it ran (functions called, not top-level code) and opened: `None` when the
+    /// adapter didn't say, and then no test of it can be told on its own.
+    pub loaded: Option<(&'a BTreeSet<String>, &'a BTreeSet<String>)>,
+    /// What the runner loads for every test of it, as files whose code ran: pytest's
+    /// `conftest.py` files above it.
+    pub every: &'a BTreeSet<String>,
+    /// Each shared setup: the ids of the tests it served, what it ran and what it opened.
+    pub shared: &'a [(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)],
+}
+
+/// \[C-40\] What an adapter saw while one test ran: `None` for a list it didn't say, and then the
+/// test wasn't watched alone.
+#[derive(Debug, Clone, Copy)]
+pub struct TestWatch<'a> {
+    pub id: &'a str,
+    /// Files a function of which was called while it ran: setup, body and teardown.
+    pub ran: Option<&'a BTreeSet<String>>,
+    /// Files it opened.
+    pub opened: Option<&'a BTreeSet<String>>,
+    /// Directories it listed.
+    pub dirs: Option<&'a BTreeSet<String>>,
+}
+
+/// \[C-40\] A test's list: the files its key hashes, the directories every file below which it
+/// read, and whether it is its own or, unwatched, its test file's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestList {
+    pub files: BTreeSet<String>,
+    pub dirs: BTreeSet<String>,
+    /// It is the test's own (`reads: test`, watched), not its test file's.
+    pub own: bool,
+}
+
+/// \[C-40, ADR 0081\] The one function for what a test read, which every reader calls: the plan,
+/// the record, `observe`, `ready` and `why`.
+///
+/// With `reads: file`, or for a test the adapter didn't watch alone, or a test file whose loading
+/// it didn't say, its test file's list (C-31). With `reads: test` (RFC 0004 §3.2):
+///
+/// 1. the test's own file;
+/// 2. every file a function of which was called while it ran (its setup, body and teardown), and
+///    what a shared setup that served it ran, what ran while its test file was loaded, and what
+///    the runner loads for every test of the file: files whose code ran;
+/// 3. every file that one of those, or its own file, imports directly: one step;
+/// 4. every file it opened, every file a module whose code ran opened from its own code (read once
+///    and kept), every file below a directory it listed, and what a shared setup that served it,
+///    or loading its file, opened;
+/// 5. for every file of those, the files it re-exports from, followed to the end through
+///    re-exports only: a file that only re-exports has no function of its own to call.
+///
+/// It can miss a value that reached the test two imports away, or through no import (a registry
+/// another file filled), with no function of the way called: that is the trade `reads: test`
+/// names (RFC 0004 §3.2), which audit runs stand under.
+pub fn test_list(reads: Reads, file: &FileWatch<'_>, test: &TestWatch<'_>) -> TestList {
+    let whole = || TestList {
+        files: file.file.clone(),
+        dirs: file.file_dirs.clone(),
+        own: false,
+    };
+    if reads == Reads::File {
+        return whole();
+    }
+    let (Some(ran), Some(opened), Some(dirs), Some((loaded_ran, loaded_opened))) =
+        (test.ran, test.opened, test.dirs, file.loaded)
+    else {
+        return whole();
+    };
+    let serving = file
+        .shared
+        .iter()
+        .filter(|(ids, _, _)| ids.contains(test.id));
+    let mut code: BTreeSet<String> = BTreeSet::from([file.unit.to_string()]);
+    code.extend(ran.iter().cloned());
+    code.extend(loaded_ran.iter().cloned());
+    code.extend(file.every.iter().cloned());
+    let mut files: BTreeSet<String> = opened.clone();
+    files.extend(loaded_opened.iter().cloned());
+    for (_, shared_ran, shared_opened) in serving {
+        code.extend(shared_ran.iter().cloned());
+        files.extend(shared_opened.iter().cloned());
+    }
+    for path in &code {
+        files.extend(file.imports.get(path).into_iter().flatten().cloned());
+        files.extend(file.opens.get(path).into_iter().flatten().cloned());
+    }
+    files.extend(code);
+    // 5. What every file of it re-exports from, followed to the end through re-exports only.
+    let mut pending: Vec<String> = files.iter().cloned().collect();
+    while let Some(path) = pending.pop() {
+        for next in file.reexports.get(&path).into_iter().flatten() {
+            if files.insert(next.clone()) {
+                pending.push(next.clone());
+            }
+        }
+    }
+    TestList {
+        files,
+        dirs: dirs.clone(),
+        own: true,
+    }
 }
 
 /// Something an adapter couldn't follow while a unit ran (C-32): a subprocess, a fork, the
@@ -326,6 +558,30 @@ pub struct Facts {
     pub not_followed: BTreeSet<NotFollowed>,
     /// The adapter deselected it, as the plan listed it: every process that collected it did.
     pub deselected: bool,
+    /// \[ADR 0080\] Of a test file: some of its tests were reused one by one, so this run didn't
+    /// execute all of it, and it didn't pass whole (C-39).
+    pub tests_reused: bool,
+    /// \[C-32, C-39\] Of a test: it finished without its body running (skipped, disabled, an
+    /// assumption not met). Of a test file: one of its finished tests was. In a run whose COMMAND
+    /// failed it proves nothing: a suite setup that failed skips what it hides, and a runner that
+    /// stopped may call the test in flight skipped.
+    pub skipped: bool,
+    /// \[C-39\] Of a test: its test file failed while none of its tests failed, a failure no test
+    /// explains (a failing `afterAll`, a crash between tests). Its pass would let the next run
+    /// leave it out, and what failed would never run again.
+    pub unexplained: bool,
+    /// \[C-32\] A start of the runner began and never said it ended (a `.started` file left in
+    /// `HUSHRUN_UNITS`): what it ran can't be told, so nothing of the run passes.
+    pub unfinished_start: bool,
+    /// \[C-32\] The runner ran a build older than the files (`staleBuild`): a pass proves nothing
+    /// of them.
+    pub stale_build: bool,
+    /// \[C-39\] Of a test: its adapter never leaves it out (`neverLeftOut`), so no plan could
+    /// list it by a pass of its own, and it keeps none.
+    pub never_left_out: bool,
+    /// \[C-32\] Its adapter left out what the plan didn't list even in the start that ran with
+    /// nothing listed: nothing of the run can be told from a run that left things out.
+    pub left_out_again: bool,
 }
 
 /// What a run knows beyond a unit's own facts (C-32).
@@ -339,7 +595,7 @@ pub struct RunFacts {
     pub planned: bool,
 }
 
-/// A unit's state in a run (RFC 0003 §3.5, C-32).
+/// A unit's state in a run (RFC 0003 §3.5, C-32), and \[ADR 0080\] a test's (C-39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
     /// The plan listed it and the adapter deselected it: nothing is recorded, as reuse never
@@ -383,36 +639,187 @@ impl State {
     }
 }
 
+/// \[C-37\] Why a test or a test file that ran keeps no result of its own, as [`decided`] said:
+/// the rule that decided it, which `hushrun why` says in [`NotKept::sentence`]'s words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NotKept {
+    /// Something other than the plan deselected it: nothing ran.
+    LeftOut,
+    /// It didn't finish in every process that ran it.
+    Unfinished,
+    /// Of a test file: some of its tests were reused one by one, so it didn't run whole.
+    TestsReused,
+    /// A start of the runner didn't say what it saw: it ended first, or wasn't observed.
+    UnfinishedStart,
+    /// The adapter left out what the plan didn't list, even with nothing listed.
+    LeftOutAgain,
+    /// It was skipped, or one of its tests was, in a run whose COMMAND failed.
+    SkippedInFailedRun,
+    /// Of a test: its test file failed while none of its tests did.
+    Unexplained,
+    /// The runner ran a build older than the files.
+    StaleBuild,
+    /// COMMAND failed, and the adapter doesn't report each failure by unit.
+    CommandFailed,
+    /// Of a test: its adapter never leaves it out, so it keeps no pass of its own.
+    NeverLeftOut,
+}
+
+impl NotKept {
+    /// What `hushrun why` says of it, of a test (`test`) or of a test file.
+    pub fn sentence(self, test: bool) -> &'static str {
+        match (self, test) {
+            (NotKept::LeftOut, _) => {
+                "something other than hushrun's plan left it out the last time it was collected here, so it didn't run"
+            }
+            (NotKept::Unfinished, true) => {
+                "it didn't finish in every process that ran it the last time, so it keeps no result"
+            }
+            (NotKept::Unfinished, false) => {
+                "not every test of it finished the last time it ran (one was cut short, or a start of its runner stopped first), so it keeps no result of its own"
+            }
+            (NotKept::TestsReused, _) => {
+                "some of its tests were reused one by one the last time it ran, so it didn't run whole and keeps no pass of its own"
+            }
+            (NotKept::UnfinishedStart, _) => {
+                "a start of its runner didn't say what it saw, so no pass of that run is kept"
+            }
+            (NotKept::LeftOutAgain, _) => {
+                "its adapter left out what hushrun's plan didn't list, even when it ran again with nothing listed, so nothing of that run is kept"
+            }
+            (NotKept::SkippedInFailedRun, true) => {
+                "it was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"
+            }
+            (NotKept::SkippedInFailedRun, false) => {
+                "one of its tests was skipped in a run that failed, and a skip there proves nothing: what failed may have skipped what it hides"
+            }
+            (NotKept::Unexplained, _) => {
+                "its test file failed while none of its tests did, and what failed may need this test to run, so it keeps no pass"
+            }
+            (NotKept::StaleBuild, _) => {
+                "it ran on a build older than these files, so its pass proves nothing of them"
+            }
+            (NotKept::CommandFailed, true) => {
+                "its run failed, and its adapter doesn't report each failure by test, so no pass of that run is kept"
+            }
+            (NotKept::CommandFailed, false) => {
+                "its run failed, and its adapter doesn't report each failure by test file, so no pass of that run is kept"
+            }
+            (NotKept::NeverLeftOut, _) => {
+                "its adapter can't leave it out of a run, so it runs every time and keeps no pass of its own"
+            }
+        }
+    }
+}
+
+/// \[C-32, C-37\] A unit's or a test's state in a run, and why it keeps no result of its own
+/// when it ran and keeps none: what [`decided`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decision {
+    pub state: State,
+    /// Why it keeps nothing: for `not run`, and for a `passed` test that keeps no pass
+    /// ([`NotKept::NeverLeftOut`]). `None` otherwise: a reuse, a failure, what wasn't followed
+    /// (its own words), a pass kept.
+    pub not_kept: Option<NotKept>,
+}
+
+impl Decision {
+    /// What it records under its key: `Some(true)` a pass, `Some(false)` a fail, `None` nothing.
+    pub fn recorded(self) -> Option<bool> {
+        match (self.state.recorded(), self.not_kept) {
+            (Some(true), Some(_)) => None,
+            (recorded, _) => recorded,
+        }
+    }
+}
+
+/// A unit's state in a run: [`decided`]'s.
+pub fn state(facts: &Facts, run: &RunFacts) -> State {
+    decided(facts, run).state
+}
+
 /// \[C-32, ADR 0060\] The one place a unit's state is decided, from what its adapter reported and
 /// what the run knows. A failure is a failure, whatever else is true, a deselection included; a
 /// unit the plan listed and the adapter deselected is `reused`; a unit that didn't run whole is
 /// `not run`; one with something the adapter couldn't follow is `not observed`; and a pass holds
 /// only when COMMAND passed or the adapter reports each failure by unit.
-pub fn state(facts: &Facts, run: &RunFacts) -> State {
+///
+/// \[ADR 0080\] A test is decided here too, from its own facts: `complete` that it finished,
+/// `not_followed` what wasn't followed inside its window and outside every window of its file. A
+/// test file some of whose tests were reused one by one didn't run whole: `not run`, so it records
+/// no pass of its own (C-39).
+///
+/// \[C-32\] In a run whose COMMAND failed, a test that was skipped, and a test file one of whose
+/// tests was, are `not run`: a skip there proves nothing. In a run that passed, a skip is a pass.
+/// \[C-39\] A test of a test file that failed while none of its tests failed is `not run`.
+///
+/// \[C-32\] A run with a start that never said it ended, or on a stale build, is `not run` for
+/// all but its failures. \[C-39\] A test its adapter never leaves out passes and keeps no pass.
+///
+/// \[C-37\] With each `not run`, the rule that said so: why `hushrun why` says it kept nothing.
+pub fn decided(facts: &Facts, run: &RunFacts) -> Decision {
+    let not_run = |why| Decision {
+        state: State::NotRun,
+        not_kept: Some(why),
+    };
     // \[ADR 0069\] First, before a deselection: a process that may not deselect (a nested pytest, an
     // xdist worker the plan doesn't speak for) can run a unit another deselected, and its failure
     // must never read as a reuse.
     if facts.failed {
-        return State::Failed;
+        return Decision {
+            state: State::Failed,
+            not_kept: None,
+        };
     }
     if facts.deselected {
         // Deselected by something other than the plan, such as another plugin: nothing ran.
         return if run.planned {
-            State::Reused
+            Decision {
+                state: State::Reused,
+                not_kept: None,
+            }
         } else {
-            State::NotRun
+            not_run(NotKept::LeftOut)
         };
     }
     if !facts.complete {
-        return State::NotRun;
+        return not_run(NotKept::Unfinished);
+    }
+    if facts.tests_reused {
+        return not_run(NotKept::TestsReused);
+    }
+    // \[C-32\] A start that never said it ended: what it ran can't be told.
+    if facts.unfinished_start {
+        return not_run(NotKept::UnfinishedStart);
+    }
+    // \[C-32\] Left out what no plan listed, twice: nothing of the run can be told.
+    if facts.left_out_again {
+        return not_run(NotKept::LeftOutAgain);
+    }
+    // \[C-32\] A skip in a run whose COMMAND failed: nothing ran that a pass could stand on.
+    if facts.skipped && !run.command_passed {
+        return not_run(NotKept::SkippedInFailedRun);
+    }
+    // \[C-39\] Its test file failed and no test of it did: what failed may need this test to run.
+    if facts.unexplained {
+        return not_run(NotKept::Unexplained);
     }
     if !facts.not_followed.is_empty() {
-        return State::NotObserved;
+        return Decision {
+            state: State::NotObserved,
+            not_kept: None,
+        };
     }
-    if run.command_passed || run.failures_by_unit {
-        State::Passed
-    } else {
-        State::NotRun
+    // \[C-32\] What ran was built before these files.
+    if facts.stale_build {
+        return not_run(NotKept::StaleBuild);
+    }
+    if !(run.command_passed || run.failures_by_unit) {
+        return not_run(NotKept::CommandFailed);
+    }
+    Decision {
+        state: State::Passed,
+        not_kept: facts.never_left_out.then_some(NotKept::NeverLeftOut),
     }
 }
 

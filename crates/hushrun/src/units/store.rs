@@ -769,6 +769,23 @@ pub struct Map {
     /// \[ADR 0071\] The test files the adapter listed then, for an adapter whose unit rule is its
     /// runner's own list: Vitest's.
     pub unit_files: BTreeSet<String>,
+    /// \[C-33\] The longest a run of the check that reused nothing took here: what reuse can save
+    /// at most. `None` until one ran.
+    pub whole_ms: Option<u64>,
+    /// \[C-32\] What the adapter said when the check's last run here executed no test, as it said
+    /// it (Gradle's test tasks up to date); `None` after a run that executed some.
+    pub ran_nothing: Option<String>,
+    /// \[C-46\] Each JUnit 4 test task's test files and the most of their tests it leaves out by
+    /// name, as the check's last run that told them said.
+    pub leave_out_at_most: Vec<LeaveOutAtMost>,
+}
+
+/// \[C-46\] A Gradle JUnit 4 task leaves out at most `most` of the tests of `units`, its test
+/// files, by name: past them its tests run ([`super::gradle::left_in`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaveOutAtMost {
+    pub most: usize,
+    pub units: BTreeSet<String>,
 }
 
 impl Map {
@@ -830,6 +847,71 @@ pub struct Mapped {
     pub dirs: BTreeSet<String>,
     /// \[C-38\] Whether it ran here, or another machine saw it read these files.
     pub origin: Origin,
+    /// \[ADR 0080\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:
+    /// the ids a plan keys before COMMAND (C-39).
+    pub tests: BTreeMap<String, TestRow>,
+    /// \[C-37\] Why it kept no result of its own when it last ran here, as the run decided it
+    /// `not run` ([`hushrun_core::units::NotKept`]): what `hushrun why` says. `None` otherwise.
+    pub not_kept: Option<String>,
+}
+
+/// \[ADR 0080\] One test as it last ran here (C-39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRow {
+    /// Its state then: never `reused`, since a test reused keeps the row of the run it stands on.
+    pub state: hushrun_core::units::State,
+    pub duration_ms: u64,
+    /// What wasn't followed inside its own window.
+    pub not_followed: BTreeSet<hushrun_core::units::NotFollowed>,
+    /// \[C-37\] Why it kept no result, as the run decided it `not-run`, or `passed` and kept no
+    /// pass ([`hushrun_core::units::Decision`]): its adapter's words for one that didn't finish,
+    /// else the rule's. What `hushrun why` says. `None` in any other state.
+    pub not_kept: Option<String>,
+    /// \[ADR 0081\] With `reads: test`, what it read then (C-40): its own list; `None` when it
+    /// read its test file's.
+    pub list: Option<TestListRow>,
+}
+
+/// \[ADR 0081\] A test's own list as the store keeps it, a set tests share: the files its key
+/// held, each with its kind and content hash then, and the directories it listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestListRow {
+    pub reads: BTreeMap<String, String>,
+    pub dirs: BTreeSet<String>,
+}
+
+impl TestListRow {
+    /// The store's id of the list: the SHA-256 of each read's path, entry and NUL, then each
+    /// directory's path with a `/` and a NUL, sorted. Tests with one list share one row.
+    pub fn digest(&self) -> Digest {
+        let mut bytes = Vec::new();
+        for (path, entry) in &self.reads {
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(entry.as_bytes());
+            bytes.push(0);
+        }
+        for dir in &self.dirs {
+            bytes.extend_from_slice(dir.as_bytes());
+            bytes.extend_from_slice(b"/\0");
+        }
+        Digest::of(&bytes)
+    }
+}
+
+impl TestRow {
+    /// The state a row's `state` column holds, `None` for one the store's CHECK refuses.
+    pub fn state_from_word(word: &str) -> Option<hushrun_core::units::State> {
+        use hushrun_core::units::State;
+        [
+            State::Passed,
+            State::Failed,
+            State::NotObserved,
+            State::NotRun,
+        ]
+        .into_iter()
+        .find(|state| state.word() == word)
+    }
 }
 
 /// One test file that would have been reused and failed.

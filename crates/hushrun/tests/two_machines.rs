@@ -106,7 +106,7 @@ const NO_HOST: &str = "http://127.0.0.1:9";
 
 /// The Vitest these tests are written against.
 const VITEST: &str = "4.1.12";
-const VITEST_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST && import(process.env.HUSHRUN_VITEST).then((m) => m.default())],";
+const VITEST_LINE: &str = "plugins: [process.env.HUSHRUN_VITEST ? import(process.env.HUSHRUN_VITEST).then((m) => m.default()) : undefined],";
 
 fn tools(what: &str, here: bool) -> bool {
     if here {
@@ -191,6 +191,26 @@ fn observe_line(stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// \[C-33, ADR 0080 amended\] The fresh machine's `observe` line says what the copied store's does,
+/// count for count. Its saving it may not say: that is bounded by the longest a run of the check
+/// took here reusing nothing, which this machine's store keeps and a hint doesn't, and on its
+/// first run there is none, so it says the counts without a time; the copy says one when its
+/// tests took a second or more, as under load they do.
+#[track_caller]
+fn says_what_the_copy_does(fresh: &str, copied: Option<&str>) {
+    let line = observe_line(fresh);
+    assert!(
+        line.as_deref()
+            .is_some_and(|l| !l.contains(", saving about ")),
+        "{fresh}"
+    );
+    assert_eq!(
+        line.as_deref().map(hushrun_testkit::lines::without_saving),
+        copied.map(hushrun_testkit::lines::without_saving),
+        "{fresh}"
+    );
+}
+
 /// One runner's scenario: a repository, its check's COMMAND, the change, and what each machine
 /// is held to.
 struct Scenario {
@@ -237,8 +257,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .map(str::to_string)
@@ -291,6 +326,8 @@ impl Machine {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
@@ -706,7 +743,7 @@ fn pytest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() 
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // No map: no pytest has reported this check's test files on this machine (ADR 0074).
@@ -740,7 +777,7 @@ fn pytest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Vitest
@@ -866,7 +903,7 @@ fn vitest_on_a_fresh_machine_with_a_server_without_hints_runs_every_test_file() 
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 2 of 7 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 7 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // Vitest's list of test files is the map's (ADR 0071).
@@ -903,7 +940,7 @@ fn vitest_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Go
@@ -1042,7 +1079,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.copied.plan.as_deref(),
         Some(
-            "hushrun: unit: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 2 of 5 packages run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
     // `go list` says what each test binary is built from. What a test opened comes from the map:
@@ -1057,7 +1094,7 @@ fn go_on_a_fresh_machine_with_a_server_without_hints_reuses_a_package_whose_test
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }
@@ -1109,11 +1146,11 @@ fn go_in_observe_on_a_fresh_machine_says_what_the_first_machines_store_would() {
     assert!(
         copied
             .as_deref()
-            .is_some_and(|l| l.contains("1 of 5 test files would have run")),
+            .is_some_and(|l| l.contains("1 of 5 packages would have run")),
         "{}",
         m.copied.stderr
     );
-    assert_eq!(observe_line(&m.fresh.stderr), copied, "{}", m.fresh.stderr);
+    says_what_the_copy_does(&m.fresh.stderr, copied.as_deref());
 }
 
 // Cargo
@@ -1238,7 +1275,7 @@ fn cargo_on_a_fresh_machine_with_a_server_without_hints_reuses_all_it_could() {
     assert_eq!(
         m.fresh.plan.as_deref(),
         Some(
-            "hushrun: test: 2 of 4 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
         )
     );
 }
@@ -1544,7 +1581,7 @@ fn a_server_from_before_hints_changes_nothing_and_is_said_once() {
         assert_eq!(
             ran.plan_line().as_deref(),
             Some(
-                "hushrun: unit: 3 of 5 test files run; 2 already passed on the files they read, and 1 more that did runs as a check"
+                "hushrun: unit: 3 of 5 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
             ),
             "{status}: {}",
             ran.stderr
@@ -1593,4 +1630,209 @@ fn counts_from_an_os_reads_that_systems_hints_and_a_run_that_doesnt_meet_it_send
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(asked[0]["os"], other.word(), "{asked:?}");
     assert_eq!(lab.puts(), 0, "{:?}", lab.hint_requests());
+}
+
+// Tests one by one across machines (C-39, C-40, C-41)
+
+/// A shop whose one test file has `passing` tests that call the cart through `app/wa.py`, two
+/// that call pricing through `app/wb.py`, and with `failing`, one that fails: each test reads
+/// what it calls, and the test file reads both.
+fn tests_scenario(tests: &str, failing: bool) -> Scenario {
+    let mut test_file = String::from(
+        "from app import wa, wb\n\ndef test_price_a():\n    assert wb.run() == 6\n\ndef test_price_b():\n    assert wb.run() == 6\n",
+    );
+    for n in 0..10 {
+        test_file.push_str(&format!(
+            "\ndef test_total_{n}():\n    assert wa.run() == 6\n"
+        ));
+    }
+    if failing {
+        test_file.push_str("\ndef test_fails():\n    assert wa.run() == 7\n");
+    }
+    let files = vec![
+        file(
+            "hushrun.yaml",
+            &format!(
+                "version: 1\nrepository: {REPOSITORY}\nchecks:\n  unit:\n    tests: {tests}\n"
+            ),
+        ),
+        file(".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        file(
+            "pytest.ini",
+            "[pytest]\ntestpaths = tests\npythonpath = .\n",
+        ),
+        file("app/__init__.py", ""),
+        file("app/cart.py", "def total(xs):\n    return sum(xs) * 2\n"),
+        file("app/pricing.py", "def price(x):\n    return x * 2\n"),
+        file(
+            "app/wa.py",
+            "from app.cart import total\n\ndef run():\n    return total([1, 2])\n",
+        ),
+        file(
+            "app/wb.py",
+            "from app.pricing import price\n\ndef run():\n    return price(3)\n",
+        ),
+        file("tests/test_shop.py", &test_file),
+    ];
+    Scenario {
+        check: "unit",
+        files,
+        command: pytest_command(),
+        env: vec![],
+        prepare: |_| {},
+        change: (
+            "app/pricing.py",
+            "def price(x):\n    return x * 2  # changed\n",
+        ),
+        all: set(&["tests/test_shop.py"]),
+        must_run: set(&["tests/test_shop.py"]),
+        not_followed: BTreeSet::new(),
+        ran: pytest_ran,
+        ready: false,
+    }
+}
+
+/// The tests pytest's `-rA` summary says ran.
+fn tests_ran(ran: &Ran) -> BTreeSet<String> {
+    ran.stdout
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("PASSED ")
+                .or_else(|| l.strip_prefix("FAILED "))
+        })
+        .map(|l| l.split(' ').next().unwrap_or(l).to_string())
+        .collect()
+}
+
+/// The line before COMMAND when tests are the unit.
+fn tests_plan_line(ran: &Ran) -> Option<String> {
+    ran.stderr
+        .lines()
+        .find(|l| l.starts_with("hushrun: unit: ") && l.contains(" run"))
+        .map(str::to_string)
+}
+
+/// \[C-41\] Runs `s` on a first machine, then, on the server as it left it and with `change`
+/// made or not, on a machine with its store and on a fresh one: each run's tests and plan line.
+/// No hint the first machine sent holds a test's id in its content.
+fn tests_on_two_machines(s: &Scenario, change: bool) -> [(BTreeSet<String>, Option<String>); 2] {
+    let lab = Lab::new(s);
+    let first = lab.first.run(s, &lab.results);
+    assert_eq!((s.ran)(&first), s.all, "{}\n{}", first.stdout, first.stderr);
+    let kept = lab.results.hints();
+    assert_eq!(kept.len(), 1, "the first run sends one hint: {kept:?}");
+    let content = hints::inflate(&kept[0].body).expect("a hint");
+    assert!(
+        content.starts_with(b"hushrun.unit-hints/v1\n"),
+        "a hint with tests"
+    );
+    for id in ["test_total_0", "test_price_a", "test_fails"] {
+        assert!(
+            !content.windows(id.len()).any(|w| w == id.as_bytes()),
+            "{id} is sealed"
+        );
+    }
+    let left = lab.results.recorded_so_far();
+    let run_on = |name: &str, copy_store: bool| {
+        let machine = lab.fresh(name, s);
+        if copy_store {
+            let units = machine.cache.join("units");
+            std::fs::create_dir_all(&units).expect("mkdir");
+            for path in store::stores(&lab.first.cache) {
+                std::fs::copy(&path, units.join(path.file_name().expect("name")))
+                    .expect("copy the store");
+            }
+        }
+        if change {
+            machine.write(s.change.0, s.change.1);
+        }
+        lab.results.go_back_to(&left);
+        let ran = machine.run(s, &lab.results);
+        (tests_ran(&ran), tests_plan_line(&ran), ran.stderr)
+    };
+    let (copied_ran, copied_line, copied_err) = run_on("copied", true);
+    let (fresh_ran, fresh_line, fresh_err) = run_on("fresh", false);
+    assert!(copied_line.is_some(), "{copied_err}");
+    assert!(fresh_line.is_some(), "{fresh_err}");
+    [(copied_ran, copied_line), (fresh_ran, fresh_line)]
+}
+
+/// Asserts that `ran` holds every test of `must`, and of the others all but the audit's share of
+/// `reusable`, which run as a check.
+fn assert_tests_reused(what: &str, ran: &BTreeSet<String>, must: &[&str], reusable: usize) {
+    for test in must {
+        assert!(ran.contains(*test), "{what}: {test} ran: {ran:?}");
+    }
+    let audited = hushrun_core::units::audit_share(reusable);
+    assert_eq!(
+        ran.len(),
+        must.len() + audited,
+        "{what}: {} tests ran; {} must and {audited} as a check: {ran:?}",
+        ran.len(),
+        must.len()
+    );
+}
+
+// covers: C-41, C-39
+#[test]
+fn with_reads_file_a_fresh_machine_reuses_the_passing_tests_of_a_test_file_that_failed() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // One test fails: the test file records no pass, each test its own, and its hint holds their
+    // ids. Nothing changes: a machine with its store, and a fresh one with its hint, reuse every
+    // test that passed but the audit's share, and run the one that failed.
+    let s = tests_scenario("{mode: reuse, unit: test}", true);
+    let [(copied, copied_line), (fresh, fresh_line)] = tests_on_two_machines(&s, false);
+    let failing = "tests/test_shop.py::test_fails";
+    assert_tests_reused("with its store", &copied, &[failing], 12);
+    assert_tests_reused("on a fresh machine", &fresh, &[failing], 12);
+    assert_eq!(fresh_line, copied_line);
+    assert_eq!(
+        copied_line.as_deref(),
+        Some(
+            "hushrun: unit: 2 of 13 tests run, in 1 of 1 test file; 11 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
+    );
+}
+
+/// Whether the Python the fixtures run watches a test: 3.12 or later (C-42).
+fn python_watches() -> bool {
+    succeeds(
+        &python(),
+        &[
+            "-c",
+            "import sys; sys.exit(0 if hasattr(sys, 'monitoring') else 1)",
+        ],
+    )
+}
+
+// covers: C-41, C-40
+#[test]
+fn with_reads_test_a_fresh_machine_reuses_each_test_on_the_list_another_machine_saw_it_read() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    if !python_watches() {
+        eprintln!("skipped: this Python has no sys.monitoring, so pytest watches no test");
+        return;
+    }
+    // Pricing changes: the test file and its two tests that call pricing run; the ten that
+    // call the cart didn't read it, and are reused but the audit's share, on the lists the first
+    // machine saw: from its store, and on a fresh machine from its hint.
+    let s = tests_scenario("{mode: reuse, unit: test, reads: test}", false);
+    let [(copied, copied_line), (fresh, fresh_line)] = tests_on_two_machines(&s, true);
+    let pricing = [
+        "tests/test_shop.py::test_price_a",
+        "tests/test_shop.py::test_price_b",
+    ];
+    assert_tests_reused("with its store", &copied, &pricing, 10);
+    assert_tests_reused("on a fresh machine", &fresh, &pricing, 10);
+    assert_eq!(fresh_line, copied_line);
+    assert_eq!(
+        copied_line.as_deref(),
+        Some(
+            "hushrun: unit: 3 of 12 tests run, in 1 of 1 test file; 9 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        )
+    );
 }

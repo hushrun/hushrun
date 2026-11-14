@@ -12,7 +12,9 @@
 //! flags name, and each run records their summary.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Output;
 
 use hushrun_testkit::{git, schema};
 use serde_json::{Value, json};
@@ -23,6 +25,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NO_HOST: &str = "http://127.0.0.1:9";
 
 /// The org's URL in a plan that signed in to nothing.
+#[cfg(unix)]
 const PLACEHOLDER: &str = "<your org's URL, once you sign in>";
 
 /// The cases every phase starts from (Appendix E of the plan).
@@ -131,6 +134,8 @@ impl Case {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         cmd
     }
 
@@ -260,6 +265,7 @@ fn every_fixture_gets_the_plan_it_expects() {
 }
 
 /// What starts a workflow: the keys of its `on:`.
+#[cfg(unix)]
 fn triggers(workflow: &Value) -> Vec<String> {
     match workflow.get("on").or_else(|| workflow.get("true")) {
         Some(Value::String(one)) => vec![one.clone()],
@@ -275,6 +281,7 @@ fn triggers(workflow: &Value) -> Vec<String> {
 /// The workflow GitHub names in a job of `file`, `GITHUB_WORKFLOW_REF`: its own; for a reusable
 /// workflow, the top-level workflow here that calls it, since GitHub names the outermost one; or
 /// another repository's when none here does.
+#[cfg(unix)]
 fn named_in(repo: &Path, file: &str) -> String {
     let dir = repo.join(".github/workflows");
     let mut workflows: Vec<(String, Value)> = Vec::new();
@@ -345,6 +352,7 @@ fn named_in(repo: &Path, file: &str) -> String {
 }
 
 /// The variables GitLab gives `job` of `file`: the file's, then the job's own, as text.
+#[cfg(unix)]
 fn gitlab_variables(repo: &Path, file: &str, job: &str) -> Vec<(String, String)> {
     let text = std::fs::read_to_string(repo.join(file)).expect("read");
     let doc: Value = serde_saphyr::from_str(&text).expect("YAML");
@@ -365,6 +373,7 @@ fn gitlab_variables(repo: &Path, file: &str, job: &str) -> Vec<(String, String)>
 /// \[ADR 0049\] The env GitHub gives `job` of `file`: the file's, then the job's own, with the
 /// expressions that tell its runs apart filled in, the same for both runs of a case. Any other
 /// expression is CI's to fill in, which this can't, so it leaves it out.
+#[cfg(unix)]
 fn github_env(repo: &Path, file: &str, job: &str) -> Vec<(String, String)> {
     let text = std::fs::read_to_string(repo.join(file)).expect("read");
     let doc: Value = serde_saphyr::from_str(&text).expect("YAML");
@@ -394,6 +403,7 @@ fn github_env(repo: &Path, file: &str, job: &str) -> Vec<(String, String)> {
 }
 
 /// The matrix of `job` of `file`, as its file lists it; `null` for a job with none.
+#[cfg(unix)]
 fn github_matrix(repo: &Path, file: &str, job: &str) -> Value {
     let text = std::fs::read_to_string(repo.join(file)).expect("read");
     let doc: Value = serde_saphyr::from_str(&text).expect("YAML");
@@ -403,6 +413,7 @@ fn github_matrix(repo: &Path, file: &str, job: &str) -> Value {
 /// \[ADR 0050\] `line` as the shell gets it, since GitHub fills in each `${{ … }}` first: a matrix
 /// value is the first its job lists, and anything else a word that stands for what CI fills in,
 /// the same for both runs of a case.
+#[cfg(unix)]
 fn filled(line: &str, matrix: &Value) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;

@@ -11,16 +11,22 @@
 //! machine knows. \[C-38\] With results on a server, it reads the hints a run would, and keys the
 //! test file by the same lists ([`super::shared::lists`]); when the list it would be reused on is
 //! another machine's, it says so. It writes nothing (ADR 0061).
+//!
+//! \[C-39, C-41\] With tests as the unit, `UNIT::TEST` asks of one test: its test file's reasons
+//! first, then the second tier's, keyed by the lists \[C-40\] [`super::shared::test_lists`] gives,
+//! hints' included. A test file one of whose tests wasn't followed the last time it ran here isn't
+//! reused whole, and says so.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
-use hushrun_core::units::{self, KeyBase, Mode, Set, Sources, Tests, Tree};
+use hushrun_core::units::{self, KeyBase, Mode, Reads, Set, State, Tests, Tree, Unit};
 
+use super::adapter::{self, Adapter, Hints, WhyAt};
 use super::db::{self, EdgeKind};
 use super::shared::{self, Asker, Choice, Shared};
 use super::store::{self, Map, UnitResults};
-use super::{Adapter, Keyer, adapter_word, cargo, choose, fetch, gotest, pytest, rest_of, vitest};
+use super::{Keyer, every_changed, fetch, what_it_reuses, whole_reusable};
 use crate::results::RunResult;
 
 /// What `hushrun why` needs.
@@ -80,6 +86,8 @@ pub struct Hop {
 pub struct Explanation {
     /// The test file, as the check names it (for Go, the package's directory).
     pub unit: String,
+    /// \[C-39\] The test asked about, by its id, when tests are the unit.
+    pub test: Option<String>,
     pub decision: Decision,
     /// A word for the reason, the JSON's.
     pub reason: &'static str,
@@ -101,6 +109,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     let asked = input.unit.trim_start_matches("./").trim_end_matches('/');
     let mut out = Explanation {
         unit: asked.to_string(),
+        test: None,
         decision: Decision::Runs,
         reason: "",
         says: String::new(),
@@ -117,7 +126,8 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     };
-    let adapter = match choose(&input.base.command, input.cwd) {
+    let stored = db::adapter_of(input.store, &store::check_id(&input.base, input.repository));
+    let adapter = match adapter::choose_kept(&input.base.command, input.cwd, stored.as_deref()) {
         Ok(adapter) => adapter,
         Err(why) => {
             out.decision = Decision::Off;
@@ -133,16 +143,30 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             .push(format!("every test file runs: {}", unread.why()));
     }
     let map = loaded.map;
-    // For Go a unit is a package's directory, which one of its test files names too.
-    let unit = match adapter {
-        Adapter::Go(_) if asked.ends_with("_test.go") => match asked.rsplit_once('/') {
-            Some((dir, _)) => dir.to_string(),
-            None => ".".to_string(),
-        },
-        Adapter::Go(_) if asked.is_empty() => ".".to_string(),
-        _ => asked.to_string(),
+    // \[C-39\] `UNIT::TEST`: a test, when tests are the unit; else its test file, said so. A
+    // name without `::` is a test file's, whatever its runner calls its items.
+    let (unit_mode, reads_mode, notes) = what_it_reuses(tests, adapter.as_ref());
+    let (asked, test) = split_asked(asked, &map, input.tree, adapter.as_ref());
+    let test = match test {
+        Some(_) if unit_mode == Unit::File => {
+            let why = notes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "`tests.unit` is `file` in hushrun.yaml".to_string());
+            out.detail
+                .push(format!("its tests are reused with their test file: {why}"));
+            None
+        }
+        test => test,
     };
+    // For Go a unit is a package's directory, which one of its test files names too.
+    let unit = adapter.why_unit(asked);
     out.unit = unit.clone();
+    out.test = test.clone();
+    let named = match &test {
+        Some(id) => units::test_name(&unit, id),
+        None => unit.clone(),
+    };
     let would = tests.mode != Mode::Reuse;
     let verb = |decision: Decision| match (decision, would) {
         (Decision::Reused, false) => "would be reused",
@@ -154,130 +178,89 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         out.decision = decision;
         out.reason = reason;
         out.says = match decision {
-            Decision::Runs | Decision::Reused => format!("{} {}: {why}", out.unit, verb(decision)),
+            Decision::Runs | Decision::Reused => format!("{named} {}: {why}", verb(decision)),
             Decision::NotATestFile | Decision::Off => why,
         };
     };
 
     // \[C-38\] The hints a run would read: with results on a server, for any adapter but Cargo's.
     let systems = shared::systems(&input.base);
-    let asker = match (&input.results, &adapter) {
-        (_, Adapter::Cargo(_)) => None,
-        (Ok(results), _) if !systems.is_empty() => Some(Asker {
-            store: *results,
+    let asker = match &input.results {
+        _ if adapter.hints() == Hints::None => None,
+        Ok(results) if !systems.is_empty() => Some(Asker::new(
+            *results,
             check_id,
-            systems: systems.clone(),
-            adapter: adapter_word(&adapter).word(),
-        }),
+            systems.clone(),
+            adapter.word(),
+        )),
         _ => None,
     };
-    let vitest_shared = match &adapter {
-        Adapter::Vitest(_) => fetch(
+    let kinds_shared = match adapter.hints() {
+        Hints::Kinds(_) => fetch(
             asker.as_ref(),
-            true,
+            adapter.hints(),
             &units::Sets::default(),
             input.tree,
             &tests.ignore,
         ),
-        _ => Shared::default(),
+        Hints::None | Hints::Sources => Shared::default(),
     };
     let listed = if map.unit_files.is_empty() {
-        vitest_shared.unit_files()
+        kinds_shared.unit_files()
     } else {
         map.unit_files.clone()
     };
-    // The four sets, by the adapter's rule (C-30): pytest's from files now; the others' from the
-    // last run here, as far as this machine knows, or Vitest's from a hint.
-    let python_files = pytest::python_files(input.root, input.cwd);
-    let sets = match &adapter {
-        Adapter::Pytest => units::classify(
-            input.tree.paths(),
-            &|p| pytest::is_test_file(&python_files, p) == Some(true),
-            Sources::Kinds(pytest::SOURCE_KINDS),
+    // The four sets, by the adapter's rule (C-30): from files now, or from the last run here, as
+    // far as this machine knows, or from a hint.
+    let no_hints = Shared::default();
+    let sets = adapter.why_sets(&WhyAt {
+        tree: input.tree,
+        root: input.root,
+        cwd: input.cwd,
+        map: &map,
+        ignore: &tests.ignore,
+        shared: &no_hints,
+        listed: &listed,
+    });
+    let mut shared = match adapter.hints() {
+        Hints::Kinds(_) => kinds_shared,
+        Hints::None => Shared::default(),
+        Hints::Sources if !adapter.why_asks_hints(&map) => Shared::default(),
+        Hints::Sources => fetch(
+            asker.as_ref(),
+            adapter.hints(),
+            &sets,
+            input.tree,
             &tests.ignore,
         ),
-        Adapter::Vitest(_) => units::classify(
-            input.tree.paths(),
-            &|p| listed.contains(p),
-            Sources::Kinds(vitest::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-        Adapter::Cargo(_) => units::classify(
-            input.tree.paths(),
-            &|p| map.units.contains_key(p),
-            Sources::Named(&map.sources, cargo::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-        Adapter::Go(_) => units::classify(
-            input.tree.paths(),
-            &|p| {
-                p.ends_with("_test.go")
-                    && (map.unit_files.contains(p) || map.units.contains_key(&package_of(p)))
-            },
-            Sources::Named(&map.sources, gotest::SOURCE_KINDS),
-            &tests.ignore,
-        ),
-    };
-    let mut shared = match &adapter {
-        Adapter::Vitest(_) => vitest_shared,
-        Adapter::Cargo(_) => Shared::default(),
-        // Go's sources are those of its last run here: with none, there is no address to ask.
-        Adapter::Go(_) if map.sources.is_empty() => Shared::default(),
-        Adapter::Pytest | Adapter::Go(_) => {
-            fetch(asker.as_ref(), false, &sets, input.tree, &tests.ignore)
-        }
     };
     // A `shared` entry here counts only when its system is one a run reads (C-38).
     shared.systems = systems;
-    let known_from_last_run = match &adapter {
-        Adapter::Pytest => None,
-        Adapter::Vitest(_) => Some("Vitest's list of test files is the one of its last run here"),
-        Adapter::Cargo(_) => {
-            Some("its test binaries and what each is built from are those of its last build here")
-        }
-        Adapter::Go(_) => Some(
-            "its packages and what each is built from are those go list named in its last run here",
-        ),
-    };
-    if let Some(why) = known_from_last_run {
+    if let Some(why) = adapter.why_known_from() {
         out.here_only = true;
         out.detail
             .push(format!("as far as this machine knows: {why}"));
     }
+    let at = WhyAt {
+        tree: input.tree,
+        root: input.root,
+        cwd: input.cwd,
+        map: &map,
+        ignore: &tests.ignore,
+        shared: &shared,
+        listed: &listed,
+    };
 
     // Is it a test file of the check at all?
-    let is_unit = match &adapter {
-        Adapter::Go(_) => {
-            map.units.contains_key(&unit)
-                || shared.knows(&unit)
-                || map.unit_files.iter().any(|f| package_of(f) == unit)
-        }
-        _ => sets.of(&unit) == Some(Set::Units),
-    };
-    if !is_unit {
-        let why = match &adapter {
-            _ if sets.of(&unit).is_none() && !matches!(adapter, Adapter::Go(_)) => {
+    if !adapter.why_is_unit(&at, &sets, &unit) {
+        let why = match sets.of(&unit) {
+            None if !adapter.why_units_are_directories() => {
                 format!("{unit} isn't a file of {check}'s scope as it is now")
             }
-            _ if sets.of(&unit) == Some(Set::Ignored) => {
+            Some(Set::Ignored) => {
                 format!("{unit} is in {check}'s `tests.ignore`: no test reads it")
             }
-            Adapter::Pytest if !map.reported() && shared.hints.is_empty() => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: no run of {check} here has had pytest report its test files"
-            ),
-            Adapter::Pytest => format!(
-                "{unit} isn't a test file of {check}: pytest's python_files ({}) doesn't name it",
-                python_files.join(", ")
-            ),
-            Adapter::Vitest(_) => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: Vitest didn't list it in its last run here"
-            ),
-            Adapter::Cargo(_) => format!(
-                "{unit} isn't a test file of {check} as far as this machine knows: no test binary of its last build here has it as its root file"
-            ),
-            Adapter::Go(_) => format!(
-                "{unit} isn't a package {check} tests as far as this machine knows: go list didn't name it in its last run here"
-            ),
+            _ => adapter.why_not_a_unit(&at, check.as_str(), &unit),
         };
         says(&mut out, Decision::NotATestFile, "not-a-test-file", why);
         return out;
@@ -332,6 +315,14 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         None => BTreeSet::new(),
     };
     let keyer = Keyer::new(input.tree, &sets, &input.base);
+    // \[C-39\] A test file one of whose tests wasn't followed the last time it ran here isn't
+    // reused whole, whatever the check's unit is now: its own pass may stand on a run before that.
+    let unfollowed = own.and_then(|mapped| {
+        mapped
+            .tests
+            .iter()
+            .find(|(_, row)| row.state == State::NotObserved)
+    });
     let keys: Vec<Option<hushrun_core::digest::Digest>> =
         lists.iter().map(|l| keyer.key(&unit, &l.files)).collect();
     let changes = changes(&map, &sets, input.tree, &unit, &reads);
@@ -353,6 +344,76 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             );
         }
         Ok(lookup) => match shared::choose(&keys, &lookup.found) {
+            // \[C-37\] A test its test file's row doesn't have isn't one the file's reuse covers.
+            Choice::Passed(..)
+                if test.as_ref().is_some_and(|id| {
+                    own.is_some_and(|m| !m.tests.is_empty() && !m.tests.contains_key(id))
+                }) =>
+            {
+                says(
+                    &mut out,
+                    Decision::Runs,
+                    "never-ran-here",
+                    "this machine doesn't know this test: no run of its test file here told it".into(),
+                );
+            }
+            Choice::Passed(..) if test.is_some() && whole_reusable(&map, &unit) => {
+                says(
+                    &mut out,
+                    Decision::Reused,
+                    "reused",
+                    "its test file passed whole on the files it read, and none of them has changed since".into(),
+                );
+                out.detail.insert(
+                    0,
+                    "an audit run may still run it: each run runs 2% of the test files that could be reused, at least one, chosen by their keys and the run's start".into(),
+                );
+            }
+            Choice::Passed(..) if test.is_none() && unfollowed.is_some() => {
+                let Some((id, row)) = unfollowed else {
+                    return out;
+                };
+                says(
+                    &mut out,
+                    Decision::Runs,
+                    "test-not-observed",
+                    format!(
+                        "hushrun couldn't follow all that its test {id} read the last time it ran here ({}), so it isn't reused whole",
+                        not_followed(&row.not_followed)
+                    ),
+                );
+                out.detail.insert(
+                    0,
+                    match unit_mode {
+                        Unit::Test => {
+                            "its other tests may still be reused one by one: `hushrun why` of one says"
+                        }
+                        Unit::File => {
+                            "it runs whole until a run of it follows all that its tests read"
+                        }
+                    }
+                    .into(),
+                );
+            }
+            _ if test.is_some() => {
+                let id = test.as_deref().unwrap_or_default();
+                if let Some((other, _)) = unfollowed.filter(|(other, _)| other.as_str() != id) {
+                    out.detail.push(format!(
+                        "its test file isn't reused whole: hushrun couldn't follow all that its test {other} read the last time it ran here"
+                    ));
+                }
+                let at = TestAt {
+                    unit: &unit,
+                    id,
+                    reads: reads_mode,
+                    file_lists: &lists,
+                    map: &map,
+                    shared: &shared,
+                    sets: &sets,
+                    keyer: &keyer,
+                };
+                explain_test(&mut out, &at, &says, input, adapter.as_ref());
+            }
             Choice::Passed(at, _) if lists[at].seen_elsewhere() => {
                 says(
                     &mut out,
@@ -402,7 +463,17 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
                 "this machine has never seen it run, and no pass that counts here matches what another machine saw it read".into(),
             ),
             Choice::Nothing => {
-                explain_change(&mut out, &changes, &says, &map, input, &unit, &adapter);
+                let not_kept = own.and_then(|mapped| mapped.not_kept.as_deref());
+                explain_change(
+                    &mut out,
+                    &changes,
+                    &says,
+                    &map,
+                    input,
+                    &unit,
+                    adapter.as_ref(),
+                    not_kept,
+                );
             }
         },
         Err(why) => {
@@ -410,18 +481,231 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             out.detail.push(format!(
                 "as far as this machine knows: can't read which passed ({why})"
             ));
-            explain_change(&mut out, &changes, &says, &map, input, &unit, &adapter);
+            let not_kept = own.and_then(|mapped| mapped.not_kept.as_deref());
+            explain_change(
+                &mut out,
+                &changes,
+                &says,
+                &map,
+                input,
+                &unit,
+                adapter.as_ref(),
+                not_kept,
+            );
         }
     }
     out
 }
 
-/// A Go test file's package: its directory, `.` for the root.
-fn package_of(file: &str) -> String {
-    match file.rsplit_once('/') {
-        Some((dir, _)) => dir.to_string(),
-        None => ".".to_string(),
+/// \[C-37, C-39\] `UNIT` or `UNIT::TEST`, split where the unit is one this machine's store
+/// knows, by the adapter's own name for it, or a file of the scope: a unit whose name holds `::`
+/// itself (a Gradle or Maven class of no file, `<project directory>::<class>`) is found whole,
+/// and its tests after it. Else at the first `::`, as a test file's path never holds one.
+fn split_asked<'a>(
+    asked: &'a str,
+    map: &Map,
+    tree: &Tree,
+    adapter: &dyn Adapter,
+) -> (&'a str, Option<String>) {
+    let known = |unit: &str| {
+        let unit = adapter.why_unit(unit);
+        map.units.contains_key(&unit) || tree.contains(&unit)
+    };
+    if known(asked) {
+        return (asked, None);
     }
+    let cuts: Vec<usize> = asked.match_indices("::").map(|(at, _)| at).collect();
+    let split = |at: usize| (&asked[..at], Some(asked[at + 2..].to_string()));
+    match cuts.iter().find(|at| known(&asked[..**at])) {
+        Some(at) if *at + 2 < asked.len() => split(*at),
+        _ => match cuts.first() {
+            Some(at) if *at + 2 < asked.len() => split(*at),
+            _ => (asked, None),
+        },
+    }
+}
+
+/// What was not followed, for people.
+fn not_followed(what: &BTreeSet<units::NotFollowed>) -> String {
+    what.iter()
+        .map(|n| match n.detail.as_str() {
+            "" => super::describe(&n.why),
+            detail => format!("{} ({detail})", super::describe(&n.why)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What one test is explained by.
+struct TestAt<'a> {
+    unit: &'a str,
+    id: &'a str,
+    reads: Reads,
+    /// Its test file's lists, from [`shared::lists`].
+    file_lists: &'a [shared::List],
+    map: &'a Map,
+    shared: &'a Shared,
+    sets: &'a units::Sets,
+    keyer: &'a Keyer<'a>,
+}
+
+/// \[C-39, C-40, C-41\] Why the second tier would run or reuse one test of a test file it doesn't
+/// reuse whole: not followed last time, never seen, its keys' results, or what changed among the
+/// files it read.
+fn explain_test(
+    out: &mut Explanation,
+    at: &TestAt<'_>,
+    says: &Says<'_>,
+    input: &WhyInput<'_>,
+    adapter: &dyn Adapter,
+) {
+    let check = &input.base.check;
+    let row = at
+        .map
+        .units
+        .get(at.unit)
+        .and_then(|mapped| mapped.tests.get(at.id));
+    if let Some(row) = row.filter(|row| row.state == State::NotObserved) {
+        says(
+            out,
+            Decision::Runs,
+            "not-observed",
+            format!(
+                "hushrun couldn't follow all it read the last time it ran here: {}",
+                not_followed(&row.not_followed)
+            ),
+        );
+        out.detail
+            .insert(0, "so it runs every time, and records nothing".into());
+        return;
+    }
+    // \[C-37\] It ran here and kept nothing, for the reason its run recorded with it: `not run`,
+    // or a pass it keeps none of.
+    if let Some(why) = row
+        .filter(|row| matches!(row.state, State::NotRun | State::Passed))
+        .and_then(|row| row.not_kept.as_deref())
+    {
+        says(out, Decision::Runs, "not-kept", why.into());
+        return;
+    }
+    let seen = at.shared.test_seen(at.unit, at.id);
+    let lists = shared::test_lists(at.reads, at.file_lists, row, &seen, input.tree);
+    if (row.is_none() && seen.is_empty()) || lists.is_empty() {
+        says(
+            out,
+            Decision::Runs,
+            "never-ran-here",
+            "this machine has never seen it run, so it doesn't know what it reads".into(),
+        );
+        return;
+    }
+    let keys: Vec<Option<hushrun_core::digest::Digest>> = lists
+        .iter()
+        .map(|l| at.keyer.test_key(at.unit, at.id, &l.list.files))
+        .collect();
+    let looked = match (&input.results, keys.iter().any(Option::is_some)) {
+        (Ok(results), true) => {
+            shared::lookup(*results, keys.iter().flatten().copied(), input.counts)
+        }
+        (Err(why), _) => Err(why.clone()),
+        (_, false) => Err("its key can't be computed".into()),
+    };
+    let audit = "an audit run may still run it: each run runs 2% of the tests that could be reused one by one, at least one, chosen by their keys and the run's start";
+    let lookup = match looked {
+        Ok(lookup) if !lookup.reuse.allows_reuse() => {
+            says(
+                out,
+                Decision::Runs,
+                "suspended",
+                super::suspended(check, &lookup.reuse),
+            );
+            return;
+        }
+        Ok(lookup) => Some(lookup),
+        Err(why) => {
+            out.here_only = true;
+            out.detail.push(format!(
+                "as far as this machine knows: can't read which passed ({why})"
+            ));
+            None
+        }
+    };
+    if let Some(lookup) = lookup {
+        match shared::choose(&keys, &lookup.found) {
+            Choice::Passed(i, _) if lists[i].list.seen_elsewhere() => {
+                says(
+                    out,
+                    Decision::Reused,
+                    "reused",
+                    "it passed on the files another machine saw it read, and none of them has changed since".into(),
+                );
+                let mut files: Vec<&str> = lists[i].list.reads.iter().map(String::as_str).collect();
+                files.extend(lists[i].list.dirs.iter().map(String::as_str));
+                out.detail.insert(
+                    0,
+                    format!("another machine saw it read {}", files.join(", ")),
+                );
+                out.detail.insert(1, audit.into());
+                return;
+            }
+            Choice::Passed(..) => {
+                says(
+                    out,
+                    Decision::Reused,
+                    "reused",
+                    "it passed on the files it read, and none of them has changed since".into(),
+                );
+                out.detail.insert(0, audit.into());
+                return;
+            }
+            Choice::Failed if lists.len() > 1 => {
+                says(
+                    out,
+                    Decision::Runs,
+                    "failed",
+                    "machines saw it read different files, and its newest result on one of those lists failed".into(),
+                );
+                return;
+            }
+            Choice::Failed => {
+                says(
+                    out,
+                    Decision::Runs,
+                    "failed",
+                    "its newest result on the files it reads now failed".into(),
+                );
+                return;
+            }
+            Choice::Nothing if row.is_none() => {
+                says(
+                    out,
+                    Decision::Runs,
+                    "never-ran-here",
+                    "this machine has never seen it run, and no pass that counts here matches what another machine saw it read".into(),
+                );
+                return;
+            }
+            Choice::Nothing => {}
+        }
+    }
+    // What changed among what it read: its own list, or its test file's.
+    let changes = match row.and_then(|row| row.list.as_ref()) {
+        Some(list) => {
+            let files: BTreeSet<String> = list.reads.keys().cloned().collect();
+            let mut files_now = files.clone();
+            files_now.extend(super::gotest::under(input.tree, &list.dirs));
+            changes_of(Some(&list.reads), at.map, at.sets, input.tree, &files_now)
+        }
+        None => {
+            let reads = at
+                .file_lists
+                .first()
+                .map(|l| l.files.clone())
+                .unwrap_or_default();
+            changes(at.map, at.sets, input.tree, at.unit, &reads)
+        }
+    };
+    explain_change(out, &changes, says, at.map, input, at.unit, adapter, None);
 }
 
 /// What changed since the test file last ran here, among what its key holds.
@@ -441,9 +725,27 @@ fn changes(
     unit: &str,
     reads: &BTreeSet<String>,
 ) -> Changes {
+    changes_of(
+        map.units.get(unit).map(|mapped| &mapped.reads),
+        map,
+        sets,
+        tree,
+        reads,
+    )
+}
+
+/// What changed among `entries`, what a test file or a test read when it last ran here, each with
+/// its kind and content hash then, and `reads` now; and what changed for every test file.
+fn changes_of(
+    entries: Option<&BTreeMap<String, String>>,
+    map: &Map,
+    sets: &units::Sets,
+    tree: &Tree,
+    reads: &BTreeSet<String>,
+) -> Changes {
     let mut out = Changes::default();
-    if let Some(mapped) = map.units.get(unit) {
-        for (path, entry) in &mapped.reads {
+    if let Some(entries) = entries {
+        for (path, entry) in entries {
             match tree.entry(path) {
                 None => {
                     out.read = Some((path.clone(), "gone"));
@@ -459,65 +761,22 @@ fn changes(
         if out.read.is_none()
             && let Some(new) = reads
                 .iter()
-                .find(|p| sets.keyed([p.as_str()]).len() == 1 && !mapped.reads.contains_key(*p))
+                .find(|p| sets.keyed([p.as_str()]).len() == 1 && !entries.contains_key(*p))
         {
             out.read = Some((new.clone(), "new"));
         }
     }
-    let rest = rest_of(sets, tree);
-    let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
-    out.every = rest
-        .iter()
-        .find(|(path, entry)| map.rest.get(*path).is_some_and(|before| before != *entry))
-        .map(|(p, _)| {
-            (
-                p.clone(),
-                format!("{p} changed, and any test may read it"),
-                "rest-changed",
-            )
-        })
-        .or_else(|| {
-            rest.keys().find(|p| !map.rest.contains_key(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is new, and any test may read it"),
-                    "rest-changed",
-                )
-            })
-        })
-        .or_else(|| {
-            map.rest.keys().find(|p| !rest.contains_key(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is gone, and any test may have read it"),
-                    "rest-changed",
-                )
-            })
-        })
-        .or_else(|| {
-            sources.iter().find(|p| !map.sources.contains(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is new, which can change what tests load"),
-                    "shape",
-                )
-            })
-        })
-        .or_else(|| {
-            map.sources.iter().find(|p| !sources.contains(*p)).map(|p| {
-                (
-                    p.clone(),
-                    format!("{p} is gone, which can change what tests load"),
-                    "shape",
-                )
-            })
-        });
+    // \[C-37\] The plan's own function: a file on disk is never gone.
+    out.every = every_changed(map, sets, tree);
     out
 }
 
 type Says<'a> = dyn Fn(&mut Explanation, Decision, &'static str, String) + 'a;
 
-/// Why a test file with no result under its key runs: what changed, most particular first.
+/// Why a test file with no result under its key runs: what changed, most particular first; with
+/// nothing changed, \[C-37\] why it kept no result when it last ran here (`not_kept`, as that
+/// run decided it), else that its result didn't count or is gone.
+#[allow(clippy::too_many_arguments)]
 fn explain_change(
     out: &mut Explanation,
     changes: &Changes,
@@ -525,7 +784,8 @@ fn explain_change(
     map: &Map,
     input: &WhyInput<'_>,
     unit: &str,
-    adapter: &Adapter,
+    adapter: &dyn Adapter,
+    not_kept: Option<&str>,
 ) {
     if let Some((file, how)) = &changes.read {
         let (reason, why) = match *how {
@@ -554,11 +814,8 @@ fn explain_change(
                 }
             }
             out.detail.insert(0, line);
-        } else if matches!(adapter, Adapter::Cargo(_)) {
-            out.detail.insert(
-                0,
-                "its test binary is built from it: rustc's dep-info for the build names it".into(),
-            );
+        } else if let Some(why) = adapter.why_no_path() {
+            out.detail.insert(0, why.into());
         }
         if let Some((_, every, _)) = &changes.every {
             out.detail
@@ -571,6 +828,10 @@ fn explain_change(
         out.file = Some(file.clone());
         out.detail
             .insert(0, "so every test file of the check runs".into());
+        return;
+    }
+    if let Some(why) = not_kept {
+        says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
     says(
@@ -587,14 +848,20 @@ fn explain_change(
 
 /// The shortest path of direct edges the store holds from `unit` to `file` (for Go, to its
 /// package's directory), through files `unit` read; empty when there is none.
-fn path_to(input: &WhyInput<'_>, map: &Map, unit: &str, file: &str, adapter: &Adapter) -> Vec<Hop> {
+fn path_to(
+    input: &WhyInput<'_>,
+    map: &Map,
+    unit: &str,
+    file: &str,
+    adapter: &dyn Adapter,
+) -> Vec<Hop> {
     let check_id = store::check_id(&input.base, input.repository);
     let Ok(edges) = db::edges(input.store, &check_id) else {
         return Vec::new();
     };
-    let go = matches!(adapter, Adapter::Go(_));
+    let go = adapter.why_units_are_directories();
     let target = if go {
-        package_of(file)
+        super::gotest::package_of(file)
     } else {
         file.to_string()
     };
@@ -663,4 +930,84 @@ fn shortest(
         }
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(paths: &[&str]) -> Tree {
+        let mut bytes = format!("{}\n", hushrun_core::CANONICALIZATION).into_bytes();
+        let mut sorted = paths.to_vec();
+        sorted.sort();
+        for (n, path) in sorted.iter().enumerate() {
+            bytes.extend_from_slice(format!("f {:064x} {path}", n + 1).as_bytes());
+            bytes.push(0);
+        }
+        Tree::from_manifest(&bytes).unwrap()
+    }
+
+    // covers: C-37, C-39
+    #[test]
+    fn a_unit_whose_name_holds_two_colons_is_found_whole_with_its_tests_after_it() {
+        let adapter = adapter::choose_kept(&["pytest".to_string()], Path::new("."), None).unwrap();
+        let mut map = Map::default();
+        map.units
+            .insert("app::ex.app.Gen".into(), store::Mapped::default());
+        let t = tree(&["tests/test_a.py"]);
+        let split = |asked| split_asked(asked, &map, &t, adapter.as_ref());
+        // A class of no file, by the name the store keeps; then one of its tests.
+        assert_eq!(split("app::ex.app.Gen"), ("app::ex.app.Gen", None));
+        assert_eq!(
+            split("app::ex.app.Gen::testX"),
+            ("app::ex.app.Gen", Some("testX".to_string()))
+        );
+        // A test file of the scope, and a test whose id holds `::` (a class's method).
+        assert_eq!(
+            split("tests/test_a.py::TestC::test_c1"),
+            ("tests/test_a.py", Some("TestC::test_c1".to_string()))
+        );
+        // Nothing known: at the first `::`, as before.
+        assert_eq!(split("gone.py::t"), ("gone.py", Some("t".to_string())));
+        assert_eq!(split("gone.py"), ("gone.py", None));
+    }
+
+    // covers: C-37
+    #[test]
+    fn a_file_on_disk_is_never_said_to_be_gone() {
+        // The rest set then held p/tagged_test.go; the sets now take it for a test file. It is on
+        // disk: what changed is what tests load, not a file gone.
+        let t = tree(&["p/p_test.go", "p/tagged_test.go", "p/p.go"]);
+        let sets = units::classify(
+            t.paths(),
+            &|p| p.ends_with("_test.go"),
+            units::Sources::Kinds(&[".go"]),
+            &[],
+        );
+        let mut map = Map::default();
+        map.rest
+            .insert("p/tagged_test.go".into(), "f 0".to_string());
+        map.sources.insert("p/p.go".into());
+        let said = changes_of(None, &map, &sets, &t, &BTreeSet::new()).every;
+        assert_eq!(
+            said.map(|(_, why, reason)| (why, reason)),
+            Some((
+                "p/tagged_test.go is now a test file, which can change what tests load".to_string(),
+                "shape"
+            ))
+        );
+        // One that isn't on disk is gone.
+        let t = tree(&["p/p_test.go", "p/p.go"]);
+        let sets = units::classify(
+            t.paths(),
+            &|p| p.ends_with("_test.go"),
+            units::Sources::Kinds(&[".go"]),
+            &[],
+        );
+        let said = changes_of(None, &map, &sets, &t, &BTreeSet::new()).every;
+        assert_eq!(
+            said.map(|(_, why, _)| why),
+            Some("p/tagged_test.go is gone, and any test may have read it".to_string())
+        );
+    }
 }

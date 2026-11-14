@@ -18,7 +18,7 @@ mod lines;
 mod text;
 mod xml;
 
-pub use find::{Query, Search, find};
+pub use find::{Before, Query, Search, before, find, find_changed};
 pub use lines::{count, percent};
 
 /// A report file a run may have written: its path, and its path from the repository root,
@@ -433,7 +433,59 @@ fn summary(files: &[Found], limits: &Limits) -> Option<(Reports, bool)> {
         read.extend(these);
     }
     let every_file_read = read.len() == found;
+    count_shared_cases_once(&mut read, limits.file_bytes);
     Some((reports_of(&read), every_file_read))
+}
+
+/// \[C-27\] Surefire's TestNG provider writes each test in `TEST-TestSuite.xml`, and TestNG's
+/// reporter writes them again below `junitreports/` beside it; a copy whose cases all are in the
+/// suite's report isn't found at all ([`find`]). One that holds more, or a case renamed, is read:
+/// the cases it shares with the suite's report, by class and name, are taken off its counts, so
+/// that each counts once.
+fn count_shared_cases_once(read: &mut [(&Found, Format, Read)], most: u64) {
+    let outcomes = |found: &Found| {
+        let bytes = read_at_most(found, most).ok()?;
+        xml::junit_outcomes(std::str::from_utf8(&bytes).ok()?)
+    };
+    let suites: std::collections::BTreeMap<String, &Found> = read
+        .iter()
+        .filter_map(|(found, ..)| {
+            let (dir, name) = found
+                .rel
+                .rsplit_once('/')
+                .unwrap_or(("", found.rel.as_str()));
+            (name == "TEST-TestSuite.xml").then(|| (dir.to_string(), *found))
+        })
+        .collect();
+    for (found, _, said) in read.iter_mut() {
+        let Read::Tests(tests) = said else { continue };
+        let Some((dir, _)) = found.rel.rsplit_once('/') else {
+            continue;
+        };
+        let parent = match dir.rsplit_once('/') {
+            Some((parent, "junitreports")) => parent,
+            None if dir == "junitreports" => "",
+            _ => continue,
+        };
+        let Some(suite) = suites.get(parent) else {
+            continue;
+        };
+        let (Some(held), Some(mine)) = (outcomes(suite), outcomes(found)) else {
+            continue;
+        };
+        for (key, ended) in mine {
+            if !held.contains_key(&key) {
+                continue;
+            }
+            tests.total = tests.total.saturating_sub(1);
+            match ended {
+                xml::Outcome::Failed => tests.failed = tests.failed.saturating_sub(1),
+                xml::Outcome::Error => tests.errors = tests.errors.saturating_sub(1),
+                xml::Outcome::Skipped => tests.skipped = tests.skipped.saturating_sub(1),
+                xml::Outcome::Passed => {}
+            }
+        }
+    }
 }
 
 /// The first bytes of the file `found`, for [`sniff`].

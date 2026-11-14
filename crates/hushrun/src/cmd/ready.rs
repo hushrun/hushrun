@@ -933,29 +933,9 @@ fn tests_note(told: &TestsTold<'_>) -> Option<String> {
         root,
         cwd: &root.join(&parts.cwd),
     })?;
-    let label = told.label;
-    Some(match previewed {
-        crate::units::Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
-        crate::units::Previewed::Plan {
-            total, run, reused, ..
-        } => {
-            let who = if here { "a run here would" } else { "CI would" };
-            let passed = if here { "passed here" } else { "passed" };
-            let files = if total == 1 {
-                "test file"
-            } else {
-                "test files"
-            };
-            if reused == 0 {
-                format!("{label}: {who} run all {total} {files}")
-            } else {
-                let they = if reused == 1 { "it" } else { "they" };
-                format!(
-                    "{label}: {who} run {run} of {total} {files}; {reused} already {passed} on the files {they} read"
-                )
-            }
-        }
-    })
+    Some(crate::units::previewed_line(
+        &previewed, told.label, told.here,
+    ))
 }
 
 /// \[ADR 0067\] What `ready` and the hook say when results stay on this machine: CI runs every

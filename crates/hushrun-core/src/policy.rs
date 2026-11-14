@@ -839,15 +839,15 @@ fn validate_reports(name: &CheckName, raw: &RawReports, errors: &mut Errors) -> 
     Reports { files, ci: raw.ci }
 }
 
-/// \[ADR 0068\] A check's `tests` (C-5): a mode, short, or `{mode, ignore, always}`, with globs
-/// from the repository root. `None` when it is absent or `off`, or written wrongly, which
-/// `errors` says.
+/// \[ADR 0068\] A check's `tests` (C-5): a mode, short, or `{mode, unit, reads, ignore, always}`,
+/// with globs from the repository root. `None` when it is absent or `off`, or written wrongly,
+/// which `errors` says. \[ADR 0080\] `reads: test` needs `unit: test`.
 fn validate_tests(
     name: &CheckName,
     node: &Spanned<Raw>,
     errors: &mut Errors,
 ) -> Option<crate::units::Tests> {
-    use crate::units::{Mode, Tests};
+    use crate::units::{Mode, Reads, Tests, Unit};
     let mode_of = |raw: &Raw, pos: Pos, errors: &mut Errors| match raw {
         Raw::Text(word) => Mode::from_word(word).or_else(|| {
             errors.push(
@@ -904,11 +904,40 @@ fn validate_tests(
                     "mode" => mode = mode_of(&value.value, value.pos, errors),
                     "ignore" => tests.ignore = globs(value, "ignore", errors),
                     "always" => tests.always = globs(value, "always", errors),
+                    "unit" => match &value.value {
+                        Raw::Text(word) if Unit::from_word(word).is_some() => {
+                            tests.unit = Unit::from_word(word).unwrap_or_default();
+                        }
+                        _ => errors.push(
+                            value.pos,
+                            format!("check `{name}`'s `tests.unit` is file or test"),
+                        ),
+                    },
+                    "reads" => match &value.value {
+                        Raw::Text(word) if Reads::from_word(word).is_some() => {
+                            tests.reads = Reads::from_word(word).unwrap_or_default();
+                        }
+                        _ => errors.push(
+                            value.pos,
+                            format!("check `{name}`'s `tests.reads` is file or test"),
+                        ),
+                    },
                     other => errors.push(
                         pos,
-                        format!("check `{name}`'s `tests` has no key `{other}`: it takes mode, ignore and always"),
+                        format!("check `{name}`'s `tests` has no key `{other}`: it takes mode, unit, reads, ignore and always"),
                     ),
                 }
+            }
+            // \[ADR 0080\] What a test read is a question only for a check whose unit is a test.
+            if tests.reads == Reads::Test && tests.unit == Unit::File {
+                let pos = keys.get("reads").map_or(node.pos, |value| value.pos);
+                errors.push(
+                    pos,
+                    format!(
+                        "check `{name}`'s `tests.reads: test` needs `tests.unit: test`: write `unit: test` beside it, or `reads: file`"
+                    ),
+                );
+                return None;
             }
             match mode {
                 Some(mode) => tests.mode = mode,

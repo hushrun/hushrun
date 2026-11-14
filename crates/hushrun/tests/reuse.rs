@@ -113,6 +113,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
@@ -182,8 +184,23 @@ impl Ran {
         self.stderr
             .lines()
             .find(|l| {
-                l.contains("test files run")
-                    || l.contains("test file run")
+                // \[C-39\] In any adapter's word: `test files`, `test binaries`, `packages`.
+                [
+                    "test file",
+                    "test files",
+                    "test binary",
+                    "test binaries",
+                    "package",
+                    "packages",
+                    "test program",
+                    "test programs",
+                    "test class",
+                    "test classes",
+                    "test target",
+                    "test targets",
+                ]
+                .iter()
+                .any(|w| l.contains(&format!("{w} run")))
                     || l.contains("every test file runs")
             })
             .unwrap_or_else(|| panic!("no plan line in:\n{}", self.stderr))
@@ -318,7 +335,7 @@ fn pytest_reuses_what_already_passed_on_the_files_it_read() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         changed.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         changed.stdout.contains("5 deselected"),
@@ -415,7 +432,38 @@ fn tests_always_and_not_observed_test_files_always_run() {
     // the three left: five run.
     assert_eq!(
         changed.plan_line(),
-        "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 5 of 8 test files run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+    );
+}
+
+// covers: C-34, C-37
+#[test]
+fn a_file_that_becomes_a_test_file_is_never_said_to_be_gone() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // pytest.ini is ignored, so a change to the rule that names test files moves a file between
+    // the sets and changes nothing else.
+    let mut files = shop("{mode: reuse, ignore: [\"pytest.ini\"]}");
+    files.push((
+        "tests/check_extra.py".into(),
+        "def test_extra():\n    assert True\n".into(),
+    ));
+    let r = repo_of(&files);
+    let python = python();
+    let pytest = || r.run(&pytest_args(&python, &[]), &[]);
+    let first = pytest();
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    // tests/check_extra.py was a source; pytest now takes it for a test file. It is on disk.
+    r.write(
+        "pytest.ini",
+        "[pytest]\ntestpaths = tests\npythonpath = .\npython_files = test_*.py check_*.py\n",
+    );
+    let moved = pytest();
+    assert_eq!(moved.code, 0, "{}\n{}", moved.stdout, moved.stderr);
+    assert_eq!(
+        moved.plan_line(),
+        "hushrun: unit: all 9 test files run: tests/check_extra.py is now a test file, which can change what tests load"
     );
 }
 
@@ -442,7 +490,7 @@ fn a_failing_run_records_what_ran_whole_and_the_fix_reuses_it() {
     assert_eq!(fixed.code, 0, "{}", fixed.stderr);
     assert_eq!(
         fixed.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 }
 
@@ -486,7 +534,7 @@ fn an_injected_missed_dependency_is_caught_by_an_audit_and_suspends_reuse() {
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         caught.plan_line(),
-        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs as a check"
+        "hushrun: unit: all 2 test files run; 1 that already passed on the files it read runs anyway, as a check"
     );
     assert!(
         caught.stderr.contains("unit: test_hidden.py failed, though it passed before on the same files it read: running it once more"),
@@ -817,7 +865,7 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
     for entry in std::fs::read_dir(r.cache.join("units")).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // \[ADR 0072\] The store, as a cache step saves it once hushrun has exited.
-        if name.ends_with(".v1.sqlite") {
+        if name.ends_with(".v2.sqlite") {
             std::fs::copy(entry.path(), ci.cache.join("units").join(name)).unwrap();
         }
     }
@@ -826,7 +874,7 @@ fn a_server_keeps_test_files_with_their_run_and_ci_reuses_them_with_the_map_alon
     assert_eq!(reused.code, 0, "{}", reused.stderr);
     assert_eq!(
         reused.plan_line(),
-        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: unit: 3 of 8 test files run; 5 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert!(
         results
@@ -1122,7 +1170,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
     assert_eq!(
         first.plan_line(),
-        "hushrun: test: all 5 test files run: none had passed here yet on the files it read"
+        "hushrun: test: all 5 test binaries run: none had passed here yet on the files it read"
     );
     // One crate changes: its test binary runs, with one audited of the four others.
     r.write(
@@ -1133,7 +1181,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(changed.code, 0, "{}", changed.stderr);
     assert_eq!(
         changed.plan_line(),
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     let units = r.newest_result()["units"].clone();
     assert!(units["savedMs"].is_u64(), "{units}");
@@ -1178,7 +1226,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(
         second.plan_line(),
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
 
     // The flag: what the flagged test reads and no dep-info names. Every other binary changes, so
@@ -1207,7 +1255,7 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     assert!(
         suspended
             .plan_line()
-            .contains("every test file runs: reuse of its test files is suspended"),
+            .contains("every test binary runs: reuse of its test files is suspended"),
         "{}",
         suspended.stderr
     );
@@ -1449,6 +1497,7 @@ fn ready_asks_the_server_as_ci_counts_and_says_a_suspension() {
 /// What a step of [`rust_steps`] came to: test reuse's outcome, which build reuse must leave as
 /// it is, and what build reuse did.
 #[derive(Debug)]
+#[cfg(unix)]
 struct Step {
     /// Test reuse's own outcome: the exit code, the plan's line, the recorded units without the
     /// time they saved (a time, never the same twice), and whether an audit suspended reuse.
@@ -1573,6 +1622,7 @@ fn rust_steps(r: &Repo, env: &[(&str, &str)]) -> Vec<Step> {
 }
 
 /// The Rust fixture, with its lockfile committed.
+#[cfg(unix)]
 fn rust_repo() -> Repo {
     let r = Repo::new(&rust_files());
     let lock = Command::new("cargo")
@@ -1616,7 +1666,7 @@ fn build_reuse_and_test_reuse_work_in_the_same_run() {
     assert_eq!(tests[0].0, 0, "{tests:?}");
     assert_eq!(
         tests[1].1,
-        "hushrun: test: 2 of 5 test files run; 3 already passed on the files they read, and 1 more that did runs as a check"
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
     assert_eq!(tests[1].2, json!({"total": 5, "ran": 2, "reused": 3}));
     assert_ne!(tests[2].0, 0, "{tests:?}");

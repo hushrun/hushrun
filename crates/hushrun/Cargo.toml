@@ -43,6 +43,10 @@ hushrun-core = { workspace = true, features = ["pack"] }
 hushrun-reports.workspace = true
 hushrun-digest.workspace = true
 hushrun-vcs.workspace = true
+# The reports the adapters read test by test, already in the build through hushrun-reports:
+# \[ADR 0090\] the JUnit file CTest writes, \[ADR 0089\] the xunit file `swift test --parallel`
+# writes, \[ADR 0088\] Surefire's and Failsafe's reports.
+quick-xml.workspace = true
 rayon.workspace = true
 # \[ADR 0072\] The local store of what test files read.
 rusqlite.workspace = true
@@ -81,7 +85,9 @@ serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix.workspace = true
+# \[ADR 0089\] `pty` and `termios`: the pseudo-terminal hushrun's `swift` copies `swift test`'s
+# output through, so that it colors as on the person's terminal.
+rustix = { workspace = true, features = ["pty", "termios"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # A terminal for tests of what hushrun says only on one.

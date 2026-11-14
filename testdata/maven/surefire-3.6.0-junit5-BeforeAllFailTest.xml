@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="com.example.lib.BeforeAllFailTest" time="0.017" tests="1" errors="1" skipped="0" failures="0" flakes="0">
+  <testcase name="initializationError" classname="com.example.lib.BeforeAllFailTest" time="0.017">
+    <error message="deliberate @BeforeAll failure" type="java.lang.IllegalStateException"><![CDATA[java.lang.IllegalStateException: deliberate @BeforeAll failure
+	at com.example.lib.BeforeAllFailTest.setUp(BeforeAllFailTest.java:4)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+]]></error>
+  </testcase>
+</testsuite>

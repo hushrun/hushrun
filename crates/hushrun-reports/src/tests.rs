@@ -282,6 +282,123 @@ fn the_default_places_are_found_from_the_command_and_the_root() {
 
 // covers: C-27
 #[test]
+fn testngs_copies_of_surefires_report_are_found_once() {
+    let dir = tree(&[
+        ("target/surefire-reports/TEST-TestSuite.xml", JUNIT),
+        ("target/surefire-reports/junitreports/TEST-ng.A.xml", JUNIT),
+        ("target/surefire-reports/junitreports/TEST-ng.B.xml", JUNIT),
+        // A directory of that name with no suite report beside it is read.
+        ("other/junitreports/TEST-x.xml", JUNIT),
+    ]);
+    let q = query(dir.path(), dir.path(), &[]);
+    assert_eq!(
+        rels(find(&q)),
+        [
+            "other/junitreports/TEST-x.xml",
+            "target/surefire-reports/TEST-TestSuite.xml",
+        ]
+    );
+}
+
+// covers: C-27
+#[test]
+fn a_report_below_junitreports_is_dropped_only_when_surefires_report_holds_its_cases() {
+    let order = r#"<testsuite name="p.OrderTest"><testcase classname="p.OrderTest" name="a"/><testcase classname="p.OrderTest" name="b"/><testcase classname="p.OrderTest" name="c"><failure/></testcase></testsuite>"#;
+    let suite = r#"<testsuite name="TestSuite"><testcase classname="p.OrderTest" name="a"/><testcase classname="p.OrderTest" name="b"/><testcase classname="p.OrderTest" name="c"><failure/></testcase></testsuite>"#;
+    let partial =
+        r#"<testsuite name="TestSuite"><testcase classname="p.OrderTest" name="a"/></testsuite>"#;
+    // TestNG's standalone layout beside another tool's report: both are results.
+    let dir = tree(&[
+        ("reports/junitreports/TEST-p.OrderTest.xml", order),
+        ("reports/TEST-smoke.xml", JUNIT),
+    ]);
+    assert_eq!(
+        rels(find(&query(dir.path(), dir.path(), &[]))),
+        [
+            "reports/TEST-smoke.xml",
+            "reports/junitreports/TEST-p.OrderTest.xml"
+        ]
+    );
+    // Surefire's TestSuite report that holds every case of the copy: the copy goes.
+    let dir = tree(&[
+        (
+            "target/surefire-reports/junitreports/TEST-p.OrderTest.xml",
+            order,
+        ),
+        ("target/surefire-reports/TEST-TestSuite.xml", suite),
+    ]);
+    assert_eq!(
+        rels(find(&query(dir.path(), dir.path(), &[]))),
+        ["target/surefire-reports/TEST-TestSuite.xml"]
+    );
+    // One that lacks a case of the copy: both stay.
+    let dir = tree(&[
+        (
+            "target/surefire-reports/junitreports/TEST-p.OrderTest.xml",
+            order,
+        ),
+        ("target/surefire-reports/TEST-TestSuite.xml", partial),
+    ]);
+    assert_eq!(rels(find(&query(dir.path(), dir.path(), &[]))).len(), 2);
+}
+
+// covers: C-27
+#[test]
+fn a_case_surefires_report_and_testngs_copy_beside_it_share_counts_once() {
+    let case = |name: &str, failed: bool| {
+        if failed {
+            format!(r#"<testcase classname="p.T" name="{name}"><failure/></testcase>"#)
+        } else {
+            format!(r#"<testcase classname="p.T" name="{name}"/>"#)
+        }
+    };
+    let suite = format!(
+        "<testsuite>{}{}{}</testsuite>",
+        case("a", false),
+        case("b", false),
+        case("c", true)
+    );
+    // An exact copy, a subset, a superset with one case of its own, and a copy with one case
+    // renamed: each case, by class and name, counts once.
+    for (copy, total, failed) in [
+        (
+            vec![case("a", false), case("b", false), case("c", true)],
+            3,
+            1,
+        ),
+        (vec![case("a", false)], 3, 1),
+        (
+            vec![
+                case("a", false),
+                case("b", false),
+                case("c", true),
+                case("d", true),
+            ],
+            4,
+            2,
+        ),
+        (
+            vec![case("a", false), case("b", false), case("x", true)],
+            4,
+            2,
+        ),
+    ] {
+        let copy = format!("<testsuite>{}</testsuite>", copy.concat());
+        let dir = tree(&[
+            ("target/surefire-reports/TEST-TestSuite.xml", &suite),
+            ("target/surefire-reports/junitreports/TEST-p.T.xml", &copy),
+        ]);
+        let found = find(&query(dir.path(), dir.path(), &[])).unwrap().files;
+        let tests = summarize(&found, &Limits::default())
+            .unwrap()
+            .tests
+            .unwrap();
+        assert_eq!((tests.total, tests.failed), (total, failed), "{copy}");
+    }
+}
+
+// covers: C-27
+#[test]
 fn a_report_older_than_the_run_is_not_its() {
     let dir = tree(&[("junit.xml", JUNIT)]);
     let mut q = query(dir.path(), dir.path(), &[]);
@@ -733,4 +850,39 @@ fn a_search_says_when_it_stopped_short_of_a_readers_files() {
     let reports = record(&find(&q).unwrap(), &Limits::default()).unwrap();
     assert!(!reports.files_complete);
     assert_eq!(reports.tests.unwrap().total, 2);
+}
+
+// covers: C-27
+#[test]
+fn a_report_the_run_didnt_change_is_never_its_own_however_new() {
+    // A report an earlier run wrote a moment before this one started (a test task Gradle then
+    // found up to date): its time is within the clock's slack of the start.
+    let dir = tree(&[
+        ("build/test-results/test/TEST-a.xml", JUNIT),
+        ("build/test-results/test/TEST-b.xml", JUNIT),
+    ]);
+    let q = Query {
+        started: SystemTime::now(),
+        ..query(dir.path(), dir.path(), &[])
+    };
+    let before = before(&q);
+    assert_eq!(
+        rels(find(&q)),
+        [
+            "build/test-results/test/TEST-a.xml",
+            "build/test-results/test/TEST-b.xml"
+        ]
+    );
+    assert_eq!(rels(find_changed(&q, &before)), Vec::<String>::new());
+    // One the run wrote again counts, as does one it wrote anew.
+    let a = dir.path().join("build/test-results/test/TEST-a.xml");
+    std::fs::write(&a, format!("{JUNIT}\n")).unwrap();
+    std::fs::write(dir.path().join("build/test-results/test/TEST-c.xml"), JUNIT).unwrap();
+    assert_eq!(
+        rels(find_changed(&q, &before)),
+        [
+            "build/test-results/test/TEST-a.xml",
+            "build/test-results/test/TEST-c.xml"
+        ]
+    );
 }

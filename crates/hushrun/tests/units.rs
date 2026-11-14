@@ -99,6 +99,8 @@ impl Repo {
         for var in CLEARED {
             cmd.env_remove(var);
         }
+        // What the developer's shell exports never reaches a runner a test starts.
+        hushrun_testkit::env::Hermetic::hermetic(&mut cmd);
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
             if name.starts_with("NEXTEST")
@@ -624,6 +626,510 @@ fn a_test_file_that_would_have_been_reused_and_fails_is_a_disagreement() {
     assert_eq!(store::disagreements(&r.cache()), ["test_flaky.py"]);
 }
 
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn two_starts_of_pytest_in_one_command_never_add_up_to_a_test_file_that_ran_whole() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The first pytest runs test_one; the second selects test_two and test_three, and test_two
+    // ends the session before test_three starts, with exit 0. One of two, then one of two: summed,
+    // two of two finished, and test_three never ran.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_a.py",
+            "import os, pytest\n\ndef test_one():\n    pass\n\ndef test_two():\n    if os.environ.get('STOP'):\n        pytest.exit('stop', returncode=0)\n\ndef test_three():\n    pass\n",
+        ),
+    ]);
+    let python = python();
+    let pytest = format!("{python} -m pytest -q -p no:cacheprovider test_a.py");
+    let line = format!("{pytest} -k test_one && STOP=1 {pytest} -k 'test_two or test_three'");
+    let ran = r.run(&["run", "unit", "--", "sh", "-c", &line], &[]);
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(ran.stdout.contains("1 passed"), "{}", ran.stdout);
+    // It didn't run whole: no pass of it is recorded.
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+}
+
+// covers: C-32
+#[test]
+fn a_relative_path_opened_after_a_chdir_is_the_file_it_names_there() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The test file opens `data.py` from the root as it loads, then its test opens `data.py`
+    // from `sub/`: the same string, another file, which its list must hold.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("data.py", "0\n"),
+        ("sub/data.py", "1\n"),
+        (
+            "test_a.py",
+            "import os\n\nwith open('data.py') as f:\n    ROOT = f.read()\n\ndef test_target():\n    os.chdir('sub')\n    try:\n        with open('data.py') as f:\n            assert f.read().strip() == '1'\n    finally:\n        os.chdir('..')\n",
+        ),
+        ("test_other.py", "def test_other():\n    assert True\n"),
+    ]);
+    let python = python();
+    let args = [
+        "run",
+        "unit",
+        "--",
+        &python,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ];
+    let first = r.run(&args, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(
+        r.reads("test_a.py").contains(&"sub/data.py".to_string()),
+        "{:?}",
+        r.reads("test_a.py")
+    );
+    r.write("sub/data.py", "2\n");
+    let second = r.run(&args, &[]);
+    assert_eq!(second.code, 1, "{}", second.stdout);
+    assert!(
+        !second.stderr.contains("it would have been reused"),
+        "{}",
+        second.stderr
+    );
+}
+
+// covers: C-36
+#[test]
+fn a_store_an_older_hushrun_kept_is_imported_once_and_left_as_it_was() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("lib.py", "X = 1\n"),
+        ("extra.py", "Y = 1\n"),
+        (
+            "test_a.py",
+            "import lib\n\ndef test_a():\n    assert lib.X == 1\n",
+        ),
+        ("test_b.py", "def test_b():\n    assert True\n"),
+    ]);
+    let python = python();
+    let args = [
+        "run",
+        "unit",
+        "--",
+        &python,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    ];
+    let first = r.run(&args, &[]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    // What an older hushrun left: the same rows in `<id>.v1.sqlite`, of schema 1, and no store of
+    // schema 2.
+    let stores = store::stores(&r.cache());
+    assert_eq!(stores.len(), 1);
+    let v2 = stores[0].clone();
+    let v1 = v2.with_file_name(
+        v2.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace(".v2.sqlite", ".v1.sqlite"),
+    );
+    {
+        let conn = rusqlite::Connection::open(&v2).unwrap();
+        conn.execute_batch(
+            "DROP TABLE test_not_followed; DROP TABLE test; DROP TABLE test_list_dir;
+             DROP TABLE test_list_read; DROP TABLE test_list; PRAGMA user_version = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    }
+    std::fs::rename(&v2, &v1).unwrap();
+    let v1_bytes = std::fs::read(&v1).unwrap();
+    // A change no test file read: the check runs, and what reuse would have done reads the map
+    // the older store held.
+    r.write("extra.py", "Y = 2\n");
+    let second = r.run(&args, &[]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(
+        hushrun_testkit::lines::without_saving(second.observe_line()),
+        "hushrun: unit: with `tests: reuse`, 0 of 2 test files would have run; 2 already passed on the files they read"
+    );
+    // The older file stays as it was, for an older hushrun; this one's store is of schema 2.
+    assert_eq!(std::fs::read(&v1).unwrap(), v1_bytes);
+    assert!(v2.is_file());
+    assert!(!second.stderr.contains("cache step"), "{}", second.stderr);
+}
+
+// covers: C-32
+#[test]
+fn a_test_file_whose_last_test_pytest_exit_cut_short_didnt_run_whole() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_db, the file's last, asks for a fixture that ends the session: two of two tests
+    // started, one finished. Neither file runs whole: nothing records a pass.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "conftest.py",
+            "import pytest\n\n@pytest.fixture\ndef db():\n    pytest.exit('database not reachable', returncode=3)\n",
+        ),
+        (
+            "test_k.py",
+            "def test_1():\n    pass\n\ndef test_db(db):\n    pass\n",
+        ),
+        ("test_z.py", "def test_z():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 3, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+    // \[C-37\] `hushrun why` says a test of it didn't finish, not that a start of its runner
+    // didn't run it whole.
+    let why = r.run(&["why", "unit", "test_k.py"], &[]);
+    assert!(
+        why.stdout.contains("test_k.py would run with `tests: reuse`: not every test of it finished the last time it ran"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
+}
+
+// covers: C-32
+#[test]
+fn a_session_fixture_whose_end_fails_keeps_every_file_it_served_from_a_pass() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // A session fixture two files use fails as it ends, after the last test: pytest reports it on
+    // test_c.py's test, which didn't use it; test_a.py and test_b.py, which it served, record no
+    // pass either.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "conftest.py",
+            "import pytest\n\n@pytest.fixture(scope='session')\ndef db():\n    yield 1\n    raise RuntimeError('the database was left dirty')\n",
+        ),
+        ("test_a.py", "def test_a(db):\n    pass\n"),
+        ("test_b.py", "def test_b(db):\n    pass\n"),
+        ("test_c.py", "def test_c():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // test_c.py records its fail, and nothing else is recorded.
+    assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
+}
+
+// covers: C-32
+#[test]
+fn a_test_file_skipped_whole_as_it_loads_records_no_pass_in_a_run_that_failed() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_mod.py skips itself as it loads, test_imp.py skips for a module that isn't there, and
+    // test_fail.py fails: in that run a skip proves nothing, of a whole file too.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_mod.py",
+            "import pytest\npytest.skip('module level', allow_module_level=True)\n\ndef test_m():\n    pass\n",
+        ),
+        (
+            "test_imp.py",
+            "import pytest\npytest.importorskip('numpy_not_here')\n\ndef test_np():\n    pass\n",
+        ),
+        ("test_fail.py", "def test_fail():\n    assert False\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 1, "{}\n{}", ran.stdout, ran.stderr);
+    // test_fail.py's fail, and nothing else.
+    assert_eq!(r.unit_results(), 1, "{}", ran.stderr);
+}
+
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn a_start_of_the_runner_that_dies_before_its_facts_keeps_every_pass_out() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // The first pytest passes; the second dies inside test_2 and writes nothing: the file's pass
+    // from the first can't be told from what the second would have said.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_x.py",
+            "import os, signal\n\ndef test_1():\n    pass\n\ndef test_2():\n    if os.environ.get('CRASH'):\n        os.kill(os.getpid(), signal.SIGKILL)\n",
+        ),
+    ]);
+    let python = python();
+    let pytest = format!("{python} -m pytest -q -p no:cacheprovider test_x.py");
+    let line = format!("{pytest}; CRASH=1 {pytest}");
+    let ran = r.run(&["run", "unit", "--", "sh", "-c", &line], &[]);
+    assert_ne!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert_eq!(r.unit_results(), 0, "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains(
+            "hushrun: unit: no test file or test records a pass: a start of its runner ended before it said what it saw"
+        ),
+        "{}",
+        ran.stderr
+    );
+    // \[C-37\] `hushrun why` says what the run decided, not that it never ran here.
+    let why = r.run(&["why", "unit", "test_x.py"], &[]);
+    assert!(
+        why.stdout
+            .contains("a start of its runner ended before it said what it saw"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
+}
+
+// covers: C-30, C-33
+#[test]
+fn observe_counts_the_test_files_the_plan_counts() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // pytest's doctest plugin collects `test*.txt` files too: tests/res/test.txt, a data file,
+    // holds no doctest and is no test file of python_files, which a plan counts. `observe` counts
+    // the same two.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("pytest.ini", "[pytest]\ntestpaths = tests\n"),
+        ("tests/test_a.py", "def test_a():\n    pass\n"),
+        ("tests/test_b.py", "def test_b():\n    pass\n"),
+        ("tests/res/test.txt", "some data\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        ran.stderr
+            .contains("hushrun: unit: with `tests: reuse`, all 2 test files would have run"),
+        "{}",
+        ran.stderr
+    );
+}
+
+// covers: C-32
+#[test]
+fn a_pytest_a_test_starts_and_stops_is_no_start_of_the_runner() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // test_nested starts a pytest of its own, which inherits the run's variables, and stops it
+    // before it says anything: that pytest is the test's doing, which isn't followed, never a
+    // start of the runner by COMMAND. The run's passes are kept.
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        (
+            "test_n.py",
+            "import os, subprocess, sys, time\n\ndef test_nested():\n    p = subprocess.Popen([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'slow_s.py'], env=dict(os.environ, IN_CHILD='1'))\n    time.sleep(3)\n    p.terminate()\n    p.wait()\n",
+        ),
+        (
+            "slow_s.py",
+            "import os, time\n\ndef test_s():\n    if os.environ.get('IN_CHILD'):\n        time.sleep(30)\n",
+        ),
+        ("test_b.py", "def test_b():\n    pass\n"),
+    ]);
+    let python = python();
+    let ran = r.run(
+        &[
+            "run",
+            "unit",
+            "--",
+            &python,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "test_n.py",
+            "test_b.py",
+        ],
+        &[],
+    );
+    assert_eq!(ran.code, 0, "{}\n{}", ran.stdout, ran.stderr);
+    assert!(
+        !ran.stderr.contains("no test file or test records a pass"),
+        "{}",
+        ran.stderr
+    );
+    assert!(r.unit_results() > 0, "{}", ran.stderr);
+}
+
+// covers: C-32
+#[cfg(unix)]
+#[test]
+fn a_command_pytest_no_longer_reports_for_is_chosen_afresh_next_time() {
+    if !tools("Python 3.8+ with pytest and pytest-xdist", has_pytest()) {
+        return;
+    }
+    // `make test` ran pytest, and the store says so; then the Makefile runs ctest. The stored word
+    // keeps CTest away only while pytest reports: a run in which it reported nothing clears it.
+    let python = python();
+    let r = Repo::new(&[
+        ("hushrun.yaml", YAML_OBSERVE),
+        (".gitignore", "__pycache__/\n.pytest_cache/\n"),
+        ("test_a.py", "def test_a():\n    pass\n"),
+        (
+            "Makefile",
+            &format!("test:\n\t{python} -m pytest -q -p no:cacheprovider\n"),
+        ),
+    ]);
+    let first = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let checks = || -> i64 {
+        let store = store::stores(&r.cache());
+        rusqlite::Connection::open(&store[0])
+            .unwrap()
+            .query_row("SELECT count(*) FROM checks", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(checks(), 1);
+    let silent_runs = || -> i64 {
+        let store = store::stores(&r.cache());
+        rusqlite::Connection::open(&store[0])
+            .unwrap()
+            .query_row("SELECT silent_runs FROM checks", [], |row| row.get(0))
+            .unwrap()
+    };
+    // A run that fails before pytest starts (no build directory) proves nothing of who reports:
+    // the word stays.
+    r.write("Makefile", "test:\n\tctest --test-dir build\n");
+    let failed = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_ne!(failed.code, 0, "{}\n{}", failed.stdout, failed.stderr);
+    assert_eq!(checks(), 1, "{}", failed.stderr);
+    // A ctest whose build directory is empty finds no test and exits 0: pytest said nothing this
+    // time, and the word stays; the next run that reaches pytest is pytest's, as before.
+    let tools = r.root.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let fake = tools.join("ctest");
+    std::fs::write(&fake, "#!/bin/sh\necho 'No tests were found!!!'\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let empty = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(empty.code, 0, "{}\n{}", empty.stdout, empty.stderr);
+    assert_eq!(checks(), 1, "{}", empty.stderr);
+    assert!(
+        empty
+            .stderr
+            .contains("hushrun: unit: test files weren't observed: pytest reported none this time"),
+        "{}",
+        empty.stderr
+    );
+    assert!(!empty.stderr.contains("afresh"), "{}", empty.stderr);
+    r.write(
+        "Makefile",
+        &format!("test:\n\tctest --test-dir build || {python} -m pytest -q -p no:cacheprovider\n"),
+    );
+    let pytest = r.run(&["run", "unit", "--", "make", "test"], &[]);
+    assert_eq!(pytest.code, 0, "{}\n{}", pytest.stdout, pytest.stderr);
+    assert_eq!((checks(), silent_runs()), (1, 0), "{}", pytest.stderr);
+    // The Makefile now runs ctest, and passes, with pytest silent: twice in a row, and the word
+    // goes on the second.
+    r.write(
+        "Makefile",
+        "test:\n\tctest --test-dir build\n# now ctest's\n",
+    );
+    let once = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(once.code, 0, "{}\n{}", once.stdout, once.stderr);
+    assert_eq!((checks(), silent_runs()), (1, 1), "{}", once.stderr);
+    r.write(
+        "Makefile",
+        "test:\n\tctest --test-dir build\n# now ctest's, again\n",
+    );
+    let twice = r.run(&["run", "unit", "--", "make", "test"], &[("PATH", &path)]);
+    assert_eq!(twice.code, 0, "{}\n{}", twice.stdout, twice.stderr);
+    assert_eq!(checks(), 0, "{}", twice.stderr);
+    assert!(
+        twice
+            .stderr
+            .contains("so the next run chooses how to observe them afresh"),
+        "{}",
+        twice.stderr
+    );
+}
+
 /// A Cargo workspace: a library crate, a binary crate whose integration test runs the binary, a
 /// crate whose test opens a `.rs` file under `testdata/` as data, and an example.
 fn rust_files() -> Vec<(&'static str, &'static str)> {
@@ -712,7 +1218,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         first
             .observe_line()
-            .contains("all 5 test files would have run: none had passed here yet"),
+            .contains("all 5 test binaries would have run: none had passed here yet"),
         "{}",
         first.stderr
     );
@@ -752,7 +1258,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         other
             .observe_line()
-            .contains("2 of 5 test files would have run; 3 already passed"),
+            .contains("2 of 5 test binaries would have run; 3 already passed"),
         "{}",
         other.stderr
     );
@@ -766,7 +1272,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         example
             .observe_line()
-            .contains("1 of 5 test files would have run; 4 already passed"),
+            .contains("1 of 5 test binaries would have run; 4 already passed"),
         "{}",
         example.stderr
     );
@@ -788,7 +1294,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         failing
             .observe_line()
-            .contains("5 test files would have run"),
+            .contains("5 test binaries would have run"),
         "{}",
         failing.stderr
     );
@@ -799,7 +1305,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         fixed
             .observe_line()
-            .contains("0 of 5 test files would have run; 5 already passed"),
+            .contains("0 of 5 test binaries would have run; 5 already passed"),
         "{}",
         fixed.stderr
     );
@@ -809,7 +1315,7 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     let data = r.run(&nextest, &[]);
     assert!(
         data.observe_line().contains(
-            "all 5 test files would have run: crates/other/testdata/fixture.rs changed, and any test may read it"
+            "all 5 test binaries would have run: crates/other/testdata/fixture.rs changed, and any test may read it"
         ),
         "{}",
         data.stderr
@@ -831,14 +1337,14 @@ fn rust_test_binaries_are_observed_from_their_dep_info() {
     assert!(
         first_plain
             .observe_line()
-            .contains("all 5 test files would have run")
+            .contains("all 5 test binaries would have run")
     );
     r.write("crates/other/src/lib.rs", "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n");
     let second_plain = r.run(&plain, &[]);
     assert!(
         second_plain
             .observe_line()
-            .contains("2 of 5 test files would have run; 3 already passed"),
+            .contains("2 of 5 test binaries would have run; 3 already passed"),
         "{}",
         second_plain.stderr
     );
@@ -912,6 +1418,54 @@ fn the_target_runner_passes_everything_through() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
+}
+
+// covers: C-39
+#[cfg(unix)]
+#[test]
+fn a_program_on_path_starts_the_real_one_with_path_as_it_was() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    // A directory of hushrun's programs, which a real program is never taken from, first on PATH;
+    // then the real one, a fake tool that says its arguments and environment.
+    let programs = root.join("programs");
+    std::fs::create_dir_all(&programs).unwrap();
+    std::fs::write(programs.join(".hushrun-programs"), b"").unwrap();
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    for at in [&programs, &real] {
+        let tool = at.join("faketool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\necho \"[$*][$PATH][${HUSHRUN_PROGRAMS-unset}][${HUSHRUN_PROGRAMS_PATH-unset}]\"\nexit 4\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let was = format!("{}:/usr/bin:/bin", real.display());
+    let program = |name: &str, args: &[&str]| {
+        let mut cmd = assert_cmd::Command::cargo_bin("hushrun").unwrap();
+        cmd.arg("__hushrun-program")
+            .arg(name)
+            .args(args)
+            .env("PATH", format!("{}:{was}", programs.display()))
+            .env("HUSHRUN_PROGRAMS", &programs)
+            .env("HUSHRUN_PROGRAMS_PATH", format!("={was}"))
+            .env("HUSHRUN_UNITS", root.join("units"));
+        cmd.output().unwrap()
+    };
+    // The real program, with no program of hushrun's named for it: its arguments as they came,
+    // its exit code, PATH as COMMAND had it, and neither of hushrun's variables.
+    let out = program("faketool", &["test", "--parallel"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("[test --parallel][{was}][unset][unset]\n")
+    );
+    // None on PATH: 127, as a shell says.
+    let out = program("nothere", &[]);
+    assert_eq!(out.status.code(), Some(127));
 }
 
 /// The first 10 characters of a ULID: its milliseconds.

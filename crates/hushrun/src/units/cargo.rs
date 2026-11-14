@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use hushrun_core::units::{Facts, NotFollowed};
+use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
+use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
 use super::facts::{FactsFile, Invocation};
 use super::runner;
 
@@ -123,8 +124,8 @@ const NEXTEST_VALUED: &[&str] = &[
 /// …` or `cargo [+toolchain] test …`.
 pub fn recognize(command: &[String]) -> Option<Recognized> {
     let program = command.first()?;
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let file = file.strip_suffix(".exe").unwrap_or(file);
+    let file = super::command::program_name(program);
+    let file = &*file;
     let mut rest = &command[1..];
     let mut toolchain = None;
     let nextest = match file {
@@ -210,6 +211,7 @@ pub fn runner_variables(
     exe: &Path,
     cwd: &Path,
     env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
 ) -> Result<Vec<(String, String)>, String> {
     let exe_text = exe
         .to_str()
@@ -228,7 +230,7 @@ pub fn runner_variables(
     if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
         triples.insert(target);
     }
-    triples.insert(host(recognized, env)?);
+    triples.insert(host(recognized, cwd, env, assigned)?);
     let mut out = Vec::new();
     for triple in triples {
         let key: String = triple
@@ -256,11 +258,16 @@ pub fn runner_variables(
 }
 
 /// The host triple, as the `rustc` COMMAND's toolchain runs says.
-fn host(recognized: &Recognized, env: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+fn host(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> Result<String, String> {
     let rustc = env("RUSTC")
         .filter(|r| !r.is_empty())
         .unwrap_or("rustc".into());
-    let mut command = Command::new(&rustc);
+    let mut command = super::command::tool(&rustc, cwd, assigned);
     if let Some(tc) = &recognized.toolchain {
         command.arg(format!("+{tc}"));
     }
@@ -346,9 +353,10 @@ pub fn plan_build(
     root: &Path,
     cwd: &Path,
     env: &[(OsString, OsString)],
+    assigned: &[(String, String)],
 ) -> Result<Built, String> {
-    let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, true, env)?;
+    let metadata = metadata(recognized, cwd, assigned)?;
+    let artifacts = build(recognized, cwd, true, env, assigned)?;
     Ok(read_build(&metadata, artifacts, root))
 }
 
@@ -425,14 +433,15 @@ pub fn observe(
     root: &Path,
     cwd: &Path,
     command_passed: bool,
+    assigned: &[(String, String)],
 ) -> Result<Observed, String> {
     let invocations: Vec<&Invocation> = files
         .iter()
         .filter(|f| f.adapter == ADAPTER)
         .filter_map(|f| f.invocation.as_ref())
         .collect();
-    let metadata = metadata(recognized, cwd)?;
-    let artifacts = build(recognized, cwd, false, &[])?;
+    let metadata = metadata(recognized, cwd, assigned)?;
+    let artifacts = build(recognized, cwd, false, &[], assigned)?;
     let built = read_build(&metadata, artifacts, root);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
@@ -457,9 +466,11 @@ pub fn observe(
                     failed,
                     not_followed: b.not_followed,
                     deselected: deselected(starts),
+                    ..Facts::default()
                 },
                 reads: b.reads,
                 duration_ms,
+                tests: None,
             },
         );
         executables.insert(unit, b.executable);
@@ -677,8 +688,12 @@ fn ended(
 
 /// `cargo metadata --no-deps`: the workspace's members, their targets and path dependencies.
 /// It resolves nothing, so it reads no network and writes no lockfile.
-fn metadata(recognized: &Recognized, cwd: &Path) -> Result<Metadata, String> {
-    let mut command = cargo(recognized, cwd);
+fn metadata(
+    recognized: &Recognized,
+    cwd: &Path,
+    assigned: &[(String, String)],
+) -> Result<Metadata, String> {
+    let mut command = cargo(recognized, cwd, assigned);
     command.args(["metadata", "--format-version", "1", "--no-deps"]);
     let mut words = recognized.build.iter();
     while let Some(word) = words.next() {
@@ -704,12 +719,13 @@ fn metadata(recognized: &Recognized, cwd: &Path) -> Result<Metadata, String> {
     serde_json::from_slice(&output.stdout).map_err(|err| format!("cargo metadata: {err}"))
 }
 
-fn cargo(recognized: &Recognized, cwd: &Path) -> Command {
-    let mut command = Command::new(&recognized.cargo);
+/// \[C-32\] A `cargo` command hushrun asks, as COMMAND's `cargo` will run: in `cwd`, with COMMAND's
+/// own `env NAME=value` assignments (`assigned`), and none of hushrun's own variables.
+fn cargo(recognized: &Recognized, cwd: &Path, assigned: &[(String, String)]) -> Command {
+    let mut command = super::command::tool(&recognized.cargo, cwd, assigned);
     if let Some(tc) = &recognized.toolchain {
         command.arg(format!("+{tc}"));
     }
-    command.current_dir(cwd);
     command
 }
 
@@ -722,8 +738,9 @@ fn build(
     cwd: &Path,
     plan: bool,
     env: &[(OsString, OsString)],
+    assigned: &[(String, String)],
 ) -> Result<Vec<Artifact>, String> {
-    let mut command = cargo(recognized, cwd);
+    let mut command = cargo(recognized, cwd, assigned);
     command.envs(env.iter().map(|(name, value)| (name, value)));
     command.args(["test", "--no-run", "--message-format=json"]);
     if !recognized
@@ -941,6 +958,134 @@ fn split_escaped(text: &str) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// \[ADR 0068\] The Cargo adapter for `cargo test` and `cargo nextest run` (C-32); `None` for any
+/// other COMMAND.
+pub fn recognized(command: &[String], _: &Path) -> Option<Result<Box<dyn Adapter>, String>> {
+    Some(Ok(Box::new(recognize(command)?)))
+}
+
+impl Adapter for Recognized {
+    fn word(&self) -> &'static str {
+        ADAPTER
+    }
+
+    fn runner(&self) -> &'static str {
+        "cargo"
+    }
+
+    fn test_file(&self) -> &'static str {
+        "test binary"
+    }
+
+    fn hints(&self) -> Hints {
+        Hints::None
+    }
+
+    fn binds(&self) -> bool {
+        true
+    }
+
+    fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
+        let exe = at.exe()?;
+        let env = |name: &str| (at.env)(name).and_then(|v| v.into_string().ok());
+        runner_variables(self, &exe, at.cwd, &env, at.assigned).map(|vars| {
+            vars.into_iter()
+                .map(|(name, value)| (name, OsString::from(value)))
+                .collect()
+        })
+    }
+
+    fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
+        let b = plan_build(self, at.root, at.cwd, at.compile_env, at.assigned)?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| b.unit_files.contains(path),
+            Sources::Named(&b.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let known = b
+            .units
+            .iter()
+            .map(|(unit, b)| {
+                let lists = (b.not_followed.is_empty() && at.tree.contains(unit))
+                    .then(|| vec![super::built_list(&b.reads)]);
+                (unit.clone(), lists)
+            })
+            .collect();
+        let bound = b
+            .units
+            .iter()
+            .map(|(unit, b)| (unit.clone(), b.executable.clone()))
+            .collect();
+        Ok(Some(Planning {
+            sets,
+            known,
+            bound,
+            ..Planning::default()
+        }))
+    }
+
+    fn read(&self, at: &ReadAt<'_>) -> Result<Option<Read>, String> {
+        if !at.files.iter().any(|f| f.adapter == ADAPTER) {
+            return Ok(None);
+        }
+        let observed = observe(
+            self,
+            at.files,
+            at.root,
+            at.cwd,
+            at.command_passed,
+            at.assigned,
+        )?;
+        let sets = units::classify(
+            at.tree.paths(),
+            &|path| observed.unit_files.contains(path),
+            Sources::Named(&observed.named, SOURCE_KINDS),
+            at.ignore,
+        );
+        let planned = observed
+            .units
+            .iter()
+            .map(|(unit, seen)| (unit.clone(), vec![super::built_list(&seen.reads)]))
+            .collect();
+        Ok(Some(Read {
+            seen: observed.units,
+            failures_by_unit: true,
+            sets,
+            planned,
+            executables: observed.executables,
+            ..Read::default()
+        }))
+    }
+
+    fn again(&self, _: &Path, _: &Path, _: &BTreeSet<String>) -> RunExtras {
+        RunExtras::default()
+    }
+
+    fn why_sets(&self, at: &WhyAt<'_>) -> Sets {
+        units::classify(
+            at.tree.paths(),
+            &|p| at.map.units.contains_key(p),
+            Sources::Named(&at.map.sources, SOURCE_KINDS),
+            at.ignore,
+        )
+    }
+
+    fn why_not_a_unit(&self, _: &WhyAt<'_>, check: &str, unit: &str) -> String {
+        format!(
+            "{unit} isn't a test file of {check} as far as this machine knows: no test binary of its last build here has it as its root file"
+        )
+    }
+
+    fn why_known_from(&self) -> Option<&'static str> {
+        Some("its test binaries and what each is built from are those of its last build here")
+    }
+
+    fn why_no_path(&self) -> Option<&'static str> {
+        Some("its test binary is built from it: rustc's dep-info for the build names it")
+    }
 }
 
 #[cfg(test)]

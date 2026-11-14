@@ -19,6 +19,7 @@
 //! after it are the runner the environment had set there, which it chains to and gives back to
 //! the test, or none.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -88,54 +89,39 @@ fn run(args: &[OsString]) -> ExitCode {
             .map_or(0, |d| d.as_nanos());
         dir.join(format!("go-{}-{nanos}.testlog", std::process::id()))
     });
+    // \[ADR 0086\] Tests one by one: the binary's tests listed, those `reuseTests` names left out,
+    // and its output read as it passes through. Its output can only be read through a pipe of
+    // hushrun's, made before anything is left out: without one, nothing is.
+    let watch = if go && !reuse {
+        dir.as_deref()
+            .zip(here.as_deref())
+            .and_then(|(dir, here)| tests_here(dir, here, &told))
+            .and_then(|at| Some((at, Watch::new()?)))
+    } else {
+        None
+    };
     let mut args: Vec<OsString> = Vec::new();
     if let Some(log) = &testlog {
         let mut arg = OsString::from("-test.testlogfile=");
         arg.push(log);
         args.push(arg);
     }
-    args.extend(told.args.iter().cloned());
-    let (program, rest) = match told.chain.split_first() {
-        Some((first, more)) => {
-            let mut rest: Vec<OsString> = more.to_vec();
-            rest.push(told.binary.clone());
-            rest.extend(args.iter().cloned());
-            (first.clone(), rest)
-        }
-        None => (told.binary.clone(), args.clone()),
-    };
-    let mut command = Command::new(&program);
-    command.args(&rest);
-    // What the test would have seen without hushrun: its runner variable, or `GOFLAGS`, as the
-    // environment had it, and no directory of hushrun's.
-    if go {
-        match std::env::var_os(super::gotest::GOFLAGS_WAS) {
-            Some(was) => {
-                let was = was.to_string_lossy().into_owned();
-                match was.strip_prefix('=') {
-                    Some(value) => command.env("GOFLAGS", value),
-                    None => command.env_remove("GOFLAGS"),
-                };
-            }
-            None => {
-                command.env_remove("GOFLAGS");
-            }
-        }
-        command.env_remove(super::gotest::GOFLAGS_WAS);
-    } else {
-        let runner_var = format!("CARGO_TARGET_{}_RUNNER", told.variable);
-        if told.chain.is_empty() {
-            command.env_remove(&runner_var);
-        } else {
-            let words: Vec<String> = told
-                .chain
-                .iter()
-                .map(|w| w.to_string_lossy().into_owned())
-                .collect();
-            command.env(&runner_var, words.join(" "));
-        }
+    // First, before any argument of COMMAND's that isn't a flag, where `flag` stops: the tests
+    // left out, and the profile Go's test main writes only once it returned from running them.
+    let returned = watch.as_ref().zip(dir.as_ref()).map(|(_, dir)| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        dir.join(format!(".go-{}-{nanos}.memprofile", std::process::id()))
+    });
+    args.extend(watch.as_ref().and_then(|(at, _)| at.skip_arg()));
+    if let Some(path) = &returned {
+        let mut arg = OsString::from("-test.memprofile=");
+        arg.push(path);
+        args.push(arg);
     }
-    command.env_remove(UNITS_VAR);
+    args.extend(told.args.iter().cloned());
+    let (program, mut command) = command_for(&told, go, &args);
     let listing = !go && told.args.iter().any(|a| a == "--list");
     // \[ADR 0069\] A binary the plan reuses: what the run would have said of its passing tests.
     if let Some(dir) = &dir
@@ -159,14 +145,19 @@ fn run(args: &[OsString]) -> ExitCode {
                 testlog: None,
                 testlog_truncated: false,
             },
+            None,
         );
         return ExitCode::SUCCESS;
     }
     if listing {
         command.stdout(Stdio::piped());
     }
+    let watch = watch.map(|(at, watch)| (at, watch.attach(&mut command)));
     let started = Instant::now();
-    let mut child = match command.spawn() {
+    let spawned = command.spawn();
+    // The pipe's ends the command held close here, so that the output ends with the test's.
+    drop(command);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(err) => {
             eprintln!("error: can't start {}: {err}", program.to_string_lossy());
@@ -178,6 +169,11 @@ fn run(args: &[OsString]) -> ExitCode {
         }
     };
     let forwarding = forward_signals(child.id());
+    // \[ADR 0086\] The binary's output, read as it passes through to `go test`.
+    let mut watched = watch.map(|(at, reader)| {
+        let output = super::gotest::Output::new(at.flags.json);
+        (at, super::program::pipe_file(reader), output)
+    });
     // A list goes on to Cargo or nextest byte for byte, as it comes; hushrun keeps a copy.
     let mut listed_bytes = Vec::new();
     if let Some(mut out) = child.stdout.take() {
@@ -198,18 +194,55 @@ fn run(args: &[OsString]) -> ExitCode {
         }
         let _ = stdout.flush();
     }
-    let status = loop {
-        match child.wait() {
-            Ok(status) => break Some(status),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break None,
+    // \[ADR 0086, amended\] Copied until it ends, or until it is still held open once the binary
+    // ended: then the rest is handed to a forwarder below, and `go test` sees what it sees without
+    // hushrun, the binary gone and its output open, and its own WaitDelay decides.
+    let (status, held) = match watched.as_mut() {
+        Some((_, from, output)) => {
+            super::program::copy_until_held(from, &mut child, &mut |bytes| output.feed(bytes))
         }
+        None => (
+            loop {
+                match child.wait() {
+                    Ok(status) => break Some(status),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break None,
+                }
+            },
+            false,
+        ),
     };
     drop(forwarding);
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let (exit, signal) = match &status {
         Some(status) => (status.code(), signal_of(status)),
         None => (None, None),
+    };
+    // \[ADR 0086\] What each test came to, from what the binary printed and how it ended.
+    let mut held_open = None;
+    let tests = match watched {
+        Some((at, from, mut out)) => {
+            let read_whole = !held;
+            if read_whole {
+                out.end();
+            } else {
+                held_open = Some(from);
+            }
+            let returned = returned.as_ref().is_some_and(|path| {
+                let written = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+                let _ = std::fs::remove_file(path);
+                written
+            });
+            let ended = super::gotest::Ended {
+                exit,
+                signal,
+                read_whole,
+                returned,
+            };
+            let (tests, note) = super::gotest::outcome(&at, &out, ended);
+            Some((at.unit.clone(), tests, note))
+        }
+        None => None,
     };
     if let Some(dir) = dir {
         let listed = listing.then(|| terse_list(&listed_bytes));
@@ -242,13 +275,253 @@ fn run(args: &[OsString]) -> ExitCode {
                 testlog: lines,
                 testlog_truncated: truncated,
             },
+            tests,
         );
     }
-    match (exit, signal) {
-        (Some(code), _) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-        (None, Some(signal)) => end_as(signal),
-        (None, None) => ExitCode::from(1),
+    // \[ADR 0086, amended\] What a program the test left running still prints goes on to `go
+    // test` through a forwarder hushrun doesn't wait for, as it would without hushrun between them.
+    if let Some(from) = held_open {
+        super::program::hand_over(from);
     }
+    end_with(exit, signal)
+}
+
+/// How hushrun ends when it stands in for a program, a test binary here or a `ctest` or `swift`
+/// on `PATH`: as the program ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ending {
+    /// An exit code `ExitCode` holds: 0 to 255.
+    Code(u8),
+    /// One it doesn't, which ends the process with `std::process::exit`.
+    Whole(i32),
+    /// By the program's signal.
+    Signal(i32),
+}
+
+/// How to end for a program that exited with `exit`, or was stopped by `signal`. Where the
+/// system's exit codes are wider than a byte (`wide`, as on Windows), one past 255 passes through
+/// whole rather than as 1; elsewhere none is wider. Neither known: 1.
+pub(super) fn ending(exit: Option<i32>, signal: Option<i32>, wide: bool) -> Ending {
+    match (exit, signal) {
+        (Some(code), _) => match u8::try_from(code) {
+            Ok(byte) => Ending::Code(byte),
+            Err(_) if wide => Ending::Whole(code),
+            Err(_) => Ending::Code(1),
+        },
+        (None, Some(signal)) => Ending::Signal(signal),
+        (None, None) => Ending::Code(1),
+    }
+}
+
+/// Ends this process as the program it stands in for ended ([`ending`]): with its exit code,
+/// whole on Windows, or by the same signal.
+pub(super) fn end_with(exit: Option<i32>, signal: Option<i32>) -> ExitCode {
+    match ending(exit, signal, cfg!(windows)) {
+        Ending::Code(byte) => ExitCode::from(byte),
+        Ending::Whole(code) => {
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            std::process::exit(code)
+        }
+        Ending::Signal(signal) => end_as(signal),
+    }
+}
+
+/// The command that starts `told`'s binary with `args`, through the runner it chains to, with the
+/// environment the runner it stands in for would have given it: its runner variable, or
+/// `GOFLAGS`, as the environment had it, and no directory of hushrun's.
+fn command_for(told: &Told, go: bool, args: &[OsString]) -> (OsString, Command) {
+    let (program, rest) = match told.chain.split_first() {
+        Some((first, more)) => {
+            let mut rest: Vec<OsString> = more.to_vec();
+            rest.push(told.binary.clone());
+            rest.extend(args.iter().cloned());
+            (first.clone(), rest)
+        }
+        None => (told.binary.clone(), args.to_vec()),
+    };
+    let mut command = Command::new(&program);
+    command.args(&rest);
+    if go {
+        match std::env::var_os(super::gotest::GOFLAGS_WAS) {
+            Some(was) => {
+                let was = was.to_string_lossy().into_owned();
+                match was.strip_prefix('=') {
+                    Some(value) => command.env("GOFLAGS", value),
+                    None => command.env_remove("GOFLAGS"),
+                };
+            }
+            None => {
+                command.env_remove("GOFLAGS");
+            }
+        }
+        command.env_remove(super::gotest::GOFLAGS_WAS);
+    } else {
+        let runner_var = format!("CARGO_TARGET_{}_RUNNER", told.variable);
+        if told.chain.is_empty() {
+            command.env_remove(&runner_var);
+        } else {
+            let words: Vec<String> = told
+                .chain
+                .iter()
+                .map(|w| w.to_string_lossy().into_owned())
+                .collect();
+            command.env(&runner_var, words.join(" "));
+        }
+    }
+    command.env_remove(UNITS_VAR);
+    (program, command)
+}
+
+/// The run's `hushrun.json`, when it reads.
+fn run_file(dir: &Path) -> Option<facts::RunFile> {
+    std::fs::read(dir.join(facts::RUN_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<facts::RunFile>(&bytes).ok())
+        .filter(|run| run.schema == facts::RUN_SCHEMA)
+}
+
+/// \[ADR 0070\] The Go package whose directory is `here`, by its directory from the run's root
+/// (`.` for the root); `None` outside it, or when either can't be read.
+fn package_at(run: &facts::RunFile, here: &Path) -> Option<String> {
+    let root = std::fs::canonicalize(&run.root).ok()?;
+    let here = std::fs::canonicalize(here).ok()?;
+    let inside = here.strip_prefix(&root).ok()?;
+    let parts: Vec<String> = inside
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Some(if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    })
+}
+
+/// \[ADR 0086\] The longest hushrun waits for a test binary to list its tests.
+const LIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// \[ADR 0086\] With `unit: test` (C-39), what the Go package in `here` runs test by test: its
+/// tests listed, and those `hushrun.json`'s `reuseTests` names to be left out. `None` with
+/// anything that can't be told, and the package runs as a package.
+fn tests_here(dir: &Path, here: &Path, told: &Told) -> Option<super::gotest::TestsAt> {
+    let run = run_file(dir)?;
+    if run.unit.as_deref() != Some("test") {
+        return None;
+    }
+    let unit = package_at(&run, here)?;
+    let reuse = run.reuse_tests.get(&unit).cloned().unwrap_or_default();
+    let mut list = |extra: &[&str]| list_binary(told, extra, dir);
+    // Said once a run, by the first start that finds it.
+    let mut old = || {
+        let first = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(".go-old"));
+        if first.is_ok() {
+            eprintln!(
+                "hushrun: go test's tests are reused by package: this Go can't leave out one test (Go 1.20 and later can)"
+            );
+        }
+    };
+    super::gotest::prepare(
+        &unit,
+        Path::new(&told.binary),
+        &told.args,
+        &reuse,
+        &mut list,
+        &mut old,
+    )
+}
+
+/// \[ADR 0086\] What `told`'s binary prints with `extra` for its arguments, as the run would start
+/// it, when it exits 0 within [`LIST_BUDGET`]; `None` otherwise. A binary built with `-cover`
+/// writes what listing covered into the run's directory `dir`, not COMMAND's.
+fn list_binary(told: &Told, extra: &[&str], dir: &Path) -> Option<Vec<u8>> {
+    let args: Vec<OsString> = extra.iter().map(OsString::from).collect();
+    let (_, mut command) = command_for(told, true, &args);
+    command.env("GOCOVERDIR", dir);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = (&mut out).take(16 << 20 | 1).read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > LIST_BUDGET => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(_) => return None,
+        }
+    };
+    let bytes = reader.join().ok()?;
+    status.success().then_some(bytes)
+}
+
+/// \[ADR 0086\] A pipe the test binary's output goes through: its standard output, and its
+/// standard error too when the runner's are one file, as `go test` makes them, so that what it
+/// prints keeps its order.
+struct Watch {
+    reader: std::io::PipeReader,
+    out: std::io::PipeWriter,
+    err: Option<std::io::PipeWriter>,
+}
+
+impl Watch {
+    fn new() -> Option<Watch> {
+        let (reader, out) = std::io::pipe().ok()?;
+        let err = if stdout_is_stderr() {
+            Some(out.try_clone().ok()?)
+        } else {
+            None
+        };
+        Some(Watch { reader, out, err })
+    }
+
+    /// Gives `command` the pipe, and the end to read it by.
+    fn attach(self, command: &mut Command) -> std::io::PipeReader {
+        command.stdout(self.out);
+        if let Some(err) = self.err {
+            command.stderr(err);
+        }
+        self.reader
+    }
+}
+
+/// Whether this process's standard output and error are one file.
+#[cfg(unix)]
+fn stdout_is_stderr() -> bool {
+    use std::os::fd::AsFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = |fd: std::os::fd::BorrowedFd<'_>| {
+        fd.try_clone_to_owned()
+            .ok()
+            .and_then(|fd| std::fs::File::from(fd).metadata().ok())
+    };
+    match (
+        meta(std::io::stdout().as_fd()),
+        meta(std::io::stderr().as_fd()),
+    ) {
+        (Some(a), Some(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn stdout_is_stderr() -> bool {
+    false
 }
 
 /// \[ADR 0069\] Whether the run's `hushrun.json` reuses `binary`: it lists a binary at the same
@@ -278,32 +551,8 @@ fn reused(dir: &Path, binary: &Path) -> bool {
 /// it lists that directory, from the repository's root (`.` for the root). Anything that can't be
 /// read is no.
 fn reused_package(dir: &Path, here: &Path) -> bool {
-    let Some(run) = std::fs::read(dir.join(facts::RUN_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<facts::RunFile>(&bytes).ok())
-        .filter(|run| run.schema == facts::RUN_SCHEMA)
-    else {
-        return false;
-    };
-    let (Ok(root), Ok(here)) = (
-        std::fs::canonicalize(&run.root),
-        std::fs::canonicalize(here),
-    ) else {
-        return false;
-    };
-    let Ok(inside) = here.strip_prefix(&root) else {
-        return false;
-    };
-    let parts: Vec<String> = inside
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let unit = if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    };
-    run.reuse.contains(&unit)
+    run_file(dir)
+        .is_some_and(|run| package_at(&run, here).is_some_and(|unit| run.reuse.contains(&unit)))
 }
 
 /// \[ADR 0070\] A Go test log's lines, and whether there were more than hushrun reads; `None` when
@@ -336,18 +585,44 @@ fn terse_list(bytes: &[u8]) -> Vec<String> {
 
 /// Writes one start's facts, whole, under a name no other start of this run has. A file that
 /// can't be written changes nothing for the test: hushrun then knows less, and records less.
-fn record(dir: &std::path::Path, invocation: Invocation) {
+/// \[ADR 0086\] With `tests`, a Go package's tests one by one, the file is `v1`.
+fn record(
+    dir: &std::path::Path,
+    invocation: Invocation,
+    tests: Option<(String, Vec<facts::TestFacts>, Option<&'static str>)>,
+) {
     // \[ADR 0070\] A start `go test` asked for says where it ran.
     let adapter = if invocation.dir.is_some() {
         super::gotest::ADAPTER
     } else {
         super::cargo::ADAPTER
     };
+    let schema = if tests.is_some() {
+        facts::FACTS_SCHEMA_V1
+    } else {
+        facts::FACTS_SCHEMA
+    };
+    // \[ADR 0086, amended\] Why no test of it but those that failed finished, which the run says.
+    let note = tests.as_ref().and_then(|(_, _, note)| *note);
+    let units = tests
+        .map(|(unit, tests, _)| facts::UnitFacts {
+            unit,
+            tests: Some(tests),
+            ..facts::UnitFacts::default()
+        })
+        .into_iter()
+        .collect();
     let file = FactsFile {
-        schema: facts::FACTS_SCHEMA.into(),
+        schema: schema.into(),
         adapter: adapter.into(),
         failures_by_unit: true,
+        // \[C-32\] `go test` starts every test binary of one start of it: one start per `go test`.
+        start: (adapter == super::gotest::ADAPTER).then(go_start).flatten(),
         invocation: Some(invocation),
+        units,
+        settings: note
+            .map(|note| BTreeMap::from([("note".to_string(), serde_json::json!(note))]))
+            .unwrap_or_default(),
         ..FactsFile::default()
     };
     let nanos = std::time::SystemTime::now()
@@ -359,42 +634,57 @@ fn record(dir: &std::path::Path, invocation: Invocation) {
     }
 }
 
+/// \[C-32\] The start of `go test` this runner belongs to: the `go` process that started it.
 #[cfg(unix)]
-fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+fn go_start() -> Option<String> {
+    Some(format!("go-test-{}", std::os::unix::process::parent_id()))
+}
+
+#[cfg(not(unix))]
+fn go_start() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+pub(super) fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt as _;
     status.signal()
 }
 
 #[cfg(not(unix))]
-fn signal_of(_: &std::process::ExitStatus) -> Option<i32> {
+pub(super) fn signal_of(_: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
 /// Ends this process as the test's did, by the same signal, so that nextest and Cargo see what
 /// they would have seen; 128 + the signal when it can't.
 #[cfg(unix)]
-fn end_as(signal: i32) -> ExitCode {
+pub(super) fn end_as(signal: i32) -> ExitCode {
     let _ = signal_hook::low_level::emulate_default_handler(signal);
     ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
 #[cfg(not(unix))]
-fn end_as(signal: i32) -> ExitCode {
+pub(super) fn end_as(signal: i32) -> ExitCode {
     ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
 /// Passes the signals that stop a process on to the test while it runs: a terminal or nextest
 /// may signal this process alone. Dropping what it returns stops passing them.
 #[cfg(unix)]
-fn forward_signals(child: u32) -> Option<Forwarding> {
+pub(super) fn forward_signals(child: u32) -> Option<Forwarding> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let arrived = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicBool::new(false));
+    let mut flags = Vec::new();
     for signal in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
         let value = usize::try_from(signal).ok()?;
-        signal_hook::flag::register_usize(signal, Arc::clone(&arrived), value).ok()?;
+        flags.push(signal_hook::flag::register_usize(signal, Arc::clone(&arrived), value).ok()?);
+        // Once forwarding stops, the signal's own action again (signal-hook can't put the
+        // default handler back): ending this process as it would have.
+        signal_hook::flag::register_conditional_default(signal, Arc::clone(&done)).ok()?;
     }
     let pid = i32::try_from(child)
         .ok()
@@ -413,24 +703,33 @@ fn forward_signals(child: u32) -> Option<Forwarding> {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     });
-    Some(Forwarding(done))
+    Some(Forwarding(done, flags))
 }
 
-/// While it lives, signals go on to the test.
+/// While it lives, signals go on to the test; once dropped, a signal does what it would without
+/// hushrun (\[ADR 0089\]: a stand-in that lists or reads after its program ended stops on it).
 #[cfg(unix)]
-struct Forwarding(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(super) struct Forwarding(
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    Vec<signal_hook::SigId>,
+);
 
 #[cfg(unix)]
 impl Drop for Forwarding {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The flags that pass a signal on, which would only be stored now; the default actions
+        // registered beside them stay.
+        for id in &self.1 {
+            signal_hook::low_level::unregister(*id);
+        }
     }
 }
 
 /// Where there are no signals, nothing to pass on. Not `()`: the caller drops what it gets, and
 /// rustc and clippy warn of dropping a value that has nothing to drop in the Windows build.
 #[cfg(not(unix))]
-struct Forwarding;
+pub(super) struct Forwarding;
 
 #[cfg(not(unix))]
 impl Drop for Forwarding {
@@ -438,13 +737,33 @@ impl Drop for Forwarding {
 }
 
 #[cfg(not(unix))]
-fn forward_signals(_: u32) -> Option<Forwarding> {
+pub(super) fn forward_signals(_: u32) -> Option<Forwarding> {
     Some(Forwarding)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // covers: C-32, C-39
+    #[test]
+    fn a_test_binary_or_program_ends_with_a_windows_exit_code_whole() {
+        assert_eq!(ending(Some(0), None, true), Ending::Code(0));
+        assert_eq!(ending(Some(8), None, false), Ending::Code(8));
+        assert_eq!(ending(Some(255), None, true), Ending::Code(255));
+        // Windows: a test binary's or a runner's 300, or an NTSTATUS such as 0xC0000005, comes
+        // back whole.
+        assert_eq!(ending(Some(300), None, true), Ending::Whole(300));
+        assert_eq!(
+            ending(Some(0xC000_0005_u32 as i32), None, true),
+            Ending::Whole(0xC000_0005_u32 as i32)
+        );
+        // Where codes are a byte, none is wider; one that were would end as 1.
+        assert_eq!(ending(Some(300), None, false), Ending::Code(1));
+        // A signal, by the same signal; neither known, 1.
+        assert_eq!(ending(None, Some(9), false), Ending::Signal(9));
+        assert_eq!(ending(None, None, true), Ending::Code(1));
+    }
 
     // covers: C-32
     #[test]

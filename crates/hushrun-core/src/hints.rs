@@ -58,6 +58,38 @@
 //! The writer refuses a hint past any bound ([`Unwritable`]); the reader reads none ([`Unread`]),
 //! and checks each count against the bound and the bytes left before it allocates.
 //!
+//! # Tests, sealed (version 1)
+//!
+//! \[C-41, ADR 0082\] A hint that holds tests is `hushrun.unit-hints/v1`: the content above, with
+//! that first line, and after its units:
+//!
+//! ```text
+//! u32 L, then L lists, each:      a test's own list (reads: test), strictly ascending as
+//!   u32 R, then R indices           (reads, dirs), the files it read
+//!   u32 D, then D indices           and the directories it listed
+//! u32 S, then S bytes             the sealed tests: a 24-byte nonce, then the ciphertext and
+//!                                 its 16-byte tag
+//! ```
+//!
+//! The sealed tests are XChaCha20-Poly1305 (RFC 8439 with HChaCha20's 192-bit nonce) under the
+//! **seal key**, HMAC-SHA-256 with the ASCII bytes of [`SEAL_DOMAIN`] as its key of the bytes
+//! `shape` hashes, as the key is derived but under another label; with the content before `S` as
+//! its associated data. The nonce is the first 24 bytes of HMAC-SHA-256 under the seal key of
+//! [`NONCE_DOMAIN`], a line feed, the associated data and the plaintext: the same hint seals to the
+//! same bytes, so its content id stays one, and two hints never share a nonce under one key but
+//! for one plaintext. The plaintext:
+//!
+//! ```text
+//! u32 N, then N entries, each:    a unit's tests, ascending by unit
+//!   u32 unit position             its position among the content's units
+//!   u32 K, then K tests, each:    1 or more, strictly ascending by id
+//!     u32 B, then B bytes           its id, UTF-8, 1 to 4,096 bytes
+//!     u32 list                      the index of its list, or 0xFFFFFFFF: its test file's
+//! ```
+//!
+//! A reader without the key, or with a seal that doesn't open or a plaintext that doesn't read,
+//! reads the hint as having no tests: its units stand, and tests are reused by test file.
+//!
 //! # Reading
 //!
 //! [`read`] turns tokens back into paths only by computing the token of each path of the scope it
@@ -71,6 +103,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use sha2::{Digest as _, Sha256};
 use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
 
@@ -81,6 +115,27 @@ pub const SCHEMA: &str = "hushrun.unit-hints/v0";
 
 /// The domain string a hint's key is derived under: HMAC-SHA-256's key.
 pub const KEY_DOMAIN: &str = "hushrun.unit-hints-key/v0";
+
+/// \[ADR 0082\] The schema of a hint's content that holds tests.
+pub const SCHEMA_V1: &str = "hushrun.unit-hints/v1";
+
+/// \[ADR 0082\] The domain string a hint's seal key is derived under.
+pub const SEAL_DOMAIN: &str = "hushrun.unit-hints-seal/v1";
+
+/// \[ADR 0082\] What a seal's nonce is derived from first.
+pub const NONCE_DOMAIN: &str = "hushrun.unit-hints-nonce/v1";
+
+/// \[ADR 0082\] The most tests a hint holds, as many as a check reuses one by one (C-39).
+pub use crate::units::MOST_TESTS;
+
+/// \[ADR 0082\] The longest id of a test a hint holds, in bytes.
+pub const MOST_ID: usize = 4096;
+
+/// A test's list index that names none: it read its test file's list.
+const NO_LIST: u32 = u32::MAX;
+
+/// \[ADR 0082\] What seals tests for associated data, or opens them: the key's, or a test's.
+type Sealer<'a> = dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>> + 'a;
 
 /// The schema of a hint's address.
 pub const ADDRESS_SCHEMA: &str = "hushrun.unit-hints-address/v0";
@@ -202,22 +257,74 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 pub struct Key {
     bytes: [u8; 32],
     mac: Mac,
+    /// \[ADR 0082\] The seal key, under [`SEAL_DOMAIN`].
+    seal: [u8; 32],
 }
 
 impl Key {
     /// \[C-38\] The key for a check whose sources set is `sources`: HMAC-SHA-256 under
     /// [`KEY_DOMAIN`] of the bytes [`crate::units::shape`] hashes.
     pub fn derive<'a>(sources: impl IntoIterator<Item = &'a str>) -> Key {
-        let bytes = hmac_sha256(KEY_DOMAIN.as_bytes(), &crate::units::shape_bytes(sources));
+        let shape = crate::units::shape_bytes(sources);
+        let bytes = hmac_sha256(KEY_DOMAIN.as_bytes(), &shape);
         Key {
             bytes,
             mac: Mac::new(&bytes),
+            seal: hmac_sha256(SEAL_DOMAIN.as_bytes(), &shape),
         }
     }
 
     /// The key's 32 bytes, for test vectors.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
+    }
+
+    /// \[ADR 0082\] The seal key's 32 bytes, for test vectors.
+    pub fn seal_bytes(&self) -> &[u8; 32] {
+        &self.seal
+    }
+
+    /// \[ADR 0082\] `plaintext` sealed for `aad`: the nonce derived from both, then the
+    /// ciphertext and its tag.
+    fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Option<Vec<u8>> {
+        let mut message = NONCE_DOMAIN.as_bytes().to_vec();
+        message.push(b'\n');
+        message.extend_from_slice(aad);
+        message.extend_from_slice(plaintext);
+        let derived = hmac_sha256(&self.seal, &message);
+        let nonce = XNonce::try_from(&derived[..24]).ok()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.seal).ok()?;
+        let sealed = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .ok()?;
+        let mut out = derived[..24].to_vec();
+        out.extend_from_slice(&sealed);
+        Some(out)
+    }
+
+    /// \[ADR 0082\] What `sealed` holds for `aad`, when it opens under this key.
+    fn open(&self, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+        if sealed.len() < 24 + 16 {
+            return None;
+        }
+        let (nonce, ciphertext) = sealed.split_at(24);
+        let nonce = XNonce::try_from(nonce).ok()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.seal).ok()?;
+        cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .ok()
     }
 
     /// \[C-38\] The token of `path`: the first 16 bytes of HMAC-SHA-256 of its UTF-8 bytes under
@@ -284,6 +391,20 @@ pub struct Hint {
     /// \[ADR 0071\] The test files the runner listed, for an adapter whose unit rule is its
     /// runner's own list (Vitest's); empty for the others.
     pub unit_files: BTreeSet<String>,
+    /// \[ADR 0082\] Each unit's tests, by id: with `reads: test` its own list, `None` for its
+    /// test file's. Sealed in the bytes; empty, the hint is `hushrun.unit-hints/v0`.
+    pub tests: BTreeMap<String, BTreeMap<String, Option<Unit>>>,
+}
+
+/// \[ADR 0082\] What a writer left out of a hint to fit its bounds (C-41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trimmed {
+    /// Nothing.
+    Nothing,
+    /// Tests' own lists: other machines take each test to have read its test file's.
+    Lists,
+    /// Tests: other machines reuse by test file.
+    Tests,
 }
 
 /// A hint's bytes, ready to send.
@@ -351,11 +472,17 @@ pub fn content_id(content: &[u8]) -> Digest {
 
 /// \[C-38\] A hint's content (uncompressed), as the module's docs lay it out.
 pub fn content(hint: &Hint, key: &Key) -> Result<Vec<u8>, Unwritable> {
-    encode(hint, &|path| key.token(path))
+    encode(hint, &|path| key.token(path), &|aad, plaintext| {
+        key.seal(aad, plaintext)
+    })
 }
 
-/// [`content`] with paths made tokens by `token`.
-fn encode(hint: &Hint, token: &dyn Fn(&str) -> Token) -> Result<Vec<u8>, Unwritable> {
+/// [`content`] with paths made tokens by `token`, and \[ADR 0082\] its tests sealed by `seal`.
+fn encode(
+    hint: &Hint,
+    token: &dyn Fn(&str) -> Token,
+    seal: &Sealer<'_>,
+) -> Result<Vec<u8>, Unwritable> {
     let word = hint.adapter.as_bytes();
     if !adapter_word(word) {
         return Err(Unwritable::Adapter(hint.adapter.clone()));
@@ -377,15 +504,47 @@ fn encode(hint: &Hint, token: &dyn Fn(&str) -> Token) -> Result<Vec<u8>, Unwrita
         paths.iter().map(|path| token(path)).collect()
     };
     let mut kept: BTreeMap<Token, (BTreeSet<Token>, BTreeSet<Token>)> = BTreeMap::new();
+    let mut kept_path: BTreeMap<Token, &str> = BTreeMap::new();
     for (own, unit) in &hint.units {
         kept.entry(token(own))
             .or_insert_with(|| (tokens_of(&unit.reads), tokens_of(&unit.dirs)));
+        kept_path.entry(token(own)).or_insert(own);
     }
+    // \[ADR 0082\] Each kept unit's tests, by its token, and each own list as tokens.
+    type TokenList = (BTreeSet<Token>, BTreeSet<Token>);
+    let mut tests_of: BTreeMap<Token, BTreeMap<&str, Option<TokenList>>> = BTreeMap::new();
+    let mut test_count = 0usize;
+    for (own, tests) in &hint.tests {
+        let own_token = token(own);
+        if kept_path.get(&own_token) != Some(&own.as_str()) || tests.is_empty() {
+            continue;
+        }
+        for (id, list) in tests {
+            bound("bytes of a test's id", id.len(), MOST_ID)?;
+            if id.is_empty() {
+                continue;
+            }
+            test_count += 1;
+            let list = list
+                .as_ref()
+                .map(|l| (tokens_of(&l.reads), tokens_of(&l.dirs)));
+            tests_of
+                .entry(own_token)
+                .or_default()
+                .insert(id.as_str(), list);
+        }
+    }
+    bound("tests", test_count, MOST_TESTS)?;
     let unit_files = tokens_of(&hint.unit_files);
     let mut table: BTreeSet<Token> = unit_files.clone();
     for (own, (reads, dirs)) in &kept {
         table.insert(*own);
         table.extend(reads.iter().chain(dirs.iter()).copied());
+    }
+    for tests in tests_of.values() {
+        for (reads, dirs) in tests.values().flatten() {
+            table.extend(reads.iter().chain(dirs.iter()).copied());
+        }
     }
     let tokens: Vec<Token> = table.into_iter().collect();
     bound("paths", tokens.len(), MOST_TOKENS)?;
@@ -399,9 +558,49 @@ fn encode(hint: &Hint, token: &dyn Fn(&str) -> Token) -> Result<Vec<u8>, Unwrita
         .iter()
         .map(|(own, (reads, dirs))| (position(own), indices(reads), indices(dirs)))
         .collect();
+    // \[ADR 0082\] The lists, sorted and once, and the plaintext the seal holds.
+    let tests_part = (!tests_of.is_empty()).then(|| {
+        let lists: Vec<(Vec<u32>, Vec<u32>)> = tests_of
+            .values()
+            .flat_map(|tests| tests.values().flatten())
+            .map(|(reads, dirs)| (indices(reads), indices(dirs)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut plaintext = Vec::new();
+        push_count(&mut plaintext, tests_of.len());
+        for (own, tests) in &tests_of {
+            let at = kept.keys().position(|k| k == own).unwrap_or_default();
+            push_count(&mut plaintext, at);
+            push_count(&mut plaintext, tests.len());
+            for (id, list) in tests {
+                push_count(&mut plaintext, id.len());
+                plaintext.extend_from_slice(id.as_bytes());
+                let index = match list {
+                    Some((reads, dirs)) => {
+                        let list = (indices(reads), indices(dirs));
+                        u32::try_from(lists.binary_search(&list).unwrap_or_default())
+                            .unwrap_or(NO_LIST)
+                    }
+                    None => NO_LIST,
+                };
+                plaintext.extend_from_slice(&index.to_be_bytes());
+            }
+        }
+        (lists, plaintext)
+    });
+    let entries = entries
+        + tests_part.as_ref().map_or(0, |(lists, _)| {
+            lists.iter().map(|(r, d)| r.len() + d.len()).sum::<usize>()
+        });
+    bound("entries", entries, MOST_ENTRIES)?;
 
     let mut out = Vec::new();
-    out.extend_from_slice(SCHEMA.as_bytes());
+    out.extend_from_slice(if tests_part.is_some() {
+        SCHEMA_V1.as_bytes()
+    } else {
+        SCHEMA.as_bytes()
+    });
     out.push(b'\n');
     out.push(u8::try_from(word.len()).unwrap_or(u8::MAX));
     out.extend_from_slice(word);
@@ -415,6 +614,16 @@ fn encode(hint: &Hint, token: &dyn Fn(&str) -> Token) -> Result<Vec<u8>, Unwrita
         out.extend_from_slice(&own.to_be_bytes());
         push_list(&mut out, reads);
         push_list(&mut out, dirs);
+    }
+    if let Some((lists, plaintext)) = tests_part {
+        push_count(&mut out, lists.len());
+        for (reads, dirs) in &lists {
+            push_list(&mut out, reads);
+            push_list(&mut out, dirs);
+        }
+        let sealed = seal(&out, &plaintext).ok_or(Unwritable::Adapter(hint.adapter.clone()))?;
+        push_count(&mut out, sealed.len());
+        out.extend_from_slice(&sealed);
     }
     bound("bytes of content", out.len(), MOST_CONTENT)?;
     Ok(out)
@@ -430,6 +639,30 @@ pub fn write(hint: &Hint, key: &Key) -> Result<Written, Unwritable> {
         bytes,
         content_id: content_id(&content),
     })
+}
+
+/// \[C-41, ADR 0082\] [`write()`], and when the hint is too large with its tests, tests' own lists
+/// left out first, then tests: what fits, and what was left out. Past its bounds without tests, it
+/// is [`Unwritable::TooLarge`].
+pub fn write_fitting(hint: &Hint, key: &Key) -> Result<(Written, Trimmed), Unwritable> {
+    match write(hint, key) {
+        Err(Unwritable::TooLarge { .. }) if !hint.tests.is_empty() => {}
+        other => return other.map(|written| (written, Trimmed::Nothing)),
+    }
+    let mut without_lists = hint.clone();
+    for tests in without_lists.tests.values_mut() {
+        for list in tests.values_mut() {
+            *list = None;
+        }
+    }
+    if let Ok(written) = write(&without_lists, key) {
+        return Ok((written, Trimmed::Lists));
+    }
+    let without_tests = Hint {
+        tests: BTreeMap::new(),
+        ..hint.clone()
+    };
+    write(&without_tests, key).map(|written| (written, Trimmed::Tests))
 }
 
 /// \[C-38\] The reader: the hint `bytes` hold, its tokens matched against the paths of `scope`
@@ -450,13 +683,19 @@ pub fn read_content<'a>(
     key: &Key,
     scope: impl IntoIterator<Item = &'a str>,
 ) -> Result<Read, Unread> {
-    decode(content, &|path| key.token(path), scope)
+    decode(
+        content,
+        &|path| key.token(path),
+        &|aad, sealed| key.open(aad, sealed),
+        scope,
+    )
 }
 
 /// [`read_content`] with paths made tokens by `token`.
 fn decode<'a>(
     content: &[u8],
     token: &dyn Fn(&str) -> Token,
+    open: &Sealer<'_>,
     scope: impl IntoIterator<Item = &'a str>,
 ) -> Result<Read, Unread> {
     if content.len() > MOST_CONTENT {
@@ -479,7 +718,8 @@ fn decode<'a>(
     };
 
     let mut hint = Hint {
-        adapter: parsed.adapter,
+        adapter: parsed.adapter.clone(),
+        tests: BTreeMap::new(),
         units: BTreeMap::new(),
         unit_files: parsed
             .unit_files
@@ -509,6 +749,42 @@ fn decode<'a>(
         };
         hint.units.insert(path.to_string(), Unit { reads, dirs });
     }
+    // \[ADR 0082\] Tests, when the seal opens and what it holds reads: else none, and the units
+    // stand.
+    if let Some((aad_end, sealed)) = parsed.sealed
+        && let Some(plaintext) = open(&content[..aad_end], sealed)
+        && let Some(tests) = sealed_tests(&plaintext, parsed.units.len(), parsed.lists.len())
+    {
+        for (at, tests) in tests {
+            let unit = &parsed.units[at];
+            let Some(path) = own(unit.own) else { continue };
+            if !hint.units.contains_key(path) {
+                continue;
+            }
+            let mut read_tests: BTreeMap<String, Option<Unit>> = BTreeMap::new();
+            for (id, list) in tests {
+                let list = match list {
+                    None => None,
+                    Some(at) => {
+                        let (reads, dirs) = &parsed.lists[at];
+                        let reads: Option<BTreeSet<String>> =
+                            reads.iter().map(|i| file(*i).map(str::to_string)).collect();
+                        let dirs: Option<BTreeSet<String>> =
+                            dirs.iter().map(|i| dir(*i).map(str::to_string)).collect();
+                        // A list a token of which names nothing here: the test runs.
+                        let (Some(reads), Some(dirs)) = (reads, dirs) else {
+                            continue;
+                        };
+                        Some(Unit { reads, dirs })
+                    }
+                };
+                read_tests.insert(id, list);
+            }
+            if !read_tests.is_empty() {
+                hint.tests.insert(path.to_string(), read_tests);
+            }
+        }
+    }
     Ok(Read {
         dropped: total - hint.units.len(),
         units: total,
@@ -518,11 +794,66 @@ fn decode<'a>(
 }
 
 /// A content's structure, before any token is matched.
-struct Parsed {
+struct Parsed<'c> {
     adapter: String,
     tokens: Vec<Token>,
     unit_files: Vec<u32>,
     units: Vec<ParsedUnit>,
+    /// \[ADR 0082\] Tests' own lists.
+    lists: Vec<(Vec<u32>, Vec<u32>)>,
+    /// \[ADR 0082\] Where the associated data ends, and the sealed bytes.
+    sealed: Option<(usize, &'c [u8])>,
+}
+
+/// \[ADR 0082\] The tests a seal's plaintext holds, by unit position, each with its list's
+/// index: `None` when it isn't the one canonical plaintext for `units` units and `lists` lists.
+#[allow(clippy::type_complexity)]
+fn sealed_tests(
+    plaintext: &[u8],
+    units: usize,
+    lists: usize,
+) -> Option<Vec<(usize, Vec<(String, Option<usize>)>)>> {
+    let mut r = Reader { rest: plaintext };
+    let entries = r.count(MOST_UNITS, 12).ok()?;
+    let mut out: Vec<(usize, Vec<(String, Option<usize>)>)> = Vec::with_capacity(entries);
+    let mut total = 0usize;
+    let mut used = vec![false; lists];
+    for _ in 0..entries {
+        let at = usize::try_from(r.u32().ok()?).ok()?;
+        if at >= units || out.last().is_some_and(|(last, _)| *last >= at) {
+            return None;
+        }
+        let count = r.count(MOST_TESTS, 9).ok()?;
+        total += count;
+        if count == 0 || total > MOST_TESTS {
+            return None;
+        }
+        let mut tests: Vec<(String, Option<usize>)> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let length = r.count(MOST_ID, 1).ok()?;
+            if length == 0 {
+                return None;
+            }
+            let id = std::str::from_utf8(r.take(length)?).ok()?.to_string();
+            if tests
+                .last()
+                .is_some_and(|(last, _)| last.as_bytes() >= id.as_bytes())
+            {
+                return None;
+            }
+            let list = match r.u32().ok()? {
+                NO_LIST => None,
+                index => {
+                    let index = usize::try_from(index).ok()?;
+                    *used.get_mut(index)? = true;
+                    Some(index)
+                }
+            };
+            tests.push((id, list));
+        }
+        out.push((at, tests));
+    }
+    (r.rest.is_empty() && !used.contains(&false)).then_some(out)
 }
 
 struct ParsedUnit {
@@ -580,10 +911,12 @@ fn resolve<'a>(
 }
 
 /// Reads a content's structure, checking every bound and that it is the one canonical content.
-fn parse(content: &[u8]) -> Result<Parsed, Unread> {
+fn parse(content: &[u8]) -> Result<Parsed<'_>, Unread> {
     let mut r = Reader { rest: content };
     let header = r.take(SCHEMA.len() + 1).ok_or(Unread::Schema)?;
-    if &header[..SCHEMA.len()] != SCHEMA.as_bytes() || header[SCHEMA.len()] != b'\n' {
+    // \[ADR 0082\] Both schemas have the same length.
+    let v1 = &header[..SCHEMA_V1.len()] == SCHEMA_V1.as_bytes();
+    if (&header[..SCHEMA.len()] != SCHEMA.as_bytes() && !v1) || header[SCHEMA.len()] != b'\n' {
         return Err(Unread::Schema);
     }
     let length = usize::from(r.byte()?);
@@ -620,6 +953,26 @@ fn parse(content: &[u8]) -> Result<Parsed, Unread> {
         let dirs = r.list(MOST_TOKENS, &mut used, &mut entries)?;
         units.push(ParsedUnit { own, reads, dirs });
     }
+    // \[ADR 0082\] Tests' lists, and their seal: what follows the units, to the end. Damaged, it
+    // is left out whole and the units stand, a hint with no tests (C-41): a reader drops only the
+    // tests. A token only its lists named is then named by no index, which reads.
+    let (lists, sealed) = if v1 {
+        match tests_part(&mut r, content.len(), &mut used, &mut entries) {
+            Ok(found) => found,
+            Err(_) => {
+                return Ok(Parsed {
+                    adapter,
+                    tokens,
+                    unit_files,
+                    units,
+                    lists: Vec::new(),
+                    sealed: None,
+                });
+            }
+        }
+    } else {
+        (Vec::new(), None)
+    };
     if !r.rest.is_empty() {
         return Err(Unread::Damaged("bytes after its end"));
     }
@@ -631,7 +984,42 @@ fn parse(content: &[u8]) -> Result<Parsed, Unread> {
         tokens,
         unit_files,
         units,
+        lists,
+        sealed,
     })
+}
+
+/// The lists and the seal of a version 1 content's tests' part, which runs to its end (`len`
+/// bytes in all): the lists strictly ascending, and a seal of a nonce and a tag at least, then
+/// nothing. `Err` why it doesn't read.
+#[allow(clippy::type_complexity)]
+fn tests_part<'c>(
+    r: &mut Reader<'c>,
+    len: usize,
+    used: &mut [bool],
+    entries: &mut usize,
+) -> Result<(Vec<(Vec<u32>, Vec<u32>)>, Option<(usize, &'c [u8])>), Unread> {
+    let mut lists: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+    let count = r.count(MOST_TESTS, 8)?;
+    for _ in 0..count {
+        let reads = r.list(MOST_TOKENS, used, entries)?;
+        let dirs = r.list(MOST_TOKENS, used, entries)?;
+        let list = (reads, dirs);
+        if lists.last().is_some_and(|last| *last >= list) {
+            return Err(Unread::Damaged("lists out of order"));
+        }
+        lists.push(list);
+    }
+    let aad_end = len - r.rest.len();
+    let length = r.count(MOST_CONTENT, 1)?;
+    let bytes = r.take(length).ok_or(Unread::Damaged("truncated"))?;
+    if length < 24 + 16 {
+        return Err(Unread::Damaged("a seal too short"));
+    }
+    if !r.rest.is_empty() {
+        return Err(Unread::Damaged("bytes after its end"));
+    }
+    Ok((lists, Some((aad_end, bytes))))
 }
 
 /// A cursor over a content.

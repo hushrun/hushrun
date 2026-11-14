@@ -179,20 +179,50 @@ fn unit_keys_match_the_golden_vectors() {
             external: base.get("external").cloned(),
             counts_from: base.get("counts_from").cloned(),
         };
-        let key = unit_key(
-            &key_base,
-            vector["unit"].as_str().unwrap(),
-            &reads,
-            &rest,
-            &shape,
-        )
-        .unwrap();
+        let unit = vector["unit"].as_str().unwrap();
+        // \[ADR 0080\] A vector that names a test is a test's key (C-39); the others, a unit's.
+        let key = match vector.get("test").and_then(Value::as_str) {
+            Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape).unwrap(),
+            None => unit_key(&key_base, unit, &reads, &rest, &shape).unwrap(),
+        };
         let expect = &vector["expect"];
         assert_eq!(reads.to_string(), expect["reads"], "{name}: reads");
         assert_eq!(rest.to_string(), expect["rest"], "{name}: rest");
         assert_eq!(shape.to_string(), expect["shape"], "{name}: shape");
         assert_eq!(key.to_string(), expect["key"], "{name}: key");
     }
+}
+
+// covers: C-39
+#[test]
+fn a_tests_key_is_its_unit_keys_fields_and_its_id_and_never_a_units_key() {
+    let base = KeyBase {
+        check: CheckName::new("unit").unwrap(),
+        command: vec!["pytest".into()],
+        cwd: String::new(),
+        scope: ScopeName::new("default").unwrap(),
+        external: None,
+        counts_from: None,
+    };
+    let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
+    let file = unit_key(&base, "tests/test_a.py", &reads, &rest, &shape).unwrap();
+    let a = test_key(&base, "tests/test_a.py", "test_x", &reads, &rest, &shape).unwrap();
+    let b = test_key(&base, "tests/test_a.py", "test_y", &reads, &rest, &shape).unwrap();
+    // A test's key is never its file's, nor another test's of the same file and files.
+    assert_ne!(a, file);
+    assert_ne!(a, b);
+    // An id that looks like a path doesn't make another unit's test the same key.
+    let c = test_key(&base, "tests/test_a.py::x", "y", &reads, &rest, &shape).unwrap();
+    let d = test_key(&base, "tests/test_a.py", "x::y", &reads, &rest, &shape).unwrap();
+    assert_ne!(c, d);
+    // Every byte a key holds of what it read moves it.
+    let other = test_key(&base, "tests/test_a.py", "test_x", &shape, &rest, &shape).unwrap();
+    assert_ne!(a, other);
+    assert_eq!(
+        test_name("tests/test_a.py", "TestA::test_x[1]"),
+        "tests/test_a.py::TestA::test_x[1]"
+    );
+    assert_eq!(MOST_TESTS, 50_000);
 }
 
 // covers: C-31
@@ -284,6 +314,70 @@ fn a_units_state_is_decided_once_from_its_facts() {
     }
 }
 
+// covers: C-39
+#[test]
+fn a_tests_state_comes_from_its_own_facts_and_a_file_partly_reused_didnt_pass_whole() {
+    // A test: the same function, from what happened inside its own window.
+    assert_eq!(state(&facts(true, false, false), &PASSED), State::Passed);
+    assert_eq!(
+        state(&facts(true, false, true), &PASSED),
+        State::NotObserved
+    );
+    assert_eq!(state(&facts(false, false, false), &PASSED), State::NotRun);
+    // A test file some of whose tests were reused one by one: not run whole, so no pass of its
+    // own; a failure of one of its tests is still its failure.
+    let partly = Facts {
+        tests_reused: true,
+        ..facts(true, false, false)
+    };
+    assert_eq!(state(&partly, &PASSED), State::NotRun);
+    assert_eq!(State::NotRun.recorded(), None);
+    let partly_failed = Facts {
+        tests_reused: true,
+        ..facts(true, true, false)
+    };
+    assert_eq!(state(&partly_failed, &PASSED), State::Failed);
+    let words = |unit: Unit, reads: Reads| (unit.word(), reads.word());
+    assert_eq!(words(Unit::default(), Reads::default()), ("file", "file"));
+    assert_eq!(Unit::from_word("test"), Some(Unit::Test));
+    assert_eq!(Reads::from_word("test"), Some(Reads::Test));
+    assert_eq!(Unit::from_word("case"), None);
+}
+
+// covers: C-32, C-39
+#[test]
+fn a_skip_in_a_run_whose_command_failed_proves_nothing() {
+    let skipped = Facts {
+        skipped: true,
+        ..facts(true, false, false)
+    };
+    // COMMAND passed: a skip is a pass, as before.
+    assert_eq!(state(&skipped, &PASSED), State::Passed);
+    // COMMAND failed, though the adapter reports each failure by unit: not run, nothing recorded.
+    let failed_run = RunFacts {
+        command_passed: false,
+        ..PASSED
+    };
+    assert_eq!(state(&skipped, &failed_run), State::NotRun);
+    assert_eq!(
+        state(&facts(true, false, false), &failed_run),
+        State::Passed
+    );
+    // A failure is still a failure.
+    let skipped_failed = Facts {
+        failed: true,
+        ..skipped.clone()
+    };
+    assert_eq!(state(&skipped_failed, &failed_run), State::Failed);
+    // A test of a test file that failed with no test failing: not run, whatever COMMAND did.
+    let unexplained = Facts {
+        unexplained: true,
+        ..facts(true, false, false)
+    };
+    assert_eq!(state(&unexplained, &PASSED), State::NotRun);
+    assert_eq!(state(&unexplained, &failed_run), State::NotRun);
+}
+
 // covers: C-5
 #[test]
 fn modes_read_as_written() {
@@ -295,6 +389,7 @@ fn modes_read_as_written() {
         mode: Mode::Observe,
         ignore: Vec::new(),
         always: globs(&["xtask/**"]),
+        ..Tests::default()
     };
     assert!(tests.is_on());
     assert!(tests.always_runs("xtask/src/main.rs"));
@@ -344,4 +439,302 @@ fn audits_take_two_percent_at_least_one_chosen_by_key_and_start() {
     assert_eq!(one, pick("2026-11-10T12:00:00.000Z"));
     assert_ne!(one, pick("2026-11-10T12:00:00.001Z"));
     assert!(audited([], "x").is_empty());
+}
+
+fn set(paths: &[&str]) -> BTreeSet<String> {
+    paths.iter().map(|p| p.to_string()).collect()
+}
+
+// covers: C-40
+#[test]
+fn a_tests_list_is_what_ran_what_that_imports_directly_and_what_it_opened() {
+    let file = set(&[
+        "tests/test_a.py",
+        "app/cart.py",
+        "app/settings.py",
+        "app/defaults.py",
+    ]);
+    let none = BTreeSet::new();
+    let imports = BTreeMap::from([
+        (
+            "tests/test_a.py".to_string(),
+            set(&["app/cart.py", "app/greet.py"]),
+        ),
+        ("app/cart.py".to_string(), set(&["app/settings.py"])),
+        ("app/settings.py".to_string(), set(&["app/defaults.py"])),
+        ("app/fixtures.py".to_string(), set(&["app/db.py"])),
+    ]);
+    let opens = BTreeMap::from([("app/prices.py".to_string(), set(&["prices.json"]))]);
+    let (loaded_ran, loaded_opened) = (set(&["app/registry.py"]), set(&["schema.json"]));
+    let every = set(&["conftest.py"]);
+    let shared = vec![(
+        set(&["test_x"]),
+        set(&["app/fixtures.py"]),
+        set(&["fixture.json"]),
+    )];
+    let no_reexports = BTreeMap::new();
+    let watch = FileWatch {
+        unit: "tests/test_a.py",
+        file: &file,
+        file_dirs: &none,
+        imports: &imports,
+        reexports: &no_reexports,
+        opens: &opens,
+        loaded: Some((&loaded_ran, &loaded_opened)),
+        every: &every,
+        shared: &shared,
+    };
+    let (ran, opened, dirs) = (
+        set(&["app/cart.py", "app/prices.py"]),
+        set(&["data.txt"]),
+        set(&["tests/data"]),
+    );
+    let test = |id| TestWatch {
+        id,
+        ran: Some(&ran),
+        opened: Some(&opened),
+        dirs: Some(&dirs),
+    };
+    let list = test_list(Reads::Test, &watch, &test("test_x"));
+    assert!(list.own);
+    assert_eq!(
+        list.files,
+        set(&[
+            // 1. its own file, and 3. what that imports directly
+            "tests/test_a.py",
+            "app/greet.py",
+            // 2. what ran, 3. what that imports directly, and 4. what it opened and kept
+            "app/cart.py",
+            "app/settings.py",
+            "app/prices.py",
+            "prices.json",
+            // 4. what the test opened
+            "data.txt",
+            // what ran and was opened while its file was loaded
+            "app/registry.py",
+            "schema.json",
+            // what the runner loads for every test
+            "conftest.py",
+            // the shared setup that served it: what it ran, imports and opened
+            "app/fixtures.py",
+            "app/db.py",
+            "fixture.json",
+        ])
+    );
+    assert_eq!(list.dirs, dirs);
+    // Two imports away with no function of the way called: a known miss of `reads: test`.
+    assert!(!list.files.contains("app/defaults.py"));
+    // A shared setup that didn't serve it isn't its.
+    let other = test_list(Reads::Test, &watch, &test("test_y"));
+    assert!(!other.files.contains("app/fixtures.py"));
+    // `reads: file`, a test not watched alone, or a file whose loading wasn't said: its file's.
+    let whole = TestList {
+        files: file.clone(),
+        dirs: none.clone(),
+        own: false,
+    };
+    assert_eq!(test_list(Reads::File, &watch, &test("test_x")), whole);
+    let unwatched = TestWatch {
+        ran: None,
+        ..test("test_x")
+    };
+    assert_eq!(test_list(Reads::Test, &watch, &unwatched), whole);
+    let no_loaded = FileWatch {
+        loaded: None,
+        ..watch
+    };
+    assert_eq!(test_list(Reads::Test, &no_loaded, &test("test_x")), whole);
+}
+
+// covers: C-40
+#[test]
+fn a_tests_list_follows_reexports_to_the_end() {
+    // The test calls a function of index.ts, which re-exports everything of api.ts, which
+    // re-exports impl.ts's `run`: no function of api.ts is called, and impl.ts isn't imported
+    // directly by anything that ran. Its list holds both, and never what impl.ts merely imports.
+    let file = set(&[
+        "test/a.test.ts",
+        "src/index.ts",
+        "src/api.ts",
+        "src/impl.ts",
+    ]);
+    let none = BTreeSet::new();
+    let imports = BTreeMap::from([
+        ("test/a.test.ts".to_string(), set(&["src/index.ts"])),
+        ("src/index.ts".to_string(), set(&["src/api.ts"])),
+        ("src/api.ts".to_string(), set(&["src/impl.ts"])),
+        ("src/impl.ts".to_string(), set(&["src/deep.ts"])),
+    ]);
+    let reexports = BTreeMap::from([
+        ("src/index.ts".to_string(), set(&["src/api.ts"])),
+        ("src/api.ts".to_string(), set(&["src/impl.ts"])),
+        // A cycle ends.
+        ("src/impl.ts".to_string(), set(&["src/index.ts"])),
+    ]);
+    let opens = BTreeMap::new();
+    let (loaded_ran, loaded_opened) = (BTreeSet::new(), BTreeSet::new());
+    let watch = FileWatch {
+        unit: "test/a.test.ts",
+        file: &file,
+        file_dirs: &none,
+        imports: &imports,
+        reexports: &reexports,
+        opens: &opens,
+        loaded: Some((&loaded_ran, &loaded_opened)),
+        every: &none,
+        shared: &[],
+    };
+    let ran = set(&["src/index.ts"]);
+    let list = test_list(
+        Reads::Test,
+        &watch,
+        &TestWatch {
+            id: "a",
+            ran: Some(&ran),
+            opened: Some(&none),
+            dirs: Some(&none),
+        },
+    );
+    assert!(list.own);
+    assert_eq!(
+        list.files,
+        set(&[
+            "test/a.test.ts",
+            "src/index.ts",
+            "src/api.ts",
+            "src/impl.ts"
+        ])
+    );
+}
+
+// covers: C-32, C-37
+#[test]
+fn each_rule_that_keeps_a_result_from_a_unit_or_a_test_says_why_with_its_state() {
+    let complete = facts(true, false, false);
+    let failed_run = RunFacts {
+        command_passed: false,
+        failures_by_unit: false,
+        planned: false,
+    };
+    let attributed = RunFacts {
+        failures_by_unit: true,
+        ..failed_run
+    };
+    let not_run = |why| Decision {
+        state: State::NotRun,
+        not_kept: Some(why),
+    };
+    let cases = [
+        (
+            Facts {
+                deselected: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::LeftOut),
+        ),
+        (
+            facts(false, false, false),
+            PASSED,
+            not_run(NotKept::Unfinished),
+        ),
+        (
+            Facts {
+                tests_reused: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::TestsReused),
+        ),
+        (
+            Facts {
+                unfinished_start: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::UnfinishedStart),
+        ),
+        (
+            Facts {
+                left_out_again: true,
+                ..complete.clone()
+            },
+            PASSED,
+            not_run(NotKept::LeftOutAgain),
+        ),
+        (
+            Facts {
+                skipped: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::SkippedInFailedRun),
+        ),
+        (
+            Facts {
+                unexplained: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::Unexplained),
+        ),
+        (
+            Facts {
+                stale_build: true,
+                ..complete.clone()
+            },
+            attributed,
+            not_run(NotKept::StaleBuild),
+        ),
+        (
+            complete.clone(),
+            failed_run,
+            not_run(NotKept::CommandFailed),
+        ),
+        (
+            Facts {
+                never_left_out: true,
+                ..complete.clone()
+            },
+            PASSED,
+            Decision {
+                state: State::Passed,
+                not_kept: Some(NotKept::NeverLeftOut),
+            },
+        ),
+    ];
+    for (facts, run, want) in &cases {
+        let got = decided(facts, run);
+        assert_eq!(got, *want, "{facts:?}");
+        assert_eq!(state(facts, run), want.state);
+        // What it records: nothing, the pass of a test never left out included.
+        assert_eq!(got.recorded(), None, "{facts:?}");
+        let why = got.not_kept.unwrap();
+        assert!(!why.sentence(true).is_empty() && !why.sentence(false).is_empty());
+    }
+    // A failure, a reuse, what wasn't followed and a pass kept say nothing: their state says it.
+    for (facts, run) in [
+        (facts(true, true, false), &PASSED),
+        (facts(true, false, true), &PASSED),
+        (complete.clone(), &PASSED),
+        (
+            Facts {
+                deselected: true,
+                ..complete.clone()
+            },
+            &RunFacts {
+                planned: true,
+                ..PASSED
+            },
+        ),
+    ] {
+        assert_eq!(decided(&facts, run).not_kept, None, "{facts:?}");
+    }
+    // A failure records, whatever else holds for the run.
+    let failed = Facts {
+        unfinished_start: true,
+        stale_build: true,
+        ..facts(true, true, false)
+    };
+    assert_eq!(decided(&failed, &failed_run).recorded(), Some(false));
 }

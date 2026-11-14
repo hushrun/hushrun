@@ -10,6 +10,12 @@
 //!
 //! Four adapters: pytest and \[ADR 0071\] Vitest, observed (a plugin inside the runner); Cargo and
 //! \[ADR 0070\] `go test`, compiler-given (the toolchain says what a test binary is built from).
+//! \[ADR 0080\] Each is one module behind one trait ([`adapter::Adapter`]), and the code here is
+//! the same for every one.
+//!
+//! \[ADR 0080\] With `tests.unit: test`, a test is a second, finer unit (C-39): the plan asks each
+//! test file's own key, then the tests of each that didn't pass (`plan_tests`); a run records a
+//! test file that passed whole as before, and each test that ran of one that didn't.
 //!
 //! A [`Session`] starts before COMMAND: it makes the run's `HUSHRUN_UNITS` directory and the
 //! variables that load an adapter, and nothing at all when `tests` is off. After COMMAND,
@@ -18,14 +24,23 @@
 //! once more ([`Session::again`]); the run records the check with its units. The directory goes
 //! on every outcome.
 
+pub mod adapter;
 pub mod cargo;
+pub mod command;
+pub mod ctest;
 pub mod db;
 pub mod facts;
 pub mod gotest;
+pub mod gradle;
+pub mod jest;
+pub mod jvm;
+pub mod maven;
+pub mod program;
 pub mod pytest;
 pub mod runner;
 pub mod shared;
 pub mod store;
+pub mod swift;
 pub mod vitest;
 pub mod why;
 
@@ -36,13 +51,17 @@ use std::process::Command;
 
 use hushrun_core::digest::Digest;
 use hushrun_core::time::Time;
-use hushrun_core::units::{self, Facts, KeyBase, Mode, RunFacts, Set, Sources, State, Tests, Tree};
+use hushrun_core::units::{
+    self, Decision, Facts, KeyBase, Mode, Reads, RunFacts, Set, State, Tests, Tree, Unit,
+};
 
+use crate::cmd::usage;
 use crate::results::RunResult;
+use adapter::{Adapter, Hints, Known, PlanAt, Read, ReadAt, RunExtras, StartAt};
 use shared::{Asker, Choice, List, Shared};
 use store::{Disagreement, Found, Mapped, Origin, UnitRecord, UnitResults};
 
-pub use hushrun_core::units::MOST_UNITS;
+pub use hushrun_core::units::{MOST_TESTS, MOST_UNITS};
 
 /// What an adapter saw of one unit, merged over its processes.
 #[derive(Debug, Clone, Default)]
@@ -50,17 +69,9 @@ pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
     pub duration_ms: u64,
-}
-
-/// Which adapter a run loads.
-#[derive(Debug, Clone)]
-enum Adapter {
-    Pytest,
-    Cargo(cargo::Recognized),
-    /// \[ADR 0070\]
-    Go(gotest::Recognized),
-    /// \[ADR 0071\]
-    Vitest(vitest::Recognized),
+    /// \[ADR 0080\] Its tests, as the adapter told them, merged over its processes; `None` when it
+    /// told none (C-39).
+    pub tests: Option<BTreeMap<String, facts::MergedTest>>,
 }
 
 /// What starting to observe a run came to.
@@ -76,8 +87,22 @@ pub enum Start {
 /// happened, what COMMAND's environment gains, and \[ADR 0069\] the plan, when reuse made one.
 pub struct Session {
     dir: PathBuf,
+    /// \[C-32\] The directory COMMAND's start writes in: `dir`, or for a start that leaves
+    /// nothing out after one that left out what the plan didn't list, one of its own inside it.
+    run_dir: PathBuf,
+    /// Where COMMAND runs.
+    cwd: PathBuf,
+    /// \[C-32\] This start is the one with nothing left out, after one whose adapter left out
+    /// what the plan didn't list.
+    whole: bool,
+    /// \[C-32\] pytest's adapter was chosen only because this machine's store said pytest last
+    /// reported the check ([`adapter::choose_kept`]).
+    kept: bool,
+    /// \[C-32\] COMMAND's own `env NAME=value` assignments, which every tool an adapter starts
+    /// for it gets.
+    assigned: Vec<(String, String)>,
     cache: PathBuf,
-    adapter: Adapter,
+    adapter: Box<dyn Adapter>,
     variables: Vec<(String, OsString)>,
     tests: Tests,
     root: PathBuf,
@@ -85,6 +110,50 @@ pub struct Session {
     /// What COMMAND's compiles get besides: the build blocks' wrapper and session (B-2), which
     /// the plan's build, COMMAND's own made first, gets too.
     compile_env: Vec<(OsString, OsString)>,
+    /// \[C-39\] What this run reuses one by one, as its adapter can: `tests.unit`, or test files
+    /// where the adapter knows no test.
+    unit: Unit,
+    /// \[C-39\] What a test is taken to have read in this run: `tests.reads`, or the test file's
+    /// list where the adapter can't watch a test.
+    reads: Reads,
+    /// \[C-39\] What the run says once, after `<NAME>: `, of what its adapter can't do.
+    notes: Vec<String>,
+    /// \[C-39\] What the plan says once, before its line.
+    plan_notes: Vec<String>,
+}
+
+/// \[C-39, ADR 0080\] What a check whose `tests` are `tests` reuses one by one with `adapter`, and
+/// what a test is taken to have read; with the lines that say, once, where the adapter can't do
+/// what the check asks (RFC 0004 §1.2): it then reuses by test file, or takes each test to have
+/// read what its test file read.
+fn what_it_reuses(tests: &Tests, adapter: &dyn Adapter) -> (Unit, Reads, Vec<String>) {
+    let knows = adapter.tests();
+    let mut notes = Vec::new();
+    let unit = match tests.unit {
+        Unit::Test if knows.unit => Unit::Test,
+        Unit::Test => {
+            notes.push(format!(
+                "its tests are reused by {}: {}'s tests can't be reused one by one yet",
+                adapter.test_file(),
+                adapter.runner()
+            ));
+            Unit::File
+        }
+        Unit::File => Unit::File,
+    };
+    let reads = match tests.reads {
+        Reads::Test if unit == Unit::Test && knows.reads => Reads::Test,
+        Reads::Test if unit == Unit::Test => {
+            notes.push(format!(
+                "each test is taken to have read what its {} read: {} can't be watched test by test yet",
+                adapter.test_file(),
+                adapter.runner()
+            ));
+            Reads::File
+        }
+        Reads::Test | Reads::File => Reads::File,
+    };
+    (unit, reads, notes)
 }
 
 impl Drop for Session {
@@ -108,6 +177,512 @@ pub struct Plan {
     chosen: BTreeMap<String, List>,
     /// \[C-38\] The hints this plan read, which this machine won't send back.
     received: Vec<db::HintKnown>,
+    /// \[C-39\] The second tier: the tests that may be reused one by one.
+    tests: PlannedTests,
+}
+
+/// \[C-39\] A test whose key had a pass that counts here, and nothing that failed: what its reuse
+/// stands on.
+#[derive(Debug, Clone)]
+struct TestPassed {
+    unit: String,
+    id: String,
+    key: Digest,
+    found: Found,
+    /// \[C-41\] The list whose key passed: one another machine saw becomes this test's row here.
+    list: shared::TestList,
+}
+
+/// \[C-39, ADR 0080\] What a plan decided of tests one by one: each that may be reused, by name,
+/// and of those the audited, which run anyway.
+#[derive(Debug, Default)]
+struct PlannedTests {
+    passed: BTreeMap<String, TestPassed>,
+    audited: BTreeSet<String>,
+    /// \[C-46\] Tests a JUnit 4 task wouldn't leave out though they could be ([`gradle::left_in`]):
+    /// not listed, so counted as running.
+    left_in: BTreeSet<String>,
+    /// \[C-34\] The tests, by name, of each test file the first tier could reuse whole that holds
+    /// a test the audit runs: its other tests are left out one by one instead.
+    whole: BTreeMap<String, (String, String)>,
+    /// \[C-41\] How many tests this machine knows of each test file, from its rows and the hints
+    /// it read: what the plan's line counts.
+    known: BTreeMap<String, usize>,
+}
+
+impl PlannedTests {
+    /// What `hushrun.json`'s `reuseTests` lists: the tests that may be reused but the audited, by
+    /// unit.
+    fn listed(&self) -> BTreeMap<String, Vec<String>> {
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let tests = self
+            .passed
+            .iter()
+            .map(|(name, test)| (name, (&test.unit, &test.id)))
+            .chain(
+                self.whole
+                    .iter()
+                    .map(|(name, (unit, id))| (name, (unit, id))),
+            );
+        for (name, (unit, id)) in tests {
+            if !self.audited.contains(name) && !self.left_in.contains(name) {
+                out.entry(unit.clone()).or_default().push(id.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether `reuseTests` lists the test `id` of `unit`.
+    fn lists(&self, unit: &str, id: &str) -> bool {
+        let name = units::test_name(unit, id);
+        (self.passed.contains_key(&name) || self.whole.contains_key(&name))
+            && !self.audited.contains(&name)
+            && !self.left_in.contains(&name)
+    }
+
+    /// \[C-34\] The test files the first tier could reuse whole of which the audit runs a test.
+    fn audited_whole(&self) -> BTreeSet<String> {
+        self.whole
+            .iter()
+            .filter(|(name, _)| self.audited.contains(*name))
+            .map(|(_, (unit, _))| unit.clone())
+            .collect()
+    }
+}
+
+/// \[C-34\] With `unit: test`, the test files of `passed` whose tests this machine doesn't know
+/// (`tested.known`): they can't be left out test by test, so they are audited whole, 2% of them,
+/// at least one, as C-34 audits test files.
+fn untold_audited(
+    passed: &BTreeMap<String, Found>,
+    keys: &BTreeMap<String, Digest>,
+    tested: &PlannedTests,
+    started: &str,
+) -> BTreeSet<String> {
+    units::audited(
+        passed
+            .keys()
+            .filter(|unit| tested.known.get(*unit).is_none_or(|n| *n == 0))
+            .filter_map(|unit| Some((unit.as_str(), keys.get(unit)?))),
+        started,
+    )
+}
+
+/// What the second tier of a plan goes by.
+struct TestsAt<'a> {
+    keyer: &'a Keyer<'a>,
+    /// \[C-40\] What a test is taken to have read in this run.
+    reads: Reads,
+    tree: &'a Tree,
+    keyed: &'a Keyed,
+    map: &'a store::Map,
+    /// \[C-41\] The hints the adapter read, with the tests they hold.
+    shared: &'a Shared,
+    /// The test files the first tier may reuse whole: their tests aren't asked.
+    passed: &'a BTreeMap<String, Found>,
+    /// \[C-34\] Of those, the key whose pass reuses each: what its tests are audited by.
+    keys: &'a BTreeMap<String, Digest>,
+    store: &'a dyn UnitResults,
+    counts: &'a dyn Fn(&RunResult) -> bool,
+    started: &'a str,
+}
+
+/// \[C-39\] More tests than a check reuses one by one.
+struct TooMany(usize);
+
+/// \[C-39, C-41\] The tests a plan knows of `unit`, by id, each with the lists its key may be made
+/// from (\[C-40\] [`shared::test_lists`]): those this machine saw run, and those hints hold of it.
+/// One that wasn't followed the last time it ran here has none.
+fn tests_known(
+    reads: Reads,
+    unit: &str,
+    file_lists: &[List],
+    map: &store::Map,
+    hints: &Shared,
+    tree: &Tree,
+) -> BTreeMap<String, Vec<shared::TestList>> {
+    let rows = map.units.get(unit).map(|mapped| &mapped.tests);
+    let mut ids: BTreeSet<&str> = hints.test_ids(unit);
+    ids.extend(
+        rows.into_iter()
+            .flat_map(|rows| rows.keys().map(String::as_str)),
+    );
+    ids.into_iter()
+        .map(|id| {
+            let row = rows.and_then(|rows| rows.get(id));
+            // Not followed the last time it ran here: a test of the file, with nothing to key it
+            // by.
+            if row.is_some_and(|row| row.state == State::NotObserved) {
+                return (id.to_string(), Vec::new());
+            }
+            let seen = hints.test_seen(unit, id);
+            let lists = shared::test_lists(reads, file_lists, row, &seen, tree);
+            (id.to_string(), lists)
+        })
+        .collect()
+}
+
+/// \[C-39, ADR 0080\] The second tier of a plan (RFC 0004 §3.3): for each test file the first tier
+/// didn't reuse whole whose lists are known, each of its tests this machine saw run (not one that
+/// wasn't followed then) and \[C-41\] each a hint holds, keyed by its lists with its id; the one
+/// rule decides; and 2% of those that may be reused, at least one, run anyway. A lookup that fails
+/// reuses no test: they run. `Err` past [`MOST_TESTS`] tests.
+fn plan_tests(at: &TestsAt<'_>) -> Result<PlannedTests, TooMany> {
+    let mut asked_of: BTreeMap<&String, BTreeMap<String, Vec<shared::TestList>>> = BTreeMap::new();
+    for (unit, lists) in at.keyed {
+        let file_lists: Vec<List> = lists.iter().map(|(_, list)| list.clone()).collect();
+        let known = tests_known(at.reads, unit, &file_lists, at.map, at.shared, at.tree);
+        if !known.is_empty() {
+            asked_of.insert(unit, known);
+        }
+    }
+    let total: usize = asked_of.values().map(BTreeMap::len).sum();
+    if total > MOST_TESTS {
+        return Err(TooMany(total));
+    }
+    let known = asked_of
+        .iter()
+        .map(|(unit, tests)| ((*unit).clone(), tests.len()))
+        .collect();
+    // \[C-34\] The tests of the test files the first tier may reuse whole, each audited by its
+    // file's key and its id.
+    let whole_keys: BTreeMap<String, (String, String, Digest)> = asked_of
+        .iter()
+        .filter_map(|(unit, tests)| Some((*unit, tests, at.keys.get(*unit)?)))
+        .flat_map(|(unit, tests, key)| {
+            tests.keys().map(move |id| {
+                (
+                    units::test_name(unit, id),
+                    (
+                        unit.clone(),
+                        id.clone(),
+                        Digest::of(format!("{}\n{id}", key.hex()).as_bytes()),
+                    ),
+                )
+            })
+        })
+        .collect();
+    let asked = asked_of
+        .into_iter()
+        .filter(|(unit, _)| !at.passed.contains_key(*unit))
+        .flat_map(|(unit, tests)| {
+            tests
+                .into_iter()
+                .map(move |(id, lists)| (unit.clone(), id, lists))
+        });
+    let passed = tests_that_passed(at.keyer, asked, at.store, at.counts).unwrap_or_default();
+    // \[C-34\] 2% of every test the plan could leave out, in test files reused whole or not, at
+    // least one, chosen as C-39 chooses: an audit costs 2% of the tests, whatever a file's size.
+    let audited = units::audited(
+        passed
+            .iter()
+            .map(|(name, t)| (name.as_str(), &t.key))
+            .chain(
+                whole_keys
+                    .iter()
+                    .map(|(name, (_, _, key))| (name.as_str(), key)),
+            ),
+        at.started,
+    );
+    // A test file reused whole of which a test is audited is left out test by test instead.
+    let audited_files: BTreeSet<&String> = whole_keys
+        .iter()
+        .filter(|(name, _)| audited.contains(*name))
+        .map(|(_, (unit, _, _))| unit)
+        .collect();
+    let whole = whole_keys
+        .iter()
+        .filter(|(_, (unit, _, _))| audited_files.contains(unit))
+        .map(|(name, (unit, id, _))| (name.clone(), (unit.clone(), id.clone())))
+        .collect::<BTreeMap<String, (String, String)>>();
+    // \[C-46\] What a JUnit 4 task leaves out at most, of what would be listed: the rest runs.
+    let left_in = gradle::left_in(
+        &at.map.leave_out_at_most,
+        passed
+            .iter()
+            .map(|(name, t)| (name.as_str(), t.unit.as_str(), t.id.as_str()))
+            .chain(
+                whole
+                    .iter()
+                    .map(|(name, (unit, id))| (name.as_str(), unit.as_str(), id.as_str())),
+            )
+            .filter(|(name, _, _)| !audited.contains(*name)),
+    );
+    Ok(PlannedTests {
+        passed,
+        audited,
+        left_in,
+        whole,
+        known,
+    })
+}
+
+/// \[C-39\] The one place tests are chosen, for a plan and for what `observe` says: of each test,
+/// keyed by each of its lists (\[C-40\] [`shared::test_lists`]), those whose keys the one rule
+/// ([`shared::choose`]) would reuse, by name, from one batch lookup. `None` when the lookup failed, or the check's
+/// reuse is suspended.
+fn tests_that_passed(
+    keyer: &Keyer<'_>,
+    asked: impl Iterator<Item = (String, String, Vec<shared::TestList>)>,
+    store: &dyn UnitResults,
+    counts: &dyn Fn(&RunResult) -> bool,
+) -> Option<BTreeMap<String, TestPassed>> {
+    type Asked = (String, String, Vec<Option<Digest>>, Vec<shared::TestList>);
+    let mut keyed: Vec<Asked> = Vec::new();
+    for (unit, id, lists) in asked {
+        let keys = lists
+            .iter()
+            .map(|list| keyer.test_key(&unit, &id, &list.list.files))
+            .collect();
+        keyed.push((unit, id, keys, lists));
+    }
+    if keyed.is_empty() {
+        return Some(BTreeMap::new());
+    }
+    let all = keyed
+        .iter()
+        .flat_map(|(_, _, keys, _)| keys.iter().flatten().copied());
+    let lookup = shared::lookup(store, all, counts).ok()?;
+    if !lookup.reuse.allows_reuse() {
+        return None;
+    }
+    let mut out = BTreeMap::new();
+    for (unit, id, keys, mut lists) in keyed {
+        if let Choice::Passed(at, key) = shared::choose(&keys, &lookup.found)
+            && let Some(found) = lookup.found.get(&key)
+            && at < lists.len()
+        {
+            let name = units::test_name(&unit, &id);
+            out.insert(
+                name,
+                TestPassed {
+                    unit,
+                    id,
+                    key,
+                    found: found.clone(),
+                    list: lists.swap_remove(at),
+                },
+            );
+        }
+    }
+    Some(out)
+}
+
+/// \[C-39\] Each of a test file's tests `told`, with its facts and its decision by the one
+/// function: it finished, failed and was deselected as told, and what wasn't followed is what was
+/// inside its own window and what `file` says was outside every test's window of its file.
+/// `run(id)` is what the run knows for it, the plan's listing of it included. When its test file
+/// failed and none of `told` did, no test of it passes: the failure is unexplained. \[C-32\] What
+/// holds for the whole run (a start that never ended, a stale build) holds for each test.
+fn tests_decided(
+    told: &BTreeMap<String, facts::MergedTest>,
+    file: &Facts,
+    run: impl Fn(&str) -> RunFacts,
+) -> BTreeMap<String, (Decision, Facts)> {
+    let unexplained = file.failed && told.values().all(|test| !test.failed);
+    told.iter()
+        .map(|(id, test)| {
+            let mut not_followed = test.not_followed.clone();
+            not_followed.extend(file.not_followed.iter().cloned());
+            let facts = Facts {
+                complete: test.finished,
+                failed: test.failed,
+                not_followed,
+                deselected: test.deselected,
+                tests_reused: false,
+                skipped: test.skipped,
+                unexplained,
+                unfinished_start: file.unfinished_start,
+                stale_build: file.stale_build,
+                never_left_out: test.never_left_out,
+                left_out_again: file.left_out_again,
+            };
+            let decision = units::decided(&facts, &run(id));
+            (id.clone(), (decision, facts))
+        })
+        .collect()
+}
+
+/// \[C-37\] What the run's adapters said of why no pass of the run is kept, which `hushrun why`
+/// says in place of the core's own sentence for the rule it goes with.
+#[derive(Debug, Clone, Default)]
+struct RunWords {
+    /// Why a start of the runner didn't say what it saw: its `.started` file's `why`.
+    started: Option<String>,
+    /// Why a run that failed keeps no pass, its failures not told by unit: a facts file's
+    /// `notKept`.
+    failed: Option<String>,
+}
+
+/// \[C-37\] Why a test or a test file kept nothing, in people's words, as `decision` says: for a
+/// test that didn't finish, its adapter's words when it gave some (`told`); for a rule of the
+/// whole run, what its adapter said of it (`words`); else the rule's.
+fn not_kept(
+    decision: Decision,
+    test: bool,
+    told: Option<&str>,
+    words: &RunWords,
+) -> Option<String> {
+    let why = decision.not_kept?;
+    let said = match why {
+        units::NotKept::Unfinished => told.map(str::to_string),
+        units::NotKept::UnfinishedStart => words
+            .started
+            .as_ref()
+            .map(|why| format!("{why}, so no pass of that run is kept")),
+        units::NotKept::CommandFailed => words.failed.clone(),
+        _ => None,
+    };
+    Some(
+        said.filter(|s| !s.is_empty())
+            .unwrap_or_else(|| why.sentence(test).to_string()),
+    )
+}
+
+/// \[C-37\] Why a test file kept no result of its own, as `decision` says: when the rule that
+/// decided it is one a test of it was decided by too (not every test finished, a skip in a run
+/// that failed), through the first such test and the reason its row keeps (`tests`), so that a
+/// test a failing wider fixture served names the fixture for its file too; else the rule's.
+fn file_not_kept(
+    decision: Decision,
+    tests: &BTreeMap<String, store::TestRow>,
+    words: &RunWords,
+) -> Option<String> {
+    let through = match decision.not_kept? {
+        units::NotKept::Unfinished | units::NotKept::SkippedInFailedRun => tests
+            .iter()
+            .find(|(_, row)| row.state == State::NotRun && row.not_kept.is_some()),
+        _ => None,
+    };
+    match through {
+        Some((id, row)) => Some(format!(
+            "its test {id} kept no result: {}",
+            row.not_kept.as_deref().unwrap_or_default()
+        )),
+        None => not_kept(decision, false, None, words),
+    }
+}
+
+/// \[C-39, C-22\] What a plan reuses when tests are the unit, counted for the run's line and for
+/// `hushrun ready`: the tests, when this machine knows every test file's (its rows or \[C-41\]
+/// hints), and the test files, with the tests reused one by one beside them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestsCounted {
+    /// Every test, and those reused, whole or one by one; `None` when some test file's tests
+    /// aren't known here.
+    pub tests: Option<(usize, usize)>,
+    pub files_total: usize,
+    /// The test files that run: neither reused whole nor every test of them one by one.
+    pub files_run: usize,
+    pub files_reused: usize,
+    /// The tests reused one by one.
+    pub one_by_one: usize,
+}
+
+fn tests_counted<'a>(
+    units: impl Iterator<Item = &'a String> + Clone,
+    reuse: &BTreeSet<String>,
+    tested: &PlannedTests,
+) -> TestsCounted {
+    let listed = tested.listed();
+    let one_by_one: usize = listed.values().map(Vec::len).sum();
+    let tests_of = |unit: &str| tested.known.get(unit).copied().unwrap_or(0);
+    let all_of = |unit: &str| {
+        listed
+            .get(unit)
+            .is_some_and(|ids| !ids.is_empty() && ids.len() == tests_of(unit))
+    };
+    let files_total = units.clone().count();
+    let files_run = units
+        .clone()
+        .filter(|unit| !reuse.contains(*unit) && !all_of(unit))
+        .count();
+    let tests = units.clone().all(|unit| tests_of(unit) > 0).then(|| {
+        let total: usize = units.map(|unit| tests_of(unit)).sum();
+        let reused: usize = reuse.iter().map(|unit| tests_of(unit)).sum::<usize>() + one_by_one;
+        (total, reused)
+    });
+    TestsCounted {
+        tests,
+        files_total,
+        files_run,
+        files_reused: reuse.len(),
+        one_by_one,
+    }
+}
+
+/// \[C-39\] The line before COMMAND when tests are the unit (RFC 0004 §1.2): `None` when nothing
+/// is reused, and the test files' lines say why. Tests are counted where this machine knows every
+/// test file's tests, from its rows or \[C-41\] hints; else test files are, with the tests reused
+/// one by one beside them.
+fn tests_line(
+    check: &hushrun_core::CheckName,
+    known: &Known,
+    reuse: &BTreeSet<String>,
+    audited: &BTreeSet<String>,
+    tested: &PlannedTests,
+    noun: &str,
+) -> Option<String> {
+    let listed = tested.listed();
+    let one_by_one: usize = listed.values().map(Vec::len).sum();
+    let tests_of = |unit: &str| tested.known.get(unit).copied().unwrap_or(0);
+    if reuse.is_empty() && one_by_one == 0 {
+        // Only tests run as a check: said as test files' are, with tests.
+        let checked = tested.audited.len();
+        if checked == 0 || !audited.is_empty() {
+            return None;
+        }
+        let total: usize = known.iter().map(|(unit, _)| tests_of(unit)).sum();
+        return Some(format!(
+            "{check}: all {} run; {}",
+            count_tests(total as u64),
+            checked_only(checked)
+        ));
+    }
+    let counted = tests_counted(known.iter().map(|(unit, _)| unit), reuse, tested);
+    let files_total = counted.files_total as u64;
+    let files_run = counted.files_run as u64;
+    let more = |line: &mut String, n: usize| line.push_str(&checked_too(n));
+    if let Some((total, reused)) = counted.tests {
+        let checked: usize =
+            audited.iter().map(|unit| tests_of(unit)).sum::<usize>() + tested.audited.len();
+        let mut line = format!(
+            "{check}: {} of {} run, in {} of {}; {} already passed on the files {} read",
+            usage::thousands((total - reused) as u64),
+            count_tests(total as u64),
+            usage::thousands(files_run),
+            test_files_grouped(files_total, noun),
+            usage::thousands(reused as u64),
+            if reused == 1 { "it" } else { "they" },
+        );
+        more(&mut line, checked);
+        return Some(line);
+    }
+    let mut line = format!(
+        "{check}: {} of {} run; {} already passed on the files {} read",
+        usage::thousands(files_run),
+        test_files_grouped(files_total, noun),
+        usage::thousands((reuse.len() + one_by_one) as u64),
+        if reuse.len() + one_by_one == 1 {
+            "it"
+        } else {
+            "they"
+        },
+    );
+    if one_by_one > 0 {
+        line = format!(
+            "{check}: {} of {} run; {} already passed on the files {} read, and so did {} of the others",
+            usage::thousands(files_run),
+            test_files_grouped(files_total, noun),
+            usage::thousands(reuse.len() as u64),
+            if reuse.len() == 1 { "it" } else { "they" },
+            count_tests(one_by_one as u64),
+        );
+    }
+    // \[C-34\] Counted test files and tests apart: the audit's tests, and the test files it
+    // runs whole whose tests this machine doesn't know.
+    line.push_str(&checked_apart(audited.len(), tested.audited.len(), noun));
+    Some(line)
 }
 
 /// \[ADR 0069\] What a plan came to: the list adapters deselect from, or why every test file runs.
@@ -121,58 +696,81 @@ pub enum Planned {
 impl Session {
     /// Starts observing a run of `command` in `cwd`, in the repository at `root`, for a check
     /// whose `tests` are `tests`: `Off` without them, and then nothing is written or set.
-    pub fn start(tests: Option<&Tests>, command: &[String], root: &Path, cwd: &Path) -> Start {
+    /// \[C-32\] `stored`: the adapter that last reported the check's test files here, as this
+    /// machine's store names it ([`db::adapter_of`]), which keeps a COMMAND pytest reported
+    /// pytest's ([`adapter::choose_kept`]).
+    pub fn start(
+        tests: Option<&Tests>,
+        command: &[String],
+        root: &Path,
+        cwd: &Path,
+        stored: Option<&str>,
+    ) -> Start {
         let Some(tests) = tests.filter(|t| t.is_on()) else {
             return Start::Off;
         };
         let Some(cache) = crate::context::cache_dir() else {
             return Start::Not("there is no cache directory".into());
         };
-        let env = |name: &str| std::env::var(name).ok();
-        let adapter = match choose(command, cwd) {
+        let adapter = match adapter::choose_kept(command, cwd, stored) {
             Ok(adapter) => adapter,
             Err(why) => return Start::Not(why),
         };
-        let exe =
-            || std::env::current_exe().map_err(|err| format!("can't tell where hushrun is: {err}"));
-        let variables = match &adapter {
-            Adapter::Go(recognized) => exe().and_then(|exe| {
-                gotest::variables(recognized, &exe, cwd, std::env::var_os("GOFLAGS"))
-            }),
-            Adapter::Cargo(recognized) => exe().and_then(|exe| {
-                cargo::runner_variables(recognized, &exe, cwd, &env).map(|vars| {
-                    vars.into_iter()
-                        .map(|(name, value)| (name, OsString::from(value)))
-                        .collect::<Vec<_>>()
-                })
-            }),
-            Adapter::Vitest(_) => vitest::install(&cache)
-                .map(|dir| vitest::variables(&dir))
-                .map_err(|err| format!("can't write its Vitest plugin: {err}")),
-            Adapter::Pytest => pytest::install(&cache)
-                .map(|dir| {
-                    pytest::variables(
-                        &dir,
-                        std::env::var_os("PYTHONPATH"),
-                        std::env::var_os("PYTEST_ADDOPTS"),
-                    )
-                })
-                .map_err(|err| format!("can't write its pytest plugin: {err}")),
-        };
-        let mut variables = match variables {
-            Ok(variables) => variables,
-            Err(why) => return Start::Not(why),
-        };
+        // \[C-32\] Whether the stored word chose pytest where CTest or Swift would take COMMAND
+        // now: then a run in which pytest reports nothing clears it.
+        let kept = adapter.word() == pytest::WORD
+            && adapter::choose(command, cwd).is_ok_and(|fresh| fresh.word() != pytest::WORD);
+        let (unit, reads, notes) = what_it_reuses(tests, adapter.as_ref());
         let name = hushrun_ledger::new_ulid(Time::from_timestamp(jiff::Timestamp::now()).millis());
         let dir = cache.join("units").join("runs").join(name);
-        let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| write_run_file(&dir, root, &[], None, &[], None));
+        let written = std::fs::create_dir_all(&dir).and_then(|()| {
+            let listed = Listed {
+                unit,
+                reads,
+                ..Listed::default()
+            };
+            write_run_file(&dir, root, &listed)
+        });
         if let Err(err) = written {
             let _ = std::fs::remove_dir_all(&dir);
             return Start::Not(format!("can't make {}: {err}", dir.display()));
         }
+        // \[C-32\] COMMAND's own `env NAME=value` assignments: in its environment as an adapter
+        // reads it, and in every tool an adapter starts for it.
+        let assigned = command::assignments(command);
+        let env = |name: &str| {
+            assigned
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| OsString::from(value))
+                .or_else(|| std::env::var_os(name))
+        };
+        let at = StartAt {
+            cache: &cache,
+            cwd,
+            dir: &dir,
+            env: &env,
+            assigned: &assigned,
+        };
+        let mut variables = match adapter.variables(&at) {
+            Ok(variables) => variables,
+            Err(why) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Start::Not(why);
+            }
+        };
         variables.push((runner::UNITS_VAR.to_string(), dir.clone().into_os_string()));
         Start::On(Box::new(Session {
+            unit,
+            reads,
+            notes,
+            plan_notes: Vec::new(),
+            run_dir: dir.clone(),
+            cwd: cwd.to_path_buf(),
+            whole: false,
+            kept,
+            assigned,
             dir,
             cache,
             adapter,
@@ -190,10 +788,40 @@ impl Session {
         self.compile_env = env;
     }
 
+    /// \[C-39\] What the run says once, each after `<NAME>: `, of what its adapter can't do.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// \[C-39\] What one of its test files is called, in its adapter's word: `test class`,
+    /// `package`, `test file`.
+    pub fn test_file(&self) -> &'static str {
+        self.adapter.test_file()
+    }
+
     /// Gives COMMAND the variables that load the adapter.
     pub fn apply(&self, command: &mut Command) {
         for (name, value) in &self.variables {
             command.env(name, value);
+        }
+    }
+
+    /// \[C-46\] Before COMMAND, in every mode: tells the adapter, in `hushrun.json`, the test files
+    /// this machine's store knows for the check, so that a runner that reuses on its own (Gradle's
+    /// up to date) runs a group of which it knows none, and the first run through hushrun always
+    /// learns. A plan in `reuse` writes the file again with its lists, and the same. A store that
+    /// can't be read knows nothing.
+    pub fn learned(&self, base: &KeyBase, repository: Option<&str>) {
+        let check_id = store::check_id(base, repository);
+        let loaded = db::load(&db::path(&self.cache, repository), &check_id);
+        let listed = Listed {
+            unit: self.unit,
+            reads: self.reads,
+            known: Some(loaded.map.units.keys().cloned().collect()),
+            ..Listed::default()
+        };
+        if let Err(err) = write_run_file(&self.run_dir, &self.root, &listed) {
+            tracing::debug!("what the store knows wasn't written for the adapter: {err}");
         }
     }
 
@@ -213,92 +841,29 @@ impl Session {
         }
         let map = loaded.map;
         let asker = self.asker(input.store, check_id, &input.base);
-        let mut patterns = None;
-        let mut built = None;
-        let mut listed_files: Option<Vec<String>> = None;
-        let mut received = Vec::new();
-        let (sets, known): (units::Sets, Known) = match &self.adapter {
-            Adapter::Pytest | Adapter::Vitest(_) => {
-                match observed_plan(
-                    &self.adapter,
-                    input.tree,
-                    input.root,
-                    input.cwd,
-                    &map,
-                    asker.as_ref(),
-                    &self.tests.ignore,
-                ) {
-                    Ok(Some(found)) => {
-                        patterns = found.python_files;
-                        listed_files = found.listed;
-                        received = found.shared.received;
-                        (found.sets, found.known)
-                    }
-                    // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
-                    Ok(None) => return Planned::Plan(String::new()),
-                    Err(why) => return Planned::Everything(why),
-                }
-            }
-            Adapter::Cargo(recognized) => {
-                let b =
-                    match cargo::plan_build(recognized, input.root, input.cwd, &self.compile_env) {
-                        Ok(b) => b,
-                        Err(why) => return Planned::Everything(why),
-                    };
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| b.unit_files.contains(path),
-                    Sources::Named(&b.named, cargo::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let known = b
-                    .units
-                    .iter()
-                    .map(|(unit, b)| {
-                        let lists = (b.not_followed.is_empty() && input.tree.contains(unit))
-                            .then(|| vec![built_list(&b.reads)]);
-                        (unit.clone(), lists)
-                    })
-                    .collect();
-                built = Some(b);
-                (sets, known)
-            }
-            Adapter::Go(recognized) => {
-                let listed = match gotest::list(recognized, input.root, input.cwd) {
-                    Ok(listed) => listed,
-                    Err(why) => return Planned::Everything(why),
-                };
-                let sets = units::classify(
-                    input.tree.paths(),
-                    &|path| listed.unit_files.contains(path),
-                    Sources::Named(&listed.named, gotest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker.as_ref(), false, &sets, input.tree, &self.tests.ignore);
-                let known = listed
-                    .units
-                    .iter()
-                    .map(|(unit, u)| {
-                        let whole = u.not_followed.is_empty()
-                            && u.own.iter().all(|f| input.tree.contains(f));
-                        let lists = whole
-                            .then(|| {
-                                shared::lists(
-                                    unit,
-                                    map.units.get(unit),
-                                    &shared,
-                                    input.tree,
-                                    Some(&u.reads),
-                                )
-                            })
-                            .flatten();
-                        (unit.clone(), lists)
-                    })
-                    .collect();
-                received = shared.received;
-                (sets, known)
-            }
+        let at = PlanAt {
+            tree: input.tree,
+            root: input.root,
+            cwd: input.cwd,
+            map: &map,
+            asker: asker.as_ref(),
+            ignore: &self.tests.ignore,
+            compile_env: &self.compile_env,
+            assigned: &self.assigned,
         };
+        let planning = match self.adapter.plan(&at) {
+            Ok(Some(planning)) => planning,
+            // \[ADR 0074\] No pytest ever reported here: nothing to say, nothing to reuse.
+            Ok(None) => return Planned::Plan(String::new()),
+            Err(why) => return Planned::Everything(why),
+        };
+        let adapter::Planning {
+            sets,
+            known,
+            received,
+            extras,
+            bound,
+        } = planning;
         let keyer = Keyer::new(input.tree, &sets, &input.base);
         let total = known.len();
         if total == 0 {
@@ -321,39 +886,48 @@ impl Session {
         let mut keys = BTreeMap::new();
         let mut passed: BTreeMap<String, Found> = BTreeMap::new();
         let mut chosen = BTreeMap::new();
-        for (unit, lists) in keyed {
+        for (unit, lists) in &keyed {
+            if !whole_reusable(&map, unit) {
+                continue;
+            }
             let lists_keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
             if let Choice::Passed(at, key) = shared::choose(&lists_keys, &lookup.found)
                 && let Some(found) = lookup.found.get(&key)
             {
                 passed.insert(unit.clone(), found.clone());
                 keys.insert(unit.clone(), key);
-                if let Some((_, list)) = lists.into_iter().nth(at) {
-                    chosen.insert(unit, list);
+                if let Some((_, list)) = lists.get(at) {
+                    chosen.insert(unit.clone(), list.clone());
                 }
             }
         }
-        let audited = units::audited(
+        // \[C-34\] An audit of test files with `unit: file`; with `unit: test`, of tests, below.
+        let file_audited = units::audited(
             passed.keys().map(|unit| (unit.as_str(), &keys[unit])),
             &started,
         );
+        let mut audited = match self.unit {
+            Unit::File => file_audited.clone(),
+            Unit::Test => BTreeSet::new(),
+        };
         let mut reuse: BTreeSet<String> = passed
             .keys()
             .filter(|unit| !audited.contains(*unit))
             .cloned()
             .collect();
-        // A test binary is reused only as the bytes whose dep-info its key holds.
+        // \[ADR 0069\] A unit bound to a file's bytes (a test binary) is reused only as the bytes
+        // whose dep-info its key holds.
         let mut binaries = Vec::new();
-        if let Some(built) = &built {
+        if self.adapter.binds() {
             reuse.retain(|unit| {
-                let Some(b) = built.units.get(unit) else {
+                let Some(path) = bound.get(unit) else {
                     return false;
                 };
-                match std::fs::read(&b.executable) {
+                match std::fs::read(path) {
                     Ok(bytes) => {
                         binaries.push(facts::Binary {
                             unit: unit.clone(),
-                            path: b.executable.clone(),
+                            path: path.clone(),
                             sha256: Digest::of(&bytes).hex(),
                         });
                         true
@@ -362,52 +936,122 @@ impl Session {
                 }
             });
         }
+        let check = &input.base.check;
+        // \[C-39\] The second tier: the tests of each test file whose own key didn't pass.
+        let mut notes = Vec::new();
+        let tested = match self.unit {
+            Unit::Test => {
+                let fetched = asker
+                    .as_ref()
+                    .map(|asker| asker.fetched.borrow().clone())
+                    .unwrap_or_default();
+                match plan_tests(&TestsAt {
+                    keyer: &keyer,
+                    reads: self.reads,
+                    tree: input.tree,
+                    keyed: &keyed,
+                    map: &map,
+                    shared: &fetched,
+                    passed: &passed,
+                    keys: &keys,
+                    store: input.store,
+                    counts: input.counts,
+                    started: &started,
+                }) {
+                    Ok(tested) => {
+                        // \[C-34\] A test file one of whose tests the audit runs isn't reused
+                        // whole: its other tests are left out one by one. One whose tests this
+                        // machine doesn't know (told without them, a hint without them) can't
+                        // be: those are audited whole, as test files are.
+                        let partly = tested.audited_whole();
+                        audited = untold_audited(&passed, &keys, &tested, &started);
+                        reuse.retain(|unit| !partly.contains(unit) && !audited.contains(unit));
+                        tested
+                    }
+                    Err(TooMany(n)) => {
+                        // \[C-39\] Past the limit, this run reuses by test file, and says so,
+                        // with the test files' audit.
+                        self.unit = Unit::File;
+                        reuse.retain(|unit| !file_audited.contains(unit));
+                        audited = file_audited.clone();
+                        notes.push(format!(
+                            "{check}: its tests are reused by test file in this run: it has {} tests, more than the {} this version reuses one by one",
+                            usage::thousands(n as u64),
+                            usage::thousands(MOST_TESTS as u64)
+                        ));
+                        PlannedTests::default()
+                    }
+                }
+            }
+            Unit::File => PlannedTests::default(),
+        };
         if let Err(err) = write_run_file(
-            &self.dir,
+            &self.run_dir,
             &self.root,
-            &reuse.iter().cloned().collect::<Vec<_>>(),
-            patterns.as_deref(),
-            &binaries,
-            listed_files.as_deref(),
+            &Listed {
+                reuse: reuse.iter().cloned().collect(),
+                extras,
+                binaries,
+                unit: self.unit,
+                reads: self.reads,
+                reuse_tests: tested.listed(),
+                known: Some(map.units.keys().cloned().collect()),
+            },
         ) {
             return Planned::Everything(format!("can't write the plan ({err})"));
         }
-        // The line before COMMAND (RFC 0003 §1.2), in the words people read.
-        let check = &input.base.check;
+        // The line before COMMAND (RFC 0003 §1.2, RFC 0004 §1.2), in the words people read.
         let reused = reuse.len();
-        let line = if reused == 0 && audited.is_empty() {
-            let all = format!("{check}: all {} run", test_files(total as u64));
-            let rest = rest_of(&sets, input.tree);
-            let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
-            match why_all(&map, &rest, &sources) {
-                Some(why) => format!("{all}: {why}"),
-                None if passed.is_empty() => {
-                    format!("{all}: none had passed here yet on the files it read")
-                }
-                None => all,
-            }
+        let tests_line = (self.unit == Unit::Test)
+            .then(|| {
+                tests_line(
+                    check,
+                    &known,
+                    &reuse,
+                    &audited,
+                    &tested,
+                    self.adapter.test_file(),
+                )
+            })
+            .flatten();
+        let line = if let Some(line) = tests_line {
+            line
+        } else if reused == 0 && audited.is_empty() {
+            let noun = self.adapter.test_file();
+            // \[C-32\] The check's last run here executed no test (its runner found every task up
+            // to date): hushrun leaves none out, which is all it can say of what the runner runs,
+            // and the reason, after what changed, is that run.
+            let all = match (&map.ran_nothing, total) {
+                (None, _) => format!("{check}: all {} run", test_files(total as u64, noun)),
+                (Some(_), 1) => format!("{check}: its one {noun} isn't left out"),
+                (Some(_), _) => format!(
+                    "{check}: none of its {} is left out",
+                    test_files(total as u64, noun)
+                ),
+            };
+            let why = why_every(
+                &map,
+                input.tree,
+                &sets,
+                known.iter().map(|(unit, _)| unit),
+                noun,
+                map.ran_nothing.as_ref().map(|_| RAN_NOTHING_LAST_TIME),
+            );
+            format!("{all}: {why}")
         } else if reused == 0 {
             format!(
-                "{check}: all {} run; {} that already passed on the files {} read {} as a check",
-                test_files(total as u64),
-                audited.len(),
-                if audited.len() == 1 { "it" } else { "they" },
-                if audited.len() == 1 { "runs" } else { "run" },
+                "{check}: all {} run; {}",
+                test_files(total as u64, self.adapter.test_file()),
+                checked_only(audited.len())
             )
         } else {
             let mut line = format!(
                 "{check}: {} of {} run; {reused} already passed on the files {} read",
                 total - reused,
-                test_files(total as u64),
+                test_files(total as u64, self.adapter.test_file()),
                 if reused == 1 { "it" } else { "they" },
             );
-            if !audited.is_empty() {
-                line.push_str(&format!(
-                    ", and {} more that did {} as a check",
-                    audited.len(),
-                    if audited.len() == 1 { "runs" } else { "run" },
-                ));
-            }
+            line.push_str(&checked_too(audited.len()));
             line
         };
         self.plan = Some(Plan {
@@ -416,8 +1060,15 @@ impl Session {
             reuse,
             chosen,
             received,
+            tests: tested,
         });
+        self.plan_notes = notes;
         Planned::Plan(line)
+    }
+
+    /// \[C-39\] What the plan says once, before its line, each a line after `hushrun: `.
+    pub fn plan_notes(&self) -> &[String] {
+        &self.plan_notes
     }
 
     /// \[C-38\] What this run asks hints with, when they can change something: `tests` is on,
@@ -430,33 +1081,51 @@ impl Session {
         base: &KeyBase,
     ) -> Option<Asker<'s>> {
         let systems = shared::systems(base);
-        if matches!(self.adapter, Adapter::Cargo(_)) || systems.is_empty() || !self.tests.is_on() {
+        if self.adapter.hints() == Hints::None || systems.is_empty() || !self.tests.is_on() {
             return None;
         }
-        Some(Asker {
-            store,
-            check_id,
-            systems,
-            adapter: self.adapter_word().word(),
-        })
-    }
-
-    /// The adapter, as the store names it.
-    fn adapter_word(&self) -> db::AdapterWord {
-        adapter_word(&self.adapter)
+        Some(Asker::new(store, check_id, systems, self.adapter.word()))
     }
 
     /// What the adapter saw, decided: each unit's state, what the plan would have reused, and the
     /// lines that say so. `None` when the adapter wrote nothing, so that everything ran and no
     /// unit is recorded.
     pub fn finish(&self, end: &Finish<'_>) -> Option<Observed> {
-        let files = facts::read_all(&self.dir)?;
+        let files = facts::read_all(&self.run_dir)?;
+        // \[C-32\] What a facts file says the runner left out that the plan didn't list, and
+        // whether it ran on a stale build.
+        let unlisted = facts::left_out(&files);
+        let stale = facts::stale_build(&files);
+        // \[C-32\] A start of the runner that began and never said it ended: what it ran can't
+        // be told, so no unit and no test of the run records a pass; a fail still records.
+        let unfinished = facts::unfinished_starts(&self.run_dir);
         let at = StoreAt {
             path: db::path(&self.cache, end.repository),
             check_id: store::check_id(&end.base, end.repository),
             base: end.base.clone(),
-            adapter: self.adapter_word(),
+            adapter: self.adapter.word(),
+            hints: self.adapter.hints(),
         };
+        // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
+        // counted, in the write that follows the run's record, and the second such run in a row
+        // forgets the word, so the next run chooses afresh. One silent run proves nothing (a ctest
+        // whose build directory is empty finds no test and passes), nor does a run that failed.
+        if self.kept && end.command_passed && !files.iter().any(|f| f.adapter == pytest::WORD) {
+            let line = if db::silent_runs(&at.path, &at.check_id) >= 1 {
+                "pytest reported none, so the next run chooses how to observe them afresh"
+            } else {
+                "pytest reported none this time"
+            };
+            return Some(Observed {
+                store: Some(at),
+                silent: true,
+                lines: vec![format!(
+                    "{}: test files weren't observed: {line}",
+                    end.base.check
+                )],
+                ..Observed::default()
+            });
+        }
         let loaded = db::load(&at.path, &at.check_id);
         let map = loaded.map;
         let how = match (end.mode, &self.plan) {
@@ -478,10 +1147,106 @@ impl Session {
             asker.as_ref(),
         ) {
             Ok(Some(read)) => read,
-            Ok(None) => return None,
-            Err(why) => return Observed::unread(&end.base.check, &why),
+            // \[C-32\] Left out what the plan didn't list: whatever else could be read, this start
+            // decides nothing.
+            Ok(None) => {
+                return (unlisted.is_some() || stale.is_some()).then(|| Observed {
+                    left_out: unlisted,
+                    stale_build: stale,
+                    ..Observed::default()
+                });
+            }
+            Err(why) => {
+                return Observed::unread(&end.base.check, &why).map(|o| Observed {
+                    left_out: unlisted,
+                    stale_build: stale,
+                    ..o
+                });
+            }
         };
-        let mut observed = decide(end, &self.tests, read, &map, at, how);
+        let left_out = read.left_out.clone().or(unlisted);
+        let stale = read.stale_build.clone().or(stale);
+        // \[C-32\] Left out what nothing listed, in a start whose plan listed nothing (`observe`,
+        // or a plan that reused nothing): another start would be the same, and could fail one that
+        // passed. No unit is recorded, said once, and COMMAND's own exit stands.
+        let listed = self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| !plan.reuse.is_empty() || !plan.tests.listed().is_empty());
+        if let Some(why) = &left_out
+            && !listed
+            && !self.whole
+        {
+            return Observed::unread(
+                &end.base.check,
+                &format!("its adapter left out what nothing listed ({why})"),
+            );
+        }
+        let watches = facts::watches(&files);
+        // \[C-40\] Why the adapter watched no test, when it says.
+        let unwatched = files.iter().find_map(|f| {
+            f.settings
+                .get("watch")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+        let fetched = asker
+            .as_ref()
+            .map(|asker| asker.fetched.borrow().clone())
+            .unwrap_or_default();
+        let mode = Modes {
+            noun: self.adapter.test_file(),
+            unit: self.unit,
+            reads: self.reads,
+            watches: &watches,
+            unwatched,
+            shared: &fetched,
+            words: RunWords {
+                started: unfinished.clone(),
+                failed: read
+                    .not_kept
+                    .clone()
+                    .or_else(|| facts::run_not_kept(&files)),
+            },
+        };
+        // \[C-32\] What holds for the whole run, in each unit's facts, for the one function: a
+        // start that didn't say what it saw, a stale build, and what the start with nothing listed
+        // left out all the same.
+        let mut read = read;
+        for seen in read.seen.values_mut() {
+            seen.facts.unfinished_start = unfinished.is_some();
+            seen.facts.stale_build = stale.is_some();
+            seen.facts.left_out_again = left_out.is_some() && self.whole;
+        }
+        let by_unit = read.failures_by_unit;
+        let failed_words = mode.words.failed.clone();
+        let mut observed = decide(end, &self.tests, &mode, read, &map, at, how);
+        // \[C-32\] What holds for the whole run, said once: a start that didn't say what it saw,
+        // or, in a run that failed whose failures aren't told by unit, the adapter's words for why
+        // no pass of it is kept (Maven's cases no class owns, a facts file's `notKept`).
+        if let Some(why) = &unfinished {
+            observed.lines.push(format!(
+                "{}: no test file or test records a pass: {why}",
+                end.base.check
+            ));
+        } else if !end.command_passed
+            && !by_unit
+            && let Some(why) = failed_words.filter(|why| !why.is_empty())
+        {
+            observed.lines.push(format!("{}: {why}", end.base.check));
+        }
+        observed.left_out = left_out;
+        observed.stale_build = stale;
+        observed.ran_nothing = facts::ran_nothing(&files);
+        observed.leave_out_at_most = facts::leave_out_at_most(&files);
+        // \[C-32\] What an adapter's facts say people should know of this run, each said once.
+        let notes: BTreeSet<&str> = files
+            .iter()
+            .filter_map(|f| f.settings.get("note").and_then(|v| v.as_str()))
+            .collect();
+        for note in notes {
+            observed.lines.push(format!("{}: {note}", end.base.check));
+        }
         // \[ADR 0072\] In `observe`, what reuse would have done needs the map: say once why there
         // was none. A plan said it already.
         if let (Some(unread), Mode::Observe) = (&loaded.unread, end.mode) {
@@ -509,161 +1274,46 @@ impl Session {
         map: &store::Map,
         asker: Option<&Asker<'_>>,
     ) -> Result<Option<Read>, String> {
-        let ignore = &self.tests.ignore;
-        match &self.adapter {
-            Adapter::Pytest => {
-                let merged = facts::merged(files, "pytest");
-                if merged.is_empty() {
-                    return Ok(None);
-                }
-                let patterns = pytest::python_files(root, cwd);
-                let told = facts::setting(files, "pytest", "pythonFiles");
-                let readable = pytest::is_test_file(&patterns, "x.py").is_some();
-                let agrees = matches!(&told, Ok(Some(list)) if *list == patterns);
-                let guard = (!readable || !agrees).then(|| units::NotFollowed {
-                    why: "python-files".into(),
-                    detail: "pytest's python_files isn't what hushrun read of its configuration"
-                        .into(),
-                });
-                let failures_by_unit = merged.values().all(|m| m.failures_by_unit);
-                let seen: BTreeMap<String, Seen> = merged
-                    .into_iter()
-                    .map(|(unit, m)| {
-                        let mut not_followed = m.not_followed;
-                        not_followed.extend(guard.clone());
-                        let facts = Facts {
-                            complete: m.finished >= m.selected,
-                            failed: m.failed,
-                            not_followed,
-                            deselected: m.deselected,
-                        };
-                        let seen = Seen {
-                            facts,
-                            reads: m.reads,
-                            duration_ms: m.duration_ms,
-                        };
-                        (unit, seen)
-                    })
-                    .collect();
-                let is_unit =
-                    |path: &str| readable && pytest::is_test_file(&patterns, path) == Some(true);
-                let sets = units::classify(
-                    tree.paths(),
-                    &is_unit,
-                    Sources::Kinds(pytest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker, false, &sets, tree, ignore);
-                let planned = seen
-                    .keys()
-                    .filter_map(|unit| {
-                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen,
-                    failures_by_unit,
-                    sets,
-                    planned,
-                    edges: facts::edges_of(files, "pytest"),
-                    received: shared.received,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Cargo(recognized) => {
-                if !files.iter().any(|f| f.adapter == cargo::ADAPTER) {
-                    return Ok(None);
-                }
-                let observed = cargo::observe(recognized, files, root, cwd, command_passed)?;
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Named(&observed.named, cargo::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let planned = observed
-                    .units
-                    .iter()
-                    .map(|(unit, seen)| (unit.clone(), vec![built_list(&seen.reads)]))
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: true,
-                    sets,
-                    planned,
-                    executables: observed.executables,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Go(recognized) => {
-                if !files.iter().any(|f| f.adapter == gotest::ADAPTER) {
-                    return Ok(None);
-                }
-                let observed = gotest::observe(recognized, files, root, cwd, tree)?;
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Named(&observed.named, gotest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let unit_files = Some(observed.unit_files.clone());
-                let shared = fetch(asker, false, &sets, tree, ignore);
-                let planned = observed
-                    .compiled
-                    .iter()
-                    .filter_map(|(unit, compiled)| {
-                        let own = map.units.get(unit);
-                        let lists = shared::lists(unit, own, &shared, tree, Some(compiled))?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: true,
-                    sets,
-                    planned,
-                    own: observed.own,
-                    dirs: observed.dirs,
-                    edges: observed.edges,
-                    unit_files,
-                    received: shared.received,
-                    ..Read::default()
-                }))
-            }
-            Adapter::Vitest(_) => {
-                let Some(observed) = vitest::observe(files, root, tree)? else {
-                    return Ok(None);
-                };
-                let sets = units::classify(
-                    tree.paths(),
-                    &|path| observed.unit_files.contains(path),
-                    Sources::Kinds(vitest::SOURCE_KINDS),
-                    &self.tests.ignore,
-                );
-                let shared = fetch(asker, true, &sets, tree, ignore);
-                let planned = observed
-                    .units
-                    .keys()
-                    .filter_map(|unit| {
-                        let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None)?;
-                        Some((unit.clone(), lists))
-                    })
-                    .collect();
-                Ok(Some(Read {
-                    seen: observed.units,
-                    failures_by_unit: observed.failures_by_unit,
-                    sets,
-                    planned,
-                    dirs: observed.dirs,
-                    unit_files: Some(observed.unit_files),
-                    refused: observed.refused,
-                    edges: observed.edges,
-                    received: shared.received,
-                    ..Read::default()
-                }))
+        self.adapter.read(&ReadAt {
+            files,
+            root,
+            cwd,
+            tree,
+            command_passed,
+            map,
+            asker,
+            ignore: &self.tests.ignore,
+            assigned: &self.assigned,
+        })
+    }
+
+    /// \[C-32\] Sets up COMMAND's start once more, with nothing left out, after a start whose
+    /// adapter left out what the plan didn't list (RFC 0003 principle 5: every failure of the
+    /// machinery ends in "ran everything"): a directory of its own whose `hushrun.json` lists
+    /// nothing, the variables pointing at it, and no plan, so that the run goes by that start
+    /// alone. `Err` why it can't be set up.
+    pub fn whole_again(&mut self) -> Result<(), String> {
+        let dir = self.dir.join("whole");
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("can't make {}: {err}", dir.display()))?;
+        let unit_files = BTreeSet::new();
+        let listed = Listed {
+            extras: self.adapter.again(&self.root, &self.cwd, &unit_files),
+            unit: self.unit,
+            reads: self.reads,
+            ..Listed::default()
+        };
+        write_run_file(&dir, &self.root, &listed)
+            .map_err(|err| format!("can't write its plan: {err}"))?;
+        for (name, value) in &mut self.variables {
+            if name == runner::UNITS_VAR {
+                *value = dir.clone().into_os_string();
             }
         }
+        self.run_dir = dir;
+        self.plan = None;
+        self.whole = true;
+        Ok(())
     }
 
     /// \[C-34, ADR 0069\] The second run of the audit (RFC 0003 §3.7): COMMAND as written, again,
@@ -671,45 +1321,54 @@ impl Session {
     /// but `again`, so that only those run. `None` when it can't be set up, and then each of them
     /// counts as having failed again.
     pub fn again(&self, observed: &Observed, again: &BTreeSet<String>) -> Option<Again> {
-        let dir = self.dir.join("again");
+        let dir = self.run_dir.join("again");
         std::fs::create_dir_all(&dir).ok()?;
+        // \[C-39\] An audited test runs alone: every other test of its file is listed one by one,
+        // and its file isn't listed whole.
+        let mut reuse_tests: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in again {
+            if let Some((unit, id)) = observed.again_tests.get(name) {
+                let others = observed
+                    .tests
+                    .get(unit)
+                    .into_iter()
+                    .flat_map(BTreeMap::keys)
+                    .filter(|other| *other != id && !again.contains(&units::test_name(unit, other)))
+                    .cloned();
+                reuse_tests.entry(unit.clone()).or_default().extend(others);
+            }
+        }
         let others: Vec<String> = observed
             .units
             .keys()
-            .filter(|unit| !again.contains(*unit))
+            .filter(|unit| !again.contains(*unit) && !reuse_tests.contains_key(*unit))
             .cloned()
             .collect();
-        let (patterns, binaries) = match &self.adapter {
-            Adapter::Pytest => (
-                Some(pytest::python_files(&self.root, &observed.cwd)),
-                Vec::new(),
-            ),
-            Adapter::Cargo(_) => {
-                let mut binaries = Vec::new();
-                for unit in &others {
-                    let path = observed.executables.get(unit)?;
-                    let bytes = std::fs::read(path).ok()?;
-                    binaries.push(facts::Binary {
-                        unit: unit.clone(),
-                        path: path.clone(),
-                        sha256: Digest::of(&bytes).hex(),
-                    });
-                }
-                (None, binaries)
+        let extras = self
+            .adapter
+            .again(&self.root, &observed.cwd, &observed.unit_files);
+        let mut binaries = Vec::new();
+        if self.adapter.binds() {
+            for unit in &others {
+                let path = observed.executables.get(unit)?;
+                let bytes = std::fs::read(path).ok()?;
+                binaries.push(facts::Binary {
+                    unit: unit.clone(),
+                    path: path.clone(),
+                    sha256: Digest::of(&bytes).hex(),
+                });
             }
-            Adapter::Go(_) | Adapter::Vitest(_) => (None, Vec::new()),
+        }
+        let listed = Listed {
+            reuse: others,
+            extras,
+            binaries,
+            unit: self.unit,
+            reads: self.reads,
+            reuse_tests,
+            known: None,
         };
-        let listed: Option<Vec<String>> = matches!(self.adapter, Adapter::Vitest(_))
-            .then(|| observed.unit_files.iter().cloned().collect());
-        write_run_file(
-            &dir,
-            &self.root,
-            &others,
-            patterns.as_deref(),
-            &binaries,
-            listed.as_deref(),
-        )
-        .ok()?;
+        write_run_file(&dir, &self.root, &listed).ok()?;
         let mut variables = self.variables.clone();
         for (name, value) in &mut variables {
             if name == runner::UNITS_VAR {
@@ -725,6 +1384,7 @@ impl Session {
 
     /// \[C-34\] How each test file of `again` ended in its second run: `Passed`, or any other
     /// state, which counts as having failed again. `passed`: the second COMMAND exited 0.
+    /// \[C-39\] And each test of it, by name, from its own facts.
     pub fn again_ended(
         &self,
         again: &Again,
@@ -748,197 +1408,42 @@ impl Session {
         again
             .units
             .iter()
-            .map(|unit| {
+            .map(|name| {
                 let state = read
                     .as_ref()
                     .and_then(|read| {
-                        let seen = read.seen.get(unit)?;
-                        Some(units::state(
-                            &seen.facts,
-                            &RunFacts {
-                                command_passed: passed,
-                                failures_by_unit: read.failures_by_unit,
-                                planned: false,
-                            },
-                        ))
+                        let run = RunFacts {
+                            command_passed: passed,
+                            failures_by_unit: read.failures_by_unit,
+                            planned: false,
+                        };
+                        if let Some((unit, id)) = observed.again_tests.get(name) {
+                            let seen = read.seen.get(unit)?;
+                            let decided = tests_decided(seen.tests.as_ref()?, &seen.facts, |_| run);
+                            return decided.get(id).map(|(decision, _)| decision.state);
+                        }
+                        let seen = read.seen.get(name)?;
+                        Some(units::state(&seen.facts, &run))
                     })
                     .unwrap_or(State::NotRun);
-                (unit.clone(), state)
+                (name.clone(), state)
             })
             .collect()
     }
 }
 
-/// An adapter, as the store and a hint name it.
-fn adapter_word(adapter: &Adapter) -> db::AdapterWord {
-    match adapter {
-        Adapter::Pytest => db::AdapterWord::Pytest,
-        Adapter::Cargo(_) => db::AdapterWord::Cargo,
-        Adapter::Go(_) => db::AdapterWord::Go,
-        Adapter::Vitest(_) => db::AdapterWord::Vitest,
-    }
-}
-
-/// The one adapter a run of `command` in `cwd` gets (C-32, C-35): Cargo's for `cargo test` and
-/// `cargo nextest run`, Go's for `go test`, Vitest's for one run of Vitest, and pytest's for any
-/// other COMMAND; `Err` says why the one it would get can't load safely. The run, `hushrun ready`
-/// and `hushrun why` all ask it.
-fn choose(command: &[String], cwd: &Path) -> Result<Adapter, String> {
-    if let Some(recognized) = cargo::recognize(command) {
-        return Ok(Adapter::Cargo(recognized));
-    }
-    if let Some(recognized) = gotest::recognize(command) {
-        return recognized.map(Adapter::Go);
-    }
-    if let Some(recognized) = vitest::recognize(command) {
-        let recognized = recognized?;
-        if let Some(why) = vitest::unloadable(&recognized, cwd) {
-            return Err(why);
-        }
-        return Ok(Adapter::Vitest(recognized));
-    }
-    match pytest::unsafe_for(command) {
-        Some(why) => Err(why.into()),
-        None => Ok(Adapter::Pytest),
-    }
-}
-
-/// What an observed adapter's plan reads from files alone, before any key.
-struct ObservedPlan {
-    sets: units::Sets,
-    known: Known,
-    /// pytest's unit rule as hushrun read it.
-    python_files: Option<Vec<String>>,
-    /// \[ADR 0071\] Vitest's test files as the map, or a hint, lists them.
-    listed: Option<Vec<String>>,
-    /// \[C-38\] The hints read.
-    shared: Shared,
-}
-
-/// \[C-22, C-34\] The test files an observed adapter's plan knows of, and the lists of files each
-/// might be keyed by, from the scope's files, the check's map and \[C-38\] the hints `asker`
-/// fetches: no tool starts. The plan and `hushrun ready` both read it. `Err` says why nothing can
-/// be reused; \[ADR 0074\] `None` that there is nothing to say: pytest, the adapter of any COMMAND
-/// hushrun doesn't recognize, never reported for this check, here or on a machine whose hint
-/// this one read ([`speaks_of_test_files`]).
-fn observed_plan(
-    adapter: &Adapter,
-    tree: &Tree,
-    root: &Path,
-    cwd: &Path,
-    map: &store::Map,
-    asker: Option<&Asker<'_>>,
-    ignore: &[hushrun_core::glob::Pattern],
-) -> Result<Option<ObservedPlan>, String> {
-    match adapter {
-        Adapter::Pytest => {
-            let found = pytest::python_files(root, cwd);
-            if pytest::is_test_file(&found, "x.py").is_none() {
-                if !speaks_of_test_files(adapter, map, &Shared::default()) {
-                    return Ok(None);
-                }
-                return Err(
-                    "pytest's python_files names a directory, which this version doesn't read"
-                        .into(),
-                );
-            }
-            let sets = units::classify(
-                tree.paths(),
-                &|path| pytest::is_test_file(&found, path) == Some(true),
-                Sources::Kinds(pytest::SOURCE_KINDS),
-                ignore,
-            );
-            let shared = fetch(asker, false, &sets, tree, ignore);
-            if !speaks_of_test_files(adapter, map, &shared) {
-                return Ok(None);
-            }
-            let known = sets
-                .files(Set::Units)
-                .map(|unit| {
-                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
-                    (unit.to_string(), lists)
-                })
-                .collect();
-            Ok(Some(ObservedPlan {
-                sets,
-                known,
-                python_files: Some(found),
-                listed: None,
-                shared,
-            }))
-        }
-        Adapter::Vitest(recognized) => {
-            if recognized.coverage {
-                return Err(
-                    "Vitest's coverage is on, and a partial run's coverage would read as a drop"
-                        .into(),
-                );
-            }
-            let shared = fetch(asker, true, &units::Sets::default(), tree, ignore);
-            let mut listed: BTreeSet<String> = map
-                .unit_files
-                .iter()
-                .filter(|f| tree.contains(f))
-                .cloned()
-                .collect();
-            if listed.is_empty() {
-                listed = shared.unit_files();
-            }
-            if listed.is_empty() {
-                return Err("no run here has listed Vitest's test files yet".into());
-            }
-            let sets = units::classify(
-                tree.paths(),
-                &|path| listed.contains(path),
-                Sources::Kinds(vitest::SOURCE_KINDS),
-                ignore,
-            );
-            let known = sets
-                .files(Set::Units)
-                .map(|unit| {
-                    let lists = shared::lists(unit, map.units.get(unit), &shared, tree, None);
-                    (unit.to_string(), lists)
-                })
-                .collect();
-            Ok(Some(ObservedPlan {
-                sets,
-                known,
-                python_files: None,
-                listed: Some(listed.into_iter().collect()),
-                shared,
-            }))
-        }
-        Adapter::Cargo(_) | Adapter::Go(_) => {
-            Err("its test files are known from a build, which this doesn't make".into())
-        }
-    }
-}
-
-/// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (for Vitest, every file of
-/// a source kind), read against `tree`; none without one.
+/// \[C-38\] The hints `asker` fetches for the check's sources in `sets` (or every file of the
+/// adapter's kinds, Vitest's), read against `tree`; none without one.
 fn fetch(
     asker: Option<&Asker<'_>>,
-    vitest: bool,
+    hints: Hints,
     sets: &units::Sets,
     tree: &Tree,
     ignore: &[hushrun_core::glob::Pattern],
 ) -> Shared {
     asker.map_or_else(Shared::default, |asker| {
-        asker.fetch(&shared::sources(vitest, sets, tree, ignore), tree)
+        asker.fetch(&shared::sources(hints, sets, tree, ignore), tree)
     })
-}
-
-/// \[ADR 0074\] Whether a plan, and `hushrun ready`, say anything of a check's test files before
-/// it runs: always for an adapter its COMMAND was recognized for, and for pytest, which any other
-/// COMMAND gets, only once pytest reported this check's test files here, as its map says, or
-/// \[C-38\] on another machine, as a hint read says. A check that runs `npm test` or `make test`
-/// never started pytest, and its Python-looking files are no test files of it. The one rule both
-/// read.
-fn speaks_of_test_files(adapter: &Adapter, map: &store::Map, shared: &Shared) -> bool {
-    match adapter {
-        Adapter::Pytest => map.reported() || shared.names_any(),
-        Adapter::Cargo(_) | Adapter::Go(_) | Adapter::Vitest(_) => true,
-    }
 }
 
 /// \[C-22\] What `hushrun ready` needs to say how many test files a run would run.
@@ -965,6 +1470,12 @@ pub enum Previewed {
         run: usize,
         reused: usize,
         audited: usize,
+        /// \[C-39\] With tests as the unit, what the plan would reuse counted with them.
+        tests: Option<TestsCounted>,
+        /// \[C-39\] The adapter's word for its test files ([`Adapter::test_file`]).
+        noun: &'static str,
+        /// \[C-34\] Why every one runs, when none would be reused, as a run's line says it.
+        why: Option<String>,
     },
     /// The check's reuse is suspended: why, as a run says it.
     Suspended(String),
@@ -975,31 +1486,30 @@ pub enum Previewed {
 /// build (Cargo, Go), when no adapter would load, or when the lookup fails. It writes nothing,
 /// and sends nothing but the lookup.
 pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
-    let adapter = choose(p.command, p.cwd).ok()?;
     let cache = crate::context::cache_dir()?;
     let check_id = store::check_id(&p.base, p.repository);
+    let stored = db::adapter_of(&db::path(&cache, p.repository), &check_id);
+    let adapter = adapter::choose_kept(p.command, p.cwd, stored.as_deref()).ok()?;
     let loaded = db::load(&db::path(&cache, p.repository), &check_id);
     if loaded.unread.is_some() {
         return None;
     }
     let map = loaded.map;
     let systems = shared::systems(&p.base);
-    let asker = (!systems.is_empty()).then(|| Asker {
-        store: p.store,
-        check_id,
-        systems,
-        adapter: adapter_word(&adapter).word(),
-    });
-    let found = observed_plan(
-        &adapter,
-        p.tree,
-        p.root,
-        p.cwd,
-        &map,
-        asker.as_ref(),
-        &p.tests.ignore,
-    )
-    .ok()??;
+    let asker =
+        (!systems.is_empty()).then(|| Asker::new(p.store, check_id, systems, adapter.word()));
+    let found = adapter
+        .plan_from_files(&PlanAt {
+            tree: p.tree,
+            root: p.root,
+            cwd: p.cwd,
+            map: &map,
+            asker: asker.as_ref(),
+            ignore: &p.tests.ignore,
+            compile_env: &[],
+            assigned: &command::assignments(p.command),
+        })
+        .ok()??;
     let total = found.known.len();
     if total == 0 || total > MOST_UNITS {
         return None;
@@ -1013,26 +1523,155 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
             &lookup.reuse,
         )));
     }
-    let passed = keyed
-        .values()
-        .filter(|lists| {
-            let keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
-            matches!(shared::choose(&keys, &lookup.found), Choice::Passed(..))
+    let (unit, reads, _) = what_it_reuses(p.tests, adapter.as_ref());
+    let mut passed: BTreeMap<String, Found> = BTreeMap::new();
+    let mut keys: BTreeMap<String, Digest> = BTreeMap::new();
+    for (test_file, lists) in &keyed {
+        let lists_keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
+        if whole_reusable(&map, test_file)
+            && let Choice::Passed(_, key) = shared::choose(&lists_keys, &lookup.found)
+            && let Some(found) = lookup.found.get(&key)
+        {
+            passed.insert(test_file.clone(), found.clone());
+            keys.insert(test_file.clone(), key);
+        }
+    }
+    let audited = units::audit_share(passed.len());
+    let reused = passed.len() - audited;
+    // \[C-39, C-22\] With tests as the unit, the second tier as a run's plan makes it, counted
+    // as its line counts it. Which test files and tests an audit runs depends on the run's start:
+    // this one's is now.
+    let tests = (unit == Unit::Test)
+        .then(|| {
+            let started = Time::from_timestamp(jiff::Timestamp::now()).to_string();
+            let fetched = asker
+                .as_ref()
+                .map(|asker| asker.fetched.borrow().clone())
+                .unwrap_or_default();
+            let tested = plan_tests(&TestsAt {
+                keyer: &keyer,
+                reads,
+                tree: p.tree,
+                keyed: &keyed,
+                map: &map,
+                shared: &fetched,
+                passed: &passed,
+                keys: &keys,
+                store: p.store,
+                counts: p.counts,
+                started: &started,
+            })
+            .ok()?;
+            // \[C-34\] As a run's plan: a test file one of whose tests is audited isn't reused
+            // whole.
+            let partly = tested.audited_whole();
+            let untold = untold_audited(&passed, &keys, &tested, &started);
+            let reuse: BTreeSet<String> = passed
+                .keys()
+                .filter(|unit| !partly.contains(*unit) && !untold.contains(*unit))
+                .cloned()
+                .collect();
+            Some(tests_counted(
+                found.known.iter().map(|(unit, _)| unit),
+                &reuse,
+                &tested,
+            ))
         })
-        .count();
-    let audited = units::audit_share(passed);
-    let reused = passed - audited;
+        .flatten();
+    let why = (passed.is_empty()).then(|| {
+        why_every(
+            &map,
+            p.tree,
+            &found.sets,
+            found.known.iter().map(|(unit, _)| unit),
+            adapter.test_file(),
+            None,
+        )
+    });
     Some(Previewed::Plan {
         total,
         run: total - reused,
         reused,
         audited,
+        tests,
+        noun: adapter.test_file(),
+        why,
     })
 }
 
-/// The test files a plan knows of, each with the lists of files it might be keyed by (C-38), as
-/// far as it can tell: `None` when it can't, and it runs.
-type Known = Vec<(String, Option<Vec<List>>)>;
+/// \[C-22\] `hushrun ready`'s line for a check whose plan `previewed` says, after `label`: what CI
+/// would run, or with results here (`here`) what a run here would, counted as a run's line counts
+/// (C-39), each adapter's units in its own word.
+pub fn previewed_line(previewed: &Previewed, label: &str, here: bool) -> String {
+    let who = if here { "a run here would" } else { "CI would" };
+    let passed = if here { "passed here" } else { "passed" };
+    let n = |n: usize| usage::thousands(n as u64);
+    match previewed {
+        Previewed::Suspended(why) => format!("{label}: every test file runs: {why}"),
+        Previewed::Plan {
+            total,
+            tests: Some(counted),
+            noun,
+            ..
+        } if counted.one_by_one > 0 || counted.tests.is_some_and(|(_, r)| r > 0) => {
+            // \[C-39\] With tests as the unit: tests, where every test file's are known here.
+            match counted.tests {
+                Some((all, reused_tests)) => {
+                    let they = if reused_tests == 1 { "it" } else { "they" };
+                    format!(
+                        "{label}: {who} run {} of {}, in {} of {}; {} already {passed} on the files {they} read",
+                        n(all - reused_tests),
+                        count_tests(all as u64),
+                        n(counted.files_run),
+                        test_files_grouped(counted.files_total as u64, noun),
+                        n(reused_tests),
+                    )
+                }
+                None => {
+                    let they = if counted.files_reused == 1 {
+                        "it"
+                    } else {
+                        "they"
+                    };
+                    format!(
+                        "{label}: {who} run {} of {}; {} already {passed} on the files {they} read, and so did {} of the others",
+                        n(counted.files_run),
+                        test_files_grouped(*total as u64, noun),
+                        n(counted.files_reused),
+                        count_tests(counted.one_by_one as u64),
+                    )
+                }
+            }
+        }
+        Previewed::Plan {
+            total,
+            run,
+            reused,
+            noun,
+            why,
+            ..
+        } => {
+            if *reused == 0 {
+                let all = format!(
+                    "{label}: {who} run all {}",
+                    test_files_grouped(*total as u64, noun)
+                );
+                match why {
+                    Some(why) => format!("{all}: {why}"),
+                    None => all,
+                }
+            } else {
+                let they = if *reused == 1 { "it" } else { "they" };
+                format!(
+                    "{label}: {who} run {} of {}; {} already {passed} on the files {they} read",
+                    n(*run),
+                    test_files_grouped(*total as u64, noun),
+                    n(*reused),
+                )
+            }
+        }
+    }
+}
 
 /// Each test file's lists with the key of each for the files on disk now (C-31): those
 /// `tests.always` names and those no list is known for left out.
@@ -1069,53 +1708,38 @@ fn built_list(reads: &BTreeSet<String>) -> List {
     }
 }
 
-/// What an adapter's files came to, before any state is decided.
+/// What `hushrun.json` lists for adapters (C-32).
 #[derive(Debug, Default)]
-struct Read {
-    /// Each unit, as seen, merged over its processes.
-    seen: BTreeMap<String, Seen>,
-    /// The adapter reports each failure by unit.
-    failures_by_unit: bool,
-    /// The four sets (C-30), by the adapter's rule for this run.
-    sets: units::Sets,
-    /// For each unit a plan of this run would have keyed, the lists it would have keyed it by
-    /// (C-38): what `observe` says reuse would have done. A unit not here would have run.
-    planned: BTreeMap<String, Vec<List>>,
-    /// \[ADR 0069\] Each test binary's executable, by its unit.
-    executables: BTreeMap<String, PathBuf>,
-    /// \[ADR 0070\] The files each unit is made of, when they aren't its own path: a Go package's
-    /// test files. All must be in the scope.
-    own: BTreeMap<String, Vec<String>>,
-    /// \[ADR 0070\] The directories each unit listed, which the map keeps for the plan.
-    dirs: BTreeMap<String, BTreeSet<String>>,
-    /// \[ADR 0071\] The test files the runner listed, which the map keeps as the unit rule; \[C-38\]
-    /// for Go, `go list`'s, which `hushrun why` reads on a machine whose map lacks a package.
-    unit_files: Option<BTreeSet<String>>,
-    /// \[ADR 0071\] Why the adapter deselected nothing the plan listed.
-    refused: Option<String>,
-    /// \[ADR 0072\] The direct edges the adapter saw, for `hushrun why`.
-    edges: BTreeSet<db::Edge>,
-    /// \[C-38\] The hints read for `planned`.
-    received: Vec<db::HintKnown>,
+struct Listed {
+    /// Units an adapter may deselect whole.
+    reuse: Vec<String>,
+    /// What the adapter checks before it deselects any.
+    extras: RunExtras,
+    /// \[ADR 0069\] The reused test binaries.
+    binaries: Vec<facts::Binary>,
+    /// \[ADR 0080\] What the run reuses one by one, and what a test is taken to have read.
+    unit: Unit,
+    reads: Reads,
+    /// \[ADR 0080\] Tests an adapter may deselect one by one, by unit, each by its id.
+    reuse_tests: BTreeMap<String, Vec<String>>,
+    /// \[C-46\] The test files the check's store knows, when the run says.
+    known: Option<Vec<String>>,
 }
 
-/// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root, what adapters may
-/// deselect, pytest's unit rule as hushrun read it, and the reused binaries.
-fn write_run_file(
-    dir: &Path,
-    root: &Path,
-    reuse: &[String],
-    python_files: Option<&[String]>,
-    binaries: &[facts::Binary],
-    test_files: Option<&[String]>,
-) -> std::io::Result<()> {
+/// \[ADR 0069\] Writes `hushrun.json` in `dir` whole: the repository's root and what `listed`
+/// says.
+fn write_run_file(dir: &Path, root: &Path, listed: &Listed) -> std::io::Result<()> {
     let run = facts::RunFile {
         schema: facts::RUN_SCHEMA.into(),
         root: root.to_path_buf(),
-        reuse: reuse.to_vec(),
-        python_files: python_files.map(<[String]>::to_vec),
-        binaries: binaries.to_vec(),
-        test_files: test_files.map(<[String]>::to_vec),
+        reuse: listed.reuse.clone(),
+        python_files: listed.extras.python_files.clone(),
+        binaries: listed.binaries.clone(),
+        test_files: listed.extras.test_files.clone(),
+        unit: Some(listed.unit.word().to_string()),
+        reads: Some(listed.reads.word().to_string()),
+        reuse_tests: listed.reuse_tests.clone(),
+        known: listed.known.clone(),
     };
     let bytes = serde_json::to_vec(&run).map_err(std::io::Error::other)?;
     facts::write_whole(&dir.join(facts::RUN_FILE), &bytes)
@@ -1179,6 +1803,7 @@ pub struct Finish<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counts {
+    /// Test files, as before: \[ADR 0080\] one is reused when none of its tests ran.
     pub total: u64,
     pub ran: u64,
     pub reused: u64,
@@ -1189,6 +1814,18 @@ pub struct Counts {
     /// saved. Never in `observe`, which saved nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_ms: Option<u64>,
+    /// \[ADR 0080\] In a run with `tests.unit: test` whose adapter told its tests, the same three
+    /// numbers for tests (C-10, C-39).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<TestCounts>,
+}
+
+/// \[ADR 0080\] `units.tests`: a run's tests, how many it had, ran and reused (C-10).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TestCounts {
+    pub total: u64,
+    pub ran: u64,
+    pub reused: u64,
 }
 
 /// How [`decide`] reads a run: as `observe` does, with what the plan would have done; with the
@@ -1202,10 +1839,19 @@ enum How<'a> {
 /// What a run observed, decided.
 #[derive(Debug, Default)]
 pub struct Observed {
+    /// \[C-39\] The adapter's word for its test files (`test program`), for the run's last line;
+    /// empty for a run whose units weren't read.
+    pub noun: &'static str,
     /// Each unit's state, and the key it records under, when it records.
     pub units: BTreeMap<String, (State, Option<Digest>)>,
     /// The units the plan would have reused.
     pub would_reuse: BTreeSet<String>,
+    /// \[C-39\] The tests the plan would have reused one by one, by name.
+    pub would_reuse_tests: BTreeSet<String>,
+    /// \[C-39\] Each unit's tests and their states, when its adapter told them.
+    pub tests: BTreeMap<String, BTreeMap<String, State>>,
+    /// \[C-39\] Of `again`, the tests, each by name with its unit and id.
+    again_tests: BTreeMap<String, (String, String)>,
     /// `None` when no unit could be read at all.
     pub counts: Option<Counts>,
     /// What the run says, each a line after `hushrun: `.
@@ -1232,6 +1878,26 @@ pub struct Observed {
     /// \[C-38\] What this run's hint says of each test file reused on what its build is made of
     /// alone, which no row of the store holds.
     built: BTreeMap<String, hushrun_core::hints::Unit>,
+    /// \[C-32\] The adapter left out what the plan didn't list, and why: this start decides
+    /// nothing, and COMMAND starts once more with nothing left out.
+    pub left_out: Option<String>,
+    /// \[C-32\] The runner ran on a stale build, and why: a run that passed records nothing.
+    pub stale_build: Option<String>,
+    /// \[C-32\] The runner executed no test (`settings.ranNothing`), with its adapter's note: the
+    /// store keeps it with the check, and the next plan's line goes by it.
+    ran_nothing: Option<String>,
+    /// \[C-46\] What each JUnit 4 task of the run leaves out at most; `None` when no task told.
+    leave_out_at_most: Option<Vec<store::LeaveOutAtMost>>,
+    /// \[C-32\] pytest's adapter was kept by the store's word and reported nothing in a run that
+    /// passed: counted, and the second such run in a row forgets the check, word and map.
+    silent: bool,
+    /// \[C-39\] Whether tests were decided one by one in this run, and \[C-40\] what each was
+    /// taken to have read: what its hint holds of them (C-41).
+    by_test: bool,
+    reads: Reads,
+    /// \[C-41\] The test files that ran whole but for tests reused one by one: their hint is
+    /// this machine's to send, as a test file that ran is.
+    partly: BTreeSet<String>,
 }
 
 impl Observed {
@@ -1257,10 +1923,16 @@ impl Observed {
     /// (ADR 0072): the map, the edges and the audit's disagreements. Only when the files didn't
     /// change while COMMAND ran, which the caller checked. A store that can't be written costs the
     /// next run its reuse, and nothing else.
-    pub fn keep(&self, run_key: &Digest, tree: &Tree, now: Time) {
+    pub fn keep(&self, run_key: &Digest, tree: &Tree, now: Time, duration_ms: u64) {
         let Some(at) = &self.store else {
             return;
         };
+        if self.silent {
+            if let Err(err) = db::note_silent(&at.path, &at.check_id) {
+                tracing::debug!("the check's silent run wasn't noted: {}", err.why());
+            }
+            return;
+        }
         let found: Vec<Disagreement> = self
             .disagreements
             .iter()
@@ -1271,6 +1943,12 @@ impl Observed {
                 at: now,
             })
             .collect();
+        // \[C-37\] Every unit the run's adapter told, whatever became of it.
+        let known: BTreeSet<String> = self.units.keys().cloned().collect();
+        // \[C-33\] A run that reused nothing took what reuse can save at most.
+        let reused_nothing = self.counts.as_ref().is_none_or(|counts| {
+            counts.reused == 0 && counts.tests.as_ref().is_none_or(|tests| tests.reused == 0)
+        });
         let write = db::Write {
             check_id: at.check_id,
             base: &at.base,
@@ -1280,6 +1958,11 @@ impl Observed {
             rest: &self.rest,
             sources: &self.sources,
             unit_files: (!self.unit_files.is_empty()).then_some(&self.unit_files),
+            known: &known,
+            // A run that executed no test took nothing of the tests' time.
+            whole_ms: (reused_nothing && self.ran_nothing.is_none()).then_some(duration_ms),
+            ran_nothing: self.ran_nothing.as_deref(),
+            leave_out_at_most: self.leave_out_at_most.as_deref(),
             edges: &self.edges,
             disagreements: &found,
             hints: &self.received,
@@ -1291,12 +1974,14 @@ impl Observed {
     }
 
     /// \[C-38\] Sends what this machine's store now says this run's test files read, as a hint
-    /// under this machine's system: every test file it executed and fully observed, and every one
-    /// it reused, with the list whose key hit. After [`Observed::keep`], for a run recorded on a
+    /// under this machine's system: every test file it executed and fully observed, \[C-41\] or ran
+    /// but for tests reused one by one, and every one it reused, with the list whose key hit; and
+    /// their tests (`hint_tests`). After [`Observed::keep`], for a run recorded on a
     /// server that keeps test files' results. One `PUT`, and none when this machine already sent
     /// or received a hint with its content id for the address and system. A `PUT` that fails
     /// leaves no note, so the next run of the check sends it again; it is said for debug only, as
-    /// the store's errors are. `Some` line to say once when the hint is too large to send.
+    /// the store's errors are. `Some` line to say once when the hint is too large to send, or
+    /// \[C-41\] went without tests' lists or tests to fit.
     pub fn share(&self, results: &dyn UnitResults, now: Time) -> Option<String> {
         let (Some(at), Some(place), Some(os)) =
             (&self.store, &self.share, hushrun_core::hints::Os::this())
@@ -1312,7 +1997,9 @@ impl Observed {
         let units: BTreeMap<String, hushrun_core::hints::Unit> = self
             .units
             .iter()
-            .filter(|(_, (state, _))| state.recorded().is_some() || *state == State::Reused)
+            .filter(|(unit, (state, _))| {
+                state.recorded().is_some() || *state == State::Reused || self.partly.contains(*unit)
+            })
             .filter_map(|(unit, _)| {
                 let Some(mapped) = map.units.get(unit) else {
                     return Some((unit.clone(), self.built.get(unit)?.clone()));
@@ -1334,18 +2021,34 @@ impl Observed {
         if units.is_empty() {
             return None;
         }
-        // \[ADR 0071\] Only Vitest's list of test files is its runner's own.
-        let unit_files = match at.adapter {
-            db::AdapterWord::Vitest => map.unit_files,
-            _ => BTreeSet::new(),
+        // \[ADR 0071\] Only an adapter whose hints go by its kinds (Vitest) has a list of test
+        // files that is its runner's own.
+        let unit_files = match at.hints {
+            Hints::Kinds(_) => map.unit_files.clone(),
+            Hints::None | Hints::Sources => BTreeSet::new(),
         };
+        let tests = self.hint_tests(&map, &units);
         let hint = hushrun_core::hints::Hint {
-            adapter: at.adapter.word().to_string(),
+            tests,
+            adapter: at.adapter.to_string(),
             units,
             unit_files,
         };
-        let written = match hushrun_core::hints::write(&hint, &place.key) {
-            Ok(written) => written,
+        let check = &at.base.check;
+        let (written, said) = match hushrun_core::hints::write_fitting(&hint, &place.key) {
+            Ok((written, hushrun_core::hints::Trimmed::Nothing)) => (written, None),
+            Ok((written, hushrun_core::hints::Trimmed::Lists)) => (
+                written,
+                Some(format!(
+                    "{check}: what each of its tests read wasn't shared with other machines: it is too large, so they take each test to have read what its test file read"
+                )),
+            ),
+            Ok((written, hushrun_core::hints::Trimmed::Tests)) => (
+                written,
+                Some(format!(
+                    "{check}: its tests weren't shared with other machines: there are too many, so they reuse them by test file"
+                )),
+            ),
             Err(hushrun_core::hints::Unwritable::TooLarge { what, size, most }) => {
                 let what = match what {
                     "unit files" => "test files listed",
@@ -1371,7 +2074,7 @@ impl Observed {
             os,
             &written.content_id,
         ) {
-            return None;
+            return said;
         }
         let to = store::HintPlace {
             check_id: at.check_id,
@@ -1392,15 +2095,160 @@ impl Observed {
             }
             Err(why) => tracing::debug!("the hint wasn't sent: {why}"),
         }
-        None
+        said
+    }
+
+    /// \[C-41, ADR 0082\] The tests this run's hint holds of the test files it sends (`units`),
+    /// from this machine's store (`map`), each that has a key: one it saw pass or fail, never one
+    /// not followed or not run. With `reads: test`, each with its own list, or `None` when it read
+    /// its test file's. With `reads: file`, ids alone, and only of test files that didn't pass
+    /// whole: one that did records no test's key. None when tests weren't decided one by one.
+    fn hint_tests(
+        &self,
+        map: &store::Map,
+        units: &BTreeMap<String, hushrun_core::hints::Unit>,
+    ) -> BTreeMap<String, BTreeMap<String, Option<hushrun_core::hints::Unit>>> {
+        if !self.by_test {
+            return BTreeMap::new();
+        }
+        units
+            .keys()
+            .filter_map(|unit| {
+                let mapped = map.units.get(unit)?;
+                let whole = self
+                    .units
+                    .get(unit)
+                    .is_some_and(|(state, _)| matches!(state, State::Passed | State::Reused));
+                if self.reads == Reads::File && whole {
+                    return None;
+                }
+                let tests: BTreeMap<String, Option<hushrun_core::hints::Unit>> = mapped
+                    .tests
+                    .iter()
+                    .filter(|(_, row)| matches!(row.state, State::Passed | State::Failed))
+                    .map(|(id, row)| {
+                        let list = match self.reads {
+                            Reads::Test => {
+                                row.list.as_ref().map(|list| hushrun_core::hints::Unit {
+                                    reads: list.reads.keys().cloned().collect(),
+                                    dirs: list.dirs.clone(),
+                                })
+                            }
+                            Reads::File => None,
+                        };
+                        (id.clone(), list)
+                    })
+                    .collect();
+                (!tests.is_empty()).then(|| (unit.clone(), tests))
+            })
+            .collect()
     }
 }
 
-/// One test file, or several, for people.
-fn test_files(n: u64) -> String {
+/// One test file, or several, for people, in the adapter's word (`noun`, C-39): `1 test program`,
+/// `22 test programs`, `3 test classes`.
+fn test_files(n: u64, noun: &str) -> String {
     match n {
-        1 => "1 test file".into(),
-        n => format!("{n} test files"),
+        1 => format!("1 {noun}"),
+        n => format!("{n} {}", plural(noun)),
+    }
+}
+
+/// \[C-39\] An adapter's word for its test files, made plural: `test binaries`, `test classes`,
+/// `packages`.
+pub fn plural(noun: &str) -> String {
+    if let Some(stem) = noun.strip_suffix('y') {
+        format!("{stem}ies")
+    } else if noun.ends_with('s') {
+        format!("{noun}es")
+    } else {
+        format!("{noun}s")
+    }
+}
+
+/// \[C-39\] Whether a test file may be reused whole, beside what its key says: not when one of its
+/// tests wasn't followed the last time it ran here, since its own pass may stand on a run before
+/// that; with tests as the unit its other tests may still be reused one by one. For either unit:
+/// a check switched from `unit: test` back to `unit: file` keeps the guard its test's row holds.
+/// The plan, what `observe` says, `hushrun ready` and `hushrun why` all ask it.
+fn whole_reusable(map: &store::Map, test_file: &str) -> bool {
+    !map.units
+        .get(test_file)
+        .is_some_and(|m| m.tests.values().any(|t| t.state == State::NotObserved))
+}
+
+/// \[C-39\] One test file, or `2,140 test files`, for the lines that count tests, in the adapter's
+/// word (`noun`).
+fn test_files_grouped(n: u64, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        n => format!("{} {}", usage::thousands(n), plural(noun)),
+    }
+}
+
+/// \[C-33, C-39\] What reuse saved, from the recorded durations of what it reused (`saved_ms`):
+/// never more than `whole_ms`, the longest this check took here when it reused nothing, since a
+/// runner with workers counts each test's own time and a person waits for the whole. `None`
+/// when no such run is kept here: then the count is said without a time.
+fn saving(saved_ms: u64, whole_ms: Option<u64>) -> Option<u64> {
+    whole_ms.map(|whole| saved_ms.min(whole))
+}
+
+/// \[C-34\] The audit's clause where a line counts test files with the tests reused one by one
+/// beside them: its `files` (run whole, their tests unknown here) and its `tests`, each in its
+/// word: `, and 1 more test that already passed runs anyway, as a check`, `, and 1 more test file
+/// and 2 more tests that already passed run anyway, as a check`.
+fn checked_apart(files: usize, tests: usize, noun: &str) -> String {
+    let files_said = match files {
+        1 => format!("1 more {noun}"),
+        n => format!("{} more {}", usage::thousands(n as u64), plural(noun)),
+    };
+    let tests_said = match tests {
+        1 => "1 more test".to_string(),
+        n => format!("{} more tests", usage::thousands(n as u64)),
+    };
+    let what = match (files, tests) {
+        (0, 0) => return String::new(),
+        (0, _) => tests_said,
+        (_, 0) => files_said,
+        _ => format!("{files_said} and {tests_said}"),
+    };
+    let verb = if files + tests == 1 { "runs" } else { "run" };
+    format!(", and {what} that already passed {verb} anyway, as a check")
+}
+
+/// \[C-34\] The clause a plan's line ends with when an audit runs `n` of what already passed,
+/// beside those reused: `, and 1 more that already passed runs anyway, as a check`; nothing for 0.
+fn checked_too(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => ", and 1 more that already passed runs anyway, as a check".into(),
+        n => format!(
+            ", and {} more that already passed run anyway, as a check",
+            usage::thousands(n as u64)
+        ),
+    }
+}
+
+/// \[C-34\] What a plan's line says after `all <N> run; ` when nothing is reused and an audit
+/// runs `n` that already passed: `1 that already passed on the files it read runs anyway, as a
+/// check`.
+fn checked_only(n: usize) -> String {
+    if n == 1 {
+        "1 that already passed on the files it read runs anyway, as a check".into()
+    } else {
+        format!(
+            "{} that already passed on the files they read run anyway, as a check",
+            usage::thousands(n as u64)
+        )
+    }
+}
+
+/// \[C-39\] One test, or `2,140 tests`.
+fn count_tests(n: u64) -> String {
+    match n {
+        1 => "1 test".into(),
+        n => format!("{} tests", usage::thousands(n)),
     }
 }
 
@@ -1453,6 +2301,21 @@ impl<'a> Keyer<'a> {
         )
         .ok()
     }
+
+    /// \[C-39\] A test's key, its id `test` in `unit`, from the files it read (`reads: file`: its
+    /// test file's).
+    fn test_key(&self, unit: &str, test: &str, reads: &BTreeSet<String>) -> Option<Digest> {
+        let keyed = self.sets.keyed(reads.iter().map(String::as_str));
+        units::test_key(
+            self.base,
+            unit,
+            test,
+            &self.tree.digest(keyed),
+            &self.rest,
+            &self.shape,
+        )
+        .ok()
+    }
 }
 
 /// The rest set's files, each with its kind and content hash as a manifest writes them.
@@ -1472,12 +2335,31 @@ struct StoreAt {
     path: PathBuf,
     check_id: Digest,
     base: KeyBase,
-    adapter: db::AdapterWord,
+    adapter: &'static str,
+    hints: Hints,
+}
+
+/// \[C-39, C-40\] What a run reuses one by one, what a test is taken to have read, and what the
+/// adapter's files say of what tests read beyond each test.
+struct Modes<'a> {
+    unit: Unit,
+    reads: Reads,
+    watches: &'a facts::Watches,
+    /// Why the adapter watched no test, as it said.
+    unwatched: Option<String>,
+    /// \[C-41\] The hints the adapter read, with the tests they hold: what `observe` would have
+    /// keyed them by.
+    shared: &'a Shared,
+    /// \[C-37\] What the run's adapters said of why no pass of it is kept.
+    words: RunWords,
+    /// \[C-39\] The adapter's word for its test files, for the run's lines.
+    noun: &'static str,
 }
 
 fn decide(
     end: &Finish<'_>,
     tests: &Tests,
+    mode: &Modes<'_>,
     read: Read,
     map: &store::Map,
     at: StoreAt,
@@ -1495,27 +2377,62 @@ fn decide(
         refused,
         edges,
         received,
+        left_out: _,
+        stale_build: _,
+        not_kept: _,
     } = read;
+    let mut seen = seen;
+    // \[C-39, C-10\] A test file reused whole whose adapter told none of its tests (it left the
+    // file out before any test was named): its tests as this machine's store, else a hint, knows
+    // them, each left out, so that `units.tests` counts them as reused. Known nowhere, no count
+    // of tests is sent, rather than one that leaves them out.
+    let mut tests_unknown = false;
+    if mode.unit == Unit::Test {
+        for (unit, s) in &mut seen {
+            if !s.facts.deselected || s.tests.as_ref().is_some_and(|t| !t.is_empty()) {
+                continue;
+            }
+            let known: BTreeSet<String> = match map.units.get(unit).filter(|m| !m.tests.is_empty())
+            {
+                Some(mapped) => mapped.tests.keys().cloned().collect(),
+                None => mode
+                    .shared
+                    .test_ids(unit)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            };
+            if known.is_empty() {
+                tests_unknown |= matches!(&how, How::Plan(plan) if plan.reuse.contains(unit));
+                continue;
+            }
+            let left_out = facts::MergedTest {
+                deselected: true,
+                ..facts::MergedTest::default()
+            };
+            s.tests = Some(known.into_iter().map(|id| (id, left_out.clone())).collect());
+        }
+    }
     let sets = &sets;
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base);
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
     // that shares none.
-    let share = (at.adapter != db::AdapterWord::Cargo && hushrun_core::hints::Os::this().is_some())
-        .then(|| {
-            let vitest = at.adapter == db::AdapterWord::Vitest;
-            shared::Place::new(
-                &at.check_id,
-                &shared::sources(vitest, sets, tree, &tests.ignore),
-            )
-        });
+    let share = (at.hints != Hints::None && hushrun_core::hints::Os::this().is_some()).then(|| {
+        shared::Place::new(
+            &at.check_id,
+            &shared::sources(at.hints, sets, tree, &tests.ignore),
+        )
+    });
     let received = match &how {
         How::Plan(plan) => plan.received.clone(),
         How::Observe | How::Quiet => received,
     };
     let mut out = Observed {
+        noun: mode.noun,
         store: Some(at),
+        reads: mode.reads,
         edges,
         cwd: end.cwd.to_path_buf(),
         executables,
@@ -1532,10 +2449,43 @@ fn decide(
             end.base.check
         ));
     }
+    let check = &end.base.check;
+    // \[C-39\] Tests one by one: with `unit: test`, for the test files whose adapter told their
+    // tests, up to the limit; past it, this run reuses by test file, and `observe` says so.
+    let reported: usize = seen
+        .values()
+        .filter_map(|s| s.tests.as_ref())
+        .map(BTreeMap::len)
+        .sum();
+    let unit_mode = mode.unit;
+    // Decided once: a run whose plan listed tests to leave out counts by test whatever it
+    // reported, since its adapter left them out and its test files didn't run whole; else past
+    // the limit, by test file (RFC 0004 principle 2: reuse never chains).
+    let listed_any = matches!(&how, How::Plan(plan) if !plan.tests.listed().is_empty());
+    let by_test = listed_any || (unit_mode == Unit::Test && reported <= MOST_TESTS);
+    out.by_test = by_test;
+    if by_test
+        && mode.reads == Reads::Test
+        && reported > 0
+        && let Some(why) = &mode.unwatched
+    {
+        out.lines.push(format!(
+            "{check}: each test is taken to have read what its test file read: {why}"
+        ));
+    }
+    if unit_mode == Unit::Test && !by_test && matches!(how, How::Observe) {
+        out.lines.push(format!(
+            "{check}: its tests are reused by test file in this run: it has {} tests, more than the {} this version reuses one by one",
+            usage::thousands(reported as u64),
+            usage::thousands(MOST_TESTS as u64)
+        ));
+    }
     // What the plan would have done, in `observe`: from what was recorded before this run, a unit
     // the plan would have keyed (by the lists \[C-38\] gives, or for Cargo this build's) that the
-    // one rule would reuse, unless `tests.always` names it. One batch, in pages.
+    // one rule would reuse, unless `tests.always` names it. One batch, in pages. \[C-39\] Then the
+    // tests of each test file it wouldn't have reused whole, by the same rule.
     let mut would: BTreeMap<String, (Digest, Found)> = BTreeMap::new();
+    let mut would_tests: BTreeMap<String, TestPassed> = BTreeMap::new();
     if matches!(how, How::Observe) {
         let known: Known = planned
             .iter()
@@ -1544,19 +2494,50 @@ fn decide(
             .collect();
         let keyed = keyed(&keyer, &known, tests);
         if let Ok(lookup) = shared::lookup(end.store, all_keys(&keyed), end.counts) {
-            for (unit, lists) in keyed {
+            for (unit, lists) in &keyed {
+                if !whole_reusable(map, unit) {
+                    continue;
+                }
                 let keys: Vec<Option<Digest>> = lists.iter().map(|(key, _)| *key).collect();
                 if let Choice::Passed(_, key) = shared::choose(&keys, &lookup.found)
                     && let Some(found) = lookup.found.get(&key)
                 {
-                    would.insert(unit, (key, found.clone()));
+                    would.insert(unit.clone(), (key, found.clone()));
                 }
             }
         }
+        if by_test {
+            let asked = keyed
+                .iter()
+                .filter(|(unit, _)| !would.contains_key(*unit))
+                .filter_map(|(unit, lists)| Some((unit, lists, seen.get(unit)?.tests.as_ref()?)))
+                .flat_map(|(unit, lists, told)| {
+                    let file_lists: Vec<List> =
+                        lists.iter().map(|(_, list)| list.clone()).collect();
+                    let before = map.units.get(unit);
+                    told.keys()
+                        .map(|id| {
+                            let row = before.and_then(|m| m.tests.get(id));
+                            let seen = mode.shared.test_seen(unit, id);
+                            let lists =
+                                shared::test_lists(mode.reads, &file_lists, row, &seen, tree);
+                            (unit.clone(), id.clone(), lists)
+                        })
+                        .collect::<Vec<_>>()
+                });
+            would_tests =
+                tests_that_passed(&keyer, asked, end.store, end.counts).unwrap_or_default();
+        }
     }
     let mut counts = Counts::default();
+    let mut file_keys: BTreeSet<Digest> = BTreeSet::new();
+    let mut test_counts = TestCounts::default();
+    let mut told_tests = false;
     let mut saved_ms = 0u64;
     let mut not_observed: BTreeMap<String, u64> = BTreeMap::new();
+    // \[C-39\] The tests that always run as not followed: every test of a test file with what
+    // wasn't followed outside every test's window, and each test with something inside its own.
+    let mut tests_not_followed: usize = 0;
     for (unit, seen) in &seen {
         counts.total += 1;
         let mut facts = seen.facts.clone();
@@ -1574,20 +2555,88 @@ fn decide(
             How::Plan(plan) => plan.reuse.contains(unit),
             _ => false,
         };
-        let state = units::state(
-            &facts,
-            &RunFacts {
-                command_passed: end.command_passed,
-                failures_by_unit,
-                planned,
-            },
-        );
-        if state.ran() {
+        let run = RunFacts {
+            command_passed: end.command_passed,
+            failures_by_unit,
+            planned,
+        };
+        // \[C-39\] Each test's state, by the one function, from its own facts and what wasn't
+        // followed outside every test's window of its file.
+        let listed_tests = |id: &str| match &how {
+            How::Plan(plan) => plan.tests.lists(unit, id),
+            _ => false,
+        };
+        let decisions: Option<BTreeMap<String, (Decision, Facts)>> = by_test
+            .then_some(seen.tests.as_ref())
+            .flatten()
+            .map(|told| {
+                tests_decided(told, &facts, |id| RunFacts {
+                    planned: planned || listed_tests(id),
+                    ..run
+                })
+            });
+        let test_states: Option<BTreeMap<String, (State, Facts)>> = decisions.as_ref().map(|d| {
+            d.iter()
+                .map(|(id, (decision, facts))| (id.clone(), (decision.state, facts.clone())))
+                .collect()
+        });
+        // The test file's own state: decided as before from its facts, with what wasn't followed
+        // inside any of its tests, and not whole when some of its tests were reused one by one.
+        // What wasn't followed inside a test is its test file's too, whether or not its tests
+        // are decided one by one in this run: past the limit, they go by test file, and a test
+        // that started a process still keeps its file from a pass of its own (C-34).
+        let mut whole = facts.clone();
+        for test in seen.tests.iter().flat_map(BTreeMap::values) {
+            whole.not_followed.extend(test.not_followed.iter().cloned());
+            // \[C-32\] A test file one of whose tests was skipped: in a run that failed, no pass.
+            whole.skipped |= test.skipped && !test.deselected;
+        }
+        if let Some(states) = &test_states {
+            told_tests = true;
+            whole.tests_reused = states
+                .iter()
+                .any(|(id, (state, _))| *state == State::Reused && listed_tests(id));
+        }
+        let decision = units::decided(&whole, &run);
+        let state = decision.state;
+        let tests_ran = test_states
+            .as_ref()
+            .is_some_and(|states| states.values().any(|(s, _)| s.ran()));
+        let ran = state.ran() || tests_ran;
+        let reused_whole = state == State::Reused
+            || (!ran
+                && test_states
+                    .as_ref()
+                    .is_some_and(|states| states.values().any(|(s, _)| *s == State::Reused)));
+        if ran {
             counts.ran += 1;
         }
+        if whole.tests_reused && ran && whole.complete {
+            out.partly.insert(unit.clone());
+        }
+        if reused_whole {
+            counts.reused += 1;
+        }
         if state == State::NotObserved {
-            for why in facts.not_followed.iter().map(|n| n.why.clone()) {
+            for why in whole.not_followed.iter().map(|n| n.why.clone()) {
                 *not_observed.entry(why).or_default() += 1;
+            }
+        }
+        if let Some(states) = &test_states {
+            tests_not_followed += if state == State::NotObserved && !facts.not_followed.is_empty() {
+                states.len()
+            } else {
+                states
+                    .values()
+                    .filter(|(test, _)| *test == State::NotObserved)
+                    .count()
+            };
+        }
+        if let Some(states) = &test_states {
+            for (test, _) in states.values() {
+                test_counts.total += 1;
+                test_counts.ran += u64::from(test.ran());
+                test_counts.reused += u64::from(*test == State::Reused);
             }
         }
         match &how {
@@ -1599,10 +2648,19 @@ fn decide(
                         out.disagreements.push((unit.clone(), *key));
                     }
                 }
+                for (id, (test, _)) in test_states.iter().flatten() {
+                    let name = units::test_name(unit, id);
+                    if let Some(passed) = would_tests.get(&name) {
+                        saved_ms = saved_ms.saturating_add(passed.found.duration_ms);
+                        out.would_reuse_tests.insert(name.clone());
+                        if *test == State::Failed {
+                            out.disagreements.push((name, passed.key));
+                        }
+                    }
+                }
             }
             How::Plan(plan) => {
                 if state == State::Reused {
-                    counts.reused += 1;
                     if let Some(found) = plan.passed.get(unit) {
                         saved_ms = saved_ms.saturating_add(found.duration_ms);
                     }
@@ -1638,83 +2696,310 @@ fn decide(
                 {
                     out.again.insert(unit.clone(), *key);
                 }
+                // \[C-39\] The same for a test, by its name.
+                for (id, (test, _)) in test_states.iter().flatten() {
+                    let name = units::test_name(unit, id);
+                    // \[C-34\] A test left out of a test file the audit split: what it took when
+                    // its file last told it, from the store's row.
+                    if *test == State::Reused
+                        && plan.tests.whole.contains_key(&name)
+                        && let Some(row) = map.units.get(unit).and_then(|m| m.tests.get(id))
+                    {
+                        saved_ms = saved_ms.saturating_add(row.duration_ms);
+                    }
+                    let Some(passed) = plan.tests.passed.get(&name) else {
+                        continue;
+                    };
+                    if *test == State::Reused {
+                        saved_ms = saved_ms.saturating_add(passed.found.duration_ms);
+                    }
+                    if *test == State::Failed {
+                        out.again.insert(name.clone(), passed.key);
+                        out.again_tests.insert(name, (unit.clone(), id.clone()));
+                    }
+                }
             }
             How::Quiet => {}
         }
-        let key = state.recorded().and_then(|_| keyer.key(unit, &seen.reads));
-        if let (Some(passed), Some(key)) = (state.recorded(), key) {
+        // \[C-39\] A test file some of whose tests were reused read, for this run's keys, what it
+        // read now and what it read when it last ran here: its reused tests didn't run, and what
+        // only they opened is still theirs. A larger list only makes keys finer.
+        let mut reads = seen.reads.clone();
+        if whole.tests_reused
+            && let Some(before) = map.units.get(unit)
+        {
+            reads.extend(before.reads.keys().cloned());
+        }
+        let key = decision.recorded().and_then(|_| keyer.key(unit, &reads));
+        if let Some(key) = key {
+            file_keys.insert(key);
+        }
+        if let (Some(passed), Some(key)) = (decision.recorded(), key) {
             out.records.push(UnitRecord {
                 key,
                 result: if passed { "pass" } else { "fail" }.into(),
                 duration_ms: seen.duration_ms,
             });
         }
-        if state.ran() {
+        // \[C-40\] Each test's list, by the one function: its test file's with `reads: file`.
+        let no_dirs = BTreeSet::new();
+        let unit_watch = mode.watches.units.get(unit);
+        let file_watch = units::FileWatch {
+            unit,
+            file: &reads,
+            file_dirs: dirs.get(unit).unwrap_or(&no_dirs),
+            imports: &mode.watches.imports,
+            reexports: &mode.watches.reexports,
+            opens: &mode.watches.opens,
+            loaded: unit_watch
+                .and_then(|w| w.loaded.as_ref())
+                .map(|(ran, opened)| (ran, opened)),
+            every: unit_watch.map_or(&no_dirs, |w| &w.every),
+            shared: unit_watch.map_or(&[], |w| w.shared.as_slice()),
+        };
+        let test_list = |id: &str| {
+            let told = seen.tests.as_ref().and_then(|t| t.get(id));
+            units::test_list(
+                mode.reads,
+                &file_watch,
+                &units::TestWatch {
+                    id,
+                    ran: told.and_then(|t| t.ran.as_ref()),
+                    opened: told.and_then(|t| t.opened.as_ref()),
+                    dirs: told.and_then(|t| t.dirs.as_ref()),
+                },
+            )
+        };
+        // What a test's key holds: its own list, with every file now below a directory it
+        // listed, or its test file's.
+        let test_files = |list: &units::TestList| {
+            if list.own {
+                let mut files = list.files.clone();
+                files.extend(gotest::under(tree, &list.dirs));
+                files
+            } else {
+                reads.clone()
+            }
+        };
+        // \[C-39\] Two tiers: a test file that passed whole records its own pass, and nothing more
+        // with `reads: file`, \[C-40\] and each test's with `reads: test`; one that didn't run
+        // whole, or didn't pass whole, records each test that ran under the test's own key.
+        if state != State::Passed || mode.reads == Reads::Test {
+            for (id, (test, _)) in decisions.iter().flatten() {
+                // \[C-39\] One its adapter never leaves out records no pass of its own: no plan
+                // finds one to list it by, and it runs, as it would. A fail still counts.
+                let Some(passed) = test.recorded() else {
+                    continue;
+                };
+                let Some(key) = keyer.test_key(unit, id, &test_files(&test_list(id))) else {
+                    continue;
+                };
+                let duration_ms = seen
+                    .tests
+                    .as_ref()
+                    .and_then(|told| told.get(id))
+                    .map_or(0, |t| t.duration_ms);
+                out.records.push(UnitRecord {
+                    key,
+                    result: if passed { "pass" } else { "fail" }.into(),
+                    duration_ms,
+                });
+            }
+        }
+        // \[C-37\] A test file the run decided `not run` keeps its row too, with why, as a run that
+        // recorded nothing else would: `hushrun why` says what the run decided, not that it never
+        // ran here. One that didn't run whole (left out by something else, unfinished, tests
+        // reused one by one) read less than all it reads, so a row it had stays as it was.
+        let kept_row = state == State::NotRun
+            && match decision.not_kept {
+                Some(
+                    units::NotKept::LeftOut
+                    | units::NotKept::Unfinished
+                    | units::NotKept::TestsReused,
+                ) => !map.units.contains_key(unit),
+                _ => true,
+            };
+        if ran || kept_row {
+            // \[C-39\] Its tests as they ran, and a test reused as the row it stands on.
+            let before = map.units.get(unit);
+            let tests_rows = decisions
+                .iter()
+                .flatten()
+                .filter_map(|(id, (decision, _))| {
+                    let test = &decision.state;
+                    if *test == State::Reused {
+                        if let Some(row) = before.and_then(|b| b.tests.get(id)) {
+                            return Some((id.clone(), row.clone()));
+                        }
+                        // \[C-41\] Reused on what another machine saw: the row it stands on is
+                        // that machine's pass, with the list whose key hit when it was its own.
+                        let How::Plan(plan) = &how else { return None };
+                        let passed = plan.tests.passed.get(&units::test_name(unit, id))?;
+                        let list = passed.list.own.then(|| store::TestListRow {
+                            reads: entries(sets, tree, &passed.list.list.reads),
+                            dirs: passed.list.list.dirs.clone(),
+                        });
+                        return Some((
+                            id.clone(),
+                            store::TestRow {
+                                state: State::Passed,
+                                duration_ms: passed.found.duration_ms,
+                                not_followed: BTreeSet::new(),
+                                not_kept: None,
+                                list,
+                            },
+                        ));
+                    }
+                    let told = seen.tests.as_ref()?.get(id)?;
+                    // \[C-40\] With `reads: test`, its own list, which the next plan keys it by.
+                    let list = test_list(id);
+                    let list = list.own.then(|| store::TestListRow {
+                        reads: entries(sets, tree, &list.files),
+                        dirs: list.dirs.clone(),
+                    });
+                    Some((
+                        id.clone(),
+                        store::TestRow {
+                            state: *test,
+                            duration_ms: told.duration_ms,
+                            not_followed: told.not_followed.clone(),
+                            // \[C-37\] Why it kept nothing, as the one function decided it.
+                            not_kept: not_kept(
+                                *decision,
+                                true,
+                                told.not_kept.as_deref(),
+                                &mode.words,
+                            ),
+                            list,
+                        },
+                    ))
+                })
+                .collect();
+            let file_why = file_not_kept(decision, &tests_rows, &mode.words);
             out.mapped.insert(
                 unit.clone(),
                 Mapped {
                     reads: sets
-                        .keyed(seen.reads.iter().map(String::as_str))
+                        .keyed(reads.iter().map(String::as_str))
                         .into_iter()
                         .filter_map(|path| {
                             let (kind, hash) = tree.entry(path)?;
                             Some((path.to_string(), format!("{kind} {hash}")))
                         })
                         .collect(),
-                    not_followed: facts.not_followed.clone(),
+                    // What wasn't followed outside every test's window: what stops the test file,
+                    // and each of its tests, from being keyed at all (C-34). With its tests not
+                    // kept one by one, what wasn't followed inside them too: no row then says it.
+                    not_followed: if test_states.is_some() {
+                        facts.not_followed.clone()
+                    } else {
+                        whole.not_followed.clone()
+                    },
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
                     origin: Origin::SeenHere,
+                    tests: tests_rows,
+                    // \[C-37\] Why it kept no result of its own, as the one function decided it.
+                    not_kept: file_why,
                 },
+            );
+        }
+        if let Some(states) = test_states {
+            out.tests.insert(
+                unit.clone(),
+                states.into_iter().map(|(id, (s, _))| (id, s)).collect(),
             );
         }
         out.units.insert(unit.clone(), (state, key));
     }
     out.rest = rest_of(sets, tree);
     out.sources = sources;
-    if matches!(how, How::Plan(_)) && counts.reused > 0 {
-        counts.saved_ms = Some(saved_ms);
+    if told_tests && !tests_unknown {
+        counts.tests = Some(test_counts.clone());
     }
-    if out.records.len() > MOST_UNITS {
-        // More than a server takes for one run: none goes, so none counts.
-        out.records.clear();
+    if matches!(how, How::Plan(_)) && (counts.reused > 0 || test_counts.reused > 0) {
+        counts.saved_ms = saving(saved_ms, map.whole_ms);
     }
+    // \[RFC 0004 §3.8\] In the order whatever a server cuts is a pass of: failures, then test
+    // files' results, then tests' passes. The backend sends what its server takes.
+    out.records = order_records(std::mem::take(&mut out.records), &file_keys);
 
-    // What `observe` says (RFC 0003 §1.2), in the words people read: test files, the files they
-    // read.
-    let check = &end.base.check;
+    // What `observe` says (RFC 0003 §1.2, RFC 0004 §1.2), in the words people read: test files,
+    // tests, the files they read.
     let reused = out.would_reuse.len() as u64;
     if counts.total > 0 && matches!(how, How::Observe) {
         let would_run = counts.total - reused;
-        let mut line = if reused == 0 {
+        let saving = match saving(saved_ms, map.whole_ms) {
+            Some(ms) if ms >= 1000 => format!(", saving about {}", crate::cmd::wrap::took(ms)),
+            _ => String::new(),
+        };
+        // \[C-39\] Tests that would have been reused: those of the test files reused whole, and
+        // those reused one by one.
+        let tests_reused: u64 = out
+            .tests
+            .iter()
+            .map(|(unit, states)| {
+                if out.would_reuse.contains(unit) {
+                    states.len() as u64
+                } else {
+                    states
+                        .keys()
+                        .filter(|id| out.would_reuse_tests.contains(&units::test_name(unit, id)))
+                        .count() as u64
+                }
+            })
+            .sum();
+        let mut line = if told_tests && tests_reused > 0 {
+            let files_run = counts.total
+                - out
+                    .tests
+                    .iter()
+                    .filter(|(unit, states)| {
+                        out.would_reuse.contains(*unit)
+                            || (!states.is_empty()
+                                && states.keys().all(|id| {
+                                    out.would_reuse_tests.contains(&units::test_name(unit, id))
+                                }))
+                    })
+                    .count() as u64;
+            format!(
+                "{check}: with `tests: reuse`, {} of {} would have run, in {} of {}; {} already passed on the files {}{saving}",
+                usage::thousands(test_counts.total - tests_reused),
+                count_tests(test_counts.total),
+                usage::thousands(files_run),
+                test_files_grouped(counts.total, mode.noun),
+                usage::thousands(tests_reused),
+                if tests_reused == 1 {
+                    "it read"
+                } else {
+                    "they read"
+                },
+            )
+        } else if reused == 0 {
             let all = format!(
                 "{check}: with `tests: reuse`, all {} would have run",
-                test_files(counts.total)
+                test_files(counts.total, mode.noun)
             );
-            match why_all(map, &out.rest, &out.sources) {
-                Some(why) => format!("{all}: {why}"),
-                None if !map.reported() => {
-                    format!("{all}: none had passed here yet on the files it read")
-                }
-                None => all,
-            }
+            let why = why_every(map, tree, sets, out.units.keys(), mode.noun, None);
+            format!("{all}: {why}")
         } else {
-            let saving = if saved_ms >= 1000 {
-                format!(", saving about {}", crate::cmd::wrap::took(saved_ms))
-            } else {
-                String::new()
-            };
             format!(
                 "{check}: with `tests: reuse`, {would_run} of {} would have run; {reused} already passed on the files {}{saving}",
-                test_files(counts.total),
+                test_files(counts.total, mode.noun),
                 if reused == 1 { "it read" } else { "they read" },
             )
         };
         if !not_observed.is_empty() {
-            let n = out
-                .units
-                .values()
-                .filter(|(s, _)| *s == State::NotObserved)
-                .count();
+            // \[C-39\] Counted as the line counts: tests, where it counts tests: every test of a test
+            // file not followed, whatever else kept each from a pass, and each test not followed in
+            // the others.
+            let n = if told_tests && tests_reused > 0 {
+                tests_not_followed
+            } else {
+                out.units
+                    .values()
+                    .filter(|(s, _)| *s == State::NotObserved)
+                    .count()
+            };
             let whys: Vec<String> = not_observed.keys().map(|w| describe(w)).collect();
             line.push_str(&format!(
                 "; hushrun couldn't follow all that {} read ({}), so {} always run",
@@ -1738,6 +3023,29 @@ fn decide(
     out
 }
 
+/// \[RFC 0004 §3.8\] `records` in the order a server that takes fewer keeps the first of: every
+/// failure, then the passes of test files (`file_keys`), then the passes of tests. Cutting the end
+/// only ever loses a pass, which costs its next run; a lost failure could let an older pass reuse.
+fn order_records(records: Vec<UnitRecord>, file_keys: &BTreeSet<Digest>) -> Vec<UnitRecord> {
+    let (fails, passes): (Vec<UnitRecord>, Vec<UnitRecord>) =
+        records.into_iter().partition(|r| r.result != "pass");
+    let (files, tests): (Vec<UnitRecord>, Vec<UnitRecord>) =
+        passes.into_iter().partition(|r| file_keys.contains(&r.key));
+    fails.into_iter().chain(files).chain(tests).collect()
+}
+
+/// Of `files`, those a key holds (units and sources), each with its kind and content hash now, as
+/// a manifest writes them: what the store keeps of a list.
+fn entries(sets: &units::Sets, tree: &Tree, files: &BTreeSet<String>) -> BTreeMap<String, String> {
+    sets.keyed(files.iter().map(String::as_str))
+        .into_iter()
+        .filter_map(|path| {
+            let (kind, hash) = tree.entry(path)?;
+            Some((path.to_string(), format!("{kind} {hash}")))
+        })
+        .collect()
+}
+
 /// \[C-38\] The row a test file reused on another machine's list gets in this machine's store: the
 /// files of the list its key holds, as they are now, which are as they were when it passed.
 fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree: &Tree) -> Mapped {
@@ -1753,6 +3061,8 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
         origin: Origin::Shared(os),
+        tests: BTreeMap::new(),
+        not_kept: None,
     }
 }
 
@@ -1781,44 +3091,227 @@ fn describe(why: &str) -> String {
     }
 }
 
+/// \[C-32\] Why none of a check's units is reused when its last run here executed no test.
+const RAN_NOTHING_LAST_TIME: &str =
+    "its last run here executed none of them, so none kept a pass on the files it read";
+
 /// Why every test file would have run though some ran here before: the first file of the rest set
 /// that changed since the map was written, or a source that is new or gone (RFC 0003 §1.2).
-fn why_all(
+/// \[C-33, C-34\] Why every one of `units` runs, or would, when none is reused: the one reason
+/// the plan's line, `observe`'s and `hushrun ready` give, from what decides the plan, in this
+/// order of truth. A file of the rest set changed, or a source is new or gone ([`why_all`]); a file
+/// every one of them read the last time changed or is gone; none was followed the last time (and
+/// why, from their rows); none kept a pass the last time (and why, from their rows); else none had
+/// passed here yet on the files it read. `noun` is the adapter's word for them. `said` is what an
+/// adapter said of the whole of the last run, such as a runner that executed nothing (tasks up
+/// to date): it comes after what changed and before what the rows say. Units an adapter never
+/// leaves out have no key, so a plan counts them as running already.
+#[allow(clippy::too_many_arguments)]
+fn why_every<'a>(
     map: &store::Map,
-    rest: &BTreeMap<String, String>,
-    sources: &BTreeSet<String>,
+    tree: &Tree,
+    sets: &units::Sets,
+    units: impl Iterator<Item = &'a String> + Clone,
+    noun: &str,
+    said: Option<&str>,
+) -> String {
+    if let Some(why) = why_all(map, sets, tree) {
+        return why;
+    }
+    let changed = why_every_read(map, tree, units.clone(), noun);
+    if let Some(why) = changed {
+        return why;
+    }
+    if let Some(said) = said.filter(|s| !s.is_empty()) {
+        return said.to_string();
+    }
+    let none_yet = "none had passed here yet on the files it read".to_string();
+    let rows: Option<Vec<&Mapped>> = units.clone().map(|unit| map.units.get(unit)).collect();
+    let Some(rows) = rows.filter(|rows| !rows.is_empty()) else {
+        return none_yet;
+    };
+    // None of them followed the last time: what wasn't, as their rows say.
+    if rows.iter().all(|row| !row.not_followed.is_empty()) {
+        let whys: BTreeSet<String> = rows
+            .iter()
+            .flat_map(|row| row.not_followed.iter().map(|n| describe(&n.why)))
+            .collect();
+        return format!(
+            "hushrun couldn't follow all that any of them read the last time ({}), so they always run",
+            whys.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    // None of them kept a pass the last time: why, as their rows say.
+    if rows.iter().all(|row| row.not_kept.is_some()) {
+        let why = rows
+            .iter()
+            .find_map(|row| row.not_kept.as_deref())
+            .unwrap_or_default();
+        return format!("none kept a pass the last time they ran here: {why}");
+    }
+    none_yet
+}
+
+/// \[C-34\] A file every one of `units` read the last time, as it was then, now changed or gone.
+fn why_every_read<'a>(
+    map: &store::Map,
+    tree: &Tree,
+    units: impl Iterator<Item = &'a String>,
+    noun: &str,
 ) -> Option<String> {
+    let rows: Vec<&Mapped> = units
+        .map(|unit| map.units.get(unit))
+        .collect::<Option<_>>()?;
+    let (first, others) = rows.split_first()?;
+    for (path, then) in &first.reads {
+        if !others.iter().all(|row| row.reads.get(path) == Some(then)) {
+            continue;
+        }
+        match tree.entry(path) {
+            None => return Some(format!("{path} is gone, and every {noun} read it")),
+            Some((kind, hash)) if format!("{kind} {hash}") != *then => {
+                return Some(format!("{path} changed, and every {noun} reads it"));
+            }
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+fn why_all(map: &store::Map, sets: &units::Sets, tree: &Tree) -> Option<String> {
     if !map.reported() {
         return None;
     }
-    let changed = rest
-        .iter()
+    every_changed(map, sets, tree).map(|(_, why, _)| why)
+}
+
+/// \[C-34, C-37\] What changed for every test file since the map was written, the one function
+/// the plan's line, `observe`'s, `hushrun ready` and `hushrun why` ask: a file of the rest set that
+/// changed, is new there or left it, then a source new or no longer one. Each with its path, what
+/// people read and `why`'s reason word. A file on disk is never gone: one that left a set says
+/// what it is now.
+pub(crate) fn every_changed(
+    map: &store::Map,
+    sets: &units::Sets,
+    tree: &Tree,
+) -> Option<(String, String, &'static str)> {
+    let rest = rest_of(sets, tree);
+    let sources: BTreeSet<&str> = sets.files(Set::Sources).collect();
+    // What a file that left the set it was in is now, as `sets` put it; `None` when it isn't on
+    // disk.
+    let now = |path: &str| -> Option<&'static str> {
+        if !tree.contains(path) {
+            return None;
+        }
+        Some(match sets.of(path) {
+            Some(Set::Units) => "is now a test file",
+            Some(Set::Sources) => "is now a source",
+            Some(Set::Ignored) => "is now in `tests.ignore`",
+            Some(Set::Rest) | None => "is no longer a source",
+        })
+    };
+    let said = |path: &str, why: String, reason: &'static str| (path.to_string(), why, reason);
+    rest.iter()
         .find(|(path, entry)| map.rest.get(*path).is_some_and(|before| before != *entry))
-        .map(|(path, _)| format!("{path} changed, and any test may read it"))
+        .map(|(path, _)| {
+            said(
+                path,
+                format!("{path} changed, and any test may read it"),
+                "rest-changed",
+            )
+        })
         .or_else(|| {
             rest.keys()
                 .find(|path| !map.rest.contains_key(*path))
-                .map(|path| format!("{path} is new, and any test may read it"))
+                .map(|path| {
+                    if map.sources.contains(path) {
+                        said(
+                            path,
+                            format!("{path} is no longer a source, and any test may read it"),
+                            "shape",
+                        )
+                    } else {
+                        said(
+                            path,
+                            format!("{path} is new, and any test may read it"),
+                            "rest-changed",
+                        )
+                    }
+                })
         })
         .or_else(|| {
             map.rest
                 .keys()
                 .find(|path| !rest.contains_key(*path))
-                .map(|path| format!("{path} is gone, and any test may have read it"))
-        });
-    changed
+                .map(|path| match now(path) {
+                    Some(now) => said(
+                        path,
+                        format!("{path} {now}, which can change what tests load"),
+                        "shape",
+                    ),
+                    None => said(
+                        path,
+                        format!("{path} is gone, and any test may have read it"),
+                        "rest-changed",
+                    ),
+                })
+        })
         .or_else(|| {
             sources
                 .iter()
-                .find(|path| !map.sources.contains(*path))
-                .map(|path| format!("{path} is new, which can change what tests load"))
+                .find(|path| !map.sources.contains(**path))
+                .map(|path| {
+                    said(
+                        path,
+                        format!("{path} is new, which can change what tests load"),
+                        "shape",
+                    )
+                })
         })
         .or_else(|| {
             map.sources
                 .iter()
-                .find(|path| !sources.contains(*path))
-                .map(|path| format!("{path} is gone, which can change what tests load"))
+                .find(|path| !sources.contains(path.as_str()))
+                .map(|path| {
+                    let now = now(path).unwrap_or("is gone");
+                    said(
+                        path,
+                        format!("{path} {now}, which can change what tests load"),
+                        "shape",
+                    )
+                })
         })
+}
+
+/// \[C-36\] Makes this machine's store for `repository` from the one an older hushrun keeps beside
+/// it, when there is none of this schema ([`db::upgrade`]): the line a run says once in CI
+/// (`in_ci`), where a cache step that names the older file restores one no run updates.
+pub fn upgrade_store(
+    check: &hushrun_core::CheckName,
+    repository: Option<&str>,
+    in_ci: bool,
+) -> Option<String> {
+    let cache = crate::context::cache_dir()?;
+    let old = db::upgrade(&db::path(&cache, repository))?;
+    in_ci.then(|| upgraded(check, &old))
+}
+
+/// \[C-36\] What a run in CI says once when it made this machine's store from `old`.
+fn upgraded(check: &hushrun_core::CheckName, old: &str) -> String {
+    format!(
+        "{check}: what its test files read was taken from {old}, which an older hushrun keeps: a CI cache step that names `units/*.v1.sqlite` restores a file no run updates, so name `units/*.sqlite` in it instead"
+    )
+}
+
+/// \[C-32\] The adapter that last reported the test files of the check `base` names here, for
+/// the repository the run names, as this machine's store says: what [`Session::start`] keeps a
+/// COMMAND pytest reported pytest's by.
+pub fn stored_adapter(base: &KeyBase, repository: Option<&str>) -> Option<String> {
+    let cache = crate::context::cache_dir()?;
+    db::adapter_of(
+        &db::path(&cache, repository),
+        &store::check_id(base, repository),
+    )
 }
 
 /// This machine's results directory, where unit results go in local mode (C-33), with the reuse

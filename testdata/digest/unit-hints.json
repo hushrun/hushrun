@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Hint vectors (C-38). Each vector gives a check id, its sources set, a scope's files and a hint with paths; `expect` holds the hint's key (hex), the shape, the address, each path's token (hex), the content (hex) and its id, and what reading `bytes` (base64, as hushrun's writer wrote them) against the scope gives, with how many test files were dropped. `unread` lists bytes no reader takes. `tools/refdigest.py unit-hints` computes them independently; the Rust code must agree.",
+  "description": "Hint vectors (C-38). Each vector gives a check id, its sources set, a scope's files and a hint with paths; `expect` holds the hint's key (hex), the shape, the address, each path's token (hex), the content (hex) and its id, and what reading `bytes` (base64, as hushrun's writer wrote them) against the scope gives, with how many test files were dropped. `unread` lists bytes no reader takes; `noTests` bytes whose test files read and whose tests don't. `tools/refdigest.py unit-hints` computes them independently; the Rust code must agree.",
   "vectors": [
     {
       "name": "pytest",
@@ -387,6 +387,326 @@
         },
         "dropped": 0
       }
+    },
+    {
+      "name": "pytest-tests",
+      "covers": [
+        "C-41"
+      ],
+      "description": "The pytest vector with tests, sealed: two with lists of their own that are one list, one that read its test file's, and one that read a lockfile.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "hint": {
+        "adapter": "pytest",
+        "units": {
+          "tests/test_cart.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/cart.py",
+              "shop/pricing.py",
+              "tests/test_cart.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          },
+          "tests/test_pricing.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/pricing.py",
+              "tests/test_pricing.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          }
+        },
+        "unitFiles": [],
+        "tests": {
+          "tests/test_cart.py": {
+            "test_total": {
+              "reads": [
+                "shop/cart.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            },
+            "test_discount[10%]": null
+          },
+          "tests/test_pricing.py": {
+            "TestPrice::test_rounds": {
+              "reads": [
+                "shop/pricing.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "TestPrice::test_zero": {
+              "reads": [
+                "shop/pricing.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "test_lock_é": {
+              "reads": [
+                "tests/test_pricing.py",
+                "uv.lock"
+              ],
+              "dirs": []
+            }
+          }
+        }
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSCwjW22/YO4OypO4m0TL00SnDTNLbG578ptp7OaBziP3XJyfrm1NFxkqtk/lisryl/XvlMX7SvcephNZtWeyX2qe+6w1Z8+c38nx5Zpp3ed3f70hcGEKpc8luqeWfmtyzWMTgZ/ylEpXFHulKnNtlZs0ZONZybPPTn13P1/DilW8qw6TBv8HFadLVg5q+HdqrorwjWb3l2bUXtqhYP1FcUZmbdDtiwVaOI3Zej70xu+Q/q1amHq7b+P3i3KNZFWvvxc0Q0Aazycjw==",
+      "expect": {
+        "key": "9e8d6fb464addd0be91bc5670211868d81d950e53b965a82966fa060478ebc2a",
+        "sealKey": "a382d3d7f7045c8dbb98535987867670944d5c8691d144e7abb02cb28e29f560",
+        "shape": "sha256:b8576a7cf32b9a99dd5aae7ce08294ffa442ce3d1f09f66b92a1d14f436dd51e",
+        "address": "sha256:2330293381c14a28cf29a32ead861cafa543eea38ca5c5ec5f8bb4f69f782316",
+        "tokens": {
+          "shop/__init__.py": "d851facb8cdb6750be0ea7b0026f870b",
+          "shop/cart.py": "c6b496783e01d6c3e0da9c48a376e9a4",
+          "shop/pricing.py": "075f35931176129402a491e3ec39e788",
+          "tests/conftest.py": "6657188571147dcdadb1a4537e956c71",
+          "tests/test_cart.py": "9c878a30d2851123140b74de489d3a64",
+          "tests/test_pricing.py": "4d86598d21589a60a73d7c7f718bb439",
+          "uv.lock": "11821c7a3e72139e977f4507f5af0ed2"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76310a0670797465737400000007075f35931176129402a491e3ec39e78811821c7a3e72139e977f4507f5af0ed24d86598d21589a60a73d7c7f718bb4396657188571147dcdadb1a4537e956c719c878a30d2851123140b74de489d3a64c6b496783e01d6c3e0da9c48a376e9a4d851facb8cdb6750be0ea7b0026f870b00000000000000020000000200000004000000000000000200000003000000060000000000000004000000050000000000000003000000040000000500000006000000000000000300000002000000000000000200000000000000020000000100000002000000000000000300000003000000040000000500000000000000b6069b3fe05edc2442178691d2921192964661838ed4db42cd29c009c6da4243e9b57557149536fe04d4a877eb7dee27158e71b5c3061caabc938e25bcdc067fcbccdfb908b496cbbacdb7e5e830907a446e047b8c9a6f85a72832c953f26c2471a87742692b06ad16a2e4b1cc939dc995cedffe40643a1f052c02b04e40aacd70a99a80eeaa7ed4137cb2eed6987dcaa8403bd4219869db54b4a510820f35008efc8d57b81beb257165dbfde2eea26d341b23d3e72146",
+        "contentId": "sha256:cda55bd6c120c45a352cd6de4fbc86e528dce9be4f7879a4ea92eb7a959df947",
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": [],
+          "tests": {
+            "tests/test_pricing.py": {
+              "TestPrice::test_rounds": {
+                "reads": [
+                  "shop/pricing.py",
+                  "tests/test_pricing.py"
+                ],
+                "dirs": []
+              },
+              "TestPrice::test_zero": {
+                "reads": [
+                  "shop/pricing.py",
+                  "tests/test_pricing.py"
+                ],
+                "dirs": []
+              },
+              "test_lock_é": {
+                "reads": [
+                  "tests/test_pricing.py",
+                  "uv.lock"
+                ],
+                "dirs": []
+              }
+            },
+            "tests/test_cart.py": {
+              "test_discount[10%]": null,
+              "test_total": {
+                "reads": [
+                  "shop/cart.py",
+                  "tests/conftest.py",
+                  "tests/test_cart.py"
+                ],
+                "dirs": []
+              }
+            }
+          }
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "pytest-tests-file-gone",
+      "covers": [
+        "C-41"
+      ],
+      "description": "The same hint, read where uv.lock is gone: every test file stays, and the one test whose list named uv.lock is dropped.",
+      "checkId": "sha256:684aa2b7c0abe439d5044975bc9623e0b001317293657c8513ada16e6216abe4",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py"
+      ],
+      "hint": {
+        "adapter": "pytest",
+        "units": {
+          "tests/test_cart.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/cart.py",
+              "shop/pricing.py",
+              "tests/test_cart.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          },
+          "tests/test_pricing.py": {
+            "reads": [
+              "shop/__init__.py",
+              "shop/pricing.py",
+              "tests/test_pricing.py",
+              "tests/conftest.py"
+            ],
+            "dirs": []
+          }
+        },
+        "unitFiles": [],
+        "tests": {
+          "tests/test_cart.py": {
+            "test_total": {
+              "reads": [
+                "shop/cart.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            },
+            "test_discount[10%]": null
+          },
+          "tests/test_pricing.py": {
+            "TestPrice::test_rounds": {
+              "reads": [
+                "shop/pricing.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "TestPrice::test_zero": {
+              "reads": [
+                "shop/pricing.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "test_lock_é": {
+              "reads": [
+                "tests/test_pricing.py",
+                "uv.lock"
+              ],
+              "dirs": []
+            }
+          }
+        }
+      },
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSCwjW22/YO4OypO4m0TL00SnDTNLbG578ptp7OaBziP3XJyfrm1NFxkqtk/lisryl/XvlMX7SvcephNZtWeyX2qe+6w1Z8+c38nx5Zpp3ed3f70hcGEKpc8luqeWfmtyzWMTgZ/ylEpXFHulKnNtlZs0ZONZybPPTn13P1/DilW8qw6TBv8HFadLVg5q+HdqrorwjWb3l2bUXtqhYP1FcUZmbdDtiwVaOI3Zej70xu+Q/q1amHq7b+P3i3KNZFWvvxc0Q0Aazycjw==",
+      "expect": {
+        "key": "9e8d6fb464addd0be91bc5670211868d81d950e53b965a82966fa060478ebc2a",
+        "sealKey": "a382d3d7f7045c8dbb98535987867670944d5c8691d144e7abb02cb28e29f560",
+        "shape": "sha256:b8576a7cf32b9a99dd5aae7ce08294ffa442ce3d1f09f66b92a1d14f436dd51e",
+        "address": "sha256:2330293381c14a28cf29a32ead861cafa543eea38ca5c5ec5f8bb4f69f782316",
+        "tokens": {
+          "shop/__init__.py": "d851facb8cdb6750be0ea7b0026f870b",
+          "shop/cart.py": "c6b496783e01d6c3e0da9c48a376e9a4",
+          "shop/pricing.py": "075f35931176129402a491e3ec39e788",
+          "tests/conftest.py": "6657188571147dcdadb1a4537e956c71",
+          "tests/test_cart.py": "9c878a30d2851123140b74de489d3a64",
+          "tests/test_pricing.py": "4d86598d21589a60a73d7c7f718bb439",
+          "uv.lock": "11821c7a3e72139e977f4507f5af0ed2"
+        },
+        "content": "6875736872756e2e756e69742d68696e74732f76310a0670797465737400000007075f35931176129402a491e3ec39e78811821c7a3e72139e977f4507f5af0ed24d86598d21589a60a73d7c7f718bb4396657188571147dcdadb1a4537e956c719c878a30d2851123140b74de489d3a64c6b496783e01d6c3e0da9c48a376e9a4d851facb8cdb6750be0ea7b0026f870b00000000000000020000000200000004000000000000000200000003000000060000000000000004000000050000000000000003000000040000000500000006000000000000000300000002000000000000000200000000000000020000000100000002000000000000000300000003000000040000000500000000000000b6069b3fe05edc2442178691d2921192964661838ed4db42cd29c009c6da4243e9b57557149536fe04d4a877eb7dee27158e71b5c3061caabc938e25bcdc067fcbccdfb908b496cbbacdb7e5e830907a446e047b8c9a6f85a72832c953f26c2471a87742692b06ad16a2e4b1cc939dc995cedffe40643a1f052c02b04e40aacd70a99a80eeaa7ed4137cb2eed6987dcaa8403bd4219869db54b4a510820f35008efc8d57b81beb257165dbfde2eea26d341b23d3e72146",
+        "contentId": "sha256:cda55bd6c120c45a352cd6de4fbc86e528dce9be4f7879a4ea92eb7a959df947",
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": [],
+          "tests": {
+            "tests/test_pricing.py": {
+              "TestPrice::test_rounds": {
+                "reads": [
+                  "shop/pricing.py",
+                  "tests/test_pricing.py"
+                ],
+                "dirs": []
+              },
+              "TestPrice::test_zero": {
+                "reads": [
+                  "shop/pricing.py",
+                  "tests/test_pricing.py"
+                ],
+                "dirs": []
+              }
+            },
+            "tests/test_cart.py": {
+              "test_discount[10%]": null,
+              "test_total": {
+                "reads": [
+                  "shop/cart.py",
+                  "tests/conftest.py",
+                  "tests/test_cart.py"
+                ],
+                "dirs": []
+              }
+            }
+          }
+        },
+        "dropped": 0
+      }
     }
   ],
   "unread": [
@@ -504,29 +824,6 @@
         "uv.lock"
       ],
       "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPgYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ0o4pA=="
-    },
-    {
-      "name": "schema",
-      "covers": [
-        "C-38"
-      ],
-      "description": "Another schema's content.",
-      "sources": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py"
-      ],
-      "scope": [
-        "shop/__init__.py",
-        "shop/cart.py",
-        "shop/pricing.py",
-        "tests/conftest.py",
-        "tests/test_cart.py",
-        "tests/test_pricing.py",
-        "uv.lock"
-      ],
-      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ/s4pg=="
     },
     {
       "name": "cut-content",
@@ -688,6 +985,337 @@
         "uv.lock"
       ],
       "bytes": "eNrswbEBgCAMADBmfwE9qywdhHI/jySJWvFXjsq5e8zc6z3f0wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAue3AgAAAAAADk/9oIqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqKuzBgQAAAAAAkP9rI6iqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwBwcCAAAAAED+r42gqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0h4cEgAAAAAI+v/aD2YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJgCyoMILg=="
+    },
+    {
+      "name": "schema-v2",
+      "covers": [
+        "C-41"
+      ],
+      "description": "A schema this reader doesn't know, hushrun.unit-hints/v2.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPiYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAKKw4pw=="
+    }
+  ],
+  "noTests": [
+    {
+      "name": "seal-flipped",
+      "covers": [
+        "C-41"
+      ],
+      "description": "The pytest-tests vector with its tag's last bit flipped: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSCwjW22/YO4OypO4m0TL00SnDTNLbG578ptp7OaBziP3XJyfrm1NFxkqtk/lisryl/XvlMX7SvcephNZtWeyX2qe+6w1Z8+c38nx5Zpp3ed3f70hcGEKpc8luqeWfmtyzWMTgZ/ylEpXFHulKnNtlZs0ZONZybPPTn13P1/DilW8qw6TBv8HFadLVg5q+HdqrorwjWb3l2bUXtqhYP1FcUZmbdDtiwVaOI3Zej70xu+Q/q1amHq7b+P3i3KNZFWvvxc0R0Aaz2ckA==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "seal-another-key",
+      "covers": [
+        "C-41"
+      ],
+      "description": "Its clear part, with tests sealed under another check's seal key: no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSCg07E7s/ezFMfFw9V6x4MWPZhy/V38krJv3tZrjWfsq7eQfvTilfmy04nrthfqX1YAAAysV5g=",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "plaintext-not-canonical",
+      "covers": [
+        "C-41"
+      ],
+      "description": "Its clear part, with a plaintext sealed under its key that holds a test with no id and leaves its lists unused: no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSBgc1D7ou1Jjhv6syvc15z96Zvj+70jrkL1r41rScX8nPj+tS9nX3wmMknkVJTHtl0vt62efOvaz6pnMapvJgmVPgUArs1gxw==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "seal-too-short",
+      "covers": [
+        "C-41"
+      ],
+      "description": "A hint with tests whose seal is shorter than a nonce and a tag: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYkxIemF0YxIfGY0vSDAxQAHAHjtP0U=",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "lists-out-of-order",
+      "covers": [
+        "C-41"
+      ],
+      "description": "The pytest-tests vector with its first two tests' lists swapped: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBnjzedLFgmNIVpycTHbyyfdwg2yVTZFQnPm17vyv51Pd8l37bIXsWIWQnLbWvqC7u3WKaFS7QWitSeXbtxSXDd1JzCOe1dBpdaBZVFuEvuecy1Sjm2ZVqFHeO1ww9uzfFYXPZyyY3AX6d7bqcH7ONbvoEpv52bAQKYoJgFic8MxGxQPkicFcpmRuKzIYmB9DBCaQYsNDOaXhDYxjbb/kHcHRUn8baJlyYJTprmltjcd+W201nNA5zHbjk5v9xaGi4y1ewfy5UV5a9r36mL9hVuPcwms2rP5D7VPXfY6k+fub+TY8u007vObn/6wmBClUseS3XPrPzW5RpGJ4M/5agUrih3ytRmWyu26MnGM5Pnnpx67v4/hxQreVYdpg1+DqvOFqyc1fBuVd0V4ZpN767NqD21wsH6iuKMzNshW5YKNPGbMvT96Q3fIf1atTD19t9H7xblmkgrX36u6AYAa0ycjw==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
+    },
+    {
+      "name": "v1-without-tests",
+      "covers": [
+        "C-41"
+      ],
+      "description": "A version 0 content under version 1's first line, with no tests' part: its test files read, with no tests.",
+      "sources": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py"
+      ],
+      "scope": [
+        "shop/__init__.py",
+        "shop/cart.py",
+        "shop/pricing.py",
+        "tests/conftest.py",
+        "tests/test_cart.py",
+        "tests/test_pricing.py",
+        "uv.lock"
+      ],
+      "bytes": "eNrLKC3OKCrN0yvNyyzRzcjMKynWLzPkYiuoLEktLmFgYGBjjzedLFgmNIVpycTHbyyfd/i2RfYqRsxKWG5bU1/YvcUyLVyitVCk9uzajUuC66bmFM5p7zK41CqoLMJdcs9jrlXKsS3TKuwYrx1+cGuOx+Kyl0tuBP463XM7PWAf3/INTPnt3AwQwATEjEDMAuUzQsVYoXxmJDYTlM8CEwMAJ/s4pg==",
+      "expect": {
+        "read": {
+          "adapter": "pytest",
+          "units": {
+            "tests/test_pricing.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_pricing.py"
+              ],
+              "dirs": []
+            },
+            "tests/test_cart.py": {
+              "reads": [
+                "shop/__init__.py",
+                "shop/cart.py",
+                "shop/pricing.py",
+                "tests/conftest.py",
+                "tests/test_cart.py"
+              ],
+              "dirs": []
+            }
+          },
+          "unitFiles": []
+        },
+        "dropped": 0
+      }
     }
   ]
 }

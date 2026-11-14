@@ -1,0 +1,40 @@
+{
+ "adapter": "gradle",
+ "errors": [],
+ "failuresByUnit": true,
+ "schema": "hushrun.unit-facts/v1",
+ "settings": {
+  "gradle": {
+   "framework": "junit-platform",
+   "gradle": "9.3.1",
+   "invocations": [],
+   "leftOut": {
+    "classes": [],
+    "how": null,
+    "notAttempted": [],
+    "tests": []
+   },
+   "names": {
+    "ex.lib.LibTest": "lib/src/test/java/ex/lib/LibTest.java"
+   },
+   "narrowedBy": [],
+   "notFollowed": [],
+   "outcome": "up-to-date",
+   "projectDir": "lib",
+   "reads": {
+    "dirs": [
+     "lib"
+    ],
+    "paths": []
+   },
+   "rootDone": false,
+   "rootResult": "SUCCESS",
+   "schema": "hushrun.gradle-report/v1",
+   "sourceDirsHow": "sourceSets",
+   "suiteFailures": [],
+   "task": ":lib:test",
+   "taskFailed": false
+  }
+ },
+ "units": []
+}
