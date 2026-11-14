@@ -2292,6 +2292,7 @@ impl Call<'_> {
             &dry_args,
             &set,
             path_var.as_deref().unwrap_or_default(),
+            &environment.ld,
             &cwd,
             dsymutil.as_deref(),
         );

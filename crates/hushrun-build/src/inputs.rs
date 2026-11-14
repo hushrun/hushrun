@@ -346,7 +346,8 @@ impl Context<'_> {
 
     /// E for one link (B-37), from its question: the driver as found and as rustc named it,
     /// the line without its inputs and output, the variables the line set or removed (`PATH`
-    /// excepted, which is `path`), and the `dsymutil` a bundle runs. The same at the link and at
+    /// excepted, which is `path`), the `ld` B-18 found for it, and the `dsymutil` a bundle runs.
+    /// The same at the link and at
     /// a lookup, which asks it from a hint's question. With each file it hashed and the stat it
     /// was hashed at, which B-11 judges like every other file a link read.
     #[allow(clippy::too_many_arguments)]
@@ -357,6 +358,7 @@ impl Context<'_> {
         dry_args: &[String],
         set: &[(String, Option<String>)],
         path: &std::ffi::OsStr,
+        ld: &Path,
         cwd: &Path,
         dsymutil: Option<&Path>,
     ) -> (linkenv::LinkEnv, Vec<Watched>) {
@@ -407,6 +409,7 @@ impl Context<'_> {
                 args: dry_args,
                 env: set,
                 path,
+                ld,
                 cwd,
                 apple: self.apple,
                 toolchain,
@@ -1026,6 +1029,7 @@ impl Context<'_> {
             &dry_args,
             &set,
             &asked.path,
+            &environment.ld,
             &asked.cwd,
             found_dsymutil.as_deref(),
         );
@@ -1339,6 +1343,16 @@ pub fn linkers_text(
     if let Some((at, path)) = ld {
         text.push('\n');
         text.push_str(&ld_text(at, path)?);
+        // rustc's own `gcc-ld/ld.lld` only runs `rust-lld` one folder up, which no part of the
+        // compiler's identity holds (B-17 hashes `lib/`): the linker that writes the bytes is
+        // named too, as an `ld` outside the checkout is.
+        if let Some(real) = linkenv::behind_gcc_ld(path) {
+            let stat = Stat::of(&fs::metadata(&real).ok()?);
+            text.push_str(&format!(
+                "\nrust-lld {} {} {} {}",
+                stat.size, stat.mtime_ns, stat.ctime_ns, stat.inode
+            ));
+        }
     }
     if let Some((at, path)) = dsymutil {
         text.push_str("\ndsymutil ");
@@ -1359,5 +1373,41 @@ pub fn sdk_text(sdk: Option<(&Located, &Path)>) -> String {
                 .unwrap_or_default();
             format!("{} {stamp}", located_text(at).unwrap_or_default())
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod linkers_text_tests {
+    use super::*;
+
+    // covers: B-18
+    #[test]
+    fn the_rust_lld_behind_gcc_ld_is_named_where_the_link_environment_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("lib/rustlib/host/bin");
+        fs::create_dir_all(bin.join("gcc-ld")).unwrap();
+        let (driver, ld, lld) = (
+            dir.path().join("cc"),
+            bin.join("gcc-ld/ld.lld"),
+            bin.join("rust-lld"),
+        );
+        fs::write(&driver, b"driver").unwrap();
+        fs::write(&ld, b"wrapper").unwrap();
+        fs::write(&lld, b"lld one").unwrap();
+        let at = |path: &Path| Located::Shared(path.display().to_string());
+        let text = || linkers_text((&at(&driver), &driver), Some((&at(&ld), &ld)), None);
+        let one = text().unwrap();
+        assert!(one.contains("\nrust-lld "), "{one}");
+        // Another `rust-lld`, the wrapper untouched: another text.
+        fs::write(&lld, b"lld two, longer").unwrap();
+        assert_ne!(text().unwrap(), one);
+        // None there: the linkers can't be named.
+        fs::remove_file(&lld).unwrap();
+        assert_eq!(text(), None);
+        // An `ld` in any other folder names no `rust-lld`.
+        let plain = dir.path().join("ld");
+        fs::write(&plain, b"ld").unwrap();
+        let text = linkers_text((&at(&driver), &driver), Some((&at(&plain), &plain)), None);
+        assert!(!text.unwrap().contains("rust-lld"));
     }
 }

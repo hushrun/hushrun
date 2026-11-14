@@ -500,7 +500,9 @@ driver, the `ld`, `dsymutil` and the SDK: it holds each of them by content, with
 the start files, the C runtime and the toolchain's own linker tools, so a driver whose date
 changed and whose bytes didn't is the same link, and one rebuilt with the same date is another.
 Where E is unknown the texts stay, the block is stored and reused on this machine as before, and
-it never leaves it (B-24). The hint keeps E's question (the driver as rustc named it, the line
+it never leaves it (B-24); an `ld` in a folder named `gcc-ld` then also names the `rust-lld` in
+the folder above by its size, dates and inode, since that is the linker it runs and no part of
+the compiler's identity holds it (B-17). The hint keeps E's question (the driver as rustc named it, the line
 without its inputs and output, the variables the line set, roots replaced) beside the one below;
 a hint without it is not followed.
 
@@ -600,10 +602,13 @@ answer a hint or an earlier link gave. E is the SHA-256 of an **ordered list** o
    outputs can see and which the text carries; so does the loader's path the driver adds;
 2. the driver by SHA-256, except on Apple's targets, where `cc` is a shim that runs the selected
    Xcode's clang and the dry run is all clang gives a link of objects; the program the dry run's
-   last command names (`collect2`, or the `ld` clang runs); the `ld` `collect2` runs, taken from
-   that command (its `-fuse-ld=`) and found as `collect2` finds it: gcc's configured
-   `--with-ld=`, else `real-ld`, `collect-ld`, then `ld` or `ld.<name>` in the dry run's
-   `COMPILER_PATH`, then on the link's `PATH`; the plugin it loads (`-plugin`); and every shared
+   last command names (`collect2`, or the `ld` clang runs); the `ld` that really runs, which is
+   B-18's answer for this link and nothing E searches for by itself (one rule says which `ld`
+   runs: the one `collect2` finds, a gcc 15 driver's own answer believed only as B-18 says);
+   when that `ld` lies in a folder named `gcc-ld` (rustc's own, handed to the driver with `-B`
+   where rustc links with its lld, x86-64 Linux since 1.90), the `rust-lld` in the folder above,
+   which that small program only runs and which writes the bytes; the plugin it loads
+   (`-plugin`); and every shared
    library each of those loads, transitively, where the loader would find it: ELF `DT_NEEDED`
    through `DT_RPATH` (when there is no `DT_RUNPATH`), `LD_LIBRARY_PATH`, `DT_RUNPATH`, the
    folders `/etc/ld.so.conf` lists and `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib`, with each
@@ -647,7 +652,8 @@ E is **unknown**, with why, when: the dry run doesn't say it is gcc (`gcc versio
 (`… clang version …`), judged from its output, never from the driver's name (a wrapper script
 named `clang` that runs clang is clang); the dry run exits with an error, prints `error:`, or
 names no program; that program is neither `collect2` nor an `ld` hushrun knows (`ld`, `ld.bfd`,
-`ld.gold`, `ld.lld`, `ld64.lld`, `ld64`, `ld-classic`); a `-fuse-ld=` on rustc's line or on the
+`ld.gold`, `ld.lld`, `ld64.lld`, `ld64`, `ld-classic`); the `ld` B-18 found can't be run, or it
+is rustc's `gcc-ld` program and there is no `rust-lld` above it to run; a `-fuse-ld=` on rustc's line or on the
 command names anything but `bfd`, `gold` and `lld` (`mold`); `ld --print-sysroot`, with the
 command's `--sysroot`, is neither `/` nor empty (an `ld` that can't say: the command's own
 `--sysroot`); a linker script does more than name files; a `-l` or a library a program loads is
@@ -667,9 +673,8 @@ run nor its loader names (a configuration file of its own, a plugin it searches 
 the driver changed what it adds without printing it in its dry run; a library came from the
 loader's cache (`ld.so.cache`) where `ld.so.conf`'s folders don't lead, or from a
 `glibc-hwcaps` subfolder; macOS's shared cache held another version of a library a linker program
-loads and that changed what it writes; or the `ld` of a gcc built with a default linker path
-other than `--with-ld=` ran instead. The linker's version text is not asked: the `ld` it would
-describe is in E by content.
+loads and that changed what it writes; or another `ld` ran than B-18 finds (its own *breaks
+if*). The linker's version text is not asked: the `ld` it would describe is in E by content.
 
 Cost, measured on rustc 1.94 (median of 11 links of a proc macro and of a program after the
 first, release build): on macOS (Xcode 27.2 through `/usr/bin/cc`) about 12 to 19 ms at each

@@ -13,8 +13,9 @@
 //!    path;
 //! 2. the driver (not on Apple's targets, where `cc` is a shim that runs the selected Xcode's
 //!    clang, whose dry run is all it gives a link of objects), the program the dry run names
-//!    (`collect2`, or the `ld` clang runs), the `ld` `collect2` runs (found as `collect2` finds
-//!    it, from the program line's `-fuse-ld=` and the dry run's `COMPILER_PATH`, then `PATH`),
+//!    (`collect2`, or the `ld` clang runs), the `ld` that really runs (the one B-18 finds,
+//!    [`crate::link::environment`]: never a second search here), the toolchain's `rust-lld`
+//!    when that `ld` is rustc's own `gcc-ld` wrapper, which only runs it,
 //!    the plugin it loads, and every shared library each of those loads, resolved where the
 //!    loader would find it (ELF `DT_NEEDED` through `DT_RPATH`, `LD_LIBRARY_PATH`,
 //!    `DT_RUNPATH`, `/etc/ld.so.conf` and the system folders; Mach-O load commands through
@@ -120,6 +121,10 @@ pub struct Question<'a> {
     pub env: &'a [(String, Option<String>)],
     /// The link command's `PATH`.
     pub path: &'a OsStr,
+    /// The `ld` this link runs, as B-18 finds it ([`link::environment`]), asked at this link or
+    /// this lookup. One definition of which `ld` runs: E hashes that file, and searches for no
+    /// `ld` itself.
+    pub ld: &'a Path,
     /// rustc's working directory.
     pub cwd: &'a Path,
     /// The target is Apple's.
@@ -170,10 +175,6 @@ struct DryRun {
     text: String,
     /// The program line: the last command, split into words.
     program: Vec<String>,
-    /// gcc's `COMPILER_PATH=` folders, where `collect2` looks for `ld` before `PATH`.
-    compiler_path: Vec<String>,
-    /// gcc's `--with-ld=` from `Configured with:`: the `ld` `collect2` runs whatever it finds.
-    configured_ld: Option<String>,
 }
 
 /// Reads a dry run: an error is a [`Why`].
@@ -184,8 +185,6 @@ fn read_dry_run(answer: &Answer, placeholders: &dyn Fn(&str) -> String) -> Resul
     // gcc or clang, by their own words: only these two are asked (B-37).
     let mut known_driver = false;
     let mut program = None;
-    let mut compiler_path = Vec::new();
-    let mut configured_ld = None;
     for line in answer.stderr.lines() {
         if line.starts_with(' ') {
             program = Some(split_command(line)?);
@@ -198,19 +197,6 @@ fn read_dry_run(answer: &Answer, placeholders: &dyn Fn(&str) -> String) -> Resul
         if line.starts_with("gcc version ") || line.contains("clang version ") {
             known_driver = true;
         }
-        if let Some(rest) = line.strip_prefix("COMPILER_PATH=") {
-            compiler_path = rest
-                .split(':')
-                .filter(|dir| !dir.is_empty())
-                .map(str::to_owned)
-                .collect();
-        }
-        if let Some(rest) = line.strip_prefix("Configured with:") {
-            configured_ld = rest
-                .split_whitespace()
-                .find_map(|word| word.strip_prefix("--with-ld="))
-                .map(|ld| ld.trim_matches('\'').to_owned());
-        }
     }
     if !known_driver {
         return Err("the C driver is neither gcc nor clang by its dry run".into());
@@ -222,8 +208,6 @@ fn read_dry_run(answer: &Answer, placeholders: &dyn Fn(&str) -> String) -> Resul
     Ok(DryRun {
         text: normalize(&answer.stderr, placeholders),
         program,
-        compiler_path,
-        configured_ld,
     })
 }
 
@@ -714,13 +698,41 @@ fn items(q: &Question<'_>, ask: &Ask<'_>) -> Result<Vec<Item>, Why> {
     {
         return Err(format!("-fuse-ld names {name}, not bfd, gold or lld"));
     }
-    let ld = if program_name == "collect2" {
-        let (name, found) = collect2_ld(q, &dry, fuse.as_deref())?;
-        g.program("ld", &name, &found)?;
-        found
-    } else {
-        program.clone()
+    // Which `ld` runs is B-18's answer, the same one the key's other parts were made with:
+    // `collect2` runs it, and a clang that runs an `ld` itself names the same file in its dry
+    // run. Where the two differ both are in E.
+    let ld = q.cwd.join(q.ld);
+    if !executable(&ld) {
+        return Err(format!(
+            "the ld the link runs, {}, can't be run",
+            ld.display()
+        ));
+    }
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     };
+    if program_name == "collect2" || !same(&ld, &program) {
+        let name = match &fuse {
+            Some(fuse) => format!("ld.{fuse}"),
+            None => "ld".to_owned(),
+        };
+        g.program("ld", &name, &ld)?;
+    }
+    // rustc's own `gcc-ld/ld.lld` (and `ld`, `ld64.lld`, `wasm-ld` beside it) is a small
+    // program that only runs `rust-lld` one folder up: that is the linker that writes the
+    // bytes, so it is in E by content with what it loads, whatever else is known of the
+    // toolchain.
+    if let Some(real) = behind_gcc_ld(&ld) {
+        if !executable(&real) {
+            return Err(format!(
+                "{} runs {}, which can't be run",
+                ld.display(),
+                real.display()
+            ));
+        }
+        g.program("ld", "rust-lld", &real)?;
+    }
 
     // What the program line names: the plugin, the files it adds, the SDK.
     let mut sdk = None;
@@ -886,39 +898,15 @@ fn loader_variables(q: &Question<'_>) -> Result<(), Why> {
     Ok(())
 }
 
-/// The `ld` `collect2` runs: gcc's configured one, else `real-ld`, `collect-ld` and the name
-/// (`ld`, or `ld.<name>` for the program line's `-fuse-ld=<name>`) in the dry run's
-/// `COMPILER_PATH`, then the name on the link's `PATH`. The name asked for, and the file.
-fn collect2_ld(
-    q: &Question<'_>,
-    dry: &DryRun,
-    fuse: Option<&str>,
-) -> Result<(String, PathBuf), Why> {
-    let name = match fuse {
-        Some(fuse) => format!("ld.{fuse}"),
-        None => "ld".to_owned(),
+/// The program rustc's `gcc-ld` wrapper runs for `ld`: `rust-lld` in the folder above, when
+/// `ld` lies in a folder named `gcc-ld` (as it is found, and as it resolves).
+pub(crate) fn behind_gcc_ld(ld: &Path) -> Option<PathBuf> {
+    let in_gcc_ld = |path: &Path| -> Option<PathBuf> {
+        let dir = path.parent()?;
+        (dir.file_name() == Some(OsStr::new("gcc-ld")))
+            .then(|| dir.parent().map(|up| up.join("rust-lld")))?
     };
-    if let Some(configured) = &dry.configured_ld {
-        let path = PathBuf::from(configured);
-        if executable(&path) {
-            return Ok((name, path));
-        }
-    }
-    for program in ["real-ld", "collect-ld", name.as_str()] {
-        for dir in &dry.compiler_path {
-            let path = q.cwd.join(dir).join(program);
-            if executable(&path) {
-                return Ok((program.to_owned(), path));
-            }
-        }
-    }
-    for dir in std::env::split_paths(q.path) {
-        let path = q.cwd.join(dir).join(&name);
-        if executable(&path) {
-            return Ok((name, path));
-        }
-    }
-    Err(format!("the {name} collect2 runs is found nowhere"))
+    in_gcc_ld(ld).or_else(|| in_gcc_ld(&std::fs::canonicalize(ld).ok()?))
 }
 
 fn executable(path: &Path) -> bool {
@@ -1447,6 +1435,10 @@ mod tests {
         lto: bool,
         apple: bool,
         args: Vec<String>,
+        /// The `ld` B-18 found, when it is not the first on `path`.
+        ld: Option<PathBuf>,
+        /// Whether the toolchain's sysroot is known.
+        toolchain: bool,
     }
 
     impl Setup {
@@ -1474,6 +1466,8 @@ mod tests {
                 loader: Vec::new(),
                 lto: false,
                 apple: false,
+                ld: None,
+                toolchain: true,
                 args: vec![
                     "-Wl,--as-needed".into(),
                     "-lgcc_s".into(),
@@ -1508,15 +1502,24 @@ mod tests {
             let digest = |path: &Path| fs::read(path).map(|bytes| Digest::of(&bytes));
             let driver = self.root.join("cc");
             let sysroot = self.root.join("toolchain");
+            // The `ld` B-18 would name here: the fixture driver has no folder of its own for
+            // one, so the first on the link's `PATH`.
+            let ld = self.ld.clone().unwrap_or_else(|| {
+                std::env::split_paths(&self.path)
+                    .map(|dir| dir.join("ld"))
+                    .find(|path| executable(path))
+                    .expect("an ld on the fixture's PATH")
+            });
             let q = Question {
                 driver: &driver,
                 driver_name: "cc",
                 args: &self.args,
                 env: &self.env,
                 path: &self.path,
+                ld: &ld,
                 cwd: &self.root,
                 apple: self.apple,
-                toolchain: Some((&sysroot, "host")),
+                toolchain: self.toolchain.then_some((&sysroot, "host")),
                 dsymutil: None,
                 lto: self.lto,
                 loader_env: &self.loader,
@@ -1654,6 +1657,43 @@ mod tests {
         assert!(items.iter().any(|i| i.role == "ld" && i.name == "ld"));
         fs::remove_file(s.root.join("early/ld")).unwrap();
         assert_eq!(s.digest(), first);
+    }
+
+    // covers: B-18, B-37
+    #[test]
+    fn the_rust_lld_behind_rustcs_own_gcc_ld_is_in_e_by_content() {
+        // x86-64 Linux: the `ld` the driver runs is `<toolchain>/…/bin/gcc-ld/ld.lld`, a small
+        // program that runs `rust-lld` one folder up. That is the linker that writes the bytes.
+        use std::os::unix::fs::PermissionsExt;
+        let make = |lld: &[u8], toolchain: bool| {
+            let dir = tempfile::tempdir().unwrap().keep();
+            let mut s = Setup::new(&dir);
+            let bin = s.root.join("toolchain/lib/rustlib/host/bin");
+            script(&bin.join("gcc-ld/ld.lld"), "exit 1");
+            file(&bin.join("rust-lld"), lld);
+            fs::set_permissions(bin.join("rust-lld"), fs::Permissions::from_mode(0o755)).unwrap();
+            s.ld = Some(bin.join("gcc-ld/ld.lld"));
+            s.toolchain = toolchain;
+            s
+        };
+        // Told apart by `rust-lld`'s bytes alone, the wrapper the same, also where nothing
+        // else is known of the toolchain.
+        for toolchain in [true, false] {
+            let one = make(b"lld one", toolchain);
+            let LinkEnv::Known { digest, items } = one.identity() else {
+                panic!("{:?}", one.identity());
+            };
+            assert!(
+                items.iter().any(|i| i.role == "ld" && i.name == "rust-lld"),
+                "{items:#?}"
+            );
+            assert_eq!(make(b"lld one", toolchain).digest(), digest);
+            assert_ne!(make(b"lld two", toolchain).digest(), digest);
+        }
+        // No `rust-lld` there to run: unknown.
+        let gone = make(b"lld one", true);
+        fs::remove_file(gone.root.join("toolchain/lib/rustlib/host/bin/rust-lld")).unwrap();
+        assert!(gone.unknown().contains("rust-lld"), "{}", gone.unknown());
     }
 
     // covers: B-37
