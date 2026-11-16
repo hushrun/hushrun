@@ -386,18 +386,81 @@ enum CiStore {
     /// the runner empties the folder when the job ends, and a folder it kept is another job's,
     /// whose name this job can't have.
     Job(PathBuf),
-    /// No such folder, or no job to name it by: a folder of this process's under the system's
-    /// temporary folder, made by this run and removed when its session ends.
+    /// No such folder, or no job to name it by (GitLab CI has none): a folder under the system's
+    /// temporary folder named by the job's id (`CI_JOB_ID`, else this process's) and a random
+    /// part ([`CiStore::of`] picks a new one at each call), which only this run makes and uses.
+    /// Its states:
+    ///
+    /// | The folder | Moved by | To |
+    /// |---|---|---|
+    /// | absent | [`CiStore::prepare`]: created exclusively (0700), then its lock taken and held for the run ([`RUN_STORE`]) | this run's |
+    /// | there already | nothing: never adopted, never removed by this run | no store, one line |
+    /// | this run's | the session's end, on every outcome ([`end_run_store`]) | absent |
+    /// | a dead run's (its lock free, taken over an hour ago) | any run's [`CiStore::prepare`] in the same folder | absent |
     Run(PathBuf),
+}
+
+/// The file in a run's store whose lock the run holds while it lives (B-31).
+const RUN_LOCK: &str = "ci-run.lock";
+
+/// A store whose lock is free is a dead run's only once the lock was made this long ago: a run
+/// takes it at once, so a younger one may be a run between making the folder and locking it.
+const DEAD_AFTER: Duration = Duration::from_secs(3600);
+
+/// The run store this process made and the lock it holds on it (B-31): one per process, as the
+/// session is.
+static RUN_STORE: std::sync::Mutex<Option<(PathBuf, std::fs::File)>> = std::sync::Mutex::new(None);
+
+/// B-31: the end of a run's own store, on every outcome of its session: the lock goes, then the
+/// folder. A path this process didn't make is left alone.
+fn end_run_store(path: &Path) {
+    let mut held = RUN_STORE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if held.as_ref().is_some_and(|(store, _)| store == path) {
+        *held = None;
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// The system's temporary folder: `TMPDIR` when it is an absolute path, else the platform's.
+fn temp_dir(env: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    env("TMPDIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 impl CiStore {
     fn of(env: &dyn Fn(&str) -> Option<OsString>) -> CiStore {
         match (env("RUNNER_TEMP").map(PathBuf::from), github_job(env)) {
             (Some(temp), Some(job)) if temp.is_absolute() => CiStore::Job(temp.join(job.folder)),
-            _ => CiStore::Run(
-                std::env::temp_dir().join(format!("{CI_STORE}-{}", std::process::id())),
-            ),
+            _ => {
+                let job: String = env("CI_JOB_ID")
+                    .map(|id| id.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .take(20)
+                    .collect();
+                let job = if job.is_empty() {
+                    std::process::id().to_string()
+                } else {
+                    job
+                };
+                let mut random = [0u8; 8];
+                if getrandom::fill(&mut random).is_err() {
+                    let digest = hushrun_build::origin::fingerprint(&format!(
+                        "{:?}\n{}",
+                        SystemTime::now(),
+                        std::process::id()
+                    ));
+                    random.copy_from_slice(&digest.as_bytes()[..8]);
+                }
+                CiStore::Run(
+                    temp_dir(env).join(format!("{CI_STORE}-{job}-{}", hex::encode(random))),
+                )
+            }
         }
     }
 
@@ -409,9 +472,10 @@ impl CiStore {
 
     /// B-31: makes sure the store is this job's before anything in it is read. Beside a job's
     /// store, every other store folder in the job's temporary folder is another job's (a
-    /// runner that kept it): it is removed, and never read. A run's store found at the start is
-    /// another process's that died with the same id: it is removed, and the store is made anew
-    /// by this run; where it can't be, there is no store. `Err` is the line to say.
+    /// runner that kept it): it is removed, and never read. A run's store is made by this run,
+    /// exclusively, and its lock held until the session ends; a folder already at its path is
+    /// never adopted, and the run has no store. Dead runs' stores beside it go first
+    /// ([`sweep_dead_runs`]). `Err` is the line to say.
     fn prepare(&self) -> Result<(), String> {
         match self {
             CiStore::Job(path) => {
@@ -432,19 +496,97 @@ impl CiStore {
                 Ok(())
             }
             CiStore::Run(path) => {
-                if std::fs::symlink_metadata(path).is_ok() {
-                    let _ = std::fs::remove_dir_all(path).or_else(|_| std::fs::remove_file(path));
+                if let (Some(parent), Some(own)) = (path.parent(), path.file_name()) {
+                    sweep_dead_runs(parent, own, SystemTime::now());
                 }
                 // The guard is in the write: only a folder this call creates is the run's.
-                std::fs::create_dir(path).map_err(|err| {
+                let mut folder = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt as _;
+                    folder.mode(0o700);
+                }
+                folder.create(path).map_err(|err| {
                     format!(
-                        "{OFF}: another run's store at {} can't be removed: {err}",
+                        "{OFF}: the run's store at {} can't be made, and a run never takes a folder it didn't make: {err}",
                         path.display()
                     )
-                })
+                })?;
+                let lock = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path.join(RUN_LOCK))
+                    .and_then(|file| file.try_lock().map(|()| file).map_err(io_error));
+                match lock {
+                    Ok(file) => {
+                        *RUN_STORE
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some((path.clone(), file));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = std::fs::remove_dir_all(path);
+                        Err(format!(
+                            "{OFF}: the run's store at {} can't be locked: {err}",
+                            path.display()
+                        ))
+                    }
+                }
             }
         }
     }
+}
+
+fn io_error(err: std::fs::TryLockError) -> std::io::Error {
+    match err {
+        std::fs::TryLockError::Error(err) => err,
+        std::fs::TryLockError::WouldBlock => std::io::Error::from(std::io::ErrorKind::WouldBlock),
+    }
+}
+
+/// B-31: removes the run stores in `parent` that a dead run left (a crash, a kill): this
+/// user's, other than `own`, whose lock file was made over an hour before `now` and whose lock
+/// nobody holds. A store whose lock is held is a live run's, whatever its age; one with no lock
+/// file is left alone.
+fn sweep_dead_runs(parent: &Path, own: &std::ffi::OsStr, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == own || !name.to_string_lossy().starts_with(&format!("{CI_STORE}-")) {
+            continue;
+        }
+        let dir = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || !owned_here(&meta) {
+            continue;
+        }
+        let lock = dir.join(RUN_LOCK);
+        let old = std::fs::symlink_metadata(&lock)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| meta.modified().ok())
+            .is_some_and(|made| made + DEAD_AFTER < now);
+        let free = old && std::fs::File::open(&lock).is_ok_and(|file| file.try_lock().is_ok());
+        if free {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn owned_here(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    meta.uid() == rustix::process::geteuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn owned_here(_: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// B-31, B-36: a CI job's own store, made ready as a run's is, when the job has one that a
@@ -545,17 +687,13 @@ fn begin_in_ci(
     let mut session = match begin_with(here, std::env::current_exe(), Some(store.path())) {
         Ok(session) => session,
         Err(line) => {
-            if let CiStore::Run(path) = &store {
-                let _ = std::fs::remove_dir_all(path);
-            }
+            end_run_store(store.path());
             return Err(line);
         }
     };
     let abandon = |session: Session, line: Option<String>| {
         session.finish(here.now);
-        if let CiStore::Run(path) = &store {
-            let _ = std::fs::remove_dir_all(path);
-        }
+        end_run_store(store.path());
         Err(line)
     };
     let relay = match start_sharing(&mut session, start, repository, here.env) {
@@ -737,11 +875,7 @@ pub(crate) fn finish(mut session: Session, now: SystemTime) -> hushrun_build::se
     let store = session.current().store.clone();
     let summary = session.finish(now);
     // B-31: a CI job's store with no job folder to go with goes with the run.
-    if hushrun_ci::in_ci(&Env::from_process())
-        && CiStore::of(&|name| hushrun_ci::var_os(name)) == CiStore::Run(store.clone())
-    {
-        let _ = std::fs::remove_dir_all(&store);
-    }
+    end_run_store(&store);
     summary
 }
 
@@ -1079,26 +1213,117 @@ mod tests {
         assert!(!other.exists() && !legacy.exists());
         assert!(unrelated.exists());
 
-        // A run's store found at the start died with another process of the same id.
-        let run = temp.path().join("hushrun-build-12345");
+        // A folder found where a run's store would be is another run's: never adopted, never
+        // removed, and the run has no store.
+        let run = temp.path().join("hushrun-build-12345-0123456789abcdef");
         std::fs::create_dir_all(run.join("blocks/x")).unwrap();
-        CiStore::Run(run.clone()).prepare().unwrap();
-        assert!(run.is_dir());
-        assert_eq!(std::fs::read_dir(&run).unwrap().count(), 0);
-        // One that can't be removed means no store.
-        let stuck = temp.path().join("stuck");
-        std::fs::create_dir_all(&stuck).unwrap();
-        let run = stuck.join("hushrun-build-12346");
-        std::fs::create_dir_all(run.join("blocks")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let said = CiStore::Run(run.clone()).prepare();
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let said = said.unwrap_err();
+        let said = CiStore::Run(run.clone()).prepare().unwrap_err();
         assert!(
-            said.starts_with("build reuse is off for this run: another run's store"),
+            said.starts_with("build reuse is off for this run: the run's store at"),
             "{said}"
         );
+        assert!(run.join("blocks/x").is_dir());
+        assert!(!run.join(RUN_LOCK).exists());
+    }
+
+    /// The tests that make run stores, one at a time: a process holds one (`RUN_STORE`).
+    static RUN_STORES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // covers: B-31
+    #[test]
+    fn two_runs_of_one_process_id_never_remove_or_read_each_others_store() {
+        let _one = RUN_STORES.lock().unwrap_or_else(|p| p.into_inner());
+        // A shared temporary folder (a shell runner, a Docker volume): two jobs whose hushrun has
+        // the same process id, as in two containers.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        let env = vars(&[
+            ("TMPDIR", &path),
+            ("GITLAB_CI", "true"),
+            ("CI_JOB_ID", "77"),
+        ]);
+        let first = CiStore::of(&env);
+        first.prepare().unwrap();
+        std::fs::write(first.path().join("left-by-the-first"), b"").unwrap();
+        let second = CiStore::of(&env);
+        let prepared = second.prepare();
+        let kept = first.path().join("left-by-the-first").exists();
+        let apart = first.path() != second.path();
+        for store in [&first, &second] {
+            let _ = std::fs::remove_dir_all(store.path());
+        }
+        prepared.unwrap();
+        assert!(kept, "the second run removed the first's store");
+        assert!(apart, "both runs use {}", first.path().display());
+    }
+
+    // covers: B-31
+    #[test]
+    fn a_run_s_store_goes_with_its_session_and_a_dead_run_s_with_the_next_run() {
+        let _one = RUN_STORES.lock().unwrap_or_else(|p| p.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        let env = vars(&[("TMPDIR", &path), ("CI_JOB_ID", "88")]);
+        let store = CiStore::of(&env);
+        let name = store
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.starts_with("hushrun-build-88-"), "{name}");
+        assert_eq!(name.len(), "hushrun-build-88-".len() + 16, "{name}");
+        store.prepare().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(store.path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Its lock is held while it lives: another run's sweep leaves it, however old.
+        let lock = store.path().join(RUN_LOCK);
+        let long_ago = SystemTime::now() - Duration::from_secs(7200);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        // A dead run's store, whose lock nobody holds, made over an hour ago; a young one; one
+        // with no lock file; and something else.
+        let dead = temp.path().join("hushrun-build-87-00000000000000aa");
+        let young = temp.path().join("hushrun-build-86-00000000000000bb");
+        let unlocked = temp.path().join("hushrun-build-85-00000000000000cc");
+        let other = temp.path().join("not-a-store");
+        for dir in [&dead, &young, &unlocked, &other] {
+            std::fs::create_dir_all(dir.join("blocks")).unwrap();
+        }
+        for (dir, made) in [(&dead, long_ago), (&young, SystemTime::now())] {
+            std::fs::File::create(dir.join(RUN_LOCK))
+                .unwrap()
+                .set_modified(made)
+                .unwrap();
+        }
+        let next = CiStore::of(&env);
+        next.prepare().unwrap();
+        assert!(store.path().is_dir(), "a live run's store stays");
+        assert!(!dead.exists(), "a dead run's store goes");
+        for kept in [&young, &unlocked, &other] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        // The first run's session ends: its store goes, on every outcome. A path this process
+        // didn't make (the next run's lock is the one held now) is left alone.
+        end_run_store(store.path());
+        assert!(
+            store.path().exists(),
+            "only the store this process holds goes"
+        );
+        end_run_store(next.path());
+        assert!(!next.path().exists());
+        let _ = std::fs::remove_dir_all(store.path());
     }
 
     // covers: B-23
