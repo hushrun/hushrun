@@ -109,7 +109,8 @@ impl World {
     }
 
     /// A session of a run that shares, its backend out of reach (B-34): a program nobody set
-    /// gets its debug bundle there (B-9, B-21).
+    /// gets its debug bundle there (B-9, B-21). Only macOS makes debug bundles.
+    #[cfg(target_os = "macos")]
     fn begin_sharing(&self, mode: Mode) -> Session {
         let mut session = self.begin(mode).unwrap();
         session.set_unreached().unwrap();
