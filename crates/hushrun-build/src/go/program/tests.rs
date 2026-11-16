@@ -322,10 +322,11 @@ fn a_go_version_whose_cache_is_unknown_gets_misses_and_a_folder_of_its_own() {
 #[test]
 fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
     let mut m = Machine::new();
-    m.env.insert(BUDGET_VAR.into(), "300".into());
+    m.env.insert(BUDGET_VAR.into(), "1000".into());
+    // Counted by command: the gets are requests 1, 2 and 4.
     m.env.insert(
         FAULT_VAR.into(),
-        "hang-get=1,panic-get=2,panic-put=1,slow-get=4".into(),
+        "hang-get=1,panic-get=2,panic-put=1,slow-get=3".into(),
     );
     let started = Instant::now();
     // The body a panicking put leaves, read before `close`, after which Go reads nothing.
@@ -352,15 +353,21 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         let seen = seen.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
+            let mut panicked_at = None;
             while Instant::now() < deadline {
-                if let Some(line) = out.lines().into_iter().find(|l| l["ID"] == 3) {
+                let lines = out.lines();
+                if panicked_at.is_none() && lines.iter().any(|l| l["ID"] == 2) {
+                    panicked_at = Some(started.elapsed());
+                }
+                if let Some(line) = lines.into_iter().find(|l| l["ID"] == 3) {
                     if let Some(path) = line["DiskPath"].as_str() {
                         *lock(&seen) = std::fs::read(path).unwrap_or_default();
                     }
-                    return;
+                    return panicked_at.unwrap_or(started.elapsed());
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
+            Duration::MAX
         })
     };
     serve_with(
@@ -369,9 +376,11 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         m.env.clone(),
         Box::new(|_| Ok("go build".into())),
     );
-    reader.join().unwrap();
+    // A panic is answered at once, not by the watchdog at the budget.
+    let panicked_at = reader.join().unwrap();
+    assert!(panicked_at < Duration::from_millis(500), "{panicked_at:?}");
     // The slow handler answers after `close`'s wait: given its time, it writes nothing.
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(Duration::from_millis(1500));
     let lines = out.lines();
     let answers = by_id(&lines);
     assert_eq!(answers.len(), 6, "{lines:?}");
