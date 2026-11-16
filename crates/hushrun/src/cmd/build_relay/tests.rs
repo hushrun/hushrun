@@ -3191,7 +3191,7 @@ fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_buil
     }
 }
 
-// covers: B-43
+// covers: B-45
 #[test]
 fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
     let fake = FakeBuild::start();
@@ -3253,7 +3253,7 @@ fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
     relay.end_check(&[]);
 }
 
-// covers: B-43
+// covers: B-45
 #[test]
 fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
     let fake = FakeBuild::start();

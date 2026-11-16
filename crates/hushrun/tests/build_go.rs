@@ -233,7 +233,7 @@ fn go_blocks(fake: &FakeBuild) -> usize {
         .sum()
 }
 
-// covers: B-36, B-41, B-43
+// covers: B-39, B-41, B-45
 #[test]
 fn a_go_package_one_machine_built_is_reused_on_another_from_the_shared_store() {
     if !have_go() {
@@ -281,7 +281,7 @@ fn a_go_package_one_machine_built_is_reused_on_another_from_the_shared_store() {
     assert!(fake.count(route::OPEN) > opens_before);
 }
 
-// covers: B-36, B-41
+// covers: B-39, B-41
 #[test]
 fn inside_hushrun_run_go_reads_the_persons_own_warm_cache_and_audits_nothing_there() {
     if !have_go() {
@@ -308,7 +308,7 @@ fn inside_hushrun_run_go_reads_the_persons_own_warm_cache_and_audits_nothing_the
     assert_eq!(go_blocks(&fake), 0, "nothing was built, so nothing goes up");
 }
 
-// covers: B-40
+// covers: B-42
 #[test]
 fn a_cgo_package_and_assembly_including_a_header_from_elsewhere_stay_on_the_machine() {
     if !have_go() {
@@ -355,7 +355,7 @@ fn a_cgo_package_and_assembly_including_a_header_from_elsewhere_stay_on_the_mach
     );
 }
 
-// covers: B-40
+// covers: B-42
 #[test]
 fn a_build_through_toolexec_uploads_nothing() {
     if !have_go() {
@@ -379,7 +379,7 @@ fn a_build_through_toolexec_uploads_nothing() {
     assert!(stderr.contains("the go command was altered"), "{stderr}");
 }
 
-// covers: B-40
+// covers: B-42
 #[test]
 fn a_compile_that_printed_stays_here_and_the_other_machine_prints_it_too() {
     if !have_go() {
@@ -400,7 +400,7 @@ fn a_compile_that_printed_stays_here_and_the_other_machine_prints_it_too() {
     assert!(stderr.contains("can inline F"), "{stderr}");
 }
 
-// covers: B-36
+// covers: B-39
 #[test]
 fn a_cache_program_the_person_set_stays_and_none_is_set_outside_a_module() {
     if !have_go() {
@@ -440,7 +440,7 @@ fn a_cache_program_the_person_set_stays_and_none_is_set_outside_a_module() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
-// covers: B-36
+// covers: B-39
 #[test]
 fn a_store_under_a_folder_with_a_space_still_builds() {
     if !have_go() {
@@ -456,7 +456,7 @@ fn a_store_under_a_folder_with_a_space_still_builds() {
     assert!(go_line(&stderr).contains("built"), "{stderr}");
 }
 
-// covers: B-37
+// covers: B-40
 #[test]
 fn a_hung_or_panicking_handler_never_stalls_or_fails_go() {
     if !have_go() {
@@ -521,4 +521,127 @@ fn go_clean_cache_inside_hushrun_run_clears_what_the_program_kept() {
         .filter(|l| matches!(l.trim(), "1" | "2"))
         .collect();
     assert_eq!(printed, vec!["1", "2"], "{stderr}");
+}
+
+/// Not a check: what two machines save on a real module, for the record. `HUSHRUN_GO_MEASURE`
+/// names a module's folder (its dependencies already in the module cache `GOMODCACHE` names),
+/// `HUSHRUN_GO_MEASURE_BIN` the hushrun binary to measure (else this test's), and
+/// `HUSHRUN_GO_MEASURE_FLAGS` Go's flags (default `-trimpath`). Run with `--ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn measure_two_machines_on_a_real_module() {
+    let Some(module) = std::env::var_os("HUSHRUN_GO_MEASURE").map(PathBuf::from) else {
+        return;
+    };
+    let bin = std::env::var_os("HUSHRUN_GO_MEASURE_BIN").map_or_else(
+        || PathBuf::from(env!("CARGO_BIN_EXE_hushrun")),
+        PathBuf::from,
+    );
+    let flags = std::env::var("HUSHRUN_GO_MEASURE_FLAGS").unwrap_or_else(|_| "-trimpath".into());
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let copy = |name: &str| -> Machine {
+        let root = dir.path().join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = root.join("src").join(name).join("module");
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        let status = Command::new("cp")
+            .arg("-R")
+            .arg(&module)
+            .arg(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        if !repo.join(".git").exists() {
+            git::init(&repo, "sha1");
+            git::commit_all(&repo, "init");
+        }
+        std::fs::write(
+            root.join("machine.pem"),
+            hushrun_testkit::world::test_key(7).to_pem().as_str(),
+        )
+        .unwrap();
+        std::fs::write(root.join("gitconfig"), "").unwrap();
+        Machine { root, repo }
+    };
+    let go = |m: &Machine, cmd: &mut Command| {
+        for var in CLEARED {
+            if *var != "GOFLAGS" {
+                cmd.env_remove(var);
+            }
+        }
+        cmd.env("GOCACHE", m.gocache())
+            .env("GOTOOLCHAIN", "local")
+            .env("GOENV", "off")
+            .env("GOFLAGS", &flags);
+    };
+    let build = "go build -o /dev/null ./...";
+    let timed_plain = |m: &Machine| {
+        let mut cmd = Command::new("sh");
+        go(m, &mut cmd);
+        let started = Instant::now();
+        let out = cmd
+            .current_dir(&m.repo)
+            .args(["-c", build])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        started.elapsed()
+    };
+    let timed_run = |m: &Machine, audit: &str| {
+        let mut cmd = Command::new(&bin);
+        cmd.current_dir(&m.repo)
+            .env("HUSHRUN_CACHE_DIR", m.root.join("cache"))
+            .env("HUSHRUN_CREDENTIALS", m.root.join("credentials.json"))
+            .env("HUSHRUN_MACHINE_KEY_FILE", m.root.join("machine.pem"))
+            .env("HUSHRUN_HOST", "http://127.0.0.1:9")
+            .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+            .env("HUSHRUN_BACKEND", fake.url())
+            .env("HUSHRUN_TOKEN", FakeBuild::TOKEN)
+            .env("HUSHRUN_BUILD", "on")
+            .env("HUSHRUN_BUILD_AUDIT", audit)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", m.root.join("gitconfig"))
+            .args(["run", "build", "--force", "--", "sh", "-c", build]);
+        go(m, &mut cmd);
+        let started = Instant::now();
+        let out = cmd.output().unwrap();
+        let took = started.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{stderr}");
+        let lines: Vec<String> = stderr
+            .lines()
+            .filter(|l| l.contains("build: go"))
+            .map(str::to_string)
+            .collect();
+        (took, lines)
+    };
+    let cold = copy("cold");
+    let cold_time = timed_plain(&cold);
+    let warm_time = timed_plain(&cold);
+    let a = copy("a");
+    let (a_time, a_lines) = timed_run(&a, "none");
+    let (a_warm, a_warm_lines) = timed_run(&a, "none");
+    let b = copy("b");
+    let (b_time, b_lines) = timed_run(&b, "none");
+    let c = copy("c");
+    let (c_time, c_lines) = timed_run(&c, "every");
+    println!("plain go, cold: {cold_time:?}; warm: {warm_time:?}");
+    println!("A, cold, hushrun run: {a_time:?} {a_lines:?}");
+    println!("A, warm, hushrun run: {a_warm:?} {a_warm_lines:?}");
+    println!("B, from A's blocks: {b_time:?} {b_lines:?}");
+    println!("C, from A's blocks, every one audited: {c_time:?} {c_lines:?}");
+    let go_begins: usize = fake
+        .begins()
+        .iter()
+        .filter(|b| b.kind == "go/1")
+        .map(|b| b.blocks.len())
+        .sum();
+    println!(
+        "go/1 blocks begun {go_begins}, stored {}, lookups {}, bytes served {}",
+        fake.stored().len(),
+        fake.count(route::LOOKUP),
+        fake.served_bytes()
+    );
 }

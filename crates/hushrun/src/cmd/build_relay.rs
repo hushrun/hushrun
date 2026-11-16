@@ -100,7 +100,7 @@ impl Default for Tuning {
     }
 }
 
-/// The most a Go fetch waits for the Go manifest's prefetch to look up what it names (B-43).
+/// The most a Go fetch waits for the Go manifest's prefetch to look up what it names (B-45).
 const GO_PREFETCH_WAIT: Duration = Duration::from_secs(1);
 /// How many failures in a row rest the relay.
 const FAILURES_TO_REST: u32 = 3;
@@ -283,12 +283,12 @@ struct Check {
     check: Option<Hex32>,
     socket: socket::Bound,
     stop_serving: Arc<AtomicBool>,
-    /// B-43: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
+    /// B-45: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
     /// module's and gets the cache program: its Go manifest is asked for and closed apart.
     go: Option<String>,
 }
 
-/// The check's Go manifest (B-43): asked once `open` answered, kept until the first Go fetch
+/// The check's Go manifest (B-45): asked once `open` answered, kept until the first Go fetch
 /// takes it for the prefetch. Until it has answered, a Go fetch is a miss, and a Go fetch for an
 /// archive the manifest doesn't name never asks the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,7 +920,7 @@ impl Relay {
         // C4: kept for the first wrapper that misses; a run that compiles nothing fetches
         // nothing.
         self.state().manifest = Some(manifest);
-        // B-43: the check's Go manifest, asked apart once the org said the run shares.
+        // B-45: the check's Go manifest, asked apart once the org said the run shares.
         let go = {
             let mut state = self.state();
             let asked = state
@@ -940,7 +940,7 @@ impl Relay {
         }
     }
 
-    /// B-43: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
+    /// B-45: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
     /// is the one the check's own `open` answered. A failure leaves no manifest, and so no Go
     /// download, and changes nothing else.
     async fn go_open(&self, check: Option<Hex32>, platform: String) {
@@ -965,7 +965,7 @@ impl Relay {
         }
     }
 
-    /// B-43: a Go package archive the cache program asks for. Downloaded only when the check's
+    /// B-45: a Go package archive the cache program asks for. Downloaded only when the check's
     /// Go manifest names it: the program asks about every entry Go's cache misses, and most of
     /// them are local ones no server holds. The first Go fetch starts the prefetch of what the
     /// manifest names (a warm machine, whose `go` finds everything in its own cache, asks
@@ -2075,7 +2075,7 @@ impl Relay {
                 *bound,
                 *cost_ms,
             ),
-            // B-43: a Go package archive is a library whose first key is its key, and the cache
+            // B-45: a Go package archive is a library whose first key is its key, and the cache
             // program tells only of portable ones.
             Request::GoBuilt { key, cost_ms } => (
                 Kind::Go,
@@ -2390,7 +2390,7 @@ impl Relay {
             .min(self.config.tuning.close);
         if let (true, false, Some(check), false) = (shares, self.saved, &check, left.is_zero()) {
             let close = self.close_request(Kind::Rustc, check, entries);
-            // B-43: the check's Go command closes apart, with its own manifest and run.
+            // B-45: the check's Go command closes apart, with its own manifest and run.
             let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
                 .then(|| self.close_request(Kind::Go, check, entries));
             let relay = self.clone();

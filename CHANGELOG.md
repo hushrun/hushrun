@@ -11,6 +11,30 @@ programs, proc macros and build-script binaries are shared between machines whos
 environment is the same by content, and a block that holds a machine's folder between CI jobs
 where that folder is the same. Every linked output's key changes once.
 
+Go build blocks ([ADR 0093](docs/adr/0093-go-build-blocks.md)): `hushrun run NAME -- COMMAND` in
+a Go module, in a run that shares, reuses the pure-Go package archives another machine compiled,
+through Go's own cache program, beside the person's own Go cache.
+
+### Added
+
+- **`GOCACHEPROG` for a Go module** (B-39): where the run shares (B-25) and the folder COMMAND
+  runs in is a Go module's whose `go` is 1.24 to 1.27, `hushrun run NAME -- COMMAND` sets
+  `GOCACHEPROG` to `hushrun-gocache`, a link to the hushrun binary beside the wrapper's (its path
+  quoted when it holds a space). A cache program the person set, in the environment, in Go's env
+  file or in `$GOROOT/go.env`, is left alone, and every other Go gets nothing.
+- **Go's own cache stays the local side** (B-41): the program reads and writes `GOCACHE` in Go's
+  format, so plain `go` and `go` inside `hushrun run` share one cache and `go clean -cache` clears
+  it. Only package archives of pure Go, from a `go` command that wasn't altered (`-toolexec`,
+  `-overlay`, flags naming files) and whose compile printed nothing, become blocks of kind `go/1`
+  (B-42), keyed by Go's action id and the toolchain's tools and headers by content (B-43), and
+  checked byte for byte (build ID, content id, SHA-256) before they are stored or served (B-44).
+  cgo, assembly outside the standard library, test results and Go's package index stay Go's.
+- **The relay shares `go/1` beside `rustc/1`** (B-45): its own `open` and `close` for a check's
+  Go command, its manifest's archives prefetched at the first Go fetch, and a Go fetch looked up
+  only when that manifest names it. No server change.
+- **The run's summary has a Go line** (B-46): packages from Go's own cache, reused (from the
+  shared store) and built, and the compiled ones kept on this machine, by reason.
+
 ### Changed
 
 - **On macOS, programs are tied unless the run shares**

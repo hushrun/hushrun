@@ -76,7 +76,7 @@ pub struct Session {
     rebuilt: Vec<String>,
     /// Lines the run adds to its summary: what its relay said (B-26).
     more: Vec<String>,
-    /// The Go cache program COMMAND gets (B-36), when the run is a Go module's and shares.
+    /// The Go cache program COMMAND gets (B-39), when the run is a Go module's and shares.
     go: Option<crate::go::probe::Go>,
 }
 
@@ -297,7 +297,7 @@ pub struct GoEntry {
     /// of hushrun's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub go_cache: bool,
-    /// Why it stays on this machine, when it was compiled and doesn't go up (B-40).
+    /// Why it stays on this machine, when it was compiled and doesn't go up (B-42).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<crate::go::archive::Local>,
 }
@@ -533,7 +533,12 @@ impl GoCounts {
         if self.saved_ms >= 1_000 {
             first.push_str(&format!(", saving about {}", took(self.saved_ms)));
         }
-        if self.differed > 0 {
+        if self.compared > 0 {
+            first.push_str(&format!(
+                ", {} compared with their blocks, {} differed",
+                self.compared, self.differed
+            ));
+        } else if self.differed > 0 {
             first.push_str(&format!(
                 ", {} differed from their blocks and are not reused",
                 self.differed
@@ -957,7 +962,7 @@ impl Session {
     }
 
     /// What to set on COMMAND: the wrapper for cargo, the session for the wrapper, and Go's
-    /// cache program when [`Session::set_go`] gave one and the run shares (B-36): with sharing
+    /// cache program when [`Session::set_go`] gave one and the run shares (B-39): with sharing
     /// off, the program would only do what Go's own cache does.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
         let mut env = vec![
@@ -973,7 +978,7 @@ impl Session {
     }
 
     /// The link Go starts as its cache program, `hushrun-gocache` beside the wrapper's link and
-    /// pointing at the same binary (B-36), made when first asked.
+    /// pointing at the same binary (B-39), made when first asked.
     pub fn program_link(&self) -> std::io::Result<PathBuf> {
         let dir = self
             .link
@@ -995,7 +1000,7 @@ impl Session {
         Ok(link)
     }
 
-    /// Gives COMMAND Go's cache program (B-36), as [`crate::go::probe::probe`] decided it.
+    /// Gives COMMAND Go's cache program (B-39), as [`crate::go::probe::probe`] decided it.
     pub fn set_go(&mut self, go: crate::go::probe::Go) {
         self.go = Some(go);
     }

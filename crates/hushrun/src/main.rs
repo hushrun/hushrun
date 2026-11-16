@@ -47,7 +47,7 @@ fn main() -> ExitCode {
     {
         return hushrun_build::wrapper::main();
     }
-    // B-36: called by the Go cache program's name, it serves the `go` command that started it
+    // B-39: called by the Go cache program's name, it serves the `go` command that started it
     // on stdin and stdout, and does nothing else: no setting, no notice, nothing on stdout but
     // the protocol.
     if std::env::args_os()

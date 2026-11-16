@@ -12,7 +12,7 @@
 //!
 //! # Rules every module here keeps
 //!
-//! 1. **The program never hangs `go` and never kills it** (B-37). Go waits for every answer
+//! 1. **The program never hangs `go` and never kills it** (B-40). Go waits for every answer
 //!    without a limit and fails the whole command if the program exits before `close`. Every
 //!    request gets exactly one answer, on every path: a panic and a watchdog both answer a
 //!    miss, and a duplicate answer, which Go takes as fatal, can't be written.
@@ -33,7 +33,7 @@ use std::path::Path;
 
 use hushrun_core::Digest;
 
-/// The name the binary is called by when Go starts it as its cache program (B-36). `main` looks
+/// The name the binary is called by when Go starts it as its cache program (B-39). `main` looks
 /// at its own name before anything else.
 pub const PROGRAM_NAME: &str = "hushrun-gocache";
 
@@ -50,7 +50,7 @@ pub fn called_as_program(argv0: &OsStr) -> bool {
         .is_some_and(|name| name == PROGRAM_NAME)
 }
 
-/// hushrun's key for a Go entry (B-39): the SHA-256 of the JCS form of the schema, Go's action
+/// hushrun's key for a Go entry (B-43): the SHA-256 of the JCS form of the schema, Go's action
 /// id in hex, and the toolchain's identity in hex. Go's id holds the version, the flags, the
 /// sources and the imports' contents; the identity holds what Go names by version alone.
 pub fn key(action: &[u8; 32], toolchain: &Digest) -> Digest {
@@ -83,7 +83,7 @@ pub fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
 
-    // covers: B-36
+    // covers: B-39
     #[test]
     fn the_program_is_known_by_its_own_name() {
         assert!(called_as_program(OsStr::new("hushrun-gocache")));
@@ -92,7 +92,7 @@ mod tests {
         assert!(!called_as_program(OsStr::new("hushrun-rustc")));
     }
 
-    // covers: B-39
+    // covers: B-43
     #[test]
     fn one_action_under_two_toolchains_is_two_keys() {
         let action = [1u8; 32];

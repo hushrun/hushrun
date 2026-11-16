@@ -1,4 +1,4 @@
-//! The cache program (B-37 to B-47): what the `go` command talks to over stdin and stdout when
+//! The cache program (B-40 to B-47): what the `go` command talks to over stdin and stdout when
 //! `GOCACHEPROG` names `hushrun-gocache`.
 //!
 //! **The protocol** (`cmd/go/internal/cacheprog`, Go 1.24 to 1.27). The program first writes
@@ -19,7 +19,7 @@
 //! [`crate::session::Shared::may_reuse`] lets a downloaded one be reused; else, when the run's
 //! relay holds the run's Go manifest naming it, a download. One time in fifty (one in ten on a
 //! downloaded archive's first reuse here) a store hit is answered as a miss on purpose, never
-//! twice for one key in a run, and what Go then compiles is compared with it (B-42).
+//! twice for one key in a run, and what Go then compiles is compared with it (B-44).
 //!
 //! **What a `put` keeps**: every body, in `GOCACHE` in Go's format, which is what Go is handed;
 //! and, when the run shares, a portable package archive also as a block in hushrun's store, for
@@ -49,7 +49,7 @@ use crate::relay::{self, Answer, Problem, Request};
 use crate::session::{Current, Entry, GoEntry};
 use crate::store::{NewFile, Store};
 
-/// The longest a `get` waits for the relay (B-44's ceiling: half of a fetch's most cost).
+/// The longest a `get` waits for the relay (B-40's ceiling: half of a fetch's most cost).
 const RELAY_WAIT: Duration = Duration::from_secs(30);
 /// How long a question the relay answers from what it holds may take: whether the run still
 /// shares, a notice.
@@ -63,7 +63,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// (F8): never rewritten or removed while the run lives.
 const BODIES: &str = "go-bodies";
 /// The session's folder of keys audited in the run: one empty file each, made with `create_new`
-/// so that two `go` commands of one run never audit one key twice (B-42).
+/// so that two `go` commands of one run never audit one key twice (B-44).
 const AUDITED: &str = "go-audited";
 /// The only file of a Go block in the store.
 pub const ARCHIVE: &str = "archive";
@@ -129,7 +129,7 @@ struct Slot {
     fallback: Fallback,
 }
 
-/// An audit the program started by answering a miss (B-42): what Go's compile is compared with.
+/// An audit the program started by answering a miss (B-44): what Go's compile is compared with.
 #[derive(Clone)]
 struct Audit {
     key: Digest,
@@ -166,9 +166,9 @@ struct Program {
     /// The run's session, when there is a usable one.
     current: Option<Current>,
     toolchain: Option<Toolchain>,
-    /// The parent's arguments and `GOFLAGS`, read once (B-40).
+    /// The parent's arguments and `GOFLAGS`, read once (B-42).
     altered: OnceLock<Option<Altered>>,
-    /// hushrun's identity of the toolchain (B-39), computed once.
+    /// hushrun's identity of the toolchain (B-43), computed once.
     identity: OnceLock<Result<Digest, String>>,
     out: Mutex<Box<dyn Write + Send>>,
     open: Mutex<HashMap<i64, Arc<Slot>>>,
@@ -448,7 +448,7 @@ impl Program {
             });
     }
 
-    /// How the `go` command was altered (B-40), read once.
+    /// How the `go` command was altered (B-42), read once.
     fn altered(&self) -> Option<Altered> {
         *self.altered.get_or_init(|| {
             let goflags = command::goflags(&|name| self.var(name));
@@ -462,7 +462,7 @@ impl Program {
         })
     }
 
-    /// The toolchain's identity (B-39), computed once.
+    /// The toolchain's identity (B-43), computed once.
     fn identity(&self) -> Result<Digest, Local> {
         self.identity
             .get_or_init(|| match &self.toolchain {
@@ -703,7 +703,7 @@ impl Program {
         if let Ok(Some(_)) = store.block(&key) {
             return self.serve(current, &store, &key, action, false, at);
         }
-        // B-43: a download, only where sharing is on (the relay says) and the run's Go manifest
+        // B-45: a download, only where sharing is on (the relay says) and the run's Go manifest
         // names it.
         if current.mode != Mode::On {
             return None;
@@ -725,7 +725,7 @@ impl Program {
 
     /// Serves the block under `key` for `action`, or `None` (a miss) when it can't be: not a Go
     /// block for this action, not vouched for (B-34), bytes that fail their checks (F2), or
-    /// picked by the audit (B-42).
+    /// picked by the audit (B-44).
     fn serve(
         &self,
         current: &Current,
@@ -791,7 +791,7 @@ impl Program {
             });
             return None;
         }
-        // B-42: one in fifty, one in ten on a downloaded archive's first reuse here, answered as
+        // B-44: one in fifty, one in ten on a downloaded archive's first reuse here, answered as
         // a miss and compared with what Go then compiles; every one in local `observe`.
         let first_download = origin
             .as_ref()
@@ -881,7 +881,7 @@ impl Program {
     /// A hit in Go's own cache, which is served as plain `go` would serve it. When the run
     /// shares and the toolchain is known already, a package archive is logged for the
     /// manifest, and compared for free with a block of the same key in hushrun's store
-    /// (B-42): a difference suspends the key here, and is reported when the block was only
+    /// (B-44): a difference suspends the key here, and is reported when the block was only
     /// downloaded.
     fn seen_in_go_cache(&self, action: &[u8; 32], hit: &gocache::Hit) {
         let Some(current) = &self.current else {

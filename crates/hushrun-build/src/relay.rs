@@ -72,7 +72,7 @@ pub enum Request {
     },
     /// A downloaded block was found wrong here: report it to the scope it came from.
     Report { key: Digest, problem: Problem },
-    /// The Go cache program's [`Request::Fetch`] (B-43): the package archive under `key`, of kind
+    /// The Go cache program's [`Request::Fetch`] (B-45): the package archive under `key`, of kind
     /// `go/1`, whose first key is itself. The relay looks it up only when the run's Go manifest
     /// names it: Go asks for every entry of its cache, most of them local ones no server holds,
     /// and a lookup for each would make a cold build slower than plain `go`.

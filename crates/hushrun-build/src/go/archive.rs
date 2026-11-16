@@ -1,4 +1,4 @@
-//! What a body Go puts is, judged from its bytes alone (B-40): a package archive whose code is
+//! What a body Go puts is, judged from its bytes alone (B-42): a package archive whose code is
 //! all Go's own, made for the action id it is put under, or something that stays on the machine.
 //!
 //! Go checks only the size of what a cache program returns, and keys every dependent by the
@@ -33,7 +33,7 @@ const MOST_TEXT_HEADER: usize = 4096;
 /// The length of each half of a package archive's build ID (`HashToString`'s 20 characters).
 const ID_PART: usize = 20;
 
-/// Why a body put by Go stays on this machine (B-40, B-41). Stable words: the run's log counts
+/// Why a body put by Go stays on this machine (B-42, B-41). Stable words: the run's log counts
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,10 +55,10 @@ pub enum Local {
     /// The compile printed something, which Go would not print again from another machine's
     /// archive (F4).
     Printed,
-    /// The `go` command was altered, or its arguments couldn't be read (B-40):
+    /// The `go` command was altered, or its arguments couldn't be read (B-42):
     /// [`crate::go::command::Altered`] says how.
     Altered,
-    /// hushrun's identity of the toolchain couldn't be computed (B-39).
+    /// hushrun's identity of the toolchain couldn't be computed (B-43).
     Toolchain,
     /// The run doesn't share: nothing is kept beside Go's own cache.
     NotSharing,
@@ -221,7 +221,7 @@ pub fn is_archive(bytes: &[u8]) -> bool {
 }
 
 /// Whether `bytes`, put or served under `action`, may be a block that leaves the machine
-/// (B-40): a package archive of Go's own code, made for that action, whose content id is its
+/// (B-42): a package archive of Go's own code, made for that action, whose content id is its
 /// bytes'. The first reason it may not otherwise.
 pub fn portable(bytes: &[u8], action: &[u8; 32]) -> Result<(), Local> {
     if !is_archive(bytes) {
@@ -331,7 +331,7 @@ pub(crate) mod tests {
         }
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn go_encodes_hashes_as_its_own_hash_to_string_does() {
         // The 20 characters `go tool buildid` printed for action id 7bd1b65d…, the design's
@@ -343,7 +343,7 @@ pub(crate) mod tests {
         assert_eq!(hash_to_string(&[0; 32]), "AAAAAAAAAAAAAAAAAAAA");
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn a_pure_go_archive_made_for_its_action_may_leave() {
         let action = [3u8; 32];
@@ -358,7 +358,7 @@ pub(crate) mod tests {
         assert_eq!(portable(&std_asm, &action), Ok(()));
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn native_code_and_another_packages_assembly_stay_here() {
         let action = [4u8; 32];
@@ -389,7 +389,7 @@ pub(crate) mod tests {
         assert_eq!(portable(&odd, &action), Err(Local::Assembly));
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn an_archive_for_another_action_or_with_a_forged_content_id_stays_here() {
         let action = [5u8; 32];
@@ -407,7 +407,7 @@ pub(crate) mod tests {
         assert_eq!(portable(b"!<arch>\nshort", &action), Err(Local::Malformed));
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn the_build_id_is_read_where_go_reads_it() {
         let action = [8u8; 32];

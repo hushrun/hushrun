@@ -1,4 +1,4 @@
-//! Whether `hushrun run` sets `GOCACHEPROG` for COMMAND (B-36), and to what.
+//! Whether `hushrun run` sets `GOCACHEPROG` for COMMAND (B-39), and to what.
 //!
 //! It is set only for a Go module (a `go.mod` or `go.work` in the folder or above it), only when
 //! the `go` there is a version whose cache this program knows, and never over a cache program the
@@ -20,7 +20,7 @@ const PROBE_WAIT: Duration = Duration::from_secs(10);
 pub struct Go {
     /// `GOCACHEPROG`'s value: the program's path, quoted when it holds a space (F7).
     pub value: String,
-    /// `GOOS_GOARCH`, the platform the run's Go manifest is kept for (B-43).
+    /// `GOOS_GOARCH`, the platform the run's Go manifest is kept for (B-45).
     pub platform: String,
     /// `go env GOVERSION`.
     pub version: String,
@@ -149,7 +149,7 @@ fn go_env(folder: &Path, names: &[&str]) -> Result<serde_json::Value, NotSet> {
 mod tests {
     use super::*;
 
-    // covers: B-36
+    // covers: B-39
     #[test]
     fn a_path_with_a_space_is_quoted_as_go_splits_it() {
         assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(quote(Path::new("/a \"b\" 'c'/x")), None);
     }
 
-    // covers: B-36
+    // covers: B-39
     #[test]
     fn only_a_go_module_is_asked_and_a_set_program_stays() {
         let dir = tempfile::tempdir().unwrap();

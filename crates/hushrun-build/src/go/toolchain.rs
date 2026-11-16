@@ -1,4 +1,4 @@
-//! hushrun's identity of a Go toolchain (B-39, F5): what Go's own action id doesn't hold. For a
+//! hushrun's identity of a Go toolchain (B-43, F5): what Go's own action id doesn't hold. For a
 //! release Go names each tool by its version line alone (`toolID`), so a patched toolchain that
 //! reports the same version shares every id with the official one, with other bytes (proved for
 //! `compile` and for `cover`). The identity is a hash of the toolchain's files by content: the
@@ -210,7 +210,7 @@ mod tests {
         }
     }
 
-    // covers: B-39
+    // covers: B-43
     #[test]
     fn a_patched_tool_with_the_same_version_line_is_another_toolchain() {
         let dir = tempfile::tempdir().unwrap();
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(tc.identity(None).unwrap(), before);
     }
 
-    // covers: B-39
+    // covers: B-43
     #[test]
     fn the_runs_memo_sees_a_tool_rewritten_in_place() {
         let dir = tempfile::tempdir().unwrap();

@@ -633,7 +633,7 @@ fn start_sharing(
     Ok(relay)
 }
 
-/// B-36: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose
+/// B-39: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose
 /// `go` is a version the program knows and has no cache program of the person's: what
 /// `hushrun_build::go::probe` decides, asked here once. A path Go can't be given is said in one
 /// line; every other reason for none is silent.

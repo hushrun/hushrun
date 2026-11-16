@@ -254,7 +254,7 @@ fn by_id(lines: &[Value]) -> HashMap<i64, Value> {
     answers
 }
 
-// covers: B-37, B-41
+// covers: B-40, B-41
 #[test]
 fn every_request_is_answered_once_and_a_put_lands_in_gos_own_cache() {
     let m = Machine::new();
@@ -300,7 +300,7 @@ fn every_request_is_answered_once_and_a_put_lands_in_gos_own_cache() {
     assert_eq!(answers[&5], json!({"ID": 5}));
 }
 
-// covers: B-37
+// covers: B-40
 #[test]
 fn a_go_version_whose_cache_is_unknown_gets_misses_and_a_folder_of_its_own() {
     let mut m = Machine::new();
@@ -318,7 +318,7 @@ fn a_go_version_whose_cache_is_unknown_gets_misses_and_a_folder_of_its_own() {
     assert_eq!(m.gocache().get(&action, SystemTime::now()), None);
 }
 
-// covers: B-37
+// covers: B-40
 #[test]
 fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
     let mut m = Machine::new();
@@ -386,7 +386,7 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
     assert_eq!(answers[&5], json!({"ID": 5}));
 }
 
-// covers: B-38, B-40
+// covers: B-42
 #[test]
 fn a_block_in_the_store_is_served_only_when_its_bytes_are_what_its_build_id_says() {
     let m = Machine::new().with_session(Some("none"), None);
@@ -435,7 +435,7 @@ fn a_block_in_the_store_is_served_only_when_its_bytes_are_what_its_build_id_says
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }
 
-// covers: B-40
+// covers: B-42
 #[test]
 fn an_altered_command_is_served_nothing_from_the_store_and_keeps_nothing() {
     let m = Machine::new().with_session(Some("none"), None);
@@ -448,7 +448,7 @@ fn an_altered_command_is_served_nothing_from_the_store_and_keeps_nothing() {
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }
 
-// covers: B-42
+// covers: B-44
 #[test]
 fn an_audit_answers_a_miss_once_a_run_and_a_difference_suspends_the_key() {
     let m = Machine::new().with_session(Some("every"), None);
@@ -513,7 +513,7 @@ fn relay(dir: &Path, answer: Option<&'static str>) -> (PathBuf, mpsc::Receiver<V
     (socket, rx)
 }
 
-// covers: B-40, B-43
+// covers: B-42, B-45
 #[test]
 fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_of_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -550,7 +550,7 @@ fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_o
     );
 }
 
-// covers: B-40
+// covers: B-42
 #[test]
 fn an_archive_whose_compile_printed_or_that_holds_native_code_stays_here() {
     let dir = tempfile::tempdir().unwrap();
@@ -595,7 +595,7 @@ fn an_archive_whose_compile_printed_or_that_holds_native_code_stays_here() {
     assert!(heard.try_iter().all(|t| t["op"] != "go_built"));
 }
 
-// covers: B-44
+// covers: B-40
 #[test]
 fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     let dir = tempfile::tempdir().unwrap();
@@ -629,7 +629,7 @@ fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }
 
-// covers: B-37
+// covers: B-40
 #[test]
 fn go_s_time_is_written_as_rfc_3339_in_utc() {
     assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
@@ -643,7 +643,7 @@ fn go_s_time_is_written_as_rfc_3339_in_utc() {
     );
 }
 
-// covers: B-38
+// covers: B-42
 #[test]
 fn a_body_handed_to_go_keeps_its_bytes_when_the_block_is_replaced() {
     let m = Machine::new().with_session(Some("none"), None);

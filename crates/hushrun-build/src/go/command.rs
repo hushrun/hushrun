@@ -1,4 +1,4 @@
-//! The `go` command the program serves (B-36, B-40): which Go versions it is set for, and whether
+//! The `go` command the program serves (B-39, B-42): which Go versions it is set for, and whether
 //! the command was altered in a way Go's action id doesn't show.
 //!
 //! The program is always the direct child of the `go` command (`exec.CommandContext` in Go's
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The oldest and newest Go minor versions whose cache protocol (`GOCACHEPROG`, standard from Go
-/// 1.24) and `GOCACHE` format the program knows. A newer one gets no program (B-36): `go` runs
+/// 1.24) and `GOCACHE` format the program knows. A newer one gets no program (B-39): `go` runs
 /// as it would without hushrun.
 pub const OLDEST_MINOR: u32 = 24;
 pub const NEWEST_MINOR: u32 = 27;
@@ -43,7 +43,7 @@ pub fn version_known(version: &str) -> bool {
 }
 
 /// How a `go` command was altered so that Go's action id no longer says what was compiled
-/// (B-40). Any of them keeps every block of the command on the machine, and the hushrun store
+/// (B-42). Any of them keeps every block of the command on the machine, and the hushrun store
 /// serves the command nothing: only Go's own cache does, as plain `go` would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -195,7 +195,7 @@ pub fn goflags(env: &dyn Fn(&str) -> Option<OsString>) -> String {
 mod tests {
     use super::*;
 
-    // covers: B-36
+    // covers: B-39
     #[test]
     fn only_the_go_versions_whose_cache_the_program_knows_get_it() {
         for known in [
@@ -224,7 +224,7 @@ mod tests {
         }
     }
 
-    // covers: B-40
+    // covers: B-42
     #[test]
     fn a_command_that_alters_what_its_ids_name_is_seen_in_every_spelling() {
         assert_eq!(altered("go build ./...", ""), None);
@@ -268,7 +268,7 @@ mod tests {
         );
     }
 
-    // covers: B-40
+    // covers: B-42
     #[cfg(unix)]
     #[test]
     fn a_parent_that_is_not_the_go_binary_is_unreadable() {
