@@ -70,6 +70,9 @@ futures-util.workspace = true
 # \[B-31\] The random part of a CI run's store's name. Already part of the binary's build,
 # through hushrun-attest.
 getrandom.workspace = true
+# \[B-49\] A GitLab job's key, wiped from memory. Already part of the binary's build, through
+# hushrun-attest.
+zeroize.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

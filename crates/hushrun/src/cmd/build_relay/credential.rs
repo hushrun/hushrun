@@ -1,6 +1,8 @@
 //! B-26, B-31: what the relay's requests carry. A person's or an agent's token, as it is; or in
-//! GitHub Actions the job's ID token, whose audience is the backend. A token is held in memory
-//! only: nothing here writes one anywhere.
+//! GitHub Actions the job's ID token, whose audience is the backend; or in GitLab CI (B-48, B-49)
+//! the job's ID token from `HUSHRUN_ID_TOKEN`, as it is, with the job's key and its signature
+//! over each request ([`Credential::job_headers`]). A token is held in memory only: nothing here
+//! writes one anywhere.
 //!
 //! The job's ID token has one home, [`Tokens`], and one place that decides what a request
 //! carries, [`Credential::bearer`]:
@@ -33,7 +35,21 @@ pub(crate) enum Credential {
     Nothing,
     Token(String),
     GithubOidc(Arc<Oidc>),
+    /// B-48, B-49: a GitLab CI job.
+    GitlabJob(Arc<GitlabJob>),
 }
+
+/// A GitLab CI job (B-48, B-49): its ID token, which can't be renewed, and its key.
+pub(crate) struct GitlabJob {
+    token: crate::gitlab_job::IdToken,
+    key: crate::gitlab_job::JobKey,
+    /// The org's slug, which the signature names, and what its routes' paths start with.
+    org: String,
+}
+
+/// A GitLab job starts no `begin` with less than this left of its token: an upload takes a
+/// `begin`, a PUT and a `commit`, and none of it can be sent after the token's `exp` (B-49).
+pub(crate) const LEAST_LEFT_TO_BEGIN: Duration = Duration::from_secs(120);
 
 /// A GitHub Actions job's ID tokens (B-31).
 pub(crate) struct Oidc {
@@ -81,9 +97,24 @@ impl Held {
 }
 
 impl Credential {
-    pub(crate) fn of(access: &crate::results::BuildCredential, audience: &str) -> Credential {
-        match access {
+    /// The credential the relay's requests to the org `org` at `audience` (its URL) carry. For a
+    /// GitLab job, its key is made, or read from the job's first run (B-49): `Err` is why it
+    /// can't be, and the run shares nothing.
+    pub(crate) fn of(
+        access: &crate::results::BuildCredential,
+        audience: &str,
+        org: &str,
+    ) -> Result<Credential, String> {
+        Ok(match access {
             crate::results::BuildCredential::Token(token) => Credential::Token(token.clone()),
+            crate::results::BuildCredential::GitlabJob { token, keys } => {
+                let key = crate::gitlab_job::JobKey::of(keys, token)?;
+                Credential::GitlabJob(Arc::new(GitlabJob {
+                    token: token.clone(),
+                    key,
+                    org: org.to_string(),
+                }))
+            }
             crate::results::BuildCredential::GithubOidc {
                 url,
                 request_token,
@@ -97,6 +128,40 @@ impl Credential {
                 minted: tokio::sync::watch::Sender::new(0),
                 ending: AtomicBool::new(false),
             })),
+        })
+    }
+
+    /// B-49: the headers a GitLab job's request to `path` (under the org's URL, as
+    /// `v0/build/open`) with `body` carries: the job's key and its signature. None for any other
+    /// credential.
+    pub(crate) fn job_headers(&self, path: &str, body: &[u8]) -> Vec<(&'static str, String)> {
+        let Credential::GitlabJob(job) = self else {
+            return Vec::new();
+        };
+        let path = format!("/o/{}/{path}", job.org);
+        vec![
+            (
+                hushrun_core::blocks::JOB_KEY_HEADER,
+                job.key.public().to_string(),
+            ),
+            (
+                hushrun_core::blocks::JOB_SIGNATURE_HEADER,
+                job.key.sign(&path, &job.org, body),
+            ),
+        ]
+    }
+
+    /// B-49: whether an upload begun at `now` can still be finished before the credential's
+    /// end: a GitLab job's token, which can't be renewed, with less than
+    /// [`LEAST_LEFT_TO_BEGIN`] left, can't.
+    pub(crate) fn can_begin(&self, now: SystemTime) -> bool {
+        match self {
+            Credential::GitlabJob(job) => job
+                .token
+                .expires
+                .duration_since(now)
+                .is_ok_and(|left| left >= LEAST_LEFT_TO_BEGIN),
+            _ => true,
         }
     }
 
@@ -111,12 +176,13 @@ impl Credential {
                 "github-actions-id-token\n{}",
                 oidc.job
             )),
+            Credential::GitlabJob(job) => job.token.fingerprint(),
         }
     }
 
     /// Whether it is a CI job's own ID token, minted by the CI system for this job.
     pub(crate) fn is_a_jobs_id_token(&self) -> bool {
-        matches!(self, Credential::GithubOidc(_))
+        matches!(self, Credential::GithubOidc(_) | Credential::GitlabJob(_))
     }
 
     /// Whether a 401 is worth a fresh token and one more try.
@@ -142,6 +208,13 @@ impl Credential {
     ) -> Result<String, Failure> {
         let oidc = match self {
             Credential::Token(token) => return Ok(token.clone()),
+            // B-48: GitLab's token is the job's for its timeout, and never renewed.
+            Credential::GitlabJob(job) if job.token.expired(SystemTime::now()) => {
+                return Err(Failure::Unreachable(
+                    "the job's ID token (HUSHRUN_ID_TOKEN) has expired".into(),
+                ));
+            }
+            Credential::GitlabJob(job) => return Ok(job.token.text().to_string()),
             Credential::Nothing => {
                 return Err(Failure::Unreachable(
                     "this run reads only what a fetch saved, and sends nothing".into(),

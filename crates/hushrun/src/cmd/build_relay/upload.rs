@@ -323,10 +323,19 @@ impl Relay {
         if packed.is_empty() {
             return;
         }
-        if self.ending.load(Ordering::Relaxed) {
+        // B-49: nothing is begun that the credential can't finish (a GitLab job's token near
+        // its end): the markers wait, untouched, and the run says so once.
+        let expiring = !self.client.can_begin();
+        if self.ending.load(Ordering::Relaxed) || expiring {
             for (marker, p) in packed {
                 p.pack.remove();
                 release(&marker, Back::Untouched);
+            }
+            if expiring {
+                self.state().say(format!(
+                    "build: no more uploads this run: the job's ID token expires in less than {} minutes",
+                    super::credential::LEAST_LEFT_TO_BEGIN.as_secs() / 60
+                ));
             }
             return;
         }

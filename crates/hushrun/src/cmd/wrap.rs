@@ -1097,10 +1097,11 @@ impl<'a> BuildRun<'a> {
         let unread = repo.is_none() && access.as_ref().is_some_and(|a| a.credential.is_some());
         let share = match (repo, access) {
             (Some(repo), Some(access)) => Some(build_session::ShareStart {
-                access,
                 commit: build_commit(repo, hushrun_ci::in_ci(&Env::from_process())),
                 check: check.as_str().to_string(),
-                open_decides: repo.open_decides,
+                // B-48: a GitLab job with no token to look results up with lets `open` say.
+                open_decides: repo.open_decides || access.open_decides,
+                access,
             }),
             _ => None,
         };

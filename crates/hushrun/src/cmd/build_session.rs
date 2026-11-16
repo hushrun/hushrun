@@ -212,6 +212,8 @@ fn begin_from_saved(
         machine: None,
         shares: true,
         answered: false,
+        open_decides: false,
+        id_token_problem: None,
     };
     let config = || {
         Some(crate::cmd::build_relay::Config {
@@ -231,7 +233,7 @@ fn begin_from_saved(
             open_decides: false,
         })
     };
-    let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
+    let Some(Ok(relay)) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
     match relay.begin_check(&current.folder, None, None, here.env) {
@@ -620,7 +622,10 @@ pub(crate) fn caller(access: Option<&crate::results::BuildAccess>, in_ci: bool) 
     let agent = access.is_some_and(|access| access.agent);
     match (credential, access) {
         _ if in_ci => Caller::Ci {
-            id_token: matches!(credential, Some(BuildCredential::GithubOidc { .. })),
+            id_token: matches!(
+                credential,
+                Some(BuildCredential::GithubOidc { .. } | BuildCredential::GitlabJob { .. })
+            ),
             agent_token: matches!(credential, Some(BuildCredential::Token(_))) && agent,
         },
         (Some(_), Some(access)) if agent => Caller::Agent {
@@ -646,6 +651,11 @@ fn begin_in_ci(
     let Some(start) = share else {
         return Err(None);
     };
+    // B-48: a GitLab job's HUSHRUN_ID_TOKEN that can't be sent, said whatever the org does: the
+    // job asked to share by declaring it.
+    if let Some(crate::results::IdTokenProblem::Unusable(why)) = &start.access.id_token_problem {
+        return Err(Some(format!("{OFF}: {why}")));
+    }
     // B-25: a run that made no results lookup lets `open` say whether the org shares, waited for
     // below as any job's.
     if !start.access.shares && !start.open_decides {
@@ -675,10 +685,8 @@ fn begin_in_ci(
     );
     if let Sharing::Off(off) = does.sharing {
         let hint = match off {
-            hushrun_build::share::Off::NoIdToken => {
-                " (give the job `permissions: id-token: write`)"
-            }
-            _ => "",
+            hushrun_build::share::Off::NoIdToken => id_token_hint(Some(&start.access)),
+            _ => String::new(),
         };
         return Err(Some(format!("{OFF}: {}{hint}", off.reason())));
     }
@@ -716,6 +724,17 @@ fn begin_in_ci(
             };
             abandon(session, line)
         }
+    }
+}
+
+/// What a line says after why a CI job shares nothing for want of an ID token (B-31, B-48): how
+/// to give the job one, in GitHub Actions or in GitLab CI, or why the one it has can't be sent.
+pub(crate) fn id_token_hint(access: Option<&crate::results::BuildAccess>) -> String {
+    use crate::results::IdTokenProblem;
+    match access.and_then(|access| access.id_token_problem.as_ref()) {
+        Some(IdTokenProblem::Absent(declare)) => format!(" ({declare})"),
+        Some(IdTokenProblem::Unusable(why)) => format!(": {why}"),
+        None => " (give the job `permissions: id-token: write`)".to_string(),
     }
 }
 
@@ -782,10 +801,18 @@ fn start_sharing(
             open_decides: start.open_decides,
         })
     };
-    let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
-        return Err(Some(
-            "build: sharing is off for this run: the relay couldn't start".into(),
-        ));
+    let relay = match crate::cmd::build_relay::Relay::get_or_start(config) {
+        Some(Ok(relay)) => relay,
+        Some(Err(why)) => {
+            return Err(Some(format!(
+                "build: sharing is off for this run: the relay couldn't start: {why}"
+            )));
+        }
+        None => {
+            return Err(Some(
+                "build: sharing is off for this run: the relay couldn't start".into(),
+            ));
+        }
     };
     // B-36: a Go module's COMMAND gets Go's cache program, and the check asks for its Go
     // manifest apart.

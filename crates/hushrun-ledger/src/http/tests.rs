@@ -595,7 +595,7 @@ fn github_id_tokens_are_requested_for_the_ledger_and_cached() {
 /// Whether a results lookup of a ledger at a server that answers `reply` was answered.
 fn lookup_answered(reply: impl Fn() -> Reply + Send + Sync + 'static) -> bool {
     let (_server, ledger) = served_by(move |_| reply());
-    let _ = ledger.json_get_with("v0/results/k", None, None);
+    let _ = ledger.json_get_with("v0/results/k", None, &[]);
     ledger.answered_any()
 }
 
@@ -629,7 +629,7 @@ fn any_http_response_is_an_answer_and_only_none_at_all_is_not() {
         ..Options::default()
     };
     let ledger = open(&fake, &refused);
-    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(ledger.json_get_with("v0/results/k", None, &[]).is_err());
     assert!(ledger.answered_any(), "a refused credential");
 
     // No answer: a server that closes every connection, one that isn't there, and a
@@ -638,7 +638,7 @@ fn any_http_response_is_an_answer_and_only_none_at_all_is_not() {
     let nowhere = Server::start(|_| Reply::Close).url();
     let gone = LedgerUrl::parse(&format!("{nowhere}/l/a/b")).unwrap();
     let ledger = HttpLedger::open_tuned(&gone, &Options::default(), quick()).unwrap();
-    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(ledger.json_get_with("v0/results/k", None, &[]).is_err());
     assert!(!ledger.answered_any());
     let unreachable = Options {
         github_oidc: Some(OidcEndpoint {
@@ -648,7 +648,7 @@ fn any_http_response_is_an_answer_and_only_none_at_all_is_not() {
         ..Options::default()
     };
     let ledger = open(&fake, &unreachable);
-    assert!(ledger.json_get_with("v0/results/k", None, None).is_err());
+    assert!(ledger.json_get_with("v0/results/k", None, &[]).is_err());
     assert!(!ledger.answered_any());
     assert_eq!(fake.requests().len(), 0);
 }

@@ -508,13 +508,18 @@ pub(crate) struct Relay {
 static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
 
 impl Relay {
-    /// The process's relay, started on first use (B-26: one per `hushrun run` process).
-    pub(crate) fn get_or_start(make: impl FnOnce() -> Option<Config>) -> Option<Arc<Relay>> {
+    /// The process's relay, started on first use (B-26: one per `hushrun run` process). `None`
+    /// when `make` gives no config; `Err` is why it couldn't start.
+    pub(crate) fn get_or_start(
+        make: impl FnOnce() -> Option<Config>,
+    ) -> Option<Result<Arc<Relay>, String>> {
         if let Some(relay) = RELAY.get() {
-            return Some(relay.clone());
+            return Some(Ok(relay.clone()));
         }
-        let relay = Arc::new(Relay::start(make()?).ok()?);
-        Some(RELAY.get_or_init(|| relay).clone())
+        Some(Relay::start(make()?).map(|relay| {
+            let relay = Arc::new(relay);
+            RELAY.get_or_init(|| relay).clone()
+        }))
     }
 
     /// The process's relay, when one started.
@@ -526,7 +531,9 @@ impl Relay {
     /// (claims of dead runs back to waiting, dead runs' folders gone).
     pub(crate) fn start(mut config: Config) -> Result<Relay, String> {
         let credential = match (&config.access.credential, &config.saved) {
-            (Some(credential), _) => credential::Credential::of(credential, &config.access.base),
+            (Some(credential), _) => {
+                credential::Credential::of(credential, &config.access.base, &config.access.org)?
+            }
             (None, Some(_)) => credential::Credential::Nothing,
             (None, None) => return Err("no credential to send".to_string()),
         };
@@ -2692,6 +2699,18 @@ pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
         }
         blocks::Untrusted::Credential => {
             "it uses a person's or an agent's token in CI, not the job's own ID token"
+        }
+        // B-48, B-49: gitlab.com's, as the build page says them.
+        blocks::Untrusted::Job => {
+            "another request showed this job's ID token with another key, so the backend withdrew the job"
+        }
+        blocks::Untrusted::Token => "its ID token is older than a job can be",
+        blocks::Untrusted::Fork => "it builds a fork's code",
+        blocks::Untrusted::Source => "a policy or another source added this job",
+        blocks::Untrusted::Unprotected => "its branch isn't protected in GitLab",
+        blocks::Untrusted::Config => "its pipeline's configuration isn't the project's own file",
+        blocks::Untrusted::User => {
+            "whoever started, retried or played it isn't a Maintainer or an Owner"
         }
         blocks::Untrusted::Unknown => "the backend says it isn't trusted",
     }

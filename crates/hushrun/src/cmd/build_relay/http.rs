@@ -25,6 +25,10 @@ impl Failure {
     pub(crate) fn line(&self) -> String {
         match self {
             Failure::Unreachable(why) | Failure::Failed(why) => why.clone(),
+            // B-49: a GitLab job withdrawn for a second key.
+            Failure::Refused(status, Some(code)) if code == "job_withdrawn" => format!(
+                "answered {status} {code}: a request with another key carried this job's ID token, so the backend withdrew the job and serves nothing it wrote"
+            ),
             Failure::Refused(status, Some(code)) => format!("answered {status} {code}"),
             Failure::Refused(status, None) => format!("answered {status}"),
         }
@@ -98,6 +102,11 @@ impl Client {
         self.credential.ending(ending);
     }
 
+    /// B-49: whether an upload begun now can be finished with this credential.
+    pub(crate) fn can_begin(&self) -> bool {
+        self.credential.can_begin(std::time::SystemTime::now())
+    }
+
     /// `POST {base}/{path}` with `body`, within `timeout`; one more try after a 503 or 429 whose
     /// `Retry-After` fits, or a connection that failed at once (every request may be sent again).
     pub(crate) async fn post<B: Serialize, R: DeserializeOwned>(
@@ -144,6 +153,10 @@ impl Client {
                 .body(bytes.clone());
             if let Some(signature) = &signature {
                 request = request.header("hushrun-signature", signature);
+            }
+            // B-49: a GitLab job signs every request with its key, `open` first.
+            for (name, value) in self.credential.job_headers(path, &bytes) {
+                request = request.header(name, value);
             }
             if self.says_ci() {
                 request = request.header(hushrun_core::blocks::CI_HEADER, "1");

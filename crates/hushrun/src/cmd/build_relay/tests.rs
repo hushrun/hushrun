@@ -77,6 +77,8 @@ fn access_at(base: &str, host: &str, token: &str) -> crate::results::BuildAccess
         }),
         shares: true,
         answered: true,
+        open_decides: false,
+        id_token_problem: None,
     }
 }
 
@@ -2078,6 +2080,96 @@ fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {
             agent_token: false,
         };
     }
+}
+
+/// B-48, B-49: a GitLab job's credential: the fake's token for job `job`, its claims changed by
+/// `change`, and the job's key kept in `keys`.
+fn with_gitlab_job<'a>(
+    fake: &'a FakeBuild,
+    job: i64,
+    keys: &'a Path,
+    change: impl FnOnce(&mut serde_json::Value) + 'a,
+) -> impl FnOnce(&mut Config) + 'a {
+    move |c: &mut Config| {
+        let url = fake.url();
+        let text = fake.gitlab_token_with(job, |claims| {
+            claims["aud"] = serde_json::Value::from(url);
+            change(claims);
+        });
+        let token = match crate::gitlab_job::read(
+            &|name| (name == crate::gitlab_job::VARIABLE).then(|| text.clone().into()),
+            &fake.url(),
+            SystemTime::now(),
+        ) {
+            crate::gitlab_job::Token::Usable(token) => token,
+            other => panic!("{other:?}"),
+        };
+        c.access.credential = Some(crate::results::BuildCredential::GitlabJob {
+            token,
+            keys: keys.to_path_buf(),
+        });
+        c.access.agent = false;
+        c.access.machine = None;
+        c.caller = hushrun_build::share::Caller::Ci {
+            id_token: true,
+            agent_token: false,
+        };
+    }
+}
+
+// covers: B-49
+#[test]
+fn a_gitlab_job_signs_every_request_and_begins_no_upload_it_cant_finish_before_its_token_ends() {
+    let fake = FakeBuild::start();
+    let keys = tempfile::tempdir().unwrap();
+    // A token with an hour left: open, begin, commit and close, each signed by the job's key.
+    let m = machine();
+    let relay = start(&fake, &m, with_gitlab_job(&fake, 31, keys.path(), |_| {}));
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let (key, step) = block(&m.store, 7, 5_000, Some(relay.by.clone()));
+    assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+    until("stored", || {
+        fake.block(address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    let lines = relay.end_check(&[]);
+    assert!(lines.is_empty(), "{lines:?}");
+    let job = &fake.gitlab_jobs()[&31];
+    assert!(!job.withdrawn);
+    for route in [route::OPEN, route::BEGIN, route::COMMIT, route::CLOSE] {
+        assert_eq!(job.signed.get(route), Some(&1), "{route}: {job:?}");
+    }
+    // One with a minute and a half left: `open` and `close` go, no `begin`, and it says why once.
+    let m = machine();
+    let soon = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 90;
+    let relay = start(
+        &fake,
+        &m,
+        with_gitlab_job(&fake, 32, keys.path(), move |claims| {
+            claims["exp"] = serde_json::Value::from(soon);
+        }),
+    );
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let begins = fake.begins().len();
+    let (key, step) = block(&m.store, 8, 5_000, Some(relay.by.clone()));
+    assert_eq!(ask(&relay, built(key, step)), Answer::Ok);
+    let lines = relay.end_check(&[]);
+    assert_eq!(fake.begins().len(), begins, "{lines:?}");
+    assert_eq!(
+        lines,
+        [
+            "build: no more uploads this run: the job's ID token expires in less than 2 minutes",
+            "build: 1 block weren't uploaded before the job's command ended",
+        ],
+    );
+    assert_eq!(waiting(&m).len(), 1, "the block's marker waits, untouched");
+    assert_eq!(fake.gitlab_jobs()[&32].signed.get(route::CLOSE), Some(&1));
 }
 
 fn bearers(fake: &FakeBuild) -> Vec<String> {

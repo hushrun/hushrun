@@ -11,6 +11,7 @@ mod credentials;
 mod environment;
 mod events;
 mod exit;
+mod gitlab_job;
 mod hosted;
 mod isolated;
 mod lifecycle;

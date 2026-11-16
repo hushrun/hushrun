@@ -162,8 +162,8 @@ struct Call<'a> {
     body: Option<(&'a [u8], &'static str)>,
     /// Send `If-None-Match: *`: object creates and root creates (L-10).
     create_only: bool,
-    /// One more header, such as a delete's GC statement (L-9).
-    header: Option<(&'static str, String)>,
+    /// More headers, such as a delete's GC statement (L-9).
+    headers: Vec<(&'static str, String)>,
     /// The most response bytes read; the rest is cut off.
     limit: usize,
     /// What the request is about, for messages: a key, a name, a listing.
@@ -178,7 +178,7 @@ impl<'a> Call<'a> {
             query: None,
             body: None,
             create_only: false,
-            header: None,
+            headers: Vec::new(),
             limit,
             what,
         }
@@ -314,15 +314,23 @@ impl HttpLedger {
         self.json_call(Method::GET, path, Some(query.to_string()), None, None)
     }
 
-    /// A GET of `path`, with a query when there is one, and one more header: a results lookup
-    /// that says it comes from CI (the build protocol's `Hushrun-Ci`).
+    /// A GET of `path`, with a query when there is one, and more headers: a results lookup that
+    /// says it comes from CI (the build protocol's `Hushrun-Ci`), or that carries a GitLab job's
+    /// ID token beside its bearer (`Hushrun-Id-Token`, B-48). Their values are marked sensitive.
     pub fn json_get_with(
         &self,
         path: &str,
         query: Option<&str>,
-        header: Option<(&'static str, String)>,
+        headers: &[(&'static str, String)],
     ) -> Result<(u16, Vec<u8>), LedgerError> {
-        self.json_call(Method::GET, path, query.map(str::to_string), None, header)
+        self.json_call_sized(
+            Method::GET,
+            path,
+            query.map(str::to_string),
+            None,
+            headers.to_vec(),
+            MAX_SMALL_BYTES,
+        )
     }
 
     /// [`HttpLedger::json_request`] with one more header, such as a result's machine signature
@@ -350,7 +358,14 @@ impl HttpLedger {
     ) -> Result<(u16, Vec<u8>), LedgerError> {
         let method = Method::from_bytes(method.as_bytes())
             .map_err(|_| LedgerError::Invalid(format!("{method} isn't an HTTP method")))?;
-        self.json_call_sized(method, path, None, body, header, MAX_PAGE_BYTES)
+        self.json_call_sized(
+            method,
+            path,
+            None,
+            body,
+            header.into_iter().collect(),
+            MAX_PAGE_BYTES,
+        )
     }
 
     /// [`HttpLedger::json_request`] for an answer of up to `max` bytes, past which it is cut off:
@@ -364,7 +379,7 @@ impl HttpLedger {
     ) -> Result<(u16, Vec<u8>), LedgerError> {
         let method = Method::from_bytes(method.as_bytes())
             .map_err(|_| LedgerError::Invalid(format!("{method} isn't an HTTP method")))?;
-        self.json_call_sized(method, path, None, body, None, max)
+        self.json_call_sized(method, path, None, body, Vec::new(), max)
     }
 
     /// `PUT` of `bytes` as `application/octet-stream` at `path` with `query`, already encoded,
@@ -428,7 +443,14 @@ impl HttpLedger {
         body: Option<&[u8]>,
         header: Option<(&'static str, String)>,
     ) -> Result<(u16, Vec<u8>), LedgerError> {
-        self.json_call_sized(method, path, query, body, header, MAX_SMALL_BYTES)
+        self.json_call_sized(
+            method,
+            path,
+            query,
+            body,
+            header.into_iter().collect(),
+            MAX_SMALL_BYTES,
+        )
     }
 
     fn json_call_sized(
@@ -437,7 +459,7 @@ impl HttpLedger {
         path: &str,
         query: Option<String>,
         body: Option<&[u8]>,
-        header: Option<(&'static str, String)>,
+        headers: Vec<(&'static str, String)>,
         max: usize,
     ) -> Result<(u16, Vec<u8>), LedgerError> {
         self.check_path(path)?;
@@ -447,7 +469,7 @@ impl HttpLedger {
                 call.body = Some((body, JSON));
             }
             call.query = query;
-            call.header = header;
+            call.headers = headers;
             let answer = self.call(&call).await?;
             if answer.status.is_redirection() {
                 return Err(self.failure(&answer, path));
@@ -492,8 +514,11 @@ impl HttpLedger {
             if call.create_only {
                 request = request.header(header::IF_NONE_MATCH, "*");
             }
-            if let Some((name, value)) = &call.header {
-                request = request.header(*name, value.as_str());
+            for (name, value) in &call.headers {
+                if let Ok(mut value) = reqwest::header::HeaderValue::from_str(value) {
+                    value.set_sensitive(true);
+                    request = request.header(*name, value);
+                }
             }
             if let Some(token) = &token {
                 // reqwest marks the header sensitive, so it never shows in Debug output.
@@ -799,7 +824,10 @@ impl HttpLedger {
         self.io.run(async {
             let path = format!("objects/{key}");
             let mut call = Call::new(Method::DELETE, &path, key, MAX_SMALL_BYTES);
-            call.header = gc.map(|statement| (log::GC_HEADER, statement));
+            call.headers = gc
+                .map(|statement| (log::GC_HEADER, statement))
+                .into_iter()
+                .collect();
             let answer = self.call(&call).await?;
             // A 404 is a retried delete that had succeeded (L-10).
             if answer.status == StatusCode::NOT_FOUND

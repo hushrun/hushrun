@@ -19,9 +19,10 @@ pub enum Caller {
     /// A person's machine. `signed_in`: a backend and a credential for it (a login or a personal
     /// token), so `open` can be asked.
     Person { signed_in: bool },
-    /// A CI job. `id_token`: the job can mint an ID token for the backend (GitHub Actions).
-    /// `agent_token`: an agent token is the job's credential, as in CI outside GitHub Actions,
-    /// where it reads the org's blocks and uploads none (B-31).
+    /// A CI job. `id_token`: the job has an ID token for the backend (GitHub Actions' minted,
+    /// GitLab CI's `HUSHRUN_ID_TOKEN`, B-48). `agent_token`: an agent token is the job's
+    /// credential, as in CI outside GitHub Actions and GitLab CI, where it reads the org's blocks
+    /// and uploads none (B-31).
     Ci { id_token: bool, agent_token: bool },
     /// An agent token. `sandbox`: a machine where no person is signed in to the run's backend (a
     /// cloud sandbox); else a person's machine where the agent runs, whose settings apply.
@@ -127,7 +128,7 @@ fn sharing_of(mode: Mode, why_off: Off) -> Sharing {
 /// | A person signed in, the org shares, own setting not `off` | the local mode | the lowest of the org's mode, the own setting and the local mode |
 /// | A person otherwise | the local mode | off |
 /// | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
-/// | CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
+/// | CI with an agent token and no ID token, the org shares, outside GitHub Actions and GitLab CI | on, in the job's own store | the org's mode, reading only |
 /// | CI otherwise | off | off |
 /// | An agent token where a person is signed in, the org shares | that person's local mode | the org's mode, lowered as for the person |
 /// | An agent token where a person is signed in, otherwise | that person's local mode | off |

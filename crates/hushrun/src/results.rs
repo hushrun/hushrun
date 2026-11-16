@@ -533,6 +533,8 @@ struct Server {
     ci_repository: RefCell<Option<String>>,
     /// In GitHub Actions: the ID token endpoint and the request token (B-31).
     oidc: Option<(String, String)>,
+    /// B-48: in GitLab CI, what `HUSHRUN_ID_TOKEN` is for this backend; `None` elsewhere.
+    gitlab: Option<crate::gitlab_job::Token>,
     /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
     /// this run asks nothing more of them, and says so once.
     keeps_no_hints: Cell<bool>,
@@ -867,6 +869,15 @@ impl Backend {
                 None => (None, Credential::Nothing),
             },
         };
+        // B-48: in GitLab CI the job's ID token, read from its variable alone, for this backend
+        // only: one whose audience is another URL goes nowhere.
+        let gitlab = (hushrun_ci::detect(&env) == Provider::Gitlab).then(|| {
+            crate::gitlab_job::read(
+                &|name| hushrun_ci::var_os(name),
+                &url.to_string(),
+                std::time::SystemTime::now(),
+            )
+        });
         let github_oidc = oidc.clone().map(|(url, token)| OidcEndpoint {
             url,
             token: Secret::new(token),
@@ -901,6 +912,7 @@ impl Backend {
                 answered: Cell::new(false),
                 ci_repository: RefCell::new(hushrun_ci::context(&env).repository),
                 oidc,
+                gitlab,
                 keeps_no_hints: Cell::new(false),
             })),
         })
@@ -1125,10 +1137,18 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
-                let header = says_ci.then(|| (hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                let mut headers = Vec::new();
+                if says_ci {
+                    headers.push((hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                }
+                // B-48: a GitLab job's ID token beside the token that is the lookup's bearer, so
+                // the answer's `Hushrun-Build` is CI's for the job's project.
+                if let (Some(_), Some(token)) = (&server.token, server.gitlab_id_token()) {
+                    headers.push((hushrun_core::blocks::ID_TOKEN_HEADER, token.text().into()));
+                }
                 let (status, body) = server
                     .ledger
-                    .json_get_with(&path, query.as_deref(), header)
+                    .json_get_with(&path, query.as_deref(), &headers)
                     .map_err(plain)?;
                 if status != 200 {
                     return Err(server.refused(status, &body, "reading the newest result"));
@@ -1377,6 +1397,23 @@ pub struct BuildAccess {
     /// Whether the server answered any request of this run: without, whether the org shares is
     /// unknown, which a CI job says (B-2).
     pub answered: bool,
+    /// B-48: no results lookup of this run can say whether the org shares, though the run has a
+    /// credential for its build requests (a GitLab job with an ID token and no token to look
+    /// results up with): `open` does.
+    pub open_decides: bool,
+    /// B-48: in GitLab CI, what keeps the job from sharing, as a line ends with it: its
+    /// `HUSHRUN_ID_TOKEN` can't be sent (said whatever the org does), or the job has none (said
+    /// where the org shares). `None` elsewhere, and for a job whose token is usable.
+    pub id_token_problem: Option<IdTokenProblem>,
+}
+
+/// B-48: why a GitLab job has no ID token to share with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdTokenProblem {
+    /// `HUSHRUN_ID_TOKEN` isn't set: how to declare it, for the backend at this URL.
+    Absent(String),
+    /// It is set, and can't be sent: why.
+    Unusable(String),
 }
 
 /// The backend a run's results go to, as a saved fetch is compared with (B-36): its origin and
@@ -1410,6 +1447,12 @@ pub enum BuildCredential {
         url: String,
         request_token: String,
         job: String,
+    },
+    /// B-48, B-49: GitLab CI: the job's ID token from `HUSHRUN_ID_TOKEN`, whose audience is the
+    /// backend's URL, and the folder the job's key is kept in (the system's temporary folder).
+    GitlabJob {
+        token: crate::gitlab_job::IdToken,
+        keys: std::path::PathBuf,
     },
 }
 
@@ -1473,6 +1516,16 @@ impl Backend {
                 // In GitHub Actions without an ID token, nothing: whatever else the job holds,
                 // sharing is off there (B-31).
                 (None, _) if server.in_github => (None, false),
+                // B-48: in GitLab CI the job's ID token, or nothing, whatever token it holds.
+                (None, _) if server.gitlab.is_some() => (
+                    server
+                        .gitlab_id_token()
+                        .map(|token| BuildCredential::GitlabJob {
+                            token: token.clone(),
+                            keys: std::env::temp_dir(),
+                        }),
+                    false,
+                ),
                 // Anywhere else in CI an agent token reads the org's blocks, and writes none
                 // (`hushrun_build::share::what_a_run_does`).
                 (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),
@@ -1495,6 +1548,19 @@ impl Backend {
             },
             shares: server.ledger.build_sharing_seen(),
             answered: server.ledger.answered_any(),
+            // A GitLab job's results lookup says whether its org shares only beside a token.
+            open_decides: server.in_ci
+                && server.gitlab_id_token().is_some()
+                && server.token.is_none(),
+            id_token_problem: match &server.gitlab {
+                Some(crate::gitlab_job::Token::Absent) => Some(IdTokenProblem::Absent(
+                    crate::gitlab_job::declare(&server.base),
+                )),
+                Some(crate::gitlab_job::Token::Unusable(why)) => {
+                    Some(IdTokenProblem::Unusable(why.clone()))
+                }
+                _ => None,
+            },
         })
     }
 }
@@ -1771,6 +1837,14 @@ impl Server {
     /// job whose credential is a person's or an agent's token. A job's ID token says who it is
     /// by itself, and a lookup with no credential asks as the repository's CI already. The
     /// relay's requests of such a run say the same (`hushrun_core::blocks::CI_HEADER`).
+    /// B-48: the GitLab job's ID token, when it may be sent to this backend.
+    fn gitlab_id_token(&self) -> Option<&crate::gitlab_job::IdToken> {
+        match &self.gitlab {
+            Some(crate::gitlab_job::Token::Usable(token)) => Some(token),
+            _ => None,
+        }
+    }
+
     fn says_ci(&self) -> bool {
         self.in_ci
             && matches!(

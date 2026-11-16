@@ -15,6 +15,15 @@
 //! [`FakeBuild::fail`]), an object store held to a rate ([`FakeBuild::throttle_store`]), blocks
 //! seeded or withdrawn ([`FakeBuild::put_block`], [`FakeBuild::withdraw`]). It counts every
 //! request by route and keeps what each carried ([`FakeBuild::seen`]).
+//!
+//! gitlab.com CI jobs (B-48, B-49), as build-v0 §2.1 says the backend takes them: a token from
+//! [`FakeBuild::gitlab_token`] is a bearer on build routes only (results refuse it, 403); every
+//! request it carries must be signed by the job's key over `hushrun_core::blocks::job_message`
+//! (401 `job_key_required`, `invalid_job_signature`); the job's first `open` binds the job to
+//! that key, a request before it is 403 `job_not_opened`, and one with another key withdraws the
+//! job (403 `job_withdrawn`, then and ever after). A person's or an agent token's build request
+//! that carries a job header or `Hushrun-Id-Token` is 403. A results lookup's
+//! `Hushrun-Id-Token` is kept ([`Seen::id_token`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -67,6 +76,11 @@ pub struct Seen {
     pub signature: Option<String>,
     /// The `Hushrun-Ci` header, when there was one: the caller says it runs in CI.
     pub ci: Option<String>,
+    /// The `Hushrun-Id-Token` header, when there was one: a GitLab job's token on a results
+    /// lookup (B-48).
+    pub id_token: Option<String>,
+    /// The `Hushrun-Job-Key` header, when there was one (B-49).
+    pub job_key: Option<String>,
     /// The query's parameters, percent-decoded.
     pub query: Vec<(String, String)>,
     /// The body, but for the object store's, which is only counted.
@@ -159,10 +173,26 @@ struct State {
     id_token_seconds: u64,
     /// The audiences the token endpoint was asked for.
     audiences: Vec<String>,
+    /// gitlab.com ID tokens the fake issued ([`FakeBuild::gitlab_token`]): each with its job
+    /// and expiry.
+    gitlab_tokens: Vec<(String, i64, u64)>,
+    /// gitlab.com jobs by id: the key their first `open` bound, and whether they were withdrawn.
+    gitlab_jobs: BTreeMap<i64, GitlabJob>,
     /// Every connection is closed unanswered, as a network that drops it does.
     unreachable: bool,
     /// The paths of the requests dropped so.
     dropped: Vec<String>,
+}
+
+/// A gitlab.com job the fake knows (B-49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitlabJob {
+    /// The public key its first `open` bound it to, as `Hushrun-Job-Key` carried it.
+    pub key: String,
+    /// Another key came for it: nothing of it is taken any more.
+    pub withdrawn: bool,
+    /// How many of its requests verified, by route.
+    pub signed: BTreeMap<String, usize>,
 }
 
 /// A manifest the fake keeps, as the backend keeps one per repository, check and platform: from
@@ -241,6 +271,8 @@ impl FakeBuild {
             id_tokens: Vec::new(),
             id_token_seconds: 300,
             audiences: Vec::new(),
+            gitlab_tokens: Vec::new(),
+            gitlab_jobs: BTreeMap::new(),
             unreachable: false,
             dropped: Vec::new(),
         }));
@@ -284,6 +316,54 @@ impl FakeBuild {
     /// The audiences ID tokens were asked for.
     pub fn audiences(&self) -> Vec<String> {
         self.state().audiences.clone()
+    }
+
+    /// B-48: a gitlab.com CI job's ID token for job `job`, as a job's `id_tokens:` gets one, whose
+    /// audience is the org's URL and which lives an hour: JWT-shaped, with gitlab.com's issuer,
+    /// a `jti` of its own and the job's id. Its signature is no one's: the fake takes the tokens
+    /// it issued, by their text.
+    pub fn gitlab_token(&self, job: i64) -> String {
+        let audience = self.url();
+        self.gitlab_token_with(job, |claims| claims["aud"] = Value::from(audience))
+    }
+
+    /// [`FakeBuild::gitlab_token`], with its claims changed by `change`: another audience, an
+    /// expiry. The fake takes it whatever it says, as the tests that use it expect the CLI not
+    /// to send it. `change` runs with the fake's state held: it calls nothing of the fake's.
+    pub fn gitlab_token_with(&self, job: i64, change: impl FnOnce(&mut Value)) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut state = self.state();
+        let mut claims = json!({
+            "iss": "https://gitlab.com",
+            "aud": format!("{}/o/{}", state.origin, state.org),
+            "iat": now,
+            "exp": now + 3600,
+            "jti": format!("jti-{job}-{}", state.gitlab_tokens.len()),
+            "job_id": job.to_string(),
+            "project_id": "4242",
+            "job_project_id": "4242",
+            "ref_path": "refs/heads/main",
+        });
+        change(&mut claims);
+        let exp = claims["exp"].as_u64().unwrap_or(0);
+        let encode = |value: &Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        let token = format!(
+            "{}.{}.{}",
+            encode(&json!({"alg": "RS256", "kid": "fake"})),
+            encode(&claims),
+            encode(&json!("no one's signature"))
+        );
+        state.gitlab_tokens.push((token.clone(), job, exp));
+        token
+    }
+
+    /// B-49: the gitlab.com jobs the fake knows, by id.
+    pub fn gitlab_jobs(&self) -> BTreeMap<i64, GitlabJob> {
+        self.state().gitlab_jobs.clone()
     }
 
     /// The org's URL: `http://127.0.0.1:<port>/o/<org>`.
@@ -679,6 +759,8 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         authorization: request.header("authorization").map(str::to_string),
         signature: request.header("hushrun-signature").map(str::to_string),
         ci: request.header("hushrun-ci").map(str::to_string),
+        id_token: request.header("hushrun-id-token").map(str::to_string),
+        job_key: request.header("hushrun-job-key").map(str::to_string),
         query: request.query.clone(),
         body: if store_object.is_some() {
             Vec::new()
@@ -734,11 +816,59 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
             .iter()
             .any(|(issued, expires)| issued == token && *expires > now)
     });
-    if !id_token && !matches!(token, Some(FakeBuild::TOKEN | FakeBuild::AGENT_TOKEN)) {
+    let gitlab = token.and_then(|token| {
+        state
+            .gitlab_tokens
+            .iter()
+            .find(|(issued, _, expires)| issued == token && *expires > now)
+            .map(|(_, job, _)| *job)
+    });
+    if !id_token
+        && gitlab.is_none()
+        && !matches!(token, Some(FakeBuild::TOKEN | FakeBuild::AGENT_TOKEN))
+    {
         return answer(
             error(401, "unauthorized", "a token this server takes is needed"),
             pause,
         );
+    }
+    let build = route != route::RESULTS && route != route::MACHINES;
+    // B-48: GitLab's ID tokens are for build blocks only.
+    if gitlab.is_some() && !build {
+        return answer(
+            error(
+                403,
+                "forbidden",
+                "GitLab ID tokens are for build blocks only: results from GitLab CI are recorded with an agent token",
+            ),
+            pause,
+        );
+    }
+    // B-48: in GitLab CI only the job's ID token counts for build blocks.
+    let says_gitlab = [
+        "hushrun-job-key",
+        "hushrun-job-signature",
+        "hushrun-id-token",
+    ]
+    .iter()
+    .any(|name| request.header(name).is_some());
+    if build && gitlab.is_none() && !id_token && says_gitlab {
+        return answer(
+            error(
+                403,
+                "forbidden",
+                "in GitLab CI only the job's ID token counts for build blocks",
+            ),
+            pause,
+        );
+    }
+    // B-49: a gitlab.com job proves it is the job, `open` first; builds answer 404 for an org
+    // that doesn't share before any of it.
+    if let Some(job) = gitlab.filter(|_| build && state.sharing) {
+        let org = state.org.clone();
+        if let Err(refused) = prove_job(&mut state, &request, &route, &org, job) {
+            return answer(refused, pause);
+        }
     }
     let response = match route.as_str() {
         route::RESULTS => {
@@ -800,8 +930,8 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         route::BEGIN => match serde_json::from_slice::<BeginRequest>(&request.body) {
             Ok(ask) if ask.blocks.len() > blocks::MOST_BEGIN => too_many(),
             Ok(ask) => match request.header("hushrun-signature") {
-                // CI's ID tokens never sign.
-                None if id_token => begin(&mut state, ask, None),
+                // CI's ID tokens never sign: a gitlab.com job's key signed the whole request.
+                None if id_token || gitlab.is_some() => begin(&mut state, ask, None),
                 None => error(401, "machine_required", "a machine's signature is needed"),
                 Some(signature) => {
                     let machine = signature.split_whitespace().next().map(str::to_string);
@@ -861,6 +991,66 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
         _ => error(404, "not_found", "no such endpoint"),
     };
     answer(response, pause)
+}
+
+/// B-49: a gitlab.com job's request, checked as the backend checks it: its key and signature over
+/// [`blocks::job_message`], the job bound on its first `open`, another key withdrawing it.
+fn prove_job(
+    state: &mut State,
+    request: &Request,
+    route: &str,
+    org: &str,
+    job: i64,
+) -> Result<(), Response> {
+    let (Some(key), Some(signature)) = (
+        request.header("hushrun-job-key"),
+        request.header("hushrun-job-signature"),
+    ) else {
+        return Err(error(
+            401,
+            "job_key_required",
+            "a gitlab.com job's build requests carry its key and signature",
+        ));
+    };
+    let message = blocks::job_message("POST", &request.path, org, job, &request.body);
+    let verified = hushrun_core::signers::PublicKey::parse(key)
+        .ok()
+        .zip(
+            base64::engine::general_purpose::STANDARD
+                .decode(signature.trim())
+                .ok(),
+        )
+        .is_some_and(|(public, signature)| {
+            hushrun_attest::keys::verify_signature(&public, message.as_bytes(), &signature)
+        });
+    if !verified {
+        return Err(error(
+            401,
+            "invalid_job_signature",
+            "the job's signature doesn't verify by its key",
+        ));
+    }
+    if route == route::OPEN && !state.gitlab_jobs.contains_key(&job) {
+        state.gitlab_jobs.insert(
+            job,
+            GitlabJob {
+                key: key.to_string(),
+                withdrawn: false,
+                signed: BTreeMap::new(),
+            },
+        );
+    }
+    let Some(bound) = state.gitlab_jobs.get_mut(&job) else {
+        return Err(error(403, "job_not_opened", "open first"));
+    };
+    if bound.key != key {
+        bound.withdrawn = true;
+    }
+    if bound.withdrawn {
+        return Err(error(403, "job_withdrawn", "the job was withdrawn"));
+    }
+    *bound.signed.entry(route.to_string()).or_default() += 1;
+    Ok(())
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> Response {
