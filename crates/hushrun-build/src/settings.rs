@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Mode, Programs};
+use crate::model::{Mode, ProgramsSetting};
 
 /// The version of the file this hushrun writes and reads.
 pub const VERSION: u64 = 1;
@@ -34,8 +34,9 @@ pub struct Settings {
     pub env: Vec<String>,
     /// Gigabytes the store's volume keeps free; 0 turns the rule off (B-22).
     pub min_free_gb: u32,
-    /// What the wrapper does with a program on an Apple target (B-9).
-    pub programs: Programs,
+    /// What the person chose for programs on an Apple target (B-9): nothing, so they follow
+    /// sharing, or `tied`.
+    pub programs: ProgramsSetting,
     /// How much of the org's shared store this machine takes part in (B-33): `on`, `observe` or
     /// `off`. It lowers the org's shared mode for this machine and never raises it.
     pub share: Mode,
@@ -53,7 +54,7 @@ impl Default for Settings {
             never_store: Vec::new(),
             env: Vec::new(),
             min_free_gb: MIN_FREE_GB,
-            programs: Programs::default(),
+            programs: ProgramsSetting::default(),
             share: Mode::On,
             mode_chosen: false,
         }
@@ -121,12 +122,13 @@ struct Stored {
     never_store: Option<Vec<String>>,
     env: Option<Vec<String>>,
     min_free_gb: Option<u32>,
-    programs: Option<Programs>,
+    programs: Option<ProgramsSetting>,
     share: Option<Mode>,
 }
 
-/// The file as written: every field, but for a mode nobody chose (B-25). A file with no `mode`
-/// reads as `off` on a person's machine, here and in every released hushrun.
+/// The file as written: every field, but for a mode nobody chose (B-25) and for `programs`
+/// unless it is `tied` (B-21). A file with no `mode` reads as `off` on a person's machine, here
+/// and in every released hushrun; one with no `programs` reads there as that hushrun's default.
 #[derive(Serialize)]
 struct Written<'a> {
     version: u64,
@@ -136,7 +138,8 @@ struct Written<'a> {
     never_store: &'a [String],
     env: &'a [String],
     min_free_gb: u32,
-    programs: Programs,
+    #[serde(skip_serializing_if = "ProgramsSetting::is_follow")]
+    programs: ProgramsSetting,
     share: Mode,
 }
 
@@ -428,7 +431,7 @@ fn text(
 #[cfg(test)]
 mod tests {
     use super::{Overrides, Settings, SettingsError, load, update};
-    use crate::model::{Mode, Programs};
+    use crate::model::{Mode, ProgramsSetting};
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::fs;
@@ -514,7 +517,7 @@ mod tests {
         assert_eq!(settings.keep_days, 15);
         assert!(settings.never_store.is_empty() && settings.env.is_empty());
         assert_eq!(settings.min_free_gb, 10);
-        assert_eq!(settings.programs, Programs::Movable);
+        assert_eq!(settings.programs, ProgramsSetting::Follow);
         assert_eq!(settings, Settings::default());
     }
 
@@ -528,7 +531,7 @@ mod tests {
             settings.never_store = vec!["openssl-sys".into()];
             settings.env = vec!["SQLX_OFFLINE".into()];
             settings.min_free_gb = 0;
-            settings.programs = Programs::Tied;
+            settings.programs = ProgramsSetting::Tied;
         })
         .unwrap();
         assert_eq!(load(&path).unwrap(), saved);
@@ -547,6 +550,35 @@ mod tests {
 
     // covers: B-21
     #[test]
+    fn programs_is_written_only_when_someone_set_it_to_tied() {
+        let (_dir, path) = file();
+        let written = |path: &Path| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        };
+        // A save of another setting writes no `programs`: nobody chose.
+        update(&path, |s| s.keep_days = 7).unwrap();
+        assert!(
+            written(&path).get("programs").is_none(),
+            "{}",
+            written(&path)
+        );
+        // A file an earlier hushrun wrote names `movable` though nobody chose it: the next save
+        // drops it.
+        fs::write(&path, br#"{"version": 1, "programs": "movable"}"#).unwrap();
+        update(&path, |s| s.keep_days = 3).unwrap();
+        assert!(
+            written(&path).get("programs").is_none(),
+            "{}",
+            written(&path)
+        );
+        // `tied` is someone's choice, and later saves keep it.
+        fs::write(&path, br#"{"version": 1, "programs": "tied"}"#).unwrap();
+        update(&path, |s| s.keep_days = 5).unwrap();
+        assert_eq!(written(&path)["programs"], "tied");
+    }
+
+    // covers: B-21
+    #[test]
     fn a_file_with_only_a_version_is_the_defaults() {
         let (_dir, path) = file();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -554,9 +586,13 @@ mod tests {
         let settings = load(&path).unwrap();
         assert_eq!(settings.mode, Mode::On);
         assert_eq!(settings.keep_days, 15);
-        assert_eq!(settings.programs, Programs::Movable);
+        assert_eq!(settings.programs, ProgramsSetting::Follow);
         fs::write(&path, r#"{"version": 1, "programs": "tied"}"#).unwrap();
-        assert_eq!(load(&path).unwrap().programs, Programs::Tied);
+        assert_eq!(load(&path).unwrap().programs, ProgramsSetting::Tied);
+        // What every hushrun up to 0.16 wrote on each save, whoever chose or didn't: nobody's
+        // choice.
+        fs::write(&path, r#"{"version": 1, "programs": "movable"}"#).unwrap();
+        assert_eq!(load(&path).unwrap().programs, ProgramsSetting::Follow);
     }
 
     // covers: B-21

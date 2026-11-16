@@ -643,6 +643,14 @@ fn world_with(mode: Mode, change: impl FnOnce(&mut settings::Settings)) -> World
     }
 }
 
+/// A world whose runs share, their backend out of reach (B-34): a program nobody set gets its
+/// debug bundle there (B-9, B-21).
+fn world_that_shares(mode: Mode) -> World {
+    let mut w = world(mode);
+    w.unreached();
+    w
+}
+
 /// Sets file dates far enough back that the compile's start is after them (B-11).
 fn settle() {
     std::thread::sleep(Duration::from_millis(30));
@@ -1526,7 +1534,7 @@ fn an_audit_finds_a_proc_macro_or_a_debug_bundle_that_differs_from_its_block() {
     assert!(w.store().suspended(&step).is_some());
 
     // A program whose debug bundle alone differs.
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let ws = program_checkout(&w, "ws");
     settle();
@@ -3710,7 +3718,7 @@ fn a_movable_program_sees_the_toolchain_through_a_link_beside_its_outputs() {
     // Apple's linker names each object by the path it is given, and the program's UUID is a
     // hash over those names. Through the link the standard library's objects are named from
     // the output folder, not by where this machine keeps the toolchain.
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let one = program_checkout(&w, "one");
     let two = program_checkout(&w, "two-longer");
@@ -3914,7 +3922,7 @@ fn next_session(w: &mut World, change: impl FnOnce(&mut settings::Settings)) {
 // covers: B-5, B-9, B-21
 #[test]
 fn a_program_set_to_tied_is_compiled_as_asked_and_never_takes_a_movable_block() {
-    let mut w = world(Mode::On);
+    let mut w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let one = program_checkout(&w, "one");
     let two = program_checkout(&w, "two-longer");
@@ -3922,7 +3930,8 @@ fn a_program_set_to_tied_is_compiled_as_asked_and_never_takes_a_movable_block() 
     assert_eq!(call_program(&w, &one, &[]).outcome(), STORED);
     assert!(one.join("target/debug/deps/a-xa.dSYM").is_dir());
 
-    next_session(&mut w, |s| s.programs = crate::model::Programs::Tied);
+    next_session(&mut w, |s| s.programs = crate::model::ProgramsSetting::Tied);
+    w.unreached();
     // Another checkout: a movable block would be reused here, but the setting is part of the
     // first key, so a tied program never takes it.
     let r = call_program(&w, &two, &[]);
@@ -3950,10 +3959,89 @@ fn a_program_set_to_tied_is_compiled_as_asked_and_never_takes_a_movable_block() 
     assert!(!two.join("target/debug/deps/a-xa.dSYM").exists());
 }
 
+/// Whether the wrapper asked rustc for a debug bundle (B-9).
+fn asked_for_a_bundle(r: &Result) -> bool {
+    r.seen.compiles[0]
+        .iter()
+        .any(|a| a == "split-debuginfo=packed")
+}
+
+// covers: B-9, B-21
+#[test]
+fn a_program_nobody_set_is_tied_in_a_run_that_shares_nothing() {
+    let w = world(Mode::On);
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    // Nothing is added to the compile but what B-18 needs, and no bundle is made.
+    let asked = &r.seen.compiles[0];
+    assert!(
+        !asked_for_a_bundle(&r)
+            && !asked
+                .iter()
+                .any(|a| a.starts_with("strip=") || a.contains("oso_prefix")),
+        "{asked:?}"
+    );
+    assert_eq!(sysroot_arg(asked), None);
+    assert!(!one.join("target/debug/deps/a-xa.dSYM").exists());
+}
+
+// covers: B-9, B-21
+#[test]
+fn a_program_nobody_set_gets_a_bundle_when_the_backend_is_out_of_reach() {
+    let mut w = world(Mode::On);
+    w.unreached();
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(asked_for_a_bundle(&r), "{:?}", r.seen.compiles[0]);
+    assert!(one.join("target/debug/deps/a-xa.dSYM").is_dir());
+}
+
+// covers: B-9, B-21
+#[test]
+fn a_program_nobody_set_gets_a_bundle_in_a_run_with_a_relay() {
+    let mut w = world(Mode::On);
+    w.share("acme");
+    w.plan("a", program_plan(false));
+    let one = program_checkout(&w, "one");
+    settle();
+    let r = call_program(&w, &one, &[]);
+    assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+    assert!(asked_for_a_bundle(&r), "{:?}", r.seen.compiles[0]);
+    assert!(one.join("target/debug/deps/a-xa.dSYM").is_dir());
+}
+
+// covers: B-9, B-21
+#[test]
+fn a_program_set_to_tied_stays_tied_in_a_run_that_shares() {
+    for relay in [false, true] {
+        let mut w = world_with(Mode::On, |s| {
+            s.programs = crate::model::ProgramsSetting::Tied
+        });
+        if relay {
+            w.share("acme");
+        } else {
+            w.unreached();
+        }
+        w.plan("a", program_plan(false));
+        let one = program_checkout(&w, "one");
+        settle();
+        let r = call_program(&w, &one, &[]);
+        assert_eq!(r.outcome(), STORED, "{}", r.stderr);
+        assert!(!asked_for_a_bundle(&r), "{:?}", r.seen.compiles[0]);
+        assert!(!one.join("target/debug/deps/a-xa.dSYM").exists());
+    }
+}
+
 // covers: B-9, B-12, B-18
 #[test]
 fn a_programs_debug_bundle_is_stored_and_put_back_whole() {
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let one = program_checkout(&w, "one");
     let two = program_checkout(&w, "two-longer");
@@ -4049,7 +4137,7 @@ fn a_programs_debug_bundle_is_stored_and_put_back_whole() {
 // covers: B-10
 #[test]
 fn a_bundle_file_that_holds_a_root_ties_the_program() {
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(true));
     let one = program_checkout(&w, "one");
     let two = program_checkout(&w, "two-longer");
@@ -4067,7 +4155,7 @@ fn a_bundle_file_that_holds_a_root_ties_the_program() {
 // covers: B-12, B-19
 #[test]
 fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whole() {
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let one = program_checkout(&w, "one");
     settle();
@@ -4155,7 +4243,7 @@ fn a_kill_between_placing_a_program_and_its_bundle_leaves_nothing_taken_for_whol
 // covers: B-18
 #[test]
 fn the_dsymutil_that_writes_a_programs_bundle_is_keyed() {
-    let w = world(Mode::On);
+    let w = world_that_shares(Mode::On);
     w.plan("a", program_plan(false));
     let one = program_checkout(&w, "one");
     let two = program_checkout(&w, "two-longer");
@@ -6152,7 +6240,7 @@ fn a_downloaded_program_that_cant_start_here_is_a_miss_and_is_built_in_its_place
     // build script) or a test would: before it is put in place its loader is asked whether it
     // can start. One that can't is compiled here instead, and that block takes its place.
     for (missing, starts) in [(None, true), (Some("libq.9.dylib"), false)] {
-        let other = world(Mode::On);
+        let other = world_that_shares(Mode::On);
         other.plan("a", program_plan(false));
         let there = program_checkout(&other, "ws");
         settle();

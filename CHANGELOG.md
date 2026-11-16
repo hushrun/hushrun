@@ -13,6 +13,21 @@ where that folder is the same. Every linked output's key changes once.
 
 ### Changed
 
+- **On macOS, programs are tied unless the run shares**
+  ([ADR 0092](docs/adr/0092-programs-follow-sharing.md), B-9, B-21). A program (a test binary, a
+  `bin`) got a debug bundle by default, which costs a `dsymutil` run per program: a first build of
+  this repository took 76.3 s against 49.9 s with no cache. Now a program gets the bundle only in
+  a run that shares build blocks (or would, its backend out of reach), where it is what lets the
+  block reach another machine. In a run that shares nothing it is compiled as asked and reused
+  only in the target folder that built it: the same first build takes 52.4 s, and three worktrees
+  take less time and less disk than before. `programs: tied` in `build.json` still ties programs
+  in every run.
+- Contract: **`programs` in `build.json`** is written only when it is `tied`. A written
+  `movable` is read as not chosen (every earlier version wrote it on each save, whoever chose or
+  didn't), and the next save drops it. The file's version is unchanged. `hushrun build status`
+  shows `programs  follow sharing: …` or `programs  tied: …`, and its JSON has `"programs":
+  "follow"` in place of `"movable"`.
+
 - **A program, a proc macro or a build-script binary is keyed by its link environment by
   content** (B-37): the C driver's dry run of the link, the programs it runs and what they load,
   the start files, the C runtime as `ld` finds it, the toolchain's own linker tools and, on macOS,

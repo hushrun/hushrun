@@ -332,8 +332,15 @@ one kind is never reused for the other. **To keep the map while the org shares**
 off on this machine (`hushrun build share off`, B-33), or name the package under `never_store`
 (B-4), which passes all of that package's compiles through untouched.
 A program (a `bin` that is
-not a build script, or a test) that links with debug info gets a debug bundle instead, unless the
-person set `programs` to `tied` (B-21), through four additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
+not a build script, or a test) that links with debug info gets a debug bundle instead, in a run
+that shares (the same test as above: the shared mode is `observe` or `on`, whether or not the
+backend answered) and unless the person set `programs` to `tied` (B-21). In a run that shares
+nothing a program is tied: compiled as asked, with nothing added, and reused only in the target
+folder that built it. The bundle costs a `dsymutil` run per program (measured on this
+repository's first build on macOS: 49.9 s with no cache, 52.4 s with programs tied, 76.3 s
+with a bundle each) and pays only where a program's block may leave the machine (B-24). One
+function decides which a run's programs are, from the setting and whether the run shares, for
+the wrapper and for `hushrun build status`. A program gets its bundle through four additions: `-C split-debuginfo=packed`, so that rustc runs `dsymutil` and writes
 `<program>.dSYM` beside it with the DWARF of every object it was linked from;
 `-C strip=debuginfo`, so that the program keeps no debug map naming those objects by their
 paths; `-oso_prefix` for the workspace, in the form the output folder is written with (as cargo
@@ -370,10 +377,11 @@ text (`-C link-arg=-Wl,-rpath,…`) is an argument like any other, in the first 
 (shown: a toolchain copied to another path links the same program, bundle and UUID through the
 link, and other ones without it). *Breaks if:* a later `ld` resolved links in the names. Before such a
 compile the wrapper removes the bundle an earlier compile left, since `dsymutil` adds to one; it
-does so too for a program set to `tied` whose flags would allow a bundle, since that bundle
+does so too for a tied program (set to `tied`, or of a run that shares nothing) whose flags
+would allow a bundle, since that bundle
 matches no program compiled now and would keep it from being stored (B-18).
 After it, it removes the bundle's `Contents/Resources/Relocations`, which names the program by
-its absolute path and which no debugger reads. A program set to `tied`, a program whose own
+its absolute path and which no debugger reads. A tied program, a program whose own
 flags say `-C split-debuginfo=off` or a `-C strip` other than `none`, a program without debug
 info and a program for any other target are left as they are. When the toolchain holds the
 sources of the standard library or of the compiler (`lib/rustlib/src`, rustup's `rust-src`;
@@ -779,12 +787,20 @@ lock: `mode`, `keep_days`, `never_store` (package names), `env` (extra variable 
 on|observe|off`, or a file written by hand): a save of another setting keeps the mode the file
 had, and writes none where it had none, so that a file never says `off` where nobody chose it
 (B-25 reads a written `off` in a sandbox). A file with no `mode` is `off` on a person's
-machine. `programs` is `movable` (unless set) or `tied`: a movable program
-gets a debug bundle (B-9), which costs a `dsymutil` run per program and about twice the bytes
-stored on a first build and lets a later checkout reuse it; a tied one is compiled as asked and
-reused only in the target folder that built it. Any other value makes the file invalid. The
-session carries what the file said when `hushrun run` began, so every compile of a run sees one
-value. `hushrun build status` shows the mode, the store's folder, how long blocks are kept,
+machine. `programs` is not chosen, or `tied`. Not chosen, programs follow sharing: in a run that
+shares (B-9) a program is movable and
+gets a debug bundle, which costs a `dsymutil` run per program and about twice the bytes
+stored on a first build and lets another checkout or machine reuse it; in a run that shares
+nothing it is tied, compiled as asked and
+reused only in the target folder that built it. Set to `tied`, programs are tied in every run.
+Nothing sets a bundle for a run that shares nothing. In the file, only `tied` is written. A
+written `movable` is read as not chosen, like a missing field: every hushrun up to 0.16 wrote
+`movable` on each save, whoever chose or didn't, so it can't be told from nobody's choice; and
+the file's version stays 1 with no new value, since those versions read the same file and
+refuse a value or a version they don't know. Any other value makes the file invalid. The
+session carries what the file said when `hushrun run` began, written the same way, so every
+compile of a run sees one value; in CI and in a sandbox, where no person's settings are read
+(B-25, B-31), `programs` is not chosen. `hushrun build status` shows the mode, the store's folder, how long blocks are kept,
 `programs`, the share setting and what sharing does here and why (B-33), the store's size and
 its blocks by age and by repository; in CI, one more line of what `hushrun run NAME -- COMMAND`
 does in the job and why, from B-25's one function and no person's settings (reuse in the job's
@@ -891,8 +907,8 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   if*); the audit (B-16), which compares every class, is the check on it.
 - `toolchain-in-output`: a linked output holds the toolchain's own folder (B-10). Such a block is
   keyed by the toolchain's place (`bound`), as by any machine folder it holds. On macOS B-9's
-  changes keep it out of proc macros, build scripts and movable programs; a program set to
-  `tied`, or one the wrapper leaves as it is, still names the standard library by it.
+  changes keep it out of proc macros, build scripts and movable programs; a tied program
+  (B-21), or one the wrapper leaves as it is, still names the standard library by it.
 - `tied`: its place is its roots (B-10), or it is a movable macOS program whose output folder
   lies outside its workspace, or a linked output with rustc's own run paths (`-C rpath`),
   whose first key holds those folders (B-9).

@@ -137,19 +137,22 @@ fn build_sets_the_mode_in_build_json_beside_the_credentials() {
     assert_eq!(saved_mode(&w), "observe");
     assert_eq!(status_json(&w)["mode"], "observe");
 
-    // What happens to programs on macOS: movable unless the person chose tied.
-    let movable = build(&w, &["status"]);
-    assert!(
-        movable.stdout.contains(
-            "programs  movable: a program on macOS gets a debug bundle and may be reused in another folder\n"
-        ),
-        "{}",
-        movable.stdout
-    );
-    assert_eq!(status_json(&w)["programs"], "movable");
+    // What happens to programs on macOS: they follow sharing unless the person chose tied. A
+    // save writes no `programs` nobody chose, and the `movable` an earlier hushrun wrote on
+    // every save reads the same.
+    const FOLLOW: &str = "programs  follow sharing: tied while runs here share nothing; a run that shares gives each macOS program a debug bundle so it can be reused elsewhere\n";
+    let follow = build(&w, &["status"]);
+    assert!(follow.stdout.contains(FOLLOW), "{}", follow.stdout);
+    assert_eq!(status_json(&w)["programs"], "follow");
     let mut file: Value =
         serde_json::from_str(&std::fs::read_to_string(settings(&w)).expect("settings"))
             .expect("JSON");
+    assert!(file.get("programs").is_none(), "{file}");
+    file["programs"] = "movable".into();
+    std::fs::write(settings(&w), file.to_string()).expect("settings");
+    let written = build(&w, &["status"]);
+    assert!(written.stdout.contains(FOLLOW), "{}", written.stdout);
+    assert_eq!(status_json(&w)["programs"], "follow");
     file["programs"] = "tied".into();
     std::fs::write(settings(&w), file.to_string()).expect("settings");
     let tied = build(&w, &["status"]);

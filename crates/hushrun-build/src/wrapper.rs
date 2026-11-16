@@ -861,8 +861,9 @@ impl Call<'_> {
         if class != Class::Library {
             self.apple = apple;
             self.clear_bundle = bundled(inv, apple);
+            // B-21: movable only in a run that shares, and never for a person who set `tied`.
             self.bundle = self.clear_bundle
-                && self.current.programs == Programs::Movable
+                && self.current.programs() == Programs::Movable
                 && identity.sysroot.is_some();
         }
         if self.bundle
@@ -943,8 +944,7 @@ impl Call<'_> {
             // B-9: the debug map goes only where dropping it buys something, which is a run
             // that shares or would (its backend out of reach is the same compile, so the key
             // doesn't turn with the network).
-            let shares = self.current.share != crate::session::Shared::Off;
-            self.link_extra = linked_args(inv, apple, place.as_ref(), shares);
+            self.link_extra = linked_args(inv, apple, place.as_ref(), self.current.shares());
             // Debug info packed beside a proc macro or a build script, or beside a program the
             // wrapper leaves as it is, is not something a block carries.
             if inv.debug().split.as_deref() == Some("packed") && !self.bundle {
