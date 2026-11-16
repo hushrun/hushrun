@@ -3137,3 +3137,167 @@ fn panicking_vouches(world: &str) {
     let took = ended.elapsed();
     assert!(took < Duration::from_secs(3), "{took:?}");
 }
+
+/// A Go package archive's block in `store`, built here by `by`: kind `go/1`, its first key its
+/// key.
+fn go_block(store: &Store, seed: u8, by: Option<Identity>) -> Digest {
+    let key = Digest::of(&[seed, 7]);
+    let dir = store.root().with_file_name(format!("go-src-{seed}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("archive");
+    let bytes: Vec<u8> = (0..30_000)
+        .map(|i| Digest::of(&[seed, (i / 32) as u8]).as_bytes()[i % 32])
+        .collect();
+    std::fs::write(&file, &bytes).unwrap();
+    let description = json!({"schema": "hushrun.go-block/v1", "kind": "go/1", "step": key,
+        "class": "library", "action": "00", "rustc_ms": 1000, "built_ms": 1});
+    store
+        .publish_with_origin(
+            &key,
+            &description,
+            &[NewFile {
+                name: "archive".into(),
+                source: file,
+            }],
+            &Origin::built_here("1-1", by),
+            SystemTime::now(),
+        )
+        .unwrap();
+    key
+}
+
+fn go_address(key: &Digest) -> Hex32 {
+    blocks::address("go/1", key.as_bytes())
+}
+
+/// A Go archive's line in a run's log.
+fn go_entry(key: Digest, outcome: hushrun_build::model::Outcome) -> hushrun_build::session::Entry {
+    hushrun_build::session::Entry {
+        outcome,
+        class: Some(LocalClass::Library),
+        crate_name: String::new(),
+        package: String::new(),
+        rustc_ms: 0,
+        saved_ms: 0,
+        stored_bytes: 0,
+        found: false,
+        differed: false,
+        note: None,
+        portable: None,
+        step: Some(key),
+        key: Some(key),
+        downloaded: false,
+        go: Some(hushrun_build::session::GoEntry::default()),
+    }
+}
+
+// covers: B-43
+#[test]
+fn a_go_fetch_asks_the_server_only_about_what_the_checks_go_manifest_names() {
+    let fake = FakeBuild::start();
+    let a = machine();
+    let named = go_block(&a.store, 71, Some(me(&fake)));
+    let other = go_block(&a.store, 72, Some(me(&fake)));
+    for key in [named, other] {
+        let packed = super::pack::pack_block(&a.store, &key, &a.session).unwrap();
+        fake.put_block(
+            go_address(&key),
+            "person/1",
+            &packed.pack.bytes().unwrap(),
+            packed.outputs,
+            1000,
+            blocks::Class::Library,
+        );
+    }
+    fake.set_manifest(vec![Pair(go_address(&named), go_address(&named))]);
+    let b = machine();
+    let relay = start(&fake, &b, |_| {});
+    relay
+        .begin_check(&b.session, None, Some("darwin_arm64".into()), &|_| None)
+        .unwrap();
+    until("the Go manifest", || {
+        matches!(relay.state().go_manifest, super::GoManifest::Got(_))
+    });
+    let open = fake.opens().into_iter().find(|o| o.kind == "go/1").unwrap();
+    assert_eq!(open.platform, "darwin_arm64");
+    let lookups = fake.count(route::LOOKUP);
+    // Most of what Go asks for no server holds: one the manifest doesn't name asks nothing.
+    assert_eq!(
+        ask(
+            &relay,
+            Request::GoFetch {
+                key: other,
+                local_ms: Some(60_000)
+            }
+        ),
+        Answer::None
+    );
+    assert_eq!(
+        ask(
+            &relay,
+            Request::GoFetch {
+                key: named,
+                local_ms: Some(60_000)
+            }
+        ),
+        Answer::Ready { key: named }
+    );
+    // The prefetch's one lookup, and nothing for `other`.
+    assert_eq!(fake.count(route::LOOKUP) - lookups, 1);
+    let block = b.store.block(&named).unwrap().unwrap();
+    assert_eq!(
+        hushrun_build::model::Kind::of_description(&block.description),
+        hushrun_build::model::Kind::Go
+    );
+    assert!(b.store.origin(&named).unwrap().downloaded_only());
+    relay.end_check(&[]);
+}
+
+// covers: B-43
+#[test]
+fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let key = go_block(&m.store, 73, Some(me(&fake)));
+    let relay = start(&fake, &m, |_| {});
+    relay
+        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
+        .unwrap();
+    until("open", || answering(&relay));
+    ask(&relay, Request::GoBuilt { key, cost_ms: 1000 });
+    until("stored", || {
+        fake.block(go_address(&key))
+            .is_some_and(|b| b.state == hushrun_testkit::fake_build::BlockState::Stored)
+    });
+    until("done", || no_claims(&m));
+    let rust_key = Digest::of(b"a crate");
+    let entries = vec![
+        go_entry(key, hushrun_build::model::Outcome::BuiltAndStored),
+        hushrun_build::session::Entry {
+            go: None,
+            step: Some(rust_key),
+            ..go_entry(rust_key, hushrun_build::model::Outcome::BuiltAndStored)
+        },
+    ];
+    relay.end_check(&entries);
+    let begun = fake.begins();
+    assert!(!begun.is_empty() && begun.iter().all(|b| b.kind == "go/1"));
+    assert_eq!(begun[0].blocks[0].address, go_address(&key));
+    assert_eq!(begun[0].blocks[0].hint_address, Some(go_address(&key)));
+    let closes = fake.closes();
+    let go = closes
+        .iter()
+        .find(|c| c.kind == "go/1")
+        .expect("a Go close");
+    let rust = closes
+        .iter()
+        .find(|c| c.kind == "rustc/1")
+        .expect("a rustc close");
+    assert_ne!(go.run, rust.run);
+    assert_eq!(go.platform, "linux_amd64");
+    assert_eq!(go.manifest, vec![Pair(go_address(&key), go_address(&key))]);
+    assert_eq!(
+        rust.manifest,
+        vec![Pair(address(&rust_key), address(&rust_key))]
+    );
+}

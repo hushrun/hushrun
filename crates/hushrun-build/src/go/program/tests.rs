@@ -325,7 +325,7 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
     m.env.insert(BUDGET_VAR.into(), "300".into());
     m.env.insert(
         FAULT_VAR.into(),
-        "hang-get=1,panic-get=2,panic-put=1".into(),
+        "hang-get=1,panic-get=2,panic-put=1,slow-get=4".into(),
     );
     let started = Instant::now();
     // The body a panicking put leaves, read before `close`, after which Go reads nothing.
@@ -337,6 +337,8 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
             (1, get(1, &[1u8; 32])),
             (1, get(2, &[2u8; 32])),
             (1, put(3, &[3u8; 32], b"the body")),
+            // Slower than the budget: the watchdog answers it, and its own answer, later, is
+            // never written.
             (1, get(4, &[4u8; 32])),
             (5, String::new()),
             (5, close(5)),
@@ -368,6 +370,8 @@ fn a_handler_that_hangs_or_panics_still_gets_one_answer() {
         Box::new(|_| Ok("go build".into())),
     );
     reader.join().unwrap();
+    // The slow handler answers after `close`'s wait: given its time, it writes nothing.
+    std::thread::sleep(Duration::from_millis(700));
     let lines = out.lines();
     let answers = by_id(&lines);
     assert_eq!(answers.len(), 6, "{lines:?}");
@@ -599,29 +603,28 @@ fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     let mut m = Machine::new().with_session(Some("none"), Some(&socket));
     m.env.insert(BUDGET_VAR.into(), "600".into());
     let started = Instant::now();
-    let lines = m.serve(
+    // One after another, as Go asks for a package once its imports are done.
+    let lines = m.serve_steps(
         &[
-            get(1, &[13u8; 32]),
-            get(2, &[14u8; 32]),
-            get(3, &[15u8; 32]),
-            close(4),
-        ]
-        .concat(),
+            (1, get(1, &[13u8; 32])),
+            (2, get(2, &[14u8; 32])),
+            (3, get(3, &[15u8; 32])),
+            (4, close(4)),
+        ],
         "go build ./...",
     );
     let answers = by_id(&lines);
     for id in 1..=3 {
         assert_eq!(answers[&id]["Miss"], true);
     }
-    // At most the relay's wait for the calls made at once, never one wait per request.
+    // One wait for the relay in the command, never one a request.
     assert!(
-        started.elapsed() < Duration::from_secs(3),
+        started.elapsed() < Duration::from_millis(550),
         "{:?}",
         started.elapsed()
     );
     std::thread::sleep(Duration::from_millis(50));
-    let asked = heard.try_iter().count();
-    assert!(asked <= 3, "{asked}");
+    assert_eq!(heard.try_iter().count(), 1);
     let lines = m.serve(&[get(1, &[16u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }

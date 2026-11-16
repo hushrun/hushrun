@@ -74,8 +74,9 @@ pub const BLOCK_SCHEMA: &str = "hushrun.go-block/v1";
 /// relay's wait at half of it.
 #[cfg(debug_assertions)]
 const BUDGET_VAR: &str = "HUSHRUN_GOCACHE_BUDGET_MS";
-/// Test only, never read in a release build: `hang-get=N`, `panic-get=N`, `panic-put=N`, comma
-/// separated: the N-th request of that command hangs or panics in its handler.
+/// Test only, never read in a release build: `hang-get=N`, `slow-get=N`, `panic-get=N`,
+/// `panic-put=N`, comma separated: the N-th request of that command hangs, answers after twice
+/// the budget, or panics in its handler.
 #[cfg(debug_assertions)]
 const FAULT_VAR: &str = "HUSHRUN_GOCACHE_FAULT";
 
@@ -148,6 +149,7 @@ struct Waits {
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 struct Faults {
     hang_get: Option<u64>,
+    slow_get: Option<u64>,
     panic_get: Option<u64>,
     panic_put: Option<u64>,
     gets: AtomicU64,
@@ -341,6 +343,7 @@ impl Program {
                     let n = n.parse().ok();
                     match what {
                         "hang-get" => faults.hang_get = n,
+                        "slow-get" => faults.slow_get = n,
                         "panic-get" => faults.panic_get = n,
                         "panic-put" => faults.panic_put = n,
                         _ => {}
@@ -632,6 +635,10 @@ impl Program {
         }
         if self.faults.hang_get == Some(n) {
             std::thread::sleep(Duration::from_secs(3600));
+        }
+        // Slower than the budget, then answering: the watchdog has answered it already.
+        if self.faults.slow_get == Some(n) {
+            std::thread::sleep(self.waits.budget * 2);
         }
     }
 
