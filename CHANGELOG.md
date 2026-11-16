@@ -6,6 +6,43 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+GitLab CI shares build blocks through its ID tokens
+([ADR 0094](docs/adr/0094-gitlab-ci-shares-build-blocks-through-its-id-tokens.md)): a gitlab.com
+job that declares `id_tokens: {HUSHRUN_ID_TOKEN: {aud: <the org's URL>}}` reads and writes the
+shared store as its project's CI, and an agent token in GitLab CI reads nothing of it any more.
+
+### Added
+
+- **GitLab CI's ID token for build blocks** (B-48): in GitLab CI the relay's requests carry the
+  job's ID token from `HUSHRUN_ID_TOKEN`, and nothing else. It is sent only to the backend its
+  audience names, only while it hasn't expired, and only when it is gitlab.com's and its audience
+  is one string; otherwise the run says why in one line, with the `id_tokens:` block to declare,
+  and shares nothing. The results lookup carries it in `Hushrun-Id-Token` beside the agent token,
+  so a job of an org that doesn't share, or of a project nobody confirmed, makes no build
+  request; a job with no agent token asks `open` once instead.
+- **A GitLab job proves it is the job** (B-49): its first run that shares makes an Ed25519 key,
+  kept for every later run of the job in `hushrun-job-<job id>-<digest>.key` under the system's
+  temporary folder (mode 0600, written whole, never replaced), and every build request carries
+  `Hushrun-Job-Key` and `Hushrun-Job-Signature`. Every run whose `open` answered sends `close`,
+  whatever COMMAND did, since the backend serves a GitLab job's trusted blocks only after it.
+  No upload begins with less than 2 minutes left of the token. A withdrawn job is said in plain
+  words.
+- Contract: `hushrun_core::blocks` gains `JOB_KEY_HEADER`, `JOB_SIGNATURE_HEADER`,
+  `ID_TOKEN_HEADER` and `job_message`, and `open`'s `untrusted` the words `job`, `token`, `fork`,
+  `source`, `unprotected`, `config` and `user`, each said in one line.
+
+### Changed
+
+- **In GitLab CI an agent token reads nothing of the shared store** (B-31, B-48): before, it read
+  the org's blocks, as in any CI outside GitHub Actions. `hushrun build status` says so, and how
+  to declare the job's ID token.
+- **A CI run's store with no job folder is its own** (B-31): `hushrun-build-<CI_JOB_ID or process
+  id>-<random>` under the system's temporary folder, made exclusively (0700) and locked for the
+  run's life. A folder already at that path is never adopted or removed (before, one at
+  `hushrun-build-<process id>` was removed as a dead run's, which on a shared `/tmp` could be a
+  live job's of the same process id in another container). A dead run's store, whose lock is free
+  and over an hour old, goes at the next run's start.
+
 Linked outputs between machines ([ADR 0091](docs/adr/0091-linked-outputs-between-machines.md)):
 programs, proc macros and build-script binaries are shared between machines whose link
 environment is the same by content, and a block that holds a machine's folder between CI jobs
