@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::anyhow;
 use serde_json::{Value, json};
 
-use hushrun_build::model::{Mode, Programs};
+use hushrun_build::model::{Mode, ProgramsSetting};
 use hushrun_build::session;
 use hushrun_build::settings::{self, Overrides, SettingsError};
 use hushrun_build::store::{Status, Store};
@@ -566,8 +566,8 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
         line(
             "programs",
             match effective.programs {
-                Programs::Movable => "movable: a program on macOS gets a debug bundle and may be reused in another folder",
-                Programs::Tied => "tied: a program is reused only in the target folder that built it",
+                ProgramsSetting::Follow => "follow sharing: tied while runs here share nothing; a run that shares gives each macOS program a debug bundle so it can be reused elsewhere",
+                ProgramsSetting::Tied => "tied: a program is reused only in the target folder that built it",
             }
             .to_string(),
         );

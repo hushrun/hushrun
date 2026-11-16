@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::audit::Audit;
-use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs};
+use crate::model::{Class, Mode, NotStored, Outcome, PassedThrough, Programs, ProgramsSetting};
 use crate::settings::{self, Overrides, Settings};
 use crate::store::{DAY, Store};
 use crate::unit::Checked;
@@ -98,9 +98,15 @@ pub struct Current {
     pub repository_env: Vec<String>,
     /// Nothing is stored with less free space than this (B-22). 0 turns the rule off.
     pub min_free_gb: u32,
-    /// What the wrapper does with a program on an Apple target (B-9, B-21).
-    #[serde(default)]
-    pub programs: Programs,
+    /// What the person chose for programs on an Apple target (B-21), as the settings said when
+    /// the run began. What the wrapper does with a program is [`Current::programs`]. Written
+    /// only when `tied`, and a `movable` an earlier hushrun wrote reads as nobody's choice.
+    #[serde(
+        default,
+        rename = "programs",
+        skip_serializing_if = "ProgramsSetting::is_follow"
+    )]
+    pub programs_setting: ProgramsSetting,
     /// The repository's name, when hushrun knows it (B-13).
     pub repository: Option<String>,
     /// When the run started, in milliseconds since the epoch. The audit's pick uses it (B-16).
@@ -158,6 +164,19 @@ pub enum Shared {
     Unreached,
     /// The run's relay: where its socket is and who the run is.
     Relay(Share),
+}
+
+impl Current {
+    /// Whether the run shares or would (B-34): it has a relay, or its backend was asked and
+    /// couldn't be reached. The two are one answer, so that no key turns with the network.
+    pub fn shares(&self) -> bool {
+        self.share != Shared::Off
+    }
+
+    /// What the wrapper does with this run's programs on an Apple target (B-9, B-21).
+    pub fn programs(&self) -> Programs {
+        self.programs_setting.in_a_run(self.shares())
+    }
 }
 
 impl Shared {
@@ -651,7 +670,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         env: settings.env,
         repository_env: start.repository_env.to_vec(),
         min_free_gb: settings.min_free_gb,
-        programs: settings.programs,
+        programs_setting: settings.programs,
         repository: start.repository.map(str::to_string),
         started_ms: millis,
         shared: shared_folders(start.env),
@@ -960,7 +979,8 @@ mod tests {
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
         assert_eq!(&found, session.current());
         assert_eq!(found.mode, Mode::Observe);
-        assert_eq!(found.programs, Programs::Movable);
+        assert_eq!(found.programs_setting, ProgramsSetting::Follow);
+        assert_eq!(found.programs(), Programs::Tied);
         assert!(found.shared.iter().any(|s| s == "/usr"));
         let entry = Entry {
             outcome: crate::decide::passed_through(crate::model::PassedThrough::Probe),
@@ -984,11 +1004,12 @@ mod tests {
         session.finish(UNIX_EPOCH);
 
         // What happens to programs is the person's, and every compile of the run sees it.
-        settings::update(&settings, |s| s.programs = Programs::Tied).unwrap();
+        settings::update(&settings, |s| s.programs = ProgramsSetting::Tied).unwrap();
         let session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
         let folder = session.env()[1].1.clone();
         let found = current(&|name| (name == SESSION).then(|| folder.clone())).unwrap();
-        assert_eq!(found.programs, Programs::Tied);
+        assert_eq!(found.programs_setting, ProgramsSetting::Tied);
+        assert_eq!(found.programs(), Programs::Tied);
         assert_eq!(found.audit, Audit::OneIn);
         session.finish(UNIX_EPOCH);
 
@@ -1515,6 +1536,98 @@ mod tests {
         // The next day's run does.
         run.begin().finish(now() + days(1));
         assert!(!has(3));
+    }
+
+    // covers: B-9, B-21
+    #[test]
+    fn a_runs_programs_are_decided_from_its_setting_and_whether_it_shares() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("build.json");
+        let exe = dir.path().join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        let none = |_: &str| None;
+        let share = || Share {
+            socket: dir.path().join("relay.sock"),
+            run: "1-1".into(),
+            by: crate::origin::Identity {
+                host: "https://api.example.com".into(),
+                org: "acme".into(),
+                credential: crate::origin::fingerprint("hru_test"),
+            },
+            repository: String::new(),
+        };
+        let read = |session: &Session| {
+            let folder = session.env()[1].1.clone();
+            current(&|name| (name == SESSION).then(|| folder.clone())).unwrap()
+        };
+        let written = |session: &Session| -> serde_json::Value {
+            let file = session.current().folder.join(SESSION_FILE);
+            serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        };
+
+        // Nobody chose: tied while the run shares nothing, movable once it shares or would,
+        // as every wrapper of the run reads it.
+        settings::update(&settings, |s| s.mode = Mode::On).unwrap();
+        let mut session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        assert!(!read(&session).shares());
+        assert_eq!(read(&session).programs(), Programs::Tied);
+        // Nobody's choice is not written, so a wrapper of an earlier hushrun reads its default.
+        assert!(written(&session).get("programs").is_none());
+        session.set_unreached().unwrap();
+        assert!(read(&session).shares());
+        assert_eq!(read(&session).programs(), Programs::Movable);
+        session.set_share(share()).unwrap();
+        assert!(read(&session).shares());
+        assert_eq!(read(&session).programs(), Programs::Movable);
+        assert!(written(&session).get("programs").is_none());
+
+        // A session as an earlier hushrun wrote it: `movable` whoever chose or didn't, or no
+        // field at all. Both read as nobody's choice.
+        let file = session.current().folder.join(SESSION_FILE);
+        let mut old = written(&session);
+        old["programs"] = "movable".into();
+        std::fs::write(&file, old.to_string()).unwrap();
+        assert_eq!(read(&session).programs_setting, ProgramsSetting::Follow);
+        assert_eq!(read(&session), *session.current());
+        old.as_object_mut().unwrap().remove("programs");
+        old.as_object_mut().unwrap().remove("share");
+        std::fs::write(&file, old.to_string()).unwrap();
+        assert_eq!(read(&session).programs_setting, ProgramsSetting::Follow);
+        assert_eq!(read(&session).programs(), Programs::Tied);
+        session.finish(UNIX_EPOCH);
+
+        // `tied` is tied whatever the run shares, and is written.
+        settings::update(&settings, |s| s.programs = ProgramsSetting::Tied).unwrap();
+        let mut session = begin(&start(dir.path(), &settings, &exe, &none)).unwrap();
+        assert_eq!(written(&session)["programs"], "tied");
+        assert_eq!(read(&session).programs(), Programs::Tied);
+        session.set_unreached().unwrap();
+        assert_eq!(read(&session).programs(), Programs::Tied);
+        session.set_share(share()).unwrap();
+        assert_eq!(read(&session).programs(), Programs::Tied);
+        session.finish(UNIX_EPOCH);
+    }
+
+    // covers: B-25, B-31
+    #[test]
+    fn in_ci_no_persons_programs_setting_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("build.json");
+        let exe = dir.path().join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        let none = |_: &str| None;
+        // A file on the runner that says `tied`: CI reads only its `mode`.
+        std::fs::write(&settings, br#"{"version": 1, "programs": "tied"}"#).unwrap();
+        let ci = Start {
+            in_ci: true,
+            ..start(dir.path(), &settings, &exe, &none)
+        };
+        let mut session = begin_in_ci(&ci, &dir.path().join("job")).unwrap();
+        assert_eq!(session.current().programs_setting, ProgramsSetting::Follow);
+        assert_eq!(session.current().programs(), Programs::Tied);
+        session.set_unreached().unwrap();
+        assert_eq!(session.current().programs(), Programs::Movable);
+        session.finish(UNIX_EPOCH);
     }
 
     // covers: B-19

@@ -38,28 +38,59 @@ impl Mode {
     }
 }
 
-/// What the wrapper does with a program on an Apple target (B-9, B-21): one per user.
+/// What a person chose for programs on an Apple target (B-21): one per user. Nobody chose, or
+/// someone chose `tied`; there is no way to choose a bundle for a run that shares nothing.
+///
+/// In `build.json` and in a run's `session.json` only `tied` is written. A `movable` found there
+/// is what every hushrun up to 0.16 wrote on each save, whoever chose or didn't, so it reads as
+/// nobody's choice, like a missing field; and a hushrun that old reads a missing field as its own
+/// default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Programs {
-    /// The program gets a debug bundle and may move to another folder. A first build costs a
-    /// `dsymutil` run per program and about twice the bytes stored; a later checkout pays it
-    /// back.
+pub enum ProgramsSetting {
+    /// Nobody chose: programs follow sharing ([`ProgramsSetting::in_a_run`]).
     #[default]
+    #[serde(rename = "movable")]
+    Follow,
+    /// Programs are tied in every run.
+    Tied,
+}
+
+impl ProgramsSetting {
+    /// B-9, B-21: what the wrapper does with the programs of a run, the one definition for every
+    /// reader. `shares` is whether the run shares or would ([`crate::session::Current::shares`]):
+    /// only a block that may leave the machine is worth the `dsymutil` run its bundle costs.
+    pub const fn in_a_run(self, shares: bool) -> Programs {
+        match (self, shares) {
+            (ProgramsSetting::Tied, _) | (ProgramsSetting::Follow, false) => Programs::Tied,
+            (ProgramsSetting::Follow, true) => Programs::Movable,
+        }
+    }
+
+    /// Whether nobody chose: such a setting is not written.
+    pub fn is_follow(&self) -> bool {
+        *self == ProgramsSetting::Follow
+    }
+
+    /// The setting in one word, for `hushrun build status`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ProgramsSetting::Follow => "follow",
+            ProgramsSetting::Tied => "tied",
+        }
+    }
+}
+
+/// What the wrapper does with a program on an Apple target in one run (B-9): decided by
+/// [`ProgramsSetting::in_a_run`] and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Programs {
+    /// The program gets a debug bundle and may move to another folder or machine. A first build
+    /// costs a `dsymutil` run per program and about twice the bytes stored.
     Movable,
     /// The program is compiled as asked and stored with the debug objects it names, tied to its
     /// target folder.
     Tied,
-}
-
-impl Programs {
-    /// The value as the settings file writes it.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Programs::Movable => "movable",
-            Programs::Tied => "tied",
-        }
-    }
 }
 
 /// What a compiler call produces.
@@ -546,6 +577,24 @@ mod tests {
             serde_json::Value::String(text) => text,
             other => panic!("not a string: {other}"),
         }
+    }
+
+    // covers: B-9, B-21
+    #[test]
+    fn programs_are_tied_unless_nobody_chose_and_the_run_shares() {
+        use ProgramsSetting::{Follow, Tied};
+        assert_eq!(Follow.in_a_run(false), Programs::Tied);
+        assert_eq!(Follow.in_a_run(true), Programs::Movable);
+        assert_eq!(Tied.in_a_run(false), Programs::Tied);
+        assert_eq!(Tied.in_a_run(true), Programs::Tied);
+        assert_eq!(ProgramsSetting::default(), Follow);
+        // The files' words: `movable` is what earlier versions wrote for nobody's choice.
+        let read = |text: &str| serde_json::from_str::<ProgramsSetting>(text);
+        assert_eq!(read(r#""movable""#).unwrap(), Follow);
+        assert_eq!(read(r#""tied""#).unwrap(), Tied);
+        assert!(read(r#""follow""#).is_err());
+        assert!(read(r#""auto""#).is_err());
+        assert_eq!(serde_name(&Tied), "tied");
     }
 
     // covers: B-3

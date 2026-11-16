@@ -108,6 +108,14 @@ impl World {
         self.begin_with(mode, |_| {})
     }
 
+    /// A session of a run that shares, its backend out of reach (B-34): a program nobody set
+    /// gets its debug bundle there (B-9, B-21).
+    fn begin_sharing(&self, mode: Mode) -> Session {
+        let mut session = self.begin(mode).unwrap();
+        session.set_unreached().unwrap();
+        session
+    }
+
     /// A session with the settings changed by `change` too.
     fn begin_with(
         &self,
@@ -1379,7 +1387,7 @@ fn lines_after_a_move(
 /// `env!("CARGO_BIN_EXE_prog")` in is tied, by the search, in either layout.
 #[cfg(target_os = "macos")]
 fn programs_move(w: &World, one: &Path, two: &Path, targets: Option<(&Path, &Path)>) {
-    let session = w.begin(Mode::On).unwrap();
+    let session = w.begin_sharing(Mode::On);
     let (target_one, target_two) = match targets {
         Some((a, b)) => (a.to_path_buf(), b.to_path_buf()),
         None => (one.join("target"), two.join("target")),
@@ -1479,12 +1487,30 @@ fn a_program_is_tied_to_a_target_folder_outside_its_workspace() {
 fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
     let w = World::new();
     let one = w.programs("one");
-    let target = one.join("target");
-    let session = w
+    // Tied by the person's setting, in a run that shares.
+    let mut session = w
         .begin_with(Mode::On, |s| {
-            s.programs = hushrun_build::model::Programs::Tied;
+            s.programs = hushrun_build::model::ProgramsSetting::Tied;
         })
         .unwrap();
+    session.set_unreached().unwrap();
+    tied_programs(&one, &session);
+}
+
+// covers: B-9, B-21
+#[cfg(target_os = "macos")]
+#[test]
+fn a_program_nobody_set_has_no_bundle_in_a_run_that_shares_nothing() {
+    let w = World::new();
+    let one = w.programs("one");
+    tied_programs(&one, &w.begin(Mode::On).unwrap());
+}
+
+/// The programs of `one` built in `session`, whose programs are tied: none gets a bundle, each
+/// block is `tied`, and each is reused in the target folder that built it.
+#[cfg(target_os = "macos")]
+fn tied_programs(one: &Path, session: &Session) {
+    let target = one.join("target");
     let env = session.env();
     let no_bundle = |name: &str| {
         let exe = program(&target, name);
@@ -1493,8 +1519,8 @@ fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
             "a bundle beside {name}"
         );
     };
-    cargo_ok(&one, &["test", "--no-run"], &env);
-    let first = entries(&session);
+    cargo_ok(one, &["test", "--no-run"], &env);
+    let first = entries(session);
     let store = session.current().store.clone();
     for name in ["prog", "lib_a", "t"] {
         assert_eq!(
@@ -1511,11 +1537,11 @@ fn a_program_set_to_tied_has_no_bundle_and_is_reused_where_it_was_built() {
     let lib = one.join("lib_a/src/lib.rs");
     let text = fs::read_to_string(&lib).unwrap();
     fs::write(&lib, format!("{text}// edited\n")).unwrap();
-    cargo_ok(&one, &["test", "--no-run"], &env);
+    cargo_ok(one, &["test", "--no-run"], &env);
     fs::write(&lib, &text).unwrap();
-    let n = entries(&session).len();
-    cargo_ok(&one, &["test", "--no-run"], &env);
-    let back = entries(&session)[n..].to_vec();
+    let n = entries(session).len();
+    cargo_ok(one, &["test", "--no-run"], &env);
+    let back = entries(session)[n..].to_vec();
     for name in ["prog", "lib_a", "t"] {
         assert!(
             reused(&last(&back, name, Class::Program)),
@@ -1543,7 +1569,7 @@ fn two_independent_builds_at_two_paths_give_the_same_programs_and_bundles() {
     let one = first.programs("one");
     let two = second.programs("a-second-checkout/with-a-longer-path");
     for (w, ws) in [(&first, &one), (&second, &two)] {
-        let session = w.begin(Mode::On).unwrap();
+        let session = w.begin_sharing(Mode::On);
         cargo_ok(ws, &["test", "--no-run"], &session.env());
         let built = entries(&session);
         assert_eq!(
@@ -1567,7 +1593,7 @@ fn two_independent_builds_at_two_paths_give_the_same_programs_and_bundles() {
 fn a_truncated_file_in_a_stored_bundle_gives_a_green_build() {
     let w = World::new();
     let one = w.programs("one");
-    let session = w.begin(Mode::On).unwrap();
+    let session = w.begin_sharing(Mode::On);
     cargo_ok(&one, &["test", "--no-run"], &session.env());
     let store = session.current().store.clone();
     let dwarf: Vec<PathBuf> = walk(&store.join("blocks"))
@@ -2014,7 +2040,8 @@ mod two_machines {
                 }
                 vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
             };
-            session::begin(&Start {
+            // Two machines that share: a program nobody set gets its debug bundle (B-9, B-21).
+            let mut session = session::begin(&Start {
                 settings: &settings,
                 cache_dir: Some(&self.root.join("cache")),
                 exe: &wrapper_exe(),
@@ -2024,7 +2051,9 @@ mod two_machines {
                 env: &env,
                 now: SystemTime::now(),
             })
-            .unwrap()
+            .unwrap();
+            session.set_unreached().unwrap();
+            session
         }
 
         /// What this machine's cargo and rustup set: its homes, its toolchain by its own name.

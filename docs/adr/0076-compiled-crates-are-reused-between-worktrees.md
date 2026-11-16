@@ -1,6 +1,8 @@
 # 0076. Compiled crates are reused between worktrees
 
 - **Status:** accepted
+- **Amended by:** [0092](0092-programs-follow-sharing.md): programs are movable only in a run
+  that shares, and tied otherwise (decision 11's default)
 - **Date:** 2026-11-11
 - **Rules:** B-1 to B-23
 
