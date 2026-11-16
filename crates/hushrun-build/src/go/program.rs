@@ -9,7 +9,7 @@
 //! that isn't JSON as fatal, and fails the whole command when the program exits before `close`.
 //!
 //! **Each request is a state machine** of two states, `open` and `answered`, moved by one
-//! compare-and-set ([`Slot::answer`]): the handler's answer, the answer a panic leaves
+//! compare-and-set (`Program::answer`): the handler's answer, the answer a panic leaves
 //! (`catch_unwind`), and the watchdog's for a request open past its budget all race for it, and
 //! only the first is written. A `get` that fails in any way is a miss; a `put` always answers a
 //! file holding the body, in Go's cache, else in a folder of the program's own.
@@ -676,7 +676,7 @@ impl Program {
             });
         }
         lock(&self.misses).insert(*action, Instant::now());
-        match self.from_store(action, at) {
+        match self.served_from_store(action, at) {
             Some(value) => value,
             None => miss,
         }
@@ -694,7 +694,7 @@ impl Program {
     }
 
     /// A store hit, checked, or a download the relay brings: `None` is a miss.
-    fn from_store(&self, action: &[u8; 32], at: SystemTime) -> Option<Value> {
+    fn served_from_store(&self, action: &[u8; 32], at: SystemTime) -> Option<Value> {
         let (current, store, identity) = self.reuse_side()?;
         let key = super::key(action, &identity);
         if store.suspended_at(&key, at).is_some() {

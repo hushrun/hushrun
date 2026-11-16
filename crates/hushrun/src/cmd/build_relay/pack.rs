@@ -306,6 +306,7 @@ pub(crate) fn open_pack(
 /// this machine's repository, date and the stated cost filled in, and its record of where it
 /// came from. A block there that was only downloaded gives way; one built here, or with no
 /// record, stays.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     store: &Store,
     kind: hushrun_build::model::Kind,

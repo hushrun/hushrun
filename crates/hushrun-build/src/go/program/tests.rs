@@ -254,7 +254,7 @@ fn by_id(lines: &[Value]) -> HashMap<i64, Value> {
     answers
 }
 
-// covers: B-40, B-41
+// covers: B-40, B-41, B-47
 #[test]
 fn every_request_is_answered_once_and_a_put_lands_in_gos_own_cache() {
     let m = Machine::new();
@@ -300,7 +300,7 @@ fn every_request_is_answered_once_and_a_put_lands_in_gos_own_cache() {
     assert_eq!(answers[&5], json!({"ID": 5}));
 }
 
-// covers: B-40
+// covers: B-40, B-47
 #[test]
 fn a_go_version_whose_cache_is_unknown_gets_misses_and_a_folder_of_its_own() {
     let mut m = Machine::new();

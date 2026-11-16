@@ -1942,4 +1942,54 @@ mod tests {
         assert!(other.is_dir());
         assert!(live.exists());
     }
+
+    // covers: B-46
+    #[test]
+    fn go_archives_are_counted_apart_from_crates_and_said_in_their_own_lines() {
+        use crate::go::archive::Local;
+        let go = |outcome: Outcome, go: GoEntry| Entry {
+            go: Some(go),
+            ..entry(outcome)
+        };
+        let entries = vec![
+            entry(Outcome::BuiltAndStored),
+            go(
+                Outcome::Reused,
+                GoEntry {
+                    go_cache: true,
+                    local: None,
+                },
+            ),
+            Entry {
+                downloaded: true,
+                saved_ms: 3_000,
+                ..go(Outcome::Reused, GoEntry::default())
+            },
+            go(Outcome::BuiltAndStored, GoEntry::default()),
+            go(
+                Outcome::BuiltNotStored(NotStored::StoreSkipped),
+                GoEntry {
+                    go_cache: false,
+                    local: Some(Local::Native),
+                },
+            ),
+            go(
+                Outcome::BuiltNotStored(NotStored::StoreSkipped),
+                GoEntry {
+                    go_cache: false,
+                    local: Some(Local::NotSharing),
+                },
+            ),
+        ];
+        let summary = Summary::of(Mode::On, 10, &entries);
+        assert_eq!(summary.counts().compiles, 1, "a crate, and no Go archive");
+        assert_eq!(
+            summary.lines(),
+            [
+                "build: 1 crate built, none reused".to_string(),
+                "build: go: 5 packages: 1 from Go's own cache, 1 reused (1 from the shared store), 3 built, saving about 3s".to_string(),
+                "build: go: 1 package compiled here stays on this machine (1 native code (cgo or .syso))".to_string(),
+            ]
+        );
+    }
 }
