@@ -209,7 +209,7 @@ fn begin_from_saved(
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
-    match relay.begin_check(&current.folder, None, here.env) {
+    match relay.begin_check(&current.folder, None, None, here.env) {
         Ok(share) => {
             if let Err(err) = session.set_share(share) {
                 session.add_line(format!("build: sharing is off for this run: {err}"));
@@ -614,12 +614,50 @@ fn start_sharing(
             "build: sharing is off for this run: the relay couldn't start".into(),
         ));
     };
-    let share = relay.begin_check(&current.folder, Some(check), env)?;
+    // B-36: a Go module's COMMAND gets Go's cache program, and the check asks for its Go
+    // manifest apart.
+    let go = go_program(session, env);
+    let share = relay.begin_check(
+        &current.folder,
+        Some(check),
+        go.as_ref().map(|go| go.platform.clone()),
+        env,
+    )?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
+    if let Some(go) = go {
+        session.set_go(go);
+    }
     Ok(relay)
+}
+
+/// B-36: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose
+/// `go` is a version the program knows and has no cache program of the person's: what
+/// `hushrun_build::go::probe` decides, asked here once. A path Go can't be given is said in one
+/// line; every other reason for none is silent.
+fn go_program(
+    session: &mut Session,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<hushrun_build::go::probe::Go> {
+    use hushrun_build::go::probe::{self, NotSet};
+    let folder = std::env::current_dir().ok()?;
+    let link = session.program_link().ok()?;
+    match probe::probe(&folder, &link, env) {
+        Ok(go) => Some(go),
+        Err(NotSet::Unquotable(path)) => {
+            session.add_line(format!(
+                "build: Go packages are not shared in this run: the store's path holds a space and both kinds of quote, which Go can't be given ({})",
+                path.display()
+            ));
+            None
+        }
+        Err(why) => {
+            tracing::debug!("no Go cache program: {why:?}");
+            None
+        }
+    }
 }
 
 /// A check's id, as the build protocol names it (B-26): a digest of the repository and the

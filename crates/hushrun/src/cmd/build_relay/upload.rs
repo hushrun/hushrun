@@ -16,7 +16,7 @@
 //! `begin` goes a few blocks at a time, just before their PUTs: links live 15 minutes. PUTs run
 //! 4 at a time, 2 while downloads are in flight.
 
-use hushrun_build::model::Class as LocalClass;
+use hushrun_build::model::{Class as LocalClass, Kind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -228,8 +228,10 @@ impl Relay {
             } else {
                 PUTS
             };
+            // One kind a batch: `begin` and `commit` name one kind.
+            let kind = ready[0].kind;
             let mut claimed = Vec::new();
-            for marker in ready {
+            for marker in ready.into_iter().filter(|m| m.kind == kind) {
                 if claimed.len() >= most {
                     break;
                 }
@@ -246,6 +248,7 @@ impl Relay {
 
     /// Packs, begins, puts and commits a few claimed markers, and moves each by the table.
     async fn send(self: Arc<Relay>, outbox: &Outbox, claimed: Vec<Marker>) {
+        let kind = claimed.first().map_or(Kind::Rustc, |m| m.kind);
         let run = self.run.clone();
         let release = |marker: &Marker, back: Back| {
             let _ = outbox.release(&run, marker, back);
@@ -328,12 +331,12 @@ impl Relay {
             return;
         }
         let request = BeginRequest {
-            kind: super::KIND.to_string(),
+            kind: kind.word().to_string(),
             blocks: packed
                 .iter()
                 .map(|(m, p)| BeginBlock {
-                    address: Relay::address(&m.key),
-                    hint_address: Some(Relay::address(&m.step)),
+                    address: Relay::address_in(kind, &m.key),
+                    hint_address: Some(Relay::address_in(kind, &m.step)),
                     bytes: p.sealed.bytes,
                     pack_sha256: p.sealed.sha256,
                     outputs: p.outputs,
@@ -385,7 +388,7 @@ impl Relay {
         // PUTs, each a task the end of the command may cut off.
         let mut puts = Vec::new();
         for (marker, p) in packed {
-            let address = Relay::address(&marker.key);
+            let address = Relay::address_in(kind, &marker.key);
             let answer = answers
                 .iter()
                 .find(|a| a.address == address)
@@ -457,8 +460,11 @@ impl Relay {
             return;
         }
         let request = CommitRequest {
-            kind: super::KIND.to_string(),
-            addresses: sent.iter().map(|m| Relay::address(&m.key)).collect(),
+            kind: kind.word().to_string(),
+            addresses: sent
+                .iter()
+                .map(|m| Relay::address_in(kind, &m.key))
+                .collect(),
             commit: self.config.commit.clone(),
         };
         let committed = self
@@ -478,7 +484,7 @@ impl Relay {
             Some(Ok(answered)) => {
                 let mut stored = Vec::new();
                 for marker in sent {
-                    let address: Hex32 = Relay::address(&marker.key);
+                    let address: Hex32 = Relay::address_in(kind, &marker.key);
                     let state = answered
                         .body
                         .blocks
@@ -492,7 +498,10 @@ impl Relay {
                     }
                     finish(&marker, step);
                 }
-                self.send_hints(&stored).await;
+                // A Go block has no hints.
+                if kind == Kind::Rustc {
+                    self.send_hints(&stored).await;
+                }
             }
             Some(Err(failure)) => {
                 {

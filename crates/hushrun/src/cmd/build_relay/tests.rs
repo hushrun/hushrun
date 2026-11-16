@@ -110,7 +110,9 @@ fn start_at(
 }
 
 fn begin(relay: &Arc<Relay>, m: &Machine) {
-    relay.begin_check(&m.session, None, &|_| None).unwrap();
+    relay
+        .begin_check(&m.session, None, None, &|_| None)
+        .unwrap();
 }
 
 /// Waits on `done`, at most 20 seconds.
@@ -748,7 +750,7 @@ fn panicking_run(world: &str) {
             c.tuning.close = Duration::from_secs(3);
         },
     );
-    let share = relay.begin_check(session, None, &|_| None).unwrap();
+    let share = relay.begin_check(session, None, None, &|_| None).unwrap();
     until("open", || answering(&relay));
     let wait = hushrun_build::relay::WAIT;
     let (key, step) = (Digest::of(&[13, 1]), Digest::of(&[13, 2]));
@@ -1230,9 +1232,12 @@ fn observe_opens_what_it_compares_within_the_room_a_download_gets() {
     let relay = start(&fake, &m, |_| {});
     begin(&relay, &m);
     until("open", || answering(&relay));
-    relay
-        .runtime
-        .block_on(relay.clone().compare(key, address(&key), false));
+    relay.runtime.block_on(relay.clone().compare(
+        hushrun_build::model::Kind::Rustc,
+        key,
+        address(&key),
+        false,
+    ));
     // Downloaded, then refused before it was unpacked: nothing compared, nothing reported.
     assert_eq!(fake.count(route::STORE_GET), 1);
     assert_eq!(relay.state().tally.compared, 0);
@@ -1660,7 +1665,7 @@ fn a_long_session_folder_gets_its_socket_in_a_private_folder_and_a_wrapper_reach
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let relay = start(&fake, &m, |_| {});
-    let share = relay.begin_check(&long, None, &|_| None).unwrap();
+    let share = relay.begin_check(&long, None, None, &|_| None).unwrap();
     assert!(!share.socket.starts_with(&long));
     assert!(share.socket.as_os_str().len() <= hushrun_build::relay::MOST_SOCKET_PATH);
     until("open", || answering(&relay));
@@ -3107,7 +3112,7 @@ fn panicking_vouches(world: &str) {
         c.tuning.close = Duration::from_secs(3);
     });
     relay
-        .begin_check(Path::new(session), None, &|_| None)
+        .begin_check(Path::new(session), None, None, &|_| None)
         .unwrap();
     until("open", || answering(&relay));
     until("the lookup's panic", || {

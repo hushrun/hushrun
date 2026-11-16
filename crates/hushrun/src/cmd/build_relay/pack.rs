@@ -308,6 +308,7 @@ pub(crate) fn open_pack(
 /// record, stays.
 pub(crate) fn publish(
     store: &Store,
+    kind: hushrun_build::model::Kind,
     key: &Digest,
     opened: &Opened,
     repository: Option<&str>,
@@ -326,6 +327,16 @@ pub(crate) fn publish(
             .map_or(0, |d| d.as_millis() as u64);
         object.insert("built_ms".into(), ms.into());
         object.insert("rustc_ms".into(), cost_ms.into());
+        // The kind it was fetched as, whatever the uploader's record says: what its address
+        // is taken under here when the relay asks about it (B-34).
+        match kind {
+            hushrun_build::model::Kind::Rustc => {
+                object.remove("kind");
+            }
+            hushrun_build::model::Kind::Go => {
+                object.insert("kind".into(), kind.word().into());
+            }
+        }
     }
     let files: Vec<NewFile> = opened
         .files

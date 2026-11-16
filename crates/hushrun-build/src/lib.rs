@@ -53,6 +53,7 @@ pub mod compiler;
 pub mod decide;
 pub mod depinfo;
 pub mod description;
+pub mod go;
 pub mod inputs;
 pub mod invocation;
 pub mod key;

@@ -217,6 +217,7 @@ impl Relay {
             state.fetches.insert(
                 found.address,
                 Fetch {
+                    kind: hushrun_build::model::Kind::Rustc,
                     found: found.clone(),
                     looked_up: now,
                     state: Download::Arrived(link),

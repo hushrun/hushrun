@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use hushrun_build::model::{Class as LocalClass, Mode};
+use hushrun_build::model::{Class as LocalClass, Kind, Mode};
 use hushrun_build::origin::{Identity, Origin, Standing, Vouch, Word};
 use hushrun_build::outbox::{self, Marker, Outbox};
 use hushrun_build::relay::{Answer, Problem, Request};
@@ -100,6 +100,8 @@ impl Default for Tuning {
     }
 }
 
+/// The most a Go fetch waits for the Go manifest's prefetch to look up what it names (B-43).
+const GO_PREFETCH_WAIT: Duration = Duration::from_secs(1);
 /// How many failures in a row rest the relay.
 const FAILURES_TO_REST: u32 = 3;
 /// How many of this machine's compiles, with a cost the server also knew, it takes to learn
@@ -205,6 +207,8 @@ enum Download {
 
 /// One download: what the lookup said, its state, how far it got.
 struct Fetch {
+    /// Whose block it is: a `rustc` one or a Go one.
+    kind: Kind,
     found: Found,
     /// When the lookup that gave its link answered.
     looked_up: Instant,
@@ -279,6 +283,22 @@ struct Check {
     check: Option<Hex32>,
     socket: socket::Bound,
     stop_serving: Arc<AtomicBool>,
+    /// B-43: the platform of the check's Go command (`GOOS_GOARCH`), when COMMAND is a Go
+    /// module's and gets the cache program: its Go manifest is asked for and closed apart.
+    go: Option<String>,
+}
+
+/// The check's Go manifest (B-43): asked once `open` answered, kept until the first Go fetch
+/// takes it for the prefetch. Until it has answered, a Go fetch is a miss, and a Go fetch for an
+/// archive the manifest doesn't name never asks the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoManifest {
+    /// No Go command in the check, or `open` hasn't answered yet.
+    NotAsked,
+    Asking,
+    Got(Vec<Pair>),
+    /// The prefetch has it: what it found is in the fetches.
+    Taken,
 }
 
 struct State {
@@ -287,6 +307,9 @@ struct State {
     sharing: Sharing,
     /// The manifest `open` returned, until the first wrapper that misses starts its prefetch.
     manifest: Option<Vec<Pair>>,
+    go_manifest: GoManifest,
+    /// The prefetch of the Go manifest is looking up what it names.
+    go_prefetching: bool,
     /// Whether the run may upload, as [`what_a_run_does`] says; the policy decides the rest.
     uploads: bool,
     /// Lines for the person, each once.
@@ -552,6 +575,8 @@ impl Relay {
                 policy: None,
                 sharing: does.sharing,
                 manifest: None,
+                go_manifest: GoManifest::NotAsked,
+                go_prefetching: false,
                 uploads: does.uploads,
                 lines: Vec::new(),
                 found: HashMap::new(),
@@ -600,6 +625,7 @@ impl Relay {
         self: &Arc<Relay>,
         session_folder: &Path,
         check: Option<Hex32>,
+        go: Option<String>,
         env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Result<Share, String> {
         let bound = socket::bind(session_folder, env)
@@ -625,7 +651,9 @@ impl Relay {
                 check,
                 socket: bound,
                 stop_serving,
+                go,
             });
+            state.go_manifest = GoManifest::NotAsked;
             if !matches!(state.phase, Phase::Stopped(_)) {
                 state.phase = Phase::Opening;
             }
@@ -725,21 +753,38 @@ impl Relay {
                 fault::fetch();
                 self.fetch(step, keys, class, local_ms).await
             }
-            Request::Vouch { key, outputs, .. } => self.vouch(key, outputs).await,
+            Request::Vouch { key, outputs, .. } => self.vouch(Kind::Rustc, key, outputs).await,
             Request::Sharing => self.still_sharing(),
             Request::Built { .. } => {
                 self.built(request);
                 Answer::Ok
             }
             Request::Report { key, problem } => {
-                self.report_problem(key, problem).await;
+                self.report_problem(Kind::Rustc, key, problem).await;
+                Answer::Ok
+            }
+            Request::GoFetch { key, local_ms } => self.go_fetch(key, local_ms).await,
+            Request::GoVouch { key, outputs } => self.vouch(Kind::Go, key, outputs).await,
+            Request::GoBuilt { .. } => {
+                self.built(request);
+                Answer::Ok
+            }
+            Request::GoReport { key, problem } => {
+                self.report_problem(Kind::Go, key, problem).await;
                 Answer::Ok
             }
         }
     }
 
+    /// The address of a `rustc` block's key, or a first key's.
     fn address(key: &Digest) -> Hex32 {
-        blocks::address(KIND, key.as_bytes())
+        Relay::address_in(Kind::Rustc, key)
+    }
+
+    /// The address of a key of `kind` (B-27): the kind is part of it, so a Go block and a
+    /// `rustc` one never share one.
+    fn address_in(kind: Kind, key: &Digest) -> Hex32 {
+        blocks::address(kind.word(), key.as_bytes())
     }
 
     // --- open and the prefetch ----------------------------------------------------------
@@ -875,6 +920,100 @@ impl Relay {
         // C4: kept for the first wrapper that misses; a run that compiles nothing fetches
         // nothing.
         self.state().manifest = Some(manifest);
+        // B-43: the check's Go manifest, asked apart once the org said the run shares.
+        let go = {
+            let mut state = self.state();
+            let asked = state
+                .check
+                .as_ref()
+                .and_then(|c| c.go.clone().map(|platform| (c.check, platform)));
+            match asked {
+                Some(asked) if state.go_manifest == GoManifest::NotAsked => {
+                    state.go_manifest = GoManifest::Asking;
+                    Some(asked)
+                }
+                _ => None,
+            }
+        };
+        if let Some((check, platform)) = go {
+            self.go_open(check, platform).await;
+        }
+    }
+
+    /// B-43: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
+    /// is the one the check's own `open` answered. A failure leaves no manifest, and so no Go
+    /// download, and changes nothing else.
+    async fn go_open(&self, check: Option<Hex32>, platform: String) {
+        let body = OpenRequest {
+            kind: Kind::Go.word().to_string(),
+            repository: self.config.repository.clone(),
+            commit: self.config.commit.clone(),
+            check,
+            platform,
+        };
+        let manifest = match self
+            .client
+            .post::<_, Policy>(blocks::OPEN_PATH, &body, self.config.tuning.open, None)
+            .await
+        {
+            Ok(answered) => answered.body.manifest,
+            Err(_) => Vec::new(),
+        };
+        let mut state = self.state();
+        if state.go_manifest == GoManifest::Asking {
+            state.go_manifest = GoManifest::Got(manifest);
+        }
+    }
+
+    /// B-43: a Go package archive the cache program asks for. Downloaded only when the check's
+    /// Go manifest names it: the program asks about every entry Go's cache misses, and most of
+    /// them are local ones no server holds. The first Go fetch starts the prefetch of what the
+    /// manifest names (a warm machine, whose `go` finds everything in its own cache, asks
+    /// nothing and downloads nothing); one that comes while it looks up waits for it, within
+    /// half what this machine's own last compile of the key took, and at most a second.
+    async fn go_fetch(self: Arc<Relay>, key: Digest, local_ms: Option<u64>) -> Answer {
+        let manifest = {
+            let mut state = self.state();
+            let now = Instant::now();
+            if !state.serving(now) || state.sharing != Sharing::On {
+                return Answer::None;
+            }
+            let got = matches!(state.go_manifest, GoManifest::Got(_));
+            if got && state.answering(now) {
+                match std::mem::replace(&mut state.go_manifest, GoManifest::Taken) {
+                    GoManifest::Got(manifest) => Some(manifest),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(manifest) = manifest {
+            self.state().go_prefetching = true;
+            self.clone().prefetch_in(Kind::Go, manifest).await;
+            self.state().go_prefetching = false;
+        }
+        let address = Relay::address_in(Kind::Go, &key);
+        let wait = local_ms
+            .map_or(GO_PREFETCH_WAIT, |ms| Duration::from_millis(ms) / 2)
+            .min(GO_PREFETCH_WAIT);
+        let until = Instant::now() + wait;
+        loop {
+            {
+                let state = self.state();
+                if state.suspended.contains(&address) {
+                    return Answer::None;
+                }
+                if state.fetches.contains_key(&address) || state.found.contains_key(&address) {
+                    break;
+                }
+                if !state.go_prefetching || Instant::now() >= until {
+                    return Answer::None;
+                }
+            }
+            tokio::time::sleep(self.config.tuning.tick).await;
+        }
+        self.wait_for(Kind::Go, key, key, address, local_ms).await
     }
 
     /// C4, B-30: the prefetch starts at the first wrapper that asks the relay, once: a run whose
@@ -891,7 +1030,7 @@ impl Relay {
             state.manifest.take()
         };
         if let Some(manifest) = manifest {
-            self.prefetch(manifest).await;
+            self.prefetch_in(Kind::Rustc, manifest).await;
         }
     }
 
@@ -899,7 +1038,8 @@ impl Relay {
     /// block or the hint of, ask for the rest's hints and look up the rest's blocks, one request
     /// each, and queue the downloads [`prefetched`] names: proc macros and build-script binaries
     /// first, then libraries in order. Programs wait to be asked for.
-    async fn prefetch(self: Arc<Relay>, manifest: Vec<Pair>) {
+    /// A Go manifest (`kind` Go) has no hints: each pair's first key is its block's key.
+    async fn prefetch_in(self: Arc<Relay>, kind: Kind, manifest: Vec<Pair>) {
         if manifest.is_empty() {
             return;
         }
@@ -907,7 +1047,14 @@ impl Relay {
         let (held_blocks, held_hints, kept_local) = self
             .runtime
             .spawn_blocking(move || {
-                let blocks: HashSet<Hex32> = store.keys().iter().map(Relay::address).collect();
+                let blocks: HashSet<Hex32> = store
+                    .keys()
+                    .iter()
+                    .map(|key| Relay::address_in(kind, key))
+                    .collect();
+                if kind == Kind::Go {
+                    return (blocks, HashSet::new(), HashSet::new());
+                }
                 let steps = store.steps();
                 let hints: HashSet<Hex32> = steps.iter().map(Relay::address).collect();
                 // B-34: a first key this machine keeps to itself asks the shared store nothing.
@@ -939,8 +1086,10 @@ impl Relay {
                 .map(Pair::block)
                 .filter(|a| !held_blocks.contains(a)),
         );
-        for batch in hints.chunks(limit) {
-            self.lookup_hints(batch).await;
+        if kind == Kind::Rustc {
+            for batch in hints.chunks(limit) {
+                self.lookup_hints(batch).await;
+            }
         }
         // What is fetched without being asked for, by class (B-30): proc macros and
         // build-script binaries first, since cargo can start no dependent of a macro and no
@@ -949,7 +1098,12 @@ impl Relay {
         // waits to be asked for.
         let mut looked_up = Vec::new();
         for batch in wanted.chunks(limit) {
-            looked_up.extend(self.lookup(batch, true).await.into_iter().flatten());
+            looked_up.extend(
+                self.lookup_in(kind, batch, true)
+                    .await
+                    .into_iter()
+                    .flatten(),
+            );
         }
         {
             let mut state = self.state();
@@ -963,6 +1117,7 @@ impl Relay {
                     state.fetches.insert(
                         found.address,
                         Fetch {
+                            kind,
                             found,
                             looked_up: looked,
                             state: Download::Queued,
@@ -1018,12 +1173,17 @@ impl Relay {
     /// A lookup of `addresses` (B-26: "this is the use"); what it found, or `None` when it
     /// failed.
     async fn lookup(&self, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
+        self.lookup_in(Kind::Rustc, addresses, fetch).await
+    }
+
+    /// [`Relay::lookup`] of blocks of `kind`.
+    async fn lookup_in(&self, kind: Kind, addresses: &[Hex32], fetch: bool) -> Option<Vec<Found>> {
         // Resting, nothing new is asked (B-26).
         if self.saved || !self.state().answering(Instant::now()) {
             return None;
         }
         let body = LookupRequest {
-            kind: KIND.to_string(),
+            kind: kind.word().to_string(),
             addresses: addresses.to_vec(),
             fetch,
             repository: self.config.repository.clone(),
@@ -1174,12 +1334,15 @@ impl Relay {
         let Some((key, address)) = chosen else {
             return Answer::None;
         };
-        self.wait_for(key, step, address, local_ms).await
+        self.wait_for(Kind::Rustc, key, step, address, local_ms)
+            .await
     }
 
-    /// Starts or joins the download of `address` and waits for it within half its cost.
+    /// Starts or joins the download of `address`, a block of `kind`, and waits for it within
+    /// half its cost.
     async fn wait_for(
         self: Arc<Relay>,
+        kind: Kind,
         key: Digest,
         step: Digest,
         address: Hex32,
@@ -1208,6 +1371,7 @@ impl Relay {
                 state.fetches.insert(
                     address,
                     Fetch {
+                        kind,
                         found,
                         looked_up: looked,
                         state: Download::Queued,
@@ -1364,6 +1528,7 @@ impl Relay {
                 fetch.started = Some(Instant::now());
                 starts.push((
                     address,
+                    fetch.kind,
                     fetch.found.clone(),
                     fetch.looked_up,
                     fetch.cancel.clone(),
@@ -1375,10 +1540,13 @@ impl Relay {
                 state.meter.start(now);
             }
         }
-        for (address, found, looked_up, cancel) in starts {
+        for (address, kind, found, looked_up, cancel) in starts {
             let relay = self.clone();
-            self.runtime
-                .spawn(async move { relay.download(address, found, looked_up, cancel).await });
+            self.runtime.spawn(async move {
+                relay
+                    .download(address, kind, found, looked_up, cancel)
+                    .await
+            });
         }
     }
 
@@ -1386,6 +1554,7 @@ impl Relay {
     async fn download(
         self: Arc<Relay>,
         address: Hex32,
+        kind: Kind,
         mut found: Found,
         looked_up: Instant,
         cancel: Arc<AtomicBool>,
@@ -1397,7 +1566,7 @@ impl Relay {
         });
         if looked_up.elapsed() + Duration::from_secs(30) >= expires
             && let Some(again) = self
-                .lookup(&[address], true)
+                .lookup_in(kind, &[address], true)
                 .await
                 .and_then(|f| f.into_iter().next())
         {
@@ -1495,7 +1664,7 @@ impl Relay {
             }
         }
         if unreadable {
-            self.report(address, &found.scope, blocks::Problem::Unreadable)
+            self.report(kind, address, &found.scope, blocks::Problem::Unreadable)
                 .await;
         }
         self.pump();
@@ -1505,21 +1674,22 @@ impl Relay {
     /// store, recorded as downloaded with the server's word for it. Only for a wrapper that is
     /// waiting, and never in shared `observe`.
     async fn publish(self: Arc<Relay>, key: Digest, step: Digest, address: Hex32) -> Answer {
-        let (path, found) = {
+        let (kind, path, found) = {
             let state = self.state();
             match state.fetches.get(&address) {
                 Some(Fetch {
+                    kind,
                     state: Download::Arrived(path),
                     found,
                     ..
-                }) => (path.clone(), found.clone()),
+                }) => (*kind, path.clone(), found.clone()),
                 _ => return Answer::None,
             }
         };
         let relay = self.clone();
         let opened = self
             .runtime
-            .spawn_blocking(move || relay.open_and_publish(&key, &step, &path, &found))
+            .spawn_blocking(move || relay.open_and_publish(kind, &key, &step, &path, &found))
             .await
             .unwrap_or(Err(false));
         let scope = {
@@ -1538,7 +1708,7 @@ impl Relay {
             Ok(()) => Answer::Ready { key },
             Err(unreadable) => {
                 if unreadable && let Some(scope) = scope {
-                    self.report(address, &scope, blocks::Problem::Unreadable)
+                    self.report(kind, address, &scope, blocks::Problem::Unreadable)
                         .await;
                 }
                 Answer::None
@@ -1549,6 +1719,7 @@ impl Relay {
     /// The blocking part of [`Relay::publish`]. `Err(true)`: the pack failed its checks.
     fn open_and_publish(
         &self,
+        kind: Kind,
         key: &Digest,
         step: &Digest,
         path: &Path,
@@ -1569,6 +1740,7 @@ impl Relay {
         let origin = Origin::downloaded(self.vouch_entry(found, date));
         let published = pack::publish(
             &self.config.store,
+            kind,
             key,
             &opened,
             self.config.repository.as_deref(),
@@ -1615,12 +1787,12 @@ impl Relay {
     /// what its compile took. The server can't be reached (an entry of any age counts) only when
     /// `open` failed, or hasn't answered within that budget. Once `open` has answered, a stale
     /// entry is never enough: the run's lookup of stale vouches answers, or it is a miss.
-    async fn vouch(self: Arc<Relay>, key: Digest, outputs: Hex32) -> Answer {
+    async fn vouch(self: Arc<Relay>, kind: Kind, key: Digest, outputs: Hex32) -> Answer {
         // A run from a saved fetch reaches no server (B-36).
         if self.saved {
             return Answer::Offline;
         }
-        let address = Relay::address(&key);
+        let address = Relay::address_in(kind, &key);
         let deadline = Instant::now() + self.vouch_budget(&key);
         // A lookup naming it was under way since this question came.
         let mut named = false;
@@ -1654,7 +1826,7 @@ impl Relay {
                             named = true;
                             let relay = self.clone();
                             self.runtime
-                                .spawn(async move { relay.ask_vouches(Some(key)).await });
+                                .spawn(async move { relay.ask_vouches(Some((kind, key))).await });
                         }
                         if now >= deadline {
                             return Answer::None;
@@ -1670,16 +1842,16 @@ impl Relay {
     /// again for a block a wrapper asks about that no lookup named: every block in the store only
     /// downloaded whose entry for this run's host, org and repository is stale, as the store's
     /// records say, and `first`. One runs at a time (`vouching`, set by the caller).
-    async fn ask_vouches(self: Arc<Relay>, first: Option<Digest>) {
+    async fn ask_vouches(self: Arc<Relay>, first: Option<(Kind, Digest)>) {
         // However the lookup ends, a panic included, it is over: the end of the command waits
         // for it no longer, the next question about a block no lookup named starts one, and a
         // question about `first` is a miss at once (B-29, B-34).
-        struct Over<'a>(&'a Relay, Option<Digest>);
+        struct Over<'a>(&'a Relay, Option<(Kind, Digest)>);
         impl Drop for Over<'_> {
             fn drop(&mut self) {
                 let mut state = self.0.state();
-                if let Some(first) = &self.1 {
-                    state.vouch_asked.remove(&Relay::address(first));
+                if let Some((kind, first)) = &self.1 {
+                    state.vouch_asked.remove(&Relay::address_in(*kind, first));
                 }
                 state.vouching = false;
             }
@@ -1693,14 +1865,14 @@ impl Relay {
             .spawn_blocking(move || relay.stale_downloads())
             .await
             .unwrap_or_default();
-        let asked: Vec<Digest> = {
+        let asked: Vec<(Kind, Digest)> = {
             let state = self.state();
             let mut seen = HashSet::new();
             first
                 .into_iter()
                 .chain(stale)
-                .filter(|key| {
-                    let address = Relay::address(key);
+                .filter(|(kind, key)| {
+                    let address = Relay::address_in(*kind, key);
                     seen.insert(address) && !state.vouched.contains_key(&address)
                 })
                 .collect()
@@ -1713,17 +1885,32 @@ impl Relay {
     /// the block's outputs renews its entry; anything else is a "no", which the block's record
     /// keeps (`Word::Withdrawn`), so that it is never reused as a download again. A lookup that
     /// fails records nothing. What the run learnt answers its wrappers (`vouched`).
-    async fn ask_about(self: &Arc<Relay>, keys: &[Digest]) {
+    async fn ask_about(self: &Arc<Relay>, keys: &[(Kind, Digest)]) {
         let limit = self
             .state()
             .policy
             .as_ref()
             .map_or(blocks::MOST_LOOKUP, |p| p.limits.lookup as usize)
             .max(1);
+        for kind in [Kind::Rustc, Kind::Go] {
+            let keys: Vec<Digest> = keys
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, key)| *key)
+                .collect();
+            self.ask_about_in(kind, &keys, limit).await;
+        }
+    }
+
+    /// [`Relay::ask_about`], for blocks of one kind.
+    async fn ask_about_in(self: &Arc<Relay>, kind: Kind, keys: &[Digest], limit: usize) {
         for batch in keys.chunks(limit) {
-            let addresses: Vec<Hex32> = batch.iter().map(Relay::address).collect();
+            let addresses: Vec<Hex32> = batch
+                .iter()
+                .map(|key| Relay::address_in(kind, key))
+                .collect();
             self.state().vouch_asked.extend(addresses.iter().copied());
-            let found = self.lookup(&addresses, false).await;
+            let found = self.lookup_in(kind, &addresses, false).await;
             let date_ms = self.state().server_date_ms.unwrap_or_else(now_ms);
             let answered: Option<HashMap<Hex32, Found>> =
                 found.map(|found| found.into_iter().map(|f| (f.address, f)).collect());
@@ -1742,17 +1929,23 @@ impl Relay {
             let batch = batch.to_vec();
             let _ = self
                 .runtime
-                .spawn_blocking(move || relay.record_words(&batch, &answered, date_ms))
+                .spawn_blocking(move || relay.record_words(kind, &batch, &answered, date_ms))
                 .await;
         }
     }
 
     /// Writes what the server said of each of `keys` into its record (B-32, B-34), dated
     /// `date_ms` by the server's clock.
-    fn record_words(&self, keys: &[Digest], answered: &HashMap<Hex32, Found>, date_ms: u64) {
+    fn record_words(
+        &self,
+        kind: Kind,
+        keys: &[Digest],
+        answered: &HashMap<Hex32, Found>,
+        date_ms: u64,
+    ) {
         let repository = self.config.repository.clone().unwrap_or_default();
         for key in keys {
-            let found = answered.get(&Relay::address(key));
+            let found = answered.get(&Relay::address_in(kind, key));
             let _ = self.config.store.update_origin(key, |origin| {
                 let mut origin = origin.filter(Origin::downloaded_only)?;
                 let held = origin
@@ -1780,7 +1973,7 @@ impl Relay {
 
     /// The blocks in the store only downloaded whose entry for this run's host, org and
     /// repository is a day old or more ([`Origin::standing`] says stale).
-    fn stale_downloads(&self) -> Vec<Digest> {
+    fn stale_downloads(&self) -> Vec<(Kind, Digest)> {
         let repository = self.config.repository.clone().unwrap_or_default();
         let run = Some((
             self.by.host.as_str(),
@@ -1800,26 +1993,40 @@ impl Relay {
                         && origin.standing(run, now) == Standing::Stale
                 })
             })
+            .map(|key| (self.kind_of(&key), key))
             .collect()
+    }
+
+    /// The kind of the block in the store under `key`, as its description says.
+    fn kind_of(&self, key: &Digest) -> Kind {
+        self.config
+            .store
+            .block(key)
+            .ok()
+            .flatten()
+            .map_or(Kind::Rustc, |block| {
+                Kind::of_description(&block.description)
+            })
     }
 
     /// B-34: at the end of a check, the downloaded blocks its compiles reused that no lookup of
     /// the run answered for, asked about once more, so that a machine in daily use never goes
     /// stale.
-    fn reused_downloads(&self, entries: &[Entry]) -> Vec<Digest> {
+    fn reused_downloads(&self, entries: &[Entry]) -> Vec<(Kind, Digest)> {
         let state = self.state();
         let mut seen = HashSet::new();
         entries
             .iter()
             .filter(|e| e.outcome == hushrun_build::model::Outcome::Reused)
-            .filter_map(|e| e.key)
-            .filter(|key| {
-                let address = Relay::address(key);
+            .filter(|e| !e.go.as_ref().is_some_and(|go| go.go_cache))
+            .filter_map(|e| e.key.map(|key| (e.kind(), key)))
+            .filter(|(kind, key)| {
+                let address = Relay::address_in(*kind, key);
                 seen.insert(address) && !state.vouched.contains_key(&address)
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .filter(|key| {
+            .filter(|(_, key)| {
                 self.config.store.origin(key).is_some_and(|origin| {
                     matches!(
                         origin.standing(None, now_ms()),
@@ -1851,29 +2058,41 @@ impl Relay {
     /// org and credential built it. In shared `observe` it is also compared with the shared
     /// store's copy.
     fn built(self: &Arc<Relay>, request: Request) {
-        let Request::Built {
-            key,
-            step,
-            class,
-            portable,
-            bound,
-            cost_ms,
-        } = request
-        else {
-            return;
+        let (kind, key, step, class, portable, bound, cost_ms) = match &request {
+            Request::Built {
+                key,
+                step,
+                class,
+                portable,
+                bound,
+                cost_ms,
+            } => (
+                Kind::Rustc,
+                *key,
+                *step,
+                *class,
+                *portable,
+                *bound,
+                *cost_ms,
+            ),
+            // B-43: a Go package archive is a library whose first key is its key, and the cache
+            // program tells only of portable ones.
+            Request::GoBuilt { key, cost_ms } => (
+                Kind::Go,
+                *key,
+                *key,
+                LocalClass::Library,
+                true,
+                false,
+                *cost_ms,
+            ),
+            _ => return,
         };
-        let address = Relay::address(&key);
+        let address = Relay::address_in(kind, &key);
         let (writes, sharing) = {
             let mut state = self.state();
             if state.phase == Phase::Opening {
-                state.pending.push(Request::Built {
-                    key,
-                    step,
-                    class,
-                    portable,
-                    bound,
-                    cost_ms,
-                });
+                state.pending.push(request);
                 return;
             }
             // The machine's speed: its compile against the uploader's, where the server knew one.
@@ -1915,7 +2134,8 @@ impl Relay {
                     self.by.clone(),
                     self.config.repository.clone(),
                     SystemTime::now(),
-                );
+                )
+                .of_kind(kind);
                 if Outbox::new(&self.config.store).add(&marker).is_ok() {
                     self.wake.notify_one();
                 }
@@ -1926,7 +2146,7 @@ impl Relay {
             let relay = self.clone();
             let linked = class != LocalClass::Library;
             self.runtime
-                .spawn(async move { relay.compare(key, address, linked).await });
+                .spawn(async move { relay.compare(kind, key, address, linked).await });
         }
     }
 
@@ -1944,9 +2164,9 @@ impl Relay {
     /// first key here for the store's kept days and is reported to the scope it came from. For
     /// a linked output (`linked`) it keeps the first key to this machine instead, and the
     /// report says the link differs (B-34): this machine's linker makes these bytes.
-    async fn compare(self: Arc<Relay>, key: Digest, address: Hex32, linked: bool) {
+    async fn compare(self: Arc<Relay>, kind: Kind, key: Digest, address: Hex32, linked: bool) {
         let Some(found) = self
-            .lookup(&[address], true)
+            .lookup_in(kind, &[address], true)
             .await
             .and_then(|f| f.into_iter().find(|f| f.address == address))
         else {
@@ -2010,7 +2230,7 @@ impl Relay {
         let (record, local) = match verdict {
             Ok(Ok((record, Some(local)))) => (record, local),
             Ok(Err(err)) if err.unreadable() => {
-                self.report(address, &found.scope, blocks::Problem::Unreadable)
+                self.report(kind, address, &found.scope, blocks::Problem::Unreadable)
                     .await;
                 return;
             }
@@ -2056,14 +2276,14 @@ impl Relay {
             } else {
                 blocks::Problem::Differs
             };
-            self.report(address, &found.scope, problem).await;
+            self.report(kind, address, &found.scope, problem).await;
         }
     }
 
     // --- reports -------------------------------------------------------------------------
 
     /// A wrapper found a downloaded block wrong: reported to the scope its record names.
-    async fn report_problem(self: Arc<Relay>, key: Digest, problem: Problem) {
+    async fn report_problem(self: Arc<Relay>, kind: Kind, key: Digest, problem: Problem) {
         let Some(origin) = self.config.store.origin(&key) else {
             return;
         };
@@ -2079,15 +2299,16 @@ impl Relay {
             Problem::Rejected => blocks::Problem::Rejected,
             Problem::LinkDiffers => blocks::Problem::LinkDiffers,
         };
-        self.report(Relay::address(&key), &scope, problem).await;
+        self.report(kind, Relay::address_in(kind, &key), &scope, problem)
+            .await;
     }
 
-    async fn report(&self, address: Hex32, scope: &str, problem: blocks::Problem) {
+    async fn report(&self, kind: Kind, address: Hex32, scope: &str, problem: blocks::Problem) {
         if self.saved || !self.state().answering(Instant::now()) {
             return;
         }
         let body = ReportRequest {
-            kind: KIND.to_string(),
+            kind: kind.word().to_string(),
             address,
             scope: scope.to_string(),
             problem,
@@ -2168,13 +2389,27 @@ impl Relay {
             .saturating_duration_since(Instant::now())
             .min(self.config.tuning.close);
         if let (true, false, Some(check), false) = (shares, self.saved, &check, left.is_zero()) {
-            let close = self.close_request(check, entries);
+            let close = self.close_request(Kind::Rustc, check, entries);
+            // B-43: the check's Go command closes apart, with its own manifest and run.
+            let go = (check.go.is_some() && entries.iter().any(|e| e.kind() == Kind::Go))
+                .then(|| self.close_request(Kind::Go, check, entries));
             let relay = self.clone();
             self.runtime.block_on(async move {
-                let _ = relay
-                    .client
-                    .post::<_, serde_json::Value>(blocks::CLOSE_PATH, &close, left, None)
-                    .await;
+                let rust = relay.client.post::<_, serde_json::Value>(
+                    blocks::CLOSE_PATH,
+                    &close,
+                    left,
+                    None,
+                );
+                let go = async {
+                    if let Some(go) = &go {
+                        let _ = relay
+                            .client
+                            .post::<_, serde_json::Value>(blocks::CLOSE_PATH, go, left, None)
+                            .await;
+                    }
+                };
+                let _ = futures_util::future::join(rust, go).await;
             });
         }
         if end.in_ci {
@@ -2289,16 +2524,26 @@ impl Relay {
         }
     }
 
-    fn close_request(&self, check: &Check, entries: &[Entry]) -> CloseRequest {
+    /// The check's `close` for its blocks of `kind`: a Go command's goes under a run of its own,
+    /// made from the check's, with the Go command's platform, and the relay's tallies go with the
+    /// `rustc` one alone.
+    fn close_request(&self, kind: Kind, check: &Check, entries: &[Entry]) -> CloseRequest {
         let mut manifest = Vec::new();
         let mut seen = HashSet::new();
         let mut counts = Counts::default();
-        for entry in entries {
+        for entry in entries.iter().filter(|e| e.kind() == kind) {
             if let (Some(step), Some(key)) = (entry.step, entry.key) {
-                let pair = Pair(Relay::address(&step), Relay::address(&key));
+                let pair = Pair(
+                    Relay::address_in(kind, &step),
+                    Relay::address_in(kind, &key),
+                );
                 if seen.insert(pair) && manifest.len() < blocks::MOST_MANIFEST {
                     manifest.push(pair);
                 }
+            }
+            // What Go's own cache served is plain Go's: in the manifest, and counted nowhere.
+            if entry.go.as_ref().is_some_and(|go| go.go_cache) {
+                continue;
             }
             match entry.outcome {
                 hushrun_build::model::Outcome::Reused if entry.downloaded => {
@@ -2312,6 +2557,21 @@ impl Relay {
             counts.saved_ms = counts.saved_ms.saturating_add(entry.saved_ms);
         }
         let state = self.state();
+        if kind == Kind::Go {
+            let mut bytes = [0u8; 32 + 5];
+            bytes[..32].copy_from_slice(&check.run.0);
+            bytes[32..].copy_from_slice(b"go/1\n");
+            return CloseRequest {
+                kind: kind.word().to_string(),
+                run: Hex32::sha256(&bytes),
+                repository: self.config.repository.clone(),
+                check: check.check,
+                platform: check.go.clone().unwrap_or_default(),
+                commit: self.config.commit.clone(),
+                manifest,
+                counts,
+            };
+        }
         let tally = &state.tally;
         counts.uploaded = tally.uploaded;
         counts.bytes_down = tally.bytes_down;
@@ -2326,7 +2586,7 @@ impl Relay {
         counts.compared_others = tally.compared_others;
         counts.compared_differed = tally.compared_differed;
         CloseRequest {
-            kind: KIND.to_string(),
+            kind: kind.word().to_string(),
             run: check.run,
             repository: self.config.repository.clone(),
             check: check.check,

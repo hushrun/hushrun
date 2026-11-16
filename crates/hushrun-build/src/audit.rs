@@ -58,6 +58,17 @@ pub fn picked(key: &Digest, started_ms: u64) -> bool {
     picked_one_in(key, started_ms, ONE_IN)
 }
 
+/// The pick for a reuse (B-16, B-34): one time in [`FIRST_DOWNLOAD_ONE_IN`] for a downloaded
+/// block's first reuse here, else one in [`ONE_IN`]. The one rule the `rustc` wrapper's ports
+/// and the Go cache program pick by.
+pub fn sample(key: &Digest, started_ms: u64, first_download: bool) -> bool {
+    if first_download {
+        picked_one_in(key, started_ms, FIRST_DOWNLOAD_ONE_IN)
+    } else {
+        picked(key, started_ms)
+    }
+}
+
 /// [`picked`], one time in `one_in`.
 pub fn picked_one_in(key: &Digest, started_ms: u64, one_in: u64) -> bool {
     let mut bytes = Vec::with_capacity(40);

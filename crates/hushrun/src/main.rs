@@ -47,6 +47,15 @@ fn main() -> ExitCode {
     {
         return hushrun_build::wrapper::main();
     }
+    // B-36: called by the Go cache program's name, it serves the `go` command that started it
+    // on stdin and stdout, and does nothing else: no setting, no notice, nothing on stdout but
+    // the protocol.
+    if std::env::args_os()
+        .next()
+        .is_some_and(|name| hushrun_build::go::called_as_program(&name))
+    {
+        return hushrun_build::go::main();
+    }
     // \[ADR 0068\] As the target runner Cargo starts a test binary through, hushrun is no command
     // of its own: it runs the binary and passes everything through, before anything else.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();

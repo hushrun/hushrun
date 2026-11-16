@@ -76,6 +76,8 @@ pub struct Session {
     rebuilt: Vec<String>,
     /// Lines the run adds to its summary: what its relay said (B-26).
     more: Vec<String>,
+    /// The Go cache program COMMAND gets (B-36), when the run is a Go module's and shares.
+    go: Option<crate::go::probe::Go>,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -187,6 +189,47 @@ impl Shared {
             Shared::Off | Shared::Unreached => None,
         }
     }
+
+    /// Whether a block may be reused as far as who vouches for it goes (B-34): the one
+    /// definition the `rustc` wrapper and the Go cache program decide by, from the block's
+    /// record ([`Origin::standing`](crate::origin::Origin::standing)) and this state. A block
+    /// built here, or with no record, may. One only downloaded never may once a server said it
+    /// no longer serves it, and never in a run that isn't sharing by a decision. In a run whose
+    /// backend couldn't be reached, its entry of any age counts. With a relay: on an entry for
+    /// this run's host, org and repository under a day old it may unless the relay says sharing
+    /// stopped by a decision; else the relay asks the server (`vouch`, the question), and
+    /// "served" or "no server could be reached in this run" lets it. `ask` is the relay's
+    /// client: a relay that doesn't answer is no decision for a fresh entry, and a miss for a
+    /// stale one.
+    pub fn may_reuse(
+        &self,
+        origin: Option<&crate::origin::Origin>,
+        now_ms: u64,
+        vouch: crate::relay::Request,
+        ask: &mut dyn FnMut(&Path, &crate::relay::Request) -> Option<crate::relay::Answer>,
+    ) -> bool {
+        use crate::origin::Standing;
+        use crate::relay::{Answer, Request};
+        let Some(origin) = origin else {
+            return true;
+        };
+        let run = self
+            .relay()
+            .map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
+        match (origin.standing(run, now_ms), self) {
+            (Standing::Any, _) => true,
+            (Standing::Withdrawn, _) | (_, Shared::Off) => false,
+            (_, Shared::Unreached) => true,
+            // Only an answer that says so stops a reuse: a relay that is gone is no decision.
+            (Standing::Fresh, Shared::Relay(share)) => {
+                !matches!(ask(&share.socket, &Request::Sharing), Some(Answer::None))
+            }
+            (Standing::Stale, Shared::Relay(share)) => matches!(
+                ask(&share.socket, &vouch),
+                Some(Answer::Served | Answer::Offline)
+            ),
+        }
+    }
 }
 
 /// What a wrapper needs of its run's relay (B-26, B-32).
@@ -241,6 +284,33 @@ pub struct Entry {
     /// The block was downloaded from the shared store for this compile (B-26).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub downloaded: bool,
+    /// A Go package archive's line, logged by the Go cache program (B-46): absent for the
+    /// `rustc` wrapper's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub go: Option<GoEntry>,
+}
+
+/// What a Go package archive's line says beside the rest (B-46).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoEntry {
+    /// It was served from Go's own cache (`GOCACHE`), as plain `go` would serve it: no saving
+    /// of hushrun's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub go_cache: bool,
+    /// Why it stays on this machine, when it was compiled and doesn't go up (B-40).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<crate::go::archive::Local>,
+}
+
+impl Entry {
+    /// Which adapter logged the line.
+    pub fn kind(&self) -> crate::model::Kind {
+        if self.go.is_some() {
+            crate::model::Kind::Go
+        } else {
+            crate::model::Kind::Rustc
+        }
+    }
 }
 
 const SESSION_FILE: &str = "session.json";
@@ -370,6 +440,122 @@ pub struct Counts {
     pub unkeyed: u64,
     /// Those variables, by name only, sorted.
     pub unkeyed_variables: Vec<String>,
+    /// What the Go cache program's lines came to (B-46), counted apart from the crates.
+    pub go: GoCounts,
+}
+
+/// What a run's Go package archives came to (B-46).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GoCounts {
+    /// Package archives the run's `go` commands asked for or compiled, as the program logged
+    /// them.
+    pub packages: u64,
+    /// Served from Go's own cache, as plain `go` would serve them.
+    pub go_cache: u64,
+    /// Served from hushrun's store.
+    pub reused: u64,
+    /// Of those, downloaded from the shared store for it.
+    pub downloaded: u64,
+    /// Compiled by Go.
+    pub built: u64,
+    /// Compiled and compared with a block of the same key (an audit, a block there already).
+    pub compared: u64,
+    /// Of those, the ones whose bytes differed.
+    pub differed: u64,
+    /// Milliseconds reuse from hushrun's store saved.
+    pub saved_ms: u64,
+    /// Compiled archives kept on this machine, by reason, in the order first seen.
+    pub local: Vec<(crate::go::archive::Local, u64)>,
+}
+
+impl GoCounts {
+    fn add(&mut self, entry: &Entry) {
+        let Some(go) = &entry.go else {
+            return;
+        };
+        self.packages += 1;
+        match entry.outcome {
+            Outcome::Reused if go.go_cache => self.go_cache += 1,
+            Outcome::Reused => {
+                self.reused += 1;
+                self.downloaded += u64::from(entry.downloaded);
+                self.saved_ms = self.saved_ms.saturating_add(entry.saved_ms);
+            }
+            Outcome::BuiltAndStored | Outcome::BuiltNotStored(_) | Outcome::PassedThrough(_) => {
+                self.built += 1;
+                if entry.found {
+                    self.compared += 1;
+                }
+            }
+        }
+        self.differed += u64::from(entry.differed);
+        if let Some(local) = go.local
+            && local != crate::go::archive::Local::NotSharing
+        {
+            match self.local.iter_mut().find(|(seen, _)| *seen == local) {
+                Some((_, n)) => *n += 1,
+                None => self.local.push((local, 1)),
+            }
+        }
+    }
+
+    /// B-46's lines for Go, without a prefix. Empty when no archive was logged.
+    pub fn lines(&self) -> Vec<String> {
+        if self.packages == 0 {
+            return Vec::new();
+        }
+        let packages = |n: u64| {
+            if n == 1 {
+                "1 package".to_string()
+            } else {
+                format!("{n} packages")
+            }
+        };
+        let mut parts = Vec::new();
+        if self.go_cache > 0 {
+            parts.push(format!("{} from Go's own cache", self.go_cache));
+        }
+        if self.reused > 0 {
+            let mut part = format!("{} reused", self.reused);
+            if self.downloaded > 0 {
+                part.push_str(&format!(" ({} from the shared store)", self.downloaded));
+            }
+            parts.push(part);
+        }
+        if self.built > 0 {
+            parts.push(format!("{} built", self.built));
+        }
+        let mut first = format!(
+            "build: go: {}: {}",
+            packages(self.packages),
+            parts.join(", ")
+        );
+        if self.saved_ms >= 1_000 {
+            first.push_str(&format!(", saving about {}", took(self.saved_ms)));
+        }
+        if self.differed > 0 {
+            first.push_str(&format!(
+                ", {} differed from their blocks and are not reused",
+                self.differed
+            ));
+        }
+        let mut lines = vec![first];
+        let kept: u64 = self.local.iter().map(|(_, n)| n).sum();
+        if kept > 0 {
+            let why: Vec<String> = self
+                .local
+                .iter()
+                .map(|(local, n)| format!("{n} {}", local.words()))
+                .collect();
+            lines.push(format!(
+                "build: go: {} compiled here {} on this machine ({})",
+                packages(kept),
+                if kept == 1 { "stays" } else { "stay" },
+                why.join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 impl Counts {
@@ -381,6 +567,10 @@ impl Counts {
             ..Counts::default()
         };
         for entry in entries.iter().filter(|entry| !is_probe(entry.outcome)) {
+            if entry.go.is_some() {
+                counts.go.add(entry);
+                continue;
+            }
             counts.compiles += 1;
             match entry.outcome {
                 Outcome::Reused => {
@@ -484,6 +674,12 @@ impl Summary {
 /// B-20's lines: the totals, then what the check before COMMAND removed (B-23), then at most
 /// [`MAX_NOTES`] notes, then low space once (B-22).
 fn lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
+    let mut lines = rust_lines(counts, rebuilt);
+    lines.extend(counts.go.lines());
+    lines
+}
+
+fn rust_lines(counts: &Counts, rebuilt: &[String]) -> Vec<String> {
     let rebuilt = rebuilt.iter().map(|line| format!("build: {line}"));
     if counts.compiles == 0 {
         return rebuilt.collect();
@@ -698,6 +894,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         link,
         rebuilt: Vec::new(),
         more: Vec::new(),
+        go: None,
     })
 }
 
@@ -759,12 +956,55 @@ impl Session {
             .flatten()
     }
 
-    /// What to set on COMMAND: the wrapper for cargo, and the session for the wrapper.
+    /// What to set on COMMAND: the wrapper for cargo, the session for the wrapper, and Go's
+    /// cache program when [`Session::set_go`] gave one and the run shares (B-36): with sharing
+    /// off, the program would only do what Go's own cache does.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
-        vec![
+        let mut env = vec![
             (RUSTC_WRAPPER.into(), self.link.clone().into_os_string()),
             (SESSION.into(), self.current.folder.clone().into_os_string()),
-        ]
+        ];
+        if let Some(go) = &self.go
+            && self.current.share != Shared::Off
+        {
+            env.push((crate::go::GOCACHEPROG.into(), go.value.clone().into()));
+        }
+        env
+    }
+
+    /// The link Go starts as its cache program, `hushrun-gocache` beside the wrapper's link and
+    /// pointing at the same binary (B-36), made when first asked.
+    pub fn program_link(&self) -> std::io::Result<PathBuf> {
+        let dir = self
+            .link
+            .parent()
+            .ok_or_else(|| std::io::Error::other("the wrapper's link has no folder"))?;
+        let exe = std::fs::read_link(&self.link)?;
+        let link = dir.join(crate::go::PROGRAM_NAME);
+        if std::fs::read_link(&link).is_ok_and(|target| target == exe) {
+            return Ok(link);
+        }
+        let temp = dir.join(format!(
+            ".{}.{}.tmp",
+            crate::go::PROGRAM_NAME,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&temp);
+        symlink(&exe, &temp)?;
+        std::fs::rename(&temp, &link)?;
+        Ok(link)
+    }
+
+    /// Gives COMMAND Go's cache program (B-36), as [`crate::go::probe::probe`] decided it.
+    pub fn set_go(&mut self, go: crate::go::probe::Go) {
+        self.go = Some(go);
+    }
+
+    /// The Go cache program the run sets, when it sets one.
+    pub fn go(&self) -> Option<&crate::go::probe::Go> {
+        self.go
+            .as_ref()
+            .filter(|_| self.current.share != Shared::Off)
     }
 
     /// Adds a line to the run's summary, once: what its relay said (B-26).
@@ -889,6 +1129,11 @@ fn remove_dangling_links(store: &Path) {
         );
         if is_link && dangling {
             let _ = fs::remove_file(&link);
+            // Go's cache program's link points at the same binary.
+            let program = folder.join(crate::go::PROGRAM_NAME);
+            if fs::symlink_metadata(&program).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                let _ = fs::remove_file(&program);
+            }
             let _ = fs::remove_dir(&folder);
         }
     }
@@ -925,6 +1170,16 @@ fn link_to(store: &Path, exe: &Path) -> std::io::Result<PathBuf> {
 #[cfg(not(unix))]
 fn link_to(_store: &Path, _exe: &Path) -> std::io::Result<PathBuf> {
     Err(std::io::Error::other("no wrapper link on this platform"))
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("no links on this platform"))
 }
 
 #[cfg(all(test, unix))]
@@ -997,6 +1252,7 @@ mod tests {
             step: None,
             key: None,
             downloaded: false,
+            go: None,
         };
         found.log(&entry);
         found.log(&entry);
@@ -1108,6 +1364,7 @@ mod tests {
             step: None,
             key: None,
             downloaded: false,
+            go: None,
         }
     }
 

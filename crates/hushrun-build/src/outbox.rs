@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hushrun_core::Digest;
 use serde::{Deserialize, Serialize};
 
-use crate::model::Class;
+use crate::model::{Class, Kind};
 use crate::origin::Identity;
 use crate::store::{DAY, Store, Tally};
 
@@ -75,6 +75,9 @@ pub struct Marker {
     /// How many times the end of a command cut its upload off.
     #[serde(default)]
     pub cutoffs: u32,
+    /// Which adapter's block it is, and so its kind on the wire: absent, `rustc`.
+    #[serde(default, skip_serializing_if = "Kind::is_rustc")]
+    pub kind: Kind,
 }
 
 impl Marker {
@@ -99,7 +102,14 @@ impl Marker {
             created_ms: epoch_ms(now),
             not_before_ms: 0,
             cutoffs: 0,
+            kind: Kind::Rustc,
         }
+    }
+
+    /// The marker, of a block of `kind`.
+    pub fn of_kind(mut self, kind: Kind) -> Marker {
+        self.kind = kind;
+        self
     }
 }
 
