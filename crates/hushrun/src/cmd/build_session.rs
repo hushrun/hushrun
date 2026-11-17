@@ -43,9 +43,34 @@ pub(crate) fn begin(
     // B-2: a compiler wrapper set already passes through. That is worth its line only where the
     // run's results lookup said the org shares: there the person may expect the shared store.
     let org_shares = share.as_ref().is_some_and(|start| start.access.shares);
-    begin_here(now, repository, repository_env, share, place)
-        .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))
+    let mut session = begin_here(now, repository, repository_env, share, place)
+        .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))?;
+    let cargo = std::env::current_dir().ok().is_some_and(|folder| {
+        folder
+            .ancestors()
+            .any(|dir| dir.join("Cargo.toml").is_file())
+    });
+    if session.rustc_left_out() && org_shares && cargo {
+        session.add_line(RUST_LEFT_OUT.to_string());
+    }
+    Ok(session)
 }
+
+/// B-2, B-39: whether the run's own `RUSTC_WRAPPER` (sccache) is set in a Go module's folder:
+/// hushrun's wrapper stays out, and the session still begins, for Go's cache program alone.
+/// Elsewhere a wrapper set begins no session, as before.
+fn go_beside_another_wrapper(here: &Here<'_>) -> bool {
+    (here.env)(session::RUSTC_WRAPPER).is_some_and(|v| !v.is_empty())
+        && here
+            .folder
+            .as_deref()
+            .is_some_and(hushrun_build::go::probe::is_module)
+}
+
+/// The line of a Go module's run whose Rust crates aren't reused because `RUSTC_WRAPPER` is set
+/// already, said in an org that shares, where the folder is a cargo project's too.
+const RUST_LEFT_OUT: &str =
+    "build: Rust crates aren't reused in this run: another compiler wrapper is set (RUSTC_WRAPPER)";
 
 /// The line of a run that begins no session because `RUSTC_WRAPPER` is set already (B-2), which
 /// [`begin`] says only in an org that shares.
@@ -209,7 +234,7 @@ fn begin_from_saved(
     let Some(relay) = crate::cmd::build_relay::Relay::get_or_start(config) else {
         return Ok(session);
     };
-    match relay.begin_check(&current.folder, None, here.env) {
+    match relay.begin_check(&current.folder, None, None, here.env) {
         Ok(share) => {
             if let Err(err) = session.set_share(share) {
                 session.add_line(format!("build: sharing is off for this run: {err}"));
@@ -224,8 +249,18 @@ fn begin_from_saved(
 fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String>> {
     let exe = std::env::current_exe()
         .map_err(|err| Some(format!("{OFF}: hushrun can't find its own binary: {err}")))?;
-    let start = here.start(&exe, here.cache_dir, here.env);
+    let beside = go_beside_another_wrapper(here);
+    let hidden = |name: &str| {
+        (name != session::RUSTC_WRAPPER)
+            .then(|| (here.env)(name))
+            .flatten()
+    };
+    let env: &dyn Fn(&str) -> Option<OsString> = if beside { &hidden } else { here.env };
+    let start = here.start(&exe, here.cache_dir, env);
     let mut session = session::begin_in_sandbox(&start, store).or_else(said)?;
+    if beside {
+        session.leave_out_rustc();
+    }
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
         if let Some(sysroot) = (here.sysroot)(folder) {
@@ -614,12 +649,50 @@ fn start_sharing(
             "build: sharing is off for this run: the relay couldn't start".into(),
         ));
     };
-    let share = relay.begin_check(&current.folder, Some(check), env)?;
+    // B-36: a Go module's COMMAND gets Go's cache program, and the check asks for its Go
+    // manifest apart.
+    let go = go_program(session, env);
+    let share = relay.begin_check(
+        &current.folder,
+        Some(check),
+        go.as_ref().map(|go| go.platform.clone()),
+        env,
+    )?;
     if let Err(err) = session.set_share(share) {
         relay.end_check(&[]);
         return Err(Some(format!("build: sharing is off for this run: {err}")));
     }
+    if let Some(go) = go {
+        session.set_go(go);
+    }
     Ok(relay)
+}
+
+/// B-39: Go's cache program for COMMAND, when the folder COMMAND runs in is a Go module's whose
+/// `go` is a version the program knows and has no cache program of the person's: what
+/// `hushrun_build::go::probe` decides, asked here once. A path Go can't be given is said in one
+/// line; every other reason for none is silent.
+fn go_program(
+    session: &mut Session,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<hushrun_build::go::probe::Go> {
+    use hushrun_build::go::probe::{self, NotSet};
+    let folder = std::env::current_dir().ok()?;
+    let link = session.program_link().ok()?;
+    match probe::probe(&folder, &link, env) {
+        Ok(go) => Some(go),
+        Err(NotSet::Unquotable(path)) => {
+            session.add_line(format!(
+                "build: Go packages are not shared in this run: the store's path holds a space and both kinds of quote, which Go can't be given ({})",
+                path.display()
+            ));
+            None
+        }
+        Err(why) => {
+            tracing::debug!("no Go cache program: {why:?}");
+            None
+        }
+    }
 }
 
 /// A check's id, as the build protocol names it (B-26): a digest of the repository and the
@@ -744,12 +817,12 @@ struct Here<'a> {
 }
 
 impl<'a> Here<'a> {
-    fn start(
-        &self,
-        exe: &'a Path,
-        cache_dir: Option<&'a Path>,
-        env: &'a dyn Fn(&str) -> Option<OsString>,
-    ) -> session::Start<'a> {
+    fn start<'b>(
+        &'b self,
+        exe: &'b Path,
+        cache_dir: Option<&'b Path>,
+        env: &'b dyn Fn(&str) -> Option<OsString>,
+    ) -> session::Start<'b> {
         session::Start {
             settings: self.settings,
             cache_dir,
@@ -789,12 +862,22 @@ fn begin_with(
             };
         }
     };
-    let start = here.start(&exe, here.cache_dir, here.env);
+    let beside = go_beside_another_wrapper(here);
+    let hidden = |name: &str| {
+        (name != session::RUSTC_WRAPPER)
+            .then(|| (here.env)(name))
+            .flatten()
+    };
+    let env: &dyn Fn(&str) -> Option<OsString> = if beside { &hidden } else { here.env };
+    let start = here.start(&exe, here.cache_dir, env);
     let mut session = match ci_store {
         Some(store) => session::begin_in_ci(&start, store),
         None => session::begin(&start),
     }
     .or_else(said)?;
+    if beside {
+        session.leave_out_rustc();
+    }
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {

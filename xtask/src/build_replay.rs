@@ -2043,6 +2043,7 @@ mod tests {
             step: None,
             key: None,
             downloaded: false,
+            go: None,
         }
     }
 

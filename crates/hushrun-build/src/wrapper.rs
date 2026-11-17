@@ -22,7 +22,7 @@ use crate::invocation::{self, Emit, Env, Invocation, Parsed};
 use crate::key::{Asked, Bound, Link, LinkLibrary, Observed, Place, PlaceKind, ReadList};
 use crate::messages::{Line, Recorded, Recorder};
 use crate::model::{Class, Folder, Located, NotStored, Outcome, PassedThrough, Programs, RootName};
-use crate::origin::{Origin, Standing};
+use crate::origin::Origin;
 use crate::portable::{self, Portability, Reason};
 use crate::relay::{self, Answer, Request};
 use crate::restore::Restore;
@@ -101,12 +101,12 @@ pub trait Ports {
     /// Whether the audit picks the compile of block `key` in the run started at `started_ms`
     /// (B-16). Tests choose.
     fn audited(&self, key: &Digest, started_ms: u64) -> bool {
-        audit::picked(key, started_ms)
+        audit::sample(key, started_ms, false)
     }
     /// Whether the audit picks the first reuse here of the downloaded library `key` (B-16,
     /// B-34): one time in ten. Tests choose.
     fn audited_first(&self, key: &Digest, started_ms: u64) -> bool {
-        audit::picked_one_in(key, started_ms, audit::FIRST_DOWNLOAD_ONE_IN)
+        audit::sample(key, started_ms, true)
     }
     /// Asks the run's relay (B-26). Tests stand in for it.
     fn relay(
@@ -260,6 +260,7 @@ fn entry(outcome: Outcome, class: Option<Class>) -> Entry {
         step: None,
         key: None,
         downloaded: false,
+        go: None,
     }
 }
 
@@ -1398,40 +1399,16 @@ impl Call<'_> {
     /// stopped by a decision; else the relay asks the server, and "served" or "no server could
     /// be reached in this run" lets it.
     fn vouched(&self, key: &Digest, step: &Digest, block: &Block, origin: Option<&Origin>) -> bool {
-        use crate::session::Shared;
-        let Some(origin) = origin else {
-            return true;
+        let vouch = Request::Vouch {
+            key: *key,
+            step: *step,
+            outputs: outputs_of(block),
         };
-        let run = self
-            .current
-            .share
-            .relay()
-            .map(|s| (s.by.host.as_str(), s.by.org.as_str(), s.repository.as_str()));
-        let standing = origin.standing(run, epoch_ms(self.ports.now()));
-        let (share, asked) = match (standing, &self.current.share) {
-            (Standing::Any, _) => return true,
-            (Standing::Withdrawn, _) | (_, Shared::Off) => return false,
-            (_, Shared::Unreached) => return true,
-            // Only an answer that says so stops a reuse: a relay that is gone is no decision.
-            (Standing::Fresh, Shared::Relay(share)) => {
-                return !matches!(
-                    self.ports
-                        .relay(&share.socket, &Request::Sharing, relay::WAIT),
-                    Some(Answer::None)
-                );
-            }
-            (Standing::Stale, Shared::Relay(share)) => (
-                share,
-                Request::Vouch {
-                    key: *key,
-                    step: *step,
-                    outputs: outputs_of(block),
-                },
-            ),
-        };
-        matches!(
-            self.ports.relay(&share.socket, &asked, relay::WAIT),
-            Some(Answer::Served | Answer::Offline)
+        self.current.share.may_reuse(
+            origin,
+            epoch_ms(self.ports.now()),
+            vouch,
+            &mut |socket, request| self.ports.relay(socket, request, relay::WAIT),
         )
     }
 
