@@ -434,7 +434,8 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
     let store = place.store.as_deref().map(Store::new);
     let held = store.as_ref().map(|store| store.status(now(global)));
     let env = hushrun_ci::Env::from_process();
-    let in_ci = hushrun_ci::in_ci(&env);
+    // B-48: a GitLab job is CI here too, whatever else says so.
+    let in_ci = crate::gitlab_job::in_ci(&env);
     let wrapper = std::env::var_os(session::RUSTC_WRAPPER).filter(|v| !v.is_empty());
     // Settings `hushrun run` can't read turn reuse off there: a configuration error.
     let exit = if saved.is_err() {
