@@ -58,8 +58,21 @@ later plain `go` rebuild everything.
   `GOFLAGS=-trimpath` widens it, and changes the file names in stack traces.
 - Above a cgo package, sharing is limited to machines with the same C toolchain and headers (243
   of caddy's 771 packages on Linux); `CGO_ENABLED=0` widens it.
-- A run whose `RUSTC_WRAPPER` is set already (sccache) has no session, so its Go shares nothing
-  either; `hushrun build fetch` saves no Go blocks for a sandbox.
+- In a Go module, a `RUSTC_WRAPPER` set already (sccache) leaves only hushrun's own Rust wrapper
+  out: the session begins for Go's cache program, and Go shares as it would without it.
+  `hushrun build fetch` saves no Go blocks for a sandbox.
+- Go's own cache is evidence of nothing: a Go cache hit with other bytes than a block's is
+  counted, never reported or suspended (a `-toolexec` build may have put it there). Only the
+  audit's miss on purpose reports `differs`; a downloaded archive that fails its checks is
+  reported `rejected`, suspended, then removed.
+- Go doesn't trim its cache while a program serves it, so the program trims it at `close` as
+  Go would (`trim.txt`, once a day, five days and an hour).
+- A relay that fails or times out once is down for the rest of the run (a file in the session's
+  folder), so a frozen relay costs a run one wait instead of one per `go` command; a fetch that
+  is only slow on a relay that still answers is a miss and leaves it on.
+- A `go` whose version the probe didn't see keeps Go's own cache and leaves hushrun's store out,
+  so a `GOTOOLCHAIN` switch inside COMMAND is as warm as plain Go and never served another
+  toolchain's archives.
 - The relay's tallies (bytes, uploads, comparisons) go with the `rustc/1` close; the `go/1` close
   carries the Go command's manifest and counts.
 

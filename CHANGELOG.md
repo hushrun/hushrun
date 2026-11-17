@@ -34,6 +34,10 @@ through Go's own cache program, beside the person's own Go cache.
   only when that manifest names it. No server change.
 - **The run's summary has a Go line** (B-46): packages from Go's own cache, reused (from the
   shared store) and built, and the compiled ones kept on this machine, by reason.
+- **Go's own cache is trimmed inside `hushrun run`** (B-41) as Go trims it, once a day, at the
+  program's `close`.
+- **A run in a Go module with `RUSTC_WRAPPER` set** (sccache) still shares Go (B-39): only
+  hushrun's Rust wrapper stays out, said once where the folder is a cargo project's too.
 
 ### Changed
 

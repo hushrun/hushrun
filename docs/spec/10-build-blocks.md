@@ -1571,9 +1571,15 @@ patch, release candidates and betas) and no `GOCACHEPROG`, which is where Go rea
 COMMAND's environment, the user's go env file and the toolchain's own `$GOROOT/go.env` (F12); and
 the link's path can be given to Go: as it is when it holds no white space and doesn't start with
 a quote, else wrapped in `'`, else in `"`, else not at all, with one line. A `GOCACHEPROG` the
-person set is left as it is. `hushrun run CHECK…`, an isolated check, Windows, a run whose
-`RUSTC_WRAPPER` is set already (no session, B-2) and any other Go version get nothing, and `go`
-runs as it would without hushrun. A binary called by that name is the program and does nothing
+person set is left as it is. `hushrun run CHECK…`, an isolated check, Windows, a run outside a
+Go module whose `RUSTC_WRAPPER` is set already (no session, B-2) and any other Go version get
+nothing, and `go` runs as it would without hushrun. In a Go module's folder a `RUSTC_WRAPPER` set
+already (sccache, say) leaves only hushrun's own wrapper out: the session still begins, the
+person's wrapper passes through as it is, Go's program is decided by the rules above alone, and,
+in an org that shares and where the folder is a cargo project's too, the run says once `build:
+Rust crates aren't reused in this run: another compiler wrapper is set (RUSTC_WRAPPER)`. A `go`
+command inside COMMAND whose version is not the one the probe saw (`GOTOOLCHAIN` switched inside
+COMMAND) is B-47's. A binary called by that name is the program and does nothing
 else; it decides that from its own name, before reading any setting. *Rests on:* Go 1.24 and
 later starting the named program for every `go` command and sending it every get and put of its
 build cache, splitting the variable as `quoted.Split` does; stock Go before 1.24 ignoring the
@@ -1594,12 +1600,23 @@ nothing on its stderr, which is the person's. `close` waits for the handlers sti
 most the watchdog's time, answers, and the process exits. Every call to the relay is bounded: a
 fetch by at most 30 seconds (half B-26's most cost; less when this machine's own last compile of
 the key says so), a vouch by half the block's compile, whether the run still shares by 2
-seconds; a notice (a block built, a report) is written and not waited for. After one call fails
-or times out, the program asks the relay nothing more for the rest of that `go` command (F10).
+seconds; a notice (a block built, a report) is written and not waited for; connecting to the
+relay's socket is bounded by the same wait. After one call fails or times out the relay is down
+for the rest of the run, not only of that `go` command: a file in the session's folder
+(`go-relay-down`) tells every later `go` command of the run, which asks it nothing, so a frozen
+relay costs a run one wait (F10). The one exception is a fetch whose wait ran out on a relay that
+still answers whether the run shares within 2 seconds: it was only slow (a large download), that
+`get` is a miss, and the relay stays on. A panic while the program starts it starts again with no
+session (B-47); one while it reads a request answers that request with an error, which Go takes
+as a miss for a `get` and leaves its own build output in place of for a `put`, and reading goes
+on: the program never exits before `close`. Side effects of serving a block (its use, a
+download's first reuse, the log's line) happen only for the answer Go got: a `get` the watchdog
+answered first records nothing.
 *Rests on:* Go waiting for every answer without a limit, failing the command when the program
 exits before `close` or sends an answer it doesn't expect, and building on a miss (read in
 `cmd/go/internal/cache/prog.go`; proved by a test whose handlers hang and panic). *Breaks if:* Go
-starts the program through a shell, or a Go release treats a miss on a hit's subkey differently.
+starts the program through a shell, or a Go release treats a miss on a hit's subkey differently,
+or an error answer to a `get` as fatal.
 
 **B-41 Go's own cache is the local side.** The program reads and writes `GOCACHE`, the folder the
 `go` command exports to it, in Go's own format (`<2 hex>/<action>-a` holding `v1 <action>
@@ -1607,15 +1624,18 @@ starts the program through a shell, or a Go release treats a miss on a hit's sub
 a temporary file renamed into place, and that file is what Go is handed. A `get` is answered from
 there first, as Go's own disk cache would answer it (a well-formed line naming the id, a body of
 the size it says), the time it holds included (so `go clean -testcache` still expires a result),
-and both files' dates moved to now when an hour old (Go's `markUsed`, so Go's trim keeps them).
+and both files' dates moved to now when an hour old (Go's `markUsed`). At `close` the program
+trims the cache as Go's `DiskCache.Trim` does, since Go doesn't while a program serves it: at most
+once a day by `trim.txt` (decimal Unix seconds, read again and written under a lock), removing
+the `-a` and `-d` entries of the 256 folders unused for five days and an hour.
 So plain `go` and `go` inside `hushrun run` share one cache, the first run inside `hushrun run`
 is as warm as plain Go, `go clean -cache` clears what the program kept there, and Go's package
 index, test results, compiler output, cgo's files and vet's facts, which are keyed by paths,
 sizes and dates, stay exactly as Go keeps them and never leave the machine. A body served from
 hushrun's store, a download among them, is never written into `GOCACHE`: its keys carry no
 toolchain identity, and a withdrawn download would outlive its withdrawal there. *Rests on:* Go's
-disk format, the same from Go 1.10 to 1.27 (`cmd/go/internal/cache/cache.go`), and the `go`
-command exporting its effective `GOCACHE` to the program. *Breaks if:* Go changes it within the
+disk format and trim, the same from Go 1.10 to 1.27 (`cmd/go/internal/cache/cache.go`), and the
+`go` command exporting its effective `GOCACHE` to the program. *Breaks if:* Go changes it within the
 versions B-39 names.
 
 **B-42 Portable (Go).** A package archive Go puts may become a block, and leave the machine,
@@ -1631,7 +1651,8 @@ puts under `Subkey(action, "stdout")` just before the archive, was empty (`print
 prints a compile's output again only from its own cache); and the bytes say so
 (`archive::portable`): an `ar` archive whose first member is `__.PKGDEF` and every other member a
 Go object, `_go_.o` or an object the assembler made for a standard library package (flags
-`ObjFlagFromAssembly` and `ObjFlagStd`): a cgo object or a `.syso` is `native`, assembly of any
+`ObjFlagFromAssembly` and `ObjFlagStd`, read after the object's text header, whose end `\n!\n` is
+looked for over the whole member: the runtime's header on macOS runs past 4096 bytes): a cgo object or a `.syso` is `native`, assembly of any
 other package `assembly` (F1: its includes are outside Go's id); its build ID, read where Go's
 `buildid.ReadFile` reads it, is `<action>/<content>` with `<action>` Go's `HashToString` of the
 action id it is put under (`build-id`); and `<content>` is the SHA-256 of the bytes with every
@@ -1661,15 +1682,19 @@ that wasn't altered and a known toolchain: a block under the key that the store 
 isn't suspended (B-15), whose description says `go/1` and the action asked, is served only when
 `Shared::may_reuse` says so (B-34, the one definition the `rustc` wrapper decides by too), its
 file's SHA-256 and size are its record's (else it is removed and compiled), and its bytes pass
-B-42's byte checks (else it is removed, compiled, and when only downloaded reported `rejected`).
+B-42's byte checks (else it is compiled; when it was only downloaded it is first reported
+`rejected` to the scope its record names, then its key is suspended for `keep_days` as the
+`rustc` wrapper's refused downloads are, then it is removed).
 Then one time in fifty, one in ten on a downloaded block's first reuse here (`audit::sample`),
 every time in local `observe` and with `HUSHRUN_BUILD_AUDIT=every`, never with `none`, and never
 twice for one key in a run (a file per key in the session's folder, made with `create_new`), it is
 answered as a miss on purpose: what Go then compiles is compared with it, and a difference
 suspends the key for `keep_days`, reports `differs` when the block was only downloaded, and puts
 the compile in its place. An id Go's own cache holds is never audited by miss: it is compared
-for free, when the toolchain is known already, with a block under the same key, and a difference
-suspends the key the same way. A block served is handed to Go as a file named by its SHA-256 in
+for free, when the toolchain is known already, with a block under the same key, and a
+difference is only counted (`N in Go's own cache with other bytes than hushrun's blocks (not
+reported)`): Go's cache is not evidence, as a `-toolexec` build or a patched toolchain may have
+put other bytes under the same id there, so only a miss on purpose suspends or reports. A block served is handed to Go as a file named by its SHA-256 in
 the session's folder, a link to the store's file it was read from (the same inode) or a copy of
 the bytes checked, never rewritten or removed while the run lives, whatever later replaces the
 block (F8). A compile whose block is in the store already is compared with it; one only
@@ -1681,11 +1706,12 @@ miss: an audit would then compare nothing, which the run's line shows as no comp
 (B-26 to B-34) as the `rustc` wrapper's are: an outbox marker for a block built here (B-29, its
 `kind` recorded), `begin` and `commit` of one kind at a time, records of where a block came from,
 vouches, reports and withdrawals. A check whose COMMAND gets the program asks `open` a second
-time, kind `go/1`, for its manifest alone (the policy is the first `open`'s), once the first has
-answered, with the platform `GOOS_GOARCH` that `go env` gave; and `close`s a second time, kind
-`go/1`, under a run of its own (the SHA-256 of the check's run and `go/1`), with the Go command's
-archives in the order the program logged them, each pair's first address its block address, Go's
-own cache's hits included. A Go fetch is looked up only when that manifest names it: Go asks
+time, kind `go/1`, for its manifest alone (the policy is the first `open`'s), at the same time
+as the first, with the platform `GOOS_GOARCH` that `go env` gave; and `close`s a second time,
+kind `go/1`, under a run of its own (the SHA-256 of the check's run and `go/1`), with the Go
+command's archives that may leave the machine in the order the program logged them, each pair's
+first address its block address, Go's own cache's hits included; an archive kept here (B-42) is
+counted and not listed. A Go fetch is looked up only when that manifest names it: Go asks
 about every entry its cache misses, most of them local ones no server holds. The first Go fetch
 of the check starts the prefetch of what the manifest names that the store lacks (a machine
 whose `go` finds everything in its own cache asks nothing and downloads nothing); a fetch that
@@ -1702,6 +1728,9 @@ named). Go's own output is unchanged. *Rests on:* nothing.
 
 **B-47 Without a session.** A program that finds no usable session (a `go` command that outlived
 its run, `GOCACHEPROG` set by hand to the link) serves Go's own cache only, as Go's disk cache
-would, and keeps nothing else. One whose Go version is not one B-39 names, or that has no usable
-`GOCACHE`, answers every `get` as a miss, keeps every body in its own folder until `close`, and
-fails nothing. *Rests on:* nothing.
+would, and keeps nothing else. One whose Go version is not the probe's and not one B-39 names
+(`GOTOOLCHAIN` switched inside COMMAND) still serves and keeps Go's own cache, whose format is
+the same from Go 1.10, and leaves hushrun's store out: nothing is served from it or stored in it.
+One with a version B-39 names serves the store under that toolchain's own identity (B-43). One
+with no usable `GOCACHE` answers every `get` as a miss, keeps every body in its own folder until
+`close`, and fails nothing. *Rests on:* nothing.
