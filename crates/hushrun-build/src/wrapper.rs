@@ -511,11 +511,25 @@ impl Search {
         for form in toolchain {
             add(form.as_bytes().to_vec(), Hit::Toolchain);
         }
-        let kinds = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
-        Search {
-            needles: Needles::new(texts.into_iter().map(|(text, _)| text).collect()),
-            kinds,
+        let kinds: Vec<Vec<Hit>> = texts.iter().map(|(_, kinds)| kinds.clone()).collect();
+        let mut needles = Needles::new(texts.into_iter().map(|(text, _)| text).collect());
+        // The texts are distinct and none is empty, so the needles are the texts, in order.
+        debug_assert_eq!(needles.needles().count(), kinds.len());
+        // A value found only as part of a root, a machine's folder or the toolchain's (macOS's
+        // `TMPDIR` above a store, a user's name in the home folder) is that folder, which its own
+        // rule reports; the value is in the output only where it lies outside them (B-24).
+        let value_only = |kinds: &[Hit]| kinds.iter().all(|k| matches!(k, Hit::Value(_)));
+        for (inner, inner_kinds) in kinds.iter().enumerate() {
+            if !value_only(inner_kinds) {
+                continue;
+            }
+            for (outer, outer_kinds) in kinds.iter().enumerate() {
+                if !value_only(outer_kinds) {
+                    needles.not_within(inner, outer);
+                }
+            }
         }
+        Search { needles, kinds }
     }
 
     /// One output, hashed and searched in one pass.
@@ -1949,7 +1963,8 @@ impl Call<'_> {
     /// The variables whose values the outputs are searched for (B-24): each one that is in
     /// neither key (the first key's variables, and `tracked`, those the dep-info names, which the
     /// second key holds) and that [`portable::unkeyed_candidate`] chooses, less those whose value
-    /// holds a root or a folder of this machine, which the search finds by their own rules.
+    /// holds a root or a folder of this machine, which the search finds by their own rules (and
+    /// where a value lies inside one of them, [`Search::new`] leaves it to that rule too).
     /// Values stay in this process: only a name is ever written.
     fn unkeyed_values(&self, roots: &Roots, tracked: &[&str]) -> Vec<(String, Vec<u8>)> {
         let keyed = self.asked.as_ref().map(|asked| &asked.env);
@@ -3319,6 +3334,65 @@ mod tests {
             .unwrap()
             .machine;
         assert!(found.contains(&Folder::CargoHome), "{found:?}");
+    }
+
+    // covers: B-10, B-24
+    #[test]
+    fn a_value_inside_a_folder_the_search_found_is_that_folder_not_the_value() {
+        // macOS's `TMPDIR` above the store that holds the toolchain a proc macro's debug map
+        // names, and a user name inside the home folder: each value is in the output only as
+        // part of a folder the search already reports by its own rule.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = "/var/folders/xy/T/ws";
+        let paths = RootPaths {
+            workspace: ws.to_string(),
+            package: Some(ws.to_string()),
+            script_out: None,
+            out_dir: format!("{ws}/target/debug/deps"),
+            deps: vec![],
+            native: vec![],
+            package_id: "app-0.1.0".to_string(),
+            target_dir: None,
+            build_target_dir: None,
+            target_tmpdir: None,
+            bin_exe_dirs: vec![],
+        };
+        let machine = Machine {
+            cargo_home: Some("/home/someone-else/.cargo".into()),
+            toolchain: Some("/var/folders/xy/T/store/sysroots/ab12".into()),
+            toolchain_view: None,
+            rustup_home: Some("/home/someone-else/.rustup".into()),
+            home: Some("/home/someone-else".into()),
+        };
+        let roots = Roots::new(&paths, &[], &machine, |_| None).unwrap();
+        let values = [
+            ("TMPDIR".to_string(), b"/var/folders/xy/T/".to_vec()),
+            ("USER".to_string(), b"someone-else".to_vec()),
+        ];
+        let search = Search::new(&roots, &values, &roots.toolchain_needles());
+        let inside = b"\0OSO /var/folders/xy/T/store/sysroots/ab12/lib/rustlib/x/libstd.rlib\0\
+            /home/someone-else/notes\0/var/folders/xy/T/ws/src/lib.rs\0";
+        for name in ["libm.dylib", "libm.rlib"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, inside).unwrap();
+            let found = search.file(path, name.into(), OutputKind::Link).unwrap();
+            assert!(found.toolchain && found.tied, "{name}");
+            assert!(found.machine.contains(&Folder::Home), "{name}");
+            assert!(found.values.is_empty(), "{name}: {:?}", found.values);
+        }
+        // The same values on their own, beside those folders, are still found.
+        let mut alone = inside.to_vec();
+        alone.extend(b"by someone-else in /var/folders/xy/T/\0");
+        for name in ["alone.dylib", "alone.rlib"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &alone).unwrap();
+            let found = search.file(path, name.into(), OutputKind::Link).unwrap();
+            assert_eq!(
+                found.values,
+                BTreeSet::from(["TMPDIR".to_string(), "USER".to_string()]),
+                "{name}"
+            );
+        }
     }
 
     // covers: B-2

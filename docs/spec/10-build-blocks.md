@@ -945,7 +945,9 @@ that catches it, by compiling a reused block again and comparing. The reasons:
   `RUST_`, `OUT_DIR`, `HUSHRUN_`, by prefix). The shell's: `_`, `PWD` and `OLDPWD`, which name
   where a command started. A name that reads like a secret (`GITHUB_TOKEN`, `CI_JOB_TOKEN`) is
   searched whatever its system. A value that holds a root or a folder of the machine is left to those
-  rules. The values are looked for in the same pass over each output as the roots, and only
+  rules, and so is each place a value lies inside one of those folders or the toolchain's (the
+  folder macOS's `TMPDIR` names, above a store; a user's name, in the home folder): there it is
+  that folder, which its own reason reports, and only a place outside them counts. The values are looked for in the same pass over each output as the roots, and only
   the variables' names are recorded, in the description and the run's log, which counts the
   blocks held back and their variables; a value is never written anywhere. *Rests on:* a value
   a compile reads without telling rustc (a proc macro calling `std::env::var`) reaching the

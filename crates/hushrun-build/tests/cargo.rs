@@ -2057,7 +2057,10 @@ mod two_machines {
             session
         }
 
-        /// What this machine's cargo and rustup set: its homes, its toolchain by its own name.
+        /// What this machine's cargo and rustup set: its homes, its toolchain by its own name;
+        /// and a temporary folder above them and the store, as macOS's `TMPDIR` is above a
+        /// checkout or a store made under it. Its value is then part of every path an output
+        /// holds of those folders, which is those folders, not the variable (B-24).
         fn vars(&self) -> Vec<(OsString, OsString)> {
             let rustup = self.home.join(".rustup");
             let rustc = rustup
@@ -2070,6 +2073,7 @@ mod two_machines {
                 ("RUSTUP_HOME".into(), rustup.into()),
                 ("RUSTUP_TOOLCHAIN".into(), self.toolchain.clone().into()),
                 ("RUSTC".into(), rustc.into()),
+                ("TMPDIR".into(), self.root.clone().into()),
             ]
         }
 

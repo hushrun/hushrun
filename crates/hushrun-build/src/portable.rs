@@ -1051,7 +1051,8 @@ pub const OTHER_MIN_BYTES: usize = 8;
 /// with a value of [`SECRET_MIN_BYTES`] or more, or any variable that neither a detected CI
 /// system (`ci`) documents as its own, nor a build tool or the shell set, with a value of
 /// [`OTHER_MIN_BYTES`] or more. The caller leaves out values that hold a root or a folder of this
-/// machine, which the search already finds by their own rules.
+/// machine, which the search already finds by their own rules, and the search counts a value
+/// only where it lies outside those folders and the toolchain's.
 pub fn unkeyed_candidate(name: &str, value: &[u8], ci: &SetByCi) -> bool {
     if hushrun_core::secret_names::is_secret_name(name) {
         return value.len() >= SECRET_MIN_BYTES;
