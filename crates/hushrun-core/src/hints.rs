@@ -105,7 +105,7 @@ use std::fmt;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use sha2::{Digest as _, Sha256};
+use sha2_hw::{Digest as _, Sha256};
 use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
 
 use crate::digest::{Digest, to_hex};

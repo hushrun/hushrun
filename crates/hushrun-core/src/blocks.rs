@@ -35,7 +35,7 @@ use std::fmt;
 use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest as _, Sha256};
+use sha2_hw::{Digest as _, Sha256};
 
 /// The header a results lookup's answer carries, `on`, when the org shares build blocks.
 pub const SHARING_HEADER: &str = "hushrun-build";

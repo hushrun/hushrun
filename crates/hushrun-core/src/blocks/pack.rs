@@ -59,7 +59,7 @@ use std::rc::Rc;
 use ring::aead::{self, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use ring::{hkdf, hmac};
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
+use sha2_hw::{Digest as _, Sha256};
 
 use super::{Hex32, MOST_HINT_BYTES, MOST_PACK_BYTES, OutputFile, outputs_digest};
 

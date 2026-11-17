@@ -20,7 +20,7 @@ regex-automata.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+sha2-hw.workspace = true
 thiserror.workspace = true
 zlib-rs.workspace = true
 # \[B-27, B-28\] Sealing and packing a build block (`blocks::pack`): ring's HKDF, HMAC and
