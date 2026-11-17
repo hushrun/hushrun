@@ -3301,3 +3301,67 @@ fn a_go_block_built_here_goes_up_and_closes_as_go_1() {
         vec![Pair(address(&rust_key), address(&rust_key))]
     );
 }
+
+// covers: B-45
+#[test]
+fn the_go_open_goes_beside_the_checks_own_and_waits_for_nothing() {
+    let fake = FakeBuild::start();
+    fake.delay(route::OPEN, Duration::from_millis(1000));
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    let started = Instant::now();
+    relay
+        .begin_check(&m.session, None, Some("darwin_arm64".into()), &|_| None)
+        .unwrap();
+    until("the Go manifest", || {
+        matches!(relay.state().go_manifest, super::GoManifest::Got(_))
+    });
+    // One `open`'s delay, not two in a row.
+    assert!(
+        started.elapsed() < Duration::from_millis(1800),
+        "{:?}",
+        started.elapsed()
+    );
+    relay.end_check(&[]);
+}
+
+// covers: B-45
+#[test]
+fn the_go_manifest_names_only_archives_that_may_leave() {
+    let fake = FakeBuild::start();
+    let m = machine();
+    let relay = start(&fake, &m, |_| {});
+    relay
+        .begin_check(&m.session, None, Some("linux_amd64".into()), &|_| None)
+        .unwrap();
+    until("open", || answering(&relay));
+    let shared = Digest::of(b"shared");
+    let native = Digest::of(b"cgo");
+    let kept = hushrun_build::session::Entry {
+        go: Some(hushrun_build::session::GoEntry {
+            go_cache: false,
+            local: Some(hushrun_build::go::archive::Local::Native),
+        }),
+        ..go_entry(
+            native,
+            hushrun_build::model::Outcome::BuiltNotStored(
+                hushrun_build::model::NotStored::StoreSkipped,
+            ),
+        )
+    };
+    relay.end_check(&[
+        go_entry(shared, hushrun_build::model::Outcome::BuiltAndStored),
+        kept,
+    ]);
+    let close = fake
+        .closes()
+        .into_iter()
+        .find(|c| c.kind == "go/1")
+        .expect("a Go close");
+    assert_eq!(
+        close.manifest,
+        vec![Pair(go_address(&shared), go_address(&shared))]
+    );
+    // It was built, and counts so.
+    assert_eq!(close.counts.built, 2);
+}

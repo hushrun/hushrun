@@ -663,6 +663,22 @@ impl Relay {
         } else {
             let relay = self.clone();
             self.runtime.spawn(async move { relay.open(check).await });
+            // B-45: the check's Go manifest, asked beside the check's own `open`, not after it:
+            // the standard library's leaves, which Go asks for first, would miss meanwhile. A Go
+            // fetch serves nothing before the check's `open` says the run shares.
+            let go_platform = {
+                let mut state = self.state();
+                let platform = state.check.as_ref().and_then(|c| c.go.clone());
+                if platform.is_some() {
+                    state.go_manifest = GoManifest::Asking;
+                }
+                platform
+            };
+            if let Some(platform) = go_platform {
+                let relay = self.clone();
+                self.runtime
+                    .spawn(async move { relay.go_open(check, platform).await });
+            }
             let relay = self.clone();
             self.runtime.spawn(async move { relay.uploads().await });
         }
@@ -770,7 +786,9 @@ impl Relay {
                 Answer::Ok
             }
             Request::GoReport { key, problem } => {
-                self.report_problem(Kind::Go, key, problem).await;
+                // Answered once the block's record is read: the cache program then suspends the
+                // key and discards the block, and the report goes on behind.
+                self.report_problem_soon(Kind::Go, key, problem);
                 Answer::Ok
             }
         }
@@ -920,28 +938,10 @@ impl Relay {
         // C4: kept for the first wrapper that misses; a run that compiles nothing fetches
         // nothing.
         self.state().manifest = Some(manifest);
-        // B-45: the check's Go manifest, asked apart once the org said the run shares.
-        let go = {
-            let mut state = self.state();
-            let asked = state
-                .check
-                .as_ref()
-                .and_then(|c| c.go.clone().map(|platform| (c.check, platform)));
-            match asked {
-                Some(asked) if state.go_manifest == GoManifest::NotAsked => {
-                    state.go_manifest = GoManifest::Asking;
-                    Some(asked)
-                }
-                _ => None,
-            }
-        };
-        if let Some((check, platform)) = go {
-            self.go_open(check, platform).await;
-        }
     }
 
     /// B-45: `open` for the check's Go command, kind `go/1`, for its manifest alone: the policy
-    /// is the one the check's own `open` answered. A failure leaves no manifest, and so no Go
+    /// is the one the check's own `open` answers, sent at the same time. A failure leaves no manifest, and so no Go
     /// download, and changes nothing else.
     async fn go_open(&self, check: Option<Hex32>, platform: String) {
         let body = OpenRequest {
@@ -2283,24 +2283,45 @@ impl Relay {
     // --- reports -------------------------------------------------------------------------
 
     /// A wrapper found a downloaded block wrong: reported to the scope its record names.
-    async fn report_problem(self: Arc<Relay>, kind: Kind, key: Digest, problem: Problem) {
-        let Some(origin) = self.config.store.origin(&key) else {
+    /// [`Relay::report_problem`], with the scope read now and the report sent in the
+    /// background.
+    fn report_problem_soon(self: &Arc<Relay>, kind: Kind, key: Digest, problem: Problem) {
+        let Some(scope) = self.report_scope(&key) else {
             return;
         };
+        let relay = self.clone();
+        self.runtime.spawn(async move {
+            relay
+                .report(
+                    kind,
+                    Relay::address_in(kind, &key),
+                    &scope,
+                    wire_problem(problem),
+                )
+                .await;
+        });
+    }
+
+    /// The scope a report about the block `key` goes to, from its record.
+    fn report_scope(&self, key: &Digest) -> Option<String> {
+        let origin = self.config.store.origin(key)?;
         let repository = self.config.repository.clone().unwrap_or_default();
-        let Some(scope) = origin
+        origin
             .report_scope(&self.by.host, &self.by.org, &repository)
             .map(str::to_string)
-        else {
+    }
+
+    async fn report_problem(self: Arc<Relay>, kind: Kind, key: Digest, problem: Problem) {
+        let Some(scope) = self.report_scope(&key) else {
             return;
         };
-        let problem = match problem {
-            Problem::Differs => blocks::Problem::Differs,
-            Problem::Rejected => blocks::Problem::Rejected,
-            Problem::LinkDiffers => blocks::Problem::LinkDiffers,
-        };
-        self.report(kind, Relay::address_in(kind, &key), &scope, problem)
-            .await;
+        self.report(
+            kind,
+            Relay::address_in(kind, &key),
+            &scope,
+            wire_problem(problem),
+        )
+        .await;
     }
 
     async fn report(&self, kind: Kind, address: Hex32, scope: &str, problem: blocks::Problem) {
@@ -2531,8 +2552,10 @@ impl Relay {
         let mut manifest = Vec::new();
         let mut seen = HashSet::new();
         let mut counts = Counts::default();
+        // A Go archive kept on this machine (B-42) never goes up: no later prefetch looks it up.
+        let kept_here = |e: &Entry| e.go.as_ref().is_some_and(|go| go.local.is_some());
         for entry in entries.iter().filter(|e| e.kind() == kind) {
-            if let (Some(step), Some(key)) = (entry.step, entry.key) {
+            if let (Some(step), Some(key), false) = (entry.step, entry.key, kept_here(entry)) {
                 let pair = Pair(
                     Relay::address_in(kind, &step),
                     Relay::address_in(kind, &key),
@@ -2598,6 +2621,15 @@ impl Relay {
             manifest,
             counts,
         }
+    }
+}
+
+/// A wrapper's word for what was wrong with a block, as the protocol writes it.
+fn wire_problem(problem: Problem) -> blocks::Problem {
+    match problem {
+        Problem::Differs => blocks::Problem::Differs,
+        Problem::Rejected => blocks::Problem::Rejected,
+        Problem::LinkDiffers => blocks::Problem::LinkDiffers,
     }
 }
 
