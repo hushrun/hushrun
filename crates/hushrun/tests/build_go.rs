@@ -523,6 +523,344 @@ fn go_clean_cache_inside_hushrun_run_clears_what_the_program_kept() {
     assert_eq!(printed, vec!["1", "2"], "{stderr}");
 }
 
+/// Plain `go`, with no hushrun, through `sh -c SCRIPT` in the machine's checkout.
+fn plain(m: &Machine, script: &str) -> std::process::Output {
+    let mut cmd = Command::new("sh");
+    m.go_env(&mut cmd);
+    cmd.current_dir(&m.repo)
+        .args(["-c", script])
+        .output()
+        .unwrap()
+}
+
+/// B, served A's blocks once: two machines that share a store's worth of the runtime and `lib`.
+fn two_machines(dir: &Path, fake: &FakeBuild, files: &[(&str, &str)]) -> (Machine, Machine) {
+    let a = Machine::new(dir, "a", None, files);
+    let (code, _, stderr) = a.run(fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir, "b", Some(&a.repo), &[]);
+    let (code, _, stderr) = b.run(fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        go_line(&stderr).contains("from the shared store"),
+        "{stderr}"
+    );
+    (a, b)
+}
+
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// covers: B-42
+#[test]
+fn every_package_of_a_pure_go_command_is_reused_on_the_other_machine_runtime_too() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, &[]);
+    let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("stay on this machine"), "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
+    let (code, _, stderr) = b.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    // On macOS the runtime's header runs past 4096 bytes of `cgo_import_dynamic` lines.
+    let line = go_line(&stderr);
+    assert!(line.contains("from the shared store"), "{stderr}");
+    assert!(!line.contains("built"), "{stderr}");
+}
+
+// covers: B-44
+#[test]
+fn a_toolexec_build_in_gos_own_cache_reports_and_suspends_nothing() {
+    if !have_go() {
+        return;
+    }
+    // A step that compiles with other flags and passes `-V=full` through, so that Go's action
+    // ids are the same: as a coverage or obfuscation step would.
+    const TX: &str = "#!/bin/sh\ntool=$1; shift\ncase \"$(basename \"$tool\")\" in\n  compile)\n    for a in \"$@\"; do [ \"$a\" = \"-V=full\" ] && exec \"$tool\" \"$@\"; done\n    exec \"$tool\" -l \"$@\" ;;\nesac\nexec \"$tool\" \"$@\"\n";
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (_, b) = two_machines(dir.path(), &fake, &[]);
+    let tx = b.root.join("tx.sh");
+    executable(&tx, TX);
+    let out = plain(
+        &b,
+        &format!("go build -toolexec={} -o /dev/null ./cmd/app", tx.display()),
+    );
+    assert!(out.status.success(), "{out:?}");
+    let reports_before = fake.reports().len();
+    let (code, _, stderr) = b.run(
+        &fake,
+        "go build -o /dev/null ./cmd/app && go build -o /dev/null ./cmd/app",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(fake.reports().len(), reports_before, "{stderr}");
+    // Counted, apart from what the audit compares.
+    assert!(
+        stderr.contains("in Go's own cache with other bytes"),
+        "{stderr}"
+    );
+    // And B's blocks are still served once Go's own cache is gone: no key was suspended.
+    assert!(plain(&b, "go clean -cache").status.success());
+    let (code, _, stderr) = b.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    let line = go_line(&stderr);
+    assert!(
+        line.contains("reused") && !line.contains("built"),
+        "{stderr}"
+    );
+}
+
+// covers: B-42
+#[test]
+fn a_forged_archive_in_the_store_is_reported_suspended_and_compiled() {
+    use hushrun_build::go::archive;
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = two_machines(dir.path(), &fake, &[]);
+    let export_of = |m: &Machine| -> Vec<u8> {
+        let out = plain(m, "go list -export -f '{{.Export}}' ./lib");
+        assert!(out.status.success(), "{out:?}");
+        std::fs::read(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+    };
+    // `lib` with V = 2, built elsewhere, under the honest archive's build ID.
+    let z = Machine::new(
+        dir.path(),
+        "z",
+        None,
+        &[(
+            "lib/lib.go",
+            "package lib\n\nconst V = 2\n\nfunc F() int { return V * 1 }\n",
+        )],
+    );
+    let honest = export_of(&a);
+    let variant = export_of(&z);
+    let honest_id = archive::build_id(&honest).unwrap();
+    let variant_id = archive::build_id(&variant).unwrap();
+    assert_eq!(honest_id.len(), variant_id.len());
+    let mut forged = variant.clone();
+    let needle = variant_id.as_bytes();
+    let mut i = 0;
+    while i + needle.len() <= forged.len() {
+        if &forged[i..i + needle.len()] == needle {
+            forged[i..i + needle.len()].copy_from_slice(honest_id.as_bytes());
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    // In B's store in place of the lib it downloaded, with a record that matches.
+    fn files_named(dir: &Path, name: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if e.file_type().unwrap().is_dir() {
+                files_named(&p, name, out);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                out.push(p);
+            }
+        }
+    }
+    let mut archives = Vec::new();
+    files_named(&b.root.join("cache"), "archive", &mut archives);
+    let target = archives
+        .into_iter()
+        .find(|p| archive::build_id(&std::fs::read(p).unwrap()).as_deref() == Some(&honest_id))
+        .expect("B's store holds A's lib");
+    let old = std::fs::read(&target).unwrap();
+    let json = target.parent().unwrap().join("block.json");
+    let json = if json.exists() {
+        json
+    } else {
+        target
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("block.json")
+    };
+    let sha = |b: &[u8]| hushrun_core::Digest::of(b).hex();
+    let text = std::fs::read_to_string(&json).unwrap();
+    assert!(text.contains(&sha(&old)), "{text}");
+    let text = text.replace(&sha(&old), &sha(&forged)).replace(
+        &format!("\"size\":{}", old.len()),
+        &format!("\"size\":{}", forged.len()),
+    );
+    for p in [&target, &json] {
+        Command::new("chmod").arg("u+w").arg(p).status().unwrap();
+        Command::new("chmod")
+            .arg("u+w")
+            .arg(p.parent().unwrap())
+            .status()
+            .unwrap();
+    }
+    std::fs::write(&target, &forged).unwrap();
+    std::fs::write(&json, text).unwrap();
+    assert!(plain(&b, "go clean -cache").status.success());
+    let reports_before = fake.reports().len();
+    let (code, _, stderr) = b.run(&fake, "go build -o ../app ./cmd/app && ../app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.lines().any(|l| l.trim() == "1") && !stderr.lines().any(|l| l.trim() == "2"),
+        "{stderr}"
+    );
+    let reports: Vec<_> = fake.reports().into_iter().skip(reports_before).collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].kind, "go/1");
+    assert!(
+        matches!(reports[0].problem, hushrun_core::blocks::Problem::Rejected),
+        "{reports:?}"
+    );
+    // Suspended: with Go's own cache gone again, `lib` is compiled, not downloaded again.
+    assert!(plain(&b, "go clean -cache").status.success());
+    let (code, _, stderr) = b.run(&fake, "go build -o ../app ./cmd/app && ../app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(go_line(&stderr).contains("1 built"), "{stderr}");
+}
+
+// covers: B-41
+#[test]
+fn gos_own_cache_is_trimmed_inside_hushrun_run_as_plain_go_trims_it() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, &[]);
+    let plant = || -> PathBuf {
+        let shard = a.gocache().join("ff");
+        std::fs::create_dir_all(&shard).unwrap();
+        let old = shard.join(format!("{}-d", "f".repeat(64)));
+        std::fs::write(&old, b"old").unwrap();
+        // Ten days old, and no trim.txt: Go trims at the end of its next build.
+        let ten_days = std::time::SystemTime::now() - Duration::from_secs(10 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(ten_days)
+            .unwrap();
+        let _ = std::fs::remove_file(a.gocache().join("trim.txt"));
+        old
+    };
+    assert!(
+        plain(&a, "go build -o /dev/null ./cmd/app")
+            .status
+            .success()
+    );
+    let old = plant();
+    assert!(plain(&a, "go build -o /dev/null ./lib").status.success());
+    assert!(!old.exists(), "plain Go trims");
+    let old = plant();
+    let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./lib");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!old.exists(), "{stderr}");
+    let stamp = std::fs::read_to_string(a.gocache().join("trim.txt")).unwrap();
+    assert!(stamp.trim().parse::<u64>().is_ok(), "{stamp:?}");
+}
+
+// covers: B-39
+#[test]
+fn another_compiler_wrapper_leaves_go_sharing_on_and_only_rust_out() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let files = [(
+        "Cargo.toml",
+        "[package]\nname = \"m\"\nversion = \"0.1.0\"\n",
+    )];
+    let a = Machine::new(dir.path(), "a", None, &files);
+    let (code, _, stderr) = a.run(&fake, "go build -o /dev/null ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
+    let (code, stdout, stderr) = b.run_with(
+        &fake,
+        "printf '%s\\n' \"$RUSTC_WRAPPER\"; go build -o /dev/null ./cmd/app",
+        |cmd| {
+            cmd.env("RUSTC_WRAPPER", "sccache");
+        },
+    );
+    assert_eq!(code, 0, "{stderr}");
+    // The person's wrapper passes through, hushrun's stays out.
+    assert_eq!(stdout.trim(), "sccache");
+    assert!(
+        go_line(&stderr).contains("from the shared store"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr
+            .matches("Rust crates aren't reused in this run: another compiler wrapper is set")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
+
+// covers: B-40
+#[test]
+fn a_frozen_relay_costs_a_run_one_wait_not_one_per_go_command() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (a, _) = two_machines(dir.path(), &fake, &[]);
+    // A third machine, with nothing of its own yet: every package asks the relay.
+    let b = Machine::new(dir.path(), "c", Some(&a.repo), &[]);
+    let stamp = |name: &str| format!("date +%s > ../{name}");
+    let script = format!(
+        "sleep 3; {}; go build -o /dev/null ./cmd/app; {}; go build -o /dev/null ./lib; {}; \
+         go build -o /dev/null ./cmd/app; {}",
+        stamp("t0"),
+        stamp("t1"),
+        stamp("t2"),
+        stamp("t3"),
+    );
+    let mut cmd = b.hushrun(&fake);
+    cmd.args(["run", "build", "--force", "--", "sh", "-c", &script])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let child = cmd.spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    // Frozen, not gone: the relay is a thread of hushrun's own process.
+    let pid = child.id().to_string();
+    Command::new("kill").args(["-STOP", &pid]).status().unwrap();
+    let t3 = b.root.join("t3");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while !t3.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Command::new("kill").args(["-CONT", &pid]).status().unwrap();
+    let out = child.wait_with_output().unwrap();
+    let read = |n: &str| -> u64 {
+        std::fs::read_to_string(b.root.join(n))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(t3.exists(), "go hung with a frozen relay: {stderr}");
+    // The first command waits for the relay once; the run's later ones don't ask it.
+    let (t0, t1, t2, t3) = (read("t0"), read("t1"), read("t2"), read("t3"));
+    assert!(t1 - t0 < 60, "{}s: {stderr}", t1 - t0);
+    assert!(t2 - t1 < 10, "{}s: {stderr}", t2 - t1);
+    assert!(t3 - t2 < 10, "{}s: {stderr}", t3 - t2);
+}
+
 /// Not a check: what two machines save on a real module, for the record. `HUSHRUN_GO_MEASURE`
 /// names a module's folder (its dependencies already in the module cache `GOMODCACHE` names),
 /// `HUSHRUN_GO_MEASURE_BIN` the hushrun binary to measure (else this test's), and
