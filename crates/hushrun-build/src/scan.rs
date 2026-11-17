@@ -29,9 +29,20 @@ pub struct Found {
 /// that remain, in their first order.
 pub struct Needles {
     finders: Vec<Finder<'static>>,
+    /// For each needle, every other needle it is part of and where it sits in it:
+    /// [`Needles::not_within`].
+    within: Vec<Vec<Within>>,
     /// The length of the longest needle, so a chunk keeps enough of the one before it.
     longest: usize,
     chunk: usize,
+}
+
+/// A needle that is part of another: an occurrence of it `at` bytes into an occurrence of
+/// `outer` is that one's.
+#[derive(Debug, Clone, Copy)]
+struct Within {
+    outer: usize,
+    at: usize,
 }
 
 impl Needles {
@@ -44,15 +55,65 @@ impl Needles {
             }
         }
         let longest = kept.iter().map(Vec::len).max().unwrap_or(0);
-        let finders = kept
+        let finders: Vec<Finder<'static>> = kept
             .iter()
             .map(|needle| Finder::new(needle).into_owned())
             .collect();
         Needles {
+            within: vec![Vec::new(); finders.len()],
             finders,
             longest,
             chunk: CHUNK,
         }
+    }
+
+    /// Counts needle `inner` in [`Needles::all_in_file_hashed`] and [`Needles::all_in_bytes`]
+    /// only where it is not part of an occurrence of needle `outer`, wherever `inner` sits in
+    /// `outer`'s text: there it is `outer`, which the caller reports by its own rule. Nothing
+    /// changes when `outer`'s text doesn't hold `inner`'s. The first-hit searches
+    /// ([`Needles::in_bytes`], [`Needles::in_file`]) count every occurrence.
+    pub fn not_within(&mut self, inner: usize, outer: usize) {
+        if inner == outer {
+            return;
+        }
+        let (part, whole) = (self.finders[inner].needle(), self.finders[outer].needle());
+        if part.len() > whole.len() {
+            return;
+        }
+        for at in 0..=whole.len() - part.len() {
+            if &whole[at..at + part.len()] == part {
+                self.within[inner].push(Within { outer, at });
+            }
+        }
+    }
+
+    /// Whether the occurrence of needle `index` that starts at `start` in `bytes` lies inside
+    /// an occurrence of a needle it is part of, all of which is in `bytes`.
+    fn covered(&self, index: usize, bytes: &[u8], start: usize) -> bool {
+        self.within[index].iter().any(|w| {
+            let outer = self.finders[w.outer].needle();
+            start >= w.at
+                && start - w.at + outer.len() <= bytes.len()
+                && &bytes[start - w.at..start - w.at + outer.len()] == outer
+        })
+    }
+
+    /// Whether needle `index` occurs in `bytes`, starting in `from..to`, other than inside an
+    /// occurrence of a needle it is part of. Every start is looked at, overlapping ones too.
+    fn uncovered(&self, index: usize, bytes: &[u8], from: usize, to: usize) -> bool {
+        let finder = &self.finders[index];
+        let end = (to + finder.needle().len() - 1).min(bytes.len());
+        let mut at = from;
+        while at < end {
+            let Some(hit) = finder.find(&bytes[at..end]) else {
+                return false;
+            };
+            if !self.covered(index, bytes, at + hit) {
+                return true;
+            }
+            at += hit + 1;
+        }
+        false
     }
 
     /// The needles kept, in the order [`Found::needle`] counts them.
@@ -85,16 +146,50 @@ impl Needles {
     /// Every needle found anywhere in the file at `path`, as one flag per needle in the order
     /// [`Needles::needles`] gives them, with the SHA-256 and size of all its bytes, in one pass.
     /// Unlike [`Needles::in_file_hashed`] the search doesn't stop at the first hit: each needle
-    /// is looked for until it is found.
+    /// is looked for until it is found, a needle that is part of another only outside it
+    /// ([`Needles::not_within`]).
     pub fn all_in_file_hashed(&self, path: &Path) -> io::Result<(Vec<bool>, Digest, u64)> {
         let mut file = crate::regular::open(path)?;
         let mut hasher = Hasher::new();
         let keep = self.longest.saturating_sub(1);
+        // A needle that is part of another is judged at a start only with the bytes around it
+        // that an occurrence of the other could take: up to `keep` before and after. So a chunk
+        // keeps `keep` more bytes, and a start is judged once: in the first chunk that holds
+        // `keep` bytes after it, or at the end of the file.
+        let context = if self.within.iter().any(|w| !w.is_empty()) {
+            keep
+        } else {
+            0
+        };
         let chunk = self.chunk.max(1);
-        let mut buf = vec![0u8; keep + chunk];
+        let mut buf = vec![0u8; keep + context + chunk];
+        // Bytes of `buf` that hold file data, the file offset of `buf[0]`, and the offset up
+        // to which every start has been judged.
         let mut have = 0usize;
+        let mut base = 0u64;
+        let mut judged = 0u64;
         let mut size = 0u64;
         let mut found = vec![false; self.finders.len()];
+        let mut search = |buf: &[u8], base: u64, judged: &mut u64, end: bool| {
+            let have = buf.len() as u64;
+            let limit = if end {
+                base + have
+            } else {
+                (base + have).saturating_sub(keep as u64).max(*judged)
+            };
+            for (index, finder) in self.finders.iter().enumerate() {
+                if found[index] {
+                    continue;
+                }
+                found[index] = if self.within[index].is_empty() {
+                    finder.find(buf).is_some()
+                } else {
+                    let (from, to) = ((*judged - base) as usize, (limit - base) as usize);
+                    self.uncovered(index, buf, from, to)
+                };
+            }
+            *judged = limit;
+        };
         loop {
             let n = match file.read(&mut buf[have..have + chunk]) {
                 Ok(0) => break,
@@ -105,15 +200,13 @@ impl Needles {
             hasher.update(&buf[have..have + n]);
             size += n as u64;
             have += n;
-            for (index, finder) in self.finders.iter().enumerate() {
-                if !found[index] && finder.find(&buf[..have]).is_some() {
-                    found[index] = true;
-                }
-            }
-            let tail = keep.min(have);
+            search(&buf[..have], base, &mut judged, false);
+            let tail = (keep + context).min(have);
             buf.copy_within(have - tail..have, 0);
+            base += (have - tail) as u64;
             have = tail;
         }
+        search(&buf[..have], base, &mut judged, true);
         Ok((found, Digest::from_bytes(hasher.finish()), size))
     }
 
@@ -122,7 +215,14 @@ impl Needles {
     pub fn all_in_bytes(&self, bytes: &[u8]) -> Vec<bool> {
         self.finders
             .iter()
-            .map(|finder| finder.find(bytes).is_some())
+            .enumerate()
+            .map(|(index, finder)| {
+                if self.within[index].is_empty() {
+                    finder.find(bytes).is_some()
+                } else {
+                    self.uncovered(index, bytes, 0, bytes.len())
+                }
+            })
             .collect()
     }
 
@@ -208,7 +308,9 @@ impl Needles {
     /// A copy of the same needles, read `chunk` bytes at a time.
     #[cfg(test)]
     fn clone_with(&self, chunk: usize) -> Needles {
-        Needles::new(self.needles().map(<[u8]>::to_vec).collect()).with_chunk(chunk)
+        let mut copy = Needles::new(self.needles().map(<[u8]>::to_vec).collect()).with_chunk(chunk);
+        copy.within = self.within.clone();
+        copy
     }
 }
 
@@ -309,6 +411,72 @@ mod tests {
                 assert_eq!(size, bytes.len() as u64);
             }
         }
+    }
+
+    // covers: B-10, B-24
+    #[test]
+    fn a_needle_inside_another_counts_only_outside_it_wherever_the_chunks_fall() {
+        let dir = tempfile::tempdir().unwrap();
+        // As macOS resolves it: the inner needle is neither the outer's start nor its end.
+        let outer: &[u8] = b"/private/var/folders/xy/T/store/lib/rustlib";
+        let inner: &[u8] = b"/var/folders/xy/T/";
+        let mut n = needles(&[outer, inner]);
+        n.not_within(1, 0);
+        // A start judged at the wrong time, or with too few bytes around it, shows here: inside
+        // the outer needle at every offset around a chunk boundary, then the inner one alone.
+        for chunk in [1usize, 2, 3, 7, 8, 9, 16, 17, 18, 42, 43, 44, 64] {
+            let n = n.clone_with(chunk);
+            for at in 0..chunk * 2 + outer.len() + 2 {
+                let mut bytes = filler(at);
+                bytes.extend_from_slice(outer);
+                bytes.extend(filler(chunk + 3));
+                bytes.extend_from_slice(outer);
+                let path = write(dir.path(), "inside", &bytes);
+                let (found, sha, _) = n.all_in_file_hashed(&path).unwrap();
+                assert_eq!(found, [true, false], "chunk {chunk}, at {at}");
+                assert_eq!(n.all_in_bytes(&bytes), [true, false]);
+                assert_eq!(sha, Digest::of(&bytes));
+                // Cut short at either end, the outer needle no longer holds it.
+                let mut cut = filler(at);
+                cut.extend_from_slice(&outer[1..]);
+                cut.extend(filler(chunk + 3));
+                cut.extend_from_slice(&outer[..outer.len() - 1]);
+                cut.extend(filler(chunk + 3));
+                let path = write(dir.path(), "cut", &cut);
+                let (found, _, _) = n.all_in_file_hashed(&path).unwrap();
+                assert_eq!(found, [false, true], "chunk {chunk}, at {at}");
+                assert_eq!(n.all_in_bytes(&cut), [false, true]);
+                // On its own beside it, or overlapping it from before, it counts.
+                for alone in [b"/var/folders/xy/T/x".as_slice(), b"/var/folders/xy/T/T/"] {
+                    let mut bytes = filler(at);
+                    bytes.extend_from_slice(alone);
+                    bytes.extend(filler(3));
+                    bytes.extend_from_slice(outer);
+                    let path = write(dir.path(), "alone", &bytes);
+                    let (found, _, _) = n.all_in_file_hashed(&path).unwrap();
+                    assert_eq!(found, [true, true], "chunk {chunk}, at {at}");
+                    assert_eq!(n.all_in_bytes(&bytes), [true, true]);
+                }
+            }
+        }
+        // An occurrence inside the other that overlaps one outside it: the second still counts.
+        let mut n = needles(&[b"xabab", b"abab"]);
+        n.not_within(1, 0);
+        let bytes = b"xababab";
+        assert_eq!(n.all_in_bytes(bytes), [true, true]);
+        assert_eq!(n.all_in_bytes(b"xabab-xabab"), [true, false]);
+        for chunk in [1, 2, 3, 64] {
+            let path = write(dir.path(), "overlap", bytes);
+            assert_eq!(
+                n.clone_with(chunk).all_in_file_hashed(&path).unwrap().0,
+                [true, true]
+            );
+        }
+        // A needle that doesn't lie in the other is untouched; nor is one marked within itself.
+        let mut n = needles(&[b"/a/b", b"/c"]);
+        n.not_within(1, 0);
+        n.not_within(0, 0);
+        assert_eq!(n.all_in_bytes(b"/a/b/c"), [true, true]);
     }
 
     // covers: B-10
