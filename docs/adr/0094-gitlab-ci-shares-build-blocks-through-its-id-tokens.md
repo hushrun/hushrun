@@ -39,23 +39,42 @@ to look results up with lets `open` decide, as a run of several scopes does.
 
 **Only the ID token counts.** In GitLab CI a person's or an agent's token reads nothing of the
 shared store and uploads nothing. The backend can enforce this only for a request that says it
-comes from GitLab CI, so the CLI's relay asks with the job's ID token or not at all.
+comes from GitLab CI, so the CLI's relay asks with the job's ID token or not at all. "A GitLab
+job" is one function: GitLab as the provider, or GitLab's job variables (`CI_JOB_ID`,
+`CI_SERVER_URL`) beside the job's ID token or job token, whatever `HUSHRUN_PROVIDER` says, so a
+container a step starts, or a job that names another provider, keeps the rule.
 
-**The job's key.** The job's first run that shares makes an Ed25519 key and keeps it in one file
-under the system's temporary folder, named by the token's `job_id` and a digest of its `jti`,
-written whole at mode 0600 and hard-linked into place, so of two runs starting at once one wins
-and the other reads its key. Every later run reads the same file, because a second key withdraws
-the job on the backend. A file that isn't a plain file of this user's alone, or isn't this job's,
-is never read as the key nor replaced: that run shares nothing. Every build request, `open` first,
+**The job's key is derived, never stored.** The backend binds a job to the first key that opens
+it, and a request with another key withdraws the job: it deletes everything the job wrote, the
+blocks its earlier runs already closed included, and refuses its later requests. So every
+`hushrun run` of a job must have the same key, and nobody without the job's secrets may. The
+Ed25519 seed is HKDF-SHA256 (salt `hushrun.gitlab-job-key/v1`, input key material the job's
+`CI_JOB_TOKEN`, info `<job_id>\n<jti>` of the ID token). GitLab gives every step of a job the
+same `CI_JOB_TOKEN`, masks it, and stops taking it when the job ends; a copied ID token alone
+doesn't give the key. The first version kept a generated key in a file under the temporary
+folder. The review found an honest job withdrawing itself with it: a step that runs hushrun in a
+container of its own, a tool that exports its own `TMPDIR`, or a relative `TMPDIR` with another
+current folder each found no file, made a second key, and lost the whole job's uploads. Derived,
+the key is the same wherever the step runs, and the file, its permission checks and its sweep
+are gone. The backend needs only the public half to be the same for the job, which it is. With
+no `CI_JOB_TOKEN` the run shares nothing, reads included, and says why: every request of a GitLab
+job must carry the job's key, and any other key would withdraw the job, so there is no reading
+without it. The thief model is unchanged in kind: whoever holds both the ID token and
+`CI_JOB_TOKEN` (code inside the job) can sign as the job until its timeout, as on GitHub code in
+a job holds the job's credential. Every build request, `open` first,
 carries the public half and the key's signature over `hushrun_core::blocks::job_message`, added in
 the one function every build request goes through. The message, the header names and the new
 words of `open` live in `hushrun_core::blocks`, the wire types the backend pins, so the two sides
 share one definition.
 
 **Close after every run.** The backend serves what a GitLab job wrote as trusted only once that
-job closed a run with its key. Every `hushrun run` whose `open` answered sends `close`, whatever
-COMMAND did. No `begin` starts with less than 2 minutes left of the token: it couldn't be
-committed.
+job closed a run with its key. Every `hushrun run` whose `open` answered sends `close` when
+COMMAND ends, whatever its exit code. GitLab cancels and times out a job with SIGTERM, then kills
+it after a grace period, so while a GitLab job's COMMAND runs, a stop signal goes to COMMAND
+instead of ending hushrun; once COMMAND has ended, the run waits for no upload, sends `close`
+within 2 seconds and removes its store. A run killed outright sends nothing and has uploaded for
+nothing, the safe side. No `begin` starts with less than 2 minutes left of the token: it couldn't
+be committed.
 
 **A store of the run's own.** Without a job folder, a CI run's store is
 `hushrun-build-<CI_JOB_ID or process id>-<16 random hex>`, made exclusively at mode 0700, its lock
@@ -80,15 +99,17 @@ docs, not in a file init writes.
   and confirms none of the records the cache brought (B-6, B-31, fixed with
   [ADR 0079](0079-sharing-build-blocks-in-ci-and-sandboxes.md)'s release). A job that caches
   `target/` gains nothing from it for sharing.
-- Two steps of one job that see different temporary folders make two keys and withdraw their own
-  job. GitLab runs a job's script in one shell, so this takes a `TMPDIR` changed between steps.
-- A key file stays in a shell runner's `/tmp` until its token has been expired for an hour and
-  another run starts there.
+- Every step of a job signs with one key wherever it runs, as long as `HUSHRUN_ID_TOKEN` and
+  `CI_JOB_TOKEN` reach it: a container a step starts must be handed both (and `CI_JOB_ID`,
+  `CI_SERVER_URL`), or it shares nothing.
+- Nothing of the job's key is written anywhere; a shell runner's shared `/tmp` holds only the
+  run's own store while it lives.
 
 ## What only a real gitlab.com project can settle
 
 Whether an ordinary job's token carries the claims the backend requires, and their exact form
 (`ci_config_ref_uri`'s case, `job_source`); the token's lifetime in each kind of job; whether
-`/tmp` and `TMPDIR` stay the same across a job's script lines on each executor; whether a hosted
+`CI_JOB_TOKEN` reaches every script line as GitLab documents; the grace period between GitLab's
+SIGTERM and its kill on each executor; whether a hosted
 runner restores one job's cache into another's. The tests here run against the CLI's own fake of
 the contract.

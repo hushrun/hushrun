@@ -298,11 +298,16 @@ why. Keep `HUSHRUN_TOKEN` too: results are recorded with the agent token, and th
 lookup carries the ID token beside it, so a job of an org that doesn't share makes no other
 request.
 
-- Each `hushrun run` of a job signs its requests with a key the job's first run makes, kept in
-  the system's temporary folder for the job's later runs: don't change `TMPDIR` between a job's
-  script lines.
-- A job's trusted uploads count only once its `hushrun run` has finished and sent `close`: a job
-  cancelled in the middle of one has uploaded for nothing, which is the safe side.
+- Each `hushrun run` of a job signs its requests with a key made from the job's `CI_JOB_TOKEN`
+  and its ID token, the same in every script line. A step that runs hushrun in a container of its
+  own must hand it `HUSHRUN_ID_TOKEN`, `CI_JOB_TOKEN`, `CI_JOB_ID` and `CI_SERVER_URL`; without
+  `CI_JOB_TOKEN` it shares nothing and says why. A request with another key for the job (someone
+  else holding its ID token) withdraws the job: the backend deletes what it uploaded and refuses
+  its later runs.
+- A job's trusted uploads count only once its `hushrun run` has finished and sent `close`. When
+  GitLab cancels the job or it times out, hushrun passes GitLab's SIGTERM to COMMAND and closes
+  within 2 seconds; a job killed outright has uploaded for nothing, which is the safe side.
+- The audience must be the org's URL exactly: a trailing slash is another audience.
 - A `target/` folder restored from GitLab's cache is keyed by its content, so it proves nothing
   and gains nothing for sharing: with the shared store on, don't cache `target/`.
 - gitlab.com only: a self-managed instance's tokens are not taken.

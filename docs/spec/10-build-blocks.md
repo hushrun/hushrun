@@ -1382,17 +1382,22 @@ proxy's 403) counts as the backend's answer, and the fetch then serves nothing: 
 wrong block. A sandbox whose later phases have the network and no token gets a 401, and so
 nothing from its fetch, for the same reason.
 
-**B-48 GitLab CI, through its ID token.** In GitLab CI (`GITLAB_CI=true`) a job's credential for
-build blocks is its ID token, read from `HUSHRUN_ID_TOKEN` alone, which the job declares with
+**B-48 GitLab CI, through its ID token.** In a GitLab CI job a credential for build blocks is
+the job's ID token, read from `HUSHRUN_ID_TOKEN` alone, which the job declares with
 `id_tokens: {HUSHRUN_ID_TOKEN: {aud: <the org's URL>}}`, one string: hushrun asks GitLab for no
-other, and gitlab.com only (a self-managed instance's tokens are not taken). One function reads
-the variable (`gitlab_job::read`) and decides one of three things, which nothing else decides:
+other, and gitlab.com only (a self-managed instance's tokens are not taken). A run is a GitLab
+job's by one function (`gitlab_job::is_job`): GitLab as the provider (`GITLAB_CI`), or GitLab's
+job variables `CI_JOB_ID` and `CI_SERVER_URL` beside `HUSHRUN_ID_TOKEN` or `CI_JOB_TOKEN`,
+whatever `HUSHRUN_PROVIDER` says and whether or not `CI` is set (a container a step starts, handed
+the job's variables). Such a run is CI for build blocks (B-31). One function reads the variable
+(`gitlab_job::read`) and decides one of three things, which nothing else decides; the run keeps
+the answer in one place (`results::GitlabCi`, the credential its build requests carry):
 
 | `HUSHRUN_ID_TOKEN` | What the run does |
 |---|---|
 | unset or empty | shares nothing; where the results lookup says the org shares, says once `build reuse is off for this run: the job can't mint an ID token (declare `id_tokens: {HUSHRUN_ID_TOKEN: {aud: <URL>}}` in the job)` |
-| not a JWT, an issuer other than `https://gitlab.com` exactly, an audience that isn't one string equal to the backend's URL (an array that holds it is in another service's hands too), no `job_id` or `jti`, or expired | sent nowhere; shares nothing, and says why once, with how to declare it, whatever the org does: the job asked to share by declaring it |
-| gitlab.com's, for the backend's URL, not expired | the bearer of every build request (B-26) |
+| not a JWT, an issuer other than `https://gitlab.com` exactly, an audience that isn't one string equal to the backend's URL as the run names it, compared exactly as the backend compares it (a trailing slash is another audience; an array that holds it is in another service's hands too), no `job_id` or `jti`, expired, or no `CI_JOB_TOKEN` beside it (B-49) | sent nowhere; shares nothing, and says why once, with how to declare it, whatever the org does: the job asked to share by declaring it |
+| gitlab.com's, for the backend's URL, not expired, with `CI_JOB_TOKEN` | the bearer of every build request (B-26), signed with the job's key (B-49) |
 
 A usable token goes to no server but the one its audience names: a repository's files can name
 any backend, and a token sent elsewhere could be used at hushrun's until the job's timeout. It is
@@ -1403,32 +1408,36 @@ results take no GitLab ID token: the answer's `Hushrun-Build` is then CI's for t
 so a job of an org that doesn't share, or of a project nobody confirmed, makes no build request.
 A job with no token to look results up with lets `open` say whether the org shares, as B-25's run
 of several scopes does (`BuildAccess::open_decides`): one `open`, as silent as ever when the org
-doesn't. In GitLab CI a person's or an agent's token reads nothing of the shared store and
+doesn't. In a GitLab job a person's or an agent's token reads nothing of the shared store and
 uploads nothing: the relay's requests carry the job's ID token or none
 (`results::Backend::build_access`), which is the CLI's rule, since the backend can't tell where a
-token runs unless the request says so. The store is the run's own (B-31), and a `target/` folder
-restored from GitLab's cache is keyed by its content (B-6, B-31). `open`'s `untrusted` may also be
-`job`, `token`, `fork`, `source`, `unprotected`, `config` or `user`, each said in one line
-(`untrusted_words`). *Rests on:* the backend verifying the token (its signature by gitlab.com's
-keys, its issuer, its audience, its CI claims, its expiry by the backend's clock) and deciding
-what the job may write: this rule only decides whether to send it. *Breaks if:* the backend's
-URL as the run names it is not the audience the backend checks (a proxy in front of it, another
-spelling of the host): every job then says its audience is wrong.
+token runs unless the request says so. A container handed an agent token and none of GitLab's
+variables is a sandbox to hushrun as to the backend. The store is the run's own (B-31), and a
+`target/` folder restored from GitLab's cache is keyed by its content (B-6, B-31). `open`'s
+`untrusted` may also be `job`, `token`, `fork`, `source`, `unprotected`, `config` or `user`, each
+said in one line (`untrusted_words`). *Rests on:* the backend verifying the token (its signature
+by gitlab.com's keys, its issuer, its audience, its CI claims, its expiry by the backend's clock)
+and deciding what the job may write: this rule only decides whether to send it. *Breaks if:* the
+backend's URL as the run names it is not the audience the backend checks (a proxy in front of
+it, another spelling of the host): every job then says its audience is wrong.
 
 **B-49 A GitLab job proves it is the job.** A GitLab ID token works until the job's timeout, also
 after the job ended, so a copied one could write. A GitLab job's build requests are therefore
 signed with a key of the job's own, which its first `open` binds the job to on the backend; a
-request with another key withdraws the job (the backend's rule). The key is Ed25519, made by the
-job's first run that shares and kept for every later `hushrun run` of the job in one file under
-the system's temporary folder, `hushrun-job-<job_id>-<16 hex of the digest of the jti>.key`, named
-by the token's `job_id` and `jti` (`gitlab_job::JobKey::of`). Its states:
-
-| The file | Moved by | To |
-|---|---|---|
-| absent | the job's first run: a JSON with the key's PEM and the token's `exp`, written whole to a temporary file of mode 0600 and hard-linked into place, which fails if another run linked first; that run's key is then read | present |
-| present, a plain file of this user's, mode 0600, of this job | every later run: read, never replaced | used |
-| present otherwise (a link, another user's, readable by others, unreadable, another job's) | nothing: never read as the key, never replaced | the run shares nothing, with one line |
-| present, its token expired over an hour ago | any run's start, beside temporary files over an hour old (`gitlab_job::sweep`) | absent |
+request with another key withdraws the job, and the backend then deletes what the job wrote and
+refuses its later requests (its rule). So the key must be the same in every `hushrun run` of the
+job, whatever its temporary folder, current folder or container, and a key nobody else can make.
+It is **derived, never stored** (`gitlab_job::JobKey::of`): the Ed25519 seed is HKDF-SHA256 with
+the salt `hushrun.gitlab-job-key/v1`, the job's `CI_JOB_TOKEN` as input key material and
+`<job_id>\n<jti>` of the ID token as info. GitLab gives every step of a job the same
+`CI_JOB_TOKEN`, masks it in logs and stops taking it when the job ends; a copied ID token alone
+doesn't give the key. A file under the temporary folder (the first design) followed `TMPDIR` and
+the container, so a step in a container of its own, or a tool that exported its own `TMPDIR`,
+made a second key and withdrew its own job, its first runs' uploads with it. With no
+`CI_JOB_TOKEN` (a container that wasn't handed it) the run shares nothing and says why: every
+request of a GitLab job, a read included, must carry the job's key, and any other key would
+withdraw the job, so there is no reading without it. The backend needs only the public half to
+be the same in every request of the job.
 
 Every build request, `open` first, carries `Hushrun-Job-Key`, the public half as a machine's is
 written (`ed25519:<base64>`), and `Hushrun-Job-Signature`, standard base64 of its signature over
@@ -1437,16 +1446,21 @@ of the body, lowercase hex>\n`, `<path>` `/o/<org>/<route>` (`/o/acme/v0/build/o
 the token's `job_id`. Both are added in the one place every build request is sent
 (`Client::post_bytes`), so no request goes unsigned. What a GitLab job writes as trusted is served
 only once the job has closed a run with its key, so every `hushrun run` whose `open` answered
-sends `close` at its end, whatever COMMAND did (B-29's end, `BuildRun::finish`); a run killed
-before then has uploaded for nothing, which is the safe side. No `begin` starts with less than 2
-minutes left of the token, since nothing can be committed after its `exp`: the markers wait,
-untouched, and the run says once `build: no more uploads this run: the job's ID token expires in
-less than 2 minutes`. A refusal of the job (`job_withdrawn`) stops sharing for the run and is said
-in plain words. *Rests on:* no one but the job holding both its token and this user's temporary
-folder: a shell runner shares that folder between jobs of one user, and such a job could read the
-key, though it would still need this job's token; hosted runners give each job its own machine.
-*Breaks if:* two runs of one job see different temporary folders (`TMPDIR` changed between
-steps, a container per step): the second key withdraws the job, and nothing it wrote is served.
+sends `close` at its end: when COMMAND ends, whatever its exit code, and when hushrun is asked to
+stop (`build_session::run_command`). GitLab cancels and times out a job with SIGTERM, then kills it
+after a grace period: while COMMAND runs, a stop signal (SIGTERM, SIGINT, SIGHUP) goes to COMMAND,
+once, instead of ending hushrun; when COMMAND has ended, the run waits for no upload, sends `close`
+within 2 seconds (`upload::STOPPED_CLOSE`), and removes its store. The signal goes to COMMAND's
+process, not to processes COMMAND started that outlive it. A run killed outright (SIGKILL, a
+machine that went) sends no `close` and has uploaded for nothing, which is the safe side; its
+store is a dead run's (B-31). No `begin` starts with less than 2 minutes left of the token, since
+nothing can be committed after its `exp`: the markers wait, untouched, and the run says once
+`build: no more uploads this run: the job's ID token expires in less than 2 minutes`. A refusal
+of the job (`job_withdrawn`) stops sharing and is said in plain words, with that the job's later
+runs are refused too. *Rests on:* nobody but the job holding both its ID token and its
+`CI_JOB_TOKEN`; HKDF-SHA256 and Ed25519. *Breaks if:* something in the job sends both tokens out
+(a dependency's build script reading the environment): it can then sign as the job until the
+token's timeout, as on GitHub code in the job holds the job's credential.
 
 **B-32 Where a block came from.** Beside each block the store keeps a record, `origin.json`,
 written before the block is published and rewritten whole under the block's lock when it

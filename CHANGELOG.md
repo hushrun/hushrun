@@ -16,17 +16,19 @@ shared store as its project's CI, and an agent token in GitLab CI reads nothing 
 - **GitLab CI's ID token for build blocks** (B-48): in GitLab CI the relay's requests carry the
   job's ID token from `HUSHRUN_ID_TOKEN`, and nothing else. It is sent only to the backend its
   audience names, only while it hasn't expired, and only when it is gitlab.com's and its audience
-  is one string; otherwise the run says why in one line, with the `id_tokens:` block to declare,
+  is exactly one string equal to the backend's URL; otherwise the run says why in one line, with the `id_tokens:` block to declare,
   and shares nothing. The results lookup carries it in `Hushrun-Id-Token` beside the agent token,
   so a job of an org that doesn't share, or of a project nobody confirmed, makes no build
   request; a job with no agent token asks `open` once instead.
-- **A GitLab job proves it is the job** (B-49): its first run that shares makes an Ed25519 key,
-  kept for every later run of the job in `hushrun-job-<job id>-<digest>.key` under the system's
-  temporary folder (mode 0600, written whole, never replaced), and every build request carries
-  `Hushrun-Job-Key` and `Hushrun-Job-Signature`. Every run whose `open` answered sends `close`,
-  whatever COMMAND did, since the backend serves a GitLab job's trusted blocks only after it.
-  No upload begins with less than 2 minutes left of the token. A withdrawn job is said in plain
-  words.
+- **A GitLab job proves it is the job** (B-49): every build request carries `Hushrun-Job-Key`
+  and `Hushrun-Job-Signature`, by an Ed25519 key derived from the job's `CI_JOB_TOKEN` (HKDF-SHA256,
+  bound to the ID token's `job_id` and `jti`) and stored nowhere, so every step of the job has the
+  same key wherever it runs; without `CI_JOB_TOKEN` the run shares nothing and says why. Every run
+  whose `open` answered sends `close` when COMMAND ends, whatever its exit code, since the backend
+  serves a GitLab job's trusted blocks only after it; a stop signal (GitLab's SIGTERM on cancel or
+  timeout) goes to COMMAND, and the run then closes within 2 seconds and removes its store. No
+  upload begins with less than 2 minutes left of the token. A withdrawn job is said in plain
+  words, with that its later runs are refused too.
 - Contract: `hushrun_core::blocks` gains `JOB_KEY_HEADER`, `JOB_SIGNATURE_HEADER`,
   `ID_TOKEN_HEADER` and `job_message`, and `open`'s `untrusted` the words `job`, `token`, `fork`,
   `source`, `unprotected`, `config` and `user`, each said in one line.
