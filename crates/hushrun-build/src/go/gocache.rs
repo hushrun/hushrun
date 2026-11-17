@@ -1,7 +1,9 @@
 //! The person's own Go build cache, `GOCACHE`, read and written in Go's own format (F3, F9):
-//! so that plain `go` and `go` inside `hushrun run` share one cache, `go clean -cache` and Go's
-//! own trimming apply to everything the program keeps here, and the first run inside
-//! `hushrun run` is as warm as plain Go.
+//! so that plain `go` and `go` inside `hushrun run` share one cache, `go clean -cache` clears
+//! everything the program keeps here, and the first run inside `hushrun run` is as warm as plain
+//! Go. Go trims its cache only when its own disk cache closes, which never happens while a cache
+//! program serves it, so the program trims at `close` as Go would ([`GoCache::trim`]): the same
+//! `trim.txt`, the same day between trims and the same five days unused.
 //!
 //! The format is `cmd/go/internal/cache`'s `DiskCache` (Go 1.10 to 1.27): for an action id `A`,
 //! `<GOCACHE>/<first byte of A, hex>/<A hex>-a` holds one line,
@@ -24,6 +26,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ENTRY: usize = 2 + 1 + 64 + 1 + 64 + 1 + 20 + 1 + 20 + 1;
 /// Go sets a used file's date at most once in this long (`mtimeInterval`).
 const MTIME_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Go trims at most once in this long (`trimInterval`).
+const TRIM_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Go removes an entry unused this long (`trimLimit`), and an hour more for its dates' slack.
+const TRIM_LIMIT: Duration = Duration::from_secs(5 * 24 * 60 * 60);
+/// The file the time of the last trim is kept in, seconds since the epoch, as Go writes it.
+const TRIM_FILE: &str = "trim.txt";
 
 /// An entry Go's cache holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +176,83 @@ impl GoCache {
     }
 }
 
+impl GoCache {
+    /// Trims the cache as Go's `DiskCache.Trim` does: unless `trim.txt` names a trim less than a
+    /// day before `now` (and not more than an hour after it), it writes `now` there, under the
+    /// file's lock as Go's `lockedfile` takes it, and removes every `-a` and `-d` entry of the
+    /// 256 shards last used more than five days and an hour before. Whether it trimmed.
+    pub fn trim(&self, now: SystemTime) -> bool {
+        let path = self.dir.join(TRIM_FILE);
+        let skip = |text: &str| {
+            let Ok(secs) = text.trim().parse::<i64>() else {
+                return false;
+            };
+            let now_secs = now
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let since = now_secs - secs;
+            since < TRIM_INTERVAL.as_secs() as i64 && since > -(MTIME_INTERVAL.as_secs() as i64)
+        };
+        // The common case, read without the exclusive lock, as Go reads it.
+        if fs::read_to_string(&path).is_ok_and(|text| skip(&text)) {
+            return false;
+        }
+        let Ok(mut file) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+        else {
+            return false;
+        };
+        if file.lock().is_err() {
+            return false;
+        }
+        let mut text = String::new();
+        let _ = file.read_to_string(&mut text);
+        if skip(&text) {
+            return false;
+        }
+        let stamp = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let written = file
+            .set_len(0)
+            .and_then(|()| io::Seek::seek(&mut file, io::SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(stamp.to_string().as_bytes()));
+        let _ = file.unlock();
+        if written.is_err() {
+            return false;
+        }
+        let Some(cutoff) = now.checked_sub(TRIM_LIMIT + MTIME_INTERVAL) else {
+            return true;
+        };
+        for shard in 0..256 {
+            let dir = self.dir.join(format!("{shard:02x}"));
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let names: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            for entry in names {
+                let name = entry.file_name().map(|n| n.to_string_lossy().into_owned());
+                if !name.is_some_and(|n| n.ends_with("-a") || n.ends_with("-d")) {
+                    continue;
+                }
+                let Ok(meta) = fs::metadata(&entry) else {
+                    continue;
+                };
+                if meta.modified().is_ok_and(|m| m < cutoff) {
+                    let _ = if meta.is_dir() {
+                        fs::remove_dir_all(&entry)
+                    } else {
+                        fs::remove_file(&entry)
+                    };
+                }
+            }
+        }
+        true
+    }
+}
+
 /// Moves a file's date to `now` when it is older than Go's interval, as `markUsed` does. A file
 /// that can't be touched is left as it is.
 fn mark_used(path: &Path, now: SystemTime) {
@@ -272,6 +357,45 @@ mod tests {
         assert_eq!(cache.get(&other, now), None);
         // No entry at all.
         assert_eq!(cache.get(&[3u8; 32], now), None);
+    }
+
+    // covers: B-41
+    #[test]
+    fn the_cache_is_trimmed_as_go_trims_it_once_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = GoCache::new(dir.path());
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let day = Duration::from_secs(86_400);
+        let old_id = [0x10u8; 32];
+        let new_id = [0x20u8; 32];
+        let old = cache
+            .put(&old_id, &[0x11; 32], b"old", now - day * 10)
+            .unwrap();
+        let fresh = cache.put(&new_id, &[0x21; 32], b"new", now - day).unwrap();
+        // Not an entry: left alone whatever its age.
+        let other = dir.path().join("10").join("README");
+        fs::write(&other, b"x").unwrap();
+        File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(now - day * 30)
+            .unwrap();
+        assert!(cache.trim(now));
+        assert!(!old.exists() && !cache.file(&old_id, "a").exists());
+        assert!(fresh.exists() && cache.file(&new_id, "a").exists());
+        assert!(other.exists());
+        // Go's own file and format: the time in seconds.
+        assert_eq!(
+            fs::read_to_string(dir.path().join(TRIM_FILE)).unwrap(),
+            "1800000000"
+        );
+        // Within a day, not again; a day later, again.
+        assert!(!cache.trim(now + day / 2));
+        assert!(cache.trim(now + day * 2));
+        // A file Go can't read is trimmed over.
+        fs::write(dir.path().join(TRIM_FILE), b"nonsense").unwrap();
+        assert!(cache.trim(now + day * 2));
     }
 
     // covers: B-41
