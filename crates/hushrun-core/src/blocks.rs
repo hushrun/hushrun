@@ -216,6 +216,11 @@ impl<'de> Deserialize<'de> for Base64 {
     }
 }
 
+/// Standard base64 (RFC 4648 §4, padded), decoded: what [`Base64`] reads, from bytes.
+pub fn decode_base64(text: &[u8]) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
+}
+
 /// What a block is, as the server keeps it. A word this version doesn't know reads as
 /// [`Class::Unknown`]: a server refuses only that block (`unsupported`), and a client reads the rest
 /// of the answer.

@@ -78,6 +78,9 @@ pub struct Session {
     more: Vec<String>,
     /// The Go cache program COMMAND gets (B-39), when the run is a Go module's and shares.
     go: Option<crate::go::probe::Go>,
+    /// Another compiler wrapper is set (B-2): COMMAND gets no `RUSTC_WRAPPER` of hushrun's, and
+    /// the session serves Go alone.
+    rustc_left_out: bool,
 }
 
 /// What the wrapper reads at each compiler call: written once by [`begin`], so every compile of
@@ -462,6 +465,10 @@ pub struct GoCounts {
     pub compared: u64,
     /// Of those, the ones whose bytes differed.
     pub differed: u64,
+    /// Served from Go's own cache with other bytes than hushrun's block of the same key: only
+    /// counted, since Go's cache is no witness against a block (it keeps an altered command's
+    /// builds under plain ids).
+    pub cache_differed: u64,
     /// Milliseconds reuse from hushrun's store saved.
     pub saved_ms: u64,
     /// Compiled archives kept on this machine, by reason, in the order first seen.
@@ -488,7 +495,11 @@ impl GoCounts {
                 }
             }
         }
-        self.differed += u64::from(entry.differed);
+        if go.go_cache {
+            self.cache_differed += u64::from(entry.differed);
+        } else {
+            self.differed += u64::from(entry.differed);
+        }
         if let Some(local) = go.local
             && local != crate::go::archive::Local::NotSharing
         {
@@ -542,6 +553,12 @@ impl GoCounts {
             first.push_str(&format!(
                 ", {} differed from their blocks and are not reused",
                 self.differed
+            ));
+        }
+        if self.cache_differed > 0 {
+            first.push_str(&format!(
+                ", {} in Go's own cache with other bytes than hushrun's blocks (not reported)",
+                self.cache_differed
             ));
         }
         let mut lines = vec![first];
@@ -900,6 +917,7 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         rebuilt: Vec::new(),
         more: Vec::new(),
         go: None,
+        rustc_left_out: false,
     })
 }
 
@@ -965,10 +983,13 @@ impl Session {
     /// cache program when [`Session::set_go`] gave one and the run shares (B-39): with sharing
     /// off, the program would only do what Go's own cache does.
     pub fn env(&self) -> Vec<(OsString, OsString)> {
-        let mut env = vec![
-            (RUSTC_WRAPPER.into(), self.link.clone().into_os_string()),
-            (SESSION.into(), self.current.folder.clone().into_os_string()),
-        ];
+        let mut env = vec![(SESSION.into(), self.current.folder.clone().into_os_string())];
+        if !self.rustc_left_out {
+            env.insert(
+                0,
+                (RUSTC_WRAPPER.into(), self.link.clone().into_os_string()),
+            );
+        }
         if let Some(go) = &self.go
             && self.current.share != Shared::Off
         {
@@ -998,6 +1019,17 @@ impl Session {
         symlink(&exe, &temp)?;
         std::fs::rename(&temp, &link)?;
         Ok(link)
+    }
+
+    /// Leaves hushrun's `RUSTC_WRAPPER` out of COMMAND's environment, for a run whose own
+    /// wrapper (sccache) is set: the session then serves Go's cache program alone (B-2, B-39).
+    pub fn leave_out_rustc(&mut self) {
+        self.rustc_left_out = true;
+    }
+
+    /// Whether hushrun's `RUSTC_WRAPPER` is left out ([`Session::leave_out_rustc`]).
+    pub fn rustc_left_out(&self) -> bool {
+        self.rustc_left_out
     }
 
     /// Gives COMMAND Go's cache program (B-39), as [`crate::go::probe::probe`] decided it.

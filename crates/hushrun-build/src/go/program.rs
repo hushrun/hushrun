@@ -65,6 +65,9 @@ const BODIES: &str = "go-bodies";
 /// The session's folder of keys audited in the run: one empty file each, made with `create_new`
 /// so that two `go` commands of one run never audit one key twice (B-44).
 const AUDITED: &str = "go-audited";
+/// The session's file that says the run's relay failed or timed out once (F10): no `go`
+/// command of the run asks it anything after.
+const RELAY_DOWN: &str = "go-relay-down";
 /// The only file of a Go block in the store.
 pub const ARCHIVE: &str = "archive";
 /// The schema of a Go block's description.
@@ -129,6 +132,43 @@ struct Slot {
     fallback: Fallback,
 }
 
+/// The program's output, which a program that failed to start hands to the one that replaces it.
+#[derive(Clone)]
+struct Shared(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        lock(&self.0).write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        lock(&self.0).flush()
+    }
+}
+
+/// What reading a request led to.
+enum Next {
+    Go,
+    Closed,
+    End,
+}
+
+/// What serving a block from the store records, once Go has that answer (only then).
+struct Served {
+    key: Digest,
+    action: [u8; 32],
+    first_download: bool,
+    cost: u64,
+    downloaded_now: bool,
+    at: SystemTime,
+}
+
+/// A put's body: Go writes it as a JSON string of standard base64, which needs no unescaping;
+/// decoded straight from the line's bytes.
+fn decode_body(line: &[u8]) -> Option<Vec<u8>> {
+    let inner = line.strip_prefix(b"\"")?.strip_suffix(b"\"")?;
+    hushrun_core::blocks::decode_base64(inner)
+}
+
 /// An audit the program started by answering a miss (B-44): what Go's compile is compared with.
 #[derive(Clone)]
 struct Audit {
@@ -142,6 +182,8 @@ struct Audit {
 struct Waits {
     budget: Duration,
     relay: Duration,
+    /// A question the relay answers from what it holds.
+    quick: Duration,
 }
 
 /// Faults a test injects into handlers (never in a release build).
@@ -152,6 +194,8 @@ struct Faults {
     slow_get: Option<u64>,
     panic_get: Option<u64>,
     panic_put: Option<u64>,
+    panic_read: Option<u64>,
+    reads: AtomicU64,
     gets: AtomicU64,
     puts: AtomicU64,
 }
@@ -280,7 +324,32 @@ pub(crate) fn serve_with(
     env: HashMap<String, OsString>,
     parent: Parent,
 ) {
-    let program = Arc::new(Program::new(output, env, parent));
+    // A panic while starting (a session's file that can't be read as expected, say) must not
+    // end the process before `close`, which fails the whole `go` command: the program starts
+    // again with no session, Go's own cache only (B-47).
+    let parent = Arc::new(parent);
+    let output = Shared(Arc::new(Mutex::new(output)));
+    let started = {
+        let (env, parent, output) = (env.clone(), parent.clone(), output.clone());
+        catch_unwind(AssertUnwindSafe(move || {
+            Program::new(Box::new(output), env, Box::new(move |go| parent(go)))
+        }))
+    };
+    let program = match started {
+        Ok(program) => program,
+        Err(_) => {
+            let bare: HashMap<String, OsString> = env
+                .into_iter()
+                .filter(|(name, _)| name == "GOCACHE" || name == "GOVERSION")
+                .collect();
+            Program::new(
+                Box::new(output),
+                bare,
+                Box::new(|_| Err(Altered::Unreadable)),
+            )
+        }
+    };
+    let program = Arc::new(program);
     program.write(&json!({"ID": 0, "KnownCommands": ["get", "put", "close"]}));
     program.start_background();
     let watchdog = {
@@ -300,17 +369,24 @@ impl Program {
         parent: Parent,
     ) -> Program {
         let get = |name: &str| env.get(name).cloned().filter(|v| !v.is_empty());
+        #[cfg(debug_assertions)]
+        if get(FAULT_VAR).is_some_and(|f| f.to_string_lossy().contains("panic-start")) {
+            panic!("the test's panic: starting");
+        }
         let known = get("GOVERSION")
             .and_then(|v| v.into_string().ok())
             .is_some_and(|v| command::version_known(&v));
+        // Go's disk format is the same from Go 1.10 to 1.27: a `go` whose version the run's
+        // probe didn't see (another toolchain line, `GOTOOLCHAIN` set in COMMAND) still reads
+        // and writes Go's own cache, and only hushrun's store is left out (B-47).
         let gocache = get("GOCACHE")
             .map(PathBuf::from)
-            .filter(|dir| known && dir.is_absolute() && dir.is_dir())
+            .filter(|dir| dir.is_absolute() && dir.is_dir())
             .map(|dir| GoCache::new(&dir));
         // B-47: a session that can't be read, or none, is no session: Go's own cache only.
         let lookup = |name: &str| get(name);
         let current = crate::session::current(&lookup).filter(|c| c.mode != Mode::Off);
-        let current = current.filter(|_| gocache.is_some());
+        let current = current.filter(|_| gocache.is_some() && known);
         let toolchain = Toolchain::from_env(&lookup);
         static PROGRAMS: AtomicU64 = AtomicU64::new(0);
         let temp = std::env::temp_dir().join(format!(
@@ -323,6 +399,7 @@ impl Program {
         let mut waits = Waits {
             budget: BUDGET,
             relay: RELAY_WAIT,
+            quick: QUICK_WAIT,
         };
         #[allow(unused_mut)]
         let mut faults = Faults::default();
@@ -334,6 +411,7 @@ impl Program {
             {
                 waits.budget = Duration::from_millis(ms);
                 waits.relay = Duration::from_millis(ms / 2);
+                waits.quick = Duration::from_millis(ms / 4);
             }
             if let Some(text) = get(FAULT_VAR).and_then(|v| v.into_string().ok()) {
                 for part in text.split(',') {
@@ -346,6 +424,7 @@ impl Program {
                         "slow-get" => faults.slow_get = n,
                         "panic-get" => faults.panic_get = n,
                         "panic-put" => faults.panic_put = n,
+                        "panic-read" => faults.panic_read = n,
                         _ => {}
                     }
                 }
@@ -390,31 +469,33 @@ impl Program {
 
     /// Answers `slot` with `value`, when nobody did: the one compare-and-set every answer goes
     /// through (rule 1).
-    fn answer(&self, slot: &Slot, mut value: Value) {
+    /// Whether this answer was the one written: a handler acts on what it served only then.
+    fn answer(&self, slot: &Slot, mut value: Value) -> bool {
         if slot
             .answered
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return;
+            return false;
         }
         value["ID"] = json!(slot.id);
         self.write(&value);
         lock(&self.open).remove(&slot.id);
+        true
     }
 
     /// The answer a handler that can't give its own leaves: a miss, or for a put the body in a
     /// file of the program's own (an error, which Go ignores but where it needs the file at once,
     /// if even that file can't be written).
     fn fall_back(&self, slot: &Slot) {
-        match &slot.fallback {
+        let _ = match &slot.fallback {
             Fallback::Miss => self.answer(slot, json!({"Miss": true})),
             Fallback::Close => self.answer(slot, json!({})),
             Fallback::Put { output, body } => match self.write_temp(output, body) {
                 Ok(path) => self.answer(slot, json!({"DiskPath": path})),
                 Err(err) => self.answer(slot, json!({"Err": err.to_string()})),
             },
-        }
+        };
     }
 
     /// The body in the program's own folder, named by its SHA-256.
@@ -487,6 +568,41 @@ impl Program {
             let Ok(wire) = serde_json::from_slice::<Wire>(trim(&line)) else {
                 continue;
             };
+            // A panic here, on the reading thread, must not end the process: the request is
+            // answered with what a failed handler leaves, and reading goes on (rule 1).
+            let id = wire.id;
+            let read = catch_unwind(AssertUnwindSafe(|| self.request(wire, &mut input)));
+            match read {
+                Ok(Next::Go) => {}
+                Ok(Next::Closed) => return,
+                Ok(Next::End) => break,
+                Err(_) => {
+                    let slot = Slot {
+                        id,
+                        answered: AtomicBool::new(false),
+                        since: Instant::now(),
+                        fallback: Fallback::Miss,
+                    };
+                    let _ = self.answer(&slot, json!({"Err": "the program failed to read it"}));
+                }
+            }
+        }
+        // The end of the input with no `close`: Go is gone, or closed stdin.
+        self.drain();
+        self.done.store(true, Ordering::Release);
+        let _ = std::fs::remove_dir_all(&self.temp);
+    }
+
+    /// One request read, its body too, and handed to a handler.
+    fn request(self: &Arc<Program>, wire: Wire, input: &mut impl BufRead) -> Next {
+        #[cfg(debug_assertions)]
+        {
+            let n = self.faults.reads.fetch_add(1, Ordering::AcqRel) + 1;
+            if self.faults.panic_read == Some(n) {
+                panic!("the test's panic: reading");
+            }
+        }
+        {
             let mut body = Vec::new();
             if wire.command == "put" && wire.body_size > 0 {
                 // Go writes each request, then a blank line, then the body's line.
@@ -501,11 +617,11 @@ impl Program {
                     }
                 }
                 if text.is_empty() {
-                    break;
+                    return Next::End;
                 }
-                match serde_json::from_slice::<Base64>(trim(&text)) {
-                    Ok(decoded) => body = decoded.0,
-                    Err(_) => body.clear(),
+                match decode_body(trim(&text)) {
+                    Some(decoded) => body = decoded,
+                    None => body.clear(),
                 }
             }
             let asked = match wire.command.as_str() {
@@ -543,7 +659,7 @@ impl Program {
             });
             if closing {
                 self.close(&slot);
-                return;
+                return Next::Closed;
             }
             lock(&self.open).insert(slot.id, slot.clone());
             self.busy.fetch_add(1, Ordering::AcqRel);
@@ -565,10 +681,7 @@ impl Program {
                 self.busy.fetch_sub(1, Ordering::AcqRel);
             }
         }
-        // The end of the input with no `close`: Go is gone, or closed stdin.
-        self.drain();
-        self.done.store(true, Ordering::Release);
-        let _ = std::fs::remove_dir_all(&self.temp);
+        Next::Go
     }
 
     /// Waits for the handlers still running, at most the budget: the watchdog answers what they
@@ -587,7 +700,12 @@ impl Program {
         for open in lock(&self.open).values().cloned().collect::<Vec<_>>() {
             self.fall_back(&open);
         }
-        self.answer(slot, json!({}));
+        // B-41: Go trims its cache only when its own disk cache closes, which a cache program
+        // stands in for: trimmed here, as Go would, at most once a day.
+        if let Some(gocache) = &self.gocache {
+            let _ = catch_unwind(AssertUnwindSafe(|| gocache.trim(now())));
+        }
+        let _ = self.answer(slot, json!({}));
         self.done.store(true, Ordering::Release);
         let _ = std::fs::remove_dir_all(&self.temp);
     }
@@ -611,8 +729,13 @@ impl Program {
         match asked {
             Asked::Get { action } => {
                 self.fault_get();
-                let value = self.get(&action);
-                self.answer(slot, value);
+                let (value, served) = self.get(&action);
+                // What serving from the store records happens only when Go got that answer.
+                if self.answer(slot, value)
+                    && let Some(served) = served
+                {
+                    self.served(served);
+                }
             }
             Asked::Put {
                 action,
@@ -622,8 +745,12 @@ impl Program {
                 self.fault_put();
                 self.put(slot, &action, &output, &body);
             }
-            Asked::Bad(why) => self.answer(slot, json!({"Err": why})),
-            Asked::Close => self.answer(slot, json!({})),
+            Asked::Bad(why) => {
+                let _ = self.answer(slot, json!({"Err": why}));
+            }
+            Asked::Close => {
+                let _ = self.answer(slot, json!({}));
+            }
         }
     }
 
@@ -660,25 +787,26 @@ impl Program {
 
     // --- get ---------------------------------------------------------------------------
 
-    fn get(&self, action: &[u8; 32]) -> Value {
+    fn get(&self, action: &[u8; 32]) -> (Value, Option<Served>) {
         let miss = json!({"Miss": true});
         let Some(gocache) = &self.gocache else {
-            return miss;
+            return (miss, None);
         };
         let at = now();
         if let Some(hit) = gocache.get(action, at) {
             self.seen_in_go_cache(action, &hit);
-            return json!({
+            let value = json!({
                 "OutputID": b64(&hit.output),
                 "Size": hit.size,
                 "Time": rfc3339(hit.time_ns),
                 "DiskPath": hit.path,
             });
+            return (value, None);
         }
         lock(&self.misses).insert(*action, Instant::now());
         match self.served_from_store(action, at) {
-            Some(value) => value,
-            None => miss,
+            Some((value, served)) => (value, Some(served)),
+            None => (miss, None),
         }
     }
 
@@ -694,7 +822,7 @@ impl Program {
     }
 
     /// A store hit, checked, or a download the relay brings: `None` is a miss.
-    fn served_from_store(&self, action: &[u8; 32], at: SystemTime) -> Option<Value> {
+    fn served_from_store(&self, action: &[u8; 32], at: SystemTime) -> Option<(Value, Served)> {
         let (current, store, identity) = self.reuse_side()?;
         let key = super::key(action, &identity);
         if store.suspended_at(&key, at).is_some() {
@@ -713,7 +841,7 @@ impl Program {
             local_ms: store.step_cost(&key),
         };
         let wait = store.step_cost(&key).map_or(self.waits.relay, |ms| {
-            (Duration::from_millis(ms) / 2 + QUICK_WAIT).min(self.waits.relay)
+            (Duration::from_millis(ms) / 2 + self.waits.quick).min(self.waits.relay)
         });
         match self.ask(&asked, wait) {
             Some(Answer::Ready { key: got }) if got == key => {
@@ -721,6 +849,32 @@ impl Program {
             }
             _ => None,
         }
+    }
+
+    /// What serving a block records, once Go has that answer: the block's use, a downloaded
+    /// block's first reuse, the run's log line.
+    fn served(&self, served: Served) {
+        let Some(current) = &self.current else {
+            return;
+        };
+        let store = Store::new(&current.store);
+        let _ = store.used(&served.key, served.at);
+        if served.first_download {
+            let _ = store.update_origin(&served.key, |origin| {
+                let mut origin = origin?;
+                (!origin.reused).then(|| {
+                    origin.reused = true;
+                    origin
+                })
+            });
+        }
+        lock(&self.misses).remove(&served.action);
+        self.log(Entry {
+            saved_ms: served.cost,
+            found: true,
+            downloaded: served.downloaded_now,
+            ..go_entry(Outcome::Reused, &served.key)
+        });
     }
 
     /// Serves the block under `key` for `action`, or `None` (a miss) when it can't be: not a Go
@@ -734,7 +888,7 @@ impl Program {
         action: &[u8; 32],
         downloaded_now: bool,
         at: SystemTime,
-    ) -> Option<Value> {
+    ) -> Option<(Value, Served)> {
         let block = store.block(key).ok().flatten()?;
         let action_hex = Digest::from_bytes(*action).hex();
         if Kind::of_description(&block.description) != Kind::Go
@@ -749,13 +903,13 @@ impl Program {
         let outputs = outputs_of(file.size, &file.sha256);
         let vouch = Request::GoVouch { key: *key, outputs };
         let cost = block.description["rustc_ms"].as_u64().unwrap_or(0);
-        let vouch_wait = (Duration::from_millis(cost) / 2 + QUICK_WAIT).min(self.waits.relay);
+        let vouch_wait = (Duration::from_millis(cost) / 2 + self.waits.quick).min(self.waits.relay);
         let reusable =
             current
                 .share
                 .may_reuse(origin.as_ref(), epoch_ms(at), vouch, &mut |_, request| {
                     let wait = if matches!(request, Request::Sharing) {
-                        QUICK_WAIT
+                        self.waits.quick
                     } else {
                         vouch_wait
                     };
@@ -773,15 +927,24 @@ impl Program {
             return None;
         }
         if let Err(why) = archive::portable(bytes, action) {
-            // F2: a block whose bytes aren't what its build ID says is never served, and one
-            // that was downloaded is reported to the scope it came from.
-            let _ = store.discard(key);
+            // F2: a block whose bytes aren't what its build ID says is never served. One that
+            // was downloaded is reported to the scope its record names (the relay reads the
+            // record before it answers), its key is suspended for the kept days as the `rustc`
+            // wrapper's refused downloads are, and then it goes.
             if downloaded {
-                self.tell(&Request::GoReport {
+                let _ = self.ask_quick(&Request::GoReport {
                     key: *key,
                     problem: Problem::Rejected,
                 });
+                let until = at + Duration::from_secs(u64::from(current.keep_days) * 86_400);
+                let _ = store.suspend_until(
+                    key,
+                    "a downloaded Go archive failed its checks",
+                    until,
+                    at,
+                );
             }
+            let _ = store.discard(key);
             self.log(Entry {
                 note: Some(format!(
                     "a Go package archive in the store was refused: {}",
@@ -812,29 +975,21 @@ impl Program {
             return None;
         }
         let path = self.hand_out(current, &read, &file.sha256)?;
-        let _ = store.used(key, at);
-        if first_download {
-            let _ = store.update_origin(key, |origin| {
-                let mut origin = origin?;
-                (!origin.reused).then(|| {
-                    origin.reused = true;
-                    origin
-                })
-            });
-        }
-        lock(&self.misses).remove(action);
-        self.log(Entry {
-            saved_ms: cost,
-            found: true,
-            downloaded: downloaded_now,
-            ..go_entry(Outcome::Reused, key)
-        });
-        Some(json!({
+        let value = json!({
             "OutputID": b64(file.sha256.as_bytes()),
             "Size": file.size,
             "Time": rfc3339(epoch_ns(at)),
             "DiskPath": path,
-        }))
+        });
+        let served = Served {
+            key: *key,
+            action: *action,
+            first_download,
+            cost,
+            downloaded_now,
+            at,
+        };
+        Some((value, served))
     }
 
     /// Claims the audit of `key` for the run: whether no `go` command of the run audited it yet.
@@ -881,8 +1036,10 @@ impl Program {
     /// A hit in Go's own cache, which is served as plain `go` would serve it. When the run
     /// shares and the toolchain is known already, a package archive is logged for the
     /// manifest, and compared for free with a block of the same key in hushrun's store
-    /// (B-44): a difference suspends the key here, and is reported when the block was only
-    /// downloaded.
+    /// (B-44). A difference is only counted: Go's cache has no toolchain identity and keeps
+    /// what an altered `go` command (`-toolexec`, `-overlay`) compiled under plain ids, so it
+    /// is no witness against a block, and nothing is suspended or reported on its word. Only a
+    /// compile of this program's own unaltered command (an audit's deliberate miss) may.
     fn seen_in_go_cache(&self, action: &[u8; 32], hit: &gocache::Hit) {
         let Some(current) = &self.current else {
             return;
@@ -916,7 +1073,6 @@ impl Program {
             && *file.sha256.as_bytes() != hit.output
         {
             entry.differed = true;
-            self.differs(current, &store, &key);
         }
         self.log(entry);
     }
@@ -1140,27 +1296,63 @@ impl Program {
     /// Asks the run's relay within `wait` (F10): no relay, or one call that failed or timed
     /// out in this command, and nothing more is asked.
     fn ask(&self, request: &Request, wait: Duration) -> Option<Answer> {
-        if self.relay_down.load(Ordering::Acquire) {
+        if self.relay_is_down() {
             return None;
         }
         let share = self.current.as_ref()?.share.relay()?;
         let answer = relay::ask(&share.socket, request, wait);
         if answer.is_none() {
-            self.relay_down.store(true, Ordering::Release);
+            // A fetch's wait can run out on a relay that is only slow (a large download): it is
+            // down only when a quick question gets no answer either.
+            let slow_fetch = matches!(request, Request::GoFetch { .. })
+                && relay::ask(&share.socket, &Request::Sharing, self.waits.quick).is_some();
+            if !slow_fetch {
+                self.set_relay_down();
+            }
         }
         answer
     }
 
+    /// [`Program::ask`] within the quick wait.
+    fn ask_quick(&self, request: &Request) -> Option<Answer> {
+        self.ask(request, self.waits.quick)
+    }
+
+    /// Whether a call to the run's relay failed or timed out, in this `go` command or in an
+    /// earlier one of the run (F10): a file in the session's folder, so that a frozen relay
+    /// costs the run one wait, not one a command.
+    fn relay_is_down(&self) -> bool {
+        if self.relay_down.load(Ordering::Acquire) {
+            return true;
+        }
+        let down = self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.folder.join(RELAY_DOWN).exists());
+        if down {
+            self.relay_down.store(true, Ordering::Release);
+        }
+        down
+    }
+
+    fn set_relay_down(&self) {
+        self.relay_down.store(true, Ordering::Release);
+        if let Some(current) = &self.current {
+            let stamp = epoch_ms(now()).to_string();
+            let _ = gocache::write_whole(&current.folder.join(RELAY_DOWN), stamp.as_bytes(), now());
+        }
+    }
+
     /// Hands the relay a notice, reading no answer.
     fn tell(&self, request: &Request) {
-        if self.relay_down.load(Ordering::Acquire) {
+        if self.relay_is_down() {
             return;
         }
         let Some(share) = self.current.as_ref().and_then(|c| c.share.relay()) else {
             return;
         };
-        if !relay::tell(&share.socket, request, QUICK_WAIT) {
-            self.relay_down.store(true, Ordering::Release);
+        if !relay::tell(&share.socket, request, self.waits.quick) {
+            self.set_relay_down();
         }
     }
 }

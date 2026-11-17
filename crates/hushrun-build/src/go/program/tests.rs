@@ -302,20 +302,64 @@ fn every_request_is_answered_once_and_a_put_lands_in_gos_own_cache() {
 
 // covers: B-40, B-47
 #[test]
-fn a_go_version_whose_cache_is_unknown_gets_misses_and_a_folder_of_its_own() {
-    let mut m = Machine::new();
+fn a_go_version_the_probe_didnt_see_keeps_gos_own_cache_and_leaves_out_the_store() {
+    // COMMAND's `go` is another than the one the run asked (a toolchain line, `GOTOOLCHAIN`).
+    let mut m = Machine::new().with_session(Some("none"), None);
+    let stored = [2u8; 32];
+    m.seed(&stored, &archive(&stored, b"in the store", &[]));
     m.env.insert("GOVERSION".into(), "go1.28.0".into());
     let action = [3u8; 32];
-    let lines = m.serve(
-        &[put(1, &action, b"x"), get(2, &action), close(3)].concat(),
-        "go",
+    let lines = m.serve_steps(
+        &[
+            (1, put(1, &action, b"x")),
+            (2, get(2, &action)),
+            (3, get(3, &stored)),
+            (4, close(4)),
+        ],
+        "go build ./...",
     );
     let answers = by_id(&lines);
+    // Go's own cache, whose format is the same since Go 1.10: written and read.
     let path = answers[&1]["DiskPath"].as_str().unwrap();
-    assert!(!Path::new(path).starts_with(&m.env["GOCACHE"]), "{path}");
-    assert_eq!(answers[&2]["Miss"], true);
-    // Nothing went into Go's cache in a format this program doesn't know.
-    assert_eq!(m.gocache().get(&action, SystemTime::now()), None);
+    assert!(Path::new(path).starts_with(&m.env["GOCACHE"]), "{path}");
+    assert_eq!(answers[&2]["DiskPath"].as_str(), Some(path));
+    // hushrun's store is not: its keys need a toolchain the program knows.
+    assert_eq!(answers[&3]["Miss"], true);
+}
+
+// covers: B-40, B-47
+#[test]
+fn a_panic_while_starting_or_reading_never_ends_the_program_before_close() {
+    let mut m = Machine::new().with_session(Some("none"), None);
+    m.env.insert(FAULT_VAR.into(), "panic-start".into());
+    let action = [4u8; 32];
+    let lines = m.serve_steps(
+        &[
+            (1, put(1, &action, b"y")),
+            (2, get(2, &action)),
+            (3, close(3)),
+        ],
+        "go build ./...",
+    );
+    let answers = by_id(&lines);
+    assert_eq!(answers.len(), 4, "{lines:?}");
+    // It started again with no session: Go's own cache only.
+    assert!(answers[&2]["DiskPath"].is_string());
+    let mut m = Machine::new();
+    m.env.insert(FAULT_VAR.into(), "panic-read=2".into());
+    let lines = m.serve_steps(
+        &[
+            (1, put(1, &action, b"y")),
+            (2, get(2, &action)),
+            (3, get(3, &action)),
+            (4, close(4)),
+        ],
+        "go build ./...",
+    );
+    let answers = by_id(&lines);
+    assert_eq!(answers.len(), 5, "{lines:?}");
+    assert!(answers[&2]["Err"].is_string());
+    assert!(answers[&3]["DiskPath"].is_string());
 }
 
 // covers: B-40
@@ -633,7 +677,10 @@ fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
         started.elapsed()
     );
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(heard.try_iter().count(), 1);
+    // The fetch, and the quick question that told a frozen relay from a slow download.
+    let asked: Vec<Value> = heard.try_iter().collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1]["op"], "sharing");
     let lines = m.serve(&[get(1, &[16u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
 }
@@ -678,4 +725,95 @@ fn a_body_handed_to_go_keeps_its_bytes_when_the_block_is_replaced() {
         )
         .unwrap();
     assert_eq!(std::fs::read(&handed).unwrap(), first);
+}
+
+// covers: B-40, B-44
+#[test]
+fn a_store_hit_the_watchdog_answered_first_records_no_reuse() {
+    let mut m = Machine::new().with_session(Some("none"), None);
+    let action = [20u8; 32];
+    let key = m.seed(&action, &archive(&action, b"slow", &[]));
+    m.env.insert(BUDGET_VAR.into(), "300".into());
+    m.env.insert(FAULT_VAR.into(), "slow-get=1".into());
+    let lines = m.serve(&[get(1, &action), close(2)].concat(), "go build ./...");
+    assert_eq!(by_id(&lines)[&1]["Miss"], true);
+    // The handler finishes after the watchdog's miss: give it its time.
+    std::thread::sleep(Duration::from_millis(900));
+    assert!(
+        m.current()
+            .entries()
+            .iter()
+            .all(|e| e.outcome != Outcome::Reused),
+        "{:?}",
+        m.current().entries()
+    );
+    let _ = key;
+}
+
+// covers: B-40
+#[test]
+fn a_relay_that_timed_out_is_asked_nothing_by_the_runs_later_go_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, heard) = relay(dir.path(), None);
+    let mut m = Machine::new().with_session(Some("none"), Some(&socket));
+    m.env.insert(BUDGET_VAR.into(), "600".into());
+    let lines = m.serve(&[get(1, &[30u8; 32]), close(2)].concat(), "go build ./...");
+    assert_eq!(by_id(&lines)[&1]["Miss"], true);
+    let first = heard.try_iter().count();
+    assert!(first >= 1);
+    // Another `go` command of the same run: nothing asked, no wait.
+    let started = Instant::now();
+    let lines = m.serve(&[get(1, &[31u8; 32]), close(2)].concat(), "go build ./...");
+    assert_eq!(by_id(&lines)[&1]["Miss"], true);
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        started.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(heard.try_iter().count(), 0);
+}
+
+// covers: B-40
+#[test]
+fn a_fetch_that_outlasts_its_wait_on_a_live_relay_leaves_it_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("relay.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (tx, heard) = mpsc::channel::<Value>();
+    // Quick questions are answered; a fetch takes longer than the program waits.
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_ok() && !line.is_empty() {
+                    let asked: Value = serde_json::from_str(line.trim()).unwrap();
+                    let fetch = asked["op"] == "go_fetch";
+                    let _ = tx.send(asked);
+                    if fetch {
+                        std::thread::sleep(Duration::from_secs(3));
+                    }
+                    let _ = (&stream).write_all(b"{\"answer\":\"none\"}\n");
+                }
+            });
+        }
+    });
+    let mut m = Machine::new().with_session(Some("none"), Some(&socket));
+    m.env.insert(BUDGET_VAR.into(), "600".into());
+    let lines = m.serve_steps(
+        &[
+            (1, get(1, &[32u8; 32])),
+            (2, get(2, &[33u8; 32])),
+            (3, close(3)),
+        ],
+        "go build ./...",
+    );
+    assert_eq!(by_id(&lines).len(), 4);
+    let fetches = heard
+        .try_iter()
+        .filter(|asked| asked["op"] == "go_fetch")
+        .count();
+    assert_eq!(fetches, 2, "the second get asked the relay too");
 }
