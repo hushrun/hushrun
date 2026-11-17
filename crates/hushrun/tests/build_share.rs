@@ -18,6 +18,11 @@ const CLEARED: &[&str] = &[
     "CIRCLECI",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "HUSHRUN_ID_TOKEN",
+    "CI_JOB_ID",
+    "CI_JOB_TOKEN",
+    "CI_SERVER_URL",
+    "HUSHRUN_PROVIDER",
     "HUSHRUN_AGENT",
     "HUSHRUN_BACKEND",
     "HUSHRUN_TOKEN",
@@ -745,9 +750,36 @@ fn build_status_in_ci_says_what_a_run_does_there_and_why() {
             cmd.env_remove("GITHUB_ACTIONS")
                 .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
                 .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-                .env("GITLAB_CI", "true");
+                .env("BUILDKITE", "true");
         }),
-        "ci        this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions); no person's settings are read"
+        "ci        this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions and GitLab CI); no person's settings are read"
+    );
+    // GitLab CI: the job's ID token, or nothing, whatever agent token it holds (B-48).
+    let gitlab = |token: Option<String>| {
+        let fake = &fake;
+        move |cmd: &mut assert_cmd::Command| {
+            cmd.env_remove("GITHUB_ACTIONS")
+                .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+                .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+                .env("GITLAB_CI", "true")
+                .env("CI_JOB_ID", "5000")
+                .env("CI_JOB_TOKEN", "glcbt-job-token-of-5000");
+            if let Some(token) = token {
+                cmd.env("HUSHRUN_ID_TOKEN", token);
+            }
+            let _ = fake;
+        }
+    };
+    assert_eq!(
+        ci_status(&a, &fake, gitlab(None)),
+        format!(
+            "ci        this is CI, where `hushrun run` reuses nothing here: the job can't mint an ID token (declare `id_tokens: {{HUSHRUN_ID_TOKEN: {{aud: {}}}}}` in the job)",
+            fake.url()
+        )
+    );
+    assert_eq!(
+        ci_status(&a, &fake, gitlab(Some(fake.gitlab_token(5000)))),
+        "ci        this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, and shares as the org's mode says; no person's settings are read"
     );
     // No backend.
     assert_eq!(
@@ -2387,5 +2419,606 @@ fn a_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() 
         fake.stored().len() > stored,
         "the honest app went up: {stderr}\n{}",
         b.may_leave()
+    );
+}
+
+/// What a GitLab CI job's environment adds (B-48): its id, the project, a temporary folder of the
+/// test's own as the system's, the job's ID token when it has one, and an agent token beside it.
+fn in_gitlab_ci(cmd: &mut assert_cmd::Command, temp: &Path, job: &str, token: Option<&str>) {
+    std::fs::create_dir_all(temp).unwrap();
+    cmd.env("CI", "true")
+        .env("GITLAB_CI", "true")
+        .env("CI_JOB_ID", job)
+        .env("CI_PIPELINE_ID", "900")
+        .env("CI_PROJECT_URL", "https://gitlab.com/acme/shop")
+        .env("CI_SERVER_URL", "https://gitlab.com")
+        .env("CI_JOB_TOKEN", format!("glcbt-job-token-of-{job}"))
+        .env("TMPDIR", temp)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN);
+    if let Some(token) = token {
+        cmd.env("HUSHRUN_ID_TOKEN", token);
+    }
+}
+
+/// `hushrun run build -- sh -c SCRIPT` as GitLab job `job`, with `token` as its
+/// HUSHRUN_ID_TOKEN, on a runner whose temporary folder is `temp`: SCRIPT's stdout says the
+/// wrapper it was given. Its exit code, stdout, stderr, and the close it sent last.
+fn gitlab_run(
+    m: &Machine,
+    fake: &FakeBuild,
+    temp: &Path,
+    job: &str,
+    token: Option<&str>,
+    script: &str,
+    change: impl FnOnce(&mut assert_cmd::Command),
+) -> (
+    i32,
+    String,
+    String,
+    Option<hushrun_core::blocks::CloseRequest>,
+) {
+    let closes = fake.closes().len();
+    let mut cmd = m.hushrun(fake);
+    in_gitlab_ci(&mut cmd, temp, job, token);
+    change(&mut cmd);
+    let script = format!("echo \"wrapper=${{RUSTC_WRAPPER:-none}}\"; {script}");
+    let output = cmd
+        .args(["run", "build", "--force", "--", "sh", "-c", &script])
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        fake.closes().get(closes).cloned(),
+    )
+}
+
+/// The build requests the fake has seen since the `after`th request.
+fn build_requests(fake: &FakeBuild, after: usize) -> Vec<hushrun_testkit::fake_build::Seen> {
+    fake.seen()
+        .into_iter()
+        .skip(after)
+        .filter(|s| s.path.contains("/v0/build/"))
+        .collect()
+}
+
+/// The entries of `dir` whose names start with `prefix`.
+fn named(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .map(|e| e.path())
+        .collect()
+}
+
+// covers: B-31, B-48, B-49
+#[test]
+fn a_gitlab_job_shares_with_its_id_token_and_signs_every_request_with_one_key() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let temp = a.root.join("tmp");
+    let token = fake.gitlab_token(5001);
+    let (code, stdout, stderr, close) = gitlab_run(
+        &a,
+        &fake,
+        &temp,
+        "5001",
+        Some(&token),
+        "cargo build --offline && sleep 2",
+        |_| {},
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    // Every build request carried the job's ID token, never the agent token beside it, and the
+    // one key the job's first `open` bound, which signed each.
+    let build = build_requests(&fake, 0);
+    assert!(!build.is_empty(), "{stderr}");
+    let key = build[0].job_key.clone().expect("a job key");
+    assert!(key.starts_with("ed25519:"), "{key}");
+    for seen in &build {
+        assert_eq!(
+            seen.authorization.as_deref(),
+            Some(format!("Bearer {token}").as_str()),
+            "{}",
+            seen.path
+        );
+        assert_eq!(seen.job_key.as_deref(), Some(key.as_str()), "{}", seen.path);
+    }
+    let job = &fake.gitlab_jobs()[&5001];
+    assert!(!job.withdrawn, "{job:?}");
+    for route in [route::OPEN, route::BEGIN, route::COMMIT, route::CLOSE] {
+        assert!(
+            job.signed.get(route).is_some_and(|n| *n >= 1),
+            "{route}: {job:?}\n{stderr}"
+        );
+    }
+    assert!(close.is_some(), "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}\n{}", a.may_leave());
+    // The results lookup went with the agent token, the job's ID token beside it.
+    let results: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.route == route::RESULTS)
+        .collect();
+    assert!(!results.is_empty());
+    for seen in &results {
+        let bearer = format!("Bearer {}", FakeBuild::AGENT_TOKEN);
+        assert_eq!(seen.authorization.as_deref(), Some(bearer.as_str()));
+        assert_eq!(seen.id_token.as_deref(), Some(token.as_str()));
+    }
+    // The run's store went with the run, and the job's key is made from its job token, never
+    // kept: nothing is left in the temporary folder.
+    assert!(
+        named(&temp, "hushrun-").is_empty(),
+        "{:?}",
+        named(&temp, "")
+    );
+    assert!(!a.root.join("cache/build").exists());
+
+    // The job's next `hushrun run`: the same key, so the job stays bound, and it closes again.
+    let before = fake.seen().len();
+    let (code, _, stderr, close) = gitlab_run(
+        &a,
+        &fake,
+        &temp,
+        "5001",
+        Some(&token),
+        "cargo clean -q && cargo build --offline",
+        |_| {},
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(close.is_some(), "{stderr}");
+    let again = build_requests(&fake, before);
+    assert!(!again.is_empty());
+    assert!(
+        again
+            .iter()
+            .all(|s| s.job_key.as_deref() == Some(key.as_str()))
+    );
+    let job = &fake.gitlab_jobs()[&5001];
+    assert!(!job.withdrawn, "{job:?}");
+    assert_eq!(job.signed[route::CLOSE], 2, "{job:?}");
+}
+
+// covers: B-31, B-48
+#[test]
+fn a_gitlab_job_without_its_id_token_reads_nothing_whatever_agent_token_it_holds() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let (code, stdout, stderr, _) = gitlab_run(
+        &a,
+        &fake,
+        &a.root.join("tmp"),
+        "5002",
+        None,
+        "cargo build --offline",
+        |_| {},
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    let build: Vec<_> = build_requests(&fake, 0)
+        .into_iter()
+        .map(|s| s.path)
+        .collect();
+    assert!(
+        build.is_empty(),
+        "the agent token read: {build:?}\n{stderr}"
+    );
+    // Said once, with what to declare.
+    let line = format!(
+        "build reuse is off for this run: the job can't mint an ID token (declare `id_tokens: {{HUSHRUN_ID_TOKEN: {{aud: {}}}}}` in the job)",
+        fake.url()
+    );
+    assert_eq!(stderr.matches(&line).count(), 1, "{stderr}");
+}
+
+// covers: B-48
+#[test]
+fn a_gitlab_id_token_for_another_audience_goes_to_no_server_and_says_why() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    for (aud, says) in [
+        (
+            serde_json::json!("https://elsewhere.example/o/acme"),
+            "audience is https://elsewhere.example/o/acme",
+        ),
+        (serde_json::json!([fake.url(), "sigstore"]), "audience is ["),
+    ] {
+        let token = fake.gitlab_token_with(5003, |c| c["aud"] = aud.clone());
+        let before = fake.seen().len();
+        let (code, stdout, stderr, _) = gitlab_run(
+            &a,
+            &fake,
+            &a.root.join("tmp"),
+            "5003",
+            Some(&token),
+            "cargo build --offline",
+            |_| {},
+        );
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+        assert!(stderr.contains(says), "{stderr}");
+        assert!(stderr.contains("declare `id_tokens:"), "{stderr}");
+        let seen: Vec<_> = fake.seen().into_iter().skip(before).collect();
+        assert!(build_requests(&fake, before).is_empty(), "{stderr}");
+        for s in &seen {
+            assert!(
+                s.id_token.is_none()
+                    && !s
+                        .authorization
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(&token),
+                "{} carried the token",
+                s.path
+            );
+        }
+    }
+    // An expired one is said too, and goes nowhere.
+    let token = fake.gitlab_token_with(5004, |c| c["exp"] = serde_json::json!(1));
+    let before = fake.seen().len();
+    let (_, stdout, stderr, _) = gitlab_run(
+        &a,
+        &fake,
+        &a.root.join("tmp"),
+        "5004",
+        Some(&token),
+        "true",
+        |_| {},
+    );
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    assert!(stderr.contains("HUSHRUN_ID_TOKEN has expired"), "{stderr}");
+    assert!(
+        fake.seen()
+            .iter()
+            .skip(before)
+            .all(|s| s.id_token.is_none())
+    );
+}
+
+// covers: B-25, B-48
+#[test]
+fn a_gitlab_job_whose_org_doesnt_share_pays_no_build_request_and_says_nothing() {
+    let fake = FakeBuild::start();
+    fake.set_sharing(false);
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let temp = a.root.join("tmp");
+    let token = fake.gitlab_token(5005);
+    let (code, stdout, stderr, _) =
+        gitlab_run(&a, &fake, &temp, "5005", Some(&token), "true", |_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    assert!(build_requests(&fake, 0).is_empty(), "{stderr}");
+    assert!(!stderr.contains("hushrun: build reuse"), "{stderr}");
+    assert!(!stderr.contains("hushrun: build:"), "{stderr}");
+    // Nothing was made for the job: no store, no key.
+    assert!(
+        named(&temp, "hushrun-").is_empty(),
+        "{:?}",
+        named(&temp, "")
+    );
+
+    // With no token to look results up with, `open` asks once, and the org's no is as silent.
+    let (code, stdout, stderr, _) =
+        gitlab_run(&a, &fake, &temp, "5005", Some(&token), "true", |cmd| {
+            cmd.env_remove("HUSHRUN_TOKEN");
+        });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}");
+    let build: Vec<_> = build_requests(&fake, 0);
+    assert_eq!(
+        build.len(),
+        1,
+        "{:?}",
+        build.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+    assert_eq!(build[0].route, route::OPEN);
+    assert!(!stderr.contains("hushrun: build reuse"), "{stderr}");
+    assert!(!stderr.contains("hushrun: build:"), "{stderr}");
+    assert!(named(&temp, "hushrun-build").is_empty());
+}
+
+// covers: B-48, B-49
+#[test]
+fn a_gitlab_job_with_no_token_but_its_own_shares_once_open_says_the_org_does() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let token = fake.gitlab_token(5006);
+    let (code, stdout, stderr, close) = gitlab_run(
+        &a,
+        &fake,
+        &a.root.join("tmp"),
+        "5006",
+        Some(&token),
+        "cargo build --offline && sleep 2",
+        |cmd| {
+            cmd.env_remove("HUSHRUN_TOKEN");
+        },
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(close.is_some(), "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}");
+    assert!(!fake.gitlab_jobs()[&5006].withdrawn);
+}
+
+// covers: B-49
+#[test]
+fn a_gitlab_job_closes_its_run_whatever_its_command_does() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let token = fake.gitlab_token(5007);
+    let (code, stdout, stderr, close) = gitlab_run(
+        &a,
+        &fake,
+        &a.root.join("tmp"),
+        "5007",
+        Some(&token),
+        "cargo build --offline && sleep 2; exit 3",
+        |_| {},
+    );
+    assert_ne!(code, 0, "{stdout}\n{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(close.is_some(), "no close after a failed command: {stderr}");
+    assert_eq!(fake.gitlab_jobs()[&5007].signed[route::CLOSE], 1);
+    assert!(named(&a.root.join("tmp"), "hushrun-build").is_empty());
+}
+
+// covers: B-6, B-24, B-31, B-48
+#[test]
+fn a_gitlab_job_that_restores_a_doctored_proc_macro_uploads_nothing_built_against_it() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    // Each push's job is a job of its own, with its own token.
+    let job = |m: &Machine, id: i64| {
+        let token = fake.gitlab_token(id);
+        let (code, _, stderr, close) = gitlab_run(
+            m,
+            &fake,
+            &m.root.join("tmp"),
+            &id.to_string(),
+            Some(&token),
+            "CARGO_INCREMENTAL=0 cargo build --offline && sleep 2",
+            |_| {},
+        );
+        assert_eq!(code, 0, "{stderr}");
+        (stderr, close)
+    };
+    let a = Machine::with(dir.path(), "a", None, macro_workspace);
+    let (stderr, close) = job(&a, 5100);
+    assert_eq!(close.expect(&stderr).counts.built, 2, "{stderr}");
+    assert!(!fake.stored().is_empty(), "{stderr}\n{}", a.may_leave());
+    // GitLab's cache brings a `target/` whose macro was doctored, and `app` changed.
+    poison_macro(&a.repo);
+    let c = pushed(dir.path(), "c", &a.repo, Some(&a.repo.join("target")));
+    let stored = fake.stored().len();
+    let (stderr, close) = job(&c, 5101);
+    assert!(stderr.contains("1 crate built, none reused"), "{stderr}");
+    assert_eq!(close.expect(&stderr).counts.built, 1, "{stderr}");
+    assert_eq!(fake.stored().len(), stored, "it uploaded: {stderr}");
+}
+
+// covers: B-49
+#[test]
+fn every_run_of_a_gitlab_job_signs_with_one_key_whatever_its_temporary_folder() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let token = fake.gitlab_token(5008);
+    let run = |temp: &str, change: &dyn Fn(&mut assert_cmd::Command)| {
+        gitlab_run(
+            &a,
+            &fake,
+            &a.root.join(temp),
+            "5008",
+            Some(&token),
+            "cargo clean -q && cargo build --offline && sleep 2",
+            change,
+        )
+    };
+    let (code, _, stderr, close) = run("tmp", &|_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(close.is_some(), "{stderr}");
+    // A step in a container of its own, with another /tmp: the same job, the same key.
+    let (code, stdout, stderr, close) = run("tmp-of-a-container", &|_| {});
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(close.is_some(), "{stderr}");
+    let job = &fake.gitlab_jobs()[&5008];
+    assert!(!job.withdrawn, "an honest job withdrew itself: {stderr}");
+    assert_eq!(job.signed[route::CLOSE], 2, "{job:?}");
+    // Its ID token with another job's job token, as a thief who copied the ID token alone: another
+    // key, which withdraws the job, and every later run of it is refused.
+    let (code, stdout, stderr, _) = run("tmp", &|cmd| {
+        cmd.env("CI_JOB_TOKEN", "glcbt-someone-else");
+    });
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(fake.gitlab_jobs()[&5008].withdrawn);
+    let line = "build: sharing stopped for this run: the backend answered 403 job_withdrawn: a request with another key carried this job's ID token, so the backend withdrew the job: nothing it wrote is served, and its later runs are refused too\n";
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+    assert!(!stderr.contains("uploads wait"), "{stderr}");
+}
+
+// covers: B-49
+#[test]
+fn a_gitlab_job_without_its_job_token_sends_nothing_and_says_why() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let token = fake.gitlab_token(5009);
+    let (code, stdout, stderr, _) = gitlab_run(
+        &a,
+        &fake,
+        &a.root.join("tmp"),
+        "5009",
+        Some(&token),
+        "cargo build --offline",
+        |cmd| {
+            cmd.env_remove("CI_JOB_TOKEN");
+        },
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("wrapper=none"), "{stdout}\n{stderr}");
+    assert!(build_requests(&fake, 0).is_empty(), "{stderr}");
+    assert!(fake.gitlab_jobs().is_empty());
+    let line = "build reuse is off for this run: HUSHRUN_ID_TOKEN is set and CI_JOB_TOKEN isn't: the job's key is made from it, and a request with another key would withdraw the job (a step in a container needs both)";
+    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
+}
+
+// covers: B-48
+#[test]
+fn a_gitlab_job_is_known_by_its_variables_also_without_gitlab_ci_or_under_another_provider() {
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    // A nested container that was handed the job's tokens and GitLab's job variables, not
+    // GITLAB_CI or CI; and a job that names another provider.
+    type Change<'a> = &'a dyn Fn(&mut assert_cmd::Command);
+    let cases: [(&str, i64, Change); 2] = [
+        ("nested", 5010, &|cmd| {
+            cmd.env_remove("GITLAB_CI").env_remove("CI");
+        }),
+        ("generic", 5011, &|cmd| {
+            cmd.env("HUSHRUN_PROVIDER", "generic");
+        }),
+    ];
+    for (name, job, change) in cases {
+        let token = fake.gitlab_token(job);
+        let before = fake.seen().len();
+        let (code, stdout, stderr, close) = gitlab_run(
+            &a,
+            &fake,
+            &a.root.join(name),
+            &job.to_string(),
+            Some(&token),
+            "cargo clean -q && cargo build --offline && sleep 2",
+            change,
+        );
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert!(
+            !stdout.contains("wrapper=none"),
+            "{name}: {stdout}\n{stderr}"
+        );
+        assert!(close.is_some(), "{name}: {stderr}");
+        let build = build_requests(&fake, before);
+        assert!(!build.is_empty(), "{name}");
+        for seen in &build {
+            assert_eq!(
+                seen.authorization.as_deref(),
+                Some(format!("Bearer {token}").as_str()),
+                "{name}: {} carried the agent token",
+                seen.path
+            );
+        }
+        // Without the job's ID token there, the agent token reads nothing either.
+        let before = fake.seen().len();
+        let (_, stdout, stderr, _) = gitlab_run(
+            &a,
+            &fake,
+            &a.root.join(name),
+            &job.to_string(),
+            None,
+            "cargo build --offline",
+            |cmd| {
+                change(cmd);
+                cmd.env("HUSHRUN_ID_TOKEN", "");
+            },
+        );
+        let _ = stdout;
+        assert!(
+            build_requests(&fake, before).iter().all(|s| !s
+                .authorization
+                .as_deref()
+                .unwrap_or_default()
+                .contains(FakeBuild::AGENT_TOKEN)),
+            "{name}: the agent token read: {stderr}"
+        );
+    }
+}
+
+// covers: B-49
+#[test]
+fn a_gitlab_job_stopped_by_sigterm_stops_its_command_closes_and_leaves_no_store() {
+    use std::process::Stdio;
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None);
+    let temp = a.root.join("tmp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let token = fake.gitlab_token(5012);
+    // As gitlab_run, but spawned, so the test can stop it mid-COMMAND.
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("hushrun"));
+    for var in CLEARED {
+        cmd.env_remove(var);
+    }
+    cmd.current_dir(&a.repo)
+        .env("HUSHRUN_CACHE_DIR", a.root.join("cache"))
+        .env("HUSHRUN_CREDENTIALS", a.root.join("credentials.json"))
+        .env("HUSHRUN_MACHINE_KEY_FILE", a.root.join("machine.pem"))
+        .env("HUSHRUN_HOST", "http://127.0.0.1:9")
+        .env("HUSHRUN_NO_UPDATE_CHECK", "1")
+        .env("HUSHRUN_BACKEND", fake.url())
+        .env("HUSHRUN_BUILD", "on")
+        .env("HUSHRUN_BUILD_AUDIT", "none")
+        .env("CARGO_TERM_COLOR", "never")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", a.root.join("gitconfig"))
+        .env("CI", "true")
+        .env("GITLAB_CI", "true")
+        .env("CI_JOB_ID", "5012")
+        .env("CI_PIPELINE_ID", "900")
+        .env("CI_PROJECT_URL", "https://gitlab.com/acme/shop")
+        .env("CI_SERVER_URL", "https://gitlab.com")
+        .env("CI_JOB_TOKEN", "glcbt-job-token-of-5012")
+        .env("TMPDIR", &temp)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .env("HUSHRUN_ID_TOKEN", &token)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            "cargo build --offline && touch built && sleep 20",
+        ])
+        .stdout(Stdio::null())
+        // A file, not a pipe: COMMAND's own children may outlive it, holding a pipe open.
+        .stderr(std::fs::File::create(a.root.join("stderr.log")).unwrap());
+    let mut child = cmd.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !a.repo.join("built").exists() {
+        assert!(Instant::now() < deadline, "the build never finished");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // GitLab cancels the job: SIGTERM to hushrun alone, then a grace period.
+    let stopped = Instant::now();
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    let status = child.wait().unwrap();
+    let took = stopped.elapsed();
+    let stderr = std::fs::read_to_string(a.root.join("stderr.log")).unwrap();
+    assert!(!status.success(), "{stderr}");
+    assert!(took < Duration::from_secs(10), "{took:?}\n{stderr}");
+    let job = &fake.gitlab_jobs()[&5012];
+    assert_eq!(
+        job.signed.get(route::CLOSE),
+        Some(&1),
+        "no close after SIGTERM: {stderr}"
+    );
+    assert!(
+        named(&temp, "hushrun-build").is_empty(),
+        "{:?}",
+        named(&temp, "")
     );
 }

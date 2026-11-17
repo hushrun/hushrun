@@ -533,6 +533,8 @@ struct Server {
     ci_repository: RefCell<Option<String>>,
     /// In GitHub Actions: the ID token endpoint and the request token (B-31).
     oidc: Option<(String, String)>,
+    /// B-48: in GitLab CI, what `HUSHRUN_ID_TOKEN` is for this backend; `None` elsewhere.
+    gitlab: Option<crate::gitlab_job::Token>,
     /// \[C-38\] It answered 404 or 405 to a request about hints: a server from before them, which
     /// this run asks nothing more of them, and says so once.
     keeps_no_hints: Cell<bool>,
@@ -867,6 +869,15 @@ impl Backend {
                 None => (None, Credential::Nothing),
             },
         };
+        // B-48: in GitLab CI the job's ID token, read from its variable alone, for this backend
+        // only: one whose audience is another URL goes nowhere.
+        let gitlab = crate::gitlab_job::is_job(&env).then(|| {
+            crate::gitlab_job::read(
+                &|name| hushrun_ci::var_os(name),
+                &url.to_string(),
+                std::time::SystemTime::now(),
+            )
+        });
         let github_oidc = oidc.clone().map(|(url, token)| OidcEndpoint {
             url,
             token: Secret::new(token),
@@ -901,6 +912,7 @@ impl Backend {
                 answered: Cell::new(false),
                 ci_repository: RefCell::new(hushrun_ci::context(&env).repository),
                 oidc,
+                gitlab,
                 keeps_no_hints: Cell::new(false),
             })),
         })
@@ -1125,10 +1137,18 @@ impl Backend {
                     }
                     (_, query) => query,
                 };
-                let header = says_ci.then(|| (hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                let mut headers = Vec::new();
+                if says_ci {
+                    headers.push((hushrun_core::blocks::CI_HEADER, "1".to_string()));
+                }
+                // B-48: a GitLab job's ID token beside the token that is the lookup's bearer, so
+                // the answer's `Hushrun-Build` is CI's for the job's project.
+                if let (Some(_), Some(token)) = (&server.token, server.gitlab_id_token()) {
+                    headers.push((hushrun_core::blocks::ID_TOKEN_HEADER, token.text().into()));
+                }
                 let (status, body) = server
                     .ledger
-                    .json_get_with(&path, query.as_deref(), header)
+                    .json_get_with(&path, query.as_deref(), &headers)
                     .map_err(plain)?;
                 if status != 200 {
                     return Err(server.refused(status, &body, "reading the newest result"));
@@ -1379,6 +1399,25 @@ pub struct BuildAccess {
     pub answered: bool,
 }
 
+impl BuildAccess {
+    /// Whether the run has a credential its build requests can carry (B-26).
+    pub fn sends(&self) -> bool {
+        self.credential.as_ref().is_some_and(BuildCredential::sends)
+    }
+
+    /// B-25, B-48: no results lookup of this run said whether the org shares, though the run can
+    /// send (a GitLab job with its ID token and no token to look results up with): `open` does.
+    pub fn open_decides(&self) -> bool {
+        matches!(
+            self.credential,
+            Some(BuildCredential::Gitlab(GitlabCi::Usable {
+                looked_up: false,
+                ..
+            }))
+        )
+    }
+}
+
 /// The backend a run's results go to, as a saved fetch is compared with (B-36): its origin and
 /// org, as a relay names them, and whether it answered any request of this run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1411,6 +1450,36 @@ pub enum BuildCredential {
         request_token: String,
         job: String,
     },
+    /// B-48, B-49: GitLab CI, where only the job's ID token counts: the one home of what
+    /// `HUSHRUN_ID_TOKEN` is for this run, usable or not.
+    Gitlab(GitlabCi),
+}
+
+impl BuildCredential {
+    /// Whether build requests can carry it: all but a GitLab job's ID token that is absent or
+    /// can't be sent.
+    pub fn sends(&self) -> bool {
+        !matches!(
+            self,
+            BuildCredential::Gitlab(GitlabCi::Absent { .. } | GitlabCi::Unusable(_))
+        )
+    }
+}
+
+/// B-48: a GitLab CI job's credential for build blocks, from [`crate::gitlab_job::read`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitlabCi {
+    /// `HUSHRUN_ID_TOKEN` isn't set: how to declare it, for the backend at this URL. Said where
+    /// the org shares.
+    Absent { declare: String },
+    /// It is set and can't be sent: why. Said whatever the org does.
+    Unusable(String),
+    /// The job's ID token and key. `looked_up`: the run's results lookup carried it beside a
+    /// token, so its answer says whether the org shares; without one, `open` says.
+    Usable {
+        job: crate::gitlab_job::Job,
+        looked_up: bool,
+    },
 }
 
 impl Backend {
@@ -1432,9 +1501,7 @@ impl Backend {
         let Store::Server(server) = &self.store else {
             return false;
         };
-        let sends = self
-            .build_access()
-            .is_some_and(|access| access.credential.is_some());
+        let sends = self.build_access().is_some_and(|access| access.sends());
         if sends {
             let _ = self.latest(key);
         }
@@ -1452,7 +1519,8 @@ impl Backend {
         };
         let url = LedgerUrl::parse(&server.base).ok()?;
         let agent_token = matches!(server.signer(), Signer::Agent);
-        let (credential, agent) = if server.in_ci {
+        // B-48: a GitLab job is CI for build blocks, also where nothing else says CI.
+        let (credential, agent) = if server.in_ci || server.gitlab.is_some() {
             match (server.oidc.clone(), server.token.clone()) {
                 (Some((url, request_token)), _) => {
                     let job =
@@ -1473,6 +1541,22 @@ impl Backend {
                 // In GitHub Actions without an ID token, nothing: whatever else the job holds,
                 // sharing is off there (B-31).
                 (None, _) if server.in_github => (None, false),
+                // B-48: in GitLab CI the job's ID token, or nothing, whatever token it holds.
+                (None, _) if server.gitlab.is_some() => {
+                    let gitlab = match &server.gitlab {
+                        Some(crate::gitlab_job::Token::Usable(job)) => GitlabCi::Usable {
+                            job: job.clone(),
+                            looked_up: server.token.is_some(),
+                        },
+                        Some(crate::gitlab_job::Token::Unusable(why)) => {
+                            GitlabCi::Unusable(why.clone())
+                        }
+                        _ => GitlabCi::Absent {
+                            declare: crate::gitlab_job::declare(&server.base),
+                        },
+                    };
+                    (Some(BuildCredential::Gitlab(gitlab)), false)
+                }
                 // Anywhere else in CI an agent token reads the org's blocks, and writes none
                 // (`hushrun_build::share::what_a_run_does`).
                 (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),
@@ -1488,7 +1572,7 @@ impl Backend {
             org: hosted::org_of(&server.base).unwrap_or_else(|| server.base.clone()),
             credential,
             agent,
-            machine: if server.in_ci {
+            machine: if server.in_ci || server.gitlab.is_some() {
                 None
             } else {
                 server.key().ok().flatten()
@@ -1771,6 +1855,14 @@ impl Server {
     /// job whose credential is a person's or an agent's token. A job's ID token says who it is
     /// by itself, and a lookup with no credential asks as the repository's CI already. The
     /// relay's requests of such a run say the same (`hushrun_core::blocks::CI_HEADER`).
+    /// B-48: the GitLab job's ID token, when it may be sent to this backend.
+    fn gitlab_id_token(&self) -> Option<&crate::gitlab_job::IdToken> {
+        match &self.gitlab {
+            Some(crate::gitlab_job::Token::Usable(job)) => Some(&job.token),
+            _ => None,
+        }
+    }
+
     fn says_ci(&self) -> bool {
         self.in_ci
             && matches!(

@@ -80,6 +80,30 @@ pub fn begin_message(org: &str, body: &[u8]) -> String {
     )
 }
 
+/// \[B-49\] The headers a gitlab.com CI job's build requests carry, beside its ID token as the
+/// bearer: the public half of the job's key, as a machine's is written (`ed25519:<base64>` or
+/// `ecdsa-p256:<base64>`), and the key's signature over [`job_message`], standard base64. The
+/// job's first `open` binds the job to the key; a request with another key withdraws the job.
+pub const JOB_KEY_HEADER: &str = "Hushrun-Job-Key";
+pub const JOB_SIGNATURE_HEADER: &str = "Hushrun-Job-Signature";
+/// \[B-48\] The header a gitlab.com CI job's results lookup carries its ID token in, beside the
+/// agent token that is the lookup's bearer (results take no GitLab ID token): the answer's
+/// [`SHARING_HEADER`] is then CI's for the job's project.
+pub const ID_TOKEN_HEADER: &str = "Hushrun-Id-Token";
+/// What a job key's signature signs first.
+pub const JOB_SIGNATURE_SCHEMA: &str = "hushrun-build-job/v1";
+
+/// \[B-49\] What a gitlab.com job's key signs on a build request: `hushrun-build-job/v1\n<method>\n
+/// <path>\n<org>\n<job id>\n<SHA-256 of the body, lowercase hex>\n`, `<path>` the request's path as
+/// the org's routes name it (`/o/acme/v0/build/open`), `<job id>` the ID token's `job_id` in
+/// decimal.
+pub fn job_message(method: &str, path: &str, org: &str, job: i64, body: &[u8]) -> String {
+    format!(
+        "{JOB_SIGNATURE_SCHEMA}\n{method}\n{path}\n{org}\n{job}\n{}\n",
+        to_hex(&Sha256::digest(body))
+    )
+}
+
 /// Whether `text` is a kind: a lowercase word of 1 to 16 characters (`a`-`z` first, then `a`-`z`,
 /// `0`-`9` or `-`), a `/`, and the version of its keys, 1 to 4 digits. `rustc/1`.
 pub fn is_kind(text: &str) -> bool {
@@ -406,6 +430,21 @@ pub enum Untrusted {
     /// The caller is a person's or an agent's token that says it runs in CI (`Hushrun-Ci`), not
     /// the job's own ID token: it reads the repository's trusted blocks and writes nothing.
     Credential,
+    /// \[B-49\] gitlab.com: a request came with another key than the job's, or the job was
+    /// withdrawn.
+    Job,
+    /// gitlab.com: the job's token expired, or is over 3 hours old for a trusted write.
+    Token,
+    /// gitlab.com: it builds a fork's code (a fork's merge request run in this project).
+    Fork,
+    /// gitlab.com: a policy added the job, or GitLab says it started otherwise than its pipeline.
+    Source,
+    /// gitlab.com: its branch isn't protected in GitLab.
+    Unprotected,
+    /// gitlab.com: its pipeline's configuration isn't the project's own file.
+    Config,
+    /// gitlab.com: whoever started, retried or played the job isn't a Maintainer or an Owner.
+    User,
     #[serde(other)]
     Unknown,
 }

@@ -346,6 +346,8 @@ struct State {
     uploading: bool,
     /// The relay rested once this run: said once (B-26).
     rested: bool,
+    /// The run is a CI job's (B-31): its store goes with it.
+    ci: bool,
     /// The object store's host couldn't be reached once this run: said once (B-26).
     store_unreachable: bool,
     /// The run's platform, once asked.
@@ -416,6 +418,11 @@ impl State {
                 format!(
                     "build: sharing is off for this run: the shared store can't be reached ({why})"
                 )
+            }
+            // Markers wait for a later run on a machine whose store stays; in CI the store goes
+            // with the run, and a withdrawn job's later runs are refused too.
+            Stop::Refused(why) if self.ci || why.contains("job_withdrawn") => {
+                format!("build: sharing stopped for this run: the backend {why}")
             }
             Stop::Refused(why) => {
                 format!(
@@ -507,14 +514,28 @@ pub(crate) struct Relay {
 
 static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
 
+/// B-49: a stop signal came while COMMAND ran: the end of the run is short.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// B-49: the run was asked to stop (a GitLab job cancelled or timed out): its end waits for no
+/// upload, and `close` gets at most [`upload::STOPPED_CLOSE`].
+pub(crate) fn stopping() {
+    STOPPING.store(true, Ordering::SeqCst);
+}
+
 impl Relay {
-    /// The process's relay, started on first use (B-26: one per `hushrun run` process).
-    pub(crate) fn get_or_start(make: impl FnOnce() -> Option<Config>) -> Option<Arc<Relay>> {
+    /// The process's relay, started on first use (B-26: one per `hushrun run` process). `None`
+    /// when `make` gives no config; `Err` is why it couldn't start.
+    pub(crate) fn get_or_start(
+        make: impl FnOnce() -> Option<Config>,
+    ) -> Option<Result<Arc<Relay>, String>> {
         if let Some(relay) = RELAY.get() {
-            return Some(relay.clone());
+            return Some(Ok(relay.clone()));
         }
-        let relay = Arc::new(Relay::start(make()?).ok()?);
-        Some(RELAY.get_or_init(|| relay).clone())
+        Some(Relay::start(make()?).map(|relay| {
+            let relay = Arc::new(relay);
+            RELAY.get_or_init(|| relay).clone()
+        }))
     }
 
     /// The process's relay, when one started.
@@ -522,11 +543,18 @@ impl Relay {
         RELAY.get().cloned()
     }
 
+    /// Whether its credential is a GitLab job's (B-49).
+    pub(crate) fn is_gitlab_job(&self) -> bool {
+        self.client.is_gitlab_job()
+    }
+
     /// Starts a relay: its runtime, its folder in the store, and the outbox's reconciliation
     /// (claims of dead runs back to waiting, dead runs' folders gone).
     pub(crate) fn start(mut config: Config) -> Result<Relay, String> {
         let credential = match (&config.access.credential, &config.saved) {
-            (Some(credential), _) => credential::Credential::of(credential, &config.access.base),
+            (Some(credential), _) => {
+                credential::Credential::of(credential, &config.access.base, &config.access.org)?
+            }
             (None, Some(_)) => credential::Credential::Nothing,
             (None, None) => return Err("no credential to send".to_string()),
         };
@@ -600,6 +628,7 @@ impl Relay {
                 puts: HashMap::new(),
                 uploading: false,
                 rested: false,
+                ci: in_ci,
                 store_unreachable: false,
                 platform: None,
             }),
@@ -2495,8 +2524,12 @@ impl Relay {
         if waiting > 0 && end.in_ci && state.uploads {
             // B-31: the job's store goes with the job.
             lines.push(format!(
-                "build: {waiting} {} weren't uploaded before the job's command ended",
-                if waiting == 1 { "block" } else { "blocks" },
+                "build: {waiting} {} uploaded before the job's command ended",
+                if waiting == 1 {
+                    "block wasn't"
+                } else {
+                    "blocks weren't"
+                },
             ));
         } else if waiting > 0
             && !end.in_ci
@@ -2536,6 +2569,7 @@ impl Relay {
             .sum();
         upload::End {
             in_ci,
+            stopping: STOPPING.load(Ordering::SeqCst),
             trusted,
             waiting_cost: Duration::from_millis(cost_ms),
             waited: *self
@@ -2692,6 +2726,18 @@ pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
         }
         blocks::Untrusted::Credential => {
             "it uses a person's or an agent's token in CI, not the job's own ID token"
+        }
+        // B-48, B-49: gitlab.com's, as the build page says them.
+        blocks::Untrusted::Job => {
+            "another request showed this job's ID token with another key, so the backend withdrew the job"
+        }
+        blocks::Untrusted::Token => "its ID token is older than a job can be",
+        blocks::Untrusted::Fork => "it builds a fork's code",
+        blocks::Untrusted::Source => "a policy or another source added this job",
+        blocks::Untrusted::Unprotected => "its branch isn't protected in GitLab",
+        blocks::Untrusted::Config => "its pipeline's configuration isn't the project's own file",
+        blocks::Untrusted::User => {
+            "whoever started, retried or played it isn't a Maintainer or an Owner"
         }
         blocks::Untrusted::Unknown => "the backend says it isn't trusted",
     }

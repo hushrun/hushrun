@@ -14,7 +14,9 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono only comes through oci-client, unmaintained not vulnerable, no upgrade yet" },
+]
 
 [licenses]
 version = 2

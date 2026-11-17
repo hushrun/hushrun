@@ -994,3 +994,118 @@ fn measure_two_machines_on_a_real_module() {
         fake.served_bytes()
     );
 }
+
+/// B-48: `hushrun run build -- sh -c SCRIPT` as GitLab job `job` of machine `m`: its ID token
+/// from the fake, its job token, GitLab's job variables, the agent token beside them for results,
+/// and the machine's own temporary folder.
+fn gitlab_go_run(
+    m: &Machine,
+    fake: &FakeBuild,
+    job: i64,
+    token: &str,
+    script: &str,
+) -> (i32, String) {
+    let temp = m.root.join("tmp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let mut cmd = m.hushrun(fake);
+    cmd.env("CI", "true")
+        .env("GITLAB_CI", "true")
+        .env("CI_JOB_ID", job.to_string())
+        .env("CI_PIPELINE_ID", "900")
+        .env("CI_PROJECT_URL", "https://gitlab.com/acme/shop")
+        .env("CI_SERVER_URL", "https://gitlab.com")
+        .env("CI_JOB_TOKEN", format!("glcbt-job-token-of-{job}"))
+        .env("TMPDIR", &temp)
+        .env("HUSHRUN_TOKEN", FakeBuild::AGENT_TOKEN)
+        .env("HUSHRUN_ID_TOKEN", token)
+        .args([
+            "run",
+            "build",
+            "--force",
+            "--",
+            "sh",
+            "-c",
+            &format!("{script} && sleep 1"),
+        ]);
+    let output = cmd.output().unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// covers: B-45, B-48, B-49
+#[test]
+fn a_gitlab_job_s_go_requests_are_signed_with_the_job_s_one_key_beside_rust_s() {
+    if !have_go() {
+        return;
+    }
+    let fake = FakeBuild::start();
+    let dir = tempfile::tempdir().unwrap();
+    let a = Machine::new(dir.path(), "a", None, &[]);
+    let token = fake.gitlab_token(7101);
+    let (code, stderr) = gitlab_go_run(
+        &a,
+        &fake,
+        7101,
+        &token,
+        "go build -o ../app ./cmd/app && ../app",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(go_line(&stderr).contains("built"), "{stderr}");
+    assert!(go_blocks(&fake) > 0, "nothing went up: {stderr}");
+    // Go's `open` and `close` (kind go/1) beside Rust's: every build request carried the job's ID
+    // token and one key, and the job stayed bound to it.
+    let kinds: Vec<_> = fake.opens().iter().map(|o| o.kind.clone()).collect();
+    assert!(kinds.iter().any(|k| k == "go/1"), "{kinds:?}");
+    let build: Vec<_> = fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.path.contains("/v0/build/"))
+        .collect();
+    let key = build[0].job_key.clone().expect("a job key");
+    for seen in &build {
+        assert_eq!(
+            seen.authorization.as_deref(),
+            Some(format!("Bearer {token}").as_str()),
+            "{}",
+            seen.path
+        );
+        assert_eq!(seen.job_key.as_deref(), Some(key.as_str()), "{}", seen.path);
+    }
+    let job = &fake.gitlab_jobs()[&7101];
+    assert!(!job.withdrawn, "{job:?}");
+    assert!(
+        job.signed[route::OPEN] >= 2,
+        "Rust's and Go's open: {job:?}"
+    );
+    assert!(
+        job.signed[route::CLOSE] >= 2,
+        "Rust's and Go's close: {job:?}"
+    );
+    assert!(
+        job.signed.get(route::BEGIN).is_some_and(|n| *n >= 1),
+        "{job:?}"
+    );
+    // The job's next run opens and closes both again with the same key.
+    let (code, stderr) = gitlab_go_run(&a, &fake, 7101, &token, "go build -o ../app ./cmd/app");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!fake.gitlab_jobs()[&7101].withdrawn, "{stderr}");
+
+    // Another job, on another machine: Go's packages come from the shared store.
+    let b = Machine::new(dir.path(), "b", Some(&a.repo), &[]);
+    let token = fake.gitlab_token(7102);
+    let (code, stderr) = gitlab_go_run(
+        &b,
+        &fake,
+        7102,
+        &token,
+        "go build -o ../app ./cmd/app && ../app",
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        go_line(&stderr).contains("from the shared store"),
+        "{stderr}"
+    );
+    assert!(!fake.gitlab_jobs()[&7102].withdrawn);
+}

@@ -127,6 +127,25 @@ fn the_begin_signature_names_the_org_and_the_body() {
     assert_ne!(begin_message("acme", b"{ }"), message);
 }
 
+// covers: B-49
+#[test]
+fn a_gitlab_job_s_signature_names_the_method_path_org_job_and_body() {
+    // Byte for byte what the backend verifies (cloud back/src/build/jobs.rs `job_message`).
+    let message = job_message("POST", "/o/acme/v0/build/open", "acme", 1212, b"{}");
+    assert_eq!(
+        message,
+        "hushrun-build-job/v1\nPOST\n/o/acme/v0/build/open\nacme\n1212\n44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\n"
+    );
+    for other in [
+        job_message("POST", "/o/acme/v0/build/close", "acme", 1212, b"{}"),
+        job_message("POST", "/o/acme/v0/build/open", "other", 1212, b"{}"),
+        job_message("POST", "/o/acme/v0/build/open", "acme", 1213, b"{}"),
+        job_message("POST", "/o/acme/v0/build/open", "acme", 1212, b"{ }"),
+    ] {
+        assert_ne!(other, message);
+    }
+}
+
 #[test]
 fn open_and_its_policy() {
     round_trip(
@@ -205,6 +224,13 @@ fn open_and_its_policy() {
         ("runner", Untrusted::Runner),
         ("run", Untrusted::Run),
         ("credential", Untrusted::Credential),
+        ("job", Untrusted::Job),
+        ("token", Untrusted::Token),
+        ("fork", Untrusted::Fork),
+        ("source", Untrusted::Source),
+        ("unprotected", Untrusted::Unprotected),
+        ("config", Untrusted::Config),
+        ("user", Untrusted::User),
         ("a-new-reason", Untrusted::Unknown),
     ] {
         assert_eq!(

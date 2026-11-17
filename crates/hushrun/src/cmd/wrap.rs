@@ -542,7 +542,7 @@ fn skip_or_run(
         if let Some(session) = &session {
             session.apply(&mut child);
         }
-        let status = child.status();
+        let status = build_session::run_command(&mut child, build.closes_on_stop());
         let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = match status {
             Ok(status) => status,
@@ -1094,13 +1094,14 @@ impl<'a> BuildRun<'a> {
         // B-26: the run's results lookup told whether the org shares build blocks; a run that
         // made none lets `open` tell.
         let access = backend.and_then(Backend::build_access);
-        let unread = repo.is_none() && access.as_ref().is_some_and(|a| a.credential.is_some());
+        let unread = repo.is_none() && access.as_ref().is_some_and(|a| a.sends());
         let share = match (repo, access) {
             (Some(repo), Some(access)) => Some(build_session::ShareStart {
-                access,
-                commit: build_commit(repo, hushrun_ci::in_ci(&Env::from_process())),
+                commit: build_commit(repo, crate::gitlab_job::in_ci(&Env::from_process())),
                 check: check.as_str().to_string(),
-                open_decides: repo.open_decides,
+                // B-48: a GitLab job with no token to look results up with lets `open` say.
+                open_decides: repo.open_decides || access.open_decides(),
+                access,
             }),
             _ => None,
         };
@@ -1133,6 +1134,11 @@ impl<'a> BuildRun<'a> {
             global,
             say,
         }
+    }
+
+    /// B-49: whether a stop signal goes to COMMAND and the run then closes, within 2 seconds.
+    fn closes_on_stop(&self) -> bool {
+        build_session::closes_on_stop(self.session.as_ref())
     }
 
     /// What a start of COMMAND gets: the wrapper and the session; nothing without a session.

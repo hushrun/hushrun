@@ -276,6 +276,43 @@ hushrun refuses a token whose audience isn't `sigstore`, or that expired, before
 anywhere (exit 2 and 9). A merge request pipeline signs for its source project and branch, so a
 fork's never counts. `hushrun doctor` in a job says whether it signs as the project's CI.
 
+## Sharing compiled code (build blocks)
+
+When the org shares build blocks and an admin confirmed the project on the build page, a job's
+`hushrun run NAME -- cargo …` reuses what other jobs and people compiled, and the project's
+trusted branches upload what they compile (spec B-48, B-49). A job takes part through its own
+ID token, never an agent token: declare one named `HUSHRUN_ID_TOKEN` whose audience is the org's
+URL, one string, in every job that builds through hushrun.
+
+```yaml
+.hushrun:
+  id_tokens:
+    HUSHRUN_ID_TOKEN:
+      aud: https://api.hushrun.com/o/ORG # your org's URL on hushrun, exactly
+```
+
+Without it, the job compiles as it would without hushrun, and where the org shares it says
+`build reuse is off for this run: the job can't mint an ID token (declare …)`. A token with
+another audience, an array of audiences, or one that expired is sent nowhere, and the run says
+why. Keep `HUSHRUN_TOKEN` too: results are recorded with the agent token, and the run's results
+lookup carries the ID token beside it, so a job of an org that doesn't share makes no other
+request.
+
+- Each `hushrun run` of a job signs its requests with a key made from the job's `CI_JOB_TOKEN`
+  and its ID token, the same in every script line. A step that runs hushrun in a container of its
+  own must hand it `HUSHRUN_ID_TOKEN`, `CI_JOB_TOKEN`, `CI_JOB_ID` and `CI_SERVER_URL`; without
+  `CI_JOB_TOKEN` it shares nothing and says why. A request with another key for the job (someone
+  else holding its ID token) withdraws the job: the backend deletes what it uploaded and refuses
+  its later runs.
+- A job's trusted uploads count only once its `hushrun run` has finished and sent `close`. When
+  GitLab cancels the job or it times out, hushrun passes GitLab's SIGTERM to COMMAND and closes
+  within 2 seconds; a job killed outright has uploaded for nothing, which is the safe side.
+- The audience must be the org's URL exactly: a trailing slash is another audience.
+- A `target/` folder restored from GitLab's cache is keyed by its content, so it proves nothing
+  and gains nothing for sharing: with the shared store on, don't cache `target/`.
+- gitlab.com only: a self-managed instance's tokens are not taken.
+- `hushrun build status` in a job says what its runs do with build blocks there, and why.
+
 ## A sandbox project
 
 `cargo xtask e2e --gitlab GROUP/PROJECT` drives a GitLab.com project through hushrun's lifecycle

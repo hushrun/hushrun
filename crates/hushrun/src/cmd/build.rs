@@ -81,7 +81,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     }
-    .filter(|access| access.credential.is_some())
+    .filter(|access| access.sends())
     // An agent's token is read from `HUSHRUN_AGENT` (the string `hushrun token create --agent`
     // prints, which the docs name) and, as an `hra_` token, from `HUSHRUN_TOKEN`.
     .ok_or_else(|| {
@@ -213,20 +213,27 @@ fn set_share(global: &GlobalOpts, place: &Place, mode: Mode) -> CmdResult {
 /// What a `hushrun run NAME -- COMMAND` from this shell does (B-25), as far as this machine can
 /// tell without asking the backend: the one function's answer, the org taken as sharing at the
 /// most it can. A CI job with no backend to ask has nothing to share with.
-fn run_here(place: &Place, effective: &settings::Settings) -> hushrun_build::share::Does {
+fn run_here(
+    place: &Place,
+    effective: &settings::Settings,
+) -> (
+    hushrun_build::share::Does,
+    Option<crate::results::BuildAccess>,
+) {
     use hushrun_build::share::{Caller, Does, Off, Org, Sharing, what_a_run_does};
     let root = std::env::current_dir().ok();
     let access = match crate::results::Backend::select(root.as_deref()) {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     };
-    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    let in_ci = crate::gitlab_job::in_ci(&hushrun_ci::Env::from_process());
     if in_ci && access.is_none() {
-        return Does {
+        let none = Does {
             local: Mode::Off,
             sharing: Sharing::Off(Off::SignedOut),
             uploads: false,
         };
+        return (none, None);
     }
     let caller = crate::cmd::build_session::caller(access.as_ref(), in_ci);
     // In a sandbox nobody chose a mode: reuse is on unless the settings file says `off`, and
@@ -239,26 +246,27 @@ fn run_here(place: &Place, effective: &settings::Settings) -> hushrun_build::sha
             .unwrap_or(Mode::Off),
         _ => effective.mode,
     };
-    what_a_run_does(caller, local, effective.share, Org::Shares(None))
+    let does = what_a_run_does(caller, local, effective.share, Org::Shares(None));
+    (does, access)
 }
 
 /// The `ci` line of `hushrun build status` (B-2, B-31): what `hushrun run` does in this CI job,
 /// and why, from [`run_here`].
 fn ci_here(place: &Place, effective: &settings::Settings) -> String {
     use hushrun_build::share::{Off, Sharing};
-    let does = run_here(place, effective);
+    let (does, access) = run_here(place, effective);
     match (does.local, does.sharing) {
         (Mode::Off, Sharing::Off(off)) => {
             let hint = match off {
-                Off::NoIdToken => " (give the job `permissions: id-token: write`)",
-                _ => "",
+                Off::NoIdToken => crate::cmd::build_session::id_token_hint(access.as_ref()),
+                _ => String::new(),
             };
             format!(
                 "this is CI, where `hushrun run` reuses nothing here: {}{hint}",
                 off.reason()
             )
         }
-        _ if !does.uploads => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions); no person's settings are read".to_string(),
+        _ if !does.uploads => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, reading the org's blocks and uploading none (an agent token outside GitHub Actions and GitLab CI); no person's settings are read".to_string(),
         _ => "this is CI: `hushrun run NAME -- COMMAND` reuses in the job's own store when the org shares, and shares as the org's mode says; no person's settings are read".to_string(),
     }
 }
@@ -267,7 +275,7 @@ fn ci_here(place: &Place, effective: &settings::Settings) -> String {
 /// the word, and why.
 fn sharing_here(place: &Place, effective: &settings::Settings) -> (&'static str, String) {
     use hushrun_build::share::Sharing;
-    let does = run_here(place, effective);
+    let (does, _) = run_here(place, effective);
     match does.sharing {
         Sharing::Off(off) => ("off", off.reason().to_string()),
         Sharing::Observe => (
@@ -426,7 +434,8 @@ fn status(global: &GlobalOpts, place: &Place) -> CmdResult {
     let store = place.store.as_deref().map(Store::new);
     let held = store.as_ref().map(|store| store.status(now(global)));
     let env = hushrun_ci::Env::from_process();
-    let in_ci = hushrun_ci::in_ci(&env);
+    // B-48: a GitLab job is CI here too, whatever else says so.
+    let in_ci = crate::gitlab_job::in_ci(&env);
     let wrapper = std::env::var_os(session::RUSTC_WRAPPER).filter(|v| !v.is_empty());
     // Settings `hushrun run` can't read turn reuse off there: a configuration error.
     let exit = if saved.is_err() {

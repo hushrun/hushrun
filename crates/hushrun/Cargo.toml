@@ -67,6 +67,13 @@ tokio.workspace = true
 # A PUT of a build block's pack streams it from its file (B-29): the stream reqwest's body takes.
 # Already part of the binary's build through the ledger's HTTP client.
 futures-util.workspace = true
+# \[B-31\] The random part of a CI run's store's name. Already part of the binary's build,
+# through hushrun-attest.
+getrandom.workspace = true
+# \[B-49\] A GitLab job's key, derived from its job token by HKDF-SHA256 and wiped from
+# memory. Both already part of the binary's build, through hushrun-attest.
+ring.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

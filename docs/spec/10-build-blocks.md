@@ -1027,7 +1027,7 @@ caller asks it again from the same facts and nobody stores the answer:
 | A person signed in, the org shares, own setting not `off` | the local mode | the lowest of the org's mode, the own setting and the local mode |
 | A person otherwise | the local mode | off |
 | CI with an ID token, the org shares | on, in the job's own store | the org's mode |
-| CI with an agent token and no ID token, the org shares | on, in the job's own store | the org's mode, reading only |
+| CI with an agent token and no ID token, the org shares, outside GitHub Actions and GitLab CI | on, in the job's own store | the org's mode, reading only |
 | CI otherwise | off | off |
 | An agent token where a person is signed in, the org shares | that person's local mode, `off` until the person chose one | the org's mode, lowered as for the person, by the person's settings |
 | An agent token where a person is signed in, otherwise | that person's local mode | off |
@@ -1267,11 +1267,17 @@ under the job's temporary folder (`RUNNER_TEMP`), the digest one function makes
 (`GITHUB_JOB`) and the job's own request token (`ACTIONS_ID_TOKEN_REQUEST_TOKEN`), which every
 step of one job shares and no other job has: so every call of one job finds the same store, and
 no other job can make or name it. At its start a job removes every other `hushrun-build*` entry
-in its temporary folder, unread. Elsewhere (or with no request token) the store is
-`hushrun-build-<process id>` under the system's temporary folder, made by the run itself: one
-found there at the start, left by a process that died with the same id, is removed first, and
-when it can't be, the run has no store and says so in one line; it is removed when the run's
-session ends. In CI who built a block, and so whose markers go up (B-29, B-32), is the job and its
+in its temporary folder, unread. Elsewhere (GitLab CI, which gives a job no folder of its own,
+or with no request token) the store is `hushrun-build-<job>-<random>` under the system's
+temporary folder (`TMPDIR`), `<job>` the job's id (`CI_JOB_ID`) else the process's, `<random>`
+16 hex characters of fresh randomness, so that two runs never name the same folder, whatever
+their process ids (two containers on one shared `/tmp` have the same ones). The run makes it
+itself, exclusively (mode 0700), and takes the lock of its `ci-run.lock` at once, which it holds
+while it lives. A folder already at that path is never adopted, read or removed: the run has no
+store and says so in one line. The store goes when the run's session ends, whatever COMMAND did
+(`end_run_store`). At its start a run removes the other `hushrun-build-*` folders there of this
+user's whose lock file was made over an hour before and whose lock is free, which a run that
+crashed or was killed left, and leaves every other one, a live run's included whatever its age. In CI who built a block, and so whose markers go up (B-29, B-32), is the job and its
 store: the credential's fingerprint (for an ID token, the job's digest) joined with the store's
 folder, so that a marker or a block another run left is never this run's, whatever credential it
 was made with. No person's settings file is read, reuse is on unless `HUSHRUN_BUILD` says
@@ -1290,8 +1296,9 @@ wrapper carries the ID token too, before any token the environment holds (C-13),
 one to the job itself. With no ID token (a pull request from a fork, a job without
 `id-token: write`) sharing is off and the run says why in one line, whatever else the
 environment holds: an agent token in `HUSHRUN_TOKEN` or `HUSHRUN_AGENT` reads nothing there, and a
-results answer obtained with it never sets the wrapper. Anywhere else in CI an agent token reads
-the org's blocks and uploads none, whatever the policy says. **A person's or an agent's token
+results answer obtained with it never sets the wrapper. The same holds in GitLab CI with its own
+ID token (B-48). Anywhere else in CI an agent token reads the org's blocks and uploads none,
+whatever the policy says. **A person's or an agent's token
 used in CI says so:** every build request of such a run, and its results lookup, carries
 `Hushrun-Ci: 1` (`hushrun_core::blocks::CI_HEADER`; one test each for the relay's client and the
 lookup, `Client::says_ci` and `results::Server::says_ci`: the run is a CI job's and its
@@ -1374,6 +1381,86 @@ there learns only when it can. A network that refuses the backend with an answer
 proxy's 403) counts as the backend's answer, and the fetch then serves nothing: a cost, not a
 wrong block. A sandbox whose later phases have the network and no token gets a 401, and so
 nothing from its fetch, for the same reason.
+
+**B-48 GitLab CI, through its ID token.** In a GitLab CI job a credential for build blocks is
+the job's ID token, read from `HUSHRUN_ID_TOKEN` alone, which the job declares with
+`id_tokens: {HUSHRUN_ID_TOKEN: {aud: <the org's URL>}}`, one string: hushrun asks GitLab for no
+other, and gitlab.com only (a self-managed instance's tokens are not taken). A run is a GitLab
+job's by one function (`gitlab_job::is_job`): GitLab as the provider (`GITLAB_CI`), or GitLab's
+job variables `CI_JOB_ID` and `CI_SERVER_URL` beside `HUSHRUN_ID_TOKEN` or `CI_JOB_TOKEN`,
+whatever `HUSHRUN_PROVIDER` says and whether or not `CI` is set (a container a step starts, handed
+the job's variables). Such a run is CI for build blocks (B-31). One function reads the variable
+(`gitlab_job::read`) and decides one of three things, which nothing else decides; the run keeps
+the answer in one place (`results::GitlabCi`, the credential its build requests carry):
+
+| `HUSHRUN_ID_TOKEN` | What the run does |
+|---|---|
+| unset or empty | shares nothing; where the results lookup says the org shares, says once `build reuse is off for this run: the job can't mint an ID token (declare `id_tokens: {HUSHRUN_ID_TOKEN: {aud: <URL>}}` in the job)` |
+| not a JWT, an issuer other than `https://gitlab.com` exactly, an audience that isn't one string equal to the backend's URL as the run names it, compared exactly as the backend compares it (a trailing slash is another audience; an array that holds it is in another service's hands too), no `job_id` or `jti`, expired, or no `CI_JOB_TOKEN` beside it (B-49) | sent nowhere; shares nothing, and says why once, with how to declare it, whatever the org does: the job asked to share by declaring it |
+| gitlab.com's, for the backend's URL, not expired, with `CI_JOB_TOKEN` | the bearer of every build request (B-26), signed with the job's key (B-49) |
+
+A usable token goes to no server but the one its audience names: a repository's files can name
+any backend, and a token sent elsewhere could be used at hushrun's until the job's timeout. It is
+never renewed (GitLab gives a job one): no 401 retry, and the relay sends nothing with it once it
+expired. On the run's results lookup it goes in `Hushrun-Id-Token`
+(`hushrun_core::blocks::ID_TOKEN_HEADER`) beside the token that is the lookup's bearer, since
+results take no GitLab ID token: the answer's `Hushrun-Build` is then CI's for the job's project,
+so a job of an org that doesn't share, or of a project nobody confirmed, makes no build request.
+A job with no token to look results up with lets `open` say whether the org shares, as B-25's run
+of several scopes does (`BuildAccess::open_decides`): one `open`, as silent as ever when the org
+doesn't. In a GitLab job a person's or an agent's token reads nothing of the shared store and
+uploads nothing: the relay's requests carry the job's ID token or none
+(`results::Backend::build_access`), which is the CLI's rule, since the backend can't tell where a
+token runs unless the request says so. A container handed an agent token and none of GitLab's
+variables is a sandbox to hushrun as to the backend. The store is the run's own (B-31), and a
+`target/` folder restored from GitLab's cache is keyed by its content (B-6, B-31). `open`'s
+`untrusted` may also be `job`, `token`, `fork`, `source`, `unprotected`, `config` or `user`, each
+said in one line (`untrusted_words`). *Rests on:* the backend verifying the token (its signature
+by gitlab.com's keys, its issuer, its audience, its CI claims, its expiry by the backend's clock)
+and deciding what the job may write: this rule only decides whether to send it. *Breaks if:* the
+backend's URL as the run names it is not the audience the backend checks (a proxy in front of
+it, another spelling of the host): every job then says its audience is wrong.
+
+**B-49 A GitLab job proves it is the job.** A GitLab ID token works until the job's timeout, also
+after the job ended, so a copied one could write. A GitLab job's build requests are therefore
+signed with a key of the job's own, which its first `open` binds the job to on the backend; a
+request with another key withdraws the job, and the backend then deletes what the job wrote and
+refuses its later requests (its rule). So the key must be the same in every `hushrun run` of the
+job, whatever its temporary folder, current folder or container, and a key nobody else can make.
+It is **derived, never stored** (`gitlab_job::JobKey::of`): the Ed25519 seed is HKDF-SHA256 with
+the salt `hushrun.gitlab-job-key/v1`, the job's `CI_JOB_TOKEN` as input key material and
+`<job_id>\n<jti>` of the ID token as info. GitLab gives every step of a job the same
+`CI_JOB_TOKEN`, masks it in logs and stops taking it when the job ends; a copied ID token alone
+doesn't give the key. A file under the temporary folder (the first design) followed `TMPDIR` and
+the container, so a step in a container of its own, or a tool that exported its own `TMPDIR`,
+made a second key and withdrew its own job, its first runs' uploads with it. With no
+`CI_JOB_TOKEN` (a container that wasn't handed it) the run shares nothing and says why: every
+request of a GitLab job, a read included, must carry the job's key, and any other key would
+withdraw the job, so there is no reading without it. The backend needs only the public half to
+be the same in every request of the job.
+
+Every build request, `open` first, carries `Hushrun-Job-Key`, the public half as a machine's is
+written (`ed25519:<base64>`), and `Hushrun-Job-Signature`, standard base64 of its signature over
+`hushrun_core::blocks::job_message`: `hushrun-build-job/v1\nPOST\n<path>\n<org>\n<job id>\n<SHA-256
+of the body, lowercase hex>\n`, `<path>` `/o/<org>/<route>` (`/o/acme/v0/build/open`), `<job id>`
+the token's `job_id`. Both are added in the one place every build request is sent
+(`Client::post_bytes`), so no request goes unsigned. What a GitLab job writes as trusted is served
+only once the job has closed a run with its key, so every `hushrun run` whose `open` answered
+sends `close` at its end: when COMMAND ends, whatever its exit code, and when hushrun is asked to
+stop (`build_session::run_command`). GitLab cancels and times out a job with SIGTERM, then kills it
+after a grace period: while COMMAND runs, a stop signal (SIGTERM, SIGINT, SIGHUP) goes to COMMAND,
+once, instead of ending hushrun; when COMMAND has ended, the run waits for no upload, sends `close`
+within 2 seconds (`upload::STOPPED_CLOSE`), and removes its store. The signal goes to COMMAND's
+process, not to processes COMMAND started that outlive it. A run killed outright (SIGKILL, a
+machine that went) sends no `close` and has uploaded for nothing, which is the safe side; its
+store is a dead run's (B-31). No `begin` starts with less than 2 minutes left of the token, since
+nothing can be committed after its `exp`: the markers wait, untouched, and the run says once
+`build: no more uploads this run: the job's ID token expires in less than 2 minutes`. A refusal
+of the job (`job_withdrawn`) stops sharing and is said in plain words, with that the job's later
+runs are refused too. *Rests on:* nobody but the job holding both its ID token and its
+`CI_JOB_TOKEN`; HKDF-SHA256 and Ed25519. *Breaks if:* something in the job sends both tokens out
+(a dependency's build script reading the environment): it can then sign as the job until the
+token's timeout, as on GitHub code in the job holds the job's credential.
 
 **B-32 Where a block came from.** Beside each block the store keeps a record, `origin.json`,
 written before the block is published and rewritten whole under the block's lock when it
