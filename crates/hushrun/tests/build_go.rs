@@ -589,8 +589,9 @@ fn measure_two_machines_on_a_real_module() {
         assert!(out.status.success(), "{out:?}");
         started.elapsed()
     };
-    let timed_run = |m: &Machine, audit: &str| {
+    let timed_script = |m: &Machine, audit: &str, build: &str| {
         let mut cmd = Command::new(&bin);
+        go(m, &mut cmd);
         cmd.current_dir(&m.repo)
             .env("HUSHRUN_CACHE_DIR", m.root.join("cache"))
             .env("HUSHRUN_CREDENTIALS", m.root.join("credentials.json"))
@@ -604,7 +605,6 @@ fn measure_two_machines_on_a_real_module() {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", m.root.join("gitconfig"))
             .args(["run", "build", "--force", "--", "sh", "-c", build]);
-        go(m, &mut cmd);
         let started = Instant::now();
         let out = cmd.output().unwrap();
         let took = started.elapsed();
@@ -612,17 +612,28 @@ fn measure_two_machines_on_a_real_module() {
         assert!(out.status.success(), "{stderr}");
         let lines: Vec<String> = stderr
             .lines()
-            .filter(|l| l.contains("build: go"))
+            .filter(|l| l.contains("build: "))
             .map(str::to_string)
             .collect();
         (took, lines)
     };
+    let timed_run = |m: &Machine, audit: &str| timed_script(m, audit, build);
     let cold = copy("cold");
     let cold_time = timed_plain(&cold);
     let warm_time = timed_plain(&cold);
     let a = copy("a");
     let (a_time, a_lines) = timed_run(&a, "none");
     let (a_warm, a_warm_lines) = timed_run(&a, "none");
+    // Warm, three times each, alternating: plain Go, Go inside `hushrun run`, and `hushrun run`
+    // around nothing, which is its own cost.
+    for round in 1..=3 {
+        let plain = timed_plain(&a);
+        let (inside, _) = timed_run(&a, "none");
+        let (nothing, _) = timed_script(&a, "none", "true");
+        println!(
+            "warm round {round}: plain go {plain:?}, inside hushrun run {inside:?}, hushrun run of nothing {nothing:?}"
+        );
+    }
     let b = copy("b");
     let (b_time, b_lines) = timed_run(&b, "none");
     let c = copy("c");
