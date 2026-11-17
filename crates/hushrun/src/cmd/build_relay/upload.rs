@@ -100,6 +100,8 @@ pub(crate) fn after_commit(state: CommitState) -> Move {
 pub(crate) struct End {
     /// A CI job: its store goes with the job, so what it built goes up now or never.
     pub(crate) in_ci: bool,
+    /// B-49: a stop signal came while COMMAND ran: nothing is waited for but `close`.
+    pub(crate) stopping: bool,
     /// The job writes the repository's trusted blocks, as `Policy::writes_trusted` says.
     pub(crate) trusted: bool,
     /// What the compiles of the blocks still to go up took, together.
@@ -107,6 +109,10 @@ pub(crate) struct End {
     /// What this `hushrun run` call already waited at the end of its earlier checks.
     pub(crate) waited: Duration,
 }
+
+/// B-49: the most a run that was asked to stop gives `close`: GitLab's grace period before it
+/// kills a cancelled job is short.
+pub(crate) const STOPPED_CLOSE: Duration = Duration::from_secs(2);
 
 /// The end of a command's one deadline (B-29, B-31), from the moment the command ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +131,12 @@ pub(crate) struct EndWait {
 /// `close`'s 5 seconds on a person's machine; in CI that, and never less than `close`'s time.
 /// Uploads stop when `close`'s time (or half the whole, if less) is all that is left.
 pub(crate) fn wait_at_end(tuning: &Tuning, end: &End) -> EndWait {
+    if end.stopping {
+        return EndWait {
+            uploads: Duration::ZERO,
+            total: STOPPED_CLOSE.min(tuning.close),
+        };
+    }
     let (uploads, total) = if end.in_ci {
         let most = if end.trusted {
             tuning.ci_trusted_wait
@@ -658,6 +670,7 @@ mod tests {
                 &tuning,
                 &End {
                     in_ci,
+                    stopping: false,
                     trusted,
                     waiting_cost: Duration::from_secs(cost_s),
                     waited: Duration::from_secs(waited_s),
@@ -665,6 +678,21 @@ mod tests {
             );
             (wait.uploads.as_millis(), wait.total.as_millis())
         };
+        // B-49: a run asked to stop waits for no upload, and gives `close` 2 seconds at most.
+        let stopped = wait_at_end(
+            &tuning,
+            &End {
+                in_ci: true,
+                stopping: true,
+                trusted: true,
+                waiting_cost: Duration::from_secs(600),
+                waited: Duration::ZERO,
+            },
+        );
+        assert_eq!(
+            (stopped.uploads.as_millis(), stopped.total.as_millis()),
+            (0, 2_000)
+        );
         // A person's machine: the 5 seconds for those in flight, whatever waits, then `close`'s 5.
         assert_eq!(end(false, true, 10_000, 0), (5_000, 10_000));
         assert_eq!(end(false, false, 0, 0), (5_000, 10_000));

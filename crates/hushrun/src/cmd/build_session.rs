@@ -93,7 +93,7 @@ fn begin_here(
     let here = Here {
         settings: &settings,
         cache_dir: cache_dir.as_deref(),
-        in_ci: hushrun_ci::in_ci(&Env::from_process()),
+        in_ci: crate::gitlab_job::in_ci(&Env::from_process()),
         repository,
         repository_env,
         env: &env,
@@ -212,8 +212,6 @@ fn begin_from_saved(
         machine: None,
         shares: true,
         answered: false,
-        open_decides: false,
-        id_token_problem: None,
     };
     let config = || {
         Some(crate::cmd::build_relay::Config {
@@ -624,7 +622,10 @@ pub(crate) fn caller(access: Option<&crate::results::BuildAccess>, in_ci: bool) 
         _ if in_ci => Caller::Ci {
             id_token: matches!(
                 credential,
-                Some(BuildCredential::GithubOidc { .. } | BuildCredential::GitlabJob { .. })
+                Some(
+                    BuildCredential::GithubOidc { .. }
+                        | BuildCredential::Gitlab(crate::results::GitlabCi::Usable { .. })
+                )
             ),
             agent_token: matches!(credential, Some(BuildCredential::Token(_))) && agent,
         },
@@ -653,7 +654,9 @@ fn begin_in_ci(
     };
     // B-48: a GitLab job's HUSHRUN_ID_TOKEN that can't be sent, said whatever the org does: the
     // job asked to share by declaring it.
-    if let Some(crate::results::IdTokenProblem::Unusable(why)) = &start.access.id_token_problem {
+    if let Some(crate::results::BuildCredential::Gitlab(crate::results::GitlabCi::Unusable(why))) =
+        &start.access.credential
+    {
         return Err(Some(format!("{OFF}: {why}")));
     }
     // B-25: a run that made no results lookup lets `open` say whether the org shares, waited for
@@ -727,14 +730,58 @@ fn begin_in_ci(
     }
 }
 
+/// B-49: whether a stop signal must end this run gently: its session shares through a relay
+/// whose credential is a GitLab job's, whose trusted uploads count only once the run closes.
+/// GitLab cancels and times out a job with SIGTERM, then kills it after a grace period.
+pub(crate) fn closes_on_stop(session: Option<&Session>) -> bool {
+    session.is_some_and(|session| session.current().share.relay().is_some())
+        && crate::cmd::build_relay::Relay::running().is_some_and(|relay| relay.is_gitlab_job())
+}
+
+/// Runs `command` to its end. With `gently` ([`closes_on_stop`]), a stop signal (SIGTERM,
+/// SIGINT, SIGHUP) no longer ends hushrun at once: it goes to COMMAND, once, the relay's end is
+/// made short (`build_relay::stopping`: no upload waited for, `close` within 2 seconds), and the
+/// run ends as COMMAND does, its session finished and its store removed. Without, as
+/// `Command::status`.
+pub(crate) fn run_command(
+    command: &mut std::process::Command,
+    gently: bool,
+) -> std::io::Result<std::process::ExitStatus> {
+    if !gently || cfg!(not(unix)) {
+        return command.status();
+    }
+    let held = crate::isolated::Held::hold();
+    let mut child = command.spawn()?;
+    let mut forwarded = false;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if !forwarded && let Some(signal) = held.signal() {
+            forwarded = true;
+            crate::cmd::build_relay::stopping();
+            #[cfg(unix)]
+            if let (Some(pid), Some(signal)) = (
+                i32::try_from(child.id())
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw),
+                rustix::process::Signal::from_named_raw(signal),
+            ) {
+                let _ = rustix::process::kill_process(pid, signal);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// What a line says after why a CI job shares nothing for want of an ID token (B-31, B-48): how
 /// to give the job one, in GitHub Actions or in GitLab CI, or why the one it has can't be sent.
 pub(crate) fn id_token_hint(access: Option<&crate::results::BuildAccess>) -> String {
-    use crate::results::IdTokenProblem;
-    match access.and_then(|access| access.id_token_problem.as_ref()) {
-        Some(IdTokenProblem::Absent(declare)) => format!(" ({declare})"),
-        Some(IdTokenProblem::Unusable(why)) => format!(": {why}"),
-        None => " (give the job `permissions: id-token: write`)".to_string(),
+    use crate::results::{BuildCredential, GitlabCi};
+    match access.and_then(|access| access.credential.as_ref()) {
+        Some(BuildCredential::Gitlab(GitlabCi::Absent { declare })) => format!(" ({declare})"),
+        Some(BuildCredential::Gitlab(GitlabCi::Unusable(why))) => format!(": {why}"),
+        _ => " (give the job `permissions: id-token: write`)".to_string(),
     }
 }
 
@@ -766,7 +813,10 @@ fn start_sharing(
         return Err(None);
     }
     let current = session.current().clone();
-    let caller = caller(Some(&start.access), hushrun_ci::in_ci(&Env::from_process()));
+    let caller = caller(
+        Some(&start.access),
+        crate::gitlab_job::in_ci(&Env::from_process()),
+    );
     let does = what_a_run_does(
         caller,
         current.mode,

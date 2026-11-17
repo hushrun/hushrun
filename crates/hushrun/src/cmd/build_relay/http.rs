@@ -27,7 +27,7 @@ impl Failure {
             Failure::Unreachable(why) | Failure::Failed(why) => why.clone(),
             // B-49: a GitLab job withdrawn for a second key.
             Failure::Refused(status, Some(code)) if code == "job_withdrawn" => format!(
-                "answered {status} {code}: a request with another key carried this job's ID token, so the backend withdrew the job and serves nothing it wrote"
+                "answered {status} {code}: a request with another key carried this job's ID token, so the backend withdrew the job: nothing it wrote is served, and its later runs are refused too"
             ),
             Failure::Refused(status, Some(code)) => format!("answered {status} {code}"),
             Failure::Refused(status, None) => format!("answered {status}"),
@@ -100,6 +100,11 @@ impl Client {
     /// B-31: no ID token is minted from the start of a command's end wait to its check's end.
     pub(crate) fn ending(&self, ending: bool) {
         self.credential.ending(ending);
+    }
+
+    /// B-49: whether the credential is a GitLab job's.
+    pub(crate) fn is_gitlab_job(&self) -> bool {
+        matches!(self.credential, super::credential::Credential::GitlabJob(_))
     }
 
     /// B-49: whether an upload begun now can be finished with this credential.

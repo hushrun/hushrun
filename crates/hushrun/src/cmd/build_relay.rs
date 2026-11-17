@@ -346,6 +346,8 @@ struct State {
     uploading: bool,
     /// The relay rested once this run: said once (B-26).
     rested: bool,
+    /// The run is a CI job's (B-31): its store goes with it.
+    ci: bool,
     /// The object store's host couldn't be reached once this run: said once (B-26).
     store_unreachable: bool,
     /// The run's platform, once asked.
@@ -416,6 +418,11 @@ impl State {
                 format!(
                     "build: sharing is off for this run: the shared store can't be reached ({why})"
                 )
+            }
+            // Markers wait for a later run on a machine whose store stays; in CI the store goes
+            // with the run, and a withdrawn job's later runs are refused too.
+            Stop::Refused(why) if self.ci || why.contains("job_withdrawn") => {
+                format!("build: sharing stopped for this run: the backend {why}")
             }
             Stop::Refused(why) => {
                 format!(
@@ -507,6 +514,15 @@ pub(crate) struct Relay {
 
 static RELAY: OnceLock<Arc<Relay>> = OnceLock::new();
 
+/// B-49: a stop signal came while COMMAND ran: the end of the run is short.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// B-49: the run was asked to stop (a GitLab job cancelled or timed out): its end waits for no
+/// upload, and `close` gets at most [`upload::STOPPED_CLOSE`].
+pub(crate) fn stopping() {
+    STOPPING.store(true, Ordering::SeqCst);
+}
+
 impl Relay {
     /// The process's relay, started on first use (B-26: one per `hushrun run` process). `None`
     /// when `make` gives no config; `Err` is why it couldn't start.
@@ -525,6 +541,11 @@ impl Relay {
     /// The process's relay, when one started.
     pub(crate) fn running() -> Option<Arc<Relay>> {
         RELAY.get().cloned()
+    }
+
+    /// Whether its credential is a GitLab job's (B-49).
+    pub(crate) fn is_gitlab_job(&self) -> bool {
+        self.client.is_gitlab_job()
     }
 
     /// Starts a relay: its runtime, its folder in the store, and the outbox's reconciliation
@@ -607,6 +628,7 @@ impl Relay {
                 puts: HashMap::new(),
                 uploading: false,
                 rested: false,
+                ci: in_ci,
                 store_unreachable: false,
                 platform: None,
             }),
@@ -2502,8 +2524,12 @@ impl Relay {
         if waiting > 0 && end.in_ci && state.uploads {
             // B-31: the job's store goes with the job.
             lines.push(format!(
-                "build: {waiting} {} weren't uploaded before the job's command ended",
-                if waiting == 1 { "block" } else { "blocks" },
+                "build: {waiting} {} uploaded before the job's command ended",
+                if waiting == 1 {
+                    "block wasn't"
+                } else {
+                    "blocks weren't"
+                },
             ));
         } else if waiting > 0
             && !end.in_ci
@@ -2543,6 +2569,7 @@ impl Relay {
             .sum();
         upload::End {
             in_ci,
+            stopping: STOPPING.load(Ordering::SeqCst),
             trusted,
             waiting_cost: Duration::from_millis(cost_ms),
             waited: *self

@@ -1,39 +1,36 @@
 //! B-48, B-49: a GitLab CI job's part in sharing build blocks. Its credential is its ID token,
 //! read from `HUSHRUN_ID_TOKEN` alone, and the key the job proves it is the job with.
 //!
-//! **The token** ([`read`]) is one of four things, decided here and nowhere else:
+//! **The token** ([`read`]) is one of three things, decided here and nowhere else:
 //!
 //! | `HUSHRUN_ID_TOKEN` | [`Token`] | What the run does |
 //! |---|---|---|
 //! | unset or empty | `Absent` | shares nothing; says how to declare it where the org shares |
-//! | not gitlab.com's, another audience, no job, expired | `Unusable` | shares nothing, and says why, once |
-//! | gitlab.com's, for this backend's URL, alive | `Usable` | its build requests carry it, and its results lookup beside its bearer |
+//! | not gitlab.com's, another audience (compared exactly, as the backend does), no job, expired, or no `CI_JOB_TOKEN` beside it | `Unusable` | shares nothing, and says why, once |
+//! | gitlab.com's, for this backend's URL, alive, with `CI_JOB_TOKEN` | `Usable` | its build requests carry it, signed with the job's key, and its results lookup carries it beside its bearer |
 //!
 //! It goes to no server but the one its audience names: a repository's files can name any
-//! backend, and a token sent elsewhere could be replayed at hushrun's for as long as the job's
+//! backend, and a token sent elsewhere could be used at hushrun's for as long as the job's
 //! timeout. Nothing here verifies its signature, which is the backend's to do: what is read is
 //! only what decides whether to send it.
 //!
-//! **The key** ([`JobKey::of`]) is made once per job and shared by every `hushrun run` of it,
-//! since a second key withdraws the job (B-49). It lives in one file, named by the job's id and
-//! the token's `jti`, under the system's temporary folder:
-//!
-//! | The file | Moved by | To |
-//! |---|---|---|
-//! | absent | the job's first run: a key written whole to a temporary file (0600), linked into place, which fails if another run linked first | present |
-//! | present, this user's, 0600, of this job | every later run: read, never replaced | used |
-//! | present otherwise (another user's, readable by others, a link, unreadable, another job's) | nothing: never read as the key, never replaced | the run shares nothing, with one line |
-//! | present, its token expired over an hour ago | any job's run, at the start ([`sweep`]) | absent |
+//! **The key** ([`JobKey::of`]) is derived, never stored: an Ed25519 seed by HKDF-SHA256 from the
+//! job's `CI_JOB_TOKEN`, salted with a fixed label and bound to the ID token's `job_id` and `jti`.
+//! The backend binds a job to the first key that opens it and withdraws the job, deleting what it
+//! wrote, on a request with another key (B-49), so the key must be the same in every `hushrun
+//! run` of the job, whatever its temporary folder, current folder or container: a value every
+//! step of the job is handed is that, and a file is not. A copied ID token alone doesn't give the
+//! key; GitLab masks `CI_JOB_TOKEN` in logs and it stops working when the job ends. Without it the
+//! run shares nothing: every request of a GitLab job, reads included, must carry the job's key,
+//! and any other key would withdraw the job.
 
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use hushrun_attest::keys::SigningKey;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 /// The variable a job's `id_tokens:` names (B-48): the only place the token is read from.
@@ -42,14 +39,30 @@ pub(crate) const VARIABLE: &str = "HUSHRUN_ID_TOKEN";
 /// The issuer of gitlab.com's CI ID tokens, exactly. A self-managed instance is not taken.
 pub(crate) const ISSUER: &str = "https://gitlab.com";
 
-/// What a key file's JSON says it is.
-const KEY_SCHEMA: &str = "hushrun.gitlab-job-key/v1";
+/// The job's own token, which GitLab gives every step of a job: what the job's key is made from.
+pub(crate) const JOB_TOKEN: &str = "CI_JOB_TOKEN";
 
-/// What every key file's name starts with.
-const KEY_FILE: &str = "hushrun-job-";
+/// The salt of the job key's HKDF: a fixed label, so the key is for this use alone.
+const KEY_LABEL: &str = "hushrun.gitlab-job-key/v1";
 
-/// A key file whose token expired this long ago is another job's leftover.
-const KEPT_AFTER_EXPIRY: Duration = Duration::from_secs(3600);
+/// B-48: whether this process is in a GitLab CI job, for build blocks: GitLab as the provider
+/// (`GITLAB_CI`, unless `HUSHRUN_PROVIDER` names another), or GitLab's own job variables
+/// `CI_JOB_ID` and `CI_SERVER_URL` beside the job's ID token or its job token, whatever
+/// `HUSHRUN_PROVIDER` says: a container a step starts with them handed in, a job that names
+/// another provider. There only the job's ID token counts: an agent token reads nothing of the
+/// shared store. The one definition every part of the build path asks. A container handed an
+/// agent token and none of these is a sandbox to hushrun, as to the backend.
+pub(crate) fn is_job(env: &hushrun_ci::Env) -> bool {
+    let set = |name: &str| env.get(name).is_some_and(|v| !v.trim().is_empty());
+    hushrun_ci::detect(env) == hushrun_core::run::Provider::Gitlab
+        || (set("CI_JOB_ID") && set("CI_SERVER_URL") && (set(VARIABLE) || set(JOB_TOKEN)))
+}
+
+/// Whether build blocks take this run for a CI job's: [`hushrun_ci::in_ci`], or a GitLab job
+/// ([`is_job`]).
+pub(crate) fn in_ci(env: &hushrun_ci::Env) -> bool {
+    hushrun_ci::in_ci(env) || is_job(env)
+}
 
 /// What `HUSHRUN_ID_TOKEN` is, for the backend at `audience`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,9 +71,24 @@ pub(crate) enum Token {
     Absent,
     /// It is set, and can't be sent: why, as a line ends with it.
     Unusable(String),
-    /// It may be sent to the backend at its audience.
-    Usable(IdToken),
+    /// It may be sent to the backend at its audience, with the job's key.
+    Usable(Job),
 }
+
+/// A GitLab job that may share (B-48, B-49): its ID token and its key.
+#[derive(Clone, Debug)]
+pub(crate) struct Job {
+    pub(crate) token: IdToken,
+    pub(crate) key: Arc<JobKey>,
+}
+
+impl PartialEq for Job {
+    fn eq(&self, other: &Job) -> bool {
+        self.token == other.token && self.key.public == other.key.public
+    }
+}
+
+impl Eq for Job {}
 
 /// A gitlab.com ID token that may be sent to its audience, with what the run reads of it.
 #[derive(Clone, PartialEq, Eq)]
@@ -102,8 +130,8 @@ pub(crate) fn declare(audience: &str) -> String {
     format!("declare `id_tokens: {{{VARIABLE}: {{aud: {audience}}}}}` in the job")
 }
 
-/// B-48: what `HUSHRUN_ID_TOKEN` is, in a GitLab CI job whose backend is at `audience` (the
-/// org's URL), at `now`.
+/// B-48, B-49: what `HUSHRUN_ID_TOKEN` is, in a GitLab CI job whose backend is at `audience`
+/// (the org's URL, as the run names it), at `now`, and the job's key made from `CI_JOB_TOKEN`.
 pub(crate) fn read(
     env: &dyn Fn(&str) -> Option<OsString>,
     audience: &str,
@@ -115,8 +143,23 @@ pub(crate) fn read(
     else {
         return Token::Absent;
     };
-    match parse(&text, audience, now) {
-        Ok(token) => Token::Usable(token),
+    let token = match parse(&text, audience, now) {
+        Ok(token) => token,
+        Err(why) => return Token::Unusable(why),
+    };
+    let Some(job_token) = env(JOB_TOKEN)
+        .map(|value| Zeroizing::new(value.to_string_lossy().trim().to_string()))
+        .filter(|value| !value.is_empty())
+    else {
+        return Token::Unusable(format!(
+            "{VARIABLE} is set and {JOB_TOKEN} isn't: the job's key is made from it, and a request with another key would withdraw the job (a step in a container needs both)"
+        ));
+    };
+    match JobKey::of(&job_token, &token) {
+        Ok(key) => Token::Usable(Job {
+            token,
+            key: Arc::new(key),
+        }),
         Err(why) => Token::Unusable(why),
     }
 }
@@ -148,9 +191,10 @@ fn parse(text: &str, audience: &str, now: SystemTime) -> Result<IdToken, String>
             claims.iss.as_deref().unwrap_or("not named")
         ));
     }
-    let wanted = audience.trim_end_matches('/');
+    // Exactly, as the backend compares it: a trailing slash is another audience.
+    let wanted = audience;
     match &claims.aud {
-        Some(serde_json::Value::String(aud)) if aud.trim_end_matches('/') == wanted => {}
+        Some(serde_json::Value::String(aud)) if aud == wanted => {}
         other => {
             let found = match other {
                 Some(serde_json::Value::String(aud)) => aud.clone(),
@@ -199,52 +243,41 @@ pub(crate) struct JobKey {
     job_id: i64,
 }
 
-#[derive(Serialize, Deserialize)]
-struct KeyFile {
-    schema: String,
-    job_id: i64,
-    /// The token's `exp`, in seconds since the epoch: when the sweep may remove the file.
-    expires: u64,
-    key: String,
+impl std::fmt::Debug for JobKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JobKey({})", self.public)
+    }
+}
+
+/// HKDF's output length for an Ed25519 seed.
+struct Seed;
+
+impl ring::hkdf::KeyType for Seed {
+    fn len(&self) -> usize {
+        32
+    }
 }
 
 impl JobKey {
-    /// The key of `token`'s job, in `dir`: made by the job's first run, read by every later one.
-    /// `Err` is the line to say: the run shares nothing.
-    pub(crate) fn of(dir: &Path, token: &IdToken) -> Result<JobKey, String> {
-        sweep(dir, SystemTime::now());
-        let path = key_path(dir, token);
-        let read = || read_key(&path, token.job_id);
-        if fs::symlink_metadata(&path).is_ok() {
-            return read();
-        }
-        let key = SigningKey::generate().map_err(|err| format!("the job's key: {err}"))?;
-        let expires = token
-            .expires
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let file = KeyFile {
-            schema: KEY_SCHEMA.to_string(),
-            job_id: token.job_id,
-            expires,
-            key: key.to_pem().to_string(),
-        };
-        let bytes = Zeroizing::new(serde_json::to_vec(&file).map_err(|e| e.to_string())?);
-        match place(&path, &bytes) {
-            Ok(()) => Ok(JobKey::new(key, token.job_id)),
-            // Another run of the job linked its key first: that one is the job's.
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => read(),
-            Err(err) => Err(format!("the job's key at {}: {err}", path.display())),
-        }
-    }
-
-    fn new(key: SigningKey, job_id: i64) -> JobKey {
+    /// The key of `token`'s job, from the job's `CI_JOB_TOKEN`: the same in every run of the job,
+    /// another for any other job or job token. HKDF-SHA256, salt [`KEY_LABEL`], input key
+    /// material the job token, info `<job_id>\n<jti>`.
+    pub(crate) fn of(job_token: &str, token: &IdToken) -> Result<JobKey, String> {
+        let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, KEY_LABEL.as_bytes());
+        let info = format!("{}\n{}", token.job_id, token.jti);
+        let info = [info.as_bytes()];
+        let mut seed = Zeroizing::new([0u8; 32]);
+        salt.extract(job_token.as_bytes())
+            .expand(&info, Seed)
+            .and_then(|okm| okm.fill(seed.as_mut()))
+            .map_err(|_| "the job's key can't be made".to_string())?;
+        let key = SigningKey::from_seed(&seed);
         let public = key.public_key().to_string();
-        JobKey {
+        Ok(JobKey {
             key,
             public,
-            job_id,
-        }
+            job_id: token.job_id,
+        })
     }
 
     /// `Hushrun-Job-Key`'s value.
@@ -258,119 +291,6 @@ impl JobKey {
         let message = hushrun_core::blocks::job_message("POST", path, org, self.job_id, body);
         base64::engine::general_purpose::STANDARD.encode(self.key.sign(message.as_bytes()))
     }
-}
-
-/// Where `token`'s job keeps its key in `dir`: `hushrun-job-<job id>-<digest of the jti>.key`.
-fn key_path(dir: &Path, token: &IdToken) -> PathBuf {
-    let jti = hushrun_build::origin::fingerprint(&token.jti);
-    dir.join(format!(
-        "{KEY_FILE}{}-{}.key",
-        token.job_id,
-        &jti[..16.min(jti.len())]
-    ))
-}
-
-/// Writes `bytes` whole to a temporary file of this user's alone beside `path`, then links it
-/// into place, which fails with `AlreadyExists` when another run linked first. The temporary
-/// file goes either way.
-fn place(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let mut random = [0u8; 8];
-    getrandom::fill(&mut random).map_err(|err| io::Error::other(err.to_string()))?;
-    let temp = dir.join(format!(".{KEY_FILE}{}.tmp", hex::encode(random)));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let written = (|| {
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::hard_link(&temp, path)
-    })();
-    let _ = fs::remove_file(&temp);
-    written
-}
-
-/// The key in `path`, when the file is this user's alone, a plain file, and of job `job_id`.
-fn read_key(path: &Path, job_id: i64) -> Result<JobKey, String> {
-    let refused = |why: &str| {
-        format!(
-            "the job's key at {} {why}: it is never replaced, so this run shares nothing",
-            path.display()
-        )
-    };
-    let meta =
-        fs::symlink_metadata(path).map_err(|err| refused(&format!("can't be read ({err})")))?;
-    if !meta.file_type().is_file() {
-        return Err(refused("isn't a file"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if meta.uid() != rustix::process::geteuid().as_raw() {
-            return Err(refused("is another user's"));
-        }
-        if meta.mode() & 0o077 != 0 {
-            return Err(refused("can be read by others"));
-        }
-    }
-    let bytes =
-        Zeroizing::new(fs::read(path).map_err(|err| refused(&format!("can't be read ({err})")))?);
-    let file: KeyFile = serde_json::from_slice(&bytes).map_err(|_| refused("isn't a job's key"))?;
-    if file.schema != KEY_SCHEMA || file.job_id != job_id {
-        return Err(refused("isn't this job's key"));
-    }
-    let key = SigningKey::from_pem(&file.key).map_err(|_| refused("isn't a job's key"))?;
-    Ok(JobKey::new(key, job_id))
-}
-
-/// Removes this user's key files in `dir` whose token expired over an hour before `now`, and
-/// temporary files a run left there over an hour ago: no request can be signed with them any
-/// more. Another user's, and anything else, are left alone.
-pub(crate) fn sweep(dir: &Path, now: SystemTime) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !meta.file_type().is_file() || !own(&meta) {
-            continue;
-        }
-        let gone = if name.starts_with(KEY_FILE) && name.ends_with(".key") {
-            fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<KeyFile>(&bytes).ok())
-                .filter(|file| file.schema == KEY_SCHEMA)
-                .and_then(|file| UNIX_EPOCH.checked_add(Duration::from_secs(file.expires)))
-                .is_some_and(|expires| expires + KEPT_AFTER_EXPIRY < now)
-        } else if name.starts_with(&format!(".{KEY_FILE}")) && name.ends_with(".tmp") {
-            meta.modified().is_ok_and(|at| at + KEPT_AFTER_EXPIRY < now)
-        } else {
-            false
-        };
-        if gone {
-            let _ = fs::remove_file(&path);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn own(meta: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.uid() == rustix::process::geteuid().as_raw()
-}
-
-#[cfg(not(unix))]
-fn own(_: &fs::Metadata) -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -397,18 +317,27 @@ mod tests {
         })
     }
 
-    fn read_with(value: Option<&str>) -> Token {
+    fn read_as(value: Option<&str>, job_token: Option<&str>) -> Token {
         let value = value.map(OsString::from);
+        let job_token = job_token.map(OsString::from);
         read(
-            &move |name: &str| (name == VARIABLE).then(|| value.clone()).flatten(),
+            &move |name: &str| match name {
+                VARIABLE => value.clone(),
+                JOB_TOKEN => job_token.clone(),
+                _ => None,
+            },
             AUDIENCE,
             SystemTime::now(),
         )
     }
 
-    fn usable() -> IdToken {
+    fn read_with(value: Option<&str>) -> Token {
+        read_as(value, Some("glcbt-64-the-job-s-own"))
+    }
+
+    fn usable() -> Job {
         match read_with(Some(&token(claims()))) {
-            Token::Usable(token) => token,
+            Token::Usable(job) => job,
             other => panic!("{other:?}"),
         }
     }
@@ -418,19 +347,29 @@ mod tests {
     fn only_a_live_gitlab_com_token_for_this_backend_is_usable() {
         assert_eq!(read_with(None), Token::Absent);
         assert_eq!(read_with(Some("  ")), Token::Absent);
-        let token = usable();
-        assert_eq!(token.job_id, 1212);
+        let job = usable();
+        assert_eq!(job.token.job_id, 1212);
         assert!(
-            !format!("{token:?}").contains(token.text()),
+            !format!("{job:?}").contains(job.token.text()),
             "never in Debug"
         );
-        // A trailing slash on either side is the same URL.
+        // No CI_JOB_TOKEN beside it: no key, so nothing is sent.
+        match read_as(Some(&token(claims())), None) {
+            Token::Unusable(why) => assert!(why.contains("CI_JOB_TOKEN isn't"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // The audience is compared exactly, as the backend compares it: a trailing slash is
+        // another audience, and the line names the one to declare.
         let mut slash = claims();
         slash["aud"] = serde_json::json!(format!("{AUDIENCE}/"));
-        assert!(matches!(
-            read_with(Some(&super::tests::token(slash))),
-            Token::Usable(_)
-        ));
+        match read_with(Some(&super::tests::token(slash))) {
+            Token::Unusable(why) => assert!(
+                why.contains("audience is https://api.example/o/acme/, not")
+                    && why.contains("{aud: https://api.example/o/acme}}"),
+                "{why}"
+            ),
+            other => panic!("{other:?}"),
+        }
         let unusable = |change: &dyn Fn(&mut serde_json::Value), says: &str| {
             let mut claims = claims();
             change(&mut claims);
@@ -478,7 +417,7 @@ mod tests {
         number["job_id"] = serde_json::json!(1212);
         assert!(matches!(
             read_with(Some(&super::tests::token(number))),
-            Token::Usable(t) if t.job_id == 1212
+            Token::Usable(job) if job.token.job_id == 1212
         ));
     }
 
@@ -493,119 +432,36 @@ mod tests {
 
     // covers: B-49
     #[test]
-    fn every_run_of_a_job_signs_with_the_one_key_its_first_run_made() {
-        let dir = tempfile::tempdir().unwrap();
-        let token = usable();
-        let first = JobKey::of(dir.path(), &token).unwrap();
-        assert!(first.public().starts_with("ed25519:"), "{}", first.public());
-        assert!(verify(&first, "/o/acme/v0/build/open", b"{}"));
-        // The next run of the job reads the same key, also when runs start at once.
-        let again = JobKey::of(dir.path(), &token).unwrap();
-        assert_eq!(again.public(), first.public());
-        let at_once: Vec<String> = std::thread::scope(|scope| {
-            let other = tempfile::tempdir().unwrap();
-            let runs: Vec<_> = (0..8)
-                .map(|_| {
-                    let dir = other.path().to_path_buf();
-                    let token = token.clone();
-                    scope.spawn(move || JobKey::of(&dir, &token).unwrap().public().to_string())
-                })
-                .collect();
-            runs.into_iter().map(|r| r.join().unwrap()).collect()
-        });
-        assert!(at_once.iter().all(|k| *k == at_once[0]), "{at_once:?}");
-        // One key file, of this user's alone, and no temporary file left.
-        let files: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
-        assert_eq!(files.len(), 1, "{files:?}");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = files[0].metadata().unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        // Another token, of another job, has its own key.
-        let mut other = claims();
-        other["job_id"] = serde_json::json!("1213");
-        other["jti"] = serde_json::json!("other");
-        let Token::Usable(other) = read_with(Some(&super::tests::token(other))) else {
-            panic!()
-        };
-        assert_ne!(
-            JobKey::of(dir.path(), &other).unwrap().public(),
-            first.public()
+    fn every_run_of_a_job_makes_the_same_key_from_its_job_token_and_nothing_else_does() {
+        let job = usable();
+        assert!(
+            job.key.public().starts_with("ed25519:"),
+            "{}",
+            job.key.public()
         );
-    }
-
-    // covers: B-49
-    #[cfg(unix)]
-    #[test]
-    fn a_key_file_the_job_cant_trust_is_never_read_nor_replaced() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let token = usable();
-        type Plant<'a> = &'a dyn Fn(&Path);
-        let cases: [(&str, Plant); 4] = [
-            ("can be read by others", &|path| {
-                fs::write(path, "{}").unwrap();
-                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
-            }),
-            ("isn't a file", &|path| {
-                std::os::unix::fs::symlink("/dev/null", path).unwrap();
-            }),
-            ("isn't a job's key", &|path| {
-                fs::write(path, "not json").unwrap();
-                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-            }),
-            ("isn't this job's key", &|path| {
-                let file = KeyFile {
-                    schema: KEY_SCHEMA.into(),
-                    job_id: 7,
-                    expires: 4_000_000_000,
-                    key: SigningKey::generate().unwrap().to_pem().to_string(),
-                };
-                fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
-                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-            }),
-        ];
-        for (says, plant) in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let path = key_path(dir.path(), &token);
-            plant(&path);
-            let before = fs::symlink_metadata(&path).unwrap();
-            let err = JobKey::of(dir.path(), &token).err().expect(says);
-            assert!(err.contains(says), "{err}");
-            let after = fs::symlink_metadata(&path).unwrap();
-            assert_eq!(
-                before.modified().unwrap(),
-                after.modified().unwrap(),
-                "{says}"
-            );
-            assert_eq!(before.file_type(), after.file_type(), "{says}");
-        }
-    }
-
-    // covers: B-49
-    #[test]
-    fn the_sweep_removes_keys_whose_tokens_expired_over_an_hour_ago_and_nothing_else() {
-        let dir = tempfile::tempdir().unwrap();
-        let token = usable();
-        let live = key_path(dir.path(), &token);
-        JobKey::of(dir.path(), &token).unwrap();
-        let mut old = claims();
-        old["job_id"] = serde_json::json!("9");
-        old["jti"] = serde_json::json!("nine");
-        old["exp"] = serde_json::json!(2_000_000_000u64);
-        let Token::Usable(old) = read_with(Some(&super::tests::token(old))) else {
-            panic!()
+        assert!(verify(&job.key, "/o/acme/v0/build/open", b"{}"));
+        // Another run of the job, anywhere: nothing but the token and the job token goes in.
+        assert_eq!(usable().key.public(), job.key.public());
+        // Another job token (a thief with the ID token alone guesses one), another jti, another
+        // job: another key.
+        let other_job_token = match read_as(Some(&token(claims())), Some("glcbt-someone-else")) {
+            Token::Usable(job) => job,
+            other => panic!("{other:?}"),
         };
-        JobKey::of(dir.path(), &old).unwrap();
-        let stale = key_path(dir.path(), &old);
-        fs::write(dir.path().join("hushrun-job-notes.txt"), "mine").unwrap();
-        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
-        sweep(dir.path(), at(2_000_000_000 + 3599));
-        assert!(stale.exists(), "within the hour after its expiry");
-        sweep(dir.path(), at(2_000_000_000 + 3601));
-        assert!(!stale.exists());
-        assert!(live.exists());
-        assert!(dir.path().join("hushrun-job-notes.txt").exists());
+        assert_ne!(other_job_token.key.public(), job.key.public());
+        for (name, value) in [("jti", "another-jti"), ("job_id", "1213")] {
+            let mut c = claims();
+            c[name] = serde_json::json!(value);
+            let Token::Usable(other) = read_with(Some(&token(c))) else {
+                panic!("{name}")
+            };
+            assert_ne!(other.key.public(), job.key.public(), "{name}");
+        }
+        // The derivation as written, by a fixed vector: a change to it would give a job that
+        // runs two hushrun versions two keys.
+        assert_eq!(
+            job.key.public(),
+            "ed25519:e+xow1Ci4fFcUH27NuLglHKWjFpFJLd+EyynsIdxJwM="
+        );
     }
 }

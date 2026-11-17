@@ -871,7 +871,7 @@ impl Backend {
         };
         // B-48: in GitLab CI the job's ID token, read from its variable alone, for this backend
         // only: one whose audience is another URL goes nowhere.
-        let gitlab = (hushrun_ci::detect(&env) == Provider::Gitlab).then(|| {
+        let gitlab = crate::gitlab_job::is_job(&env).then(|| {
             crate::gitlab_job::read(
                 &|name| hushrun_ci::var_os(name),
                 &url.to_string(),
@@ -1397,23 +1397,25 @@ pub struct BuildAccess {
     /// Whether the server answered any request of this run: without, whether the org shares is
     /// unknown, which a CI job says (B-2).
     pub answered: bool,
-    /// B-48: no results lookup of this run can say whether the org shares, though the run has a
-    /// credential for its build requests (a GitLab job with an ID token and no token to look
-    /// results up with): `open` does.
-    pub open_decides: bool,
-    /// B-48: in GitLab CI, what keeps the job from sharing, as a line ends with it: its
-    /// `HUSHRUN_ID_TOKEN` can't be sent (said whatever the org does), or the job has none (said
-    /// where the org shares). `None` elsewhere, and for a job whose token is usable.
-    pub id_token_problem: Option<IdTokenProblem>,
 }
 
-/// B-48: why a GitLab job has no ID token to share with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdTokenProblem {
-    /// `HUSHRUN_ID_TOKEN` isn't set: how to declare it, for the backend at this URL.
-    Absent(String),
-    /// It is set, and can't be sent: why.
-    Unusable(String),
+impl BuildAccess {
+    /// Whether the run has a credential its build requests can carry (B-26).
+    pub fn sends(&self) -> bool {
+        self.credential.as_ref().is_some_and(BuildCredential::sends)
+    }
+
+    /// B-25, B-48: no results lookup of this run said whether the org shares, though the run can
+    /// send (a GitLab job with its ID token and no token to look results up with): `open` does.
+    pub fn open_decides(&self) -> bool {
+        matches!(
+            self.credential,
+            Some(BuildCredential::Gitlab(GitlabCi::Usable {
+                looked_up: false,
+                ..
+            }))
+        )
+    }
 }
 
 /// The backend a run's results go to, as a saved fetch is compared with (B-36): its origin and
@@ -1448,11 +1450,35 @@ pub enum BuildCredential {
         request_token: String,
         job: String,
     },
-    /// B-48, B-49: GitLab CI: the job's ID token from `HUSHRUN_ID_TOKEN`, whose audience is the
-    /// backend's URL, and the folder the job's key is kept in (the system's temporary folder).
-    GitlabJob {
-        token: crate::gitlab_job::IdToken,
-        keys: std::path::PathBuf,
+    /// B-48, B-49: GitLab CI, where only the job's ID token counts: the one home of what
+    /// `HUSHRUN_ID_TOKEN` is for this run, usable or not.
+    Gitlab(GitlabCi),
+}
+
+impl BuildCredential {
+    /// Whether build requests can carry it: all but a GitLab job's ID token that is absent or
+    /// can't be sent.
+    pub fn sends(&self) -> bool {
+        !matches!(
+            self,
+            BuildCredential::Gitlab(GitlabCi::Absent { .. } | GitlabCi::Unusable(_))
+        )
+    }
+}
+
+/// B-48: a GitLab CI job's credential for build blocks, from [`crate::gitlab_job::read`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitlabCi {
+    /// `HUSHRUN_ID_TOKEN` isn't set: how to declare it, for the backend at this URL. Said where
+    /// the org shares.
+    Absent { declare: String },
+    /// It is set and can't be sent: why. Said whatever the org does.
+    Unusable(String),
+    /// The job's ID token and key. `looked_up`: the run's results lookup carried it beside a
+    /// token, so its answer says whether the org shares; without one, `open` says.
+    Usable {
+        job: crate::gitlab_job::Job,
+        looked_up: bool,
     },
 }
 
@@ -1475,9 +1501,7 @@ impl Backend {
         let Store::Server(server) = &self.store else {
             return false;
         };
-        let sends = self
-            .build_access()
-            .is_some_and(|access| access.credential.is_some());
+        let sends = self.build_access().is_some_and(|access| access.sends());
         if sends {
             let _ = self.latest(key);
         }
@@ -1495,7 +1519,8 @@ impl Backend {
         };
         let url = LedgerUrl::parse(&server.base).ok()?;
         let agent_token = matches!(server.signer(), Signer::Agent);
-        let (credential, agent) = if server.in_ci {
+        // B-48: a GitLab job is CI for build blocks, also where nothing else says CI.
+        let (credential, agent) = if server.in_ci || server.gitlab.is_some() {
             match (server.oidc.clone(), server.token.clone()) {
                 (Some((url, request_token)), _) => {
                     let job =
@@ -1517,15 +1542,21 @@ impl Backend {
                 // sharing is off there (B-31).
                 (None, _) if server.in_github => (None, false),
                 // B-48: in GitLab CI the job's ID token, or nothing, whatever token it holds.
-                (None, _) if server.gitlab.is_some() => (
-                    server
-                        .gitlab_id_token()
-                        .map(|token| BuildCredential::GitlabJob {
-                            token: token.clone(),
-                            keys: std::env::temp_dir(),
-                        }),
-                    false,
-                ),
+                (None, _) if server.gitlab.is_some() => {
+                    let gitlab = match &server.gitlab {
+                        Some(crate::gitlab_job::Token::Usable(job)) => GitlabCi::Usable {
+                            job: job.clone(),
+                            looked_up: server.token.is_some(),
+                        },
+                        Some(crate::gitlab_job::Token::Unusable(why)) => {
+                            GitlabCi::Unusable(why.clone())
+                        }
+                        _ => GitlabCi::Absent {
+                            declare: crate::gitlab_job::declare(&server.base),
+                        },
+                    };
+                    (Some(BuildCredential::Gitlab(gitlab)), false)
+                }
                 // Anywhere else in CI an agent token reads the org's blocks, and writes none
                 // (`hushrun_build::share::what_a_run_does`).
                 (None, Some(token)) if agent_token => (Some(BuildCredential::Token(token)), true),
@@ -1541,26 +1572,13 @@ impl Backend {
             org: hosted::org_of(&server.base).unwrap_or_else(|| server.base.clone()),
             credential,
             agent,
-            machine: if server.in_ci {
+            machine: if server.in_ci || server.gitlab.is_some() {
                 None
             } else {
                 server.key().ok().flatten()
             },
             shares: server.ledger.build_sharing_seen(),
             answered: server.ledger.answered_any(),
-            // A GitLab job's results lookup says whether its org shares only beside a token.
-            open_decides: server.in_ci
-                && server.gitlab_id_token().is_some()
-                && server.token.is_none(),
-            id_token_problem: match &server.gitlab {
-                Some(crate::gitlab_job::Token::Absent) => Some(IdTokenProblem::Absent(
-                    crate::gitlab_job::declare(&server.base),
-                )),
-                Some(crate::gitlab_job::Token::Unusable(why)) => {
-                    Some(IdTokenProblem::Unusable(why.clone()))
-                }
-                _ => None,
-            },
         })
     }
 }
@@ -1840,7 +1858,7 @@ impl Server {
     /// B-48: the GitLab job's ID token, when it may be sent to this backend.
     fn gitlab_id_token(&self) -> Option<&crate::gitlab_job::IdToken> {
         match &self.gitlab {
-            Some(crate::gitlab_job::Token::Usable(token)) => Some(token),
+            Some(crate::gitlab_job::Token::Usable(job)) => Some(&job.token),
             _ => None,
         }
     }

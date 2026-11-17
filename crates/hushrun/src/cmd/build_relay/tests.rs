@@ -77,8 +77,6 @@ fn access_at(base: &str, host: &str, token: &str) -> crate::results::BuildAccess
         }),
         shares: true,
         answered: true,
-        open_decides: false,
-        id_token_problem: None,
     }
 }
 
@@ -2083,11 +2081,10 @@ fn with_id_token(fake: &FakeBuild) -> impl FnOnce(&mut Config) + '_ {
 }
 
 /// B-48, B-49: a GitLab job's credential: the fake's token for job `job`, its claims changed by
-/// `change`, and the job's key kept in `keys`.
+/// `change`, and its job token.
 fn with_gitlab_job<'a>(
     fake: &'a FakeBuild,
     job: i64,
-    keys: &'a Path,
     change: impl FnOnce(&mut serde_json::Value) + 'a,
 ) -> impl FnOnce(&mut Config) + 'a {
     move |c: &mut Config| {
@@ -2096,18 +2093,24 @@ fn with_gitlab_job<'a>(
             claims["aud"] = serde_json::Value::from(url);
             change(claims);
         });
-        let token = match crate::gitlab_job::read(
-            &|name| (name == crate::gitlab_job::VARIABLE).then(|| text.clone().into()),
+        let job = match crate::gitlab_job::read(
+            &|name| match name {
+                crate::gitlab_job::VARIABLE => Some(text.clone().into()),
+                crate::gitlab_job::JOB_TOKEN => Some("glcbt-a-job-token".into()),
+                _ => None,
+            },
             &fake.url(),
             SystemTime::now(),
         ) {
-            crate::gitlab_job::Token::Usable(token) => token,
+            crate::gitlab_job::Token::Usable(job) => job,
             other => panic!("{other:?}"),
         };
-        c.access.credential = Some(crate::results::BuildCredential::GitlabJob {
-            token,
-            keys: keys.to_path_buf(),
-        });
+        c.access.credential = Some(crate::results::BuildCredential::Gitlab(
+            crate::results::GitlabCi::Usable {
+                job,
+                looked_up: true,
+            },
+        ));
         c.access.agent = false;
         c.access.machine = None;
         c.caller = hushrun_build::share::Caller::Ci {
@@ -2121,10 +2124,9 @@ fn with_gitlab_job<'a>(
 #[test]
 fn a_gitlab_job_signs_every_request_and_begins_no_upload_it_cant_finish_before_its_token_ends() {
     let fake = FakeBuild::start();
-    let keys = tempfile::tempdir().unwrap();
     // A token with an hour left: open, begin, commit and close, each signed by the job's key.
     let m = machine();
-    let relay = start(&fake, &m, with_gitlab_job(&fake, 31, keys.path(), |_| {}));
+    let relay = start(&fake, &m, with_gitlab_job(&fake, 31, |_| {}));
     begin(&relay, &m);
     until("open", || answering(&relay));
     let (key, step) = block(&m.store, 7, 5_000, Some(relay.by.clone()));
@@ -2150,7 +2152,7 @@ fn a_gitlab_job_signs_every_request_and_begins_no_upload_it_cant_finish_before_i
     let relay = start(
         &fake,
         &m,
-        with_gitlab_job(&fake, 32, keys.path(), move |claims| {
+        with_gitlab_job(&fake, 32, move |claims| {
             claims["exp"] = serde_json::Value::from(soon);
         }),
     );
@@ -2165,7 +2167,7 @@ fn a_gitlab_job_signs_every_request_and_begins_no_upload_it_cant_finish_before_i
         lines,
         [
             "build: no more uploads this run: the job's ID token expires in less than 2 minutes",
-            "build: 1 block weren't uploaded before the job's command ended",
+            "build: 1 block wasn't uploaded before the job's command ended",
         ],
     );
     assert_eq!(waiting(&m).len(), 1, "the block's marker waits, untouched");

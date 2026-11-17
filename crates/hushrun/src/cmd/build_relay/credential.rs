@@ -42,7 +42,7 @@ pub(crate) enum Credential {
 /// A GitLab CI job (B-48, B-49): its ID token, which can't be renewed, and its key.
 pub(crate) struct GitlabJob {
     token: crate::gitlab_job::IdToken,
-    key: crate::gitlab_job::JobKey,
+    key: Arc<crate::gitlab_job::JobKey>,
     /// The org's slug, which the signature names, and what its routes' paths start with.
     org: String,
 }
@@ -97,9 +97,8 @@ impl Held {
 }
 
 impl Credential {
-    /// The credential the relay's requests to the org `org` at `audience` (its URL) carry. For a
-    /// GitLab job, its key is made, or read from the job's first run (B-49): `Err` is why it
-    /// can't be, and the run shares nothing.
+    /// The credential the relay's requests to the org `org` at `audience` (its URL) carry. `Err`:
+    /// there is none to send (a GitLab job whose ID token can't be sent).
     pub(crate) fn of(
         access: &crate::results::BuildCredential,
         audience: &str,
@@ -107,13 +106,16 @@ impl Credential {
     ) -> Result<Credential, String> {
         Ok(match access {
             crate::results::BuildCredential::Token(token) => Credential::Token(token.clone()),
-            crate::results::BuildCredential::GitlabJob { token, keys } => {
-                let key = crate::gitlab_job::JobKey::of(keys, token)?;
-                Credential::GitlabJob(Arc::new(GitlabJob {
-                    token: token.clone(),
-                    key,
-                    org: org.to_string(),
-                }))
+            crate::results::BuildCredential::Gitlab(crate::results::GitlabCi::Usable {
+                job,
+                ..
+            }) => Credential::GitlabJob(Arc::new(GitlabJob {
+                token: job.token.clone(),
+                key: job.key.clone(),
+                org: org.to_string(),
+            })),
+            crate::results::BuildCredential::Gitlab(_) => {
+                return Err("no credential to send".to_string());
             }
             crate::results::BuildCredential::GithubOidc {
                 url,

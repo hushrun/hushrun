@@ -81,7 +81,7 @@ fn fetch(global: &GlobalOpts, place: &Place, checks: &[String]) -> CmdResult {
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     }
-    .filter(|access| access.credential.is_some())
+    .filter(|access| access.sends())
     // An agent's token is read from `HUSHRUN_AGENT` (the string `hushrun token create --agent`
     // prints, which the docs name) and, as an `hra_` token, from `HUSHRUN_TOKEN`.
     .ok_or_else(|| {
@@ -226,7 +226,7 @@ fn run_here(
         Ok(crate::results::Selection::On(backend)) => backend.build_access(),
         _ => None,
     };
-    let in_ci = hushrun_ci::in_ci(&hushrun_ci::Env::from_process());
+    let in_ci = crate::gitlab_job::in_ci(&hushrun_ci::Env::from_process());
     if in_ci && access.is_none() {
         let none = Does {
             local: Mode::Off,
