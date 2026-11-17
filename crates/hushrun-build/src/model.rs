@@ -93,6 +93,44 @@ pub enum Programs {
     Tied,
 }
 
+/// Which adapter a block belongs to, and so its kind on the wire (`hushrun_core::blocks`): the
+/// `rustc` wrapper's blocks, or the Go cache program's (B-39). The kind is part of a block's
+/// address, so the two never share one. Absent, in a record, a marker or a log line from before
+/// Go, it is `rustc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// The `rustc` wrapper's blocks, kind `rustc/1`.
+    #[default]
+    Rustc,
+    /// The Go cache program's package archives, kind `go/1`.
+    Go,
+}
+
+impl Kind {
+    /// The kind on the wire: the adapter and its keys' version.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Kind::Rustc => "rustc/1",
+            Kind::Go => "go/1",
+        }
+    }
+
+    /// The kind a block's description names (`"kind": "go/1"`); none, or another word, is
+    /// `rustc`.
+    pub fn of_description(description: &serde_json::Value) -> Kind {
+        match description.get("kind").and_then(serde_json::Value::as_str) {
+            Some(word) if word == Kind::Go.word() => Kind::Go,
+            _ => Kind::Rustc,
+        }
+    }
+
+    /// Whether it is `rustc`, the default, which a line leaves out.
+    pub fn is_rustc(&self) -> bool {
+        *self == Kind::Rustc
+    }
+}
+
 /// What a compiler call produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

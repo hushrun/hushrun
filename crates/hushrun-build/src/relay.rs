@@ -72,6 +72,40 @@ pub enum Request {
     },
     /// A downloaded block was found wrong here: report it to the scope it came from.
     Report { key: Digest, problem: Problem },
+    /// The Go cache program's [`Request::Fetch`] (B-45): the package archive under `key`, of kind
+    /// `go/1`, whose first key is itself. The relay looks it up only when the run's Go manifest
+    /// names it: Go asks for every entry of its cache, most of them local ones no server holds,
+    /// and a lookup for each would make a cold build slower than plain `go`.
+    GoFetch {
+        key: Digest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_ms: Option<u64>,
+    },
+    /// The Go cache program's [`Request::Vouch`]: whether a server still serves the downloaded
+    /// archive `key` with these `outputs`.
+    GoVouch {
+        key: Digest,
+        outputs: hushrun_core::blocks::Hex32,
+    },
+    /// The Go cache program's [`Request::Built`]: a portable package archive this run compiled
+    /// and stored under `key`.
+    GoBuilt { key: Digest, cost_ms: u64 },
+    /// The Go cache program's [`Request::Report`].
+    GoReport { key: Digest, problem: Problem },
+}
+
+impl Request {
+    /// Whether the asker waits for nothing but the relay's taking it: an upload's marker or a
+    /// report, which the relay acts on whether or not anyone reads its answer.
+    pub fn is_a_notice(&self) -> bool {
+        matches!(
+            self,
+            Request::Built { .. }
+                | Request::Report { .. }
+                | Request::GoBuilt { .. }
+                | Request::GoReport { .. }
+        )
+    }
 }
 
 /// What was wrong with a downloaded block, as the wrapper saw it.
@@ -114,14 +148,13 @@ pub enum Answer {
 pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::os::unix::fs::MetadataExt as _;
-    use std::os::unix::net::UnixStream;
 
     // The socket must be this user's: a listener someone else put there must not get a key.
     let meta = std::fs::symlink_metadata(socket).ok()?;
     if meta.uid() != rustix::process::getuid().as_raw() {
         return None;
     }
-    let stream = UnixStream::connect(socket).ok()?;
+    let stream = connect_within(socket, wait)?;
     stream.set_read_timeout(Some(wait)).ok()?;
     stream.set_write_timeout(Some(wait)).ok()?;
     let mut line = serde_json::to_vec(request).ok()?;
@@ -135,10 +168,59 @@ pub fn ask(socket: &Path, request: &Request, wait: Duration) -> Option<Answer> {
     serde_json::from_str(answer.trim_end()).ok()
 }
 
+/// Connects to the relay's socket within `wait`: a connect blocks while the socket's backlog is
+/// full (a relay whose accepting thread is stuck), so it runs on a thread of its own, which is
+/// left to finish or not when the wait ends.
+#[cfg(unix)]
+fn connect_within(socket: &Path, wait: Duration) -> Option<std::os::unix::net::UnixStream> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = socket.to_path_buf();
+    std::thread::Builder::new()
+        .name("hushrun-relay-connect".into())
+        .spawn(move || {
+            let _ = tx.send(std::os::unix::net::UnixStream::connect(path));
+        })
+        .ok()?;
+    rx.recv_timeout(wait).ok()?.ok()
+}
+
 /// No relay off unix: always a miss.
 #[cfg(not(unix))]
 pub fn ask(_socket: &Path, _request: &Request, _wait: Duration) -> Option<Answer> {
     None
+}
+
+/// Hands the relay at `socket` a notice ([`Request::is_a_notice`]) and reads no answer: the line
+/// is in the socket's buffer once written, and the relay reads it whether or not this end is
+/// still there. Whether it was written within `wait`.
+#[cfg(unix)]
+pub fn tell(socket: &Path, request: &Request, wait: Duration) -> bool {
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(meta) = std::fs::symlink_metadata(socket) else {
+        return false;
+    };
+    if meta.uid() != rustix::process::getuid().as_raw() {
+        return false;
+    }
+    let Some(stream) = connect_within(socket, wait) else {
+        return false;
+    };
+    if stream.set_write_timeout(Some(wait)).is_err() {
+        return false;
+    }
+    let Ok(mut line) = serde_json::to_vec(request) else {
+        return false;
+    };
+    line.push(b'\n');
+    (&stream).write_all(&line).is_ok()
+}
+
+/// No relay off unix.
+#[cfg(not(unix))]
+pub fn tell(_socket: &Path, _request: &Request, _wait: Duration) -> bool {
+    false
 }
 
 /// Whether `dir` may hold the relay's socket (B-26): a real folder, not a link, owned by this

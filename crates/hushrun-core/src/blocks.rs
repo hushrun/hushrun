@@ -35,7 +35,7 @@ use std::fmt;
 use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest as _, Sha256};
+use sha2_hw::{Digest as _, Sha256};
 
 /// The header a results lookup's answer carries, `on`, when the org shares build blocks.
 pub const SHARING_HEADER: &str = "hushrun-build";
@@ -214,6 +214,11 @@ impl<'de> Deserialize<'de> for Base64 {
             .map(Base64)
             .map_err(|_| D::Error::custom("expected standard base64"))
     }
+}
+
+/// Standard base64 (RFC 4648 §4, padded), decoded: what [`Base64`] reads, from bytes.
+pub fn decode_base64(text: &[u8]) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
 /// What a block is, as the server keeps it. A word this version doesn't know reads as

@@ -31,8 +31,8 @@ impl Digest {
 
     /// The SHA-256 of `bytes`.
     pub fn of(bytes: &[u8]) -> Self {
-        use sha2::Digest as _;
-        Self(sha2::Sha256::digest(bytes).into())
+        use sha2_hw::Digest as _;
+        Self(sha2_hw::Sha256::digest(bytes).into())
     }
 
     /// The 64 lowercase hex digits, without the `sha256:` prefix.

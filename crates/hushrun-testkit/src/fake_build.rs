@@ -172,6 +172,9 @@ struct Kept {
     repository: Option<String>,
     check: Option<Hex32>,
     platform: Option<String>,
+    /// The kind it was closed with, as the backend keeps one per kind too; a seeded one has
+    /// none and answers any.
+    kind: Option<String>,
     pairs: Vec<Pair>,
 }
 
@@ -186,6 +189,7 @@ fn manifest_for(kept: &[Kept], open: &OpenRequest) -> Vec<Pair> {
                 .as_ref()
                 .is_none_or(|r| Some(r) == open.repository.as_ref())
                 && k.platform.as_ref().is_none_or(|p| *p == open.platform)
+                && k.kind.as_ref().is_none_or(|kind| *kind == open.kind)
                 && (open.check.is_none() || k.check == open.check)
         })
         .map(|k| k.pairs.clone())
@@ -335,6 +339,7 @@ impl FakeBuild {
             repository: None,
             check: None,
             platform: None,
+            kind: None,
             pairs: manifest,
         });
     }
@@ -345,6 +350,7 @@ impl FakeBuild {
             repository: None,
             check: Some(check),
             platform: None,
+            kind: None,
             pairs: manifest,
         });
     }
@@ -820,6 +826,7 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
                         k.repository == close.repository
                             && k.check == close.check
                             && k.platform.as_deref() == Some(close.platform.as_str())
+                            && k.kind.as_deref() == Some(close.kind.as_str())
                     });
                     let smaller = kept
                         .is_some_and(|i| close.manifest.len() * 2 < state.manifests[i].pairs.len());
@@ -831,6 +838,7 @@ fn handle(shared: &Mutex<State>, request: Request) -> Reply {
                             repository: close.repository.clone(),
                             check: close.check,
                             platform: Some(close.platform.clone()),
+                            kind: Some(close.kind.clone()),
                             pairs: close.manifest.clone(),
                         });
                     }

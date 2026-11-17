@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use sha2::Digest as _;
+use sha2_hw::Digest as _;
 
 use crate::Sha256;
 
@@ -15,12 +15,12 @@ pub const CHUNK: usize = 256 << 10;
 
 /// SHA-256 of `bytes`.
 pub fn sha256(bytes: &[u8]) -> Sha256 {
-    sha2::Sha256::digest(bytes).into()
+    sha2_hw::Sha256::digest(bytes).into()
 }
 
 /// An incremental SHA-256.
 #[derive(Default)]
-pub struct Hasher(sha2::Sha256);
+pub struct Hasher(sha2_hw::Sha256);
 
 impl Hasher {
     pub fn new() -> Self {
