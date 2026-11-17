@@ -27,9 +27,6 @@ const GO_OBJECT: &[u8] = b"go object ";
 const FROM_ASSEMBLY: u32 = 1 << 2;
 /// `ObjFlagStd`: the object is of a standard library package.
 const STD: u32 = 1 << 4;
-/// How far into a member its text header may run before the binary header: Go writes a few
-/// short lines (`go object …`, `build id …`, a blank one) and `!`.
-const MOST_TEXT_HEADER: usize = 4096;
 /// The length of each half of a package archive's build ID (`HashToString`'s 20 characters).
 const ID_PART: usize = 20;
 
@@ -199,14 +196,15 @@ fn trim_name(raw: &[u8]) -> &[u8] {
 }
 
 /// The flags of a Go object member's binary header, or `None` when it is no Go object: its
-/// text header starts with `go object `, ends with a line `!`, and the binary header that
-/// follows starts with Go's magic, then an 8-byte fingerprint and the flags, little-endian.
+/// text header starts with `go object `, ends with the first line that is `!`, as Go's reader
+/// reads header lines until it, however long the header is (on macOS `runtime`'s carries its
+/// `cgo_import_dynamic` lines, past 4 KiB), and the binary header that follows starts with Go's
+/// magic, then an 8-byte fingerprint and the flags, little-endian.
 fn object_flags(data: &[u8]) -> Option<u32> {
     if !data.starts_with(GO_OBJECT) {
         return None;
     }
-    let text = &data[..data.len().min(MOST_TEXT_HEADER)];
-    let end = memchr::memmem::find(text, b"\n!\n")? + 3;
+    let end = memchr::memmem::find(data, b"\n!\n")? + 3;
     let header = data.get(end..end + GOOBJ_MAGIC.len() + 8 + 4)?;
     if !header.starts_with(GOOBJ_MAGIC) {
         return None;
@@ -356,6 +354,37 @@ pub(crate) mod tests {
             &[("index_amd64.o", object(None, FROM_ASSEMBLY | STD, b"asm"))],
         );
         assert_eq!(portable(&std_asm, &action), Ok(()));
+    }
+
+    // covers: B-42
+    #[test]
+    fn a_go_object_with_a_long_text_header_is_still_go_s() {
+        // macOS `runtime`'s `_go_.o`: its `cgo_import_dynamic` lines put `!` past 4 KiB.
+        let action = [14u8; 32];
+        let mut long = b"go object darwin arm64 go1.27.4 X:none\n".to_vec();
+        for i in 0..200 {
+            long.extend_from_slice(
+                format!("cgo_import_dynamic libc_f{i} f{i} \"/usr/lib/libSystem.B.dylib\"\n")
+                    .as_bytes(),
+            );
+        }
+        long.extend_from_slice(b"\n!\n");
+        long.extend_from_slice(GOOBJ_MAGIC);
+        long.extend_from_slice(&[7u8; 8]);
+        long.extend_from_slice(&STD.to_le_bytes());
+        assert!(long.len() > 8192);
+        assert_eq!(object_flags(&long), Some(STD));
+        let bytes = archive(&action, b"runtime", &[]);
+        let mut with_long = AR_MAGIC.to_vec();
+        let members = members(&bytes).unwrap();
+        with_long.extend(member("__.PKGDEF", members[0].data));
+        with_long.extend(member("_go_.o", &long));
+        // Its build ID's content half computed again, as `go` does for the bytes it writes.
+        let placeholder = build_id(&with_long).unwrap();
+        let content = content_id(&with_long, &placeholder);
+        let id = format!("{}/{content}", hash_to_string(&action));
+        replace_all(&mut with_long, placeholder.as_bytes(), id.as_bytes());
+        assert_eq!(portable(&with_long, &action), Ok(()));
     }
 
     // covers: B-42
