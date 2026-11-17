@@ -42,6 +42,11 @@ pub enum NotSet {
     Failed(String),
 }
 
+/// Whether `folder`, or a folder above it, holds a `go.mod` or `go.work`: a Go module's.
+pub fn is_module(folder: &Path) -> bool {
+    module_root(folder).is_some()
+}
+
 /// The folder `folder` is in, or it, that holds a `go.mod` or `go.work`.
 fn module_root(folder: &Path) -> Option<&Path> {
     folder

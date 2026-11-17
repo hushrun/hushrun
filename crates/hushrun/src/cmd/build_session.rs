@@ -43,9 +43,34 @@ pub(crate) fn begin(
     // B-2: a compiler wrapper set already passes through. That is worth its line only where the
     // run's results lookup said the org shares: there the person may expect the shared store.
     let org_shares = share.as_ref().is_some_and(|start| start.access.shares);
-    begin_here(now, repository, repository_env, share, place)
-        .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))
+    let mut session = begin_here(now, repository, repository_env, share, place)
+        .map_err(|line| line.filter(|line| line != WRAPPER_SET || org_shares))?;
+    let cargo = std::env::current_dir().ok().is_some_and(|folder| {
+        folder
+            .ancestors()
+            .any(|dir| dir.join("Cargo.toml").is_file())
+    });
+    if session.rustc_left_out() && org_shares && cargo {
+        session.add_line(RUST_LEFT_OUT.to_string());
+    }
+    Ok(session)
 }
+
+/// B-2, B-39: whether the run's own `RUSTC_WRAPPER` (sccache) is set in a Go module's folder:
+/// hushrun's wrapper stays out, and the session still begins, for Go's cache program alone.
+/// Elsewhere a wrapper set begins no session, as before.
+fn go_beside_another_wrapper(here: &Here<'_>) -> bool {
+    (here.env)(session::RUSTC_WRAPPER).is_some_and(|v| !v.is_empty())
+        && here
+            .folder
+            .as_deref()
+            .is_some_and(hushrun_build::go::probe::is_module)
+}
+
+/// The line of a Go module's run whose Rust crates aren't reused because `RUSTC_WRAPPER` is set
+/// already, said in an org that shares, where the folder is a cargo project's too.
+const RUST_LEFT_OUT: &str =
+    "build: Rust crates aren't reused in this run: another compiler wrapper is set (RUSTC_WRAPPER)";
 
 /// The line of a run that begins no session because `RUSTC_WRAPPER` is set already (B-2), which
 /// [`begin`] says only in an org that shares.
@@ -224,8 +249,18 @@ fn begin_from_saved(
 fn begin_sandbox(here: &Here<'_>, store: &Path) -> Result<Session, Option<String>> {
     let exe = std::env::current_exe()
         .map_err(|err| Some(format!("{OFF}: hushrun can't find its own binary: {err}")))?;
-    let start = here.start(&exe, here.cache_dir, here.env);
+    let beside = go_beside_another_wrapper(here);
+    let hidden = |name: &str| {
+        (name != session::RUSTC_WRAPPER)
+            .then(|| (here.env)(name))
+            .flatten()
+    };
+    let env: &dyn Fn(&str) -> Option<OsString> = if beside { &hidden } else { here.env };
+    let start = here.start(&exe, here.cache_dir, env);
     let mut session = session::begin_in_sandbox(&start, store).or_else(said)?;
+    if beside {
+        session.leave_out_rustc();
+    }
     if let Some(folder) = &here.folder {
         session.check(folder, Some(Instant::now() + CHECK_BUDGET));
         if let Some(sysroot) = (here.sysroot)(folder) {
@@ -782,12 +817,12 @@ struct Here<'a> {
 }
 
 impl<'a> Here<'a> {
-    fn start(
-        &self,
-        exe: &'a Path,
-        cache_dir: Option<&'a Path>,
-        env: &'a dyn Fn(&str) -> Option<OsString>,
-    ) -> session::Start<'a> {
+    fn start<'b>(
+        &'b self,
+        exe: &'b Path,
+        cache_dir: Option<&'b Path>,
+        env: &'b dyn Fn(&str) -> Option<OsString>,
+    ) -> session::Start<'b> {
         session::Start {
             settings: self.settings,
             cache_dir,
@@ -827,12 +862,22 @@ fn begin_with(
             };
         }
     };
-    let start = here.start(&exe, here.cache_dir, here.env);
+    let beside = go_beside_another_wrapper(here);
+    let hidden = |name: &str| {
+        (name != session::RUSTC_WRAPPER)
+            .then(|| (here.env)(name))
+            .flatten()
+    };
+    let env: &dyn Fn(&str) -> Option<OsString> = if beside { &hidden } else { here.env };
+    let start = here.start(&exe, here.cache_dir, env);
     let mut session = match ci_store {
         Some(store) => session::begin_in_ci(&start, store),
         None => session::begin(&start),
     }
     .or_else(said)?;
+    if beside {
+        session.leave_out_rustc();
+    }
     // B-23: before COMMAND, the crates whose inputs changed in ways cargo can't see lose their
     // outputs, so that cargo builds them. What it removed is said with the run's summary.
     if let Some(folder) = &here.folder {
