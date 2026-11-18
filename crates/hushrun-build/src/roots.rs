@@ -51,6 +51,7 @@ pub fn stand_in(root: RootName, package_id: &str) -> String {
         RootName::BinExe(i) => format!("/hushrun/bin-exe/{i}"),
         RootName::CargoHome => "/hushrun/cargo".to_string(),
         RootName::Toolchain => "/hushrun/toolchain".to_string(),
+        RootName::Home => "/hushrun/home".to_string(),
     }
 }
 
@@ -206,9 +207,85 @@ impl Roots {
         machine: &Machine,
         resolve: impl Fn(&str) -> Option<String>,
     ) -> Result<Roots, RootsError> {
-        let workspace = clean(&paths.workspace);
+        let mut candidates = vec![(RootName::Workspace, paths.workspace.as_str())];
+        if let Some(package) = &paths.package {
+            candidates.push((RootName::Package, package));
+        }
+        if let Some(script_out) = &paths.script_out {
+            candidates.push((RootName::ScriptOut, script_out));
+        }
+        candidates.push((RootName::OutDir, &paths.out_dir));
+        for (i, dir) in paths.deps.iter().enumerate() {
+            let i = u8::try_from(i).map_err(|_| RootsError::TooManyDeps)?;
+            candidates.push((RootName::Deps(i), dir));
+        }
+        for (i, dir) in &paths.native {
+            let i = u8::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
+            candidates.push((RootName::Native(i), dir));
+        }
+        // What cargo or the person gave: never derived from another root by position.
+        if let Some(dir) = &paths.target_dir {
+            candidates.push((RootName::TargetDir, dir));
+        }
+        if let Some(dir) = &paths.build_target_dir {
+            candidates.push((RootName::BuildTargetDir, dir));
+        }
+        if let Some(dir) = &paths.target_tmpdir {
+            candidates.push((RootName::TargetTmp, dir));
+        }
+        for (i, dir) in paths.bin_exe_dirs.iter().enumerate() {
+            let i = u8::try_from(i).map_err(|_| RootsError::TooManyBinFolders)?;
+            candidates.push((RootName::BinExe(i), dir));
+        }
+
+        Roots::of_candidates(
+            &paths.workspace,
+            candidates,
+            shared,
+            machine,
+            &paths.package_id,
+            resolve,
+        )
+    }
+
+    /// \[ADR 0095\] The folders a test binary's key replaces in the values of the variables its
+    /// build read (C-31): the checkout as the workspace, Cargo's target folder, the cargo home as a
+    /// base, and the home folder, below every other. A value under none is left as it is.
+    /// `checkout` must be absolute; `resolve` gives a folder's resolved form, as for
+    /// [`Roots::new`].
+    pub fn of_checkout(
+        checkout: &str,
+        target_dir: Option<&str>,
+        cargo_home: Option<&str>,
+        home: Option<&str>,
+        resolve: impl Fn(&str) -> Option<String>,
+    ) -> Result<Roots, RootsError> {
+        let mut candidates = vec![(RootName::Workspace, checkout)];
+        candidates.extend(target_dir.map(|dir| (RootName::TargetDir, dir)));
+        candidates.extend(
+            home.filter(|home| home.starts_with('/') && clean(home) != "/")
+                .map(|home| (RootName::Home, home)),
+        );
+        let machine = Machine {
+            cargo_home: cargo_home.map(str::to_string),
+            ..Machine::default()
+        };
+        Roots::of_candidates(checkout, candidates, &[], &machine, "_", resolve)
+    }
+
+    /// The roots of `candidates`, each a root's name and folder, relative ones from `workspace`.
+    fn of_candidates(
+        workspace: &str,
+        candidates: Vec<(RootName, &str)>,
+        shared: &[String],
+        machine: &Machine,
+        package_id: &str,
+        resolve: impl Fn(&str) -> Option<String>,
+    ) -> Result<Roots, RootsError> {
+        let given_workspace = workspace;
+        let workspace = clean(workspace);
         if !workspace.starts_with('/') {
-            return Err(RootsError::RelativeWorkspace(paths.workspace.clone()));
+            return Err(RootsError::RelativeWorkspace(given_workspace.to_string()));
         }
         let absolute = |path: &str| {
             if path.starts_with('/') {
@@ -278,37 +355,6 @@ impl Roots {
                 })
         };
 
-        let mut candidates = vec![(RootName::Workspace, paths.workspace.as_str())];
-        if let Some(package) = &paths.package {
-            candidates.push((RootName::Package, package));
-        }
-        if let Some(script_out) = &paths.script_out {
-            candidates.push((RootName::ScriptOut, script_out));
-        }
-        candidates.push((RootName::OutDir, &paths.out_dir));
-        for (i, dir) in paths.deps.iter().enumerate() {
-            let i = u8::try_from(i).map_err(|_| RootsError::TooManyDeps)?;
-            candidates.push((RootName::Deps(i), dir));
-        }
-        for (i, dir) in &paths.native {
-            let i = u8::try_from(*i).map_err(|_| RootsError::TooManySearchFolders)?;
-            candidates.push((RootName::Native(i), dir));
-        }
-        // What cargo or the person gave: never derived from another root by position.
-        if let Some(dir) = &paths.target_dir {
-            candidates.push((RootName::TargetDir, dir));
-        }
-        if let Some(dir) = &paths.build_target_dir {
-            candidates.push((RootName::BuildTargetDir, dir));
-        }
-        if let Some(dir) = &paths.target_tmpdir {
-            candidates.push((RootName::TargetTmp, dir));
-        }
-        for (i, dir) in paths.bin_exe_dirs.iter().enumerate() {
-            let i = u8::try_from(i).map_err(|_| RootsError::TooManyBinFolders)?;
-            candidates.push((RootName::BinExe(i), dir));
-        }
-
         let mut roots = Vec::new();
         for (name, path) in candidates {
             let (given, resolved) = both(path)?;
@@ -347,7 +393,7 @@ impl Roots {
             forms,
             machine: machine_forms,
             shared: shared_forms,
-            package_id: paths.package_id.clone(),
+            package_id: package_id.to_string(),
         })
     }
 
@@ -629,6 +675,9 @@ fn precedence(name: RootName) -> (u8, u16) {
     match name {
         RootName::CargoHome => (0, 0),
         RootName::Toolchain => (0, 1),
+        // Below every root of the checkout: a folder under the home folder that is one of them is
+        // named by it.
+        RootName::Home => (0, 2),
         RootName::Workspace => (1, 0),
         RootName::Package => (2, 0),
         // The person's target folder, then cargo's folders under it.
@@ -916,6 +965,65 @@ mod tests {
         assert_eq!(a.to_placeholders("/w/ws2 /w/wsx/y"), "/w/ws2 /w/wsx/y");
         assert_eq!(a.to_placeholders("/x/w/ws"), "/x/w/ws");
         assert_eq!(a.to_placeholders("/w/ws"), "{hushrun:workspace}");
+    }
+
+    // covers: C-31
+    #[test]
+    fn a_checkouts_roots_name_its_folders_the_same_on_every_machine() {
+        let laptop = Roots::of_checkout(
+            "/Users/dev/code/shop",
+            Some("/Users/dev/code/shop/target"),
+            Some("/Users/dev/.cargo"),
+            Some("/Users/dev"),
+            with_r,
+        )
+        .unwrap();
+        let ci = Roots::of_checkout(
+            "/home/runner/work/shop/shop",
+            Some("/mnt/target"),
+            Some("/usr/local/cargo"),
+            Some("/home/runner"),
+            |_: &str| None,
+        )
+        .unwrap();
+        for (a, b, replaced) in [
+            (
+                "/Users/dev/code/shop/crates/app",
+                "/home/runner/work/shop/shop/crates/app",
+                "{hushrun:workspace}/crates/app",
+            ),
+            // The target folder under the checkout is named by itself, the longer.
+            (
+                "/R/Users/dev/code/shop/target/debug/build/app-1/out",
+                "/mnt/target/debug/build/app-1/out",
+                "{hushrun:target-dir}/debug/build/app-1/out",
+            ),
+            (
+                "/Users/dev/.cargo/bin",
+                "/usr/local/cargo/bin",
+                "{hushrun:cargo-home}/bin",
+            ),
+            (
+                "/Users/dev/.config/app:/Users/dev/code/shop",
+                "/home/runner/.config/app:/home/runner/work/shop/shop",
+                "{hushrun:home}/.config/app:{hushrun:workspace}",
+            ),
+            // A place no root holds is left as it is.
+            ("/opt/sdk", "/opt/sdk", "/opt/sdk"),
+        ] {
+            assert_eq!(laptop.to_placeholders(a), replaced, "{a}");
+            assert_eq!(ci.to_placeholders(b), replaced, "{b}");
+        }
+        // A folder beside the checkout is only under the home folder.
+        assert_eq!(
+            laptop.to_placeholders("/Users/dev/code/shop2"),
+            "{hushrun:home}/code/shop2"
+        );
+        // A checkout that isn't absolute has no roots, and then values are keyed as they are.
+        assert!(Roots::of_checkout("C:\\code\\shop", None, None, None, |_: &str| None).is_err());
+        // A home of `/` is no root.
+        let rooted = Roots::of_checkout("/w", None, None, Some("/"), |_: &str| None).unwrap();
+        assert_eq!(rooted.to_placeholders("/etc/x"), "/etc/x");
     }
 
     #[test]
