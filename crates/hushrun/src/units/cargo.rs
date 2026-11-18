@@ -531,6 +531,12 @@ fn run_stand_in(package_id: &str) -> String {
     format!("{{hushrun:run:{kind}:{name}@{version}}}")
 }
 
+/// \[ADR 0096\] Whether a package id names a path package: `path+…#…` (Cargo 1.77 and later),
+/// or `<name> <version> (path+…)` before.
+fn is_path_id(id: &str) -> bool {
+    id.starts_with("path+") || (id.ends_with(')') && id.contains(" (path+"))
+}
+
 /// `text` with `folder` replaced by `with` wherever it ends a path there (the end, a `/`, or a
 /// character that can't be in a name).
 fn replace_folder(text: &str, folder: &str, with: &str) -> String {
@@ -626,6 +632,11 @@ impl Resolve {
 #[derive(Debug, Deserialize)]
 struct Package {
     id: String,
+    /// \[ADR 0096\] Where it comes from (`registry+…`, `git+…`): `None` for a path package, a
+    /// member's or another's, whatever replaces the source (a vendored registry crate keeps its
+    /// registry source).
+    #[serde(default)]
+    source: Option<String>,
     manifest_path: PathBuf,
     dependencies: Vec<Dependency>,
     targets: Vec<Target>,
@@ -891,6 +902,21 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
         .collect();
     let member_ids: BTreeMap<&str, &Package> =
         packages.values().map(|p| (p.id.as_str(), *p)).collect();
+    // \[ADR 0096\] Whether a crate outside the workspace is a path package, whose sources in the
+    // checkout no lockfile pins: by `cargo metadata`'s source, or by its id's kind when the
+    // metadata doesn't list it (`--no-deps`), and so when it has no id, the safe side.
+    let sources: BTreeMap<&str, Option<&str>> = metadata
+        .packages
+        .iter()
+        .map(|p| (p.id.as_str(), p.source.as_deref()))
+        .collect();
+    let path_package = |id: Option<&str>| match id {
+        None => true,
+        Some(id) => match sources.get(id) {
+            Some(source) => source.is_none(),
+            None => is_path_id(id),
+        },
+    };
     let mut cache: BTreeMap<PathBuf, Option<DepInfo>> = BTreeMap::new();
     let mut outputs: BTreeMap<PathBuf, Option<hushrun_build::script::Script>> = BTreeMap::new();
     // \[ADR 0096\] Each dep-info's files of the build folder with their entries (`None`: unreadable),
@@ -963,7 +989,7 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
                 let id = &packages.get(&artifact.manifest)?.id;
                 resolve.closure(id)
             });
-        let mut env_only: Vec<PathBuf> = Vec::new();
+        let mut env_only: Vec<(PathBuf, bool)> = Vec::new();
         for other in &outside {
             let linked = match (&graph, &other.package_id) {
                 (Some(graph), Some(id)) => graph.contains(id),
@@ -974,7 +1000,7 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
                 continue;
             }
             match &other.depinfo {
-                Some(d) => env_only.push(d.clone()),
+                Some(d) => env_only.push((d.clone(), path_package(other.package_id.as_deref()))),
                 None => {
                     not_followed.insert(NotFollowed {
                         why: "target-without-dep-info".into(),
@@ -992,10 +1018,10 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
         let mut env: BTreeSet<(String, Option<String>)> = BTreeSet::new();
         let mut given: BTreeSet<String> = BTreeSet::new();
         let mut declared: BTreeSet<String> = BTreeSet::new();
-        for (d, files) in depinfos
+        for (d, files, sources) in depinfos
             .iter()
-            .map(|d| (d, true))
-            .chain(env_only.iter().map(|d| (d, false)))
+            .map(|d| (d, true, true))
+            .chain(env_only.iter().map(|(d, path)| (d, false, *path)))
         {
             // \[ADR 0095\] A dep-info that can't be read says nothing of what was read, never
             // that nothing was.
@@ -1015,17 +1041,18 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
             env.extend(keyed_env(info.env, keying));
             // \[ADR 0096\] What the compile read that no file of the scope is, by its content: a
             // file the build made (under the target or build folder: one a build script
-            // generated); and a file of the checkout outside the scope (a git-ignored source, a
-            // member's or a path crate's outside the workspace), but none of the cargo home, the
-            // rustup home or the toolchain, which are crates' and the compiler's, pinned by the
-            // lockfile and the toolchain, even inside the checkout.
+            // generated); and a file of the checkout outside the scope (a git-ignored source) of a
+            // path package, a member or another, but none of the cargo home, the rustup home or
+            // the toolchain, nor a registry or git crate's (vendored into the checkout), which
+            // are pinned by the lockfile and the toolchain.
             let made_files = made.entry(d.clone()).or_insert_with(|| {
                 info.files
                     .iter()
                     .filter(|f| {
                         let real = real(f);
                         made_in.iter().any(|dir| real.starts_with(dir))
-                            || (relative(f).is_some_and(|path| !keying.in_scope(&path))
+                            || (sources
+                                && relative(f).is_some_and(|path| !keying.in_scope(&path))
                                 && !keying.under_a_base(f))
                     })
                     .map(|file| (file.clone(), generated_entry(file, keying)))
@@ -2065,8 +2092,10 @@ mod tests {
                     .ok()
                     .and_then(Path::to_str)
                     .is_some_and(|rel| !scope.contains(rel));
+                // A path package's, a member's or another's: no `source`.
+                let path_package = named.get("source").is_none_or(serde_json::Value::is_null);
                 if made_in.iter().any(|dir| path.starts_with(dir))
-                    || (outside_scope && !keying.under_a_base(path))
+                    || (path_package && outside_scope && !keying.under_a_base(path))
                 {
                     let text = named["text"].as_str().unwrap();
                     given.insert(made_entry(text.as_bytes(), path, &keying));
@@ -2418,6 +2447,33 @@ mod tests {
                 "file {} {{hushrun:target-dir}}/x/info.rs",
                 Digest::of(&binary)
             )
+        );
+    }
+
+    // covers: C-31
+    // \[ADR 0096\] Only a path package's sources in the checkout are keyed: its id says so when
+    // `cargo metadata` doesn't list it, in Cargo 1.77's form and the older one. An older id's
+    // stand-in holds the package folder's name, which is the checkout's for one at its root.
+    #[test]
+    fn a_path_package_is_known_by_its_id_in_either_form() {
+        assert!(is_path_id("path+file:///home/dev/shop/side/helper#0.1.0"));
+        assert!(is_path_id(
+            "helper 0.1.0 (path+file:///home/dev/shop/side/helper)"
+        ));
+        assert!(!is_path_id(
+            "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.191"
+        ));
+        assert!(!is_path_id(
+            "libc 0.2.191 (registry+https://github.com/rust-lang/crates.io-index)"
+        ));
+        assert!(!is_path_id("git+file:///home/dev/remote#remote@0.1.0"));
+        assert_eq!(
+            run_stand_in("gen 0.1.0 (path+file:///home/ci/shop/crates/gen)"),
+            "{hushrun:run:gen 0.1.0 (path:gen)@}"
+        );
+        assert_eq!(
+            run_stand_in("gen 0.1.0 (path+file:///home/ci/shop)"),
+            "{hushrun:run:gen 0.1.0 (path:shop)@}"
         );
     }
 

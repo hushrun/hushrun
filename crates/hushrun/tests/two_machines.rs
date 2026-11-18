@@ -1657,6 +1657,177 @@ fn a_cargo_home_inside_the_checkout_doesnt_make_another_machine_miss() {
     );
 }
 
+/// \[ADR 0096\] A path crate of the repository that is no member of the workspace (excluded),
+/// which compiles a git-ignored source each machine writes, the first's other than the rest's.
+fn cargo_ignored_path_source_scenario() -> Scenario {
+    let mut s = cargo_scenario();
+    let lib = |name: &str| {
+        format!(
+            "pub fn one() -> u32 {{ 1 }}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn {name}() {{ assert_eq!(super::one(), 1); }}\n}}\n"
+        )
+    };
+    let manifest = |name: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    };
+    s.files
+        .retain(|(path, _)| path.starts_with("crates/other/") || path == "hushrun.yaml");
+    s.files.extend([
+        file(".gitignore", "target/\nside/helper/src/gen.rs\n"),
+        file(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/usehelper\", \"crates/steady\", \"crates/more\", \"crates/other\"]\nexclude = [\"side\"]\nresolver = \"2\"\n",
+        ),
+        file("side/helper/Cargo.toml", &manifest("helper")),
+        file("side/helper/src/lib.rs", "include!(\"gen.rs\");\n"),
+        file(
+            "crates/usehelper/Cargo.toml",
+            &format!(
+                "{}\n[dependencies]\nhelper = {{ path = \"../../side/helper\" }}\n",
+                manifest("usehelper")
+            ),
+        ),
+        file(
+            "crates/usehelper/src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses() { assert!(!helper::G.is_empty()); }\n}\n",
+        ),
+        file("crates/steady/Cargo.toml", &manifest("steady")),
+        file("crates/steady/src/lib.rs", &lib("steady")),
+        file("crates/more/Cargo.toml", &manifest("more")),
+        file("crates/more/src/lib.rs", &lib("more")),
+    ]);
+    s.prepare = |repo| {
+        let first = repo.parent().and_then(Path::file_name) == Some("first".as_ref());
+        let text = if first { "plain" } else { "spicy" };
+        std::fs::write(
+            repo.join("side/helper/src/gen.rs"),
+            format!("pub const G: &str = {text:?};\n"),
+        )
+        .expect("write");
+        if repo.join("Cargo.lock").exists() {
+            return;
+        }
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile", "--offline", "-q"])
+            .current_dir(repo)
+            .env_remove("CARGO_TARGET_DIR")
+            .status()
+            .expect("cargo");
+        assert!(lock.success());
+    };
+    s.all = set(&[
+        "crates/usehelper/src/lib.rs",
+        "crates/steady/src/lib.rs",
+        "crates/more/src/lib.rs",
+        "crates/other/src/lib.rs",
+    ]);
+    s.must_run = set(&["crates/usehelper/src/lib.rs", "crates/other/src/lib.rs"]);
+    s.ran = |ran| {
+        let binaries: BTreeMap<&str, &str> = [
+            ("usehelper", "crates/usehelper/src/lib.rs"),
+            ("steady", "crates/steady/src/lib.rs"),
+            ("more", "crates/more/src/lib.rs"),
+            ("other", "crates/other/src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        nextest_ran(ran, &binaries)
+    };
+    s
+}
+
+// covers: C-31, C-34
+// \[ADR 0096\] A path crate of the repository that is no member of the workspace, which
+// compiles a git-ignored source of its own: a binary that links it runs again when that source
+// changes, though no file of the scope did and no build script says so.
+#[test]
+fn a_git_ignored_source_of_a_path_crate_outside_the_workspace_runs_its_binary_again() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_ignored_path_source_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert!(
+        m.fresh.ran.contains("crates/usehelper/src/lib.rs"),
+        "{}",
+        m.fresh.stderr
+    );
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+}
+
+/// \[ADR 0096\] [`cargo_home_inside_scenario`]'s git crate vendored on every machine but the
+/// first, as a CI job does before it builds: `cargo vendor` into the checkout, git-ignored, with
+/// the source replaced in an ignored `.cargo/config.toml`. The crate keeps its git source, and
+/// its sources are in the checkout there, outside the scope.
+fn cargo_vendored_scenario() -> Scenario {
+    let mut s = cargo_home_inside_scenario();
+    for (path, text) in &mut s.files {
+        if path == ".gitignore" {
+            text.push_str("vendor/\n.cargo/\n");
+        }
+    }
+    s.elsewhere = |repo| {
+        if !repo.join("vendor").exists() {
+            let vendor = Command::new("cargo")
+                .args(["vendor", "--locked", "vendor"])
+                .current_dir(repo)
+                .env_remove("CARGO_TARGET_DIR")
+                .env(
+                    "CARGO_HOME",
+                    repo.parent().expect("parent").join("cargo-home"),
+                )
+                .output()
+                .expect("cargo");
+            assert!(
+                vendor.status.success(),
+                "{}",
+                String::from_utf8_lossy(&vendor.stderr)
+            );
+            std::fs::create_dir_all(repo.join(".cargo")).expect("mkdir");
+            std::fs::write(repo.join(".cargo/config.toml"), &vendor.stdout).expect("write");
+        }
+        Vec::new()
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] A registry or git crate is keyed by what its build gave, never by its sources,
+// vendored into the checkout or not: a laptop's pass is reused by a CI job that vendors.
+#[test]
+fn a_crate_vendored_on_one_machine_and_not_on_another_doesnt_make_it_miss() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_vendored_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    let vendored = m
+        .fresh
+        .machine
+        .as_ref()
+        .expect("machine")
+        .repo
+        .join("vendor/remote");
+    assert!(vendored.is_dir(), "the fresh machine vendored the crate");
+    let config = vendored.join("../../.cargo/config.toml");
+    let config = std::fs::read_to_string(config).expect("config");
+    assert!(config.contains("directory = \"vendor\""), "{config}");
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
 // Go, with what a server keeps of hints (C-38)
 
 /// What a server says when it keeps no hints, once in a run.

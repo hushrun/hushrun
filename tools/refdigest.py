@@ -728,7 +728,8 @@ def env_entries(env_deps, build=None):
         if value is not None:
             value = keyed_text(roots, runs, value)
         entries.add((name, value))
-    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None,
+                                          (e[1] or "").encode("utf-8")))
 
 
 def env_digest(entries):
@@ -752,10 +753,11 @@ def scripts_entries(build, scope):
     without its `cargo:` or `cargo::`, then for each variable its output declares with
     `rerun-if-env-changed`, sorted, each once, a line feed, `rerun-if-env-changed=`, its name and,
     when `values` holds it (else it is unset), `=` and its value; and each file a dep-info names
-    under the target or build folder, or in the checkout but not one of the scope's files
-    (`scope`) nor under the cargo home, the rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
-    text as `keyed_text` has it: roots replaced, and each run's folder by its stand-in (a vector's
-    text is UTF-8)."""
+    under the target or build folder, or, for a path package's dep-info (one with no `source`),
+    in the checkout but not one of the scope's files (`scope`) nor under the cargo home, the
+    rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
+    text as `keyed_text` has it: roots replaced, and each run's folder by its stand-in (a
+    vector's text is UTF-8)."""
     folders = build["folders"]
     values = build.get("values", {})
     roots = checkout_roots(folders)
@@ -765,7 +767,8 @@ def scripts_entries(build, scope):
     for run in build["runs"]:
         entry = "output " + keyed(run["outDir"])
         declared = set()
-        # Lines as Cargo reads them: split at line feeds, each trimmed, its value trimmed at its end.
+        # Lines as Cargo reads them: split at line feeds, each trimmed, its value trimmed at its
+        # end.
         for line in run["output"].split("\n"):
             line = line.strip()
             for prefix in ("cargo::", "cargo:"):
@@ -788,7 +791,8 @@ def scripts_entries(build, scope):
         path = named["path"]
         made = any(path == d or path.startswith(d + "/") for d in made_in)
         with_roots = path if roots is None else to_placeholders(roots, path)
-        outside_scope = (path.startswith(root + "/") and path[len(root) + 1:] not in scope
+        outside_scope = (not named.get("source") and path.startswith(root + "/")
+                         and path[len(root) + 1:] not in scope
                          and not with_roots.startswith(bases))
         if made or outside_scope:
             entries.add("file sha256:%s %s" % (sha256_hex(keyed(named["text"]).encode("utf-8")),
@@ -824,7 +828,8 @@ def getenv_entries(getenv):
         if value is not None and roots is not None:
             value = to_placeholders(roots, value)
         entries.add((name, value))
-    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None,
+                                          (e[1] or "").encode("utf-8")))
 
 
 def evaluate_unit_key(vector):
@@ -865,7 +870,8 @@ def evaluate_unit_key(vector):
     if "buildScripts" in vector:
         entries = scripts_entries(vector["buildScripts"], {f["path"] for f in vector["files"]})
         if entries != vector["scripts"]:
-            raise ValueError("build scripts give %r, the vector lists %r" % (entries, vector["scripts"]))
+            raise ValueError("build scripts give %r, the vector lists %r"
+                             % (entries, vector["scripts"]))
         key["scripts"] = got["scripts"] = scripts_digest(entries)
     got["key"] = "sha256:" + sha256_hex(jcs(key))
     return got
