@@ -135,14 +135,13 @@ fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now(
         systems: vec![this()],
     };
     let name = "HUSHRUN_TEST_LISTS_VARIABLE";
-    let getenv = |value: &str| {
-        gotest::Getenv::of(
-            std::path::Path::new("/home/dev/shop"),
-            &[(name.to_string(), value.to_string())],
-        )
+    let getenv = |value: &'static str| {
+        gotest::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
+            (n == name).then(|| value.to_string())
+        })
     };
     let mut own = mapped(&["data/data.go"], Origin::SeenHere);
-    own.getenv = set(&[name]);
+    own.getenv = Some(set(&[name]));
     let lists = lists(
         "data",
         Some(&own),

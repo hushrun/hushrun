@@ -2463,6 +2463,8 @@ fn decide(
     let tree = end.tree;
     let keyer = Keyer::new(tree, sets, &end.base, at.keys);
     let keeps_outside = at.keys == adapter::KeysOutside::Build;
+    // \[ADR 0096\] Go's rows keep the names of the variables its tests read.
+    let keeps_names = at.keys == adapter::KeysOutside::Getenv;
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
     // that shares none.
@@ -2717,8 +2719,10 @@ fn decide(
                     // of it, which no row holds.
                     match plan.chosen.get(unit).map(|list| (list, list.from)) {
                         Some((list, shared::From::Hint(os))) => {
-                            out.mapped
-                                .insert(unit.clone(), shared_row(list, os, sets, tree));
+                            out.mapped.insert(
+                                unit.clone(),
+                                shared_row(list, os, sets, tree, keeps_names),
+                            );
                         }
                         Some((list, shared::From::Build)) => {
                             let seen = hushrun_core::hints::Unit {
@@ -2955,7 +2959,12 @@ fn decide(
                     } else {
                         units::Outside::default()
                     },
-                    getenv: seen.getenv.clone(),
+                    // What it read this time when it ran, else what its row said.
+                    getenv: match (keeps_names, ran) {
+                        (false, _) => None,
+                        (true, true) => Some(seen.getenv.clone()),
+                        (true, false) => map.units.get(unit).and_then(|b| b.getenv.clone()),
+                    },
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
@@ -3124,7 +3133,13 @@ fn entries(sets: &units::Sets, tree: &Tree, files: &BTreeSet<String>) -> BTreeMa
 
 /// \[C-38\] The row a test file reused on another machine's list gets in this machine's store: the
 /// files of the list its key holds, as they are now, which are as they were when it passed.
-fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree: &Tree) -> Mapped {
+fn shared_row(
+    list: &List,
+    os: hushrun_core::hints::Os,
+    sets: &units::Sets,
+    tree: &Tree,
+    keeps_names: bool,
+) -> Mapped {
     Mapped {
         reads: sets
             .keyed(list.reads.iter().map(String::as_str))
@@ -3137,9 +3152,10 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
         // \[ADR 0096\] Only Go's lists come from hints, and its `env` is the variables' values
-        // now, never kept; a hint names none of them.
+        // now, never kept. A hint names no variable, and the pass its list keyed by none stood on
+        // a run that read none.
         outside: units::Outside::default(),
-        getenv: BTreeSet::new(),
+        getenv: keeps_names.then(BTreeSet::new),
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),
         not_kept: None,

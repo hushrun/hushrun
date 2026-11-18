@@ -850,9 +850,10 @@ pub struct Mapped {
     /// here; either `None` in a row an older hushrun wrote. Nothing for every other adapter's.
     pub outside: hushrun_core::units::Outside,
     /// \[ADR 0096\] The variables its tests read when it last ran here, by name: a Go package's,
-    /// whose key takes their values now. Empty for every other adapter's, and in a row an older
-    /// hushrun wrote, whose key matches no result this one records.
-    pub getenv: BTreeSet<String>,
+    /// whose key takes their values now, empty when they read none. `None` when it isn't known:
+    /// every other adapter's row, and a Go row an older hushrun wrote, whose key matches no
+    /// result this one records.
+    pub getenv: Option<BTreeSet<String>>,
     /// \[C-38\] Whether it ran here, or another machine saw it read these files.
     pub origin: Origin,
     /// \[ADR 0080\] Its tests, by id, as each last ran here, for a check with `tests.unit: test`:

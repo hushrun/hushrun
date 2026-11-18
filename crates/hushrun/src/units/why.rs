@@ -302,12 +302,9 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     // \[C-38\] The lists a run would key it by: this machine's entry, then other machines'.
     // \[ADR 0096\] Go's keys take the values, now, of the variables its tests read: COMMAND's
     // assignments over this environment, as a run's would.
-    let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv).then(|| {
-        super::gotest::Getenv::of(
-            input.root,
-            &super::command::assignments(&input.base.command),
-        )
-    });
+    let assigned = super::command::assignments(&input.base.command);
+    let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv)
+        .then(|| super::gotest::Getenv::of_command(input.root, &assigned));
     let lists =
         shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
     if lists.is_empty() {
@@ -861,6 +858,20 @@ fn explain_change(
         says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
+    // \[ADR 0096\] A Go row an older hushrun wrote says nothing of the variables its tests read,
+    // which every Go key holds now: no pass recorded before counts.
+    let row = map.units.get(unit);
+    if adapter.keys() == super::adapter::KeysOutside::Getenv
+        && row.is_some_and(|m| m.getenv.is_none())
+    {
+        says(
+            out,
+            Decision::Runs,
+            "variables-unknown",
+            "this machine doesn't know which variables its tests read when it last ran here, which every key of a Go package holds now, so no pass recorded before counts; its next run here records them".into(),
+        );
+        return;
+    }
     says(
         out,
         Decision::Runs,
@@ -873,8 +884,11 @@ fn explain_change(
     );
     // \[ADR 0096\] A Go package's key holds the values of the variables its tests read, which the
     // store keeps by name only: one may have another value now.
-    if let Some(mapped) = map.units.get(unit).filter(|m| !m.getenv.is_empty()) {
-        let names: Vec<&str> = mapped.getenv.iter().map(String::as_str).collect();
+    if let Some(read) = row
+        .and_then(|m| m.getenv.as_ref())
+        .filter(|read| !read.is_empty())
+    {
+        let names: Vec<&str> = read.iter().map(String::as_str).collect();
         out.detail.insert(
             1,
             format!(

@@ -52,27 +52,32 @@ pub const MOST_LOG_LINES: usize = 200_000;
 /// without telling the test log, and Go's own test cache keys it always (`computeTestInputsID`).
 pub const ALWAYS_READ: &str = "GODEBUG";
 
+/// \[ADR 0096\] A variable's value in an environment, `None` when unset.
+type Lookup<'a> = dyn Fn(&str) -> Option<String> + 'a;
+
 /// \[ADR 0096\] The environment a Go package's tests ran in, or a plan's would, as its key holds
 /// what they read of it (C-31's `env`): COMMAND's own `env NAME=value` assignments over hushrun's
 /// environment, with the checkout's folders (the repository's root and the home folder, B-8's
 /// replacement) replaced in each value. The plan, the record after COMMAND and `hushrun why` all
 /// key by [`Getenv::outside`].
-pub struct Getenv {
-    assigned: Vec<(String, String)>,
+pub struct Getenv<'a> {
+    lookup: Box<Lookup<'a>>,
     roots: Option<hushrun_build::roots::Roots>,
 }
 
-impl Getenv {
-    /// The environment of COMMAND, whose assignments are `assigned`, in the repository at `root`.
-    pub fn of(root: &Path, assigned: &[(String, String)]) -> Getenv {
-        let mut out = Getenv {
-            assigned: assigned.to_vec(),
-            roots: None,
-        };
-        let home = out
-            .value("HOME")
+impl<'a> Getenv<'a> {
+    /// The environment of COMMAND, whose assignments are `assigned`, over hushrun's, in the
+    /// repository at `root` ([`super::command::variable`]): what a run, a plan and `why` key by.
+    pub fn of_command(root: &Path, assigned: &'a [(String, String)]) -> Getenv<'a> {
+        Getenv::of(root, move |name| super::command::variable(assigned, name))
+    }
+
+    /// The environment whose variables `lookup` gives (`None`: unset), in the repository at
+    /// `root`.
+    pub fn of(root: &Path, lookup: impl Fn(&str) -> Option<String> + 'a) -> Getenv<'a> {
+        let home = lookup("HOME")
             .filter(|home| home.starts_with('/') && !home.trim_matches('/').is_empty());
-        out.roots = root.to_str().and_then(|checkout| {
+        let roots = root.to_str().and_then(|checkout| {
             hushrun_build::roots::Roots::of_checkout(
                 &hushrun_build::roots::CheckoutFolders {
                     checkout: checkout.to_string(),
@@ -83,17 +88,15 @@ impl Getenv {
             )
             .ok()
         });
-        out
+        Getenv {
+            lookup: Box::new(lookup),
+            roots,
+        }
     }
 
-    /// A variable's value: COMMAND's last assignment of it, else hushrun's; `None` when unset.
+    /// A variable's value; `None` when unset.
     fn value(&self, name: &str) -> Option<String> {
-        self.assigned
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, value)| value.clone())
-            .or_else(|| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned()))
+        (self.lookup)(name)
     }
 
     /// What a key holds of a package whose tests read `names`: their `env`, each name with its
@@ -1557,7 +1560,7 @@ impl Adapter for Recognized {
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
         let listed = list(self, at.root, at.cwd, at.assigned)?;
-        let getenv = Getenv::of(at.root, at.assigned);
+        let getenv = Getenv::of_command(at.root, at.assigned);
         let sets = sets_of(at.tree, &listed.unit_files, &listed.named, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let known = listed
@@ -1597,7 +1600,7 @@ impl Adapter for Recognized {
         // runner left a test out didn't run whole. One it didn't start, reused whole, tells none:
         // the core counts the tests this machine knows of it (C-39).
         let told = super::facts::merged(at.files, ADAPTER);
-        let getenv = Getenv::of(at.root, at.assigned);
+        let getenv = Getenv::of_command(at.root, at.assigned);
         for (unit, seen) in &mut observed.units {
             if let Some(tests) = told.get(unit).and_then(|m| m.tests.clone()) {
                 if tests.values().any(|t| t.deselected) {
@@ -1605,7 +1608,7 @@ impl Adapter for Recognized {
                     // \[ADR 0096\] Its tests left out read nothing this time: what they read when
                     // it last ran here is still theirs, as for the files they opened.
                     if let Some(before) = at.map.units.get(unit) {
-                        seen.getenv.extend(before.getenv.iter().cloned());
+                        seen.getenv.extend(before.getenv.iter().flatten().cloned());
                     }
                 }
                 seen.tests = Some(tests);
@@ -1873,28 +1876,17 @@ mod tests {
                 .map(|l| l.as_str().unwrap().to_string())
                 .collect();
             let log = read_log(&lines, &root.join(vector["unit"].as_str().unwrap()), root);
-            let assigned: Vec<(String, String)> = getenv["values"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .map(|(n, v)| (n.clone(), v.as_str().unwrap().to_string()))
-                .collect();
-            // A name the vector leaves unset is unset here too.
-            for name in log.getenv.iter().chain([&ALWAYS_READ.to_string()]) {
-                if !getenv["values"].as_object().unwrap().contains_key(name) {
-                    assert!(std::env::var_os(name).is_none(), "{name} is set here");
-                }
-            }
+            // The vector's values alone: a name it leaves out is unset, whatever this machine has.
+            let values = getenv["values"].as_object().unwrap().clone();
+            let lookup =
+                move |name: &str| values.get(name).map(|v| v.as_str().unwrap().to_string());
             let listed: Vec<(&str, Option<&str>)> = vector["env"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|e| (e[0].as_str().unwrap(), e[1].as_str()))
                 .collect();
-            let env = Getenv::of(root, &assigned)
-                .outside(&log.getenv)
-                .env
-                .unwrap();
+            let env = Getenv::of(root, lookup).outside(&log.getenv).env.unwrap();
             assert_eq!(env, units::env(listed), "{}", vector["name"]);
             assert_eq!(
                 env.to_string(),
@@ -1920,28 +1912,53 @@ mod tests {
                 .map(|(n, v)| (n.to_string(), v.to_string()))
                 .collect()
         };
+        // The environment the pairs make, the last of a name winning: nothing of this machine's.
         let env_of = |root: &str, pairs: &[(&str, &str)], read: &[&str]| {
-            Getenv::of(Path::new(root), &assigned(pairs))
-                .outside(&names(read))
-                .env
-                .unwrap()
+            let pairs = assigned(pairs);
+            Getenv::of(Path::new(root), move |name| {
+                pairs
+                    .iter()
+                    .rev()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+            })
+            .outside(&names(read))
+            .env
+            .unwrap()
         };
-        let unset = "HUSHRUN_TEST_SURELY_UNSET_VARIABLE";
-        assert!(std::env::var_os(unset).is_none());
-        // Nothing read: `GODEBUG` alone, with its value here.
-        let godebug = std::env::var("GODEBUG").ok();
+        let godebug: Option<&str> = None;
+        // Nothing read: `GODEBUG` alone.
         assert_eq!(
             env_of("/home/dev/shop", &[], &[]),
-            units::env([("GODEBUG", godebug.as_deref())])
+            units::env([("GODEBUG", godebug)])
         );
-        // COMMAND's assignment wins, the last of two; unset, set to nothing and set differ.
-        let with = |pairs: &[(&str, &str)]| env_of("/home/dev/shop", pairs, &[unset]);
+        assert_ne!(
+            env_of("/home/dev/shop", &[("GODEBUG", "x=1")], &[]),
+            env_of("/home/dev/shop", &[], &[])
+        );
+        // Unset, set to nothing and set differ.
+        let name = "HUSHRUN_TEST_VARIABLE";
+        let with = |pairs: &[(&str, &str)]| env_of("/home/dev/shop", pairs, &[name]);
         assert_eq!(
-            with(&[(unset, "a"), (unset, "b")]),
-            units::env([("GODEBUG", godebug.as_deref()), (unset, Some("b"))])
+            with(&[(name, "b")]),
+            units::env([("GODEBUG", godebug), (name, Some("b"))])
         );
-        assert_ne!(with(&[]), with(&[(unset, "")]));
-        assert_ne!(with(&[(unset, "")]), with(&[(unset, "b")]));
+        assert_ne!(with(&[]), with(&[(name, "")]));
+        assert_ne!(with(&[(name, "")]), with(&[(name, "b")]));
+        // COMMAND's environment: its last assignment of a name over hushrun's.
+        let command = assigned(&[(name, "a"), (name, "b")]);
+        assert_eq!(
+            Getenv::of_command(Path::new("/home/dev/shop"), &command)
+                .outside(&names(&[name]))
+                .env,
+            Getenv::of(Path::new("/home/dev/shop"), |n| {
+                (n == name)
+                    .then(|| "b".to_string())
+                    .or_else(|| super::super::command::variable(&[], n))
+            })
+            .outside(&names(&[name]))
+            .env
+        );
         // The checkout's root and the home folder are replaced: two machines, one key.
         let laptop = env_of(
             "/home/dev/shop",
@@ -1965,7 +1982,7 @@ mod tests {
         assert_eq!(
             laptop,
             units::env([
-                ("GODEBUG", godebug.as_deref()),
+                ("GODEBUG", godebug),
                 ("HOME", Some("{hushrun:home}")),
                 ("PWD", Some("{hushrun:workspace}/pkg")),
                 ("CFG", Some("{hushrun:home}/.cfg")),
@@ -1978,7 +1995,7 @@ mod tests {
         );
         // Never `scripts`: only Cargo's builds have them.
         assert!(
-            Getenv::of(Path::new("/home/dev/shop"), &[])
+            Getenv::of(Path::new("/home/dev/shop"), |_| None)
                 .outside(&names(&[]))
                 .scripts
                 .is_none()

@@ -2278,6 +2278,21 @@ fn a_go_package_whose_tests_read_another_value_of_a_variable_runs_again() {
     );
     let ran = go_ran(&empty);
     assert!(ran.contains("lookup") && ran.contains("other"), "{ran:?}");
+
+    // \[C-37\] A row an older hushrun wrote names no variable, and every Go key holds them now.
+    store::forget_getenv(&r.cache);
+    let unknown = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sour")],
+    );
+    assert!(
+        unknown.stdout.starts_with(
+            "flavor runs: this machine doesn't know which variables its tests read when it last ran here, which every key of a Go package holds now"
+        ),
+        "{}",
+        unknown.stdout
+    );
 }
 
 // covers: C-31, C-35, C-39

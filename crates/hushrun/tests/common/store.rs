@@ -148,6 +148,16 @@ pub fn forget_env(cache: &Path) {
     conn.execute("DELETE FROM unit_env", []).unwrap();
 }
 
+/// \[ADR 0096\] Forgets which variables each Go package's tests read in the one store in `cache`,
+/// as in a store an older hushrun wrote: its packages' rows stay.
+#[allow(dead_code)]
+pub fn forget_getenv(cache: &Path) {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open(&stores[0]).expect("the store opens");
+    conn.execute("DELETE FROM unit_getenv", []).unwrap();
+}
+
 /// \[ADR 0095\] What each Cargo test binary's key held of the environment, in the one store in
 /// `cache`, by its unit.
 #[allow(dead_code)]

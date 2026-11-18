@@ -85,16 +85,15 @@ macro_rules! unit_scripts {
 }
 
 /// \[ADR 0096\] The variables a Go package's tests read when it last ran here, by name (its test
-/// log's `getenv` lines), one row each: a plan keys them with their values then. Added in place as
-/// `unit_env` is; read without it, a package's tests read none, whose key matches no result an
-/// older hushrun recorded.
+/// log's `getenv` lines): one row a package, its names a JSON array of strings, sorted, `[]` when
+/// they read none; a plan keys them with their values then. No row: not known (another adapter's
+/// unit, or a row an older hushrun wrote). Added in place as `unit_env` is.
 macro_rules! unit_getenv {
     () => {
         "CREATE TABLE unit_getenv (
-    unit_ref INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
-    name     TEXT NOT NULL,
-    PRIMARY KEY (unit_ref, name)
-) STRICT, WITHOUT ROWID;"
+    unit_ref INTEGER PRIMARY KEY REFERENCES unit (id) ON DELETE CASCADE,
+    names    TEXT NOT NULL CHECK (json_valid(names) AND json_type(names) = 'array')
+) STRICT;"
     };
 }
 
@@ -928,13 +927,14 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     }
     if has_table(conn, "unit_getenv")? {
         let mut rows = conn.prepare(
-            "SELECT g.unit_ref, g.name FROM unit_getenv g JOIN unit u ON u.id = g.unit_ref
+            "SELECT g.unit_ref, g.names FROM unit_getenv g JOIN unit u ON u.id = g.unit_ref
              WHERE u.check_ref = ?1",
         )?;
         for row in rows.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
-            let (unit, name): (i64, String) = row?;
+            let (unit, list): (i64, String) = row?;
             if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
-                mapped.getenv.insert(name);
+                // A list that doesn't read is no list: not known.
+                mapped.getenv = serde_json::from_str(&list).ok();
             }
         }
     }
@@ -1370,10 +1370,13 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 )?;
             }
         }
-        for name in &mapped.getenv {
+        if let Some(read) = &mapped.getenv {
             tx.execute(
-                "INSERT INTO unit_getenv (unit_ref, name) VALUES (?1, ?2)",
-                params![unit, name],
+                "INSERT INTO unit_getenv (unit_ref, names) VALUES (?1, ?2)",
+                params![
+                    unit,
+                    serde_json::to_string(read).unwrap_or_else(|_| "[]".into())
+                ],
             )?;
         }
         // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row

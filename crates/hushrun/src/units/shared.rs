@@ -319,7 +319,7 @@ pub fn lists(
                 &reads,
                 &mapped.dirs,
                 mapped.outside,
-                &mapped.getenv,
+                mapped.getenv.as_ref().unwrap_or(&none),
                 From::Here(mapped.origin),
             ));
         }

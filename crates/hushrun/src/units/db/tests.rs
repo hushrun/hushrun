@@ -802,18 +802,36 @@ fn build_scripts_and_variables_read_are_kept_and_a_store_made_before_their_table
     binary.outside.env = Some(Digest::of(b"A=1\0"));
     binary.outside.scripts = Some(Digest::of(b"output /o\0"));
     let mut package = mapped(&[("pkg/pkg_test.go", HASH_B)]);
-    package.getenv = ["HOME".to_string(), "TMPDIR".to_string(), String::new()].into();
+    package.getenv = Some(["HOME".to_string(), "TMPDIR".to_string(), String::new()].into());
+    // A Go package that read none is known to have read none.
+    let mut quiet = mapped(&[("quiet/quiet_test.go", HASH_B)]);
+    quiet.getenv = Some(BTreeSet::new());
     let runs = |check: &'static str| {
         run(
             check,
-            &[("src/lib.rs", binary.clone()), ("pkg", package.clone())],
-            &["src/lib.rs", "pkg/pkg_test.go"],
+            &[
+                ("src/lib.rs", binary.clone()),
+                ("pkg", package.clone()),
+                ("quiet", quiet.clone()),
+            ],
+            &["src/lib.rs", "pkg/pkg_test.go", "quiet/quiet_test.go"],
         )
     };
     write_run(&path, &runs("unit")).unwrap();
     let map = load(&path, &id("unit")).map;
     assert_eq!(map.units["src/lib.rs"], binary);
     assert_eq!(map.units["pkg"], package);
+    // Read none and not known are two states: a binary's row knows nothing of variables.
+    assert_eq!(map.units["quiet"], quiet);
+    assert_eq!(map.units["src/lib.rs"].getenv, None);
+    // A list of names that isn't a JSON array is refused.
+    {
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            conn.execute_batch("UPDATE unit_getenv SET names = '{\"a\": 1}'")
+                .is_err()
+        );
+    }
     // A scripts row needs its env row: the impossible pair is refused.
     {
         let conn = Connection::open(&path).unwrap();
@@ -863,7 +881,7 @@ fn build_scripts_and_variables_read_are_kept_and_a_store_made_before_their_table
             binary_then.outside.env = None;
         }
         let package_then = Mapped {
-            getenv: BTreeSet::new(),
+            getenv: None,
             ..package.clone()
         };
         assert_eq!(read.map.units["src/lib.rs"], binary_then, "{dropped:?}");
