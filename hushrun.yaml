@@ -38,11 +38,76 @@ checks:
     counts_from:
       os: macos
     # Every test file runs as before; hushrun says which ones `tests: reuse` would have left out.
-    tests: observe
+    # The ignore list is the same as `test`'s below, and says why.
+    tests:
+      mode: observe
+      ignore:
+        - docs/adr/**
+        - docs/guides/**
+        - docs/rfc/**
+        - docs/spec/**
+        - docs/validation/**
+        - docs/plan.md
+        - "*.md"
+        - .agents/**
+        - .claude/**
+        - npm/**
+        - fuzz/**
+        - deploy/**
+        - scripts/**
+        - action/**
+        - tools/corpus/**
+        - deny.toml
+        - clippy.toml
+        - rustfmt.toml
+        - hushrun.yaml
+        - .github/actionlint.yaml
+        - .github/dist-build-setup.yml
+        - .github/workflows/ci.yml
+        - .github/workflows/nightly.yml
+        - .github/workflows/npm.yml
+        - .github/workflows/publish.yml
+        - .github/workflows/release.yml
+        - .github/workflows/skills.yml
   doctest-macos:
     counts_from:
       os: macos
   # Linux's tests, which count only from CI's system, as above. Every test file runs as before,
   # and hushrun says which ones `tests: reuse` would have left out.
   test:
-    tests: observe
+    # A change to a file below changes no test file's key. On 2026-11-17 a trace of every test
+    # binary on Linux showed that no test opens, lists or compiles in any of them. Anything a test
+    # compiles in or opens must stay out of this list: all of recipes/, testdata/, docs/schemas/,
+    # tools/*.py, dist-workspace.toml and .github/workflows/hushrun-deploy.yml. A glob matches from
+    # the root, so `*.md` is the root's own, and it can't leave one file out, so .github/ is named
+    # file by file: a new file there counts until it is listed.
+    tests:
+      mode: observe
+      ignore:
+        - docs/adr/**
+        - docs/guides/**
+        - docs/rfc/**
+        - docs/spec/**
+        - docs/validation/**
+        - docs/plan.md
+        - "*.md"
+        - .agents/**
+        - .claude/**
+        - npm/**
+        - fuzz/**
+        - deploy/**
+        - scripts/**
+        - action/**
+        - tools/corpus/**
+        - deny.toml
+        - clippy.toml
+        - rustfmt.toml
+        - hushrun.yaml
+        - .github/actionlint.yaml
+        - .github/dist-build-setup.yml
+        - .github/workflows/ci.yml
+        - .github/workflows/nightly.yml
+        - .github/workflows/npm.yml
+        - .github/workflows/publish.yml
+        - .github/workflows/release.yml
+        - .github/workflows/skills.yml
