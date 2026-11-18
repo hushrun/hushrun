@@ -14,6 +14,8 @@
 //!   and be `not run`: it records nothing.
 //! - The plan asks `go list` with COMMAND's build flags (`-tags`, `-race`, `-mod`, …) in COMMAND's
 //!   environment, before COMMAND; after it, hushrun asks again, and reads the runner's starts.
+//! - \[ADR 0096\] The variables a package's tests read (the log's `getenv` lines) are in its key
+//!   with their values, as Go's own test cache keys them ([`Getenv`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -28,7 +30,7 @@ use hushrun_core::glob::Pattern;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources, Tree};
 
 use super::adapter::{
-    Adapter, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
+    Adapter, KeysOutside, KnowsTests, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt,
 };
 use super::facts::{FactsFile, Invocation};
 use super::runner;
@@ -46,6 +48,78 @@ pub const GOFLAGS_WAS: &str = "HUSHRUN_GOFLAGS";
 const LIST_BUDGET: Duration = Duration::from_secs(120);
 /// The most lines of a test log hushrun reads: past it, the package is `not observed`.
 pub const MOST_LOG_LINES: usize = 200_000;
+/// \[ADR 0096\] The variable every package's key holds, read or not: Go's runtime reads it
+/// without telling the test log, and Go's own test cache keys it always (`computeTestInputsID`).
+pub const ALWAYS_READ: &str = "GODEBUG";
+
+/// \[ADR 0096\] The environment a Go package's tests ran in, or a plan's would, as its key holds
+/// what they read of it (C-31's `env`): COMMAND's own `env NAME=value` assignments over hushrun's
+/// environment, with the checkout's folders (the repository's root and the home folder, B-8's
+/// replacement) replaced in each value. The plan, the record after COMMAND and `hushrun why` all
+/// key by [`Getenv::outside`].
+pub struct Getenv {
+    assigned: Vec<(String, String)>,
+    roots: Option<hushrun_build::roots::Roots>,
+}
+
+impl Getenv {
+    /// The environment of COMMAND, whose assignments are `assigned`, in the repository at `root`.
+    pub fn of(root: &Path, assigned: &[(String, String)]) -> Getenv {
+        let mut out = Getenv {
+            assigned: assigned.to_vec(),
+            roots: None,
+        };
+        let home = out
+            .value("HOME")
+            .filter(|home| home.starts_with('/') && !home.trim_matches('/').is_empty());
+        out.roots = root.to_str().and_then(|checkout| {
+            hushrun_build::roots::Roots::of_checkout(
+                &hushrun_build::roots::CheckoutFolders {
+                    checkout: checkout.to_string(),
+                    home,
+                    ..Default::default()
+                },
+                hushrun_build::roots::resolve_on_disk,
+            )
+            .ok()
+        });
+        out
+    }
+
+    /// A variable's value: COMMAND's last assignment of it, else hushrun's; `None` when unset.
+    fn value(&self, name: &str) -> Option<String> {
+        self.assigned
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// What a key holds of a package whose tests read `names`: their `env`, each name with its
+    /// value now, roots replaced, or alone when unset (set to nothing is a value), and
+    /// [`ALWAYS_READ`]'s, as [`units::env()`] digests them.
+    pub fn outside(&self, names: &BTreeSet<String>) -> units::Outside {
+        let entries: Vec<(String, Option<String>)> = names
+            .iter()
+            .map(String::as_str)
+            .chain([ALWAYS_READ])
+            .map(|name| {
+                let value = self.value(name).map(|value| match &self.roots {
+                    Some(roots) => roots.to_placeholders(&value),
+                    None => value,
+                });
+                (name.to_string(), value)
+            })
+            .collect();
+        units::Outside {
+            env: Some(units::env(
+                entries.iter().map(|(n, v)| (n.as_str(), v.as_deref())),
+            )),
+            scripts: None,
+        }
+    }
+}
 
 /// COMMAND, when it is `go test …` in a form hushrun reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -761,6 +835,7 @@ pub fn observe(
         let mut reads = listed_unit.reads;
         let mut opened = BTreeSet::new();
         let mut dirs = BTreeSet::new();
+        let mut getenv = BTreeSet::new();
         for start in &ran {
             match &start.testlog {
                 Some(lines) if !start.testlog_truncated => {
@@ -773,6 +848,7 @@ pub fn observe(
                     }
                     opened.extend(log.files.iter().cloned());
                     dirs.extend(log.dirs);
+                    getenv.extend(log.getenv);
                 }
                 Some(_) => {
                     not_followed.insert(NotFollowed {
@@ -803,7 +879,9 @@ pub fn observe(
         out.units.insert(
             unit,
             super::Seen {
+                // \[ADR 0096\] Keyed by [`Adapter::read`], which knows what the map holds.
                 outside: Default::default(),
+                getenv,
                 facts: Facts {
                     complete,
                     failed,
@@ -847,10 +925,13 @@ pub struct Log {
     pub dirs: BTreeSet<String>,
     /// Programs they started, anywhere: `os.StartProcess` logs an open of the program.
     pub programs: Vec<String>,
+    /// \[ADR 0096\] The variables they read, by name (`os.Getenv`, `os.LookupEnv`).
+    pub getenv: BTreeSet<String>,
 }
 
 /// Reads a test log (`# test log`, then `open`, `stat`, `chdir` and `getenv` lines), whose relative
-/// paths start from `dir`, the package's directory, for the repository at `root`. An `open` of an
+/// paths start from `dir`, the package's directory, for the repository at `root`; \[ADR 0096\] a
+/// `getenv` line names a variable read. An `open` of an
 /// executable file is a program started, wherever it is. \[ADR 0074\] So is what
 /// [`started_from`] reads as one: a program found from `exec.Cmd.Dir`, or one gone by now.
 pub fn read_log(lines: &[String], dir: &Path, root: &Path) -> Log {
@@ -860,6 +941,10 @@ pub fn read_log(lines: &[String], dir: &Path, root: &Path) -> Log {
         let Some((op, name)) = line.split_once(' ') else {
             continue;
         };
+        if op == "getenv" {
+            out.getenv.insert(name.to_string());
+            continue;
+        }
         let path = normalize(&pwd.join(name));
         match op {
             "chdir" => {
@@ -1466,8 +1551,13 @@ impl Adapter for Recognized {
         variables(self, &exe, at.cwd, (at.env)("GOFLAGS"), at.assigned)
     }
 
+    fn keys(&self) -> KeysOutside {
+        KeysOutside::Getenv
+    }
+
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
         let listed = list(self, at.root, at.cwd, at.assigned)?;
+        let getenv = Getenv::of(at.root, at.assigned);
         let sets = sets_of(at.tree, &listed.unit_files, &listed.named, at.ignore);
         let shared = super::fetch(at.asker, self.hints(), &sets, at.tree, at.ignore);
         let known = listed
@@ -1483,6 +1573,7 @@ impl Adapter for Recognized {
                             &shared,
                             at.tree,
                             Some(&u.reads),
+                            Some(&getenv),
                         )
                     })
                     .flatten();
@@ -1506,13 +1597,20 @@ impl Adapter for Recognized {
         // runner left a test out didn't run whole. One it didn't start, reused whole, tells none:
         // the core counts the tests this machine knows of it (C-39).
         let told = super::facts::merged(at.files, ADAPTER);
+        let getenv = Getenv::of(at.root, at.assigned);
         for (unit, seen) in &mut observed.units {
             if let Some(tests) = told.get(unit).and_then(|m| m.tests.clone()) {
                 if tests.values().any(|t| t.deselected) {
                     seen.facts.complete = false;
+                    // \[ADR 0096\] Its tests left out read nothing this time: what they read when
+                    // it last ran here is still theirs, as for the files they opened.
+                    if let Some(before) = at.map.units.get(unit) {
+                        seen.getenv.extend(before.getenv.iter().cloned());
+                    }
                 }
                 seen.tests = Some(tests);
             }
+            seen.outside = getenv.outside(&seen.getenv);
         }
         let sets = sets_of(at.tree, &observed.unit_files, &observed.named, at.ignore);
         let unit_files = Some(observed.unit_files.clone());
@@ -1522,7 +1620,14 @@ impl Adapter for Recognized {
             .iter()
             .filter_map(|(unit, compiled)| {
                 let own = at.map.units.get(unit);
-                let lists = super::shared::lists(unit, own, &shared, at.tree, Some(compiled))?;
+                let lists = super::shared::lists(
+                    unit,
+                    own,
+                    &shared,
+                    at.tree,
+                    Some(compiled),
+                    Some(&getenv),
+                )?;
                 Some((unit.clone(), lists))
             })
             .collect();
@@ -1713,6 +1818,7 @@ mod tests {
         let lines: Vec<String> = [
             "# test log",
             "getenv HOME",
+            "getenv GOTMPDIR",
             "open testdata/in.txt",
             "stat ../other.go",
             "open testdata",
@@ -1737,6 +1843,146 @@ mod tests {
         if cfg!(unix) {
             assert_eq!(log.programs.len(), 1, "{log:?}");
         }
+        // \[ADR 0096\] The variables they read, by name, and no file for them.
+        assert_eq!(
+            log.getenv.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["GOTMPDIR", "HOME"]
+        );
+    }
+
+    // covers: C-31, C-35
+    // \[ADR 0096\] The Go vectors' test logs and values give the `env` entries they list, by the
+    // log reader and the environment a run keys by.
+    #[test]
+    fn the_go_vectors_logs_give_the_entries_they_list() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/digest/unit-keys.json");
+        let data: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut seen = 0;
+        for vector in data["vectors"].as_array().unwrap() {
+            let Some(getenv) = vector.get("getenv") else {
+                continue;
+            };
+            seen += 1;
+            let root = Path::new(getenv["root"].as_str().unwrap());
+            let lines: Vec<String> = getenv["log"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l.as_str().unwrap().to_string())
+                .collect();
+            let log = read_log(&lines, &root.join(vector["unit"].as_str().unwrap()), root);
+            let assigned: Vec<(String, String)> = getenv["values"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(n, v)| (n.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            // A name the vector leaves unset is unset here too.
+            for name in log.getenv.iter().chain([&ALWAYS_READ.to_string()]) {
+                if !getenv["values"].as_object().unwrap().contains_key(name) {
+                    assert!(std::env::var_os(name).is_none(), "{name} is set here");
+                }
+            }
+            let listed: Vec<(&str, Option<&str>)> = vector["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (e[0].as_str().unwrap(), e[1].as_str()))
+                .collect();
+            let env = Getenv::of(root, &assigned)
+                .outside(&log.getenv)
+                .env
+                .unwrap();
+            assert_eq!(env, units::env(listed), "{}", vector["name"]);
+            assert_eq!(
+                env.to_string(),
+                vector["expect"]["env"],
+                "{}",
+                vector["name"]
+            );
+        }
+        assert_eq!(seen, 3);
+    }
+
+    // covers: C-31, C-35
+    // \[ADR 0096\] A package's `env`: each variable its tests read with its value, COMMAND's
+    // assignment over hushrun's environment, set to nothing apart from unset, the checkout's
+    // folders replaced; and Go's runtime's `GODEBUG` always, as Go's own test cache keys it.
+    #[test]
+    fn a_packages_env_is_what_its_tests_read_with_the_values_now() {
+        let names =
+            |list: &[&str]| -> BTreeSet<String> { list.iter().map(|n| n.to_string()).collect() };
+        let assigned = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect()
+        };
+        let env_of = |root: &str, pairs: &[(&str, &str)], read: &[&str]| {
+            Getenv::of(Path::new(root), &assigned(pairs))
+                .outside(&names(read))
+                .env
+                .unwrap()
+        };
+        let unset = "HUSHRUN_TEST_SURELY_UNSET_VARIABLE";
+        assert!(std::env::var_os(unset).is_none());
+        // Nothing read: `GODEBUG` alone, with its value here.
+        let godebug = std::env::var("GODEBUG").ok();
+        assert_eq!(
+            env_of("/home/dev/shop", &[], &[]),
+            units::env([("GODEBUG", godebug.as_deref())])
+        );
+        // COMMAND's assignment wins, the last of two; unset, set to nothing and set differ.
+        let with = |pairs: &[(&str, &str)]| env_of("/home/dev/shop", pairs, &[unset]);
+        assert_eq!(
+            with(&[(unset, "a"), (unset, "b")]),
+            units::env([("GODEBUG", godebug.as_deref()), (unset, Some("b"))])
+        );
+        assert_ne!(with(&[]), with(&[(unset, "")]));
+        assert_ne!(with(&[(unset, "")]), with(&[(unset, "b")]));
+        // The checkout's root and the home folder are replaced: two machines, one key.
+        let laptop = env_of(
+            "/home/dev/shop",
+            &[
+                ("HOME", "/home/dev"),
+                ("PWD", "/home/dev/shop/pkg"),
+                ("CFG", "/home/dev/.cfg"),
+            ],
+            &["HOME", "PWD", "CFG"],
+        );
+        let ci = env_of(
+            "/builds/ci/shop",
+            &[
+                ("HOME", "/builds/ci"),
+                ("PWD", "/builds/ci/shop/pkg"),
+                ("CFG", "/builds/ci/.cfg"),
+            ],
+            &["HOME", "PWD", "CFG"],
+        );
+        assert_eq!(laptop, ci);
+        assert_eq!(
+            laptop,
+            units::env([
+                ("GODEBUG", godebug.as_deref()),
+                ("HOME", Some("{hushrun:home}")),
+                ("PWD", Some("{hushrun:workspace}/pkg")),
+                ("CFG", Some("{hushrun:home}/.cfg")),
+            ])
+        );
+        // A value under no root is keyed as it is.
+        assert_ne!(
+            env_of("/home/dev/shop", &[("TMPDIR", "/var/a")], &["TMPDIR"]),
+            env_of("/home/dev/shop", &[("TMPDIR", "/var/b")], &["TMPDIR"])
+        );
+        // Never `scripts`: only Cargo's builds have them.
+        assert!(
+            Getenv::of(Path::new("/home/dev/shop"), &[])
+                .outside(&names(&[]))
+                .scripts
+                .is_none()
+        );
     }
 
     // covers: C-35, C-32

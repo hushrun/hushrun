@@ -300,7 +300,16 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         return out;
     }
     // \[C-38\] The lists a run would key it by: this machine's entry, then other machines'.
-    let lists = shared::lists(&unit, own, &shared, input.tree, None).unwrap_or_default();
+    // \[ADR 0096\] Go's keys take the values, now, of the variables its tests read: COMMAND's
+    // assignments over this environment, as a run's would.
+    let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv).then(|| {
+        super::gotest::Getenv::of(
+            input.root,
+            &super::command::assignments(&input.base.command),
+        )
+    });
+    let lists =
+        shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
     if lists.is_empty() {
         says(
             &mut out,
@@ -862,6 +871,18 @@ fn explain_change(
         0,
         "its last result there didn't count here, or is gone: this machine forgets a result 30 days after its run".into(),
     );
+    // \[ADR 0096\] A Go package's key holds the values of the variables its tests read, which the
+    // store keeps by name only: one may have another value now.
+    if let Some(mapped) = map.units.get(unit).filter(|m| !m.getenv.is_empty()) {
+        let names: Vec<&str> = mapped.getenv.iter().map(String::as_str).collect();
+        out.detail.insert(
+            1,
+            format!(
+                "or a variable its tests read has another value now than when it passed: its key holds the value of each ({})",
+                names.join(", ")
+            ),
+        );
+    }
 }
 
 /// The shortest path of direct edges the store holds from `unit` to `file` (for Go, to its

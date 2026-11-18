@@ -790,17 +790,19 @@ fn a_test_binarys_env_is_kept_and_a_store_made_before_its_table_gets_it_with_eve
 }
 
 // covers: C-36, C-31
-// \[ADR 0096\] What a Cargo test binary's key held of its build scripts is kept beside its `env`;
-// a store made before its table (as ADR 0095's build made it, or 0.17 before `unit_env`) reads as
-// it is and gets it on its next write, every row kept.
+// \[ADR 0096\] What a Cargo test binary's key held of its build scripts is kept beside its `env`,
+// and the variables a Go package's tests read with its row; a store made before their tables (as
+// ADR 0095's build made it, or 0.17 before `unit_env`) reads as it is and gets them on its next
+// write, every row kept.
 #[test]
-fn build_scripts_are_kept_and_a_store_made_before_their_table_gets_it() {
+fn build_scripts_and_variables_read_are_kept_and_a_store_made_before_their_tables_gets_them() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("units/store.v2.sqlite");
     let mut binary = mapped(&[("src/lib.rs", HASH_A)]);
     binary.outside.env = Some(Digest::of(b"A=1\0"));
     binary.outside.scripts = Some(Digest::of(b"output /o\0"));
-    let package = mapped(&[("pkg/pkg_test.go", HASH_B)]);
+    let mut package = mapped(&[("pkg/pkg_test.go", HASH_B)]);
+    package.getenv = ["HOME".to_string(), "TMPDIR".to_string(), String::new()].into();
     let runs = |check: &'static str| {
         run(
             check,
@@ -832,7 +834,10 @@ fn build_scripts_are_kept_and_a_store_made_before_their_table_gets_it() {
         );
     }
 
-    for dropped in [&["unit_scripts"][..], &["unit_scripts", "unit_env"]] {
+    for dropped in [
+        &["unit_getenv", "unit_scripts"][..],
+        &["unit_getenv", "unit_scripts", "unit_env"],
+    ] {
         {
             let conn = Connection::open(&path).unwrap();
             for table in dropped {
@@ -857,7 +862,10 @@ fn build_scripts_are_kept_and_a_store_made_before_their_table_gets_it() {
         if dropped.contains(&"unit_env") {
             binary_then.outside.env = None;
         }
-        let package_then = package.clone();
+        let package_then = Mapped {
+            getenv: BTreeSet::new(),
+            ..package.clone()
+        };
         assert_eq!(read.map.units["src/lib.rs"], binary_then, "{dropped:?}");
         assert_eq!(read.map.units["pkg"], package_then, "{dropped:?}");
         assert!(dropped.iter().all(|t| lacks(t)), "{dropped:?}");

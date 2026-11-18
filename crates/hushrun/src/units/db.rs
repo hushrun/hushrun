@@ -84,6 +84,20 @@ macro_rules! unit_scripts {
     };
 }
 
+/// \[ADR 0096\] The variables a Go package's tests read when it last ran here, by name (its test
+/// log's `getenv` lines), one row each: a plan keys them with their values then. Added in place as
+/// `unit_env` is; read without it, a package's tests read none, whose key matches no result an
+/// older hushrun recorded.
+macro_rules! unit_getenv {
+    () => {
+        "CREATE TABLE unit_getenv (
+    unit_ref INTEGER NOT NULL REFERENCES unit (id) ON DELETE CASCADE,
+    name     TEXT NOT NULL,
+    PRIMARY KEY (unit_ref, name)
+) STRICT, WITHOUT ROWID;"
+    };
+}
+
 /// The tables, in a fresh store. `STRICT`: a value of another type is refused.
 const TABLES: &str = concat!(
     "
@@ -185,6 +199,7 @@ CREATE TABLE unit_dir (
 ",
     unit_env!(),
     unit_scripts!(),
+    unit_getenv!(),
     "
 
 -- Direct edges an adapter saw in a check's runs, for `hushrun why` to show a path. Never read
@@ -435,7 +450,11 @@ fn check_schema(conn: &Connection) -> Result<Vec<&'static str>, Unread> {
 
 /// \[ADR 0095, 0096\] The tables a store of this schema gets in place, each by its name and its
 /// statement as [`TABLES`] makes it, in an order their references allow.
-const ADDED: &[(&str, &str)] = &[("unit_env", unit_env!()), ("unit_scripts", unit_scripts!())];
+const ADDED: &[(&str, &str)] = &[
+    ("unit_env", unit_env!()),
+    ("unit_scripts", unit_scripts!()),
+    ("unit_getenv", unit_getenv!()),
+];
 
 /// \[ADR 0095, 0096\] `conn`, a store of this schema opened to write, with every table of
 /// [`ADDED`]: one made before some gets them, in one transaction under the lock beside `path`,
@@ -886,7 +905,8 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
         }
     }
     // \[ADR 0095, 0096\] What each Cargo test binary's key held of the environment and of its
-    // build scripts; none in a store made before the table, opened only to read.
+    // build scripts, and the variables each Go package's tests read; none in a store made before
+    // the table, opened only to read.
     for (table, column) in [("unit_env", "env"), ("unit_scripts", "scripts")] {
         if !has_table(conn, table)? {
             continue;
@@ -903,6 +923,18 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
                     "unit_env" => mapped.outside.env = digest,
                     _ => mapped.outside.scripts = digest,
                 }
+            }
+        }
+    }
+    if has_table(conn, "unit_getenv")? {
+        let mut rows = conn.prepare(
+            "SELECT g.unit_ref, g.name FROM unit_getenv g JOIN unit u ON u.id = g.unit_ref
+             WHERE u.check_ref = ?1",
+        )?;
+        for row in rows.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (unit, name): (i64, String) = row?;
+            if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+                mapped.getenv.insert(name);
             }
         }
     }
@@ -1337,6 +1369,12 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                     params![unit, scripts.hex()],
                 )?;
             }
+        }
+        for name in &mapped.getenv {
+            tx.execute(
+                "INSERT INTO unit_getenv (unit_ref, name) VALUES (?1, ?2)",
+                params![unit, name],
+            )?;
         }
         // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row
         // tests with the same list share.

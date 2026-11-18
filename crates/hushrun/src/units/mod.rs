@@ -69,8 +69,11 @@ pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
     /// \[ADR 0095, 0096\] What its key holds of what isn't a file of the scope (C-31's `env` and
-    /// `scripts`): Cargo's adapter's; nothing for every other, whose keys hold none.
+    /// `scripts`): Cargo's adapter's and Go's; nothing for every other, whose keys hold none.
     pub outside: units::Outside,
+    /// \[ADR 0096\] The variables its tests read while they ran, by name: Go's `getenv` lines,
+    /// which the map keeps and a plan keys with their values then. Empty for every other adapter.
+    pub getenv: BTreeSet<String>,
     pub duration_ms: u64,
     /// \[ADR 0080\] Its tests, as the adapter told them, merged over its processes; `None` when it
     /// told none (C-39).
@@ -2306,8 +2309,8 @@ impl<'a> Keyer<'a> {
     }
 
     /// A test file's key, from the files it read and what it holds of what isn't a file of the
-    /// scope (`outside`): \[ADR 0095\] what its build read of the environment (`env`) and
-    /// \[ADR 0096\] what its build scripts gave it (`scripts`), Cargo's alone.
+    /// scope (`outside`): \[ADR 0095\] what it read of the environment (`env`, Cargo's and
+    /// \[ADR 0096\] Go's) and \[ADR 0096\] what its build scripts gave it (`scripts`, Cargo's).
     /// For an adapter whose keys hold one of them, a list without it keys nothing: a key without
     /// it is a key of hushrun before it, which no run of this one records, and whose passes stand
     /// on another build or environment.
@@ -2945,12 +2948,14 @@ fn decide(
                     },
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
                     // \[ADR 0095, 0096\] What its key held of what isn't a file of the scope,
-                    // which `hushrun why` keys a Cargo binary by.
+                    // which `hushrun why` keys a Cargo binary by, and the variables a Go
+                    // package's tests read, which the next plan keys by their values then.
                     outside: if keeps_outside {
                         seen.outside
                     } else {
                         units::Outside::default()
                     },
+                    getenv: seen.getenv.clone(),
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
@@ -3131,7 +3136,10 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
             .collect(),
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
-        outside: list.outside,
+        // \[ADR 0096\] Only Go's lists come from hints, and its `env` is the variables' values
+        // now, never kept; a hint names none of them.
+        outside: units::Outside::default(),
+        getenv: BTreeSet::new(),
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),
         not_kept: None,

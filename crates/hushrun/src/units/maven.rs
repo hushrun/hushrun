@@ -1092,6 +1092,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
     let skipped = class_skipped || tests.values().any(|t| t.skipped && !t.deselected);
     Some(super::Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             complete: complete && !open,
             failed: class_failed,
@@ -1189,8 +1190,14 @@ impl Adapter for Recognized {
             .into_iter()
             .filter(|unit| unit.contains("::") || at.tree.contains(unit))
             .map(|unit| {
-                let lists =
-                    super::shared::lists(&unit, at.map.units.get(&unit), &shared, at.tree, None);
+                let lists = super::shared::lists(
+                    &unit,
+                    at.map.units.get(&unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                );
                 (unit, lists)
             })
             .collect();
@@ -1215,8 +1222,14 @@ impl Adapter for Recognized {
             .seen
             .keys()
             .filter_map(|unit| {
-                let lists =
-                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                let lists = super::shared::lists(
+                    unit,
+                    at.map.units.get(unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                )?;
                 Some((unit.clone(), lists))
             })
             .collect();

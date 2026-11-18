@@ -143,12 +143,15 @@ impl StartAt<'_> {
 /// ([`hushrun_core::units::Outside`]), and where it comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum KeysOutside {
-    /// Nothing: every adapter's but Cargo's.
+    /// Nothing: every adapter's but Cargo's and Go's.
     #[default]
     None,
     /// `env` and `scripts`, from the build (Cargo's): the map keeps them as the key of its last
     /// build here held them, which `hushrun why` keys a unit by.
     Build,
+    /// `env`, from the variables a unit's tests read (Go's `getenv`): the map keeps their names,
+    /// and every key takes their values in the environment it is computed in.
+    Getenv,
 }
 
 impl KeysOutside {
@@ -157,6 +160,7 @@ impl KeysOutside {
         match self {
             KeysOutside::None => true,
             KeysOutside::Build => outside.env.is_some() && outside.scripts.is_some(),
+            KeysOutside::Getenv => outside.env.is_some(),
         }
     }
 }
@@ -330,7 +334,7 @@ pub trait Adapter: std::fmt::Debug {
     }
 
     /// \[ADR 0095, 0096\] What every key of its units holds of what isn't a file of the scope
-    /// (C-31's `env` and `scripts`, Cargo's): a list without one of them, from a
+    /// (C-31's `env`, Cargo's and Go's; `scripts`, Cargo's): a list without one of them, from a
     /// store an older hushrun wrote or a hint, keys nothing, and the unit runs.
     fn keys(&self) -> KeysOutside {
         KeysOutside::None

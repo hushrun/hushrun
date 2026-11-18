@@ -359,8 +359,14 @@ impl Adapter for Pytest {
         let known = sets
             .files(Set::Units)
             .map(|unit| {
-                let lists =
-                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                let lists = super::shared::lists(
+                    unit,
+                    at.map.units.get(unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                );
                 (unit.to_string(), lists)
             })
             .collect();
@@ -409,6 +415,7 @@ impl Adapter for Pytest {
                 };
                 let seen = Seen {
                     outside: Default::default(),
+                    getenv: Default::default(),
                     facts,
                     reads: m.reads,
                     duration_ms: m.duration_ms,
@@ -428,8 +435,14 @@ impl Adapter for Pytest {
         let planned = seen
             .keys()
             .filter_map(|unit| {
-                let lists =
-                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                let lists = super::shared::lists(
+                    unit,
+                    at.map.units.get(unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                )?;
                 Some((unit.clone(), lists))
             })
             .collect();

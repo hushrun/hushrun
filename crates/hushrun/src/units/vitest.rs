@@ -652,6 +652,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             unit,
             super::Seen {
                 outside: Default::default(),
+                getenv: Default::default(),
                 facts: Facts {
                     complete: finished >= selected,
                     failed,
@@ -740,8 +741,14 @@ impl Adapter for Recognized {
         let known = sets
             .files(Set::Units)
             .map(|unit| {
-                let lists =
-                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                let lists = super::shared::lists(
+                    unit,
+                    at.map.units.get(unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                );
                 (unit.to_string(), lists)
             })
             .collect();
@@ -772,8 +779,14 @@ impl Adapter for Recognized {
             .units
             .keys()
             .filter_map(|unit| {
-                let lists =
-                    super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None)?;
+                let lists = super::shared::lists(
+                    unit,
+                    at.map.units.get(unit),
+                    &shared,
+                    at.tree,
+                    None,
+                    None,
+                )?;
                 Some((unit.clone(), lists))
             })
             .collect();

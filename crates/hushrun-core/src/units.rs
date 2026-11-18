@@ -276,9 +276,10 @@ pub(crate) fn shape_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec
     bytes
 }
 
-/// \[C-31, ADR 0095\] `env`: the SHA-256 of what a Cargo test binary's build read of the
-/// environment, by the `# env-dep:` lines of the dep-info its `reads` come from. Each entry is a
-/// variable's name, `=` and its value with roots replaced, or its name alone when it was unset,
+/// \[C-31, ADR 0095\] `env`: the SHA-256 of what a unit read of the environment: for a Cargo test
+/// binary, by the `# env-dep:` lines of the dep-info its `reads` come from; \[ADR 0096\] for a Go
+/// package, by the `getenv` lines of its tests' log, with each variable's value now. Each entry is
+/// a variable's name, `=` and its value with roots replaced, or its name alone when it was unset,
 /// as UTF-8 followed by one NUL byte; sorted by bytes, each once. No entry gives the SHA-256 of
 /// nothing.
 pub fn env<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Digest {
@@ -313,9 +314,9 @@ fn entries_digest(lines: impl IntoIterator<Item = String>) -> Digest {
     Digest::of(&bytes)
 }
 
-/// \[C-31\] What a unit's key holds of what isn't a file of the scope: \[ADR 0095\] what its build
-/// read of the environment ([`env()`]), and \[ADR 0096\] what the build scripts of its build gave
-/// it ([`scripts`]), Cargo's alone. `None` leaves the member out of the key, as
+/// \[C-31\] What a unit's key holds of what isn't a file of the scope: \[ADR 0095\] what it read of
+/// the environment ([`env()`], Cargo's and \[ADR 0096\] Go's), and \[ADR 0096\] what the build
+/// scripts of its build gave it ([`scripts`], Cargo's). `None` leaves the member out of the key, as
 /// every other adapter's keys have it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Outside {
@@ -405,9 +406,9 @@ pub struct KeyBase {
 /// \[C-31\] The one function for a unit's key: the SHA-256 of the JCS form of the run key's fields
 /// but `digest` (`base`), the unit's path, and the digests of what it read (`reads`), of the rest
 /// set (`rest`) and of the sources set's paths (`shape`); and what it holds of what isn't a file of
-/// the scope (`outside`): \[ADR 0095\] `env` and \[ADR 0096\] `scripts` for an adapter that keys
-/// them (Cargo's), which every key of it holds, empty ones too. Every other adapter's key has
-/// neither, and is as it was.
+/// the scope (`outside`): \[ADR 0095\] `env` for an adapter that keys what a unit read of the
+/// environment (Cargo's, \[ADR 0096\] Go's), which every key of it holds, an empty one too, and
+/// \[ADR 0096\] `scripts` for Cargo's. Every other adapter's key has neither, and is as it was.
 pub fn unit_key(
     base: &KeyBase,
     unit: &str,
@@ -431,7 +432,7 @@ pub fn unit_key(
 /// \[C-39, ADR 0080\] The one function for a test's key: [`unit_key`]'s fields, computed the same
 /// way, under [`TEST_KEY_SCHEMA`], with `test`, the test's id within its unit. `reads` digests the
 /// test's list (RFC 0004 §3.2). \[ADR 0096\] It holds what its unit's key holds of what isn't a
-/// file of the scope (`outside`).
+/// file of the scope (`outside`): a Go test, the variables its package's tests read.
 #[allow(
     clippy::too_many_arguments,
     reason = "the members of a key, each named as C-39 names it"

@@ -626,6 +626,7 @@ pub fn observe(
                 },
                 outside,
                 reads: b.reads,
+                getenv: BTreeSet::new(),
                 duration_ms,
                 tests: None,
             },

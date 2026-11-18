@@ -464,6 +464,7 @@ fn a_test_that_wasnt_followed_keeps_its_test_file_from_a_pass_when_tests_go_by_f
         ]);
         let seen = Seen {
             outside: Default::default(),
+            getenv: Default::default(),
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -507,6 +508,7 @@ fn a_test_that_wasnt_followed_keeps_its_test_file_from_a_pass_when_tests_go_by_f
             map.units.get("tests/test_a.py"),
             &Shared::default(),
             &tree,
+            None,
             None,
         );
         assert!(
@@ -577,6 +579,7 @@ fn a_run_whose_plan_left_tests_out_never_records_a_pass_of_their_test_file() {
         ]);
         let seen = Seen {
             outside: Default::default(),
+            getenv: Default::default(),
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -652,6 +655,7 @@ fn a_failure_no_test_explains_keeps_no_tests_pass() {
     ]);
     let seen = |failed: bool, tests: BTreeMap<String, facts::MergedTest>| Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             complete: true,
             failed,
@@ -739,6 +743,7 @@ fn a_test_its_adapter_never_leaves_out_records_no_pass_of_its_own() {
     ]);
     let seen = Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             complete: true,
             failed: true,
@@ -843,6 +848,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
     ]);
     let seen = Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             complete: true,
             ..Facts::default()
@@ -922,6 +928,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         &tree,
         Seen {
             outside: Default::default(),
+            getenv: Default::default(),
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -964,6 +971,7 @@ fn what_one_test_didnt_follow_is_its_own_and_its_file_doesnt_pass_whole() {
     };
     let seen = Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             complete: true,
             ..Facts::default()
@@ -1110,6 +1118,7 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
     let tree = tree(&paths);
     let left_out = || Seen {
         outside: Default::default(),
+        getenv: Default::default(),
         facts: Facts {
             deselected: true,
             ..Facts::default()

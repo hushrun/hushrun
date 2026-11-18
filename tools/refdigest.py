@@ -729,6 +729,31 @@ def scripts_digest(entries):
     return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
 
 
+def getenv_entries(getenv):
+    """[ADR 0096] The entries of a vector's `getenv` (C-31's `env` of a Go package): each name a
+    `getenv` line of its test log names, and GODEBUG always, with its value in `values` (absent:
+    unset; set to nothing is a value), the repository's root and the home folder (HOME, when it
+    is absolute and not `/`) replaced in it."""
+    values = getenv["values"]
+    home = values.get("HOME")
+    folders = {"root": getenv["root"]}
+    if home and home.startswith("/") and home.strip("/"):
+        folders["home"] = home
+    roots = checkout_roots(folders)
+    names = {"GODEBUG"}
+    for line in getenv["log"]:
+        op, sp, name = line.partition(" ")
+        if sp and op == "getenv":
+            names.add(name)
+    entries = set()
+    for name in names:
+        value = values.get(name)
+        if value is not None and roots is not None:
+            value = to_placeholders(roots, value)
+        entries.add((name, value))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
+
+
 def evaluate_unit_key(vector):
     files = {f["path"]: (f["kind"], f["text"].encode("utf-8")) for f in vector["files"]}
     keyed = [p for p in vector["reads"] if p in set(vector["units"]) | set(vector["sources"])]
@@ -753,6 +778,14 @@ def evaluate_unit_key(vector):
         listed = [tuple(e) for e in vector["env"]]
         if entries != listed:
             raise ValueError("env-dep lines give %r, the vector lists %r" % (entries, listed))
+        key["env"] = got["env"] = env_digest(entries)
+    # [ADR 0096] A Go package's key, or one of its tests': the variables its tests' log names,
+    # with their values, must be the vector's entries, whose digest is `env`.
+    if "getenv" in vector:
+        entries = getenv_entries(vector["getenv"])
+        listed = [tuple(e) for e in vector["env"]]
+        if entries != listed:
+            raise ValueError("getenv lines give %r, the vector lists %r" % (entries, listed))
         key["env"] = got["env"] = env_digest(entries)
     # [ADR 0096] A Cargo test binary's key: its build scripts' runs and the files they made must
     # be the vector's entries, whose digest is `scripts`.

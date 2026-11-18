@@ -1942,6 +1942,247 @@ fn an_integration_test_of_a_package_with_a_build_script_is_observed_and_reused()
     );
 }
 
+fn has_go() -> bool {
+    Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Go as these tests run it: this machine's build cache, so that the standard library builds
+/// once, no toolchain download and no configuration file of the person's.
+fn go_env() -> Vec<(&'static str, String)> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        Command::new("go")
+            .args(["env", "GOCACHE"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("hushrun-test-gocache")
+                    .display()
+                    .to_string()
+            })
+    });
+    vec![
+        ("GOCACHE", cache.clone()),
+        ("GOTOOLCHAIN", "local".into()),
+        ("GOENV", "off".into()),
+    ]
+}
+
+/// \[ADR 0096\] A Go module whose packages' tests read variables while they run: `flavor` with
+/// `os.Getenv`, `lookup` with `os.LookupEnv`, and `plain` and `other` none. Each test passes
+/// whatever the value.
+fn getenv_files(tests: &str) -> Vec<(String, String)> {
+    let test = |package: &str, body: &str| {
+        (
+            format!("{package}/{package}_test.go"),
+            format!(
+                "package {package}\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nvar _ = os.Getenv\n\nfunc TestOne(t *testing.T) {{\n{body}}}\n\nfunc TestTwo(t *testing.T) {{\n{body}}}\n"
+            ),
+        )
+    };
+    let mut files = vec![
+        (
+            "hushrun.yaml".to_string(),
+            format!(
+                "version: 1\nrepository: example.com/acme/mod\nchecks:\n  unit:\n    tests: {tests}\n"
+            ),
+        ),
+        (
+            "go.mod".to_string(),
+            "module example.com/mod\n\ngo 1.21\n".to_string(),
+        ),
+        test(
+            "flavor",
+            "\tif os.Getenv(\"HUSHRUN_FIXTURE_GO\") == \"never\" {\n\t\tt.Fatal(\"never\")\n\t}\n",
+        ),
+        test(
+            "lookup",
+            "\tif v, ok := os.LookupEnv(\"HUSHRUN_FIXTURE_LOOKUP\"); ok && v == \"never\" {\n\t\tt.Fatal(\"never\")\n\t}\n",
+        ),
+        test("plain", "\tif 1+1 != 2 {\n\t\tt.Fatal(\"two\")\n\t}\n"),
+    ];
+    files.push(go_other(0));
+    files
+}
+
+/// `other`'s test, its `n`-th version: a change no other package reads, so the check's own key
+/// misses and the others' keys are what decide.
+fn go_other(n: u32) -> (String, String) {
+    (
+        "other/other_test.go".to_string(),
+        format!(
+            "package other\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {{\n\tif {n}-{n} != 0 {{\n\t\tt.Fatal(\"zero\")\n\t}}\n}}\n"
+        ),
+    )
+}
+
+/// The packages `go test -json` ran a test of, by their directory.
+fn go_ran(ran: &Ran) -> std::collections::BTreeSet<String> {
+    ran.stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["Action"] == "run" && event["Test"].is_string())
+        .filter_map(|event| {
+            let package = event["Package"].as_str()?;
+            Some(package.strip_prefix("example.com/mod/")?.to_string())
+        })
+        .collect()
+}
+
+const GO_TEST: [&str; 7] = ["run", "unit", "--", "go", "test", "-json", "./..."];
+
+/// A run of `go test` in `r` with `vars` besides Go's own.
+fn go_run(r: &Repo, args: &[&str], vars: &[(&str, &str)]) -> Ran {
+    let go = go_env();
+    let mut env: Vec<(&str, &str)> = go.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    env.extend_from_slice(vars);
+    r.run(args, &env)
+}
+
+// covers: C-31, C-34, C-35
+// A Go package whose tests read a variable with `os.Getenv` or `os.LookupEnv` runs again when its
+// value changes, or it goes from unset to set to nothing, as Go's own test cache would rerun it;
+// the same value again reuses it.
+#[test]
+fn a_go_package_whose_tests_read_another_value_of_a_variable_runs_again() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let files = getenv_files("reuse");
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = Repo::new(&files);
+    let first = go_run(&r, &GO_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        first.plan_line(),
+        "hushrun: unit: all 4 packages run: none had passed here yet on the files it read"
+    );
+
+    // Another value: `flavor` runs with `other`, and one of the other two, audited.
+    let (path, text) = go_other(1);
+    r.write(&path, &text);
+    let set = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: unit: 3 of 4 packages run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        set.stderr
+    );
+    let ran = go_ran(&set);
+    assert!(ran.contains("flavor") && ran.contains("other"), "{ran:?}");
+
+    // The same value: its pass on it counts. `hushrun why` keys it by the value it is given.
+    let (path, text) = go_other(2);
+    r.write(&path, &text);
+    let same = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: unit: 2 of 4 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+    assert!(go_ran(&same).contains("other"));
+    let why = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sour")],
+    );
+    assert!(
+        why.stdout.starts_with("flavor would be reused"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
+    let why = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sweet")],
+    );
+    assert!(why.stdout.starts_with("flavor runs"), "{}", why.stdout);
+    assert!(
+        why.stdout.contains(
+            "or a variable its tests read has another value now than when it passed: its key holds the value of each (HUSHRUN_FIXTURE_GO)"
+        ),
+        "{}",
+        why.stdout
+    );
+
+    // Set to nothing is another value than unset: `lookup` runs.
+    let (path, text) = go_other(3);
+    r.write(&path, &text);
+    let empty = go_run(
+        &r,
+        &GO_TEST,
+        &[
+            ("HUSHRUN_FIXTURE_GO", "sour"),
+            ("HUSHRUN_FIXTURE_LOOKUP", ""),
+        ],
+    );
+    assert_eq!(empty.code, 0, "{}", empty.stderr);
+    assert_eq!(
+        empty.plan_line(),
+        "hushrun: unit: 3 of 4 packages run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        empty.stderr
+    );
+    let ran = go_ran(&empty);
+    assert!(ran.contains("lookup") && ran.contains("other"), "{ran:?}");
+}
+
+// covers: C-31, C-35, C-39
+// With tests reused one by one, a test's key holds what its package's tests read of the
+// environment too: a package that ran because a variable changed doesn't reuse its tests one by
+// one on their earlier passes.
+#[test]
+fn go_tests_reused_one_by_one_run_again_when_a_variable_their_package_read_changes() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let files = getenv_files("{mode: reuse, unit: test}");
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = Repo::new(&files);
+    let first = go_run(&r, &GO_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+
+    let (path, text) = go_other(1);
+    r.write(&path, &text);
+    let set = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    // Both of `flavor`'s tests ran: neither was reused on its pass with the variable unset.
+    let flavor: Vec<String> = set
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|e| {
+            e["Action"] == "pass"
+                && e["Package"] == "example.com/mod/flavor"
+                && e["Test"].is_string()
+        })
+        .filter_map(|e| e["Test"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        flavor,
+        ["TestOne", "TestTwo"],
+        "{}\n{}",
+        set.stdout,
+        set.stderr
+    );
+}
+
 /// Every file under `dir` with its length and time, to tell that nothing was written.
 fn snapshot(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let mut out = Vec::new();
