@@ -375,7 +375,20 @@ pub struct BuiltUnit {
     /// \[ADR 0096\] What the build scripts of its closure gave its build, as its key holds it
     /// (C-31's `scripts`).
     pub scripts: Digest,
+    /// \[ADR 0096\] What `hushrun why` compares of its build scripts' declared variables.
+    pub declared: super::store::Declared,
     pub not_followed: BTreeSet<NotFollowed>,
+}
+
+/// \[ADR 0096\] The SHA-256 of the values of `names` that `var` gives, raw, as [`units::env()`]
+/// digests entries: what a Cargo binary's row keeps of its build scripts' declared variables, and
+/// what `hushrun why` compares it with. Never a key.
+pub fn declared_values(names: &BTreeSet<String>, var: &dyn Fn(&str) -> Option<String>) -> Digest {
+    let values: Vec<(&str, Option<String>)> = names
+        .iter()
+        .map(|name| (name.as_str(), var(name)))
+        .collect();
+    units::env(values.iter().map(|(n, v)| (*n, v.as_deref())))
 }
 
 impl BuiltUnit {
@@ -747,6 +760,7 @@ pub fn observe(
         let starts = facts_of.unwrap_or(&[]);
         let (complete, failed, duration_ms) = ended(starts, recognized, command_passed);
         let outside = b.outside();
+        let declared = Some(b.declared.clone());
         units.insert(
             unit.clone(),
             super::Seen {
@@ -758,6 +772,7 @@ pub fn observe(
                     ..Facts::default()
                 },
                 outside,
+                declared,
                 reads: b.reads,
                 getenv: BTreeSet::new(),
                 duration_ms,
@@ -979,6 +994,7 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
         let mut reads: BTreeSet<String> = BTreeSet::new();
         let mut env: BTreeSet<(String, Option<String>)> = BTreeSet::new();
         let mut given: BTreeSet<String> = BTreeSet::new();
+        let mut declared: BTreeSet<String> = BTreeSet::new();
         for (d, files) in depinfos
             .iter()
             .map(|d| (d, true))
@@ -1066,6 +1082,7 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
                 continue;
             };
             given.insert(script_entry(&run.out_dir, output, keying));
+            declared.extend(output.rerun_if_env_changed.iter().cloned());
             // What a build script of the workspace says to watch, from its package's folder.
             if let Some(dir) = member.and_then(|p| p.manifest_path.parent()) {
                 let watched = watching.entry(run.out_dir.clone()).or_insert_with(|| {
@@ -1086,6 +1103,10 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
                 reads,
                 env: units::env(env.iter().map(|(n, v)| (n.as_str(), v.as_deref()))),
                 scripts: units::scripts(given),
+                declared: super::store::Declared {
+                    values: declared_values(&declared, &|name| keying.var(name)),
+                    names: declared,
+                },
                 not_followed,
             },
         );

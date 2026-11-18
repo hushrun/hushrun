@@ -1530,6 +1530,7 @@ impl Adapter for Swift {
                 unit,
                 Seen {
                     outside: Default::default(),
+                    declared: None,
                     getenv: Default::default(),
                     facts: Facts {
                         complete,

@@ -652,6 +652,7 @@ pub fn observe(files: &[FactsFile], root: &Path, tree: &Tree) -> Result<Option<O
             unit,
             super::Seen {
                 outside: Default::default(),
+                declared: None,
                 getenv: Default::default(),
                 facts: Facts {
                     complete: finished >= selected,

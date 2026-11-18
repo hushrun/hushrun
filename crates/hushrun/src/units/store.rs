@@ -834,6 +834,16 @@ impl Origin {
     }
 }
 
+/// \[ADR 0096\] The variables the build scripts of a Cargo test binary's closure declare with
+/// `rerun-if-env-changed`, as of its last build here, and the SHA-256 of their values then
+/// ([`super::cargo::declared_values`]): what `hushrun why`, which starts no build, compares with
+/// the values now. Never a key: values as this machine has them, no folder replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
+    pub names: BTreeSet<String>,
+    pub values: hushrun_core::digest::Digest,
+}
+
 /// What a test file read the last time it ran here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mapped {
@@ -849,6 +859,9 @@ pub struct Mapped {
     /// and `scripts`): a Cargo test binary's, which `hushrun why` keys it by, as of its last build
     /// here; either `None` in a row an older hushrun wrote. Nothing for every other adapter's.
     pub outside: hushrun_core::units::Outside,
+    /// \[ADR 0096\] A Cargo test binary's declared variables, beside its `scripts`; `None` for
+    /// every other, and where `scripts` is.
+    pub declared: Option<Declared>,
     /// \[ADR 0096\] The variables its tests read when it last ran here, by name: a Go package's,
     /// whose key takes their values now, empty when they read none. `None` when it isn't known:
     /// every other adapter's row, and a Go row an older hushrun wrote, whose key matches no

@@ -73,13 +73,18 @@ macro_rules! unit_env {
 }
 
 /// \[ADR 0096\] What the same key held of what its build scripts gave it, its `scripts` (C-31): one
-/// row beside its `unit_env` row, which it needs, as of the same build. Added in place as
+/// row beside its `unit_env` row, which it needs, as of the same build; with the variables those
+/// scripts declare (`declared`, a JSON array, sorted) and the SHA-256 of their values then
+/// (`declared_values`), which `hushrun why` compares with the values now. Added in place as
 /// `unit_env` is.
 macro_rules! unit_scripts {
     () => {
         "CREATE TABLE unit_scripts (
-    unit_ref INTEGER PRIMARY KEY REFERENCES unit_env (unit_ref) ON DELETE CASCADE,
-    scripts  TEXT NOT NULL CHECK (length(scripts) = 64 AND scripts NOT GLOB '*[^0-9a-f]*')
+    unit_ref        INTEGER PRIMARY KEY REFERENCES unit_env (unit_ref) ON DELETE CASCADE,
+    scripts         TEXT NOT NULL CHECK (length(scripts) = 64 AND scripts NOT GLOB '*[^0-9a-f]*'),
+    declared        TEXT NOT NULL CHECK (json_valid(declared) AND json_type(declared) = 'array'),
+    declared_values TEXT NOT NULL
+        CHECK (length(declared_values) = 64 AND declared_values NOT GLOB '*[^0-9a-f]*')
 ) STRICT;"
     };
 }
@@ -906,21 +911,35 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
     // \[ADR 0095, 0096\] What each Cargo test binary's key held of the environment and of its
     // build scripts, and the variables each Go package's tests read; none in a store made before
     // the table, opened only to read.
-    for (table, column) in [("unit_env", "env"), ("unit_scripts", "scripts")] {
-        if !has_table(conn, table)? {
-            continue;
-        }
-        let mut rows = conn.prepare(&format!(
-            "SELECT e.unit_ref, e.{column} FROM {table} e JOIN unit u ON u.id = e.unit_ref
-             WHERE u.check_ref = ?1"
-        ))?;
+    if has_table(conn, "unit_env")? {
+        let mut rows = conn.prepare(
+            "SELECT e.unit_ref, e.env FROM unit_env e JOIN unit u ON u.id = e.unit_ref
+             WHERE u.check_ref = ?1",
+        )?;
         for row in rows.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
             let (unit, digest): (i64, String) = row?;
             if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
-                let digest = Digest::from_hex(&digest).ok();
-                match table {
-                    "unit_env" => mapped.outside.env = digest,
-                    _ => mapped.outside.scripts = digest,
+                mapped.outside.env = Digest::from_hex(&digest).ok();
+            }
+        }
+    }
+    if has_table(conn, "unit_scripts")? {
+        let mut rows = conn.prepare(
+            "SELECT s.unit_ref, s.scripts, s.declared, s.declared_values FROM unit_scripts s
+             JOIN unit u ON u.id = s.unit_ref WHERE u.check_ref = ?1",
+        )?;
+        for row in rows.query_map([check], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })? {
+            let (unit, scripts, declared, values): (i64, String, String, String) = row?;
+            if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+                // A list or a digest that doesn't read: neither is known.
+                let declared = serde_json::from_str(&declared)
+                    .ok()
+                    .zip(Digest::from_hex(&values).ok());
+                if let Some((names, values)) = declared {
+                    mapped.outside.scripts = Digest::from_hex(&scripts).ok();
+                    mapped.declared = Some(super::store::Declared { names, values });
                 }
             }
         }
@@ -1363,10 +1382,16 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 params![unit, env.hex()],
             )?;
             // \[ADR 0096\] Beside it, never without it.
-            if let Some(scripts) = &mapped.outside.scripts {
+            if let (Some(scripts), Some(declared)) = (&mapped.outside.scripts, &mapped.declared) {
                 tx.execute(
-                    "INSERT INTO unit_scripts (unit_ref, scripts) VALUES (?1, ?2)",
-                    params![unit, scripts.hex()],
+                    "INSERT INTO unit_scripts (unit_ref, scripts, declared, declared_values)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        unit,
+                        scripts.hex(),
+                        serde_json::to_string(&declared.names).unwrap_or_else(|_| "[]".into()),
+                        declared.values.hex()
+                    ],
                 )?;
             }
         }

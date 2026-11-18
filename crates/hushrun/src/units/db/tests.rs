@@ -801,6 +801,10 @@ fn build_scripts_and_variables_read_are_kept_and_a_store_made_before_their_table
     let mut binary = mapped(&[("src/lib.rs", HASH_A)]);
     binary.outside.env = Some(Digest::of(b"A=1\0"));
     binary.outside.scripts = Some(Digest::of(b"output /o\0"));
+    binary.declared = Some(crate::units::store::Declared {
+        names: ["CC".to_string(), "CFLAGS".to_string()].into(),
+        values: Digest::of(b"CC=cc\0CFLAGS\0"),
+    });
     let mut package = mapped(&[("pkg/pkg_test.go", HASH_B)]);
     package.getenv = Some(["HOME".to_string(), "TMPDIR".to_string(), String::new()].into());
     // A Go package that read none is known to have read none.
@@ -877,6 +881,7 @@ fn build_scripts_and_variables_read_are_kept_and_a_store_made_before_their_table
         assert!(read.unread.is_none(), "{dropped:?}: {:?}", read.unread);
         let mut binary_then = binary.clone();
         binary_then.outside.scripts = None;
+        binary_then.declared = None;
         if dropped.contains(&"unit_env") {
             binary_then.outside.env = None;
         }

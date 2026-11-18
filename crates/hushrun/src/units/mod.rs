@@ -71,6 +71,8 @@ pub struct Seen {
     /// \[ADR 0095, 0096\] What its key holds of what isn't a file of the scope (C-31's `env` and
     /// `scripts`): Cargo's adapter's and Go's; nothing for every other, whose keys hold none.
     pub outside: units::Outside,
+    /// \[ADR 0096\] A Cargo test binary's declared variables, as its build left them.
+    pub declared: Option<store::Declared>,
     /// \[ADR 0096\] The variables its tests read while they ran, by name: Go's `getenv` lines,
     /// which the map keeps and a plan keys with their values then. Empty for every other adapter.
     pub getenv: BTreeSet<String>,
@@ -2959,6 +2961,11 @@ fn decide(
                     } else {
                         units::Outside::default()
                     },
+                    declared: if keeps_outside {
+                        seen.declared.clone()
+                    } else {
+                        None
+                    },
                     // What it read this time when it ran, else what its row said.
                     getenv: match (keeps_names, ran) {
                         (false, _) => None,
@@ -2974,7 +2981,7 @@ fn decide(
         } else if state == State::Reused
             && keeps_outside
             && let Some(before) = map.units.get(unit)
-            && before.outside != seen.outside
+            && (before.outside != seen.outside || before.declared != seen.declared)
         {
             // \[ADR 0095, 0096\] A test binary reused on its build's key keeps its row, with what
             // that build read of the environment and its build scripts gave it, which the key
@@ -2984,6 +2991,7 @@ fn decide(
                 unit.clone(),
                 Mapped {
                     outside: seen.outside,
+                    declared: seen.declared.clone(),
                     ..before.clone()
                 },
             );
@@ -3155,6 +3163,7 @@ fn shared_row(
         // now, never kept. A hint names no variable, and the pass its list keyed by none stood on
         // a run that read none.
         outside: units::Outside::default(),
+        declared: None,
         getenv: keeps_names.then(BTreeSet::new),
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),

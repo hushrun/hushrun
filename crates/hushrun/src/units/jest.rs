@@ -637,6 +637,7 @@ pub fn observe(
             unit,
             super::Seen {
                 outside: Default::default(),
+                declared: None,
                 getenv: Default::default(),
                 facts: Facts {
                     complete,

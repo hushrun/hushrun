@@ -329,6 +329,27 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     }
+    // \[ADR 0096\] A Cargo binary's key holds the values of the variables its build scripts
+    // declare, which `why` takes from this environment and COMMAND's assignments, as the next
+    // build would, and compares with its last build's.
+    if adapter.keys() == super::adapter::KeysOutside::Build
+        && let Some(declared) = own.and_then(|mapped| mapped.declared.as_ref())
+        && super::cargo::declared_values(&declared.names, &|name| {
+            super::command::variable(&assigned, name)
+        }) != declared.values
+    {
+        let names: Vec<&str> = declared.names.iter().map(String::as_str).collect();
+        says(
+            &mut out,
+            Decision::Runs,
+            "declared-changed",
+            format!(
+                "a variable a build script of its build declares has another value now than in its last build here ({}), which its key holds, so it runs",
+                names.join(", ")
+            ),
+        );
+        return out;
+    }
     let reads = match own {
         Some(_) => lists[0].files.clone(),
         None => BTreeSet::new(),

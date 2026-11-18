@@ -884,6 +884,7 @@ pub fn observe(
             super::Seen {
                 // \[ADR 0096\] Keyed by [`Adapter::read`], which knows what the map holds.
                 outside: Default::default(),
+                declared: None,
                 getenv,
                 facts: Facts {
                     complete,

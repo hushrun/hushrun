@@ -883,6 +883,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
             unit,
             super::Seen {
                 outside: Default::default(),
+                declared: None,
                 getenv: Default::default(),
                 facts: Facts {
                     complete: saw.complete,

@@ -1826,9 +1826,10 @@ fn a_build_script_derivation_reruns(variable: &str, value: &str, binary: &str) {
     let mut reusable = others.clone();
     reusable.push(binary);
     assert_ran(&same, &["other"], &reusable, 1);
-    // \[C-37\] `hushrun why` keys it as the run did, by what its last build here gave it.
+    // \[C-37\] `hushrun why` keys it as the run did, by what its last build here gave it, and the
+    // variable as the next build would take it.
     let unit = format!("crates/{binary}/src/lib.rs");
-    let why = r.run(&["why", "test", &unit], &[]);
+    let why = r.run(&["why", "test", &unit], &[(variable, value)]);
     assert_eq!(why.code, 0, "{}", why.stderr);
     assert!(
         why.stdout.starts_with(&format!(
@@ -1952,7 +1953,7 @@ fn native_files() -> Vec<(&'static str, &'static str)> {
 fn a_native_files_change_reruns(
     binary: &str,
     change: &dyn Fn(&Repo) -> Vec<(&'static str, &'static str)>,
-) {
+) -> Repo {
     let r = locked_repo(&native_files());
     let first = r.run(&NEXTEST, &[]);
     assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
@@ -1985,6 +1986,7 @@ fn a_native_files_change_reruns(
         "{}",
         same.stderr
     );
+    r
 }
 
 // covers: C-31, C-34
@@ -1995,7 +1997,23 @@ fn a_native_library_a_build_script_builds_from_a_variable_runs_its_test_binary_a
     if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
         return;
     }
-    a_native_files_change_reruns("native", &|_| vec![("HUSHRUN_FIXTURE_NATIVE", "2")]);
+    let r = a_native_files_change_reruns("native", &|_| vec![("HUSHRUN_FIXTURE_NATIVE", "2")]);
+    // \[C-37\] `hushrun why` takes the variable as the next build would: its value now.
+    let unit = "crates/native/src/lib.rs";
+    let why = r.run(&["why", "test", unit], &[("HUSHRUN_FIXTURE_NATIVE", "2")]);
+    assert!(
+        why.stdout.starts_with(&format!("{unit} would be reused")),
+        "{}",
+        why.stdout
+    );
+    let why = r.run(&["why", "test", unit], &[("HUSHRUN_FIXTURE_NATIVE", "3")]);
+    assert!(
+        why.stdout.starts_with(&format!(
+            "{unit} runs: a variable a build script of its build declares has another value now than in its last build here (HUSHRUN_FIXTURE_NATIVE)"
+        )),
+        "{}",
+        why.stdout
+    );
 }
 
 // covers: C-31, C-34
@@ -2006,7 +2024,7 @@ fn a_git_ignored_source_a_build_script_generates_runs_its_test_binary_again() {
     if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
         return;
     }
-    a_native_files_change_reruns("srcgen", &|r| {
+    let _ = a_native_files_change_reruns("srcgen", &|r| {
         r.write("crates/srcgen/input.txt", "spicy\n");
         vec![]
     });

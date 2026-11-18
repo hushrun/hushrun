@@ -415,6 +415,7 @@ impl Adapter for Pytest {
                 };
                 let seen = Seen {
                     outside: Default::default(),
+                    declared: None,
                     getenv: Default::default(),
                     facts,
                     reads: m.reads,

@@ -435,6 +435,7 @@ impl Adapter for Recognized {
                 unit,
                 Seen {
                     outside: Default::default(),
+                    declared: None,
                     getenv: Default::default(),
                     facts,
                     reads,
