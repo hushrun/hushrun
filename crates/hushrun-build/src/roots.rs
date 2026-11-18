@@ -53,7 +53,6 @@ pub fn stand_in(root: RootName, package_id: &str) -> String {
         RootName::Toolchain => "/hushrun/toolchain".to_string(),
         RootName::Home => "/hushrun/home".to_string(),
         RootName::RustupHome => "/hushrun/rustup".to_string(),
-        RootName::BuildDir => "/hushrun/build-dir".to_string(),
     }
 }
 
@@ -169,7 +168,9 @@ pub struct CheckoutFolders {
     pub checkout: String,
     /// Cargo's target folder (`cargo metadata`'s `target_directory`): `target-dir`.
     pub target_dir: Option<String>,
-    /// Cargo's build folder (`build_directory`), where `OUT_DIR` is: `build-dir`.
+    /// Cargo's build folder (`build_directory`), where `OUT_DIR` and `CARGO_TARGET_TMPDIR` are:
+    /// another form of `target-dir`, since Cargo lays out what it puts there as it does under the
+    /// target folder when none is set.
     pub build_dir: Option<String>,
     /// The cargo home: `cargo-home`, a base.
     pub cargo_home: Option<String>,
@@ -271,13 +272,14 @@ impl Roots {
     }
 
     /// \[ADR 0095\] The folders a test binary's key replaces in the values of the variables its
-    /// build read (C-31): the checkout as the workspace, Cargo's target folder and build folder,
-    /// the toolchain and the cargo home as bases, the rustup home and the home folder. A value
-    /// under none is left as it is. A folder that isn't absolute, or is `/`, is no root, and
-    /// the roots' precedence decides a folder two of them share: the target folder,
-    /// the build folder, the checkout, the toolchain, the rustup home, the cargo home, the home
-    /// folder. `resolve` gives a folder's resolved form, as for [`Roots::new`]; an error when the
-    /// checkout isn't absolute.
+    /// build read (C-31): the checkout as the workspace; Cargo's target folder and its build
+    /// folder, both named `target-dir`, which is sound since they are never read back and Cargo
+    /// lays out both alike; the toolchain and the cargo home as bases; the rustup home; and the
+    /// home folder. A value under none is left as it is. A folder that isn't absolute, or is `/`,
+    /// is no root, and the roots' precedence decides a folder two of them share: the target
+    /// folder, the checkout, the toolchain, the rustup home, the cargo home, the home folder.
+    /// `resolve` gives a folder's resolved form, as for [`Roots::new`]; an error when the checkout
+    /// isn't absolute.
     pub fn of_checkout(
         folders: &CheckoutFolders,
         resolve: impl Fn(&str) -> Option<String>,
@@ -289,15 +291,38 @@ impl Roots {
         let mut candidates = vec![(RootName::Workspace, folders.checkout.clone())];
         for (name, dir) in [
             (RootName::TargetDir, &folders.target_dir),
-            (RootName::BuildDir, &folders.build_dir),
+            (RootName::TargetDir, &folders.build_dir),
             (RootName::RustupHome, &folders.rustup_home),
             (RootName::Home, &folders.home),
         ] {
             candidates.extend(usable(dir).map(|dir| (name, dir)));
         }
+        // The toolchain as Cargo names it may be under a folder's given form while the compiler
+        // says its sysroot under the resolved one (a rustup home reached through a link): the
+        // sysroot under the given form too, as a view of the toolchain.
+        let toolchain = usable(&folders.toolchain);
+        let view = toolchain.as_ref().and_then(|tc| {
+            let tc = clean(tc);
+            [&folders.rustup_home, &folders.cargo_home, &folders.home]
+                .into_iter()
+                .filter_map(usable)
+                .find_map(|given| {
+                    let given = clean(&given);
+                    let real = resolve(&given).map(|r| clean(&r))?;
+                    let rest = under(&tc, &real)?;
+                    (real != given).then(|| {
+                        if rest.is_empty() {
+                            given.clone()
+                        } else {
+                            format!("{given}/{rest}")
+                        }
+                    })
+                })
+        });
         let machine = Machine {
             cargo_home: usable(&folders.cargo_home),
-            toolchain: usable(&folders.toolchain),
+            toolchain,
+            toolchain_view: view,
             ..Machine::default()
         };
         let candidates: Vec<(RootName, &str)> = candidates
@@ -717,8 +742,6 @@ fn precedence(name: RootName) -> (u8, u16) {
         RootName::Package => (2, 0),
         // The person's target folder, then cargo's folders under it.
         RootName::BuildTargetDir => (3, 0),
-        // \[ADR 0095\] Cargo's build folder, the target folder when none is set.
-        RootName::BuildDir => (3, 1),
         RootName::TargetDir => (4, 0),
         RootName::BinExe(i) => (5, 255 - u16::from(i)),
         RootName::TargetTmp => (6, 0),
@@ -1060,10 +1083,16 @@ mod tests {
                 "/mnt/target/debug/deps/app-1",
                 "{hushrun:target-dir}/debug/deps/app-1",
             ),
+            // The laptop's build folder is its target folder; CI's is its own, laid out alike.
             (
                 "/home/dev/code/shop/target/debug/build/app-1/out",
                 "/mnt/build/debug/build/app-1/out",
-                "",
+                "{hushrun:target-dir}/debug/build/app-1/out",
+            ),
+            (
+                "/home/dev/code/shop/target/tmp",
+                "/mnt/build/tmp",
+                "{hushrun:target-dir}/tmp",
             ),
             (
                 "/home/dev/.cargo/bin",
@@ -1088,18 +1117,6 @@ mod tests {
             // A place no root holds is left as it is.
             ("/opt/sdk", "/opt/sdk", "/opt/sdk"),
         ] {
-            if replaced.is_empty() {
-                // The laptop's build folder is its target folder; CI's is its own.
-                assert_eq!(
-                    laptop.to_placeholders(a),
-                    "{hushrun:target-dir}/debug/build/app-1/out"
-                );
-                assert_eq!(
-                    ci.to_placeholders(b),
-                    "{hushrun:build-dir}/debug/build/app-1/out"
-                );
-                continue;
-            }
             assert_eq!(laptop.to_placeholders(a), replaced, "{a}");
             assert_eq!(ci.to_placeholders(b), replaced, "{b}");
         }
@@ -1107,6 +1124,37 @@ mod tests {
         assert_eq!(
             laptop.to_placeholders("/home/dev/code/shop2"),
             "{hushrun:home}/code/shop2"
+        );
+        // A rustup home reached through a link: Cargo names the toolchain under the link, the
+        // compiler says its sysroot under the real folder, and both are the toolchain.
+        let linked = Roots::of_checkout(
+            &folders(
+                "/w",
+                [
+                    None,
+                    None,
+                    None,
+                    Some("/real/rustup/toolchains/stable"),
+                    Some("/link/rustup"),
+                    None,
+                ],
+            ),
+            |p: &str| p.strip_prefix("/link/").map(|rest| format!("/real/{rest}")),
+        )
+        .unwrap();
+        for value in [
+            "/link/rustup/toolchains/stable/bin/cargo",
+            "/real/rustup/toolchains/stable/bin/cargo",
+        ] {
+            assert_eq!(
+                linked.to_placeholders(value),
+                "{hushrun:toolchain}/bin/cargo",
+                "{value}"
+            );
+        }
+        assert_eq!(
+            linked.to_placeholders("/link/rustup/settings.toml"),
+            "{hushrun:rustup-home}/settings.toml"
         );
         // A folder two of them share: the cargo home is the home folder, and names it.
         let tied = Roots::of_checkout(

@@ -227,11 +227,7 @@ pub fn runner_variables(
     if recognized.build.iter().any(|word| word.contains("runner")) {
         return Err("COMMAND sets a target runner".into());
     }
-    let mut triples: BTreeSet<String> = recognized.targets.iter().cloned().collect();
-    if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
-        triples.insert(target);
-    }
-    triples.insert(host(recognized, cwd, env, assigned)?);
+    let triples = triples(recognized, cwd, env, assigned)?;
     let mut out = Vec::new();
     for triple in triples {
         let key: String = triple
@@ -258,6 +254,42 @@ pub fn runner_variables(
     Ok(out)
 }
 
+/// The triples COMMAND builds for: each `--target`, `CARGO_BUILD_TARGET`, and the host's.
+fn triples(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> Result<BTreeSet<String>, String> {
+    let mut triples: BTreeSet<String> = recognized.targets.iter().cloned().collect();
+    if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
+        triples.insert(target);
+    }
+    triples.insert(host(recognized, cwd, env, assigned)?);
+    Ok(triples)
+}
+
+/// The `rustc` Cargo runs for COMMAND, as a command and its name: `RUSTC` when set, as it is;
+/// else rustup's `rustc` with COMMAND's `+toolchain`. A `+toolchain` goes only to rustup's proxy,
+/// never to a `RUSTC` that is a compiler itself.
+fn rustc(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> (Command, String) {
+    match env("RUSTC").filter(|r| !r.is_empty()) {
+        Some(rustc) => (super::command::tool(&rustc, cwd, assigned), rustc),
+        None => {
+            let mut command = super::command::tool("rustc", cwd, assigned);
+            if let Some(tc) = &recognized.toolchain {
+                command.arg(format!("+{tc}"));
+            }
+            (command, "rustc".into())
+        }
+    }
+}
+
 /// The host triple, as the `rustc` COMMAND's toolchain runs says.
 fn host(
     recognized: &Recognized,
@@ -265,13 +297,7 @@ fn host(
     env: &dyn Fn(&str) -> Option<String>,
     assigned: &[(String, String)],
 ) -> Result<String, String> {
-    let rustc = env("RUSTC")
-        .filter(|r| !r.is_empty())
-        .unwrap_or("rustc".into());
-    let mut command = super::command::tool(&rustc, cwd, assigned);
-    if let Some(tc) = &recognized.toolchain {
-        command.arg(format!("+{tc}"));
-    }
+    let (mut command, rustc) = rustc(recognized, cwd, env, assigned);
     let output = command
         .arg("-vV")
         .stdin(Stdio::null())
@@ -359,8 +385,10 @@ pub fn plan_build(
     env: &[(OsString, OsString)],
     assigned: &[(String, String)],
 ) -> Result<Built, String> {
-    let metadata = metadata(recognized, cwd, assigned)?;
+    // \[ADR 0095\] The build first: the graph `cargo metadata` gives is asked offline, from what
+    // the build fetched.
     let artifacts = build(recognized, cwd, true, env, assigned)?;
+    let metadata = metadata(recognized, cwd, assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
     Ok(read_build(&metadata, artifacts, root, roots.as_ref()))
 }
@@ -654,6 +682,15 @@ fn read_build(
             .any(|k| k.contains("lib") || k == "proc-macro")
     };
     let outside: Vec<Artifact> = outside.into_iter().filter(|a| is_lib(a)).collect();
+    // A graph that doesn't hold every crate the build compiled (one for a platform it was filtered
+    // out for, as a Cargo configuration's `build.target` names) can't say what a binary is built
+    // against: then every such crate counts for every binary.
+    let graph_holds_the_build = metadata.resolve.as_ref().is_some_and(|resolve| {
+        let nodes: BTreeSet<&str> = resolve.nodes.iter().map(|n| n.id.as_str()).collect();
+        outside
+            .iter()
+            .all(|a| a.package_id.as_deref().is_some_and(|id| nodes.contains(id)))
+    });
     let mut cache: BTreeMap<PathBuf, Option<DepInfo>> = BTreeMap::new();
     let mut named = BTreeSet::new();
     let mut read_depinfo = |path: &Path| -> Option<DepInfo> {
@@ -716,10 +753,13 @@ fn read_build(
         }
         // \[ADR 0095\] The crates outside the workspace it may be built against: only what they
         // read of the environment counts, since their files are no file of the scope.
-        let graph = metadata.resolve.as_ref().and_then(|resolve| {
-            let id = &packages.get(&artifact.manifest)?.id;
-            resolve.closure(id)
-        });
+        let graph = graph_holds_the_build
+            .then_some(metadata.resolve.as_ref())
+            .flatten()
+            .and_then(|resolve| {
+                let id = &packages.get(&artifact.manifest)?.id;
+                resolve.closure(id)
+            });
         let mut env_only: Vec<PathBuf> = Vec::new();
         for other in &outside {
             let linked = match (&graph, &other.package_id) {
@@ -836,9 +876,11 @@ fn ended(
 }
 
 /// `cargo metadata`: the workspace's members, their targets and path dependencies, and \[ADR 0095\]
-/// the dependency graph. It writes no lockfile: the graph is asked with `--locked`, and may fetch
-/// only what COMMAND's own build fetches; without it, `--no-deps` resolves nothing and reads no
-/// network.
+/// the dependency graph, after COMMAND's build. The graph is asked `--frozen`, so
+/// it writes no lockfile and reads no network, and for COMMAND's triples alone
+/// (`--filter-platform`), so it needs no package only another platform does: what the build
+/// fetched is all it reads. When that fails, at once, `--no-deps` resolves nothing and reads no
+/// network either, and every library outside the workspace counts for every binary.
 fn metadata(
     recognized: &Recognized,
     cwd: &Path,
@@ -847,28 +889,43 @@ fn metadata(
     // \[ADR 0095\] With the dependency graph, resolved with COMMAND's features, so that each
     // binary's crates outside the workspace are known; without it when that fails, and then every
     // such crate of the build counts for every binary.
-    metadata_of(recognized, cwd, assigned, true)
-        .or_else(|_| metadata_of(recognized, cwd, assigned, false))
+    let var = |name: &str| -> Option<String> {
+        assigned
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var(name).ok())
+    };
+    triples(recognized, cwd, &var, assigned)
+        .and_then(|triples| metadata_of(recognized, cwd, assigned, Some(&triples)))
+        .or_else(|_| metadata_of(recognized, cwd, assigned, None))
 }
 
+/// `cargo metadata` with the graph for `platforms`, or with `--no-deps` for `None`.
 fn metadata_of(
     recognized: &Recognized,
     cwd: &Path,
     assigned: &[(String, String)],
-    resolve: bool,
+    platforms: Option<&BTreeSet<String>>,
 ) -> Result<Metadata, String> {
+    let resolve = platforms.is_some();
     let mut command = cargo(recognized, cwd, assigned);
     command.args(["metadata", "--format-version", "1"]);
-    if !resolve {
-        command.arg("--no-deps");
-    } else if !recognized
-        .build
-        .iter()
-        .any(|w| w == "--locked" || w == "--frozen")
-    {
-        command.arg("--locked");
+    match platforms {
+        None => {
+            command.arg("--no-deps");
+        }
+        Some(platforms) => {
+            // Locked and offline, whatever COMMAND says.
+            command.arg("--frozen");
+            for triple in platforms {
+                command.args(["--filter-platform", triple]);
+            }
+        }
     }
     let mut words = recognized.build.iter();
+    let mut given: BTreeSet<&str> = BTreeSet::new();
     while let Some(word) = words.next() {
         match word.as_str() {
             "--manifest-path" | "--config" | "-Z" => {
@@ -879,8 +936,10 @@ fn metadata_of(
                 command.arg(word);
                 command.args(words.next());
             }
-            "--frozen" | "--locked" | "--offline" => {
-                command.arg(word);
+            "--frozen" | "--locked" | "--offline" if !resolve => {
+                if given.insert(word) {
+                    command.arg(word);
+                }
             }
             "--all-features" | "--no-default-features" if resolve => {
                 command.arg(word);
@@ -1125,21 +1184,15 @@ fn checkout_folders(
     })
 }
 
-/// \[ADR 0095\] The sysroot of the `rustc` COMMAND's toolchain runs (`RUSTC`, else `rustc`, with
-/// COMMAND's `+toolchain`): the toolchain's folder. `None` when it can't be asked.
+/// \[ADR 0095\] The sysroot of the `rustc` Cargo runs for COMMAND ([`rustc`]): the toolchain's
+/// folder. `None` when it can't be asked, and then there is no toolchain root, silently.
 fn sysroot(
     recognized: &Recognized,
     cwd: &Path,
     var: &dyn Fn(&str) -> Option<String>,
     assigned: &[(String, String)],
 ) -> Option<String> {
-    let rustc = var("RUSTC")
-        .filter(|r| !r.is_empty())
-        .unwrap_or("rustc".into());
-    let mut command = super::command::tool(&rustc, cwd, assigned);
-    if let Some(tc) = &recognized.toolchain {
-        command.arg(format!("+{tc}"));
-    }
+    let (mut command, _) = rustc(recognized, cwd, var, assigned);
     let output = command
         .args(["--print", "sysroot"])
         .stdin(Stdio::null())
@@ -1768,6 +1821,33 @@ mod tests {
             ])
         );
         assert_eq!(whys("b/tests/it.rs"), whys("a/src/lib.rs"));
+    }
+
+    // covers: C-31, C-32
+    // \[ADR 0095\] The `rustc` Cargo runs for COMMAND: `RUSTC` as it is, never given COMMAND's
+    // `+toolchain`, which only rustup's proxy reads.
+    #[test]
+    fn rustc_is_cargos_and_a_toolchain_goes_only_to_rustups_proxy() {
+        let recognized = recognize(&words("cargo +1.94.0 nextest run")).unwrap();
+        let args = |command: &Command| -> Vec<String> {
+            std::iter::once(command.get_program())
+                .chain(command.get_args())
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let set = |name: &str| (name == "RUSTC").then(|| "/opt/rust/bin/rustc".to_string());
+        let (command, name) = rustc(&recognized, Path::new("/"), &set, &[]);
+        assert_eq!(name, "/opt/rust/bin/rustc");
+        assert_eq!(args(&command), ["/opt/rust/bin/rustc"]);
+        let unset = |_: &str| None;
+        let (command, name) = rustc(&recognized, Path::new("/"), &unset, &[]);
+        assert_eq!(name, "rustc");
+        assert_eq!(args(&command), ["rustc", "+1.94.0"]);
+        let empty = |name: &str| (name == "RUSTC").then(String::new);
+        assert_eq!(
+            args(&rustc(&recognized, Path::new("/"), &empty, &[]).0),
+            ["rustc", "+1.94.0"]
+        );
     }
 
     // covers: C-31

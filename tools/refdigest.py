@@ -608,8 +608,8 @@ def name_char(c):
 
 
 # C-31's folders, by the vector's names, in the order that decides a folder two of them share:
-# the first names it.
-CHECKOUT_ROOTS = [("targetDir", "target-dir"), ("buildDir", "build-dir"), ("root", "workspace"),
+# the first names it. The build folder is named as the target folder is.
+CHECKOUT_ROOTS = [("targetDir", "target-dir"), ("buildDir", "target-dir"), ("root", "workspace"),
                   ("toolchain", "toolchain"), ("rustupHome", "rustup-home"),
                   ("cargoHome", "cargo-home"), ("home", "home")]
 
@@ -622,19 +622,18 @@ def checkout_roots(folders):
     root = folders.get("root") or ""
     if not root.startswith("/"):
         return None
-    usable = {}
+    usable = []
     for key, name in CHECKOUT_ROOTS:
         folder = folders.get(key)
         if folder and folder.startswith("/") and clean_folder(folder) != "/":
-            usable[name] = clean_folder(folder)
+            usable.append((clean_folder(folder), name))
     under = lambda path, folder: path == folder or path.startswith(folder + "/")
-    for base in ("cargo-home", "toolchain"):
-        if base in usable and "workspace" in usable and under(usable["workspace"], usable[base]):
-            del usable["workspace"]
+    bases = [f for f, name in usable if name in ("cargo-home", "toolchain")]
+    usable = [(f, name) for f, name in usable
+              if not (name == "workspace" and any(under(f, base) for base in bases))]
     forms = {}
-    for _, name in CHECKOUT_ROOTS:
-        if name in usable:
-            forms.setdefault(usable[name], name)
+    for folder, name in usable:
+        forms.setdefault(folder, name)
     return sorted(forms.items(), key=lambda f: (-len(f[0]), f[0]))
 
 
