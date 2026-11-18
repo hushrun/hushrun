@@ -1387,8 +1387,8 @@ fn cargo_keys_name_no_folder_of_the_machine_a_test_binary_was_built_on() {
 }
 
 /// \[ADR 0096\] A workspace whose build script gives its test binaries machine folders: a link
-/// search path under its `OUT_DIR`, a cfg, and a file it writes into `OUT_DIR` that its library
-/// includes, with an integration test of that package. Each machine has its own checkout, cargo
+/// search path under its `OUT_DIR`, a cfg, a file it writes into `OUT_DIR` that its library
+/// includes, and another whose text is its package's folder (as `built` and `shadow-rs` write), with an integration test of that package. Each machine has its own checkout, cargo
 /// home and home.
 fn cargo_scripts_scenario() -> Scenario {
     let mut s = cargo_folders_scenario();
@@ -1407,11 +1407,11 @@ fn cargo_scripts_scenario() -> Scenario {
         ),
         file(
             "crates/scripted/build.rs",
-            "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::create_dir_all(format!(\"{out}/lib\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}/lib\");\n    println!(\"cargo::rustc-check-cfg=cfg(scripted)\");\n    println!(\"cargo::rustc-cfg=scripted\");\n    std::fs::write(format!(\"{out}/made.rs\"), \"pub const MADE: &str = \\\"made\\\";\\n\").unwrap();\n}\n",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::create_dir_all(format!(\"{out}/lib\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}/lib\");\n    println!(\"cargo::rustc-check-cfg=cfg(scripted)\");\n    println!(\"cargo::rustc-cfg=scripted\");\n    std::fs::write(format!(\"{out}/made.rs\"), \"pub const MADE: &str = \\\"made\\\";\\n\").unwrap();\n    let dir = std::env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/info.rs\"), format!(\"pub const DIR: &str = {dir:?};\\n\")).unwrap();\n}\n",
         ),
         file(
             "crates/scripted/src/lib.rs",
-            "include!(concat!(env!(\"OUT_DIR\"), \"/made.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn made() { assert!(cfg!(scripted) && super::MADE == \"made\"); }\n}\n",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/made.rs\"));\ninclude!(concat!(env!(\"OUT_DIR\"), \"/info.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn made() { assert!(cfg!(scripted) && super::MADE == \"made\"); }\n}\n",
         ),
         file(
             "crates/scripted/tests/it.rs",

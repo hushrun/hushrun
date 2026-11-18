@@ -398,6 +398,7 @@ pub fn plan_build(
     recognized: &Recognized,
     root: &Path,
     cwd: &Path,
+    tree: &units::Tree,
     env: &[(OsString, OsString)],
     assigned: &[(String, String)],
 ) -> Result<Built, String> {
@@ -406,7 +407,35 @@ pub fn plan_build(
     let compiled = build(recognized, cwd, true, env, assigned)?;
     let metadata = metadata(recognized, cwd, assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    Ok(read_build(&metadata, compiled, root, roots.as_ref()))
+    let keying = Keying {
+        roots: roots.as_ref(),
+        assigned,
+        tree: Some(tree),
+    };
+    Ok(read_build(&metadata, compiled, root, &keying))
+}
+
+/// \[ADR 0095, 0096\] What a build's keys take from beyond its files: the checkout's roots
+/// ([`checkout_roots`]), COMMAND's environment (its assignments over hushrun's,
+/// [`super::command::variable`]), and the scope's files (`tree`: a file of the checkout outside it
+/// that a compile read is keyed by content; `None`, in tests alone, takes every file for the
+/// scope's). The plan and the reading after COMMAND make it alike.
+struct Keying<'a> {
+    roots: Option<&'a hushrun_build::roots::Roots>,
+    assigned: &'a [(String, String)],
+    tree: Option<&'a units::Tree>,
+}
+
+impl Keying<'_> {
+    /// A variable as COMMAND's environment has it.
+    fn var(&self, name: &str) -> Option<String> {
+        super::command::variable(self.assigned, name)
+    }
+
+    /// Whether `path`, from the repository's root, is a file of the scope.
+    fn in_scope(&self, path: &str) -> bool {
+        self.tree.is_none_or(|tree| tree.contains(path))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -586,6 +615,7 @@ pub fn observe(
     files: &[FactsFile],
     root: &Path,
     cwd: &Path,
+    tree: &units::Tree,
     command_passed: bool,
     assigned: &[(String, String)],
 ) -> Result<Observed, String> {
@@ -597,7 +627,12 @@ pub fn observe(
     let metadata = metadata(recognized, cwd, assigned)?;
     let compiled = build(recognized, cwd, false, &[], assigned)?;
     let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
-    let built = read_build(&metadata, compiled, root, roots.as_ref());
+    let keying = Keying {
+        roots: roots.as_ref(),
+        assigned,
+        tree: Some(tree),
+    };
+    let built = read_build(&metadata, compiled, root, &keying);
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
     let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
@@ -660,13 +695,9 @@ fn deselected(starts: &[&Invocation]) -> bool {
 /// `scripts` ([`script_entry`], [`generated_entry`]). A dep-info, an output or a generated file
 /// that can't be read, or a library without dep-info, makes it `not observed`. The plan and the
 /// reading after COMMAND both call it, so both key a binary alike.
-fn read_build(
-    metadata: &Metadata,
-    compiled: Compiled,
-    root: &Path,
-    roots: Option<&hushrun_build::roots::Roots>,
-) -> Built {
+fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Keying<'_>) -> Built {
     let Compiled { artifacts, scripts } = compiled;
+    let roots = keying.roots;
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
     let relative = |path: &Path| -> Option<String> {
@@ -872,14 +903,16 @@ fn read_build(
                 reads.extend(info.files.iter().filter_map(|p| relative(p)));
             }
             env.extend(keyed_env(info.env, roots));
-            // \[ADR 0096\] What the build made that the compile read: a file a build script
-            // generated, by its content.
+            // \[ADR 0096\] What the compile read that no file of the scope is, by its content: a
+            // file the build made (under the target or build folder: one a build script
+            // generated), and a file of the checkout outside the scope (a git-ignored source).
             let files = made.entry(d.clone()).or_insert_with(|| {
                 info.files
                     .iter()
                     .filter(|f| {
-                        let f = real(f);
-                        made_in.iter().any(|dir| f.starts_with(dir))
+                        let real = real(f);
+                        made_in.iter().any(|dir| real.starts_with(dir))
+                            || relative(f).is_some_and(|path| !keying.in_scope(&path))
                     })
                     .map(|file| (file.clone(), generated_entry(file, roots)))
                     .collect()
@@ -929,7 +962,7 @@ fn read_build(
                 });
                 continue;
             };
-            given.insert(script_entry(&run.out_dir, output, roots));
+            given.insert(script_entry(&run.out_dir, output, keying));
             // What a build script of the workspace says to watch, from its package's folder.
             if let Some(dir) = member.and_then(|p| p.manifest_path.parent()) {
                 let watched = watching.entry(run.out_dir.clone()).or_insert_with(|| {
@@ -961,24 +994,39 @@ fn read_build(
     }
 }
 
-/// \[ADR 0096\] One build script's run as C-31's `scripts` holds it: `output `, its `OUT_DIR`, and
-/// each line of its output that reaches the compile after a line feed, `roots` replaced in each.
-/// Its output is read by build blocks' one reader of it ([`hushrun_build::script`]).
+/// \[ADR 0096\] One build script's run as C-31's `scripts` holds it: `output `, its `OUT_DIR`; each
+/// line of its output that reaches the compile after a line feed; and after them, for each
+/// variable it declared with `rerun-if-env-changed` (the variables Cargo reruns it on, sorted),
+/// a line feed, `rerun-if-env-changed=`, the name, and `=` and its value in COMMAND's environment,
+/// or nothing more when unset: what it read that its output may not say, such as the flags of a
+/// library it compiled. Roots replaced in each. Its output is read by build blocks' one reader of
+/// it ([`hushrun_build::script`]).
 fn script_entry(
     out_dir: &Path,
     output: &hushrun_build::script::Script,
-    roots: Option<&hushrun_build::roots::Roots>,
+    keying: &Keying<'_>,
 ) -> String {
+    let roots = keying.roots;
     let mut entry = format!("output {}", placeholders(out_dir, roots));
     for directive in &output.to_the_compile {
         entry.push('\n');
         entry.push_str(&text_placeholders(directive, roots));
     }
+    for name in &output.rerun_if_env_changed {
+        entry.push_str("\nrerun-if-env-changed=");
+        entry.push_str(name);
+        if let Some(value) = keying.var(name) {
+            entry.push('=');
+            entry.push_str(&text_placeholders(&value, roots));
+        }
+    }
     entry
 }
 
-/// \[ADR 0096\] A file the build made that a compile read, as C-31's `scripts` holds it: `file `,
-/// the SHA-256 of its bytes, a space and its path, `roots` replaced; `None` when it can't be read.
+/// \[ADR 0096\] A file a compile read that no file of the scope is, as C-31's `scripts` holds it:
+/// `file `, the SHA-256 of its text with `roots` replaced when it is UTF-8 (a file generated with a
+/// folder of the machine in it then keys the same on another), else of its bytes, a space and its
+/// path, `roots` replaced; `None` when it can't be read.
 fn generated_entry(file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> Option<String> {
     let bytes = std::fs::read(file).ok()?;
     Some(made_entry(&bytes, file, roots))
@@ -986,7 +1034,11 @@ fn generated_entry(file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> 
 
 /// \[ADR 0096\] [`generated_entry`] of a file whose bytes are `bytes`.
 fn made_entry(bytes: &[u8], file: &Path, roots: Option<&hushrun_build::roots::Roots>) -> String {
-    format!("file {} {}", Digest::of(bytes), placeholders(file, roots))
+    let digest = match (std::str::from_utf8(bytes), roots) {
+        (Ok(text), Some(roots)) => Digest::of(roots.to_placeholders(text).as_bytes()),
+        _ => Digest::of(bytes),
+    };
+    format!("file {digest} {}", placeholders(file, roots))
 }
 
 /// \[ADR 0096\] What the build script whose `OUT_DIR` is `out_dir` printed, from the output Cargo
@@ -1102,14 +1154,7 @@ fn metadata(
     // \[ADR 0095\] With the dependency graph, resolved with COMMAND's features, so that each
     // binary's crates outside the workspace are known; without it when that fails, and then every
     // such crate of the build counts for every binary.
-    let var = |name: &str| -> Option<String> {
-        assigned
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.clone())
-            .or_else(|| std::env::var(name).ok())
-    };
+    let var = |name: &str| super::command::variable(assigned, name);
     triples(recognized, cwd, &var, assigned)
         .and_then(|triples| metadata_of(recognized, cwd, assigned, Some(&triples)))
         .or_else(|_| metadata_of(recognized, cwd, assigned, None))
@@ -1368,14 +1413,7 @@ fn checkout_roots(
     metadata: &Metadata,
     assigned: &[(String, String)],
 ) -> Option<hushrun_build::roots::Roots> {
-    let var = |name: &str| -> Option<String> {
-        assigned
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.clone())
-            .or_else(|| std::env::var(name).ok())
-    };
+    let var = |name: &str| super::command::variable(assigned, name);
     let toolchain = sysroot(recognized, cwd, &var, assigned);
     let folders = checkout_folders(root, cwd, metadata, &var, toolchain)?;
     hushrun_build::roots::Roots::of_checkout(&folders, hushrun_build::roots::resolve_on_disk).ok()
@@ -1602,7 +1640,7 @@ impl Adapter for Recognized {
     }
 
     fn plan(&self, at: &PlanAt<'_>) -> Result<Option<Planning>, String> {
-        let b = plan_build(self, at.root, at.cwd, at.compile_env, at.assigned)?;
+        let b = plan_build(self, at.root, at.cwd, at.tree, at.compile_env, at.assigned)?;
         let sets = units::classify(
             at.tree.paths(),
             &|path| b.unit_files.contains(path),
@@ -1640,6 +1678,7 @@ impl Adapter for Recognized {
             at.files,
             at.root,
             at.cwd,
+            at.tree,
             at.command_passed,
             at.assigned,
         )?;
@@ -1700,6 +1739,16 @@ impl Adapter for Recognized {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// \[ADR 0096\] Keys of a build with `roots`, no variable assigned, and every file the
+    /// scope's.
+    fn keyed(roots: Option<&hushrun_build::roots::Roots>) -> Keying<'_> {
+        Keying {
+            roots,
+            assigned: &[],
+            tree: None,
+        }
+    }
 
     fn words(text: &str) -> Vec<String> {
         text.split(' ').map(str::to_string).collect()
@@ -1870,19 +1919,50 @@ mod tests {
                 continue;
             };
             assert_eq!(build["folders"], deps["folders"], "{}", vector["name"]);
+            // The variables its build scripts declare, as COMMAND's environment has them: those
+            // the vector leaves out are unset here too.
+            let assigned: Vec<(String, String)> = build
+                .get("values")
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(n, v)| (n.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            let keying = Keying {
+                roots: Some(&roots),
+                assigned: &assigned,
+                tree: None,
+            };
             let mut given: BTreeSet<String> = BTreeSet::new();
             for run in build["runs"].as_array().unwrap() {
                 let output = hushrun_build::script::parse(run["output"].as_str().unwrap());
+                for name in &output.rerun_if_env_changed {
+                    if !assigned.iter().any(|(n, _)| n == name) {
+                        assert!(std::env::var_os(name).is_none(), "{name} is set here");
+                    }
+                }
                 let out_dir = Path::new(run["outDir"].as_str().unwrap());
-                given.insert(script_entry(out_dir, &output, Some(&roots)));
+                given.insert(script_entry(out_dir, &output, &keying));
             }
             let made_in: Vec<String> = ["targetDir", "buildDir"]
                 .into_iter()
                 .filter_map(folder)
                 .collect();
+            let checkout = folder("root").unwrap();
+            let scope: BTreeSet<&str> = vector["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["path"].as_str().unwrap())
+                .collect();
             for named in build["depInfo"].as_array().unwrap() {
                 let path = Path::new(named["path"].as_str().unwrap());
-                if made_in.iter().any(|dir| path.starts_with(dir)) {
+                let outside_scope = path
+                    .strip_prefix(&checkout)
+                    .ok()
+                    .and_then(Path::to_str)
+                    .is_some_and(|rel| !scope.contains(rel));
+                if made_in.iter().any(|dir| path.starts_with(dir)) || outside_scope {
                     let text = named["text"].as_str().unwrap();
                     given.insert(made_entry(text.as_bytes(), path, Some(&roots)));
                 }
@@ -2032,7 +2112,7 @@ mod tests {
             &metadata_with(graph.clone()),
             compiled(artifacts()),
             &root,
-            Some(&roots),
+            &keyed(Some(&roots)),
         );
         let env = |entries: &[(&str, Option<&str>)]| units::env(entries.iter().copied());
         let a = ("CARGO_MANIFEST_DIR", Some("{hushrun:workspace}/a"));
@@ -2071,7 +2151,7 @@ mod tests {
             &metadata_with(serde_json::Value::Null),
             compiled(artifacts()),
             &root,
-            Some(&roots),
+            &keyed(Some(&roots)),
         );
         let mut all = vec![a, ("A_ONLY", None), ("DEV", Some("1")), ("LONE", Some("1"))];
         all.extend(outer);
@@ -2081,7 +2161,12 @@ mod tests {
         let mut broken = artifacts();
         std::fs::write(deps.join("ext.d"), [0xff, 0xfe, b'\n']).unwrap();
         broken.push(outside("far", "lib", None));
-        let built = read_build(&metadata_with(graph), compiled(broken), &root, Some(&roots));
+        let built = read_build(
+            &metadata_with(graph),
+            compiled(broken),
+            &root,
+            &keyed(Some(&roots)),
+        );
         let whys = |unit: &str| -> BTreeSet<String> {
             built.units[unit]
                 .not_followed
@@ -2120,7 +2205,7 @@ mod tests {
             script_entry(
                 Path::new("/w/target/debug/build/a-1/out"),
                 &output,
-                Some(&roots)
+                &keyed(Some(&roots))
             ),
             "output {hushrun:target-dir}/debug/build/a-1/out\nrustc-link-lib=static=z\nrustc-cfg=loud\nrustc-link-search=native={hushrun:target-dir}/debug/build/a-1/out"
         );
@@ -2130,12 +2215,108 @@ mod tests {
             ..output.clone()
         };
         assert_ne!(
-            script_entry(Path::new("/o"), &swapped, None),
-            script_entry(Path::new("/o"), &output, None)
+            script_entry(Path::new("/o"), &swapped, &keyed(None)),
+            script_entry(Path::new("/o"), &output, &keyed(None))
         );
         assert_eq!(
-            script_entry(Path::new("/o"), &output, None).lines().count(),
+            script_entry(Path::new("/o"), &output, &keyed(None))
+                .lines()
+                .count(),
             4
+        );
+    }
+
+    // covers: C-31
+    // \[ADR 0096\] A build script's run holds the values, in COMMAND's environment, of the
+    // variables it declares (set, set to nothing and unset differ; roots replaced); a file a
+    // compile read that no file of the scope is keys its text with the roots replaced, so a folder
+    // of the machine in it keys alike on another, and its bytes when it isn't UTF-8.
+    #[test]
+    fn a_build_scripts_run_holds_what_it_declared_and_a_made_files_text_names_no_machine() {
+        let output = hushrun_build::script::parse(
+            "cargo:rerun-if-env-changed=HUSHRUN_TEST_CC\ncargo::rerun-if-env-changed=HUSHRUN_TEST_CFLAGS\ncargo:rustc-link-lib=static=nat\n",
+        );
+        let checkout = |root: &str| {
+            hushrun_build::roots::Roots::of_checkout(
+                &hushrun_build::roots::CheckoutFolders {
+                    checkout: root.into(),
+                    target_dir: Some(format!("{root}/target")),
+                    ..Default::default()
+                },
+                |_: &str| None,
+            )
+            .unwrap()
+        };
+        let (laptop, ci) = (checkout("/home/dev/shop"), checkout("/builds/ci/shop"));
+        let entry = |roots: &hushrun_build::roots::Roots, assigned: &[(&str, &str)]| {
+            let assigned: Vec<(String, String)> = assigned
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect();
+            script_entry(
+                Path::new("/o"),
+                &output,
+                &Keying {
+                    roots: Some(roots),
+                    assigned: &assigned,
+                    tree: None,
+                },
+            )
+        };
+        assert!(std::env::var_os("HUSHRUN_TEST_CC").is_none());
+        assert!(std::env::var_os("HUSHRUN_TEST_CFLAGS").is_none());
+        assert_eq!(
+            entry(
+                &laptop,
+                &[("HUSHRUN_TEST_CFLAGS", "-O2 -I /home/dev/shop/inc")]
+            ),
+            "output /o\nrustc-link-lib=static=nat\nrerun-if-env-changed=HUSHRUN_TEST_CC\nrerun-if-env-changed=HUSHRUN_TEST_CFLAGS=-O2 -I {hushrun:workspace}/inc"
+        );
+        assert_eq!(
+            entry(
+                &laptop,
+                &[("HUSHRUN_TEST_CFLAGS", "-O2 -I /home/dev/shop/inc")]
+            ),
+            entry(
+                &ci,
+                &[("HUSHRUN_TEST_CFLAGS", "-O2 -I /builds/ci/shop/inc")]
+            )
+        );
+        let unset = entry(&laptop, &[]);
+        let empty = entry(&laptop, &[("HUSHRUN_TEST_CC", "")]);
+        let set = entry(&laptop, &[("HUSHRUN_TEST_CC", "clang")]);
+        assert!(unset != empty && empty != set && unset != set);
+        // A made file's text, roots replaced; bytes that aren't UTF-8 as they are.
+        let made = |roots: &hushrun_build::roots::Roots, root: &str, bytes: &[u8]| {
+            made_entry(
+                bytes,
+                &Path::new(root).join("target/x/info.rs"),
+                Some(roots),
+            )
+        };
+        assert_eq!(
+            made(
+                &laptop,
+                "/home/dev/shop",
+                b"const D: &str = \"/home/dev/shop/crates/a\";\n"
+            ),
+            made(
+                &ci,
+                "/builds/ci/shop",
+                b"const D: &str = \"/builds/ci/shop/crates/a\";\n"
+            )
+        );
+        assert_ne!(
+            made(&laptop, "/home/dev/shop", b"const D: &str = \"a\";\n"),
+            made(&laptop, "/home/dev/shop", b"const D: &str = \"b\";\n")
+        );
+        let binary = [0xff, 0xfe, b'/'];
+        assert_eq!(
+            made(&laptop, "/home/dev/shop", &binary),
+            format!(
+                "file {} {{hushrun:target-dir}}/x/info.rs",
+                Digest::of(&binary)
+            )
         );
     }
 
@@ -2324,7 +2505,7 @@ mod tests {
             |_: &str| None,
         )
         .unwrap();
-        let built = read_build(&metadata, compiled(), &root, Some(&roots));
+        let built = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)));
         let out =
             |package: &str| format!("output {{hushrun:target-dir}}/debug/build/{package}-1/out");
         let a_run = format!(
@@ -2376,7 +2557,7 @@ mod tests {
 
         // Another generated file moves the binaries that read it alone.
         std::fs::write(&made, "pub const G: &str = \"spicy\";\n").unwrap();
-        let again = read_build(&metadata, compiled(), &root, Some(&roots));
+        let again = read_build(&metadata, compiled(), &root, &keyed(Some(&roots)));
         assert_ne!(
             again.units["b/src/lib.rs"].scripts,
             built.units["b/src/lib.rs"].scripts
@@ -2390,7 +2571,7 @@ mod tests {
         let broken = compiled();
         std::fs::remove_file(root.join("target/debug/build/b-1/output")).unwrap();
         std::fs::remove_file(&made).unwrap();
-        let built = read_build(&metadata, broken, &root, Some(&roots));
+        let built = read_build(&metadata, broken, &root, &keyed(Some(&roots)));
         let whys: BTreeSet<String> = built.units["b/src/lib.rs"]
             .not_followed
             .iter()

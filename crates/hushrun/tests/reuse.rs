@@ -1872,6 +1872,146 @@ fn a_link_argument_a_build_script_derives_from_a_variable_runs_its_test_binary_a
     a_build_script_derivation_reruns("HUSHRUN_FIXTURE_LINK", "second", "linked");
 }
 
+fn has_cc() -> bool {
+    ["cc", "ar"].iter().all(|tool| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// \[ADR 0096\] A workspace whose build scripts make what the binary is built from out of what
+/// no line of their output says: `native`'s compiles C into a static library in `OUT_DIR` with
+/// `-DVAL=$HUSHRUN_FIXTURE_NATIVE`, which it declares with `rerun-if-env-changed`, and prints the
+/// same link lines whatever the value; `srcgen`'s writes a git-ignored `src/generated.rs`, which
+/// its library includes, from a git-ignored `input.txt` it watches. `steady` and `other` have
+/// none. Each test passes whatever the value.
+fn native_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (
+            ".gitignore",
+            "target/\ncrates/srcgen/input.txt\ncrates/srcgen/src/generated.rs\n",
+        ),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/native\", \"crates/srcgen\", \"crates/steady\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/native/Cargo.toml",
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("crates/native/nat.c", "int nat(void) { return VAL; }\n"),
+        (
+            "crates/native/build.rs",
+            "use std::process::Command;\nfn main() {\n    println!(\"cargo::rerun-if-env-changed=HUSHRUN_FIXTURE_NATIVE\");\n    println!(\"cargo::rerun-if-changed=nat.c\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    let val = std::env::var(\"HUSHRUN_FIXTURE_NATIVE\").unwrap_or_else(|_| \"1\".into());\n    assert!(Command::new(\"cc\").args([\"-c\", \"nat.c\", &format!(\"-DVAL={val}\"), \"-o\", &format!(\"{out}/nat.o\")]).status().unwrap().success());\n    assert!(Command::new(\"ar\").args([\"rcs\", &format!(\"{out}/libnat.a\"), &format!(\"{out}/nat.o\")]).status().unwrap().success());\n    println!(\"cargo::rustc-link-search=native={out}\");\n    println!(\"cargo::rustc-link-lib=static=nat\");\n}\n",
+        ),
+        (
+            "crates/native/src/lib.rs",
+            "extern \"C\" {\n    fn nat() -> i32;\n}\npub fn value() -> i32 {\n    unsafe { nat() }\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn value() { assert!(super::value() > 0); }\n}\n",
+        ),
+        (
+            "crates/srcgen/Cargo.toml",
+            "[package]\nname = \"srcgen\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("crates/srcgen/input.txt", "plain\n"),
+        (
+            "crates/srcgen/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=input.txt\");\n    let dir = std::env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n    let value = std::fs::read_to_string(format!(\"{dir}/input.txt\")).unwrap();\n    let text = format!(\"pub const GEN: &str = {:?};\\n\", value.trim());\n    let path = format!(\"{dir}/src/generated.rs\");\n    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {\n        std::fs::write(path, text).unwrap();\n    }\n}\n",
+        ),
+        (
+            "crates/srcgen/src/lib.rs",
+            "include!(\"generated.rs\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn generated() { assert!(!super::GEN.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/steady/Cargo.toml",
+            "[package]\nname = \"steady\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/steady/src/lib.rs",
+            "pub fn one() -> u32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() { assert_eq!(super::one(), 1); }\n}\n",
+        ),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]
+}
+
+/// \[ADR 0096\] Two runs after a first one of [`native_files`], each with `other` edited and
+/// `change` made (it returns the run's variables): the first runs `binary` with `other`, and one
+/// of the two others, audited; the second, with the same change again, reuses it.
+fn a_native_files_change_reruns(
+    binary: &str,
+    change: &dyn Fn(&Repo) -> Vec<(&'static str, &'static str)>,
+) {
+    let r = locked_repo(&native_files());
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+    let others: Vec<&str> = ["native", "srcgen", "steady"]
+        .into_iter()
+        .filter(|name| *name != binary)
+        .collect();
+    edit_other(&r, 1);
+    let vars = change(&r);
+    let changed = r.run(&NEXTEST, &vars);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        changed.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        changed.stderr
+    );
+    assert_ran(&changed, &[binary, "other"], &others, 1);
+    edit_other(&r, 2);
+    let vars = change(&r);
+    let same = r.run(&NEXTEST, &vars);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+}
+
+// covers: C-31, C-34
+// A build script that compiles C into a library in `OUT_DIR` with a variable it declares links
+// the test binary against another library with the same link lines: it runs again.
+#[test]
+fn a_native_library_a_build_script_builds_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
+        return;
+    }
+    a_native_files_change_reruns("native", &|_| vec![("HUSHRUN_FIXTURE_NATIVE", "2")]);
+}
+
+// covers: C-31, C-34
+// A source file of the checkout that no file of the scope is (git-ignored), which a build script
+// generates and the library includes, builds another test binary when it changes: it runs again.
+#[test]
+fn a_git_ignored_source_a_build_script_generates_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
+        return;
+    }
+    a_native_files_change_reruns("srcgen", &|r| {
+        r.write("crates/srcgen/input.txt", "spicy\n");
+        vec![]
+    });
+}
+
 // covers: C-30, C-31, C-34
 // An integration test of a package with a build script is observed, recorded and reused: the
 // script's own dep-info is found, so its `build.rs` is a file the binaries of its package read,
