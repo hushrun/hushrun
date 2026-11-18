@@ -246,9 +246,10 @@ pub struct List {
     pub reads: BTreeSet<String>,
     /// \[ADR 0070\] The directories listed.
     pub dirs: BTreeSet<String>,
-    /// \[ADR 0095\] What the build read of the environment, which its key holds: a Cargo test
-    /// binary's, from its build or this machine's entry; `None` for any other.
-    pub env: Option<Digest>,
+    /// \[ADR 0095, 0096\] What its key holds of what isn't a file of the scope: a Cargo test
+    /// binary's, from its build or this machine's entry; a Go package's `env`, from the variables
+    /// the entry says its tests read, with their values now; nothing for any other.
+    pub outside: units::Outside,
     pub from: From,
 }
 
@@ -267,33 +268,41 @@ impl List {
 /// this run reads (`shared.systems`, [`systems`]); otherwise it is as if there were none, so a
 /// list a rule borrowed stops keying anything once the rule is gone. `None` when this machine's
 /// entry says something of it wasn't followed: it runs, and records nothing (C-34). An empty
-/// list of lists: nothing to key it by, and it runs.
+/// list of lists: nothing to key it by, and it runs. \[ADR 0096\] For Go, `getenv` keys each
+/// list's `env`: the variables this machine's entry says its tests read, with their values in the
+/// environment it is computed in; a list of the build or of a hint, which names none, by none (a
+/// key that matches only a run whose tests read none).
 pub fn lists(
     unit: &str,
     own: Option<&Mapped>,
     shared: &Shared,
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
+    getenv: Option<&gotest::Getenv>,
 ) -> Option<Vec<List>> {
-    let make =
-        |reads: &BTreeSet<String>, dirs: &BTreeSet<String>, env: Option<Digest>, from: From| {
-            let mut files = compiled.cloned().unwrap_or_default();
-            files.extend(reads.iter().cloned());
-            files.extend(gotest::under(tree, dirs));
-            List {
-                files,
-                reads: reads.clone(),
-                dirs: dirs.clone(),
-                env,
-                from,
-            }
-        };
+    let none = BTreeSet::new();
+    let make = |reads: &BTreeSet<String>,
+                dirs: &BTreeSet<String>,
+                outside: units::Outside,
+                names: &BTreeSet<String>,
+                from: From| {
+        let mut files = compiled.cloned().unwrap_or_default();
+        files.extend(reads.iter().cloned());
+        files.extend(gotest::under(tree, dirs));
+        List {
+            files,
+            reads: reads.clone(),
+            dirs: dirs.clone(),
+            outside: getenv.map_or(outside, |getenv| getenv.outside(names)),
+            from,
+        }
+    };
     let mut out: Vec<List> = Vec::new();
     let mut add = |list: List| {
         if out.len() < MOST_LISTS
             && !out
                 .iter()
-                .any(|l| l.files == list.files && l.env == list.env)
+                .any(|l| l.files == list.files && l.outside == list.outside)
         {
             out.push(list);
         }
@@ -309,18 +318,29 @@ pub fn lists(
             add(make(
                 &reads,
                 &mapped.dirs,
-                mapped.env,
+                mapped.outside,
+                mapped.getenv.as_ref().unwrap_or(&none),
                 From::Here(mapped.origin),
             ));
         }
-        None if compiled.is_some() => {
-            add(make(&BTreeSet::new(), &BTreeSet::new(), None, From::Build))
-        }
+        None if compiled.is_some() => add(make(
+            &none,
+            &none,
+            units::Outside::default(),
+            &none,
+            From::Build,
+        )),
         None => {}
     }
     for (os, hint) in &shared.hints {
         if let Some(seen) = hint.units.get(unit) {
-            add(make(&seen.reads, &seen.dirs, None, From::Hint(*os)));
+            add(make(
+                &seen.reads,
+                &seen.dirs,
+                units::Outside::default(),
+                &none,
+                From::Hint(*os),
+            ));
         }
     }
     Some(out)
@@ -366,8 +386,9 @@ pub fn test_lists(
                 files,
                 reads,
                 dirs: dirs.clone(),
-                // \[ADR 0095\] A test's own list holds no `env`, as its key doesn't.
-                env: None,
+                // \[ADR 0096\] A test's own list holds nothing outside the scope: an adapter that
+                // keys any (Cargo's, Go's) has no test's own list (`reads: test`).
+                outside: Default::default(),
                 from,
             },
             own: true,

@@ -236,6 +236,7 @@ impl Recognized {
                                 &shared,
                                 at.tree,
                                 Some(&compiled),
+                                None,
                             )
                         });
                     (unit.clone(), lists)
@@ -246,8 +247,14 @@ impl Recognized {
                 .units
                 .keys()
                 .map(|unit| {
-                    let lists =
-                        super::shared::lists(unit, at.map.units.get(unit), &shared, at.tree, None);
+                    let lists = super::shared::lists(
+                        unit,
+                        at.map.units.get(unit),
+                        &shared,
+                        at.tree,
+                        None,
+                        None,
+                    );
                     (unit.clone(), lists)
                 })
                 .collect(),
@@ -427,7 +434,9 @@ impl Adapter for Recognized {
             seen.insert(
                 unit,
                 Seen {
-                    env: None,
+                    outside: Default::default(),
+                    declared: None,
+                    getenv: Default::default(),
                     facts,
                     reads,
                     duration_ms: m.duration_ms,
@@ -468,6 +477,7 @@ impl Adapter for Recognized {
                     &shared,
                     at.tree,
                     Some(&compiled),
+                    None,
                 )?;
                 Some((unit.clone(), lists))
             })

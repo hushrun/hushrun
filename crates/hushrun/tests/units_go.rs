@@ -1105,8 +1105,9 @@ fn with_tests_off_go_test_gets_nothing_new() {
 /// is known from the tests themselves, whatever `go test` printed.
 const RAN: &str = "func ran(t testing.TB) {\n\tif p := os.Getenv(\"RAN_LOG\"); p != \"\" {\n\t\tf, _ := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\t\tf.WriteString(t.Name() + \"\\n\")\n\t\tf.Close()\n\t}\n}\n";
 
-/// One package, `cart`, with tests: `TestFlip` fails while `FAIL` is set, `TestOk` while `HIDDEN`
-/// is, which no file says, as a missed dependency would; `TestFlipToo`, a name `TestFlip` is a
+/// One package, `cart`, with tests: `TestFlip` fails while the flag `fail` is up, `TestOk` while
+/// `hidden` is ([`Repo::flag`]), which no file of the repository says, as a missed dependency
+/// would (\[ADR 0096\] a variable they read would rerun the package: its key holds it); `TestFlipToo`, a name `TestFlip` is a
 /// prefix of, `TestTwo`, `TestThree` and `TestFour` always pass; `body` adds more.
 fn cart(tests: &str, body: &str) -> Vec<(String, String)> {
     vec![
@@ -1120,8 +1121,8 @@ fn cart(tests: &str, body: &str) -> Vec<(String, String)> {
             "cart/cart_test.go",
             &format!(
                 "package cart\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n{RAN}\n\
-                 func TestFlip(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"FAIL\") != \"\" {{\n\t\tt.Fatal(\"flip\")\n\t}}\n}}\n\
-                 func TestOk(t *testing.T) {{\n\tran(t)\n\tif os.Getenv(\"HIDDEN\") != \"\" {{\n\t\tt.Fatal(\"hidden\")\n\t}}\n}}\n\
+                 func TestFlip(t *testing.T) {{\n\tran(t)\n\tif _, err := os.Stat(\"../../fail\"); err == nil {{\n\t\tt.Fatal(\"flip\")\n\t}}\n}}\n\
+                 func TestOk(t *testing.T) {{\n\tran(t)\n\tif _, err := os.Stat(\"../../hidden\"); err == nil {{\n\t\tt.Fatal(\"hidden\")\n\t}}\n}}\n\
                  func TestFlipToo(t *testing.T) {{ ran(t) }}\n\
                  func TestTwo(t *testing.T) {{ ran(t) }}\n\
                  func TestThree(t *testing.T) {{ ran(t) }}\n\
@@ -1152,6 +1153,17 @@ impl Repo {
         (ran, names)
     }
 
+    /// \[ADR 0096\] Puts up, or takes down, the flag `name` [`cart`]'s tests look for: a file
+    /// outside the repository, beside it, which no key holds.
+    fn flag(&self, name: &str, up: bool) {
+        let path = self.root.join(name);
+        if up {
+            std::fs::write(path, "up\n").expect("flag");
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     /// The tests of `unit` this machine's store holds, by id, with their last state.
     fn tests_of(&self, unit: &str) -> Value {
         self.map()["units"][unit]["tests"].clone()
@@ -1178,7 +1190,8 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
     // With -v, so that Go names each test's outcome: without it, a package that failed keeps no
     // pass of its other tests (ADR 0086 Amendment 3). The first run, with TestFlip failing: every
     // test runs; the package didn't pass, so each test is recorded on its own.
-    let (first, ran) = r.go_tests(&["-v"], &[("FAIL", "1")]);
+    r.flag("fail", true);
+    let (first, ran) = r.go_tests(&["-v"], &[]);
     assert_eq!(first.code, 1, "{}\n{}", first.stdout, first.stderr);
     assert_eq!(ran.len(), 6, "{ran:?}");
     assert_eq!(
@@ -1193,7 +1206,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
 
     // The same files, TestFlip still failing: only it runs, and one of the five that passed, as
     // a check (C-39's audit).
-    let (second, ran) = r.go_tests(&["-v"], &[("FAIL", "1")]);
+    let (second, ran) = r.go_tests(&["-v"], &[]);
     assert_eq!(second.code, 1, "{}\n{}", second.stdout, second.stderr);
     assert_eq!(
         line(&second, "hushrun: unit: "),
@@ -1208,6 +1221,7 @@ fn a_go_test_that_failed_runs_alone_and_its_packages_others_are_reused_one_by_on
 
     // Fixed: TestFlip runs again, with one more as a check, and passes; a reused test keeps the
     // row it stands on.
+    r.flag("fail", false);
     let (third, ran) = r.go_tests(&["-v"], &[]);
     assert_eq!(third.code, 0, "{}\n{}", third.stdout, third.stderr);
     assert_eq!(ran.len(), 2, "{ran:?}");
@@ -1742,6 +1756,7 @@ fn with_commands_own_run_or_skip_go_tests_are_reused_by_package_and_it_says_so()
     let r = Repo::new(&cart("{mode: reuse, unit: test}", ""));
     // Which tests ran is Go's matching of COMMAND's pattern: hushrun doesn't reproduce it, and
     // reuses by package, said once.
+    r.flag("fail", true);
     for (n, (flag, word)) in [
         (&["-run", "TestFlip|TestOk"][..], "-run"),
         (&["-skip", "TestTwo"], "-skip"),
@@ -1754,7 +1769,7 @@ fn with_commands_own_run_or_skip_go_tests_are_reused_by_package_and_it_says_so()
         let cache_text = cache.display().to_string();
         let mut args = vec!["run", "unit", "--", "go", "test", "./..."];
         args.extend(flag);
-        let ran = r.run(&args, &[("FAIL", "1"), ("HUSHRUN_CACHE_DIR", &cache_text)]);
+        let ran = r.run(&args, &[("HUSHRUN_CACHE_DIR", &cache_text)]);
         assert_eq!(ran.code, 1, "{flag:?}\n{}", ran.stderr);
         assert!(
             ran.stderr.contains(&format!(
@@ -1768,7 +1783,7 @@ fn with_commands_own_run_or_skip_go_tests_are_reused_by_package_and_it_says_so()
     }
     // A -run COMMAND doesn't show, in GOFLAGS: each binary's own arguments say it, and no test of
     // it is told one by one.
-    let (ran, names) = r.go_tests(&[], &[("FAIL", "1"), ("GOFLAGS", "-run=^TestFlip$")]);
+    let (ran, names) = r.go_tests(&[], &[("GOFLAGS", "-run=^TestFlip$")]);
     assert_eq!(ran.code, 1, "{}", ran.stderr);
     assert_eq!(names, ["TestFlip"]);
     assert!(r.tests_of("cart").is_null(), "{:#}", r.map());
@@ -1852,8 +1867,11 @@ fn an_audited_go_test_that_fails_again_alone_suspends_the_checks_reuse() {
         .join("\n");
     // With -v: a package that failed keeps its other tests' passes only when Go names each one.
     let r = Repo::new(&files);
-    assert_eq!(r.go_tests(&["-v"], &[("FAIL", "1")]).0.code, 1);
-    let (caught, names) = r.go_tests(&["-v"], &[("HIDDEN", "1")]);
+    r.flag("fail", true);
+    assert_eq!(r.go_tests(&["-v"], &[]).0.code, 1);
+    r.flag("fail", false);
+    r.flag("hidden", true);
+    let (caught, names) = r.go_tests(&["-v"], &[]);
     assert_eq!(caught.code, 1, "{}", caught.stderr);
     assert_eq!(
         line(&caught, "hushrun: unit: all"),

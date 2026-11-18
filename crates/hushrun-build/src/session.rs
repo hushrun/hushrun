@@ -872,12 +872,9 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         .now
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64);
-    let folder = store
-        .join(SESSIONS)
-        .join(format!("{millis}-{}", std::process::id()));
-    std::fs::create_dir_all(&folder)
-        .and_then(|()| private(&folder))
-        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", folder.display())))?;
+    let folder = own_folder(&store.join(SESSIONS), millis, std::process::id())
+        .and_then(|folder| private(&folder).map(|()| folder))
+        .map_err(|err| NotBegun::Unusable(format!("{}: {err}", store.display())))?;
     let link = link_to(&store, start.exe)
         .map_err(|err| NotBegun::Unusable(format!("{}: {err}", store.display())))?;
     let current = Current {
@@ -919,6 +916,27 @@ fn begin_at(start: &Start<'_>, settings: Settings, store: PathBuf) -> Result<Ses
         go: None,
         rustc_left_out: false,
     })
+}
+
+/// Makes a session's folder under `sessions`, one no other session has: `<millis>-<pid>`, or
+/// with `-<n>` after it when that name is taken. The folder is made, never adopted: two runs
+/// that begin in the same millisecond with the same process id (two containers on one store,
+/// each with its own process ids) would otherwise share one `session.json`, and each wrapper
+/// would read the cargo home, the home folder and the mode of whichever run wrote it last.
+fn own_folder(sessions: &Path, millis: u64, pid: u32) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(sessions)?;
+    let mut name = format!("{millis}-{pid}");
+    for n in 1u32.. {
+        let folder = sessions.join(&name);
+        match std::fs::create_dir(&folder) {
+            Ok(()) => return Ok(folder),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                name = format!("{millis}-{pid}-{n}");
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::other("no free session folder"))
 }
 
 /// Writes `session.json` whole: a temporary file in the session's folder, then a rename, so a
@@ -1922,6 +1940,37 @@ mod tests {
         session.set_unreached().unwrap();
         assert_eq!(session.current().programs(), Programs::Movable);
         session.finish(UNIX_EPOCH);
+    }
+
+    // covers: B-2
+    #[test]
+    fn two_runs_that_begin_in_the_same_millisecond_have_a_session_each() {
+        // One store, one process id, one millisecond: two containers that share a store, or two
+        // sessions of one test. Each is a person with a home of their own.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("build.json");
+        let exe = dir.path().join("hushrun");
+        std::fs::write(&exe, b"binary").unwrap();
+        settings::update(&settings, |s| s.mode = Mode::On).unwrap();
+        let home =
+            |home: &'static str| move |name: &str| (name == "HOME").then(|| OsString::from(home));
+        let (one, two) = (home("/home/dev"), home("/home/dev2"));
+        let first = begin(&start(dir.path(), &settings, &exe, &one)).unwrap();
+        let second = begin(&start(dir.path(), &settings, &exe, &two)).unwrap();
+        assert_ne!(first.current().folder, second.current().folder);
+        // What each run's wrappers read is that run's own.
+        let read = |session: &Session| {
+            let folder = session.current().folder.clone();
+            current(&|name| (name == SESSION).then(|| folder.clone().into_os_string())).unwrap()
+        };
+        assert_eq!(read(&first).cargo_home.as_deref(), Some("/home/dev/.cargo"));
+        assert_eq!(
+            read(&second).cargo_home.as_deref(),
+            Some("/home/dev2/.cargo")
+        );
+        // One finishing leaves the other's session in place.
+        second.finish(SystemTime::now());
+        assert_eq!(read(&first).home.as_deref(), Some("/home/dev"));
     }
 
     // covers: B-19

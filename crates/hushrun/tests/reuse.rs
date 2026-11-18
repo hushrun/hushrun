@@ -1709,6 +1709,653 @@ fn a_dependency_only_another_platform_needs_leaves_each_binary_its_own_crates() 
     assert_env_changed(&before, &store::env_of(&r.cache), &["linked"]);
 }
 
+/// \[ADR 0096\] A workspace whose build scripts derive what its test binaries are built with from
+/// variables, each a way rustc's dep-info doesn't track: `cfgd`'s turns `HUSHRUN_FIXTURE_CFG`
+/// into `cargo::rustc-cfg`, `gen`'s writes `HUSHRUN_FIXTURE_GEN` into a file under `OUT_DIR` its
+/// library includes, and `linked`'s turns `HUSHRUN_FIXTURE_LINK` into a link argument. `other`
+/// has none. Each test passes whatever the value.
+fn script_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (".gitignore", "target/\n"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/cfgd\", \"crates/gen\", \"crates/linked\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/cfgd/Cargo.toml",
+            "[package]\nname = \"cfgd\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/cfgd/build.rs",
+            "fn main() {\n    println!(\"cargo::rerun-if-env-changed=HUSHRUN_FIXTURE_CFG\");\n    println!(\"cargo::rustc-check-cfg=cfg(loud)\");\n    if std::env::var_os(\"HUSHRUN_FIXTURE_CFG\").is_some() {\n        println!(\"cargo::rustc-cfg=loud\");\n    }\n}\n",
+        ),
+        (
+            "crates/cfgd/src/lib.rs",
+            "#[cfg(loud)]\npub const MOOD: &str = \"loud\";\n#[cfg(not(loud))]\npub const MOOD: &str = \"quiet\";\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn mood() { assert!(!super::MOOD.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/gen/Cargo.toml",
+            "[package]\nname = \"gen\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/gen/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-env-changed=HUSHRUN_FIXTURE_GEN\");\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let value = std::env::var(\"HUSHRUN_FIXTURE_GEN\").unwrap_or_else(|_| \"plain\".into());\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), format!(\"pub const GEN: &str = {value:?};\\n\")).unwrap();\n}\n",
+        ),
+        (
+            "crates/gen/src/lib.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn generated() { assert!(!super::GEN.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/linked/Cargo.toml",
+            "[package]\nname = \"linked\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/linked/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-env-changed=HUSHRUN_FIXTURE_LINK\");\n    let name = std::env::var(\"HUSHRUN_FIXTURE_LINK\").unwrap_or_else(|_| \"first\".into());\n    let dir = format!(\"{}/{name}\", std::env::var(\"OUT_DIR\").unwrap());\n    std::fs::create_dir_all(&dir).unwrap();\n    println!(\"cargo:rustc-link-search=native={dir}\");\n}\n",
+        ),
+        (
+            "crates/linked/src/lib.rs",
+            "pub fn three() -> u32 { 3 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn three() { assert_eq!(super::three(), 3); }\n}\n",
+        ),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]
+}
+
+/// `files`, with their lockfile committed.
+fn locked_repo(files: &[(&str, &str)]) -> Repo {
+    let r = Repo::new(files);
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    r
+}
+
+/// \[ADR 0096\] The run after a first one of [`script_files`], with `other` edited and `variable`
+/// set to `value`: `binary`, whose build script derived another build from it, runs with `other`,
+/// and so does one of the other two, audited. The same value again reuses it.
+fn a_build_script_derivation_reruns(variable: &str, value: &str, binary: &str) {
+    let r = locked_repo(&script_files());
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+    let others: Vec<&str> = ["cfgd", "gen", "linked"]
+        .into_iter()
+        .filter(|name| *name != binary)
+        .collect();
+
+    edit_other(&r, 1);
+    let set = r.run(&NEXTEST, &[(variable, value)]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        set.stderr
+    );
+    assert_ran(&set, &[binary, "other"], &others, 1);
+
+    // The same value: its pass on what its build script gave it counts.
+    edit_other(&r, 2);
+    let same = r.run(&NEXTEST, &[(variable, value)]);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+    let mut reusable = others.clone();
+    reusable.push(binary);
+    assert_ran(&same, &["other"], &reusable, 1);
+    // \[C-37\] `hushrun why` keys it as the run did, by what its last build here gave it, and the
+    // variable as the next build would take it.
+    let unit = format!("crates/{binary}/src/lib.rs");
+    let why = r.run(&["why", "test", &unit], &[(variable, value)]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(&format!(
+            "{unit} would be reused: it passed on the files it read"
+        )),
+        "{}",
+        why.stdout
+    );
+}
+
+// covers: C-31, C-34
+// A build script that turns a variable into `cargo::rustc-cfg` builds another test binary from the
+// same files: it runs again.
+#[test]
+fn a_cfg_a_build_script_derives_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_CFG", "1", "cfgd");
+}
+
+// covers: C-31, C-34
+// A build script that writes a variable into a file under `OUT_DIR`, which the library includes,
+// builds another test binary from the same files of the repository: it runs again.
+#[test]
+fn a_file_a_build_script_generates_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_GEN", "spicy", "gen");
+}
+
+// covers: C-31, C-34
+// A build script that turns a variable into a link argument links the test binary another way:
+// it runs again.
+#[test]
+fn a_link_argument_a_build_script_derives_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    a_build_script_derivation_reruns("HUSHRUN_FIXTURE_LINK", "second", "linked");
+}
+
+fn has_cc() -> bool {
+    ["cc", "ar"].iter().all(|tool| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// \[ADR 0096\] A workspace whose build scripts make what the binary is built from out of what
+/// no line of their output says: `native`'s compiles C into a static library in `OUT_DIR` with
+/// `-DVAL=$HUSHRUN_FIXTURE_NATIVE`, which it declares with `rerun-if-env-changed`, and prints the
+/// same link lines whatever the value; `srcgen`'s writes a git-ignored `src/generated.rs`, which
+/// its library includes, from a git-ignored `input.txt` it watches. `steady` and `other` have
+/// none. Each test passes whatever the value.
+fn native_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (
+            ".gitignore",
+            "target/\ncrates/srcgen/input.txt\ncrates/srcgen/src/generated.rs\n",
+        ),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/native\", \"crates/srcgen\", \"crates/steady\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/native/Cargo.toml",
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("crates/native/nat.c", "int nat(void) { return VAL; }\n"),
+        (
+            "crates/native/build.rs",
+            "use std::process::Command;\nfn main() {\n    println!(\"cargo::rerun-if-env-changed=HUSHRUN_FIXTURE_NATIVE\");\n    println!(\"cargo::rerun-if-changed=nat.c\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    let val = std::env::var(\"HUSHRUN_FIXTURE_NATIVE\").unwrap_or_else(|_| \"1\".into());\n    assert!(Command::new(\"cc\").args([\"-c\", \"nat.c\", &format!(\"-DVAL={val}\"), \"-o\", &format!(\"{out}/nat.o\")]).status().unwrap().success());\n    assert!(Command::new(\"ar\").args([\"rcs\", &format!(\"{out}/libnat.a\"), &format!(\"{out}/nat.o\")]).status().unwrap().success());\n    println!(\"cargo::rustc-link-search=native={out}\");\n    println!(\"cargo::rustc-link-lib=static=nat\");\n}\n",
+        ),
+        (
+            "crates/native/src/lib.rs",
+            "extern \"C\" {\n    fn nat() -> i32;\n}\npub fn value() -> i32 {\n    unsafe { nat() }\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn value() { assert!(super::value() > 0); }\n}\n",
+        ),
+        (
+            "crates/srcgen/Cargo.toml",
+            "[package]\nname = \"srcgen\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("crates/srcgen/input.txt", "plain\n"),
+        (
+            "crates/srcgen/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=input.txt\");\n    let dir = std::env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n    let value = std::fs::read_to_string(format!(\"{dir}/input.txt\")).unwrap();\n    let text = format!(\"pub const GEN: &str = {:?};\\n\", value.trim());\n    let path = format!(\"{dir}/src/generated.rs\");\n    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {\n        std::fs::write(path, text).unwrap();\n    }\n}\n",
+        ),
+        (
+            "crates/srcgen/src/lib.rs",
+            "include!(\"generated.rs\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn generated() { assert!(!super::GEN.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/steady/Cargo.toml",
+            "[package]\nname = \"steady\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/steady/src/lib.rs",
+            "pub fn one() -> u32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() { assert_eq!(super::one(), 1); }\n}\n",
+        ),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]
+}
+
+/// \[ADR 0096\] Two runs after a first one of [`native_files`], each with `other` edited and
+/// `change` made (it returns the run's variables): the first runs `binary` with `other`, and one
+/// of the two others, audited; the second, with the same change again, reuses it.
+fn a_native_files_change_reruns(
+    binary: &str,
+    change: &dyn Fn(&Repo) -> Vec<(&'static str, &'static str)>,
+) -> Repo {
+    let r = locked_repo(&native_files());
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+    let others: Vec<&str> = ["native", "srcgen", "steady"]
+        .into_iter()
+        .filter(|name| *name != binary)
+        .collect();
+    edit_other(&r, 1);
+    let vars = change(&r);
+    let changed = r.run(&NEXTEST, &vars);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        changed.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        changed.stderr
+    );
+    assert_ran(&changed, &[binary, "other"], &others, 1);
+    edit_other(&r, 2);
+    let vars = change(&r);
+    let same = r.run(&NEXTEST, &vars);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+    r
+}
+
+// covers: C-31, C-34
+// A build script that compiles C into a library in `OUT_DIR` with a variable it declares links
+// the test binary against another library with the same link lines: it runs again.
+#[test]
+fn a_native_library_a_build_script_builds_from_a_variable_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
+        return;
+    }
+    let r = a_native_files_change_reruns("native", &|_| vec![("HUSHRUN_FIXTURE_NATIVE", "2")]);
+    // \[C-37\] `hushrun why` takes the variable as the next build would: its value now.
+    let unit = "crates/native/src/lib.rs";
+    let why = r.run(&["why", "test", unit], &[("HUSHRUN_FIXTURE_NATIVE", "2")]);
+    assert!(
+        why.stdout.starts_with(&format!("{unit} would be reused")),
+        "{}",
+        why.stdout
+    );
+    let why = r.run(&["why", "test", unit], &[("HUSHRUN_FIXTURE_NATIVE", "3")]);
+    assert!(
+        why.stdout.starts_with(&format!(
+            "{unit} runs: a variable a build script of its build declares has another value now than in its last build here (HUSHRUN_FIXTURE_NATIVE)"
+        )),
+        "{}",
+        why.stdout
+    );
+}
+
+// covers: C-31, C-34
+// A source file of the checkout that no file of the scope is (git-ignored), which a build script
+// generates and the library includes, builds another test binary when it changes: it runs again.
+#[test]
+fn a_git_ignored_source_a_build_script_generates_runs_its_test_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) || !tools("cc and ar", has_cc()) {
+        return;
+    }
+    let _ = a_native_files_change_reruns("srcgen", &|r| {
+        r.write("crates/srcgen/input.txt", "spicy\n");
+        vec![]
+    });
+}
+
+// covers: C-30, C-31, C-34
+// An integration test of a package with a build script is observed, recorded and reused: the
+// script's own dep-info is found, so its `build.rs` is a file the binaries of its package read,
+// and editing it reruns those alone.
+#[test]
+fn an_integration_test_of_a_package_with_a_build_script_is_observed_and_reused() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let mut files = script_files();
+    files.push((
+        "crates/gen/tests/it.rs",
+        "#[test]\nfn generated() { assert!(!gen::GEN.is_empty()); }\n",
+    ));
+    let r = locked_repo(&files);
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 5, "ran": 5, "reused": 0})
+    );
+    assert!(
+        store::map(&r.cache)["units"]["crates/gen/tests/it.rs"]
+            .get("notFollowed")
+            .is_none(),
+        "{:#}",
+        store::map(&r.cache)
+    );
+
+    edit_other(&r, 1);
+    let second = r.run(&NEXTEST, &[]);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert_eq!(
+        second.plan_line(),
+        "hushrun: test: 2 of 5 test binaries run; 3 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        second.stderr
+    );
+    assert_ran(
+        &second,
+        &["other"],
+        &["cfgd", "gen", "gen::it", "linked"],
+        1,
+    );
+
+    // Its build script is a file the package's binaries read, and no other's.
+    r.write(
+        "crates/gen/build.rs",
+        &files
+            .iter()
+            .find(|(path, _)| *path == "crates/gen/build.rs")
+            .map(|(_, text)| format!("// edited\n{text}"))
+            .unwrap(),
+    );
+    let edited = r.run(&NEXTEST, &[]);
+    assert_eq!(edited.code, 0, "{}\n{}", edited.stdout, edited.stderr);
+    assert_eq!(
+        edited.plan_line(),
+        "hushrun: test: 3 of 5 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        edited.stderr
+    );
+    assert_ran(
+        &edited,
+        &["gen", "gen::it"],
+        &["cfgd", "linked", "other"],
+        1,
+    );
+}
+
+fn has_go() -> bool {
+    Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Go as these tests run it: this machine's build cache, so that the standard library builds
+/// once, no toolchain download and no configuration file of the person's.
+fn go_env() -> Vec<(&'static str, String)> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        Command::new("go")
+            .args(["env", "GOCACHE"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("hushrun-test-gocache")
+                    .display()
+                    .to_string()
+            })
+    });
+    vec![
+        ("GOCACHE", cache.clone()),
+        ("GOTOOLCHAIN", "local".into()),
+        ("GOENV", "off".into()),
+    ]
+}
+
+/// \[ADR 0096\] A Go module whose packages' tests read variables while they run: `flavor` with
+/// `os.Getenv`, `lookup` with `os.LookupEnv`, and `plain` and `other` none. Each test passes
+/// whatever the value.
+fn getenv_files(tests: &str) -> Vec<(String, String)> {
+    let test = |package: &str, body: &str| {
+        (
+            format!("{package}/{package}_test.go"),
+            format!(
+                "package {package}\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nvar _ = os.Getenv\n\nfunc TestOne(t *testing.T) {{\n{body}}}\n\nfunc TestTwo(t *testing.T) {{\n{body}}}\n"
+            ),
+        )
+    };
+    let mut files = vec![
+        (
+            "hushrun.yaml".to_string(),
+            format!(
+                "version: 1\nrepository: example.com/acme/mod\nchecks:\n  unit:\n    tests: {tests}\n"
+            ),
+        ),
+        (
+            "go.mod".to_string(),
+            "module example.com/mod\n\ngo 1.21\n".to_string(),
+        ),
+        test(
+            "flavor",
+            "\tif os.Getenv(\"HUSHRUN_FIXTURE_GO\") == \"never\" {\n\t\tt.Fatal(\"never\")\n\t}\n",
+        ),
+        test(
+            "lookup",
+            "\tif v, ok := os.LookupEnv(\"HUSHRUN_FIXTURE_LOOKUP\"); ok && v == \"never\" {\n\t\tt.Fatal(\"never\")\n\t}\n",
+        ),
+        test("plain", "\tif 1+1 != 2 {\n\t\tt.Fatal(\"two\")\n\t}\n"),
+    ];
+    files.push(go_other(0));
+    files
+}
+
+/// `other`'s test, its `n`-th version: a change no other package reads, so the check's own key
+/// misses and the others' keys are what decide.
+fn go_other(n: u32) -> (String, String) {
+    (
+        "other/other_test.go".to_string(),
+        format!(
+            "package other\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {{\n\tif {n}-{n} != 0 {{\n\t\tt.Fatal(\"zero\")\n\t}}\n}}\n"
+        ),
+    )
+}
+
+/// The packages `go test -json` ran a test of, by their directory.
+fn go_ran(ran: &Ran) -> std::collections::BTreeSet<String> {
+    ran.stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["Action"] == "run" && event["Test"].is_string())
+        .filter_map(|event| {
+            let package = event["Package"].as_str()?;
+            Some(package.strip_prefix("example.com/mod/")?.to_string())
+        })
+        .collect()
+}
+
+const GO_TEST: [&str; 7] = ["run", "unit", "--", "go", "test", "-json", "./..."];
+
+/// A run of `go test` in `r` with `vars` besides Go's own.
+fn go_run(r: &Repo, args: &[&str], vars: &[(&str, &str)]) -> Ran {
+    let go = go_env();
+    let mut env: Vec<(&str, &str)> = go.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    env.extend_from_slice(vars);
+    r.run(args, &env)
+}
+
+// covers: C-31, C-34, C-35
+// A Go package whose tests read a variable with `os.Getenv` or `os.LookupEnv` runs again when its
+// value changes, or it goes from unset to set to nothing, as Go's own test cache would rerun it;
+// the same value again reuses it.
+#[test]
+fn a_go_package_whose_tests_read_another_value_of_a_variable_runs_again() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let files = getenv_files("reuse");
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = Repo::new(&files);
+    let first = go_run(&r, &GO_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        first.plan_line(),
+        "hushrun: unit: all 4 packages run: none had passed here yet on the files it read"
+    );
+
+    // Another value: `flavor` runs with `other`, and one of the other two, audited.
+    let (path, text) = go_other(1);
+    r.write(&path, &text);
+    let set = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: unit: 3 of 4 packages run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        set.stderr
+    );
+    let ran = go_ran(&set);
+    assert!(ran.contains("flavor") && ran.contains("other"), "{ran:?}");
+
+    // The same value: its pass on it counts. `hushrun why` keys it by the value it is given.
+    let (path, text) = go_other(2);
+    r.write(&path, &text);
+    let same = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: unit: 2 of 4 packages run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        same.stderr
+    );
+    assert!(go_ran(&same).contains("other"));
+    let why = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sour")],
+    );
+    assert!(
+        why.stdout.starts_with("flavor would be reused"),
+        "{}\n{}",
+        why.stdout,
+        why.stderr
+    );
+    let why = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sweet")],
+    );
+    assert!(why.stdout.starts_with("flavor runs"), "{}", why.stdout);
+    assert!(
+        why.stdout.contains(
+            "or a variable its tests read has another value now than when it passed: its key holds the value of each (HUSHRUN_FIXTURE_GO)"
+        ),
+        "{}",
+        why.stdout
+    );
+
+    // Set to nothing is another value than unset: `lookup` runs.
+    let (path, text) = go_other(3);
+    r.write(&path, &text);
+    let empty = go_run(
+        &r,
+        &GO_TEST,
+        &[
+            ("HUSHRUN_FIXTURE_GO", "sour"),
+            ("HUSHRUN_FIXTURE_LOOKUP", ""),
+        ],
+    );
+    assert_eq!(empty.code, 0, "{}", empty.stderr);
+    assert_eq!(
+        empty.plan_line(),
+        "hushrun: unit: 3 of 4 packages run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        empty.stderr
+    );
+    let ran = go_ran(&empty);
+    assert!(ran.contains("lookup") && ran.contains("other"), "{ran:?}");
+
+    // \[C-37\] A row an older hushrun wrote names no variable, and every Go key holds them now.
+    store::forget_getenv(&r.cache);
+    let unknown = go_run(
+        &r,
+        &["why", "unit", "flavor"],
+        &[("HUSHRUN_FIXTURE_GO", "sour")],
+    );
+    assert!(
+        unknown.stdout.starts_with(
+            "flavor runs: this machine doesn't know which variables its tests read when it last ran here, which every key of a Go package holds now"
+        ),
+        "{}",
+        unknown.stdout
+    );
+}
+
+// covers: C-31, C-35, C-39
+// With tests reused one by one, a test's key holds what its package's tests read of the
+// environment too: a package that ran because a variable changed doesn't reuse its tests one by
+// one on their earlier passes.
+#[test]
+fn go_tests_reused_one_by_one_run_again_when_a_variable_their_package_read_changes() {
+    if !tools("Go", has_go()) {
+        return;
+    }
+    let files = getenv_files("{mode: reuse, unit: test}");
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = Repo::new(&files);
+    let first = go_run(&r, &GO_TEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+
+    let (path, text) = go_other(1);
+    r.write(&path, &text);
+    let set = go_run(&r, &GO_TEST, &[("HUSHRUN_FIXTURE_GO", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    // Both of `flavor`'s tests ran: neither was reused on its pass with the variable unset.
+    let flavor: Vec<String> = set
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|e| {
+            e["Action"] == "pass"
+                && e["Package"] == "example.com/mod/flavor"
+                && e["Test"].is_string()
+        })
+        .filter_map(|e| e["Test"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        flavor,
+        ["TestOne", "TestTwo"],
+        "{}\n{}",
+        set.stdout,
+        set.stderr
+    );
+}
+
 /// Every file under `dir` with its length and time, to tell that nothing was written.
 fn snapshot(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let mut out = Vec::new();

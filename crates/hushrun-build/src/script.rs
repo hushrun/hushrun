@@ -39,6 +39,11 @@ pub struct Script {
     pub rerun_if_changed: Vec<String>,
     /// Each `rerun-if-env-changed=NAME`, sorted, each once.
     pub rerun_if_env_changed: Vec<String>,
+    /// \[ADR 0096\] Each line that reaches the compiler or the linker ([`TO_THE_COMPILE`]), as
+    /// `KEY=VALUE`, in the order printed: what a Cargo test binary's unit key holds of the script
+    /// (C-31's `scripts`). Build blocks don't read it: a compile's key holds the compile's own
+    /// arguments, which carry these.
+    pub to_the_compile: Vec<String>,
 }
 
 impl Script {
@@ -128,6 +133,26 @@ const RESERVED_PREFIXES: &[&str] = &[
     "rerun-if-env-changed=",
 ];
 
+/// \[ADR 0096\] The directives whose values reach a compile of the package or of what links it:
+/// rustc's flags and `--cfg`, and the linker's libraries, search paths and arguments. The rest
+/// (`rustc-env`, which rustc's `env-dep` lines key where it is read; `rustc-check-cfg`, which
+/// changes only lints; `warning`, `error`, `rerun-if-*` and `metadata`) don't change what is
+/// built.
+pub const TO_THE_COMPILE: &[&str] = &[
+    "rustc-flags",
+    "rustc-link-lib",
+    "rustc-link-search",
+    "rustc-link-arg-cdylib",
+    "rustc-cdylib-link-arg",
+    "rustc-link-arg-bins",
+    "rustc-link-arg-bin",
+    "rustc-link-arg-tests",
+    "rustc-link-arg-benches",
+    "rustc-link-arg-examples",
+    "rustc-link-arg",
+    "rustc-cfg",
+];
+
 /// Reads a saved build script output as text. See [`parse_bytes`].
 pub fn parse(text: &str) -> Script {
     parse_bytes(text.as_bytes())
@@ -137,7 +162,8 @@ pub fn parse(text: &str) -> Script {
 /// `\n`, a line that isn't UTF-8 skipped, each line trimmed, `cargo::KEY=VALUE` and the old
 /// `cargo:KEY=VALUE` for the reserved keys, the value trimmed at its end. Only `rustc-env`,
 /// `rerun-if-changed` and `rerun-if-env-changed` are kept; a line cargo would refuse (no `=`)
-/// is skipped, since cargo would have failed the build before this compile.
+/// is skipped, since cargo would have failed the build before this compile. \[ADR 0096\] And the
+/// lines of [`TO_THE_COMPILE`], in the order printed.
 pub fn parse_bytes(bytes: &[u8]) -> Script {
     let mut script = Script::default();
     for line in bytes.split(|b| *b == b'\n') {
@@ -169,6 +195,9 @@ pub fn parse_bytes(bytes: &[u8]) -> Script {
             }
             "rerun-if-changed" => script.rerun_if_changed.push(value.to_owned()),
             "rerun-if-env-changed" => script.rerun_if_env_changed.push(value.to_owned()),
+            key if TO_THE_COMPILE.contains(&key) => {
+                script.to_the_compile.push(format!("{key}={value}"));
+            }
             _ => {}
         }
     }
@@ -293,6 +322,27 @@ cargo:rerun-if-changed=build.rs
             ]
         );
         assert!(script.declared_anything());
+    }
+
+    #[test]
+    // covers: C-31
+    // \[ADR 0096\] What reaches the compile, in the order printed, in either syntax, trimmed as
+    // cargo trims it; metadata and lines cargo doesn't read aren't.
+    fn the_lines_that_reach_the_compile_are_kept_in_order() {
+        let script = parse(REAL);
+        assert_eq!(script.to_the_compile, ["rustc-cfg=wrap_proc_macro"]);
+        let script = parse(
+            "cargo:rustc-link-lib=static=z \n  cargo::rustc-cfg=loud\ncargo:rustc-link-arg-tests=-Wl,-x\ncargo:rustc-check-cfg=cfg(loud)\ncargo:rustc-env=A=1\ncargo::metadata=k=v\ncargo:k=v\ncargo:warning=w\ncargo::rustc-cfg\nrustc-cfg=bare\ncargo:rustc-link-search=native=/w/out\n",
+        );
+        assert_eq!(
+            script.to_the_compile,
+            [
+                "rustc-link-lib=static=z",
+                "rustc-cfg=loud",
+                "rustc-link-arg-tests=-Wl,-x",
+                "rustc-link-search=native=/w/out",
+            ]
+        );
     }
 
     #[test]

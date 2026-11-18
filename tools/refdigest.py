@@ -663,19 +663,73 @@ def to_placeholders(roots, text):
     return "".join(out)
 
 
-def env_entries(env_deps):
-    """The entries of a vector's `envDeps`: each `# env-dep:` line, its value's roots replaced."""
+def run_stand_in(package_id):
+    """[ADR 0096] What names a build script's run in a key: `{hushrun:run:<kind>:<name>@<version>}`
+    from its package id, `<kind>+<url>#<name>@<version>` or `<kind>+<url>#<version>`, the name
+    then being the URL's last segment."""
+    url, _, fragment = package_id.rpartition("#") if "#" in package_id else (package_id, "", "")
+    kind = url.split("+", 1)[0] if "+" in url else ""
+    if "@" in fragment:
+        name, _, version = fragment.partition("@")
+    else:
+        name, version = url.rstrip("/").rsplit("/", 1)[-1], fragment
+    return "{hushrun:run:%s:%s@%s}" % (kind, name, version)
+
+
+def replace_folder(text, folder, stand_in):
+    """`folder` in `text` by `stand_in` wherever it ends a path there."""
+    out, i = [], 0
+    while True:
+        at = text.find(folder, i)
+        if at < 0 or not folder:
+            out.append(text[i:])
+            return "".join(out)
+        end = at + len(folder)
+        ends = end == len(text) or text[end] == "/" or not name_char(text[end])
+        out.append(text[i:at])
+        out.append(stand_in if ends else folder)
+        i = end
+
+
+def keyed_text(roots, runs, text):
+    """[ADR 0096] Text as a Cargo key holds it: roots replaced, then each build script run's
+    folder (its `OUT_DIR`'s parent, roots replaced) by its run's stand-in, longest first."""
+    if roots is not None:
+        text = to_placeholders(roots, text)
+    for folder, stand_in in runs:
+        text = replace_folder(text, folder, stand_in)
+    return text
+
+
+def run_folders(roots, build):
+    """The run folders of a vector's `buildScripts`, roots replaced, longest first, with their
+    stand-ins. Only their given form: a vector's folders are no files on this disk, so there is no
+    resolved form to read (the Rust code takes both, as for roots)."""
+    found = {}
+    for run in (build or {}).get("runs", []):
+        folder = run["outDir"].rsplit("/", 1)[0]
+        if roots is not None:
+            folder = to_placeholders(roots, folder)
+        found.setdefault(folder, run_stand_in(run["packageId"]))
+    return sorted(found.items(), key=lambda f: (-len(f[0]), f[0]))
+
+
+def env_entries(env_deps, build=None):
+    """The entries of a vector's `envDeps`: each `# env-dep:` line, its value as `keyed_text` has
+    it (roots replaced, and [ADR 0096] the run folders of `build`)."""
     roots = checkout_roots(env_deps["folders"])
+    runs = run_folders(roots, build)
     entries = set()
     for line in env_deps["lines"]:
         found = env_dep(line)
         if found is None:
             continue
         name, value = found
-        if value is not None and roots is not None:
-            value = to_placeholders(roots, value)
+        if value is not None:
+            value = keyed_text(roots, runs, value)
         entries.add((name, value))
-    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None,
+                                          (e[1] or "").encode("utf-8")))
 
 
 def env_digest(entries):
@@ -683,6 +737,99 @@ def env_digest(entries):
     by bytes, each once."""
     lines = sorted({(n if v is None else n + "=" + v).encode("utf-8") for n, v in entries})
     return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
+
+
+# [ADR 0096] The lines of a build script's output that reach the compiler or the linker, as C-31
+# lists them.
+SCRIPT_DIRECTIVES = {"rustc-cfg", "rustc-flags", "rustc-link-lib", "rustc-link-search",
+                     "rustc-link-arg", "rustc-link-arg-bins", "rustc-link-arg-bin",
+                     "rustc-link-arg-tests", "rustc-link-arg-examples", "rustc-link-arg-benches",
+                     "rustc-link-arg-cdylib", "rustc-cdylib-link-arg"}
+
+
+def scripts_entries(build, scope):
+    """The entries of a vector's `buildScripts` (C-31's `scripts`): each run's `output ` and its
+    OUT_DIR, then a line feed and each of its output's directives above, in order, `KEY=VALUE`
+    without its `cargo:` or `cargo::`, then for each variable its output declares with
+    `rerun-if-env-changed`, sorted, each once, a line feed, `rerun-if-env-changed=`, its name and,
+    when `values` holds it (else it is unset), `=` and its value; and each file a dep-info names
+    under the target or build folder, or, for a path package's dep-info (one with no `source`),
+    in the checkout but not one of the scope's files (`scope`) nor under the cargo home, the
+    rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
+    text as `keyed_text` has it: roots replaced, and each run's folder by its stand-in (a
+    vector's text is UTF-8)."""
+    folders = build["folders"]
+    values = build.get("values", {})
+    roots = checkout_roots(folders)
+    runs = run_folders(roots, build)
+    keyed = lambda text: keyed_text(roots, runs, text)
+    entries = set()
+    for run in build["runs"]:
+        entry = "output " + keyed(run["outDir"])
+        declared = set()
+        # Lines as Cargo reads them: split at line feeds, each trimmed, its value trimmed at its
+        # end.
+        for line in run["output"].split("\n"):
+            line = line.strip()
+            for prefix in ("cargo::", "cargo:"):
+                if line.startswith(prefix):
+                    name, eq, value = line[len(prefix):].partition("=")
+                    if eq and name in SCRIPT_DIRECTIVES:
+                        entry += "\n" + keyed(name + "=" + value.rstrip())
+                    elif eq and name == "rerun-if-env-changed":
+                        declared.add(value.rstrip())
+                    break
+        for name in sorted(declared, key=lambda n: n.encode("utf-8")):
+            entry += "\nrerun-if-env-changed=" + name
+            if name in values:
+                entry += "=" + keyed(values[name])
+        entries.add(entry)
+    made_in = [clean_folder(folders[k]) for k in ("targetDir", "buildDir") if folders.get(k)]
+    root = clean_folder(folders["root"])
+    bases = ("{hushrun:cargo-home}", "{hushrun:rustup-home}", "{hushrun:toolchain}")
+    for named in build["depInfo"]:
+        path = named["path"]
+        made = any(path == d or path.startswith(d + "/") for d in made_in)
+        with_roots = path if roots is None else to_placeholders(roots, path)
+        outside_scope = (not named.get("source") and path.startswith(root + "/")
+                         and path[len(root) + 1:] not in scope
+                         and not with_roots.startswith(bases))
+        if made or outside_scope:
+            entries.add("file sha256:%s %s" % (sha256_hex(keyed(named["text"]).encode("utf-8")),
+                                               keyed(path)))
+    return sorted(entries, key=lambda e: e.encode("utf-8"))
+
+
+def scripts_digest(entries):
+    """SHA-256 of each entry as UTF-8 and a NUL, sorted by bytes, each once."""
+    lines = sorted({e.encode("utf-8") for e in entries})
+    return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
+
+
+def getenv_entries(getenv):
+    """[ADR 0096] The entries of a vector's `getenv` (C-31's `env` of a Go package): each name a
+    `getenv` line of its test log names, and GODEBUG always, with its value in `values` (absent:
+    unset; set to nothing is a value), the repository's root and the home folder (HOME, when it
+    is absolute and not `/`) replaced in it."""
+    values = getenv["values"]
+    home = values.get("HOME")
+    folders = {"root": getenv["root"]}
+    if home and home.startswith("/") and home.strip("/"):
+        folders["home"] = home
+    roots = checkout_roots(folders)
+    names = {"GODEBUG"}
+    for line in getenv["log"]:
+        op, sp, name = line.partition(" ")
+        if sp and op == "getenv":
+            names.add(name)
+    entries = set()
+    for name in names:
+        value = values.get(name)
+        if value is not None and roots is not None:
+            value = to_placeholders(roots, value)
+        entries.add((name, value))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None,
+                                          (e[1] or "").encode("utf-8")))
 
 
 def evaluate_unit_key(vector):
@@ -705,11 +852,27 @@ def evaluate_unit_key(vector):
     # A Cargo test binary's key: its `env-dep` lines, roots replaced, must be the vector's
     # entries, whose digest is `env`.
     if "envDeps" in vector:
-        entries = env_entries(vector["envDeps"])
+        entries = env_entries(vector["envDeps"], vector.get("buildScripts"))
         listed = [tuple(e) for e in vector["env"]]
         if entries != listed:
             raise ValueError("env-dep lines give %r, the vector lists %r" % (entries, listed))
         key["env"] = got["env"] = env_digest(entries)
+    # [ADR 0096] A Go package's key, or one of its tests': the variables its tests' log names,
+    # with their values, must be the vector's entries, whose digest is `env`.
+    if "getenv" in vector:
+        entries = getenv_entries(vector["getenv"])
+        listed = [tuple(e) for e in vector["env"]]
+        if entries != listed:
+            raise ValueError("getenv lines give %r, the vector lists %r" % (entries, listed))
+        key["env"] = got["env"] = env_digest(entries)
+    # [ADR 0096] A Cargo test binary's key: its build scripts' runs and the files they made must
+    # be the vector's entries, whose digest is `scripts`.
+    if "buildScripts" in vector:
+        entries = scripts_entries(vector["buildScripts"], {f["path"] for f in vector["files"]})
+        if entries != vector["scripts"]:
+            raise ValueError("build scripts give %r, the vector lists %r"
+                             % (entries, vector["scripts"]))
+        key["scripts"] = got["scripts"] = scripts_digest(entries)
     got["key"] = "sha256:" + sha256_hex(jcs(key))
     return got
 

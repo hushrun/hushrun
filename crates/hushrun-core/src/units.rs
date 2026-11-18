@@ -4,7 +4,7 @@
 //!   check reuses by ([`Unit`]) and what a test is taken to have read ([`Reads`]).
 //! - The four sets every file of a check's scope falls in, by one function, [`classify`] (C-30).
 //! - A unit's key, by one function, [`unit_key`], with [`shape`], [`Tree::digest`] and \[ADR 0095\]
-//!   [`env()`] for the digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
+//!   [`env()`] and \[ADR 0096\] [`scripts`] for the digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
 //!   (C-39), and a test's name, by [`test_name`].
 //! - \[ADR 0081\] What a test read, by one function, [`test_list`] (C-40).
 //! - A unit's state in a run, decided once, by [`state`], from the facts an adapter reported
@@ -276,19 +276,34 @@ pub(crate) fn shape_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec
     bytes
 }
 
-/// \[C-31, ADR 0095\] `env`: the SHA-256 of what a Cargo test binary's build read of the
-/// environment, by the `# env-dep:` lines of the dep-info its `reads` come from. Each entry is a
-/// variable's name, `=` and its value with roots replaced, or its name alone when it was unset,
+/// \[C-31, ADR 0095\] `env`: the SHA-256 of what a unit read of the environment: for a Cargo test
+/// binary, by the `# env-dep:` lines of the dep-info its `reads` come from; \[ADR 0096\] for a Go
+/// package, by the `getenv` lines of its tests' log, with each variable's value now. Each entry is
+/// a variable's name, `=` and its value with roots replaced, or its name alone when it was unset,
 /// as UTF-8 followed by one NUL byte; sorted by bytes, each once. No entry gives the SHA-256 of
 /// nothing.
 pub fn env<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Digest {
-    let mut lines: Vec<String> = entries
-        .into_iter()
-        .map(|(name, value)| match value {
-            Some(value) => format!("{name}={value}"),
-            None => name.to_string(),
-        })
-        .collect();
+    entries_digest(entries.into_iter().map(|(name, value)| match value {
+        Some(value) => format!("{name}={value}"),
+        None => name.to_string(),
+    }))
+}
+
+/// \[C-31, ADR 0096\] `scripts`: the SHA-256 of what the build scripts of a Cargo test binary's
+/// closure gave its build, each entry one of them: a build script's run, `output `, its `OUT_DIR`
+/// and, for each line of its output that reaches the compiler or the linker, in the order it
+/// wrote them, a line feed and the line without its `cargo:` or `cargo::`; or a file of the build
+/// folder its dep-info names, `file `, the SHA-256 of its bytes as `sha256:<hex>`, a space and its
+/// path; folders replaced as `env`'s are. Each entry as UTF-8 followed by one NUL byte, sorted by
+/// bytes, each once. None gives the SHA-256 of nothing.
+pub fn scripts(entries: impl IntoIterator<Item = String>) -> Digest {
+    entries_digest(entries)
+}
+
+/// The SHA-256 of `lines`, each one's UTF-8 bytes followed by one NUL byte, sorted by bytes, each
+/// once: [`env()`]'s and [`scripts`]' form.
+fn entries_digest(lines: impl IntoIterator<Item = String>) -> Digest {
+    let mut lines: Vec<String> = lines.into_iter().collect();
     lines.sort_unstable();
     lines.dedup();
     let mut bytes = Vec::new();
@@ -297,6 +312,16 @@ pub fn env<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) ->
         bytes.push(0);
     }
     Digest::of(&bytes)
+}
+
+/// \[C-31\] What a unit's key holds of what isn't a file of the scope: \[ADR 0095\] what it read of
+/// the environment ([`env()`], Cargo's and \[ADR 0096\] Go's), and \[ADR 0096\] what the build
+/// scripts of its build gave it ([`scripts`], Cargo's). `None` leaves the member out of the key, as
+/// every other adapter's keys have it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Outside {
+    pub env: Option<Digest>,
+    pub scripts: Option<Digest>,
 }
 
 /// The files of a scope with their kinds and content hashes, as a source manifest (D-4) lists
@@ -380,24 +405,38 @@ pub struct KeyBase {
 
 /// \[C-31\] The one function for a unit's key: the SHA-256 of the JCS form of the run key's fields
 /// but `digest` (`base`), the unit's path, and the digests of what it read (`reads`), of the rest
-/// set (`rest`) and of the sources set's paths (`shape`); \[ADR 0095\] and for an adapter that keys
-/// what its build read of the environment (Cargo's), its [`env()`], which every key of it holds, an
-/// empty one too. Every other adapter's key has no `env`, and is as it was before.
+/// set (`rest`) and of the sources set's paths (`shape`); and what it holds of what isn't a file of
+/// the scope (`outside`): \[ADR 0095\] `env` for an adapter that keys what a unit read of the
+/// environment (Cargo's, \[ADR 0096\] Go's), which every key of it holds, an empty one too, and
+/// \[ADR 0096\] `scripts` for Cargo's. Every other adapter's key has neither, and is as it was.
 pub fn unit_key(
     base: &KeyBase,
     unit: &str,
     reads: &Digest,
     rest: &Digest,
     shape: &Digest,
-    env: Option<&Digest>,
+    outside: &Outside,
 ) -> Result<Digest, JcsError> {
-    key_of(UNIT_KEY_SCHEMA, base, unit, None, reads, rest, shape, env)
+    key_of(
+        UNIT_KEY_SCHEMA,
+        base,
+        unit,
+        None,
+        reads,
+        rest,
+        shape,
+        outside,
+    )
 }
 
 /// \[C-39, ADR 0080\] The one function for a test's key: [`unit_key`]'s fields, computed the same
 /// way, under [`TEST_KEY_SCHEMA`], with `test`, the test's id within its unit. `reads` digests the
-/// test's list (RFC 0004 §3.2). \[ADR 0095\] It holds no `env`: the one adapter that keys one
-/// (Cargo's) doesn't reuse tests one by one.
+/// test's list (RFC 0004 §3.2). \[ADR 0096\] It holds what its unit's key holds of what isn't a
+/// file of the scope (`outside`): a Go test, the variables its package's tests read.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the members of a key, each named as C-39 names it"
+)]
 pub fn test_key(
     base: &KeyBase,
     unit: &str,
@@ -405,6 +444,7 @@ pub fn test_key(
     reads: &Digest,
     rest: &Digest,
     shape: &Digest,
+    outside: &Outside,
 ) -> Result<Digest, JcsError> {
     key_of(
         TEST_KEY_SCHEMA,
@@ -414,7 +454,7 @@ pub fn test_key(
         reads,
         rest,
         shape,
-        None,
+        outside,
     )
 }
 
@@ -435,7 +475,7 @@ fn key_of(
     reads: &Digest,
     rest: &Digest,
     shape: &Digest,
-    env: Option<&Digest>,
+    outside: &Outside,
 ) -> Result<Digest, JcsError> {
     let mut input = json!({
         "schema": schema,
@@ -451,8 +491,11 @@ fn key_of(
     if let Some(test) = test {
         input["test"] = json!(test);
     }
-    if let Some(env) = env {
+    if let Some(env) = &outside.env {
         input["env"] = json!(env);
+    }
+    if let Some(scripts) = &outside.scripts {
+        input["scripts"] = json!(scripts);
     }
     if let Some(external) = &base.external {
         input["external"] = external.clone();

@@ -71,6 +71,18 @@ pub fn assignments(command: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// \[C-32\] A variable as COMMAND's environment has it: COMMAND's last assignment of it
+/// (`assigned`, [`assignments`]) over hushrun's environment, as text (lossy where it isn't UTF-8);
+/// `None` when unset. \[ADR 0095, 0096\] Every key that holds a variable's value looks it up so.
+pub fn variable(assigned: &[(String, String)], name: &str) -> Option<String> {
+    assigned
+        .iter()
+        .rev()
+        .find(|(n, _)| n == name)
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned()))
+}
+
 /// \[C-32\] The one way an adapter starts a tool of its own for COMMAND (Cargo's plan build and
 /// `cargo metadata`, `go env` and `go list`, `swift package describe`, CTest's listing): `program`
 /// in `cwd`, with COMMAND's own assignments (`assigned`, [`assignments`]) over hushrun's

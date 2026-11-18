@@ -1433,6 +1433,7 @@ impl Adapter for Swift {
                             &shared,
                             at.tree,
                             Some(&t.reads),
+                            None,
                         )
                     })
                     .flatten();
@@ -1528,7 +1529,9 @@ impl Adapter for Swift {
             seen.insert(
                 unit,
                 Seen {
-                    env: None,
+                    outside: Default::default(),
+                    declared: None,
+                    getenv: Default::default(),
                     facts: Facts {
                         complete,
                         failed: m.failed,
@@ -1559,6 +1562,7 @@ impl Adapter for Swift {
                     &shared,
                     at.tree,
                     Some(reads),
+                    None,
                 )?;
                 Some((unit.clone(), lists))
             })

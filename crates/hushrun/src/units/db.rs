@@ -62,12 +62,42 @@ const MOST_HINTS_KNOWN: i64 = 200;
 /// `env` (C-31): one row for a test file whose adapter keys it, none for any other, as of its last
 /// build here, which `hushrun why` keys it by. A store of this schema made before it has every
 /// other table and lacks this one: opened to write, it gets it, its rows kept
-/// ([`with_env_table`]); read, it reads as one whose test files hold no `env`.
+/// ([`with_added_tables`]); read, it reads as one whose test files hold no `env`.
 macro_rules! unit_env {
     () => {
         "CREATE TABLE unit_env (
     unit_ref INTEGER PRIMARY KEY REFERENCES unit (id) ON DELETE CASCADE,
     env      TEXT NOT NULL CHECK (length(env) = 64 AND env NOT GLOB '*[^0-9a-f]*')
+) STRICT;"
+    };
+}
+
+/// \[ADR 0096\] What the same key held of what its build scripts gave it, its `scripts` (C-31): one
+/// row beside its `unit_env` row, which it needs, as of the same build; with the variables those
+/// scripts declare (`declared`, a JSON array, sorted) and the SHA-256 of their values then
+/// (`declared_values`), which `hushrun why` compares with the values now. Added in place as
+/// `unit_env` is.
+macro_rules! unit_scripts {
+    () => {
+        "CREATE TABLE unit_scripts (
+    unit_ref        INTEGER PRIMARY KEY REFERENCES unit_env (unit_ref) ON DELETE CASCADE,
+    scripts         TEXT NOT NULL CHECK (length(scripts) = 64 AND scripts NOT GLOB '*[^0-9a-f]*'),
+    declared        TEXT NOT NULL CHECK (json_valid(declared) AND json_type(declared) = 'array'),
+    declared_values TEXT NOT NULL
+        CHECK (length(declared_values) = 64 AND declared_values NOT GLOB '*[^0-9a-f]*')
+) STRICT;"
+    };
+}
+
+/// \[ADR 0096\] The variables a Go package's tests read when it last ran here, by name (its test
+/// log's `getenv` lines): one row a package, its names a JSON array of strings, sorted, `[]` when
+/// they read none; a plan keys them with their values then. No row: not known (another adapter's
+/// unit, or a row an older hushrun wrote). Added in place as `unit_env` is.
+macro_rules! unit_getenv {
+    () => {
+        "CREATE TABLE unit_getenv (
+    unit_ref INTEGER PRIMARY KEY REFERENCES unit (id) ON DELETE CASCADE,
+    names    TEXT NOT NULL CHECK (json_valid(names) AND json_type(names) = 'array')
 ) STRICT;"
     };
 }
@@ -172,6 +202,8 @@ CREATE TABLE unit_dir (
 ) STRICT, WITHOUT ROWID;
 ",
     unit_env!(),
+    unit_scripts!(),
+    unit_getenv!(),
     "
 
 -- Direct edges an adapter saw in a check's runs, for `hushrun why` to show a path. Never read
@@ -394,9 +426,9 @@ fn ids(conn: &Connection) -> Result<(i64, i64), Unread> {
 /// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`], and \[C-36\]
 /// its tables as this build makes them, so that a store an older build of the same schema made (a
 /// test table without a column read now) reads as one that can't be read, and is set aside.
-/// \[ADR 0095\] One that lacks `unit_env` alone, made before it, is this schema's too: `Ok(false)`
-/// says it lacks it.
-fn check_schema(conn: &Connection) -> Result<bool, Unread> {
+/// \[ADR 0095, 0096\] One that lacks some of the tables added in place ([`ADDED`]), made before
+/// them, is this schema's too: `Ok` says which it lacks, by name, in [`ADDED`]'s order.
+fn check_schema(conn: &Connection) -> Result<Vec<&'static str>, Unread> {
     let (app, version) = ids(conn)?;
     if app != APPLICATION_ID || version != SCHEMA {
         return Err(Unread::Broken(format!(
@@ -404,26 +436,35 @@ fn check_schema(conn: &Connection) -> Result<bool, Unread> {
         )));
     }
     let tables = tables_of(conn).map_err(|e| unread(&e))?;
-    if tables == *this_builds_tables() {
-        return Ok(true);
+    let missing: Vec<&'static (&'static str, &'static str)> = ADDED
+        .iter()
+        .filter(|(_, made)| !tables.contains(made.trim_end_matches(';')))
+        .collect();
+    let mut expected = this_builds_tables().clone();
+    for (_, made) in &missing {
+        expected.remove(made.trim_end_matches(';'));
     }
-    let mut before_env = this_builds_tables().clone();
-    before_env.remove(UNIT_ENV.trim_end_matches(';'));
-    if tables == before_env {
-        return Ok(false);
+    if tables == expected {
+        return Ok(missing.into_iter().map(|(name, _)| *name).collect());
     }
     Err(Unread::Broken(
         "its tables aren't the ones this hushrun makes".into(),
     ))
 }
 
-/// \[ADR 0095\] The `unit_env` table's statement, as [`TABLES`] makes it.
-const UNIT_ENV: &str = unit_env!();
+/// \[ADR 0095, 0096\] The tables a store of this schema gets in place, each by its name and its
+/// statement as [`TABLES`] makes it, in an order their references allow.
+const ADDED: &[(&str, &str)] = &[
+    ("unit_env", unit_env!()),
+    ("unit_scripts", unit_scripts!()),
+    ("unit_getenv", unit_getenv!()),
+];
 
-/// \[ADR 0095\] `conn`, a store of this schema opened to write, with the `unit_env` table: one made
-/// before it gets it, in one transaction under the lock beside `path`, every other row as it was.
-fn with_env_table(conn: Connection, path: &Path) -> Result<Connection, Unread> {
-    if check_schema(&conn)? {
+/// \[ADR 0095, 0096\] `conn`, a store of this schema opened to write, with every table of
+/// [`ADDED`]: one made before some gets them, in one transaction under the lock beside `path`,
+/// every other row as it was.
+fn with_added_tables(conn: Connection, path: &Path) -> Result<Connection, Unread> {
+    if check_schema(&conn)?.is_empty() {
         return Ok(conn);
     }
     let _lock = locked(path)?;
@@ -431,22 +472,33 @@ fn with_env_table(conn: Connection, path: &Path) -> Result<Connection, Unread> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| unread(&e))?;
-    let there: bool = tx
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'unit_env'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| unread(&e))?
-        > 0;
-    if !there {
-        tx.execute_batch(UNIT_ENV).map_err(|e| unread(&e))?;
+    for (name, made) in ADDED {
+        let there: bool = tx
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| unread(&e))?
+            > 0;
+        if !there {
+            tx.execute_batch(made).map_err(|e| unread(&e))?;
+        }
     }
     tx.commit().map_err(|e| unread(&e))?;
-    if !check_schema(&conn)? {
-        return Err(Unread::Broken("its unit_env table couldn't be made".into()));
+    if let Some(name) = check_schema(&conn)?.first() {
+        return Err(Unread::Broken(format!("its {name} table couldn't be made")));
     }
     Ok(conn)
+}
+
+/// Whether the store `conn` has the table `name`: one of [`ADDED`] it may lack, opened to read.
+fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    )
 }
 
 /// The `CREATE TABLE` statements of a database's tables, as SQLite keeps them.
@@ -531,7 +583,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
         .map_err(|e| unread(&e))?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
-        return with_env_table(conn, path);
+        return with_added_tables(conn, path);
     }
     if app != 0 || version != 0 {
         return Err(Unread::Broken(format!(
@@ -545,7 +597,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
         drop(lock);
-        return with_env_table(conn, path);
+        return with_added_tables(conn, path);
     }
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| unread(&e))?;
@@ -565,7 +617,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     }
     tx.commit().map_err(|e| unread(&e))?;
     drop(lock);
-    with_env_table(conn, path)
+    with_added_tables(conn, path)
 }
 
 /// \[C-36\] The tables of schema 1, in an order their references allow: schema 2 holds them with
@@ -856,22 +908,52 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
             mapped.dirs.insert(dir);
         }
     }
-    // \[ADR 0095\] What each Cargo test binary's key held of the environment; none in a store
-    // made before the table, opened only to read.
-    let has_env: bool = conn.query_row(
-        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'unit_env'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_env {
-        let mut envs = conn.prepare(
+    // \[ADR 0095, 0096\] What each Cargo test binary's key held of the environment and of its
+    // build scripts, and the variables each Go package's tests read; none in a store made before
+    // the table, opened only to read.
+    if has_table(conn, "unit_env")? {
+        let mut rows = conn.prepare(
             "SELECT e.unit_ref, e.env FROM unit_env e JOIN unit u ON u.id = e.unit_ref
              WHERE u.check_ref = ?1",
         )?;
-        for row in envs.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
-            let (unit, env): (i64, String) = row?;
+        for row in rows.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (unit, digest): (i64, String) = row?;
             if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
-                mapped.env = Digest::from_hex(&env).ok();
+                mapped.outside.env = Digest::from_hex(&digest).ok();
+            }
+        }
+    }
+    if has_table(conn, "unit_scripts")? {
+        let mut rows = conn.prepare(
+            "SELECT s.unit_ref, s.scripts, s.declared, s.declared_values FROM unit_scripts s
+             JOIN unit u ON u.id = s.unit_ref WHERE u.check_ref = ?1",
+        )?;
+        for row in rows.query_map([check], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })? {
+            let (unit, scripts, declared, values): (i64, String, String, String) = row?;
+            if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+                // A list or a digest that doesn't read: neither is known.
+                let declared = serde_json::from_str(&declared)
+                    .ok()
+                    .zip(Digest::from_hex(&values).ok());
+                if let Some((names, values)) = declared {
+                    mapped.outside.scripts = Digest::from_hex(&scripts).ok();
+                    mapped.declared = Some(super::store::Declared { names, values });
+                }
+            }
+        }
+    }
+    if has_table(conn, "unit_getenv")? {
+        let mut rows = conn.prepare(
+            "SELECT g.unit_ref, g.names FROM unit_getenv g JOIN unit u ON u.id = g.unit_ref
+             WHERE u.check_ref = ?1",
+        )?;
+        for row in rows.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (unit, list): (i64, String) = row?;
+            if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+                // A list that doesn't read is no list: not known.
+                mapped.getenv = serde_json::from_str(&list).ok();
             }
         }
     }
@@ -1294,10 +1376,32 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
                 params![unit, dir],
             )?;
         }
-        if let Some(env) = &mapped.env {
+        if let Some(env) = &mapped.outside.env {
             tx.execute(
                 "INSERT INTO unit_env (unit_ref, env) VALUES (?1, ?2)",
                 params![unit, env.hex()],
+            )?;
+            // \[ADR 0096\] Beside it, never without it.
+            if let (Some(scripts), Some(declared)) = (&mapped.outside.scripts, &mapped.declared) {
+                tx.execute(
+                    "INSERT INTO unit_scripts (unit_ref, scripts, declared, declared_values)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        unit,
+                        scripts.hex(),
+                        serde_json::to_string(&declared.names).unwrap_or_else(|_| "[]".into()),
+                        declared.values.hex()
+                    ],
+                )?;
+            }
+        }
+        if let Some(read) = &mapped.getenv {
+            tx.execute(
+                "INSERT INTO unit_getenv (unit_ref, names) VALUES (?1, ?2)",
+                params![
+                    unit,
+                    serde_json::to_string(read).unwrap_or_else(|_| "[]".into())
+                ],
             )?;
         }
         // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row

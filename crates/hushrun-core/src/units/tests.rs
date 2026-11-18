@@ -191,10 +191,25 @@ fn unit_keys_match_the_golden_vectors() {
                 .collect();
             env(entries)
         });
+        // \[ADR 0096\] A vector that lists `scripts`, each entry a string, is a Cargo test
+        // binary's key, which holds their digest beside `env`.
+        let scripts_digest = vector.get("scripts").map(|entries| {
+            scripts(
+                entries
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.as_str().unwrap().to_string()),
+            )
+        });
+        let outside = Outside {
+            env,
+            scripts: scripts_digest,
+        };
         // \[ADR 0080\] A vector that names a test is a test's key (C-39); the others, a unit's.
         let key = match vector.get("test").and_then(Value::as_str) {
-            Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape).unwrap(),
-            None => unit_key(&key_base, unit, &reads, &rest, &shape, env.as_ref()).unwrap(),
+            Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape, &outside).unwrap(),
+            None => unit_key(&key_base, unit, &reads, &rest, &shape, &outside).unwrap(),
         };
         let expect = &vector["expect"];
         assert_eq!(
@@ -204,6 +219,14 @@ fn unit_keys_match_the_golden_vectors() {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             "{name}: env"
+        );
+        assert_eq!(
+            scripts_digest.map(|e| e.to_string()),
+            expect
+                .get("scripts")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            "{name}: scripts"
         );
         assert_eq!(reads.to_string(), expect["reads"], "{name}: reads");
         assert_eq!(rest.to_string(), expect["rest"], "{name}: rest");
@@ -224,18 +247,71 @@ fn a_tests_key_is_its_unit_keys_fields_and_its_id_and_never_a_units_key() {
         counts_from: None,
     };
     let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
-    let file = unit_key(&base, "tests/test_a.py", &reads, &rest, &shape, None).unwrap();
-    let a = test_key(&base, "tests/test_a.py", "test_x", &reads, &rest, &shape).unwrap();
-    let b = test_key(&base, "tests/test_a.py", "test_y", &reads, &rest, &shape).unwrap();
+    let file = unit_key(
+        &base,
+        "tests/test_a.py",
+        &reads,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
+    let a = test_key(
+        &base,
+        "tests/test_a.py",
+        "test_x",
+        &reads,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
+    let b = test_key(
+        &base,
+        "tests/test_a.py",
+        "test_y",
+        &reads,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
     // A test's key is never its file's, nor another test's of the same file and files.
     assert_ne!(a, file);
     assert_ne!(a, b);
     // An id that looks like a path doesn't make another unit's test the same key.
-    let c = test_key(&base, "tests/test_a.py::x", "y", &reads, &rest, &shape).unwrap();
-    let d = test_key(&base, "tests/test_a.py", "x::y", &reads, &rest, &shape).unwrap();
+    let c = test_key(
+        &base,
+        "tests/test_a.py::x",
+        "y",
+        &reads,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
+    let d = test_key(
+        &base,
+        "tests/test_a.py",
+        "x::y",
+        &reads,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
     assert_ne!(c, d);
     // Every byte a key holds of what it read moves it.
-    let other = test_key(&base, "tests/test_a.py", "test_x", &shape, &rest, &shape).unwrap();
+    let other = test_key(
+        &base,
+        "tests/test_a.py",
+        "test_x",
+        &shape,
+        &rest,
+        &shape,
+        &Outside::default(),
+    )
+    .unwrap();
     assert_ne!(a, other);
     assert_eq!(
         test_name("tests/test_a.py", "TestA::test_x[1]"),
@@ -271,13 +347,80 @@ fn env_is_the_sorted_entries_each_with_a_nul_and_a_key_holds_it_only_when_given(
         counts_from: None,
     };
     let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
-    let key = |env: Option<&Digest>| unit_key(&base, "src/lib.rs", &reads, &rest, &shape, env);
+    let key = |env: Option<Digest>| {
+        unit_key(
+            &base,
+            "src/lib.rs",
+            &reads,
+            &rest,
+            &shape,
+            &Outside { env, scripts: None },
+        )
+    };
     let none = key(None).unwrap();
-    let empty = key(Some(&env([]))).unwrap();
-    let set = key(Some(&env([("A", Some("1"))]))).unwrap();
+    let empty = key(Some(env([]))).unwrap();
+    let set = key(Some(env([("A", Some("1"))]))).unwrap();
     assert_ne!(none, empty, "a key with `env` is never one without it");
     assert_ne!(empty, set);
-    assert_ne!(set, key(Some(&env([("A", Some("2"))]))).unwrap());
+    assert_ne!(set, key(Some(env([("A", Some("2"))]))).unwrap());
+}
+
+// covers: C-31, C-39
+// \[ADR 0096\] `scripts` is the sorted entries, each with a NUL, as `env` is; a key holds it only
+// when given, apart from `env`; and a test's key holds both as its unit's does.
+#[test]
+fn scripts_is_the_sorted_entries_and_a_key_holds_it_apart_from_env() {
+    assert_eq!(
+        scripts([]).to_string(),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        scripts([
+            "output /o\nrustc-cfg=b".to_string(),
+            "file x".to_string(),
+            "file x".to_string()
+        ]),
+        Digest::of(b"file x\0output /o\nrustc-cfg=b\0")
+    );
+    let base = KeyBase {
+        check: CheckName::new("test").unwrap(),
+        command: vec!["cargo".into(), "test".into()],
+        cwd: String::new(),
+        scope: ScopeName::new("default").unwrap(),
+        external: None,
+        counts_from: None,
+    };
+    let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
+    let same = Digest::of(b"same");
+    let key = |outside: Outside| unit_key(&base, "src/lib.rs", &reads, &rest, &shape, &outside);
+    let env_only = key(Outside {
+        env: Some(same),
+        scripts: None,
+    })
+    .unwrap();
+    let scripts_only = key(Outside {
+        env: None,
+        scripts: Some(same),
+    })
+    .unwrap();
+    let both = Outside {
+        env: Some(same),
+        scripts: Some(scripts([])),
+    };
+    // The same digest as `env` or as `scripts` is two keys, and an empty `scripts` is one.
+    assert_ne!(env_only, scripts_only);
+    assert_ne!(env_only, key(both).unwrap());
+    let test = |outside: &Outside| {
+        test_key(&base, "src/lib.rs", "t", &reads, &rest, &shape, outside).unwrap()
+    };
+    assert_ne!(test(&Outside::default()), test(&both));
+    assert_ne!(
+        test(&both),
+        test(&Outside {
+            env: Some(env([("A", None)])),
+            scripts: Some(scripts([])),
+        })
+    );
 }
 
 // covers: C-31

@@ -238,6 +238,9 @@ struct Scenario {
     ready: bool,
     /// Each machine has a cargo home of its own, beside its checkout, rather than this one's.
     own_cargo_home: bool,
+    /// \[ADR 0096\] What COMMAND gets besides on every machine but the first, from its
+    /// checkout: another CI's settings.
+    elsewhere: fn(&Path) -> Vec<(String, String)>,
 }
 
 impl Scenario {
@@ -347,6 +350,11 @@ impl Machine {
         }
         if s.own_cargo_home {
             cmd.env("CARGO_HOME", self.root.join("cargo-home"));
+        }
+        if self.root.file_name().is_some_and(|n| n != "first") {
+            for (name, value) in (s.elsewhere)(&self.repo) {
+                cmd.env(name, value);
+            }
         }
         let output = cmd.args(args).output().expect("hushrun");
         Ran {
@@ -691,6 +699,7 @@ fn pytest_scenario() -> Scenario {
         ran: pytest_ran,
         ready: true,
         own_cargo_home: false,
+        elsewhere: |_| Vec::new(),
     }
 }
 
@@ -854,6 +863,7 @@ fn vitest_scenario() -> Scenario {
         ran: vitest_ran,
         ready: true,
         own_cargo_home: false,
+        elsewhere: |_| Vec::new(),
     }
 }
 
@@ -1044,6 +1054,7 @@ fn go_scenario() -> Scenario {
         ran: go_ran,
         ready: false,
         own_cargo_home: false,
+        elsewhere: |_| Vec::new(),
     }
 }
 
@@ -1236,6 +1247,7 @@ fn cargo_scenario() -> Scenario {
         ran: cargo_ran,
         ready: false,
         own_cargo_home: false,
+        elsewhere: |_| Vec::new(),
     }
 }
 
@@ -1375,6 +1387,436 @@ fn cargo_keys_name_no_folder_of_the_machine_a_test_binary_was_built_on() {
     }
     let s = cargo_folders_scenario();
     let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
+/// \[ADR 0096\] A workspace whose build script gives its test binaries machine folders: a link
+/// search path under its `OUT_DIR`, a cfg, a file it writes into `OUT_DIR` that its library
+/// includes, and another whose text is its package's folder (as `built` and `shadow-rs` write), with an integration test of that package. Each machine has its own checkout, cargo
+/// home and home.
+fn cargo_scripts_scenario() -> Scenario {
+    let mut s = cargo_folders_scenario();
+    s.files.retain(|(path, _)| {
+        !path.starts_with("crates/located/") && !path.starts_with("crates/core/tests/")
+    });
+    s.files.retain(|(path, _)| path != "Cargo.toml");
+    s.files.extend([
+        file(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\", \"crates/scripted\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        file(
+            "crates/scripted/Cargo.toml",
+            "[package]\nname = \"scripted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        file(
+            "crates/scripted/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::create_dir_all(format!(\"{out}/lib\")).unwrap();\n    println!(\"cargo:rustc-link-search=native={out}/lib\");\n    println!(\"cargo::rustc-check-cfg=cfg(scripted)\");\n    println!(\"cargo::rustc-cfg=scripted\");\n    std::fs::write(format!(\"{out}/made.rs\"), \"pub const MADE: &str = \\\"made\\\";\\n\").unwrap();\n    let dir = std::env::var(\"CARGO_MANIFEST_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/info.rs\"), format!(\"pub const DIR: &str = {dir:?};\\n\")).unwrap();\n}\n",
+        ),
+        file(
+            "crates/scripted/src/lib.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/made.rs\"));\ninclude!(concat!(env!(\"OUT_DIR\"), \"/info.rs\"));\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn made() { assert!(cfg!(scripted) && super::MADE == \"made\"); }\n}\n",
+        ),
+        file(
+            "crates/scripted/tests/it.rs",
+            "#[test]\nfn made() { assert_eq!(scripted::MADE, \"made\"); }\n",
+        ),
+    ]);
+    s.all = set(&[
+        "crates/core/src/lib.rs",
+        "crates/scripted/src/lib.rs",
+        "crates/scripted/tests/it.rs",
+        "crates/other/src/lib.rs",
+    ]);
+    s.ran = |ran| {
+        let binaries: BTreeMap<&str, &str> = [
+            ("core-lib", "crates/core/src/lib.rs"),
+            ("scripted", "crates/scripted/src/lib.rs"),
+            ("scripted::it", "crates/scripted/tests/it.rs"),
+            ("other", "crates/other/src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        nextest_ran(ran, &binaries)
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] What a build script gave a test binary, a link search path under its `OUT_DIR` and
+// a file it generated there among them, is keyed with the machine's folders replaced: a checkout
+// at another path, with another cargo home and home, computes the same keys, and an integration
+// test of the package is reused too.
+#[test]
+fn cargo_build_scripts_output_and_generated_files_name_no_folder_of_the_machine() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_scripts_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
+/// \[ADR 0096\] [`cargo_scripts_scenario`] with a path crate outside the repository, beside each
+/// checkout (so at another path on each machine), whose build script prints a cfg and generates a
+/// file, which `scripted` depends on; and on every machine but the first, CI's settings:
+/// `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`, which move Cargo's hash of every build
+/// script's run.
+fn cargo_profile_scenario() -> Scenario {
+    let mut s = cargo_scripts_scenario();
+    for (path, text) in &mut s.files {
+        if path == "crates/scripted/Cargo.toml" {
+            text.push_str("\n[dependencies]\nnearby = { path = \"../../../nearby\" }\n");
+        }
+        if path == "crates/scripted/src/lib.rs" {
+            *text = text.replace(
+                "fn made() { assert!(",
+                "fn made() { assert!(nearby::NEAR == \"near\" && ",
+            );
+        }
+    }
+    s.prepare = |repo| {
+        // Beside the checkout, so each machine has it at its own path; the lockfile names no path.
+        let nearby = repo.parent().expect("parent").join("nearby");
+        std::fs::create_dir_all(nearby.join("src")).expect("mkdir");
+        std::fs::write(
+            nearby.join("Cargo.toml"),
+            "[package]\nname = \"nearby\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            nearby.join("build.rs"),
+            "fn main() {\n    println!(\"cargo::rustc-check-cfg=cfg(nearby)\");\n    println!(\"cargo::rustc-cfg=nearby\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/near.rs\"), \"pub const NEAR: &str = \\\"near\\\";\\n\").unwrap();\n}\n",
+        )
+        .expect("write");
+        std::fs::write(
+            nearby.join("src/lib.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/near.rs\"));\n",
+        )
+        .expect("write");
+        if repo.join("Cargo.lock").exists() {
+            return;
+        }
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile", "--offline", "-q"])
+            .current_dir(repo)
+            .env_remove("CARGO_TARGET_DIR")
+            .env(
+                "CARGO_HOME",
+                repo.parent().expect("parent").join("cargo-home"),
+            )
+            .status()
+            .expect("cargo");
+        assert!(lock.success());
+    };
+    s.elsewhere = |_| {
+        vec![
+            ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+            ("CARGO_PROFILE_DEV_DEBUG".to_string(), "0".to_string()),
+        ]
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] A build script's run is keyed by what it gave the build, never by Cargo's hash of
+// the run, which holds the profile and an outside path crate's path: CI with
+// `CARGO_INCREMENTAL=0` and another profile setting, and a path crate outside the repository at
+// another path, reuses what a laptop's run passed.
+#[test]
+fn cargo_profile_settings_and_where_an_outside_crate_is_dont_make_another_machine_miss() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_profile_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
+/// \[ADR 0096\] A git repository outside every checkout, made once, holding the crate `remote`:
+/// what a crate of a registry or of git is, offline.
+fn remote_crate() -> &'static Path {
+    static AT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    AT.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let repo = std::fs::canonicalize(&dir)
+            .expect("real path")
+            .join("remote");
+        std::fs::create_dir_all(repo.join("src")).expect("mkdir");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"remote\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write");
+        std::fs::write(repo.join("src/lib.rs"), "pub fn far() -> u32 { 7 }\n").expect("write");
+        git::init(&repo, "sha1");
+        git::commit_all(&repo, "remote");
+        repo
+    })
+}
+
+/// \[ADR 0096\] [`cargo_scripts_scenario`] whose `scripted` depends on a git crate, and on every
+/// machine but the first a cargo home inside the checkout, git-ignored, as GitLab CI caches it:
+/// the crate's sources are in the checkout there, and outside the scope.
+fn cargo_home_inside_scenario() -> Scenario {
+    let mut s = cargo_scripts_scenario();
+    for (path, text) in &mut s.files {
+        if path == ".gitignore" {
+            text.push_str(".cargo-home/\n");
+        }
+        if path == "crates/scripted/Cargo.toml" {
+            text.push_str(&format!(
+                "\n[dependencies]\nremote = {{ git = \"file://{}\" }}\n",
+                remote_crate().display()
+            ));
+        }
+        if path == "crates/scripted/src/lib.rs" {
+            *text = text.replace(
+                "fn made() { assert!(",
+                "fn made() { assert!(remote::far() == 7 && ",
+            );
+        }
+    }
+    s.prepare = |repo| {
+        if repo.join("Cargo.lock").exists() {
+            return;
+        }
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile", "-q"])
+            .current_dir(repo)
+            .env_remove("CARGO_TARGET_DIR")
+            .env(
+                "CARGO_HOME",
+                repo.parent().expect("parent").join("cargo-home"),
+            )
+            .status()
+            .expect("cargo");
+        assert!(lock.success());
+    };
+    s.elsewhere = |repo| {
+        vec![(
+            "CARGO_HOME".to_string(),
+            repo.join(".cargo-home").display().to_string(),
+        )]
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] A crate outside the workspace is keyed by what its build gave, never by its
+// sources: with the cargo home inside the checkout on CI, as GitLab caches it, a laptop's pass
+// is reused.
+#[test]
+fn a_cargo_home_inside_the_checkout_doesnt_make_another_machine_miss() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_home_inside_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
+}
+
+/// \[ADR 0096\] A path crate of the repository that is no member of the workspace (excluded),
+/// which compiles a git-ignored source each machine writes, the first's other than the rest's.
+fn cargo_ignored_path_source_scenario() -> Scenario {
+    let mut s = cargo_scenario();
+    let lib = |name: &str| {
+        format!(
+            "pub fn one() -> u32 {{ 1 }}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn {name}() {{ assert_eq!(super::one(), 1); }}\n}}\n"
+        )
+    };
+    let manifest = |name: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    };
+    s.files
+        .retain(|(path, _)| path.starts_with("crates/other/") || path == "hushrun.yaml");
+    s.files.extend([
+        file(".gitignore", "target/\nside/helper/src/gen.rs\n"),
+        file(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/usehelper\", \"crates/steady\", \"crates/more\", \"crates/other\"]\nexclude = [\"side\"]\nresolver = \"2\"\n",
+        ),
+        file("side/helper/Cargo.toml", &manifest("helper")),
+        file("side/helper/src/lib.rs", "include!(\"gen.rs\");\n"),
+        file(
+            "crates/usehelper/Cargo.toml",
+            &format!(
+                "{}\n[dependencies]\nhelper = {{ path = \"../../side/helper\" }}\n",
+                manifest("usehelper")
+            ),
+        ),
+        file(
+            "crates/usehelper/src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses() { assert!(!helper::G.is_empty()); }\n}\n",
+        ),
+        file("crates/steady/Cargo.toml", &manifest("steady")),
+        file("crates/steady/src/lib.rs", &lib("steady")),
+        file("crates/more/Cargo.toml", &manifest("more")),
+        file("crates/more/src/lib.rs", &lib("more")),
+    ]);
+    s.prepare = |repo| {
+        let first = repo.parent().and_then(Path::file_name) == Some("first".as_ref());
+        let text = if first { "plain" } else { "spicy" };
+        std::fs::write(
+            repo.join("side/helper/src/gen.rs"),
+            format!("pub const G: &str = {text:?};\n"),
+        )
+        .expect("write");
+        if repo.join("Cargo.lock").exists() {
+            return;
+        }
+        let lock = Command::new("cargo")
+            .args(["generate-lockfile", "--offline", "-q"])
+            .current_dir(repo)
+            .env_remove("CARGO_TARGET_DIR")
+            .status()
+            .expect("cargo");
+        assert!(lock.success());
+    };
+    s.all = set(&[
+        "crates/usehelper/src/lib.rs",
+        "crates/steady/src/lib.rs",
+        "crates/more/src/lib.rs",
+        "crates/other/src/lib.rs",
+    ]);
+    s.must_run = set(&["crates/usehelper/src/lib.rs", "crates/other/src/lib.rs"]);
+    s.ran = |ran| {
+        let binaries: BTreeMap<&str, &str> = [
+            ("usehelper", "crates/usehelper/src/lib.rs"),
+            ("steady", "crates/steady/src/lib.rs"),
+            ("more", "crates/more/src/lib.rs"),
+            ("other", "crates/other/src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        nextest_ran(ran, &binaries)
+    };
+    s
+}
+
+// covers: C-31, C-34
+// \[ADR 0096\] A path crate of the repository that is no member of the workspace, which
+// compiles a git-ignored source of its own: a binary that links it runs again when that source
+// changes, though no file of the scope did and no build script says so.
+#[test]
+fn a_git_ignored_source_of_a_path_crate_outside_the_workspace_runs_its_binary_again() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_ignored_path_source_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert!(
+        m.fresh.ran.contains("crates/usehelper/src/lib.rs"),
+        "{}",
+        m.fresh.stderr
+    );
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+}
+
+/// \[ADR 0096\] [`cargo_home_inside_scenario`]'s git crate vendored on every machine but the
+/// first, as a CI job does before it builds: `cargo vendor` into the checkout, git-ignored, with
+/// the source replaced in an ignored `.cargo/config.toml`. The crate keeps its git source, and
+/// its sources are in the checkout there, outside the scope.
+fn cargo_vendored_scenario() -> Scenario {
+    let mut s = cargo_home_inside_scenario();
+    for (path, text) in &mut s.files {
+        if path == ".gitignore" {
+            text.push_str("vendor/\n.cargo/\n");
+        }
+    }
+    s.elsewhere = |repo| {
+        if !repo.join("vendor").exists() {
+            let vendor = Command::new("cargo")
+                .args(["vendor", "--locked", "vendor"])
+                .current_dir(repo)
+                .env_remove("CARGO_TARGET_DIR")
+                .env(
+                    "CARGO_HOME",
+                    repo.parent().expect("parent").join("cargo-home"),
+                )
+                .output()
+                .expect("cargo");
+            assert!(
+                vendor.status.success(),
+                "{}",
+                String::from_utf8_lossy(&vendor.stderr)
+            );
+            std::fs::create_dir_all(repo.join(".cargo")).expect("mkdir");
+            std::fs::write(repo.join(".cargo/config.toml"), &vendor.stdout).expect("write");
+        }
+        Vec::new()
+    };
+    s
+}
+
+// covers: C-31, C-33
+// \[ADR 0096\] A registry or git crate is keyed by what its build gave, never by its sources,
+// vendored into the checkout or not: a laptop's pass is reused by a CI job that vendors.
+#[test]
+fn a_crate_vendored_on_one_machine_and_not_on_another_doesnt_make_it_miss() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_vendored_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    let vendored = m
+        .fresh
+        .machine
+        .as_ref()
+        .expect("machine")
+        .repo
+        .join("vendor/remote");
+    assert!(vendored.is_dir(), "the fresh machine vendored the crate");
+    let config = vendored.join("../../.cargo/config.toml");
+    let config = std::fs::read_to_string(config).expect("config");
+    assert!(config.contains("directory = \"vendor\""), "{config}");
     assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
     assert_eq!(
         m.fresh.plan.as_deref(),
@@ -1783,6 +2225,7 @@ fn tests_scenario(tests: &str, failing: bool) -> Scenario {
         ran: pytest_ran,
         ready: false,
         own_cargo_home: false,
+        elsewhere: |_| Vec::new(),
     }
 }
 

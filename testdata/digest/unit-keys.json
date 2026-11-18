@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
+  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree. [ADR 0096] A Cargo test binary's vector may also list `buildScripts`, its closure's build scripts' runs (`packageId`, `outDir`, and `output`, the text of the `output` file beside it; [ADR 0096, amended] a run's folder is named by its package, in `env`'s values too), the values of the variables they declare in COMMAND's environment (`values`, a name absent is unset), the files a dep-info of its closure names (`path`, `text`; those under the target or build folder, and, for a path package's dep-info (no `source`; else its package's `cargo metadata` source), those in the checkout that are none of the vector's `files` nor under the cargo home, the rustup home or the toolchain, are keyed) and the folders as `envDeps` has them, and `scripts`, the entries they give (sorted); `expect` then holds `scripts`, their digest. A Go package's vector, or one of its tests', lists `getenv`: the repository's `root`, its tests' log (`log`) and the values of variables in COMMAND's environment (`values`, a name absent is unset), and `env`, the entries they give; `expect` then holds `env`.",
   "vectors": [
     {
       "name": "pytest-unit",
@@ -802,6 +802,565 @@
         "shape": "sha256:5b3f85500968b23e01cc47668cac48324cffb402449c48674d30aef769389c02",
         "env": "sha256:385e8f01192249ba6c30cb4e216b0ff1e3ad16c6b0fd4b1af77ef7b45ff40b61",
         "key": "sha256:dd1d8b859b41f601f4673a5dcfb188a2f4cc9bb7c7fecaeb9220e27bece01057"
+      }
+    },
+    {
+      "name": "cargo-binary-with-build-scripts",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0096] A Cargo test binary whose closure holds two build scripts' runs, its own package's (a cfg, a link search path under its OUT_DIR, a library to link, the variables it declares with rerun-if-env-changed, one set with a folder of the checkout in it, one unset, one declared twice; rerun-if-changed, warning, metadata and rustc-env lines left out) and a crate's outside the workspace (a path under the cargo home); a file its own script generated under OUT_DIR, whose text names the target folder, and a git-ignored source of the checkout, whose text names the checkout, both by their text with roots replaced; a file of the scope its dep-info names too isn't one. Its build script is a file it read.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/gen/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/gen\"]\n"
+        },
+        {
+          "path": "crates/gen/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"gen\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/gen/build.rs",
+          "kind": "f",
+          "text": "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), \"pub const G: &str = \\\"plain\\\";\\n\").unwrap();\n}\n"
+        },
+        {
+          "path": "crates/gen/src/lib.rs",
+          "kind": "f",
+          "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+        }
+      ],
+      "units": [
+        "crates/gen/src/lib.rs"
+      ],
+      "sources": [
+        "crates/gen/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/gen/Cargo.toml"
+      ],
+      "reads": [
+        "crates/gen/build.rs",
+        "crates/gen/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [
+          "# env-dep:OUT_DIR=/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/home/ci/.cargo",
+          "home": "/home/ci"
+        }
+      },
+      "buildScripts": {
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/home/ci/.cargo",
+          "home": "/home/ci"
+        },
+        "runs": [
+          {
+            "packageId": "path+file:///home/ci/shop/crates/gen#0.1.0",
+            "outDir": "/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out",
+            "output": "cargo:rerun-if-changed=build.rs\ncargo::rerun-if-env-changed=HUSHRUN_VECTOR_CFLAGS\ncargo:rerun-if-env-changed=HUSHRUN_VECTOR_CC \ncargo::rerun-if-env-changed=HUSHRUN_VECTOR_CFLAGS\ncargo::rustc-cfg=loud\ncargo:warning=made in /home/ci/shop\ncargo:rustc-link-search=native=/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out/lib\ncargo::rustc-check-cfg=cfg(loud)\ncargo:rustc-link-lib=static=made\ncargo::metadata=k=v\ncargo:rustc-env=X=1\nnot a directive\n"
+          },
+          {
+            "packageId": "registry+https://github.com/rust-lang/crates.io-index#zlib-sys@1.0.0",
+            "outDir": "/home/ci/shop/target/debug/build/zlib-sys-1122334455667788/out",
+            "output": "cargo:rustc-link-search=native=/home/ci/.cargo/registry/src/index-1/zlib-sys-1.0.0/lib\ncargo:rustc-link-lib=z\n"
+          }
+        ],
+        "depInfo": [
+          {
+            "path": "/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+            "text": "pub const G: &str = \"plain\";\npub const BUILT_IN: &str = \"/home/ci/shop/target/debug/build/gen-0a1b2c3d4e5f6789/out\";\n"
+          },
+          {
+            "path": "/home/ci/shop/crates/gen/src/lib.rs",
+            "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+          },
+          {
+            "path": "/home/ci/shop/crates/gen/src/bindings.rs",
+            "text": "pub const DIR: &str = \"/home/ci/shop/crates/gen\";\n"
+          }
+        ],
+        "values": {
+          "HUSHRUN_VECTOR_CFLAGS": "-O2 -I /home/ci/shop/include"
+        }
+      },
+      "env": [
+        [
+          "OUT_DIR",
+          "{hushrun:run:path:gen@0.1.0}/out"
+        ]
+      ],
+      "scripts": [
+        "file sha256:3f128b1f5ce1c78a1951ae9772cfccbec6da7dce8f9c4d43b40aa5bb2c184398 {hushrun:workspace}/crates/gen/src/bindings.rs",
+        "file sha256:83b82c3754ecdfc9f5c57d90a8dc427fe6f0be715bceac8960a1c6624be0d02e {hushrun:run:path:gen@0.1.0}/out/gen.rs",
+        "output {hushrun:run:path:gen@0.1.0}/out\nrustc-cfg=loud\nrustc-link-search=native={hushrun:run:path:gen@0.1.0}/out/lib\nrustc-link-lib=static=made\nrerun-if-env-changed=HUSHRUN_VECTOR_CC\nrerun-if-env-changed=HUSHRUN_VECTOR_CFLAGS=-O2 -I {hushrun:workspace}/include",
+        "output {hushrun:run:registry:zlib-sys@1.0.0}/out\nrustc-link-search=native={hushrun:cargo-home}/registry/src/index-1/zlib-sys-1.0.0/lib\nrustc-link-lib=z"
+      ],
+      "expect": {
+        "reads": "sha256:8352544aa4e6a642c142517cbe6ba83ab1e7dff26d6251ac5e03f02678f33774",
+        "rest": "sha256:3223cfb97391770499629d5b246c1c9652e2bde701ab2da4af884a6b91a01993",
+        "shape": "sha256:475844fd25c8fb1e84e0d57e6c8c50c2efc0c2b7c015e1b20aa35eedcee8e4da",
+        "env": "sha256:acf9a12af897ef19a7c2999af8cad6c3ba2fec1b41c2806323fa613303284337",
+        "scripts": "sha256:c0406cbe7873b766931ea1147e74a6a270150d4131d9d13d65db14067937ed0e",
+        "key": "sha256:2b04917baca780c5a5777d809daa6670a066af659f42b7012f9bbc8aa3e67a18"
+      }
+    },
+    {
+      "name": "cargo-binary-with-a-build-script-in-its-build-folder",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0096] A Cargo test binary whose build script ran in Cargo's build folder of its own (named as the target folder), wrote no line that reaches the compiler, and generated a file whose text looks like a placeholder: its run is an entry all the same, named by its package, and the file's path is under its run's name; with the cargo home inside the checkout, a registry crate's source there isn't one, nor a registry crate's vendored into the checkout (its package has a `source`), while a git-ignored source of a path crate outside the workspace is.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/gen/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/gen\"]\n"
+        },
+        {
+          "path": "crates/gen/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"gen\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/gen/build.rs",
+          "kind": "f",
+          "text": "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/gen.rs\"), \"pub const G: &str = \\\"plain\\\";\\n\").unwrap();\n}\n"
+        },
+        {
+          "path": "crates/gen/src/lib.rs",
+          "kind": "f",
+          "text": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n"
+        }
+      ],
+      "units": [
+        "crates/gen/src/lib.rs"
+      ],
+      "sources": [
+        "crates/gen/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/gen/Cargo.toml"
+      ],
+      "reads": [
+        "crates/gen/build.rs",
+        "crates/gen/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [
+          "# env-dep:OUT_DIR=/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out"
+        ],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "buildDir": "/mnt/build",
+          "home": "/home/ci",
+          "cargoHome": "/home/ci/shop/.cargo"
+        }
+      },
+      "buildScripts": {
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "buildDir": "/mnt/build",
+          "home": "/home/ci",
+          "cargoHome": "/home/ci/shop/.cargo"
+        },
+        "runs": [
+          {
+            "packageId": "path+file:///home/ci/shop/crates/gen#0.1.0",
+            "outDir": "/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out",
+            "output": "cargo:rerun-if-changed=build.rs\n"
+          }
+        ],
+        "depInfo": [
+          {
+            "path": "/mnt/build/debug/build/gen-0a1b2c3d4e5f6789/out/gen.rs",
+            "text": "pub const G: &str = \"{hushrun:home}\";\n"
+          },
+          {
+            "path": "/home/ci/shop/.cargo/registry/src/index-1/zlib-sys-1.0.0/src/lib.rs",
+            "text": "pub fn z() {}\n"
+          },
+          {
+            "path": "/home/ci/shop/vendor/zlib/src/lib.rs",
+            "text": "pub fn v() {}\n",
+            "source": "registry+https://github.com/rust-lang/crates.io-index"
+          },
+          {
+            "path": "/home/ci/shop/side/helper/src/gen.rs",
+            "text": "pub const G: &str = \"plain\";\n"
+          }
+        ]
+      },
+      "env": [
+        [
+          "OUT_DIR",
+          "{hushrun:run:path:gen@0.1.0}/out"
+        ]
+      ],
+      "scripts": [
+        "file sha256:4144382bf4ff43af29b7712d7c2d7451f974748d5fb8dd365188f8125196e79d {hushrun:workspace}/side/helper/src/gen.rs",
+        "file sha256:642381814b3406ff3d764afabfb8ec9a7b22111d5e5938e5113a2b09b6675353 {hushrun:run:path:gen@0.1.0}/out/gen.rs",
+        "output {hushrun:run:path:gen@0.1.0}/out"
+      ],
+      "expect": {
+        "reads": "sha256:8352544aa4e6a642c142517cbe6ba83ab1e7dff26d6251ac5e03f02678f33774",
+        "rest": "sha256:3223cfb97391770499629d5b246c1c9652e2bde701ab2da4af884a6b91a01993",
+        "shape": "sha256:475844fd25c8fb1e84e0d57e6c8c50c2efc0c2b7c015e1b20aa35eedcee8e4da",
+        "env": "sha256:acf9a12af897ef19a7c2999af8cad6c3ba2fec1b41c2806323fa613303284337",
+        "scripts": "sha256:4600d49353daf1cf0effa5c09d2060c802faa1a177355af49dbf83348a8d0c70",
+        "key": "sha256:36726a11fa13de4335b90b40d757aca8a51ddba87296a9d303eb3a5306d3a985"
+      }
+    },
+    {
+      "name": "go-package-with-variables",
+      "covers": [
+        "C-31",
+        "C-35"
+      ],
+      "description": "[ADR 0096] A Go package whose tests read variables (its test log's `getenv` lines, one twice): set, set to nothing, unset, values under the home folder and the repository's root replaced, one under neither kept; and GODEBUG, which Go's runtime reads unlogged, always.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "go",
+          "test",
+          "./..."
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "pricing",
+      "files": [
+        {
+          "path": "go.mod",
+          "kind": "f",
+          "text": "module example.com/shop\n\ngo 1.21\n"
+        },
+        {
+          "path": "pricing/pricing.go",
+          "kind": "f",
+          "text": "package pricing\n\nfunc Price(x int) int { return x * 2 }\n"
+        },
+        {
+          "path": "pricing/pricing_test.go",
+          "kind": "f",
+          "text": "package pricing\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestPrice(t *testing.T) {\n\tif os.Getenv(\"HUSHRUN_VECTOR_RATE\") == \"\" && Price(3) != 6 {\n\t\tt.Fatal(\"price\")\n\t}\n}\n"
+        }
+      ],
+      "units": [
+        "pricing/pricing_test.go"
+      ],
+      "sources": [
+        "pricing/pricing.go"
+      ],
+      "rest": [
+        "go.mod"
+      ],
+      "reads": [
+        "pricing/pricing.go",
+        "pricing/pricing_test.go"
+      ],
+      "getenv": {
+        "root": "/home/ci/shop",
+        "log": [
+          "# test log",
+          "getenv HOME",
+          "getenv GOTMPDIR",
+          "getenv TMPDIR",
+          "open /tmp",
+          "getenv HUSHRUN_VECTOR_RATE",
+          "getenv HUSHRUN_VECTOR_EMPTY",
+          "getenv HUSHRUN_VECTOR_UNSET",
+          "getenv PWD",
+          "stat testdata",
+          "getenv HOME"
+        ],
+        "values": {
+          "HOME": "/home/ci",
+          "TMPDIR": "/tmp/",
+          "HUSHRUN_VECTOR_RATE": "2",
+          "HUSHRUN_VECTOR_EMPTY": "",
+          "PWD": "/home/ci/shop/pricing",
+          "GODEBUG": "panicnil=1"
+        }
+      },
+      "env": [
+        [
+          "GODEBUG",
+          "panicnil=1"
+        ],
+        [
+          "GOTMPDIR",
+          null
+        ],
+        [
+          "HOME",
+          "{hushrun:home}"
+        ],
+        [
+          "HUSHRUN_VECTOR_EMPTY",
+          ""
+        ],
+        [
+          "HUSHRUN_VECTOR_RATE",
+          "2"
+        ],
+        [
+          "HUSHRUN_VECTOR_UNSET",
+          null
+        ],
+        [
+          "PWD",
+          "{hushrun:workspace}/pricing"
+        ],
+        [
+          "TMPDIR",
+          "/tmp/"
+        ]
+      ],
+      "expect": {
+        "reads": "sha256:9d7144ed7ba0c99204d03a8b8ed44d3004e61f7e031dbf7dfbf8fc96c2f50150",
+        "rest": "sha256:1f08a7684e4f9f214c7eaa0582bf40e8dc7710e7f49fcb604f44bcb552f8b4c2",
+        "shape": "sha256:560a3525f5cb5d30b011913e250d3697dc700f63d57efffad7787d5c619c360e",
+        "env": "sha256:8c53523fdb169b3919f1c96a8a5d1cdb497a3c815fe789f2a64562d9faa8bc33",
+        "key": "sha256:6d1d4cf4bddc156b0d98ca5540f4e0d70c7115f4b6522e772828fd2df3fff9ac"
+      }
+    },
+    {
+      "name": "go-test-with-variables",
+      "covers": [
+        "C-31",
+        "C-35",
+        "C-39"
+      ],
+      "description": "[ADR 0096] One test of that package, reused one by one: its key holds its package's `env` too.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "go",
+          "test",
+          "./..."
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "pricing",
+      "files": [
+        {
+          "path": "go.mod",
+          "kind": "f",
+          "text": "module example.com/shop\n\ngo 1.21\n"
+        },
+        {
+          "path": "pricing/pricing.go",
+          "kind": "f",
+          "text": "package pricing\n\nfunc Price(x int) int { return x * 2 }\n"
+        },
+        {
+          "path": "pricing/pricing_test.go",
+          "kind": "f",
+          "text": "package pricing\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestPrice(t *testing.T) {\n\tif os.Getenv(\"HUSHRUN_VECTOR_RATE\") == \"\" && Price(3) != 6 {\n\t\tt.Fatal(\"price\")\n\t}\n}\n"
+        }
+      ],
+      "units": [
+        "pricing/pricing_test.go"
+      ],
+      "sources": [
+        "pricing/pricing.go"
+      ],
+      "rest": [
+        "go.mod"
+      ],
+      "reads": [
+        "pricing/pricing.go",
+        "pricing/pricing_test.go"
+      ],
+      "getenv": {
+        "root": "/home/ci/shop",
+        "log": [
+          "# test log",
+          "getenv HOME",
+          "getenv GOTMPDIR",
+          "getenv TMPDIR",
+          "open /tmp",
+          "getenv HUSHRUN_VECTOR_RATE",
+          "getenv HUSHRUN_VECTOR_EMPTY",
+          "getenv HUSHRUN_VECTOR_UNSET",
+          "getenv PWD",
+          "stat testdata",
+          "getenv HOME"
+        ],
+        "values": {
+          "HOME": "/home/ci",
+          "TMPDIR": "/tmp/",
+          "HUSHRUN_VECTOR_RATE": "2",
+          "HUSHRUN_VECTOR_EMPTY": "",
+          "PWD": "/home/ci/shop/pricing",
+          "GODEBUG": "panicnil=1"
+        }
+      },
+      "test": "TestPrice",
+      "env": [
+        [
+          "GODEBUG",
+          "panicnil=1"
+        ],
+        [
+          "GOTMPDIR",
+          null
+        ],
+        [
+          "HOME",
+          "{hushrun:home}"
+        ],
+        [
+          "HUSHRUN_VECTOR_EMPTY",
+          ""
+        ],
+        [
+          "HUSHRUN_VECTOR_RATE",
+          "2"
+        ],
+        [
+          "HUSHRUN_VECTOR_UNSET",
+          null
+        ],
+        [
+          "PWD",
+          "{hushrun:workspace}/pricing"
+        ],
+        [
+          "TMPDIR",
+          "/tmp/"
+        ]
+      ],
+      "expect": {
+        "reads": "sha256:9d7144ed7ba0c99204d03a8b8ed44d3004e61f7e031dbf7dfbf8fc96c2f50150",
+        "rest": "sha256:1f08a7684e4f9f214c7eaa0582bf40e8dc7710e7f49fcb604f44bcb552f8b4c2",
+        "shape": "sha256:560a3525f5cb5d30b011913e250d3697dc700f63d57efffad7787d5c619c360e",
+        "env": "sha256:8c53523fdb169b3919f1c96a8a5d1cdb497a3c815fe789f2a64562d9faa8bc33",
+        "key": "sha256:af8c1a00d44e5aa8663a4ac801a6ea3e9ff207ca7091adc435796d01387e6f93"
+      }
+    },
+    {
+      "name": "go-package-without-variables",
+      "covers": [
+        "C-31",
+        "C-35"
+      ],
+      "description": "[ADR 0096] A Go package whose tests read no variable: its key holds GODEBUG's alone, here set to nothing, and so is never the same key without `env`.",
+      "base": {
+        "check": "unit",
+        "command": [
+          "go",
+          "test",
+          "./..."
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "pricing",
+      "files": [
+        {
+          "path": "go.mod",
+          "kind": "f",
+          "text": "module example.com/shop\n\ngo 1.21\n"
+        },
+        {
+          "path": "pricing/pricing.go",
+          "kind": "f",
+          "text": "package pricing\n\nfunc Price(x int) int { return x * 2 }\n"
+        },
+        {
+          "path": "pricing/pricing_test.go",
+          "kind": "f",
+          "text": "package pricing\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestPrice(t *testing.T) {\n\tif os.Getenv(\"HUSHRUN_VECTOR_RATE\") == \"\" && Price(3) != 6 {\n\t\tt.Fatal(\"price\")\n\t}\n}\n"
+        }
+      ],
+      "units": [
+        "pricing/pricing_test.go"
+      ],
+      "sources": [
+        "pricing/pricing.go"
+      ],
+      "rest": [
+        "go.mod"
+      ],
+      "reads": [
+        "pricing/pricing.go",
+        "pricing/pricing_test.go"
+      ],
+      "getenv": {
+        "root": "/home/ci/shop",
+        "log": [
+          "# test log",
+          "open testdata/in.txt"
+        ],
+        "values": {
+          "HOME": "/home/ci",
+          "GODEBUG": ""
+        }
+      },
+      "env": [
+        [
+          "GODEBUG",
+          ""
+        ]
+      ],
+      "expect": {
+        "reads": "sha256:9d7144ed7ba0c99204d03a8b8ed44d3004e61f7e031dbf7dfbf8fc96c2f50150",
+        "rest": "sha256:1f08a7684e4f9f214c7eaa0582bf40e8dc7710e7f49fcb604f44bcb552f8b4c2",
+        "shape": "sha256:560a3525f5cb5d30b011913e250d3697dc700f63d57efffad7787d5c619c360e",
+        "env": "sha256:fd96c8c4e8374685f25f29f12fd0acac78230a8cd03e1c194448915a18876122",
+        "key": "sha256:e7b1f6efdedf6e74e33dd8a6d6d3661309eed7f7eebc62969db57689d9891c14"
       }
     }
   ]

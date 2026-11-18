@@ -68,9 +68,14 @@ pub use hushrun_core::units::{MOST_TESTS, MOST_UNITS};
 pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
-    /// \[ADR 0095\] What its build read of the environment, as its key holds it (C-31's `env`):
-    /// Cargo's adapter's; `None` for every other, whose keys hold none.
-    pub env: Option<Digest>,
+    /// \[ADR 0095, 0096\] What its key holds of what isn't a file of the scope (C-31's `env` and
+    /// `scripts`): Cargo's adapter's and Go's; nothing for every other, whose keys hold none.
+    pub outside: units::Outside,
+    /// \[ADR 0096\] A Cargo test binary's declared variables, as its build left them.
+    pub declared: Option<store::Declared>,
+    /// \[ADR 0096\] The variables its tests read while they ran, by name: Go's `getenv` lines,
+    /// which the map keeps and a plan keys with their values then. Empty for every other adapter.
+    pub getenv: BTreeSet<String>,
     pub duration_ms: u64,
     /// \[ADR 0080\] Its tests, as the adapter told them, merged over its processes; `None` when it
     /// told none (C-39).
@@ -435,7 +440,7 @@ fn tests_that_passed(
     for (unit, id, lists) in asked {
         let keys = lists
             .iter()
-            .map(|list| keyer.test_key(&unit, &id, &list.list.files))
+            .map(|list| keyer.test_key(&unit, &id, &list.list.files, &list.list.outside))
             .collect();
         keyed.push((unit, id, keys, lists));
     }
@@ -867,7 +872,7 @@ impl Session {
             extras,
             bound,
         } = planning;
-        let keyer = Keyer::new(input.tree, &sets, &input.base, self.adapter.keys_env());
+        let keyer = Keyer::new(input.tree, &sets, &input.base, self.adapter.keys());
         let total = known.len();
         if total == 0 {
             // No test file: nothing to say, and nothing to deselect.
@@ -1108,7 +1113,7 @@ impl Session {
             base: end.base.clone(),
             adapter: self.adapter.word(),
             hints: self.adapter.hints(),
-            keys_env: self.adapter.keys_env(),
+            keys: self.adapter.keys(),
         };
         // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
         // counted, in the write that follows the run's record, and the second such run in a row
@@ -1518,7 +1523,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     if total == 0 || total > MOST_UNITS {
         return None;
     }
-    let keyer = Keyer::new(p.tree, &found.sets, &p.base, adapter.keys_env());
+    let keyer = Keyer::new(p.tree, &found.sets, &p.base, adapter.keys());
     let keyed = keyed(&keyer, &found.known, p.tests);
     let lookup = shared::lookup(p.store, all_keys(&keyed), p.counts).ok()?;
     if !lookup.reuse.allows_reuse() {
@@ -1689,12 +1694,7 @@ fn keyed(keyer: &Keyer<'_>, known: &Known, tests: &Tests) -> Keyed {
             let lists = lists
                 .as_ref()?
                 .iter()
-                .map(|list| {
-                    (
-                        keyer.key(unit, &list.files, list.env.as_ref()),
-                        list.clone(),
-                    )
-                })
+                .map(|list| (keyer.key(unit, &list.files, &list.outside), list.clone()))
                 .collect();
             Some((unit.clone(), lists))
         })
@@ -1707,13 +1707,14 @@ fn all_keys(keyed: &Keyed) -> impl Iterator<Item = Digest> + '_ {
 }
 
 /// \[ADR 0069\] The one list a Cargo test binary is keyed by: what its dep-info says it is built
-/// from, and \[ADR 0095\] what it says the build read of the environment.
-fn built_list(reads: &BTreeSet<String>, env: Option<Digest>) -> List {
+/// from, and \[ADR 0095, 0096\] what it says the build read of the environment and its build
+/// scripts gave it.
+fn built_list(reads: &BTreeSet<String>, outside: units::Outside) -> List {
     List {
         files: reads.clone(),
         reads: reads.clone(),
         dirs: BTreeSet::new(),
-        env,
+        outside,
         from: shared::From::Build,
     }
 }
@@ -2285,12 +2286,18 @@ struct Keyer<'a> {
     base: &'a KeyBase,
     rest: Digest,
     shape: Digest,
-    /// \[ADR 0095\] The adapter's keys all hold `env` ([`adapter::Adapter::keys_env`]).
-    keys_env: bool,
+    /// \[ADR 0095, 0096\] What the adapter's keys all hold of what isn't a file of the scope
+    /// ([`adapter::Adapter::keys`]).
+    keys: adapter::KeysOutside,
 }
 
 impl<'a> Keyer<'a> {
-    fn new(tree: &'a Tree, sets: &'a units::Sets, base: &'a KeyBase, keys_env: bool) -> Keyer<'a> {
+    fn new(
+        tree: &'a Tree,
+        sets: &'a units::Sets,
+        base: &'a KeyBase,
+        keys: adapter::KeysOutside,
+    ) -> Keyer<'a> {
         let rest = tree.digest(sets.files(Set::Rest));
         let shape = units::shape(sets.files(Set::Sources));
         Keyer {
@@ -2299,16 +2306,23 @@ impl<'a> Keyer<'a> {
             base,
             rest,
             shape,
-            keys_env,
+            keys,
         }
     }
 
-    /// A test file's key, from the files it read and \[ADR 0095\] what its build read of the
-    /// environment (`env`, Cargo's alone). For an adapter whose keys hold `env`, a list without
-    /// it keys nothing: a key without it is a key of hushrun before `env`, which no run of this
-    /// one records, and whose passes stand on another build.
-    fn key(&self, unit: &str, reads: &BTreeSet<String>, env: Option<&Digest>) -> Option<Digest> {
-        if self.keys_env && env.is_none() {
+    /// A test file's key, from the files it read and what it holds of what isn't a file of the
+    /// scope (`outside`): \[ADR 0095\] what it read of the environment (`env`, Cargo's and
+    /// \[ADR 0096\] Go's) and \[ADR 0096\] what its build scripts gave it (`scripts`, Cargo's).
+    /// For an adapter whose keys hold one of them, a list without it keys nothing: a key without
+    /// it is a key of hushrun before it, which no run of this one records, and whose passes stand
+    /// on another build or environment.
+    fn key(
+        &self,
+        unit: &str,
+        reads: &BTreeSet<String>,
+        outside: &units::Outside,
+    ) -> Option<Digest> {
+        if !self.keys.held_by(outside) {
             return None;
         }
         let keyed = self.sets.keyed(reads.iter().map(String::as_str));
@@ -2318,14 +2332,24 @@ impl<'a> Keyer<'a> {
             &self.tree.digest(keyed),
             &self.rest,
             &self.shape,
-            env,
+            outside,
         )
         .ok()
     }
 
     /// \[C-39\] A test's key, its id `test` in `unit`, from the files it read (`reads: file`: its
-    /// test file's).
-    fn test_key(&self, unit: &str, test: &str, reads: &BTreeSet<String>) -> Option<Digest> {
+    /// test file's), and \[ADR 0096\] what its test file's key holds of what isn't a file of the
+    /// scope (`outside`), on the same terms as [`Keyer::key`].
+    fn test_key(
+        &self,
+        unit: &str,
+        test: &str,
+        reads: &BTreeSet<String>,
+        outside: &units::Outside,
+    ) -> Option<Digest> {
+        if !self.keys.held_by(outside) {
+            return None;
+        }
         let keyed = self.sets.keyed(reads.iter().map(String::as_str));
         units::test_key(
             self.base,
@@ -2334,6 +2358,7 @@ impl<'a> Keyer<'a> {
             &self.tree.digest(keyed),
             &self.rest,
             &self.shape,
+            outside,
         )
         .ok()
     }
@@ -2358,8 +2383,8 @@ struct StoreAt {
     base: KeyBase,
     adapter: &'static str,
     hints: Hints,
-    /// \[ADR 0095\] Its adapter's keys all hold `env`.
-    keys_env: bool,
+    /// \[ADR 0095, 0096\] What its adapter's keys all hold of what isn't a file of the scope.
+    keys: adapter::KeysOutside,
 }
 
 /// \[C-39, C-40\] What a run reuses one by one, what a test is taken to have read, and what the
@@ -2438,7 +2463,10 @@ fn decide(
     }
     let sets = &sets;
     let tree = end.tree;
-    let keyer = Keyer::new(tree, sets, &end.base, at.keys_env);
+    let keyer = Keyer::new(tree, sets, &end.base, at.keys);
+    let keeps_outside = at.keys == adapter::KeysOutside::Build;
+    // \[ADR 0096\] Go's rows keep the names of the variables its tests read.
+    let keeps_names = at.keys == adapter::KeysOutside::Getenv;
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
     // that shares none.
@@ -2693,8 +2721,10 @@ fn decide(
                     // of it, which no row holds.
                     match plan.chosen.get(unit).map(|list| (list, list.from)) {
                         Some((list, shared::From::Hint(os))) => {
-                            out.mapped
-                                .insert(unit.clone(), shared_row(list, os, sets, tree));
+                            out.mapped.insert(
+                                unit.clone(),
+                                shared_row(list, os, sets, tree, keeps_names),
+                            );
                         }
                         Some((list, shared::From::Build)) => {
                             let seen = hushrun_core::hints::Unit {
@@ -2755,7 +2785,7 @@ fn decide(
         }
         let key = decision
             .recorded()
-            .and_then(|_| keyer.key(unit, &reads, seen.env.as_ref()));
+            .and_then(|_| keyer.key(unit, &reads, &seen.outside));
         if let Some(key) = key {
             file_keys.insert(key);
         }
@@ -2816,7 +2846,9 @@ fn decide(
                 let Some(passed) = test.recorded() else {
                     continue;
                 };
-                let Some(key) = keyer.test_key(unit, id, &test_files(&test_list(id))) else {
+                let Some(key) =
+                    keyer.test_key(unit, id, &test_files(&test_list(id)), &seen.outside)
+                else {
                     continue;
                 };
                 let duration_ms = seen
@@ -2921,9 +2953,25 @@ fn decide(
                         whole.not_followed.clone()
                     },
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
-                    // \[ADR 0095\] What its key held of the environment, which `hushrun why`
-                    // keys it by.
-                    env: seen.env,
+                    // \[ADR 0095, 0096\] What its key held of what isn't a file of the scope,
+                    // which `hushrun why` keys a Cargo binary by, and the variables a Go
+                    // package's tests read, which the next plan keys by their values then.
+                    outside: if keeps_outside {
+                        seen.outside
+                    } else {
+                        units::Outside::default()
+                    },
+                    declared: if keeps_outside {
+                        seen.declared.clone()
+                    } else {
+                        None
+                    },
+                    // What it read this time when it ran, else what its row said.
+                    getenv: match (keeps_names, ran) {
+                        (false, _) => None,
+                        (true, true) => Some(seen.getenv.clone()),
+                        (true, false) => map.units.get(unit).and_then(|b| b.getenv.clone()),
+                    },
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
@@ -2931,17 +2979,19 @@ fn decide(
                 },
             );
         } else if state == State::Reused
-            && seen.env.is_some()
+            && keeps_outside
             && let Some(before) = map.units.get(unit)
-            && before.env != seen.env
+            && (before.outside != seen.outside || before.declared != seen.declared)
         {
-            // \[ADR 0095\] A test binary reused on its build's key keeps its row, with what that
-            // build read of the environment, which the key held: a row an older hushrun wrote
-            // without it gets it, so `hushrun why` keys it as the run did.
+            // \[ADR 0095, 0096\] A test binary reused on its build's key keeps its row, with what
+            // that build read of the environment and its build scripts gave it, which the key
+            // held: a row an older hushrun wrote without them gets them, so `hushrun why` keys it
+            // as the run did.
             out.mapped.insert(
                 unit.clone(),
                 Mapped {
-                    env: seen.env,
+                    outside: seen.outside,
+                    declared: seen.declared.clone(),
                     ..before.clone()
                 },
             );
@@ -3091,7 +3141,13 @@ fn entries(sets: &units::Sets, tree: &Tree, files: &BTreeSet<String>) -> BTreeMa
 
 /// \[C-38\] The row a test file reused on another machine's list gets in this machine's store: the
 /// files of the list its key holds, as they are now, which are as they were when it passed.
-fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree: &Tree) -> Mapped {
+fn shared_row(
+    list: &List,
+    os: hushrun_core::hints::Os,
+    sets: &units::Sets,
+    tree: &Tree,
+    keeps_names: bool,
+) -> Mapped {
     Mapped {
         reads: sets
             .keyed(list.reads.iter().map(String::as_str))
@@ -3103,7 +3159,12 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
             .collect(),
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
-        env: list.env,
+        // \[ADR 0096\] Only Go's lists come from hints, and its `env` is the variables' values
+        // now, never kept. A hint names no variable, and the pass its list keyed by none stood on
+        // a run that read none.
+        outside: units::Outside::default(),
+        declared: None,
+        getenv: keeps_names.then(BTreeSet::new),
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),
         not_kept: None,
@@ -3118,6 +3179,8 @@ fn describe(why: &str) -> String {
         "native" => "native code".into(),
         "no-dep-info" | "target-without-dep-info" => "a build without dep-info".into(),
         "unreadable-dep-info" => "a dep-info file it couldn't read".into(),
+        "unreadable-build-output" => "a build script's output it couldn't read".into(),
+        "unreadable-generated-file" => "a file a build script made that it couldn't read".into(),
         "python-files" => "pytest's python_files".into(),
         "adapter-error" => "an error of hushrun's adapter".into(),
         "outside-scope" => "a file outside the check's scope".into(),

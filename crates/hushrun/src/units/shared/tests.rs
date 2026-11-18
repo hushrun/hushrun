@@ -77,7 +77,7 @@ fn a_test_files_lists_are_its_own_then_the_hints_newest_first_each_once_three_at
         systems: vec![this()],
     };
     let own = mapped(&["t.py", "a.py"], Origin::SeenHere);
-    let lists = lists("t.py", Some(&own), &shared, &t, None).expect("lists");
+    let lists = lists("t.py", Some(&own), &shared, &t, None, None).expect("lists");
     let files: Vec<BTreeSet<String>> = lists.iter().map(|l| l.files.clone()).collect();
     assert_eq!(
         files,
@@ -91,15 +91,17 @@ fn a_test_files_lists_are_its_own_then_the_hints_newest_first_each_once_three_at
     assert!(!lists[0].seen_elsewhere());
     assert_eq!(lists[1].from, From::Hint(this()));
     // No entry here: the hints alone; none either: nothing to key it by.
-    let lists_alone = super::lists("t.py", None, &shared, &t, None).expect("lists");
+    let lists_alone = super::lists("t.py", None, &shared, &t, None, None).expect("lists");
     assert_eq!(lists_alone[0].files, set(&["t.py", "b.py"]));
     assert_eq!(
-        super::lists("other.py", None, &shared, &t, None),
+        super::lists("other.py", None, &shared, &t, None, None),
         Some(Vec::new())
     );
     // A row another machine's list made is that machine's word.
     let kept = mapped(&["t.py", "b.py"], Origin::Shared(this()));
-    assert!(super::lists("t.py", Some(&kept), &shared, &t, None).unwrap()[0].seen_elsewhere());
+    assert!(
+        super::lists("t.py", Some(&kept), &shared, &t, None, None).unwrap()[0].seen_elsewhere()
+    );
 }
 
 // covers: C-38, C-34
@@ -116,7 +118,62 @@ fn an_entry_here_that_wasnt_followed_runs_whatever_the_hints_say() {
         why: "subprocess".into(),
         detail: String::new(),
     });
-    assert_eq!(lists("t.py", Some(&own), &shared, &t, None), None);
+    assert_eq!(lists("t.py", Some(&own), &shared, &t, None, None), None);
+}
+
+// covers: C-38, C-35, C-31
+// \[ADR 0096\] For Go, each list's `env` is the variables this machine's entry says its tests
+// read, with their values now; the build's list and a hint's name none, and key by none; and two
+// lists of the same files with another `env` are two lists.
+#[test]
+fn for_go_each_lists_env_is_the_variables_its_entry_names_with_their_values_now() {
+    let t = tree(&["data/data.go", "data/data_test.go"]);
+    let compiled = set(&["data/data.go", "data/data_test.go"]);
+    let shared = Shared {
+        hints: vec![hint(&[("data", &["data/data.go"])])],
+        received: Vec::new(),
+        systems: vec![this()],
+    };
+    let name = "HUSHRUN_TEST_LISTS_VARIABLE";
+    let getenv = |value: &'static str| {
+        gotest::Getenv::of(std::path::Path::new("/home/dev/shop"), move |n| {
+            (n == name).then(|| value.to_string())
+        })
+    };
+    let mut own = mapped(&["data/data.go"], Origin::SeenHere);
+    own.getenv = Some(set(&[name]));
+    let lists = lists(
+        "data",
+        Some(&own),
+        &shared,
+        &t,
+        Some(&compiled),
+        Some(&getenv("a")),
+    )
+    .expect("lists");
+    assert_eq!(lists.len(), 2, "{lists:?}");
+    assert_eq!(lists[0].from, From::Here(Origin::SeenHere));
+    assert_eq!(lists[0].outside, getenv("a").outside(&set(&[name])));
+    assert_ne!(lists[0].outside, getenv("b").outside(&set(&[name])));
+    // The hint's list has the entry's files and names no variable: another list.
+    assert_eq!(lists[1].from, From::Hint(this()));
+    assert_eq!(lists[1].files, lists[0].files);
+    assert_eq!(lists[1].outside, getenv("a").outside(&BTreeSet::new()));
+    // No entry: the build's list, by none.
+    let alone = super::lists(
+        "data",
+        None,
+        &Shared::default(),
+        &t,
+        Some(&compiled),
+        Some(&getenv("a")),
+    )
+    .expect("lists");
+    assert_eq!(alone.len(), 1);
+    assert_eq!(alone[0].outside, getenv("b").outside(&BTreeSet::new()));
+    // Without a `Getenv`, as for every other adapter, a list holds what the entry kept.
+    let none = super::lists("data", Some(&own), &shared, &t, Some(&compiled), None).unwrap();
+    assert_eq!(none[0].outside, units::Outside::default());
 }
 
 // covers: C-38, C-35
@@ -136,7 +193,7 @@ fn for_go_every_list_holds_what_the_build_is_made_of_which_alone_stands_for_no_e
         received: Vec::new(),
         systems: vec![this()],
     };
-    let lists = lists("data", None, &shared, &t, Some(&compiled)).expect("lists");
+    let lists = lists("data", None, &shared, &t, Some(&compiled), None).expect("lists");
     assert_eq!(lists.len(), 2);
     assert_eq!(lists[0].from, From::Build);
     assert_eq!(lists[0].files, compiled);
@@ -270,7 +327,7 @@ fn another_systems_list_kept_here_keys_nothing_once_no_rule_names_that_system() 
         systems: vec![other],
         ..Shared::default()
     };
-    let lists_then = lists("t.py", Some(&kept), &reading_it, &t, None).expect("lists");
+    let lists_then = lists("t.py", Some(&kept), &reading_it, &t, None, None).expect("lists");
     assert_eq!(lists_then.len(), 1);
     assert_eq!(lists_then[0].from, From::Here(Origin::Shared(other)));
     // The rule is gone: this machine reads its own system's, and the entry is as if it weren't.
@@ -279,12 +336,12 @@ fn another_systems_list_kept_here_keys_nothing_once_no_rule_names_that_system() 
         received: Vec::new(),
         systems: vec![this()],
     };
-    let lists_now = lists("t.py", Some(&kept), &own_system, &t, None).expect("lists");
+    let lists_now = lists("t.py", Some(&kept), &own_system, &t, None, None).expect("lists");
     assert_eq!(lists_now.len(), 1, "{lists_now:?}");
     assert_eq!(lists_now[0].files, set(&["t.py", "b.py"]));
     assert_eq!(lists_now[0].from, From::Hint(this()));
     // This system's own shared list still counts.
     let ours = mapped(&["t.py", "a.py"], Origin::Shared(this()));
-    let lists_ours = lists("t.py", Some(&ours), &own_system, &t, None).expect("lists");
+    let lists_ours = lists("t.py", Some(&ours), &own_system, &t, None, None).expect("lists");
     assert_eq!(lists_ours[0].from, From::Here(Origin::Shared(this())));
 }

@@ -300,7 +300,13 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         return out;
     }
     // \[C-38\] The lists a run would key it by: this machine's entry, then other machines'.
-    let lists = shared::lists(&unit, own, &shared, input.tree, None).unwrap_or_default();
+    // \[ADR 0096\] Go's keys take the values, now, of the variables its tests read: COMMAND's
+    // assignments over this environment, as a run's would.
+    let assigned = super::command::assignments(&input.base.command);
+    let getenv = (adapter.keys() == super::adapter::KeysOutside::Getenv)
+        .then(|| super::gotest::Getenv::of_command(input.root, &assigned));
+    let lists =
+        shared::lists(&unit, own, &shared, input.tree, None, getenv.as_ref()).unwrap_or_default();
     if lists.is_empty() {
         says(
             &mut out,
@@ -310,14 +316,37 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     }
-    // \[ADR 0095\] A key that holds what the build read of the environment can't be made from a
-    // list without it: a row an older hushrun wrote, or a hint.
-    if adapter.keys_env() && lists.iter().all(|l| l.env.is_none()) {
+    // \[ADR 0095, 0096\] A key that holds what the build read of the environment and its build
+    // scripts gave it can't be made from a list without them: a row an older hushrun wrote.
+    if adapter.keys() == super::adapter::KeysOutside::Build
+        && lists.iter().all(|l| !adapter.keys().held_by(&l.outside))
+    {
         says(
             &mut out,
             Decision::Runs,
             "build-unknown",
-            "this machine doesn't know what its last build here read of the environment, which its key holds, so it runs; its next run here records it".into(),
+            "this machine doesn't know what its last build here read of the environment and its build scripts gave it, which its key holds, so it runs; its next run here records it".into(),
+        );
+        return out;
+    }
+    // \[ADR 0096\] A Cargo binary's key holds the values of the variables its build scripts
+    // declare, which `why` takes from this environment and COMMAND's assignments, as the next
+    // build would, and compares with its last build's.
+    if adapter.keys() == super::adapter::KeysOutside::Build
+        && let Some(declared) = own.and_then(|mapped| mapped.declared.as_ref())
+        && super::cargo::declared_values(&declared.names, &|name| {
+            super::command::variable(&assigned, name)
+        }) != declared.values
+    {
+        let names: Vec<&str> = declared.names.iter().map(String::as_str).collect();
+        says(
+            &mut out,
+            Decision::Runs,
+            "declared-changed",
+            format!(
+                "a variable a build script of its build declares has another value now than in its last build here ({}), which its key holds, so it runs",
+                names.join(", ")
+            ),
         );
         return out;
     }
@@ -325,7 +354,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         Some(_) => lists[0].files.clone(),
         None => BTreeSet::new(),
     };
-    let keyer = Keyer::new(input.tree, &sets, &input.base, adapter.keys_env());
+    let keyer = Keyer::new(input.tree, &sets, &input.base, adapter.keys());
     // \[C-39\] A test file one of whose tests wasn't followed the last time it ran here isn't
     // reused whole, whatever the check's unit is now: its own pass may stand on a run before that.
     let unfollowed = own.and_then(|mapped| {
@@ -336,7 +365,7 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
     });
     let keys: Vec<Option<hushrun_core::digest::Digest>> = lists
         .iter()
-        .map(|l| keyer.key(&unit, &l.files, l.env.as_ref()))
+        .map(|l| keyer.key(&unit, &l.files, &l.outside))
         .collect();
     let changes = changes(&map, &sets, input.tree, &unit, &reads);
 
@@ -614,7 +643,10 @@ fn explain_test(
     }
     let keys: Vec<Option<hushrun_core::digest::Digest>> = lists
         .iter()
-        .map(|l| at.keyer.test_key(at.unit, at.id, &l.list.files))
+        .map(|l| {
+            at.keyer
+                .test_key(at.unit, at.id, &l.list.files, &l.list.outside)
+        })
         .collect();
     let looked = match (&input.results, keys.iter().any(Option::is_some)) {
         (Ok(results), true) => {
@@ -847,6 +879,20 @@ fn explain_change(
         says(out, Decision::Runs, "not-kept", why.into());
         return;
     }
+    // \[ADR 0096\] A Go row an older hushrun wrote says nothing of the variables its tests read,
+    // which every Go key holds now: no pass recorded before counts.
+    let row = map.units.get(unit);
+    if adapter.keys() == super::adapter::KeysOutside::Getenv
+        && row.is_some_and(|m| m.getenv.is_none())
+    {
+        says(
+            out,
+            Decision::Runs,
+            "variables-unknown",
+            "this machine doesn't know which variables its tests read when it last ran here, which every key of a Go package holds now, so no pass recorded before counts; its next run here records them".into(),
+        );
+        return;
+    }
     says(
         out,
         Decision::Runs,
@@ -857,6 +903,21 @@ fn explain_change(
         0,
         "its last result there didn't count here, or is gone: this machine forgets a result 30 days after its run".into(),
     );
+    // \[ADR 0096\] A Go package's key holds the values of the variables its tests read, which the
+    // store keeps by name only: one may have another value now.
+    if let Some(read) = row
+        .and_then(|m| m.getenv.as_ref())
+        .filter(|read| !read.is_empty())
+    {
+        let names: Vec<&str> = read.iter().map(String::as_str).collect();
+        out.detail.insert(
+            1,
+            format!(
+                "or a variable its tests read has another value now than when it passed: its key holds the value of each ({})",
+                names.join(", ")
+            ),
+        );
+    }
 }
 
 /// The shortest path of direct edges the store holds from `unit` to `file` (for Go, to its
