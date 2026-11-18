@@ -323,8 +323,10 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             .iter()
             .find(|(_, row)| row.state == State::NotObserved)
     });
-    let keys: Vec<Option<hushrun_core::digest::Digest>> =
-        lists.iter().map(|l| keyer.key(&unit, &l.files)).collect();
+    let keys: Vec<Option<hushrun_core::digest::Digest>> = lists
+        .iter()
+        .map(|l| keyer.key(&unit, &l.files, l.env.as_ref()))
+        .collect();
     let changes = changes(&map, &sets, input.tree, &unit, &reads);
 
     let looked = match (&input.results, keys.iter().any(Option::is_some)) {

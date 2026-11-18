@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
+  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `cargoHome`, `home`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree.",
   "vectors": [
     {
       "name": "pytest-unit",
@@ -390,6 +390,218 @@
         "key": "sha256:1bee80c94def519f7f82d587371e67902624f65f771a226d4431741aa517f9f2"
       },
       "test": "test_prix[déjà vu]"
+    },
+    {
+      "name": "cargo-binary-with-variables",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0095] A Cargo test binary whose build read variables: set, set to nothing, unset, escaped as rustc escapes them, under each folder a root's placeholder replaces (the checkout, the target folder, the cargo home, the home folder), next to the checkout, outside every root, and text that looks like a placeholder; a comment that isn't an env-dep line names none.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/located/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/located\"]\n"
+        },
+        {
+          "path": "crates/located/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"located\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/located/build.rs",
+          "kind": "f",
+          "text": "fn main() {}\n"
+        },
+        {
+          "path": "crates/located/src/lib.rs",
+          "kind": "f",
+          "text": "pub const DIR: &str = env!(\"CARGO_MANIFEST_DIR\");\n"
+        }
+      ],
+      "units": [
+        "crates/located/src/lib.rs"
+      ],
+      "sources": [
+        "crates/located/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/located/Cargo.toml"
+      ],
+      "reads": [
+        "crates/located/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [
+          "# env-dep:CARGO_MANIFEST_DIR=/home/ci/shop/crates/located",
+          "# env-dep:CARGO_PKG_VERSION=0.1.0",
+          "# env-dep:CONFIG=/home/ci/.config/located",
+          "# env-dep:EMPTY=",
+          "# env-dep:FLAVOR",
+          "# env-dep:LOOKS={hushrun:home}",
+          "# env-dep:NEAR=/home/ci/shop2/x:/home/ci/shop",
+          "# env-dep:OUT_DIR=/home/ci/shop/target/debug/build/located-1a2b/out",
+          "# env-dep:SDK=/opt/sdk",
+          "# env-dep:TOOLS=/usr/local/cargo/bin",
+          "# env-dep:WEIRD=a b\\\\c\\nd=e",
+          "# checksum:not-an-env-dep"
+        ],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/usr/local/cargo",
+          "home": "/home/ci"
+        }
+      },
+      "env": [
+        [
+          "CARGO_MANIFEST_DIR",
+          "{hushrun:workspace}/crates/located"
+        ],
+        [
+          "CARGO_PKG_VERSION",
+          "0.1.0"
+        ],
+        [
+          "CONFIG",
+          "{hushrun:home}/.config/located"
+        ],
+        [
+          "EMPTY",
+          ""
+        ],
+        [
+          "FLAVOR",
+          null
+        ],
+        [
+          "LOOKS",
+          "{hushrun:}home}"
+        ],
+        [
+          "NEAR",
+          "{hushrun:home}/shop2/x:{hushrun:workspace}"
+        ],
+        [
+          "OUT_DIR",
+          "{hushrun:target-dir}/debug/build/located-1a2b/out"
+        ],
+        [
+          "SDK",
+          "/opt/sdk"
+        ],
+        [
+          "TOOLS",
+          "{hushrun:cargo-home}/bin"
+        ],
+        [
+          "WEIRD",
+          "a b\\c\nd=e"
+        ]
+      ],
+      "expect": {
+        "reads": "sha256:16c9e858003f91b00f8bf4ef8504ae1d40f655bd6e4ec053a9d899f4a2116baa",
+        "rest": "sha256:821ae0f4d30ab7922f64b5507bd98f73b2c56643edef9d2021f5a8f638492815",
+        "shape": "sha256:5b3f85500968b23e01cc47668cac48324cffb402449c48674d30aef769389c02",
+        "env": "sha256:58ed348f895ec916e7f429812f3309e71e41cda766ebcb78b6b02337b6585044",
+        "key": "sha256:8b1973fcd88f1e2918a52253df2b0cb5380e7974c87222775a3bffc372fac3d6"
+      }
+    },
+    {
+      "name": "cargo-binary-without-variables",
+      "covers": [
+        "C-31"
+      ],
+      "description": "[ADR 0095] A Cargo test binary whose build read no variable: its key still holds env, the SHA-256 of nothing, and so is never the same key without it.",
+      "base": {
+        "check": "test",
+        "command": [
+          "cargo",
+          "nextest",
+          "run",
+          "--workspace"
+        ],
+        "cwd": "",
+        "scope": "default"
+      },
+      "unit": "crates/located/src/lib.rs",
+      "files": [
+        {
+          "path": "Cargo.lock",
+          "kind": "f",
+          "text": "version = 4\n"
+        },
+        {
+          "path": "Cargo.toml",
+          "kind": "f",
+          "text": "[workspace]\nmembers = [\"crates/located\"]\n"
+        },
+        {
+          "path": "crates/located/Cargo.toml",
+          "kind": "f",
+          "text": "[package]\nname = \"located\"\nversion = \"0.1.0\"\n"
+        },
+        {
+          "path": "crates/located/build.rs",
+          "kind": "f",
+          "text": "fn main() {}\n"
+        },
+        {
+          "path": "crates/located/src/lib.rs",
+          "kind": "f",
+          "text": "pub const DIR: &str = env!(\"CARGO_MANIFEST_DIR\");\n"
+        }
+      ],
+      "units": [
+        "crates/located/src/lib.rs"
+      ],
+      "sources": [
+        "crates/located/build.rs"
+      ],
+      "rest": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/located/Cargo.toml"
+      ],
+      "reads": [
+        "crates/located/src/lib.rs"
+      ],
+      "envDeps": {
+        "lines": [],
+        "folders": {
+          "root": "/home/ci/shop",
+          "targetDir": "/home/ci/shop/target",
+          "cargoHome": "/usr/local/cargo",
+          "home": "/home/ci"
+        }
+      },
+      "env": [],
+      "expect": {
+        "reads": "sha256:16c9e858003f91b00f8bf4ef8504ae1d40f655bd6e4ec053a9d899f4a2116baa",
+        "rest": "sha256:821ae0f4d30ab7922f64b5507bd98f73b2c56643edef9d2021f5a8f638492815",
+        "shape": "sha256:5b3f85500968b23e01cc47668cac48324cffb402449c48674d30aef769389c02",
+        "env": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "key": "sha256:654112ed353de7beae75ce5b1169f73a31b3e67c7e03435f5629b942ac4479af"
+      }
     }
   ]
 }

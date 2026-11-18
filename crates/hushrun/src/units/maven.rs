@@ -1091,6 +1091,7 @@ fn decide_class(c: &ClassSeen, run_failed: bool) -> Option<super::Seen> {
     }
     let skipped = class_skipped || tests.values().any(|t| t.skipped && !t.deselected);
     Some(super::Seen {
+        env: None,
         facts: Facts {
             complete: complete && !open,
             failed: class_failed,

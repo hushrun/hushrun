@@ -68,6 +68,9 @@ pub use hushrun_core::units::{MOST_TESTS, MOST_UNITS};
 pub struct Seen {
     pub facts: Facts,
     pub reads: BTreeSet<String>,
+    /// \[ADR 0095\] What its build read of the environment, as its key holds it (C-31's `env`):
+    /// Cargo's adapter's; `None` for every other, whose keys hold none.
+    pub env: Option<Digest>,
     pub duration_ms: u64,
     /// \[ADR 0080\] Its tests, as the adapter told them, merged over its processes; `None` when it
     /// told none (C-39).
@@ -1685,7 +1688,12 @@ fn keyed(keyer: &Keyer<'_>, known: &Known, tests: &Tests) -> Keyed {
             let lists = lists
                 .as_ref()?
                 .iter()
-                .map(|list| (keyer.key(unit, &list.files), list.clone()))
+                .map(|list| {
+                    (
+                        keyer.key(unit, &list.files, list.env.as_ref()),
+                        list.clone(),
+                    )
+                })
                 .collect();
             Some((unit.clone(), lists))
         })
@@ -1698,12 +1706,13 @@ fn all_keys(keyed: &Keyed) -> impl Iterator<Item = Digest> + '_ {
 }
 
 /// \[ADR 0069\] The one list a Cargo test binary is keyed by: what its dep-info says it is built
-/// from.
-fn built_list(reads: &BTreeSet<String>) -> List {
+/// from, and \[ADR 0095\] what it says the build read of the environment.
+fn built_list(reads: &BTreeSet<String>, env: Option<Digest>) -> List {
     List {
         files: reads.clone(),
         reads: reads.clone(),
         dirs: BTreeSet::new(),
+        env,
         from: shared::From::Build,
     }
 }
@@ -2290,7 +2299,9 @@ impl<'a> Keyer<'a> {
         }
     }
 
-    fn key(&self, unit: &str, reads: &BTreeSet<String>) -> Option<Digest> {
+    /// A test file's key, from the files it read and \[ADR 0095\] what its build read of the
+    /// environment (`env`, Cargo's alone).
+    fn key(&self, unit: &str, reads: &BTreeSet<String>, env: Option<&Digest>) -> Option<Digest> {
         let keyed = self.sets.keyed(reads.iter().map(String::as_str));
         units::unit_key(
             self.base,
@@ -2298,6 +2309,7 @@ impl<'a> Keyer<'a> {
             &self.tree.digest(keyed),
             &self.rest,
             &self.shape,
+            env,
         )
         .ok()
     }
@@ -2730,7 +2742,9 @@ fn decide(
         {
             reads.extend(before.reads.keys().cloned());
         }
-        let key = decision.recorded().and_then(|_| keyer.key(unit, &reads));
+        let key = decision
+            .recorded()
+            .and_then(|_| keyer.key(unit, &reads, seen.env.as_ref()));
         if let Some(key) = key {
             file_keys.insert(key);
         }
@@ -2896,6 +2910,9 @@ fn decide(
                         whole.not_followed.clone()
                     },
                     dirs: dirs.get(unit).cloned().unwrap_or_default(),
+                    // \[ADR 0095\] What its key held of the environment, which `hushrun why`
+                    // keys it by.
+                    env: seen.env,
                     origin: Origin::SeenHere,
                     tests: tests_rows,
                     // \[C-37\] Why it kept no result of its own, as the one function decided it.
@@ -3060,6 +3077,7 @@ fn shared_row(list: &List, os: hushrun_core::hints::Os, sets: &units::Sets, tree
             .collect(),
         not_followed: BTreeSet::new(),
         dirs: list.dirs.clone(),
+        env: list.env,
         origin: Origin::Shared(os),
         tests: BTreeMap::new(),
         not_kept: None,

@@ -1261,6 +1261,184 @@ fn rust_test_binaries_are_reused_and_an_audit_catches_a_missed_dependency() {
     );
 }
 
+/// \[ADR 0095\] A workspace whose test binaries read variables at compile time: `flavored` reads
+/// `HUSHRUN_FIXTURE_FLAVOR` with `option_env!`, `scripted` reads `HUSHRUN_FIXTURE_TONE`, which its
+/// build script sets with `cargo:rustc-env` from `HUSHRUN_FIXTURE_MOOD`; `steady` and `other` read
+/// none.
+fn env_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (".gitignore", "target/\n"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/flavored\", \"crates/scripted\", \"crates/steady\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/flavored/Cargo.toml",
+            "[package]\nname = \"flavored\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/flavored/src/lib.rs",
+            "pub const FLAVOR: Option<&str> = option_env!(\"HUSHRUN_FIXTURE_FLAVOR\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn flavor() { assert_ne!(super::FLAVOR, Some(\"\")); }\n}\n",
+        ),
+        (
+            "crates/scripted/Cargo.toml",
+            "[package]\nname = \"scripted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/scripted/build.rs",
+            "fn main() {\n    println!(\"cargo:rerun-if-env-changed=HUSHRUN_FIXTURE_MOOD\");\n    let mood = std::env::var(\"HUSHRUN_FIXTURE_MOOD\").unwrap_or_else(|_| \"calm\".into());\n    println!(\"cargo:rustc-env=HUSHRUN_FIXTURE_TONE={mood}\");\n}\n",
+        ),
+        (
+            "crates/scripted/src/lib.rs",
+            "pub const TONE: &str = env!(\"HUSHRUN_FIXTURE_TONE\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn tone() { assert!(!super::TONE.is_empty()); }\n}\n",
+        ),
+        (
+            "crates/steady/Cargo.toml",
+            "[package]\nname = \"steady\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/steady/src/lib.rs",
+            "pub fn one() -> u32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() { assert_eq!(super::one(), 1); }\n}\n",
+        ),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]
+}
+
+/// [`env_files`], with its lockfile committed.
+fn env_repo() -> Repo {
+    let r = Repo::new(&env_files());
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+    r
+}
+
+const NEXTEST: [&str; 8] = [
+    "run",
+    "test",
+    "--",
+    "cargo",
+    "nextest",
+    "run",
+    "--workspace",
+    "--locked",
+];
+
+/// `crates/other/src/lib.rs` edited, its `n`-th version: a change no other binary reads, so the
+/// check's own key misses and the others' keys are what decide.
+fn edit_other(r: &Repo, n: u32) {
+    r.write(
+        "crates/other/src/lib.rs",
+        &format!(
+            "pub fn two() -> u32 {{ 2 + {n} - {n} }}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn two() {{ assert_eq!(super::two(), 2); }}\n}}\n"
+        ),
+    );
+}
+
+// covers: C-31, C-34
+// A test binary compiled with another value of a variable it read with `option_env!` isn't
+// reused: Cargo rebuilt it, and its key holds the variables its build read. The same value again
+// reuses it.
+#[test]
+fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let r = env_repo();
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+
+    // Unset, then set: `flavored` runs with `other`; `scripted` and `steady` could be reused,
+    // and one of them is audited.
+    edit_other(&r, 1);
+    let set = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_FLAVOR", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+    );
+    let units = r.newest_result()["units"].clone();
+    assert_eq!(
+        units,
+        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
+    );
+
+    // Another value runs it again.
+    edit_other(&r, 2);
+    let other = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_FLAVOR", "sweet")]);
+    assert_eq!(other.code, 0, "{}", other.stderr);
+    assert_eq!(
+        other.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+    );
+
+    // The same value as the run before: its pass on that value counts.
+    edit_other(&r, 3);
+    let same = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_FLAVOR", "sweet")]);
+    assert_eq!(same.code, 0, "{}", same.stderr);
+    assert_eq!(
+        same.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+    );
+    // \[C-37\] `hushrun why` keys it as the run does: with what its last build here read.
+    let why = r.run(&["why", "test", "crates/flavored/src/lib.rs"], &[]);
+    assert_eq!(why.code, 0, "{}", why.stderr);
+    assert!(
+        why.stdout.starts_with(
+            "crates/flavored/src/lib.rs would be reused: it passed on the files it read"
+        ),
+        "{}",
+        why.stdout
+    );
+}
+
+// covers: C-31, C-34
+// A build script that sets another value with `cargo:rustc-env` reruns the test binary that reads
+// it, though no file it was built from changed: here the script sets what it read from the
+// environment, a variable the binary itself never read.
+#[test]
+fn a_variable_a_build_script_sets_changing_runs_the_test_binary_that_read_it_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let r = env_repo();
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+
+    edit_other(&r, 1);
+    let changed = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_MOOD", "loud")]);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        changed.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
+    );
+    let units = r.newest_result()["units"].clone();
+    assert_eq!(
+        units,
+        json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
+    );
+}
+
 /// Every file under `dir` with its length and time, to tell that nothing was written.
 fn snapshot(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let mut out = Vec::new();
