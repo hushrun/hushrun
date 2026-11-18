@@ -919,7 +919,7 @@ impl Relay {
                     if let Some(untrusted) = policy.untrusted {
                         state.say(format!(
                             "build: this job reads the repository's trusted blocks and writes none: {}",
-                            untrusted_words(untrusted)
+                            untrusted_words(untrusted, self.is_gitlab_job())
                         ));
                     }
                     // B-25: the org shares, and its plan sets its storage by contract alone,
@@ -2689,7 +2689,6 @@ fn prefetched(class: blocks::Class) -> bool {
     )
 }
 
-/// Why a CI job on a listed branch isn't trusted, in plain words (the policy's reason word).
 /// The summary's line for shared `observe` (B-20, B-33): how many blocks built here were compared
 /// with the shared store's copy, and how many differed, which are reported and not reused here
 /// for `keep_days`.
@@ -2706,10 +2705,18 @@ fn observed_line(compared: u64, differed: u64, keep_days: u32) -> String {
     )
 }
 
-pub(crate) fn untrusted_words(why: blocks::Untrusted) -> &'static str {
+/// Why a CI job on a listed branch isn't trusted, in plain words: the one place that says each
+/// reason. `gitlab_job`: the run's credential is a GitLab job's ID token, which is what makes the
+/// backend judge it by gitlab.com's rule (`build_trust`'s `gitlab`); only `event` differs, since a
+/// listed branch on gitlab.com trusts a push, and a schedule, web or API pipeline only where the
+/// project's admin chose the dashboard's Trust pipelines started by a person.
+pub(crate) fn untrusted_words(why: blocks::Untrusted, gitlab_job: bool) -> &'static str {
     match why {
         blocks::Untrusted::Repository => {
             "the repository's owner isn't the one an admin confirmed (transferred, or made again)"
+        }
+        blocks::Untrusted::Event if gitlab_job => {
+            "its pipeline isn't a push, nor a schedule, web or API run the project trusts (Trust pipelines started by a person)"
         }
         blocks::Untrusted::Event => {
             "its event isn't a push or a schedule, nor a dispatch the repository allows"
