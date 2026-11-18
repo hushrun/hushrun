@@ -416,8 +416,6 @@ pub enum Untrusted {
     /// The repository's owner id isn't the one an admin confirmed.
     Repository,
     /// The event isn't `push` or `schedule`, nor a `workflow_dispatch` the repository allows.
-    /// gitlab.com: the pipeline isn't a `push`, nor a `schedule`, `web` or `api` one the project
-    /// trusts (pipelines started by a person).
     Event,
     /// The job names a deployment environment.
     Environment,
