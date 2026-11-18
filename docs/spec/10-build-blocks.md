@@ -359,8 +359,11 @@ digits>`, that leads to the toolchain (to its view without sources where there i
 so that the linker, which names each object by the path it is given, names the standard
 library's objects from the output folder too and the UUID is the same wherever the toolchain is
 installed. The link is one per toolchain, so two toolchains building into one target folder
-never share it; a call that finds it leading elsewhere makes it again under a name of its own
-and renames it into place, before the compile; paths under it are paths under the toolchain
+never share it; a call that finds none makes it in place, which replaces nothing, so that the
+compiles that start at once and all find it missing make it once and a link that is right is
+never renamed over (on macOS 26 a readlink racing a rename over its link fails now and then); a
+call that finds it leading elsewhere makes it again under a name of its own and renames it into
+place, before the compile; paths under it are paths under the toolchain
 (B-8, B-11). The name is the wrapper's own and is only ever a link: a folder found in its place
 (a target folder copied by a tool that followed the link, something planted) would be the
 sysroot rustc reads, so it is removed with what it holds and the link made; a file there is
