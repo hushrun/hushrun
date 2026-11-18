@@ -50,10 +50,15 @@ graph holds (every one the build compiled when there is no graph). Each entry is
   the script printed them, a line feed and the line as `KEY=VALUE` without `cargo:` or `cargo::`.
   Those lines are `rustc-cfg`, `rustc-flags`, `rustc-link-lib`, `rustc-link-search`,
   `rustc-link-arg` and its `-bins`, `-bin`, `-tests`, `-examples`, `-benches` and `-cdylib` forms,
-  and `rustc-cdylib-link-arg`;
-- **a file the build made that a compile read**: a file the dep-info of the closure names
+  and `rustc-cdylib-link-arg`; then, for each variable the output declares with
+  `rerun-if-env-changed`, sorted, each once, a line feed, `rerun-if-env-changed=`, its name and,
+  when it is set, `=` and its value in COMMAND's environment (its assignments over hushrun's, as
+  every tool the adapter starts gets it), roots replaced;
+- **a file a compile read that no file of the scope is**: a file the dep-info of the closure names
   (its `reads`' files and those of the crates outside the workspace) under Cargo's target folder or
-  its build folder, `file `, the SHA-256 of its bytes as `sha256:<hex>`, a space and its path.
+  its build folder (one the build made), or in the checkout but outside the scope (a git-ignored
+  source a build script or another tool wrote), `file `, the SHA-256 of its text with the roots
+  replaced when it is UTF-8 (else of its bytes) as `sha256:<hex>`, a space and its path.
 
 In each, the checkout's folders are replaced exactly as ADR 0095 replaces them in `env`
 (`Roots::of_checkout`, `to_placeholders`): the same roots, the same function. The entries are
@@ -70,8 +75,9 @@ binary by what its last build here held, which the store keeps beside `env` (bel
 **Why these lines, and not the whole file.** The file holds lines that don't change the binary
 and do change between machines or runs:
 
-- `rerun-if-changed` and `rerun-if-env-changed` say when Cargo reruns the script, not what it
-  built; their paths may be absolute and so name the machine.
+- `rerun-if-changed` says when Cargo reruns the script, not what it built; its paths may be
+  absolute and so name the machine. `rerun-if-env-changed` is kept as the variables' values
+  (below), not as the line.
 - `warning` (and `error`, which fails the build) may print anything, a time or a folder included.
 - `metadata` (and the old `cargo:KEY=VALUE` for any other key) reaches only the build scripts of
   dependents, as `DEP_<links>_<KEY>`: what those print is keyed in their own entries.
@@ -90,6 +96,26 @@ A member of its own can't collide with `env`, keeps `unit_env` meaning what ADR 
 means, and lets a store that knows `env` but not `scripts` (ADR 0095's build) be told apart:
 a Cargo list that lacks either keys nothing, and `hushrun why` says the binary's last build here
 isn't known, as for a row without `env`.
+
+**What a script read: the variables it declares.** A build script that compiles C into `OUT_DIR`
+(by hand or with the `cc` crate) prints the same `rustc-link-search` and `rustc-link-lib` lines
+whatever flags it compiled with, and no dep-info names the library, so its lines alone left the
+binary's key the same when a variable changed the library (a review showed it, `cc`'s `CC` and
+`CFLAGS` being the common case). The variables a script declares with `rerun-if-env-changed` are
+exactly those Cargo reruns it on, and `cc` declares every one it reads: keying their values keys
+what the script read of the environment, as `env` keys what rustc read. It covers a file in
+`OUT_DIR` read at run time too, when the script that wrote it declared what it wrote it from. The
+value is looked up as `env`'s folders are (`command::variable`, the one lookup), so the plan and
+the reading after COMMAND key alike; unset and set to nothing are two values.
+
+**A file of the checkout outside the scope.** A dep-info names a git-ignored source (prost,
+bindgen or a script writing into `src/`) by its path in the checkout, but no file of the scope is
+it, so `reads` skipped it. It is keyed by content as a file the build made is.
+
+**A file's text, roots replaced.** A generated file that names a folder of the machine (`built`
+and `shadow-rs` write the package's folder and the compiler's path) would key per machine by its
+bytes; its text, when it is UTF-8, is hashed with the same roots replaced as `env`'s values, by the
+same function, so CI and a laptop agree. A file that isn't UTF-8 is hashed as it is.
 
 **A generated file's path.** It is under the target or build folder, `{hushrun:target-dir}` with
 roots replaced, and holds Cargo's hash of the script's run (`build/<package>-<hash>/out/…`). That
@@ -121,10 +147,13 @@ nothing is a value. This is Go's rule, `computeTestInputsID`'s, with Go's proces
 being COMMAND's.
 
 **Where the names live.** As for files, the map holds the list and the key takes what is current:
-this machine's store keeps the names a package's tests read when it last ran here, one row each in
-a new table, `unit_getenv`, and every key, the plan's before COMMAND, the record's after it and
+this machine's store keeps the names a package's tests read when it last ran here, one row a
+package in a new table, `unit_getenv`, its names a JSON array (`[]` when they read none, so a row
+an older hushrun wrote, which has none, is told apart from a package that read nothing), and every
+key, the plan's before COMMAND, the record's after it and
 `hushrun why`'s, takes their values from the environment it is computed in, by one function
-(`gotest::Getenv::outside`). The store never keeps a value. A package whose tests were left out
+(`gotest::Getenv::outside`), from a lookup the caller gives (`Getenv::of_command`: COMMAND's
+assignments over hushrun's). The store never keeps a value. A package whose tests were left out
 one by one (C-39) keys by the names this run's log gave and those its last run here kept, as it
 does for the files they opened.
 
@@ -146,12 +175,39 @@ machine this changes nothing but one case: `HOME` itself moved to another folder
 cache and build cache aren't roots: they need `go env`, and `hushrun why` starts no tool; under the
 home folder by default, they are replaced as part of it. `TMPDIR` isn't a root either (below).
 
+### What isn't keyed
+
+These still reuse a pass wrongly, or miss, and are left as they are:
+
+- **A file a test reads at run time that no rule names**, such as one a build script wrote into
+  `OUT_DIR` from something it didn't declare (a script that declares no variable is rerun by Cargo
+  only when its package's files change, and those are keyed). Rust has no log of what a test
+  binary opens, as Go does.
+- **A variable a Go package reads while it initializes**: a package-level initializer (`var x =
+  os.Getenv(…)`), an `init` function, or `TestMain` before `m.Run`. Go starts its test log only when
+  the tests start, so the log never names them, and Go's own test cache has the same hole. A
+  package with a `TestMain` is `not observed` already (C-35); the others are reused.
+- **What Go's build flags change**: `GOFLAGS` (`-ldflags`, `-tags` given there), `CGO_*`,
+  `GOEXPERIMENT`. Go's cache keys them through the test binary's build ID; hushrun's key holds
+  COMMAND's own flags but not these. That gap was there before this decision (the Go side of B2).
+- A variable a proc macro reads with `std::env`, and a Cargo configuration's `[env]` values, which
+  Cargo gives a build script without them being in COMMAND's environment (the configuration file is
+  in the rest set).
+
+And one wrong miss: **a path package outside the workspace's root**. Cargo's hash of its build
+script's run holds its path, so `OUT_DIR` in its `output` entry differs between two checkouts at
+different paths, and their binaries never share a key; a member's or a registry crate's don't.
+A folder named after a flag with no separator before it (`-I/home/ci/inc`) isn't replaced, as
+B-8 replaces a root only where it starts a path, so a value that holds one keys per machine.
+
 ## Consequences
 
-- The wrong reuses are gone: a binary whose build script gave it another cfg, another link
-  argument or another generated file runs, and so does a Go package, or a Go test, whose tests read
-  another value of a variable, or a variable newly set, unset or set to nothing. The same values
-  key the same binary or package again.
+- A binary whose build script gave it another cfg, another link argument or another generated
+  file runs, and so does one whose build script declared a variable that now has another value
+  (another native library), one that read a git-ignored source of the checkout that changed, a Go
+  package, and a Go test, whose tests read another value of a variable while they ran, or a
+  variable newly set, unset or set to nothing. The same values key the same binary or package
+  again. What isn't keyed (above) still can be reused wrongly.
 - Every Cargo key and every Go key is new: the first run of each Cargo and Go check after the
   release reuses nothing, here and in CI. pytest's, Vitest's, Jest's and every other adapter's
   keys, and their tests' keys, are byte for byte what they were. The schema string stays
@@ -170,7 +226,9 @@ home folder by default, they are replaced as part of it. `TMPDIR` isn't a root e
   that leave `TMPDIR` unset, do.
 - `hushrun why` keys a Go package with the values in its own environment and COMMAND's
   assignments, as a run would; when no file changed it says that a variable its tests read may
-  have another value now, naming them, since the store keeps no value to compare with.
+  have another value now, naming them, since the store keeps no value to compare with. A row an
+  older hushrun wrote names no variable: `why` says so (`variables-unknown`) rather than that a
+  result expired.
 - `build.rs` is a source now, so the sources' shape changes for every Cargo repository with a build
   script, which is one more reason every Cargo key is new; after that, editing a build script
   reruns only the binaries that read it.
@@ -182,8 +240,11 @@ home folder by default, they are replaced as part of it. `TMPDIR` isn't a root e
 - `cargo test --no-run --message-format=json` already gave `build-script-executed` messages; the
   plan and `observe` read them and one `output` file per build script run, and the generated files'
   bytes, which costs reading what the build wrote, no tool more.
-- Testdata gains vectors: two Cargo binaries with `scripts` (a cfg, link arguments, an outside
-  crate under the cargo home, a generated file, lines left out, a build folder of its own), and a Go
+- A variable a build script declares changing reruns every binary whose closure holds the script,
+  whether or not what it built changed, as Cargo reruns the script.
+- Testdata gains vectors: two Cargo binaries with `scripts` (a cfg, link arguments, declared
+  variables set and unset, an outside crate under the cargo home, a generated file and a
+  git-ignored source whose text names folders, lines left out, a build folder of its own), and a Go
   package with and without variables and one of its tests, which `tools/refdigest.py unit-keys`
   recomputes from C-31's text: the output's lines, the files' text, the log and the values.
 
@@ -202,6 +263,9 @@ home folder by default, they are replaced as part of it. `TMPDIR` isn't a root e
   build from one of this.
 - **Key Go's values raw, as Go does.** Every key would name the checkout and the home folder, so CI
   and a laptop would never share one for a package that reads `HOME` or `PWD`.
+- **Hash the libraries under a `rustc-link-search` folder** instead of the declared variables. It
+  catches a library changed by what a script didn't declare, but object files hold `OUT_DIR` and the
+  compiler's working folder, so CI and a laptop would never share a key.
 - **Make `TMPDIR` a root, or leave it out.** A root would let two Macs share keys, but a
   variable's value named by a placeholder no build block has; leaving it out would be a guess that
   no test's result depends on it. Both are the owner's call; keyed as it is, it is correct.

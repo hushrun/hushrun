@@ -24,16 +24,19 @@ codes, environment variables, event formats, the ledger layout) are listed first
 - **A Cargo test binary's key holds `scripts`, and a Go package's holds `env`** (C-31,
   [ADR 0096](docs/adr/0096-unit-keys-hold-what-build-scripts-gave-and-what-go-tests-read-of-the-environment.md)):
   `scripts` is what the build scripts of the binary's closure gave its build (the lines of each
-  script's output that reach the compiler or the linker, and the files they generated, by
-  content); a Go package's `env` is the variables its tests read, with their values. A Go test's
+  script's output that reach the compiler or the linker, the values of the variables each declares
+  with `rerun-if-env-changed`, and the files they generated or a git-ignored source the build
+  read, by content); a Go package's `env` is the variables its tests read, with their values. A Go test's
   key holds its package's `env` too. Every Cargo and Go key is new, so the first run of each Cargo
   and Go check with `tests` on reuses nothing, here and in CI. Every other adapter's keys are
   byte for byte as before.
 - **`build.rs` is a source a binary reads** (C-30): a build script's own dep-info is found now, so
   editing a build script reruns the binaries of its package and of those that link it, not the
-  whole workspace, and what it watches with `rerun-if-changed` is read by them too.
+  whole workspace. A file it watches with `rerun-if-changed` that is a source counts as theirs too;
+  any other file it watches is in the rest set as before, and editing it still reruns every binary.
 - **This machine's store gains two tables** (C-36): `unit_scripts`, beside `unit_env`, and
-  `unit_getenv`, the names (never the values) of the variables a Go package's tests read. They are
+  `unit_getenv`, the names (never the values) of the variables a Go package's tests read; `hushrun
+  why` says when a Go row an older CLI wrote names none. They are
   added in place on the next run that writes, every row kept, as `unit_env` is.
 - **A fresh machine reuses no Go package whose tests read a variable** (ADR 0096): hints hold no
   variable names yet. A package that calls `t.TempDir` reads `GOTMPDIR` and `TMPDIR`. A CI job
@@ -53,18 +56,24 @@ codes, environment variables, event formats, the ledger layout) are listed first
   different paths, CI's and a laptop's, still compute the same keys, whether or not one of them
   sets Cargo's build folder. Not keyed: a variable a proc macro reads with `std::env`.
 - **A test binary whose build script gave it another build runs again** (C-31, ADR 0096): a
-  variable a build script turned into `cargo:rustc-cfg`, a link argument or a file it generated
-  under `OUT_DIR` rebuilt the binary with the same key, so a pass recorded before was reused. What
-  the build scripts of its closure (its package's, the workspace libraries' it may link, and the
-  crates' outside the workspace its graph holds) gave the build is keyed now, with the machine's
-  folders replaced, so CI and a laptop still compute the same keys.
+  variable a build script turned into `cargo:rustc-cfg`, a link argument, a file it generated
+  under `OUT_DIR` or a native library it compiled there rebuilt the binary with the same key, so a
+  pass recorded before was reused. What the build scripts of its closure (its package's, the
+  workspace libraries' it may link, and the crates' outside the workspace its graph holds) gave the
+  build, and the variables they declare, are keyed now, and so is a git-ignored source the build
+  read, with the machine's folders replaced, so CI and a laptop compute the same keys. Not keyed: a
+  file a test reads at run time that a script wrote from what it didn't declare. A path crate
+  outside the workspace's root keys per checkout path, which costs reuse between two checkouts, not
+  correctness.
 - **An integration test of a package with a build script is observed** (C-31): the build script's
   dep-info wasn't found, so such a test was never recorded and never reused.
 - **A Go package whose tests read another value of a variable runs again** (C-31, C-35, ADR 0096):
   the `getenv` lines of Go's test log were skipped, so a package was reused after a variable its
   tests read with `os.Getenv` or `os.LookupEnv` changed, was set or was unset. They're keyed now,
   as Go's own test cache keys them, `GODEBUG` included, with the repository's root and the home
-  folder replaced in each value. `hushrun why` keys them with the values in its own environment,
+  folder replaced in each value. Not keyed, as in Go's own cache: a variable read while the package
+  initializes (a package-level `var`, `init`), which Go's log never names; nor what `GOFLAGS`,
+  `CGO_*` or `GOEXPERIMENT` change of the test binary. `hushrun why` keys them with the values in its own environment,
   and names them when only they can have changed.
 - **A dep-info that can't be read** makes its test binary not observed, rather than one that read
   nothing.
