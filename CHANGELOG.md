@@ -60,20 +60,23 @@ codes, environment variables, event formats, the ledger layout) are listed first
   under `OUT_DIR` or a native library it compiled there rebuilt the binary with the same key, so a
   pass recorded before was reused. What the build scripts of its closure (its package's, the
   workspace libraries' it may link, and the crates' outside the workspace its graph holds) gave the
-  build, and the variables they declare, are keyed now, and so is a git-ignored source the build
-  read, with the machine's folders replaced, so CI and a laptop compute the same keys. Not keyed: a
-  file a test reads at run time that a script wrote from what it didn't declare. A path crate
-  outside the workspace's root keys per checkout path, which costs reuse between two checkouts, not
-  correctness.
+  build, and the variables they declare, are keyed now, and so is a git-ignored source a member's
+  build read, with the machine's folders replaced and each build script's run named by its
+  package, never by Cargo's hash of it: CI with `CARGO_INCREMENTAL=0` or other profile settings, a
+  cargo home inside the checkout, and a path crate outside the repository at another path compute
+  a laptop's keys. Not keyed: what a script made from what it doesn't declare (a variable, a tool
+  on `PATH`, a file outside the repository), including a file a test reads at run time. `hushrun
+  why` says when a variable a build script declares has another value than at the last build.
 - **An integration test of a package with a build script is observed** (C-31): the build script's
   dep-info wasn't found, so such a test was never recorded and never reused.
 - **A Go package whose tests read another value of a variable runs again** (C-31, C-35, ADR 0096):
   the `getenv` lines of Go's test log were skipped, so a package was reused after a variable its
   tests read with `os.Getenv` or `os.LookupEnv` changed, was set or was unset. They're keyed now,
   as Go's own test cache keys them, `GODEBUG` included, with the repository's root and the home
-  folder replaced in each value. Not keyed, as in Go's own cache: a variable read while the package
-  initializes (a package-level `var`, `init`), which Go's log never names; nor what `GOFLAGS`,
-  `CGO_*` or `GOEXPERIMENT` change of the test binary. `hushrun why` keys them with the values in its own environment,
+  folder replaced in each value. Not keyed: a variable read while the package initializes (a
+  package-level `var`, `init`), which Go's log never names and Go's own cache misses too; and what
+  `-ldflags`, `CGO_*` or `GOEXPERIMENT` change of the test binary, which Go's own cache keys
+  through the build ID and hushrun doesn't yet. `hushrun why` keys them with the values in its own environment,
   and names them when only they can have changed.
 - **A dep-info that can't be read** makes its test binary not observed, rather than one that read
   nothing.
