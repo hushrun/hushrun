@@ -56,10 +56,11 @@ graph holds (every one the build compiled when there is no graph). Each entry is
   every tool the adapter starts gets it), roots replaced;
 - **a file a compile read that no file of the scope is**: a file the dep-info of the closure names
   (its `reads`' files and those of the crates outside the workspace) under Cargo's target folder or
-  its build folder (one the build made); or one it names in the checkout but outside the scope (a
-  git-ignored source a build script or another tool wrote, of a member or of a path crate that is
-  no member), and not under the cargo home, the rustup home or the toolchain; `file `, the SHA-256 of its text as a key holds text when it is
-  UTF-8 (else of its bytes) as `sha256:<hex>`, a space and its path.
+  its build folder (one the build made); or one a path package's dep-info names in the checkout
+  but outside the scope (a git-ignored source a build script or another tool wrote, of a member or
+  of a path crate that is no member), and not under the cargo home, the rustup home or the
+  toolchain; `file `, the SHA-256 of its text as a key holds text when it is UTF-8 (else of its
+  bytes) as `sha256:<hex>`, a space and its path.
 
 In each, the checkout's folders are replaced exactly as ADR 0095 replaces them in `env`
 (`Roots::of_checkout`, `to_placeholders`): the same roots, the same function; then each build
@@ -116,14 +117,19 @@ the reading after COMMAND key alike; unset and set to nothing are two values.
 
 **A file of the checkout outside the scope.** A dep-info names a git-ignored source (prost,
 bindgen or a script writing into `src/`) by its path in the checkout, but no file of the scope is
-it, so `reads` skipped it. It is keyed by content as a file the build made is, for every dep-info
-of the closure: a path crate in the repository that is no member (`exclude`d, or a workspace's
-sibling) compiles git-ignored sources too. Never under the cargo home, the rustup home or the
-toolchain: with the cargo home inside the checkout, as GitLab CI caches it, every registry and
-git crate's sources would otherwise be keyed there and not on a laptop (a review showed it), and
-those are pinned by the lockfile and the toolchain already. What else a crate outside the
-workspace names in the checkout is vendored or path sources, the same on every machine, so
-keying them costs hashing, not reuse.
+it, so `reads` skipped it. It is keyed by content as a file the build made is, for the dep-info
+of every path package of the closure: a member's, and a path crate's in the repository that is no
+member (`exclude`d, or a workspace's sibling), which compiles git-ignored sources too. A path
+package is one whose `cargo metadata` source is null, or, when the metadata doesn't list it
+(`--no-deps`), one whose id is `path+…`; a crate with no id counts as one, the side that misses.
+A registry or git crate's sources are never keyed, wherever they are: their content is pinned by
+`Cargo.lock`'s checksum or revision (and the toolchain's by the toolchain). With the cargo home
+inside the checkout, as GitLab CI caches it, or with `cargo vendor` run into a git-ignored
+`vendor/` before the build, their sources are in the checkout and outside the scope, and keying
+them would make that CI and a laptop that builds from its own cargo home miss each other on every
+binary whose closure holds one (two reviews showed it). Source replacement keeps a vendored
+crate's registry or git source in the metadata and in its package id, so it is known as what it
+is. The cargo home, the rustup home and the toolchain are left out by folder as well.
 
 **A file's text, roots replaced.** A generated file that names a folder of the machine (`built`
 and `shadow-rs` write the package's folder and the compiler's path) would key per machine by its
@@ -143,8 +149,10 @@ the same. A generated file's path is under its run's stand-in. A file that can't
 the binary `not observed` (`unreadable-generated-file`), and so does an output that can't be read
 (`unreadable-build-output`). A stand-in reads Cargo's package id as Cargo 1.77 and later write it
 (`<kind>+<url>#<name>@<version>`); an older Cargo's form (`<name> <version> (<kind>+<url>)`) has
-no `#`, and its stand-in then holds the URL's last segment, the checkout's folder name for a path
-package: a miss between checkouts under other folder names, never a wrong match.
+no `#`, and its stand-in then holds the name, the version and the URL's last segment
+(`{hushrun:run:gen 0.1.0 (path:gen)@}`), which for a path package is its folder's name, the
+checkout's for a package at its root: such a package misses between checkouts under other folder
+names, never a wrong match, since the stand-in holds the name and the version.
 
 ### Cargo: build scripts' dep-info, and what they watch
 
@@ -214,7 +222,8 @@ These still reuse a pass wrongly, or miss between machines, and are left as they
 - **What Go's build flags change that no file says, set outside COMMAND**: `-ldflags` in
   `GOFLAGS`, `CGO_*`, `GOEXPERIMENT`. Go's own cache keys them, through the test binary's build ID;
   hushrun's key holds COMMAND's own flags (C-31's `command`) but not these (a `-tags` in `GOFLAGS`
-  is keyed, through the files `go list` names). That gap was there before this decision (the Go side of B2).
+  is keyed, through the files `go list` names). That gap was there before this decision (the Go
+  side of B2).
 - A variable a proc macro reads with `std::env`, and a Cargo configuration's `[env]` values, which
   Cargo gives a build script without them being in COMMAND's environment (the configuration file is
   in the rest set).
@@ -222,18 +231,22 @@ These still reuse a pass wrongly, or miss between machines, and are left as they
 Two wrong misses between machines: **an outside path crate's own folder**, where what it gives
 names it (a `-sys` crate printing `rustc-link-search=native=$CARGO_MANIFEST_DIR/lib`, or reading
 `env!("CARGO_MANIFEST_DIR")`, as under ADR 0095): that folder is no root, so a path crate outside
-the repository keys per checkout path then. And a folder named after a flag with no separator before it (`-I/home/ci/inc`) isn't replaced, as
-B-8 replaces a root only where it starts a path, so a value that holds one keys per machine.
+the repository keys per checkout path then. And a folder named after a flag with no separator
+before it (`-I/home/ci/inc`) isn't replaced, as B-8 replaces a root only where it starts a path,
+so a value that holds one keys per machine.
 
 ## Consequences
 
 - When the check runs (its own key missed, C-34), a binary whose build script gave it another
-  cfg, another link argument or another generated file runs, and so does one whose build script declared a variable that now has another value
-  (another native library), one that read a git-ignored source of the checkout that changed, a Go
-  package, and a Go test, whose tests read another value of a variable while they ran, or a
-  variable newly set, unset or set to nothing. The same values key the same binary or package
-  again, on another machine too, whatever its profile settings or where a path crate outside the
-  repository is (unless what that crate gives names its own folder, above). What isn't keyed (above) still can be reused wrongly.
+  cfg, another link argument or another generated file runs, and so does one whose build script
+  declared a variable that now has another value (another native library), one that read a
+  git-ignored source of a path package in the checkout that changed, a Go package, and a Go test,
+  whose tests read another value of a variable while they ran, or a variable newly set, unset or
+  set to nothing. The same values key the same binary or package again, on another machine too,
+  whatever its profile settings, where a path crate outside the repository is (unless what that
+  crate gives names its own folder, above), and whether its registry and git crates are vendored
+  into the checkout or in a cargo home there. What isn't keyed (above) still can be reused
+  wrongly.
 - Every Cargo key and every Go key is new: the first run of each Cargo and Go check after the
   release reuses nothing, here and in CI. pytest's, Vitest's, Jest's and every other adapter's
   keys, and their tests' keys, are byte for byte what they were. The schema string stays
