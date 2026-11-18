@@ -3,6 +3,8 @@
 - **Status:** accepted
 - **Date:** 2026-11-17
 - **Rules:** C-31, C-33, C-36, C-37, B-6, B-8
+- **Amended by:** [0096](0096-unit-keys-hold-what-build-scripts-gave-and-what-go-tests-read-of-the-environment.md)
+  (what build scripts give a binary is keyed in a member of its own, `scripts`)
 
 ## Context
 
@@ -68,9 +70,9 @@ binary's that has none, makes the binary `not observed`, never one that read not
 **What isn't keyed.** Only what rustc tracks: variables read with `env!` and `option_env!`, those
 a build script sets with `cargo:rustc-env` among them. A build script that turns a variable into
 `cargo:rustc-cfg`, into link arguments, or into a file it generates under `OUT_DIR` changes the
-binary with the same key; that gap was there before this decision and is not closed by it. Nor
-is a variable a proc macro reads with `std::env` while it expands, which neither rustc nor Cargo
-tracks.
+binary with the same key; that gap was there before this decision and is not closed by it
+(ADR 0096 closes it). Nor is a variable a proc macro reads with `std::env` while it expands, which
+neither rustc nor Cargo tracks.
 
 **The same on every machine.** Some values are folders of the machine: `CARGO_MANIFEST_DIR`,
 `CARGO_MANIFEST_PATH`, `OUT_DIR`, `CARGO_TARGET_TMPDIR`, `CARGO_BIN_EXE_*`, `CARGO` (the
@@ -120,7 +122,8 @@ kept. Any other difference in its tables sets it aside, as before.
 
 - A wrong reuse is gone: a binary built with another value of a variable it, or a crate it is
   built against, read with `env!` or `option_env!` (one a build script set with `cargo:rustc-env`
-  included) runs. What a build script derives any other way is not covered (above). The same value keys the same binary again, so nothing
+  included) runs. What a build script derives any other way is not covered (above; ADR 0096
+  covers it). The same value keys the same binary again, so nothing
   runs that didn't need to, and two checkouts at different paths, with different cargo homes and
   homes, compute the same keys.
 - The first run of each Cargo check after the release reuses nothing on any machine, CI

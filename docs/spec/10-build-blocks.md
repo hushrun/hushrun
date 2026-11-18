@@ -290,7 +290,11 @@ folder and its build folder both as `target-dir` (a key is never read back, so t
 share a name), the cargo home and the toolchain as bases, the rustup home as `rustup-home` and
 the home folder as `home`. `rustup-home` and `home` are roots no compile has. A folder two of
 them share is named by the first of `target-dir`, `workspace`, `toolchain`, `rustup-home`,
-`cargo-home`, `home`: the home folder below every other.
+`cargo-home`, `home`: the home folder below every other. [ADR 0096] The same roots replace those
+folders in what a binary's build scripts gave it (C-31's `scripts`: their output's lines and the
+paths of the files they generated), and a Go package's unit key replaces the repository's root and
+the home folder alone, with those names, in the values of the variables its tests read. No root
+or base is added, so a compile's roots and keys are as they were.
 
 Two more folders are **bases**: the cargo home (`CARGO_HOME`, else `~/.cargo`, as `hushrun run`
 found it) and the toolchain (the compiler's sysroot, B-17, and its view without sources, B-9).
