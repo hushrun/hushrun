@@ -122,8 +122,9 @@ of every path package of the closure: a member's, and a path crate's in the repo
 member (`exclude`d, or a workspace's sibling), which compiles git-ignored sources too. A path
 package is one whose `cargo metadata` source is null, or, when the metadata doesn't list it
 (`--no-deps`), one whose id is `path+…`; a crate with no id counts as one, the side that misses.
-A registry or git crate's sources are never keyed, wherever they are: their content is pinned by
-`Cargo.lock`'s checksum or revision (and the toolchain's by the toolchain). With the cargo home
+A registry or git crate's sources are never keyed, wherever they are: `Cargo.lock`'s checksum or
+revision pins what the crate ships (and the toolchain pins its own), though not a file the crate's
+build script writes into its own folder (see What isn't keyed). With the cargo home
 inside the checkout, as GitLab CI caches it, or with `cargo vendor` run into a git-ignored
 `vendor/` before the build, their sources are in the checkout and outside the scope, and keying
 them would make that CI and a laptop that builds from its own cargo home miss each other on every
@@ -215,6 +216,11 @@ These still reuse a pass wrongly, or miss between machines, and are left as they
   wrote into `OUT_DIR` so. A script that declares nothing is rerun by Cargo only when its
   package's files change, and those are keyed. Rust has no log of what a test binary opens, as Go
   does.
+- **A file a registry or git crate's build script writes into its own folder** from what it
+  watches outside the repository with `rerun-if-changed`. `Cargo.lock` pins what the crate ships,
+  not that file, and the crate is never a path package. A variable it declares and a file under
+  `OUT_DIR` are keyed. `cargo publish` refuses a build script that changes its package's folder,
+  so on crates.io this is rare; a git dependency can do it.
 - **A variable a Go package reads while it initializes**: a package-level initializer (`var x =
   os.Getenv(…)`), an `init` function, or `TestMain` before `m.Run`. Go starts its test log only when
   the tests start, so the log never names them, and Go's own test cache has the same hole. A

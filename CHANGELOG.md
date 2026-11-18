@@ -63,14 +63,15 @@ codes, environment variables, event formats, the ledger layout) are listed first
   build, and the variables they declare, are keyed now, and so is a git-ignored source the build
   read of a path package (a member's or a path crate's in the repository), with the machine's
   folders replaced and each build script's run named by its package, never by Cargo's hash of it.
-  A registry or git crate's sources aren't keyed, which `Cargo.lock` pins: CI with
+  A registry or git crate's sources aren't keyed, since `Cargo.lock` pins what it ships: CI with
   `CARGO_INCREMENTAL=0` or other profile settings, a cargo home inside the checkout, crates
   vendored into a git-ignored `vendor/`, and a path crate outside the repository at another path
   compute a laptop's keys, unless what that path crate gives names its own folder (a link search
   path under it), which keys per checkout path. Not keyed: what a script made from what it doesn't
   declare (a variable, a tool on `PATH`, a file outside the repository), including a file a test
-  reads at run time. `hushrun why` says when a variable a build script declares has another value
-  than at the last build.
+  reads at run time, and a file a registry or git crate's build script writes into its own folder.
+  `hushrun why` says when a variable a build script declares has another value than at the last
+  build.
 - **An integration test of a package with a build script is observed** (C-31): the build script's
   dep-info wasn't found, so such a test was never recorded and never reused.
 - **A Go package whose tests read another value of a variable runs again** (C-31, C-35, ADR 0096):
