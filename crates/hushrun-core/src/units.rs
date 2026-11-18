@@ -3,8 +3,8 @@
 //! - `checks.<name>.tests` in `hushrun.yaml` (C-5): [`Tests`], with \[ADR 0080\] the unit a
 //!   check reuses by ([`Unit`]) and what a test is taken to have read ([`Reads`]).
 //! - The four sets every file of a check's scope falls in, by one function, [`classify`] (C-30).
-//! - A unit's key, by one function, [`unit_key`], with [`shape`] and [`Tree::digest`] for the
-//!   digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
+//! - A unit's key, by one function, [`unit_key`], with [`shape`], [`Tree::digest`] and \[ADR 0095\]
+//!   [`env()`] for the digests it holds (C-31); \[ADR 0080\] a test's, by one function beside it, [`test_key`]
 //!   (C-39), and a test's name, by [`test_name`].
 //! - \[ADR 0081\] What a test read, by one function, [`test_list`] (C-40).
 //! - A unit's state in a run, decided once, by [`state`], from the facts an adapter reported
@@ -276,6 +276,29 @@ pub(crate) fn shape_bytes<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec
     bytes
 }
 
+/// \[C-31, ADR 0095\] `env`: the SHA-256 of what a Cargo test binary's build read of the
+/// environment, by the `# env-dep:` lines of the dep-info its `reads` come from. Each entry is a
+/// variable's name, `=` and its value with roots replaced, or its name alone when it was unset,
+/// as UTF-8 followed by one NUL byte; sorted by bytes, each once. No entry gives the SHA-256 of
+/// nothing.
+pub fn env<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Digest {
+    let mut lines: Vec<String> = entries
+        .into_iter()
+        .map(|(name, value)| match value {
+            Some(value) => format!("{name}={value}"),
+            None => name.to_string(),
+        })
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    let mut bytes = Vec::new();
+    for line in lines {
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(0);
+    }
+    Digest::of(&bytes)
+}
+
 /// The files of a scope with their kinds and content hashes, as a source manifest (D-4) lists
 /// them: what [`Tree::digest`] hashes for `reads` and `rest` (C-31).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -357,20 +380,24 @@ pub struct KeyBase {
 
 /// \[C-31\] The one function for a unit's key: the SHA-256 of the JCS form of the run key's fields
 /// but `digest` (`base`), the unit's path, and the digests of what it read (`reads`), of the rest
-/// set (`rest`) and of the sources set's paths (`shape`).
+/// set (`rest`) and of the sources set's paths (`shape`); \[ADR 0095\] and for an adapter that keys
+/// what its build read of the environment (Cargo's), its [`env()`], which every key of it holds, an
+/// empty one too. Every other adapter's key has no `env`, and is as it was before.
 pub fn unit_key(
     base: &KeyBase,
     unit: &str,
     reads: &Digest,
     rest: &Digest,
     shape: &Digest,
+    env: Option<&Digest>,
 ) -> Result<Digest, JcsError> {
-    key_of(UNIT_KEY_SCHEMA, base, unit, None, reads, rest, shape)
+    key_of(UNIT_KEY_SCHEMA, base, unit, None, reads, rest, shape, env)
 }
 
 /// \[C-39, ADR 0080\] The one function for a test's key: [`unit_key`]'s fields, computed the same
 /// way, under [`TEST_KEY_SCHEMA`], with `test`, the test's id within its unit. `reads` digests the
-/// test's list (RFC 0004 §3.2).
+/// test's list (RFC 0004 §3.2). \[ADR 0095\] It holds no `env`: the one adapter that keys one
+/// (Cargo's) doesn't reuse tests one by one.
 pub fn test_key(
     base: &KeyBase,
     unit: &str,
@@ -379,7 +406,16 @@ pub fn test_key(
     rest: &Digest,
     shape: &Digest,
 ) -> Result<Digest, JcsError> {
-    key_of(TEST_KEY_SCHEMA, base, unit, Some(test), reads, rest, shape)
+    key_of(
+        TEST_KEY_SCHEMA,
+        base,
+        unit,
+        Some(test),
+        reads,
+        rest,
+        shape,
+        None,
+    )
 }
 
 /// \[ADR 0080\] A test's name, everywhere a person reads it: its unit, `::`, and its id (C-39).
@@ -387,6 +423,10 @@ pub fn test_name(unit: &str, test: &str) -> String {
     format!("{unit}{TEST_SEPARATOR}{test}")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the members of a key, each named as C-31 names it"
+)]
 fn key_of(
     schema: &str,
     base: &KeyBase,
@@ -395,6 +435,7 @@ fn key_of(
     reads: &Digest,
     rest: &Digest,
     shape: &Digest,
+    env: Option<&Digest>,
 ) -> Result<Digest, JcsError> {
     let mut input = json!({
         "schema": schema,
@@ -409,6 +450,9 @@ fn key_of(
     });
     if let Some(test) = test {
         input["test"] = json!(test);
+    }
+    if let Some(env) = env {
+        input["env"] = json!(env);
     }
     if let Some(external) = &base.external {
         input["external"] = external.clone();

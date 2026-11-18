@@ -65,6 +65,7 @@ fn observed(dir: &Path, units: usize) -> (Observed, Tree) {
             base,
             adapter: "pytest",
             hints: adapter::Hints::Sources,
+            keys_env: false,
         }),
         ..Observed::default()
     };
@@ -395,6 +396,7 @@ fn decided_run(
         base: base.clone(),
         adapter: "pytest",
         hints: adapter::Hints::Sources,
+        keys_env: false,
     };
     let watches = facts::Watches::default();
     let mode = Modes {
@@ -419,7 +421,7 @@ fn decided_run(
     let tree: &'static Tree = Box::leak(Box::new(tree.clone()));
     let sets: &'static units::Sets = Box::leak(Box::new(sets));
     let base: &'static KeyBase = Box::leak(Box::new(base));
-    (observed, Keyer::new(tree, sets, base))
+    (observed, Keyer::new(tree, sets, base, false))
 }
 
 // covers: C-39, C-34
@@ -458,6 +460,7 @@ fn a_test_that_wasnt_followed_keeps_its_test_file_from_a_pass_when_tests_go_by_f
             ),
         ]);
         let seen = Seen {
+            env: None,
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -570,6 +573,7 @@ fn a_run_whose_plan_left_tests_out_never_records_a_pass_of_their_test_file() {
             ),
         ]);
         let seen = Seen {
+            env: None,
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -590,7 +594,7 @@ fn a_run_whose_plan_left_tests_out_never_records_a_pass_of_their_test_file() {
                     duration_ms: 7,
                 },
                 list: shared::TestList {
-                    list: built_list(&BTreeSet::new()),
+                    list: built_list(&BTreeSet::new(), None),
                     own: false,
                 },
             },
@@ -598,7 +602,7 @@ fn a_run_whose_plan_left_tests_out_never_records_a_pass_of_their_test_file() {
         let (o, keyer) = decided_by(dir.path(), &tree, seen, &store::Map::default(), &plan, unit);
         assert_eq!(o.units["tests/test_a.py"].0, State::NotRun, "{unit:?}");
         let reads: BTreeSet<String> = paths.iter().cloned().collect();
-        let file_key = keyer.key("tests/test_a.py", &reads).unwrap();
+        let file_key = keyer.key("tests/test_a.py", &reads, None).unwrap();
         assert!(
             o.records().iter().all(|r| r.key != file_key),
             "{unit:?}: {:?}",
@@ -642,6 +646,7 @@ fn a_failure_no_test_explains_keeps_no_tests_pass() {
         ("test_two".to_string(), passed.clone()),
     ]);
     let seen = |failed: bool, tests: BTreeMap<String, facts::MergedTest>| Seen {
+        env: None,
         facts: Facts {
             complete: true,
             failed,
@@ -662,7 +667,7 @@ fn a_failure_no_test_explains_keeps_no_tests_pass() {
         false,
     );
     // Its own fail is recorded, as before; no test's pass is.
-    let file_key = keyer.key("tests/test_a.py", &reads).unwrap();
+    let file_key = keyer.key("tests/test_a.py", &reads, None).unwrap();
     assert!(
         o.records()
             .iter()
@@ -726,6 +731,7 @@ fn a_test_its_adapter_never_leaves_out_records_no_pass_of_its_own() {
         ("test_bad".to_string(), test(true, false)),
     ]);
     let seen = Seen {
+        env: None,
         facts: Facts {
             complete: true,
             failed: true,
@@ -825,6 +831,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         ),
     ]);
     let seen = Seen {
+        env: None,
         facts: Facts {
             complete: true,
             ..Facts::default()
@@ -848,7 +855,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
                 duration_ms: 7,
             },
             list: shared::TestList {
-                list: built_list(&BTreeSet::new()),
+                list: built_list(&BTreeSet::new(), None),
                 own: false,
             },
         },
@@ -903,6 +910,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
         dir.path(),
         &tree,
         Seen {
+            env: None,
             facts: Facts {
                 complete: true,
                 ..Facts::default()
@@ -924,7 +932,7 @@ fn a_test_file_partly_reused_records_its_tests_and_no_pass_of_its_own() {
     assert_eq!(o.records().len(), 1);
     assert_eq!(
         o.records()[0].key,
-        keyer.key("tests/test_a.py", &union).unwrap()
+        keyer.key("tests/test_a.py", &union, None).unwrap()
     );
 }
 
@@ -942,6 +950,7 @@ fn what_one_test_didnt_follow_is_its_own_and_its_file_doesnt_pass_whole() {
         detail: "git".into(),
     };
     let seen = Seen {
+        env: None,
         facts: Facts {
             complete: true,
             ..Facts::default()
@@ -1024,7 +1033,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         external: None,
         counts_from: None,
     };
-    let keyer = Keyer::new(&tree, &sets, &base);
+    let keyer = Keyer::new(&tree, &sets, &base, false);
     let row = store::TestRow {
         state: State::Passed,
         duration_ms: 1,
@@ -1087,6 +1096,7 @@ fn a_test_file_reused_whole_counts_its_known_tests_as_reused() {
         .collect();
     let tree = tree(&paths);
     let left_out = || Seen {
+        env: None,
         facts: Facts {
             deselected: true,
             ..Facts::default()

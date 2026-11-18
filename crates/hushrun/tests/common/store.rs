@@ -136,6 +136,36 @@ pub fn forget_listed(cache: &Path) {
     conn.execute("DELETE FROM check_listed", []).unwrap();
 }
 
+/// \[ADR 0095\] Forgets what each Cargo test binary's key held of the environment in the one store
+/// in `cache`, as in a store an older hushrun wrote: its test binaries' rows stay.
+#[allow(dead_code)]
+pub fn forget_env(cache: &Path) {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open(&stores[0]).expect("the store opens");
+    conn.execute("DELETE FROM unit_env", []).unwrap();
+}
+
+/// \[ADR 0095\] What each Cargo test binary's key held of the environment, in the one store in
+/// `cache`, by its unit.
+#[allow(dead_code)]
+pub fn env_of(cache: &Path) -> std::collections::BTreeMap<String, String> {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open_with_flags(&stores[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("the store opens");
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.path, e.env FROM unit_env e JOIN unit u ON u.id = e.unit_ref
+             JOIN path p ON p.id = u.path_ref",
+        )
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// The test files of the disagreements the one store in `cache` holds, oldest first.
 #[allow(dead_code)]
 pub fn disagreements(cache: &Path) -> Vec<String> {

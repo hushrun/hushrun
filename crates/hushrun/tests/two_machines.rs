@@ -236,6 +236,8 @@ struct Scenario {
     /// \[C-22\] Whether `hushrun ready` can say how many test files a run would run: its
     /// `package.json` names the check's command.
     ready: bool,
+    /// Each machine has a cargo home of its own, beside its checkout, rather than this one's.
+    own_cargo_home: bool,
 }
 
 impl Scenario {
@@ -342,6 +344,9 @@ impl Machine {
             .env("HUSHRUN_TOKEN", FakeResults::TOKEN);
         for (name, value) in &s.env {
             cmd.env(name, value);
+        }
+        if s.own_cargo_home {
+            cmd.env("CARGO_HOME", self.root.join("cargo-home"));
         }
         let output = cmd.args(args).output().expect("hushrun");
         Ran {
@@ -685,6 +690,7 @@ fn pytest_scenario() -> Scenario {
         not_followed: set(&["tests/test_child.py"]),
         ran: pytest_ran,
         ready: true,
+        own_cargo_home: false,
     }
 }
 
@@ -847,6 +853,7 @@ fn vitest_scenario() -> Scenario {
         not_followed: BTreeSet::new(),
         ran: vitest_ran,
         ready: true,
+        own_cargo_home: false,
     }
 }
 
@@ -1036,6 +1043,7 @@ fn go_scenario() -> Scenario {
         not_followed: BTreeSet::new(),
         ran: go_ran,
         ready: false,
+        own_cargo_home: false,
     }
 }
 
@@ -1227,6 +1235,7 @@ fn cargo_scenario() -> Scenario {
         not_followed: BTreeSet::new(),
         ran: cargo_ran,
         ready: false,
+        own_cargo_home: false,
     }
 }
 
@@ -1240,6 +1249,12 @@ fn cargo_ran(ran: &Ran) -> BTreeSet<String> {
     ]
     .into_iter()
     .collect();
+    nextest_ran(ran, &binaries)
+}
+
+/// The test files of nextest's lines for the tests it ran, by `binaries`, each test binary's id
+/// with its test file.
+fn nextest_ran(ran: &Ran, binaries: &BTreeMap<&str, &str>) -> BTreeSet<String> {
     let text = plain(&format!("{}\n{}", ran.stdout, ran.stderr));
     text.lines()
         .filter_map(|l| {
@@ -1291,6 +1306,84 @@ fn cargo_on_a_fresh_machine_reuses_what_the_first_machines_store_would() {
     }
     let s = cargo_scenario();
     assert_parity(&s, &two_machines(&s, Hints::Kept));
+}
+
+/// \[ADR 0095\] A workspace whose test binaries read machine folders at compile time: its package's
+/// folder and manifest, its build script's output, what its build script sets from the cargo home
+/// and the home folder, and an integration test's temporary folder. Each machine has its own
+/// checkout, cargo home and home.
+fn cargo_folders_scenario() -> Scenario {
+    let mut s = cargo_scenario();
+    s.files.retain(|(path, _)| !path.starts_with("crates/app/"));
+    s.files.retain(|(path, _)| path != "Cargo.toml");
+    s.files.extend([
+        file(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/core\", \"crates/located\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        file(
+            "crates/located/Cargo.toml",
+            "[package]\nname = \"located\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        file(
+            "crates/located/build.rs",
+            "fn main() {\n    let home = std::env::var(\"HOME\").unwrap();\n    let cargo = std::env::var(\"CARGO_HOME\").unwrap_or_else(|_| format!(\"{home}/.cargo\"));\n    println!(\"cargo:rustc-env=HUSHRUN_FIXTURE_TOOLS={cargo}/bin\");\n    println!(\"cargo:rustc-env=HUSHRUN_FIXTURE_CONFIG={home}/.config/located\");\n    std::fs::write(format!(\"{}/made.txt\", std::env::var(\"OUT_DIR\").unwrap()), \"made\").unwrap();\n}\n",
+        ),
+        file(
+            "crates/located/src/lib.rs",
+            "pub const DIR: &str = env!(\"CARGO_MANIFEST_DIR\");\npub const MANIFEST: Option<&str> = option_env!(\"CARGO_MANIFEST_PATH\");\npub const OUT: &str = env!(\"OUT_DIR\");\npub const TOOLS: &str = env!(\"HUSHRUN_FIXTURE_TOOLS\");\npub const CONFIG: &str = env!(\"HUSHRUN_FIXTURE_CONFIG\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn located() {\n        assert!(std::path::Path::new(super::DIR).join(\"Cargo.toml\").is_file());\n        assert!(std::path::Path::new(super::OUT).join(\"made.txt\").is_file());\n        assert!(super::TOOLS.ends_with(\"/bin\") && super::CONFIG.ends_with(\"/.config/located\"));\n        assert_ne!(super::MANIFEST, Some(\"\"));\n    }\n}\n",
+        ),
+        // An integration test of a package without a build script: one with a build script is
+        // never followed, since the script's dep-info isn't found.
+        file(
+            "crates/core/tests/scratch.rs",
+            "#[test]\nfn has_a_scratch_folder() {\n    let tmp = env!(\"CARGO_TARGET_TMPDIR\");\n    std::fs::create_dir_all(tmp).unwrap();\n    assert!(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"Cargo.toml\").is_file());\n}\n",
+        ),
+    ]);
+    s.all = set(&[
+        "crates/core/src/lib.rs",
+        "crates/core/tests/scratch.rs",
+        "crates/located/src/lib.rs",
+        "crates/other/src/lib.rs",
+    ]);
+    s.ran = |ran| {
+        let binaries: BTreeMap<&str, &str> = [
+            ("core-lib", "crates/core/src/lib.rs"),
+            ("located", "crates/located/src/lib.rs"),
+            ("core-lib::scratch", "crates/core/tests/scratch.rs"),
+            ("other", "crates/other/src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        nextest_ran(ran, &binaries)
+    };
+    s.own_cargo_home = true;
+    s
+}
+
+// covers: C-31, C-33
+// A test binary's key holds the variables its build read with the machine's folders replaced:
+// a checkout at another path, with another cargo home and home, computes the same keys, so a
+// fresh machine reuses all it could.
+#[test]
+fn cargo_keys_name_no_folder_of_the_machine_a_test_binary_was_built_on() {
+    if !tools(
+        "cargo-nextest",
+        succeeds("cargo", &["nextest", "--version"]),
+    ) {
+        return;
+    }
+    let s = cargo_folders_scenario();
+    let m = two_machines(&s, Hints::Older(404));
+    assert_could_reuse("on a fresh machine", &s, &m.fresh, &s.reusable());
+    assert_eq!(
+        m.fresh.plan.as_deref(),
+        Some(
+            "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+        ),
+        "{}",
+        m.fresh.stderr
+    );
 }
 
 // Go, with what a server keeps of hints (C-38)
@@ -1689,6 +1782,7 @@ fn tests_scenario(tests: &str, failing: bool) -> Scenario {
         not_followed: BTreeSet::new(),
         ran: pytest_ran,
         ready: false,
+        own_cargo_home: false,
     }
 }
 

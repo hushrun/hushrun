@@ -427,6 +427,7 @@ impl Adapter for Recognized {
             seen.insert(
                 unit,
                 Seen {
+                    env: None,
                     facts,
                     reads,
                     duration_ms: m.duration_ms,

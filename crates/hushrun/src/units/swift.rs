@@ -1528,6 +1528,7 @@ impl Adapter for Swift {
             seen.insert(
                 unit,
                 Seen {
+                    env: None,
                     facts: Facts {
                         complete,
                         failed: m.failed,

@@ -180,12 +180,31 @@ fn unit_keys_match_the_golden_vectors() {
             counts_from: base.get("counts_from").cloned(),
         };
         let unit = vector["unit"].as_str().unwrap();
+        // \[ADR 0095\] A vector that lists `env`, each entry its name and its value with roots
+        // replaced or null, is a Cargo test binary's key, which holds their digest.
+        let env = vector.get("env").map(|entries| {
+            let entries: Vec<(&str, Option<&str>)> = entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (e[0].as_str().unwrap(), e[1].as_str()))
+                .collect();
+            env(entries)
+        });
         // \[ADR 0080\] A vector that names a test is a test's key (C-39); the others, a unit's.
         let key = match vector.get("test").and_then(Value::as_str) {
             Some(test) => test_key(&key_base, unit, test, &reads, &rest, &shape).unwrap(),
-            None => unit_key(&key_base, unit, &reads, &rest, &shape).unwrap(),
+            None => unit_key(&key_base, unit, &reads, &rest, &shape, env.as_ref()).unwrap(),
         };
         let expect = &vector["expect"];
+        assert_eq!(
+            env.map(|e| e.to_string()),
+            expect
+                .get("env")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            "{name}: env"
+        );
         assert_eq!(reads.to_string(), expect["reads"], "{name}: reads");
         assert_eq!(rest.to_string(), expect["rest"], "{name}: rest");
         assert_eq!(shape.to_string(), expect["shape"], "{name}: shape");
@@ -205,7 +224,7 @@ fn a_tests_key_is_its_unit_keys_fields_and_its_id_and_never_a_units_key() {
         counts_from: None,
     };
     let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
-    let file = unit_key(&base, "tests/test_a.py", &reads, &rest, &shape).unwrap();
+    let file = unit_key(&base, "tests/test_a.py", &reads, &rest, &shape, None).unwrap();
     let a = test_key(&base, "tests/test_a.py", "test_x", &reads, &rest, &shape).unwrap();
     let b = test_key(&base, "tests/test_a.py", "test_y", &reads, &rest, &shape).unwrap();
     // A test's key is never its file's, nor another test's of the same file and files.
@@ -223,6 +242,42 @@ fn a_tests_key_is_its_unit_keys_fields_and_its_id_and_never_a_units_key() {
         "tests/test_a.py::TestA::test_x[1]"
     );
     assert_eq!(MOST_TESTS, 50_000);
+}
+
+// covers: C-31
+#[test]
+fn env_is_the_sorted_entries_each_with_a_nul_and_a_key_holds_it_only_when_given() {
+    // No variable: the SHA-256 of nothing, which a Cargo key still holds.
+    assert_eq!(
+        env([]).to_string(),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        env([("B", Some("2")), ("A", None), ("B", Some("2"))]),
+        Digest::of(b"A\0B=2\0")
+    );
+    // Unset, set to nothing and set are three entries; the same name with two values, two.
+    assert_ne!(env([("A", None)]), env([("A", Some(""))]));
+    assert_eq!(
+        env([("A", Some("1")), ("A", Some("2"))]),
+        Digest::of(b"A=1\0A=2\0")
+    );
+    let base = KeyBase {
+        check: CheckName::new("test").unwrap(),
+        command: vec!["cargo".into(), "test".into()],
+        cwd: String::new(),
+        scope: ScopeName::new("default").unwrap(),
+        external: None,
+        counts_from: None,
+    };
+    let (reads, rest, shape) = (Digest::of(b"r"), Digest::of(b"s"), Digest::of(b"t"));
+    let key = |env: Option<&Digest>| unit_key(&base, "src/lib.rs", &reads, &rest, &shape, env);
+    let none = key(None).unwrap();
+    let empty = key(Some(&env([]))).unwrap();
+    let set = key(Some(&env([("A", Some("1"))]))).unwrap();
+    assert_ne!(none, empty, "a key with `env` is never one without it");
+    assert_ne!(empty, set);
+    assert_ne!(set, key(Some(&env([("A", Some("2"))]))).unwrap());
 }
 
 // covers: C-31

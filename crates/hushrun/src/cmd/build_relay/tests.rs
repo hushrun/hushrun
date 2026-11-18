@@ -3210,6 +3210,11 @@ fn a_lookup_of_stale_vouches_that_panics_holds_up_neither_questions_nor_the_end(
             "--test-threads=1",
         ])
         .env(PANICKING_VOUCHES, world)
+        // The panic hook runs before the unwinding that ends the lookup, so a question waits for
+        // it. With CI's RUST_BACKTRACE=1 the hook symbolizes a backtrace of some 50 frames from
+        // the test binary's debug info: 40 to 130 ms on a Mac here, 1.4 s on CI's macOS runner.
+        // What is tested is the relay, not the symbolizer. The panic's message is still printed.
+        .env("RUST_BACKTRACE", "0")
         .output()
         .unwrap();
     let said = format!(
@@ -3264,10 +3269,17 @@ fn panicking_vouches(world: &str) {
             outputs: Hex32([1; 32]),
         },
     );
-    // The server doesn't know it: a "no", from a lookup, not from a budget run out.
+    // The server doesn't know it: a "no", from a lookup, not from a budget run out. A "no" is
+    // what a budget run out gives too, so what tells them apart is that the run's lookup
+    // recorded it, and that it came before the budget, which is what would answer otherwise.
     assert_eq!(answer, Answer::None);
     let took = asked.elapsed();
-    assert!(took < Duration::from_secs(1), "{took:?}");
+    let budget = relay.vouch_budget(&key);
+    assert_eq!(budget, Duration::from_secs(2));
+    assert!(took < budget, "{took:?}");
+    let address = Relay::address_in(hushrun_build::model::Kind::Rustc, &key);
+    assert_eq!(relay.state().vouched.get(&address), Some(&None));
+    assert!(answering(&relay));
     // The end doesn't wait for a lookup that is gone: well within its 6 seconds, `close` sent.
     let ended = Instant::now();
     relay.end_check(&[]);

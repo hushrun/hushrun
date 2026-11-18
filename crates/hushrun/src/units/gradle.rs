@@ -882,6 +882,7 @@ pub fn observe(files: &[FactsFile], tree: &Tree) -> Result<Option<Observed>, Str
         out.units.insert(
             unit,
             super::Seen {
+                env: None,
                 facts: Facts {
                     complete: saw.complete,
                     failed: saw.failed,

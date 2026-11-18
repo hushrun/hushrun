@@ -630,8 +630,12 @@ pub fn hidden_sources(
 /// are named from the output folder, the same text on every machine, and not by where the
 /// toolchain is installed. One link per toolchain, named by the compiler's identity, so two
 /// toolchains building into one target folder never share one, and the name is the same on
-/// every machine. Found right, it is left alone; else it is made under a name of this
-/// process's own and renamed into place, so a reader sees the old link or the new one.
+/// every machine. Found right, it is left alone. Found missing, it is made in place, which
+/// replaces nothing: of the compiles that start at once and all find it missing, one makes it
+/// and the others find it right. Found wrong, it is made under a name of this process's own and
+/// renamed into place. Only that rename touches a link a compile may be reading through, and on
+/// macOS 26 a readlink racing a rename over its link fails now and then with EINVAL (CI's
+/// runners, 2026-11-18), so a link that is right is never renamed over.
 ///
 /// What lies there is the wrapper's alone (its own folder beside the outputs), and is only
 /// ever a link: a folder found in its place (a copied target folder that followed the link,
@@ -651,6 +655,20 @@ pub fn sysroot_link(out_dir: &Path, compiler: &Digest, leads_to: &Path) -> io::R
         fs::remove_dir_all(&link)?;
     }
     clear_stale_links(&dir, &name, SystemTime::now());
+    match symlink(leads_to, &link) {
+        Ok(()) => return Ok(link),
+        // Another compile made it a moment ago, or what is there is wrong: a file, a folder made
+        // since, a link leading elsewhere.
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::read_link(&link).is_ok_and(|at| at == leads_to) {
+                return Ok(link);
+            }
+            if fs::symlink_metadata(&link).is_ok_and(|meta| meta.is_dir()) {
+                fs::remove_dir_all(&link)?;
+            }
+        }
+        Err(err) => return Err(err),
+    }
     let pid = std::process::id();
     for n in 0..64 {
         let temp = dir.join(format!(".{name}.{pid}.{n}.tmp"));
@@ -2168,20 +2186,48 @@ mod tests {
         std::os::unix::fs::symlink(&b, &young).unwrap();
         assert_eq!(leads(&super::sysroot_link(&out, &id, &a).unwrap()), a);
         assert!(fs::symlink_metadata(&young).is_ok(), "a young one stays");
-        // Many at once, to two toolchains: always one of the two, and nothing left behind.
         fs::remove_file(&young).unwrap();
+        // Many compiles of one toolchain at once, which all find the link missing: it is made
+        // once and never renamed over, so each finds it right however the others go. A rename
+        // over it would show as a link that another call replaced, and on macOS 26 as a
+        // readlink failing with EINVAL.
+        use std::os::unix::fs::MetadataExt;
+        for _ in 0..20 {
+            fs::remove_file(&link).unwrap();
+            let start = std::sync::Barrier::new(16);
+            let made: Vec<u64> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..16)
+                    .map(|_| {
+                        let (out, a, start) = (&out, &a, &start);
+                        s.spawn(move || {
+                            start.wait();
+                            let link = super::sysroot_link(out, &id, a).unwrap();
+                            assert_eq!(fs::read_link(&link).unwrap(), *a);
+                            fs::symlink_metadata(&link).unwrap().ino()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let ino = fs::symlink_metadata(&link).unwrap().ino();
+            assert!(made.iter().all(|&at| at == ino), "{made:?} {ino}");
+        }
+        // Many at once, to two toolchains, which replace each other's link: every call makes
+        // one, it ends as one of the two, and nothing is left behind. What a reader sees while
+        // another call renames over it is the system's to say (above), so it is read after.
         std::thread::scope(|s| {
             for n in 0..16 {
                 let (out, a, b) = (&out, &a, &b);
                 s.spawn(move || {
                     for _ in 0..100 {
                         let to = if n % 2 == 0 { a } else { b };
-                        let at = fs::read_link(super::sysroot_link(out, &id, to).unwrap()).unwrap();
-                        assert!(at == *a || at == *b, "{at:?}");
+                        super::sysroot_link(out, &id, to).unwrap();
                     }
                 });
             }
         });
+        let at = leads(&link);
+        assert!(at == a || at == b, "{at:?}");
         let left: Vec<_> = fs::read_dir(folder)
             .unwrap()
             .flatten()
