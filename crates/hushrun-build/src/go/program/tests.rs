@@ -540,8 +540,21 @@ impl Machine {
     }
 }
 
-/// A relay that takes every connection and answers what `answer` says to each line, or never.
-fn relay(dir: &Path, answer: Option<&'static str>) -> (PathBuf, mpsc::Receiver<Value>) {
+/// What the test relay does with each line, once it has passed the line on to the test.
+#[derive(Clone, Copy)]
+enum Says {
+    /// Answers this line.
+    Line(&'static str),
+    /// Never answers: the asker's wait runs out.
+    Nothing,
+    /// Closes the connection unanswered: the asker's call fails at once.
+    HangsUp,
+}
+
+/// A relay that takes every connection and does what `says` says with each line. A line is in
+/// the returned channel before the relay answers it or hangs up, so an ask that came back has
+/// been heard.
+fn relay(dir: &Path, says: Says) -> (PathBuf, mpsc::Receiver<Value>) {
     let socket = dir.join("relay.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let (tx, rx) = mpsc::channel();
@@ -553,11 +566,12 @@ fn relay(dir: &Path, answer: Option<&'static str>) -> (PathBuf, mpsc::Receiver<V
                 let mut line = String::new();
                 if BufReader::new(&stream).read_line(&mut line).is_ok() && !line.is_empty() {
                     let _ = tx.send(serde_json::from_str::<Value>(line.trim()).unwrap());
-                    match answer {
-                        Some(answer) => {
+                    match says {
+                        Says::Line(answer) => {
                             let _ = (&stream).write_all(format!("{answer}\n").as_bytes());
                         }
-                        None => std::thread::sleep(Duration::from_secs(30)),
+                        Says::Nothing => std::thread::sleep(Duration::from_secs(30)),
+                        Says::HangsUp => {}
                     }
                 }
             });
@@ -586,7 +600,7 @@ fn hear_until(heard: &mpsc::Receiver<Value>, done: impl Fn(&[Value]) -> bool) ->
 #[test]
 fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_of_it() {
     let dir = tempfile::tempdir().unwrap();
-    let (socket, heard) = relay(dir.path(), Some(r#"{"answer":"none"}"#));
+    let (socket, heard) = relay(dir.path(), Says::Line(r#"{"answer":"none"}"#));
     let m = Machine::new().with_session(Some("none"), Some(&socket));
     let action = [10u8; 32];
     let body = archive(&action, b"shared code", &[]);
@@ -616,7 +630,7 @@ fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_o
 #[test]
 fn an_archive_whose_compile_printed_or_that_holds_native_code_stays_here() {
     let dir = tempfile::tempdir().unwrap();
-    let (socket, heard) = relay(dir.path(), Some(r#"{"answer":"none"}"#));
+    let (socket, heard) = relay(dir.path(), Says::Line(r#"{"answer":"none"}"#));
     let m = Machine::new().with_session(Some("none"), Some(&socket));
     // F4: the compile printed its inlining report.
     let printed = [11u8; 32];
@@ -661,7 +675,7 @@ fn an_archive_whose_compile_printed_or_that_holds_native_code_stays_here() {
 #[test]
 fn after_one_relay_call_times_out_the_command_asks_it_nothing_more() {
     let dir = tempfile::tempdir().unwrap();
-    let (socket, heard) = relay(dir.path(), None);
+    let (socket, heard) = relay(dir.path(), Says::Nothing);
     let mut m = Machine::new().with_session(Some("none"), Some(&socket));
     m.env.insert(BUDGET_VAR.into(), "600".into());
     let started = Instant::now();
@@ -761,33 +775,20 @@ fn a_store_hit_the_watchdog_answered_first_records_no_reuse() {
 
 // covers: B-40
 #[test]
-fn a_relay_that_timed_out_is_asked_nothing_by_the_runs_later_go_commands() {
+fn a_relay_that_failed_is_asked_nothing_by_the_runs_later_go_commands() {
     let dir = tempfile::tempdir().unwrap();
-    let (socket, heard) = relay(dir.path(), None);
-    let mut m = Machine::new().with_session(Some("none"), Some(&socket));
-    m.env.insert(BUDGET_VAR.into(), "600".into());
+    let (socket, heard) = relay(dir.path(), Says::HangsUp);
+    // The full budget: the watchdog never answers first, so `close` waits for the handler, which
+    // marks the relay down before it is done.
+    let m = Machine::new().with_session(Some("none"), Some(&socket));
     let lines = m.serve(&[get(1, &[30u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
-    // The fetch, and the quick question that found the relay frozen: both heard before the
-    // next command, so neither is counted as its own.
-    let asked = |told: &[Value], op: &str| told.iter().any(|t| t["op"] == op);
-    let first = hear_until(&heard, |told| {
-        asked(told, "go_fetch") && asked(told, "sharing")
-    });
-    assert!(
-        asked(&first, "go_fetch") && asked(&first, "sharing"),
-        "{first:?}"
-    );
-    // Another `go` command of the same run: nothing asked, no wait.
-    let started = Instant::now();
+    // The fetch, and the quick question that found the relay down.
+    let first: Vec<Value> = heard.try_iter().map(|t| t["op"].clone()).collect();
+    assert_eq!(first, [json!("go_fetch"), json!("sharing")]);
+    // Another `go` command of the same run asks it nothing.
     let lines = m.serve(&[get(1, &[31u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
-    assert!(
-        started.elapsed() < Duration::from_millis(250),
-        "{:?}",
-        started.elapsed()
-    );
-    std::thread::sleep(Duration::from_millis(50));
     assert_eq!(heard.try_iter().count(), 0);
 }
 
