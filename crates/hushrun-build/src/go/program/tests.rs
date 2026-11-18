@@ -566,6 +566,22 @@ fn relay(dir: &Path, answer: Option<&'static str>) -> (PathBuf, mpsc::Receiver<V
     (socket, rx)
 }
 
+/// What the relay heard until `done` holds for it, or until ten seconds passed. A notice is
+/// written and left in the socket (`relay::tell`), so the relay can read it after the command
+/// that told it has returned.
+fn hear_until(heard: &mpsc::Receiver<Value>, done: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut told = Vec::new();
+    while !done(&told) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match heard.recv_timeout(left) {
+            Ok(t) => told.push(t),
+            Err(_) => break,
+        }
+    }
+    told
+}
+
 // covers: B-42, B-45
 #[test]
 fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_of_it() {
@@ -591,16 +607,9 @@ fn a_portable_archive_put_by_a_sharing_run_becomes_a_block_and_the_relay_hears_o
     assert_eq!(std::fs::read(&block.files[0].path).unwrap(), body);
     let by = m.current().share.relay().unwrap().by.clone();
     assert!(m.store().origin(&key).is_some_and(|o| o.may_go_up_as(&by)));
-    let told: Vec<Value> = heard
-        .recv_timeout(Duration::from_secs(5))
-        .into_iter()
-        .chain(heard.try_iter())
-        .collect();
-    assert!(
-        told.iter()
-            .any(|t| t["op"] == "go_built" && t["key"] == json!(key)),
-        "{told:?}"
-    );
+    let built = |t: &Value| t["op"] == "go_built" && t["key"] == json!(key);
+    let told = hear_until(&heard, |told| told.iter().any(built));
+    assert!(told.iter().any(built), "{told:?}");
 }
 
 // covers: B-42
@@ -759,8 +768,16 @@ fn a_relay_that_timed_out_is_asked_nothing_by_the_runs_later_go_commands() {
     m.env.insert(BUDGET_VAR.into(), "600".into());
     let lines = m.serve(&[get(1, &[30u8; 32]), close(2)].concat(), "go build ./...");
     assert_eq!(by_id(&lines)[&1]["Miss"], true);
-    let first = heard.try_iter().count();
-    assert!(first >= 1);
+    // The fetch, and the quick question that found the relay frozen: both heard before the
+    // next command, so neither is counted as its own.
+    let asked = |told: &[Value], op: &str| told.iter().any(|t| t["op"] == op);
+    let first = hear_until(&heard, |told| {
+        asked(told, "go_fetch") && asked(told, "sharing")
+    });
+    assert!(
+        asked(&first, "go_fetch") && asked(&first, "sharing"),
+        "{first:?}"
+    );
     // Another `go` command of the same run: nothing asked, no wait.
     let started = Instant::now();
     let lines = m.serve(&[get(1, &[31u8; 32]), close(2)].concat(), "go build ./...");
@@ -811,9 +828,11 @@ fn a_fetch_that_outlasts_its_wait_on_a_live_relay_leaves_it_on() {
         "go build ./...",
     );
     assert_eq!(by_id(&lines).len(), 4);
-    let fetches = heard
-        .try_iter()
-        .filter(|asked| asked["op"] == "go_fetch")
-        .count();
-    assert_eq!(fetches, 2, "the second get asked the relay too");
+    let fetches = |told: &[Value]| told.iter().filter(|a| a["op"] == "go_fetch").count();
+    let asked = hear_until(&heard, |told| fetches(told) >= 2);
+    assert_eq!(
+        fetches(&asked),
+        2,
+        "the second get asked the relay too: {asked:?}"
+    );
 }
