@@ -286,11 +286,11 @@ not what removing the `..` gives (a linked folder before it), the read can't be 
 compile is `built, not stored`.
 [ADR 0095] A Cargo test binary's unit key (C-31) replaces roots in the values of its `env-dep`
 lines the same way, with roots of its own: the repository's root as `workspace`, Cargo's target
-folder as `target-dir`, its build folder as `build-dir`, the cargo home and the toolchain as
-bases, the rustup home as `rustup-home` and the home folder as `home`. `build-dir`,
-`rustup-home` and `home` are roots no compile has. A folder two of them share is named by the
-first of `target-dir`, `build-dir`, `workspace`, `toolchain`, `rustup-home`, `cargo-home`, `home`:
-the home folder below every other.
+folder and its build folder both as `target-dir` (a key is never read back, so two folders may
+share a name), the cargo home and the toolchain as bases, the rustup home as `rustup-home` and
+the home folder as `home`. `rustup-home` and `home` are roots no compile has. A folder two of
+them share is named by the first of `target-dir`, `workspace`, `toolchain`, `rustup-home`,
+`cargo-home`, `home`: the home folder below every other.
 
 Two more folders are **bases**: the cargo home (`CARGO_HOME`, else `~/.cargo`, as `hushrun run`
 found it) and the toolchain (the compiler's sysroot, B-17, and its view without sources, B-9).

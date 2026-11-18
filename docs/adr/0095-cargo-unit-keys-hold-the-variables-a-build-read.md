@@ -36,9 +36,15 @@ variables the same dep-info files name that its `reads` come from (C-31's closur
 every library outside the workspace it may be built against. Those are the packages `cargo
 metadata`'s dependency graph holds for the binary's package: its own dependencies of any kind,
 then theirs other than dev-dependencies, closed, resolved with COMMAND's `--features`,
-`--all-features` and `--no-default-features`. When `cargo metadata` can't give the graph, every
-library outside the workspace that the build compiled counts for every binary, which keys more,
-never less. Their files are no file of the scope, so only their variables are added, not their
+`--all-features` and `--no-default-features`. The graph is asked after the build, `--frozen` and
+with `--filter-platform` for each triple COMMAND builds for (`--target`, `CARGO_BUILD_TARGET`,
+the host's): resolving every platform would need, and fetch, packages only another platform uses,
+and offline it fails outright, so a sandbox without a network waited out Cargo's retries twice a
+run. Asked this way it reads only what the build fetched, and fails at once when it can't. When
+`cargo metadata` can't give the graph, or gives one that lacks a crate outside the workspace the
+build compiled (a Cargo configuration's `build.target` the triples didn't name), every library
+outside the workspace that the build compiled counts for every binary, which keys more, never
+less. Their files are no file of the scope, so only their variables are added, not their
 `reads`. The graph costs `cargo metadata` without `--no-deps`, twice a run (the plan and the
 reading after COMMAND): on hushrun's own workspace, 412 packages, about 0.13 s warm against
 0.02 s, and 2 MB of JSON. Each
@@ -72,20 +78,28 @@ toolchain's cargo), and anything a build script derives from the checkout, the c
 home folder. In each value these folders, each in its given form and its form with symlinks
 resolved, are replaced by B-8's placeholders, the longest folder first, where it starts and ends a
 path: the repository's root (`{hushrun:workspace}`), Cargo's target folder (`cargo metadata`'s
-`target_directory`, `{hushrun:target-dir}`), its build folder (`build_directory`,
-`{hushrun:build-dir}`), the toolchain (the sysroot of COMMAND's `rustc`, `{hushrun:toolchain}`),
+`target_directory`) and its build folder (`build_directory`), both `{hushrun:target-dir}`, the
+toolchain (the sysroot of `RUSTC` when set, as it is, else of rustup's `rustc` with COMMAND's
+`+toolchain`, `{hushrun:toolchain}`; also under a link's given form when the rustup home, cargo
+home or home folder is reached through one),
 the rustup home (`RUSTUP_HOME`, else `$HOME/.rustup`, `{hushrun:rustup-home}`), the cargo home
 (`CARGO_HOME`, else `$HOME/.cargo`, `{hushrun:cargo-home}`) and the home folder (`HOME`,
 `{hushrun:home}`). Those of COMMAND's `env NAME=value` assignments win over hushrun's
 environment, as for every tool the adapter starts; an empty variable is unset; a `CARGO_HOME` or
 `RUSTUP_HOME` that isn't absolute is from where COMMAND runs, as Cargo reads it; a `HOME` that is
 empty, not absolute or `/` is no folder and gives no cargo or rustup home. A folder two of them
-share is named by the first of `target-dir`, `build-dir`, `workspace`, `toolchain`,
-`rustup-home`, `cargo-home`, `home`: the home folder below every other, so `CARGO_HOME=$HOME`
-names `{hushrun:cargo-home}`. This is build blocks' replacement, not a second one:
+share is named by the first of `target-dir`, `workspace`, `toolchain`, `rustup-home`,
+`cargo-home`, `home`: the home folder below every other, so `CARGO_HOME=$HOME` names
+`{hushrun:cargo-home}`. The build folder shares the target folder's name because Cargo lays out
+what it puts in either the same way below it (`<profile>/build/<package>-<hash>/out`, `tmp`,
+`<profile>/deps`; checked with Cargo 1.94), so a machine that sets `build.build-dir` and one that
+doesn't compute the same keys. That is sound because a key is only compared, never read back
+into a path: two values that differ only in which of the two folders holds Cargo's own output
+name the same thing Cargo built. Should a Cargo lay out the two differently, the rests differ
+and the keys miss, never match wrongly. This is build blocks' replacement, not a second one:
 `Roots::of_checkout` in `hushrun_build::roots` builds the same `Roots` from these folders, the
-cargo home and the toolchain as B-8's bases, and `build-dir`, `rustup-home` and `home` are root
-names only these roots have, so a compile's roots and keys are as they were. A value under none of
+cargo home and the toolchain as B-8's bases, and `rustup-home` and `home` are root names only
+these roots have, so a compile's roots and keys are as they were. A value under none of
 them is keyed as it is, and then the key is per machine, correctly. Where the repository's root
 isn't a `/` path (Windows), no value is replaced.
 
