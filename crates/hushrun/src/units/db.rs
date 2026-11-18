@@ -58,8 +58,23 @@ const MOST_DISAGREEMENTS: i64 = 200;
 /// \[C-38\] How many hints known a check keeps.
 const MOST_HINTS_KNOWN: i64 = 200;
 
+/// \[ADR 0095\] What a Cargo test binary's key held of what its build read of the environment, its
+/// `env` (C-31): one row for a test file whose adapter keys it, none for any other, as of its last
+/// build here, which `hushrun why` keys it by. A store of this schema made before it has every
+/// other table and lacks this one: opened to write, it gets it, its rows kept
+/// ([`with_env_table`]); read, it reads as one whose test files hold no `env`.
+macro_rules! unit_env {
+    () => {
+        "CREATE TABLE unit_env (
+    unit_ref INTEGER PRIMARY KEY REFERENCES unit (id) ON DELETE CASCADE,
+    env      TEXT NOT NULL CHECK (length(env) = 64 AND env NOT GLOB '*[^0-9a-f]*')
+) STRICT;"
+    };
+}
+
 /// The tables, in a fresh store. `STRICT`: a value of another type is refused.
-const TABLES: &str = "
+const TABLES: &str = concat!(
+    "
 CREATE TABLE path (
     id   INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE
@@ -155,6 +170,9 @@ CREATE TABLE unit_dir (
     path_ref INTEGER NOT NULL REFERENCES path (id),
     PRIMARY KEY (unit_ref, path_ref)
 ) STRICT, WITHOUT ROWID;
+",
+    unit_env!(),
+    "
 
 -- Direct edges an adapter saw in a check's runs, for `hushrun why` to show a path. Never read
 -- for a key.
@@ -228,7 +246,8 @@ CREATE TABLE disagreement (
     run_key   TEXT NOT NULL CHECK (length(run_key) = 64),
     at        TEXT NOT NULL
 ) STRICT;
-";
+"
+);
 
 /// Where a repository's store is: `<cache dir>/units/<id>.v2.sqlite`, the id the SHA-256 of the
 /// JCS form of `{"schema": "hushrun.unit-store-id/v1", "repository"}`, the repository as the run
@@ -375,19 +394,59 @@ fn ids(conn: &Connection) -> Result<(i64, i64), Unread> {
 /// Whether `conn` is a store of this schema: hushrun's application id and [`SCHEMA`], and \[C-36\]
 /// its tables as this build makes them, so that a store an older build of the same schema made (a
 /// test table without a column read now) reads as one that can't be read, and is set aside.
-fn check_schema(conn: &Connection) -> Result<(), Unread> {
+/// \[ADR 0095\] One that lacks `unit_env` alone, made before it, is this schema's too: `Ok(false)`
+/// says it lacks it.
+fn check_schema(conn: &Connection) -> Result<bool, Unread> {
     let (app, version) = ids(conn)?;
     if app != APPLICATION_ID || version != SCHEMA {
         return Err(Unread::Broken(format!(
             "it isn't hushrun's store of schema {SCHEMA}"
         )));
     }
-    if tables_of(conn).map_err(|e| unread(&e))? != *this_builds_tables() {
-        return Err(Unread::Broken(
-            "its tables aren't the ones this hushrun makes".into(),
-        ));
+    let tables = tables_of(conn).map_err(|e| unread(&e))?;
+    if tables == *this_builds_tables() {
+        return Ok(true);
     }
-    Ok(())
+    let mut before_env = this_builds_tables().clone();
+    before_env.remove(UNIT_ENV.trim_end_matches(';'));
+    if tables == before_env {
+        return Ok(false);
+    }
+    Err(Unread::Broken(
+        "its tables aren't the ones this hushrun makes".into(),
+    ))
+}
+
+/// \[ADR 0095\] The `unit_env` table's statement, as [`TABLES`] makes it.
+const UNIT_ENV: &str = unit_env!();
+
+/// \[ADR 0095\] `conn`, a store of this schema opened to write, with the `unit_env` table: one made
+/// before it gets it, in one transaction under the lock beside `path`, every other row as it was.
+fn with_env_table(conn: Connection, path: &Path) -> Result<Connection, Unread> {
+    if check_schema(&conn)? {
+        return Ok(conn);
+    }
+    let _lock = locked(path)?;
+    let mut conn = conn;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| unread(&e))?;
+    let there: bool = tx
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'unit_env'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| unread(&e))?
+        > 0;
+    if !there {
+        tx.execute_batch(UNIT_ENV).map_err(|e| unread(&e))?;
+    }
+    tx.commit().map_err(|e| unread(&e))?;
+    if !check_schema(&conn)? {
+        return Err(Unread::Broken("its unit_env table couldn't be made".into()));
+    }
+    Ok(conn)
 }
 
 /// The `CREATE TABLE` statements of a database's tables, as SQLite keeps them.
@@ -472,8 +531,7 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
         .map_err(|e| unread(&e))?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
-        check_schema(&conn)?;
-        return Ok(conn);
+        return with_env_table(conn, path);
     }
     if app != 0 || version != 0 {
         return Err(Unread::Broken(format!(
@@ -483,10 +541,11 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
     // A new file: WAL, then the tables and the version in one transaction, so that a store with a
     // version always has its tables. One hushrun makes it, holding a lock file beside it; another
     // that waited finds it made.
-    let _lock = locked(path)?;
+    let lock = locked(path)?;
     let (app, version) = ids(&conn)?;
     if app == APPLICATION_ID && version == SCHEMA {
-        return Ok(conn);
+        drop(lock);
+        return with_env_table(conn, path);
     }
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| unread(&e))?;
@@ -505,8 +564,8 @@ fn open_writable(path: &Path) -> Result<Connection, Unread> {
         .map_err(|e| unread(&e))?;
     }
     tx.commit().map_err(|e| unread(&e))?;
-    check_schema(&conn)?;
-    Ok(conn)
+    drop(lock);
+    with_env_table(conn, path)
 }
 
 /// \[C-36\] The tables of schema 1, in an order their references allow: schema 2 holds them with
@@ -795,6 +854,25 @@ fn read_map(conn: &Connection, check_id: &Digest) -> rusqlite::Result<Map> {
         let (unit, dir): (i64, String) = row?;
         if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
             mapped.dirs.insert(dir);
+        }
+    }
+    // \[ADR 0095\] What each Cargo test binary's key held of the environment; none in a store
+    // made before the table, opened only to read.
+    let has_env: bool = conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'unit_env'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_env {
+        let mut envs = conn.prepare(
+            "SELECT e.unit_ref, e.env FROM unit_env e JOIN unit u ON u.id = e.unit_ref
+             WHERE u.check_ref = ?1",
+        )?;
+        for row in envs.query_map([check], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (unit, env): (i64, String) = row?;
+            if let Some(mapped) = names.get(&unit).and_then(|n| map.units.get_mut(n)) {
+                mapped.env = Digest::from_hex(&env).ok();
+            }
         }
     }
     // \[ADR 0080\] Each test file's tests, as they last ran here.
@@ -1214,6 +1292,12 @@ fn write_in(tx: &Transaction<'_>, w: &Write<'_>) -> rusqlite::Result<()> {
             tx.execute(
                 "INSERT OR IGNORE INTO unit_dir (unit_ref, path_ref) VALUES (?1, ?2)",
                 params![unit, dir],
+            )?;
+        }
+        if let Some(env) = &mapped.env {
+            tx.execute(
+                "INSERT INTO unit_env (unit_ref, env) VALUES (?1, ?2)",
+                params![unit, env.hex()],
             )?;
         }
         // \[ADR 0080\] Its tests; \[ADR 0081\] with `reads: test`, each with its own list, a row

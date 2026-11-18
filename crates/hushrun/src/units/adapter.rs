@@ -307,6 +307,13 @@ pub trait Adapter: std::fmt::Debug {
         false
     }
 
+    /// \[ADR 0095\] Whether every key of its units holds what their build read of the environment
+    /// (C-31's `env`, Cargo's): then a list without it, from a store an older hushrun wrote or a
+    /// hint, keys nothing, and the unit runs.
+    fn keys_env(&self) -> bool {
+        false
+    }
+
     /// \[C-22\] The plan from the scope's files, the map and hints alone, starting no tool, which
     /// `hushrun ready` makes too. `Ok(None)` when there is nothing to say of the check's test
     /// files; `Err` why nothing can be reused.

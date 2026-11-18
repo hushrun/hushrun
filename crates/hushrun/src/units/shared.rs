@@ -246,6 +246,9 @@ pub struct List {
     pub reads: BTreeSet<String>,
     /// \[ADR 0070\] The directories listed.
     pub dirs: BTreeSet<String>,
+    /// \[ADR 0095\] What the build read of the environment, which its key holds: a Cargo test
+    /// binary's, from its build or this machine's entry; `None` for any other.
+    pub env: Option<Digest>,
     pub from: From,
 }
 
@@ -272,20 +275,26 @@ pub fn lists(
     tree: &Tree,
     compiled: Option<&BTreeSet<String>>,
 ) -> Option<Vec<List>> {
-    let make = |reads: &BTreeSet<String>, dirs: &BTreeSet<String>, from: From| {
-        let mut files = compiled.cloned().unwrap_or_default();
-        files.extend(reads.iter().cloned());
-        files.extend(gotest::under(tree, dirs));
-        List {
-            files,
-            reads: reads.clone(),
-            dirs: dirs.clone(),
-            from,
-        }
-    };
+    let make =
+        |reads: &BTreeSet<String>, dirs: &BTreeSet<String>, env: Option<Digest>, from: From| {
+            let mut files = compiled.cloned().unwrap_or_default();
+            files.extend(reads.iter().cloned());
+            files.extend(gotest::under(tree, dirs));
+            List {
+                files,
+                reads: reads.clone(),
+                dirs: dirs.clone(),
+                env,
+                from,
+            }
+        };
     let mut out: Vec<List> = Vec::new();
     let mut add = |list: List| {
-        if out.len() < MOST_LISTS && !out.iter().any(|l| l.files == list.files) {
+        if out.len() < MOST_LISTS
+            && !out
+                .iter()
+                .any(|l| l.files == list.files && l.env == list.env)
+        {
             out.push(list);
         }
     };
@@ -297,14 +306,21 @@ pub fn lists(
         Some(mapped) if !mapped.not_followed.is_empty() => return None,
         Some(mapped) => {
             let reads: BTreeSet<String> = mapped.reads.keys().cloned().collect();
-            add(make(&reads, &mapped.dirs, From::Here(mapped.origin)));
+            add(make(
+                &reads,
+                &mapped.dirs,
+                mapped.env,
+                From::Here(mapped.origin),
+            ));
         }
-        None if compiled.is_some() => add(make(&BTreeSet::new(), &BTreeSet::new(), From::Build)),
+        None if compiled.is_some() => {
+            add(make(&BTreeSet::new(), &BTreeSet::new(), None, From::Build))
+        }
         None => {}
     }
     for (os, hint) in &shared.hints {
         if let Some(seen) = hint.units.get(unit) {
-            add(make(&seen.reads, &seen.dirs, From::Hint(*os)));
+            add(make(&seen.reads, &seen.dirs, None, From::Hint(*os)));
         }
     }
     Some(out)
@@ -350,6 +366,8 @@ pub fn test_lists(
                 files,
                 reads,
                 dirs: dirs.clone(),
+                // \[ADR 0095\] A test's own list holds no `env`, as its key doesn't.
+                env: None,
                 from,
             },
             own: true,

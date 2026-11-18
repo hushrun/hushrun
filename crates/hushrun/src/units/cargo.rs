@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use hushrun_core::digest::Digest;
 use hushrun_core::units::{self, Facts, NotFollowed, Sets, Sources};
 
 use super::adapter::{Adapter, Hints, PlanAt, Planning, Read, ReadAt, RunExtras, StartAt, WhyAt};
@@ -226,11 +227,7 @@ pub fn runner_variables(
     if recognized.build.iter().any(|word| word.contains("runner")) {
         return Err("COMMAND sets a target runner".into());
     }
-    let mut triples: BTreeSet<String> = recognized.targets.iter().cloned().collect();
-    if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
-        triples.insert(target);
-    }
-    triples.insert(host(recognized, cwd, env, assigned)?);
+    let triples = triples(recognized, cwd, env, assigned)?;
     let mut out = Vec::new();
     for triple in triples {
         let key: String = triple
@@ -257,6 +254,42 @@ pub fn runner_variables(
     Ok(out)
 }
 
+/// The triples COMMAND builds for: each `--target`, `CARGO_BUILD_TARGET`, and the host's.
+fn triples(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> Result<BTreeSet<String>, String> {
+    let mut triples: BTreeSet<String> = recognized.targets.iter().cloned().collect();
+    if let Some(target) = env("CARGO_BUILD_TARGET").filter(|t| !t.is_empty()) {
+        triples.insert(target);
+    }
+    triples.insert(host(recognized, cwd, env, assigned)?);
+    Ok(triples)
+}
+
+/// The `rustc` Cargo runs for COMMAND, as a command and its name: `RUSTC` when set, as it is;
+/// else rustup's `rustc` with COMMAND's `+toolchain`. A `+toolchain` goes only to rustup's proxy,
+/// never to a `RUSTC` that is a compiler itself.
+fn rustc(
+    recognized: &Recognized,
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> (Command, String) {
+    match env("RUSTC").filter(|r| !r.is_empty()) {
+        Some(rustc) => (super::command::tool(&rustc, cwd, assigned), rustc),
+        None => {
+            let mut command = super::command::tool("rustc", cwd, assigned);
+            if let Some(tc) = &recognized.toolchain {
+                command.arg(format!("+{tc}"));
+            }
+            (command, "rustc".into())
+        }
+    }
+}
+
 /// The host triple, as the `rustc` COMMAND's toolchain runs says.
 fn host(
     recognized: &Recognized,
@@ -264,13 +297,7 @@ fn host(
     env: &dyn Fn(&str) -> Option<String>,
     assigned: &[(String, String)],
 ) -> Result<String, String> {
-    let rustc = env("RUSTC")
-        .filter(|r| !r.is_empty())
-        .unwrap_or("rustc".into());
-    let mut command = super::command::tool(&rustc, cwd, assigned);
-    if let Some(tc) = &recognized.toolchain {
-        command.arg(format!("+{tc}"));
-    }
+    let (mut command, rustc) = rustc(recognized, cwd, env, assigned);
     let output = command
         .arg("-vV")
         .stdin(Stdio::null())
@@ -339,6 +366,9 @@ pub struct Built {
 pub struct BuiltUnit {
     pub executable: PathBuf,
     pub reads: BTreeSet<String>,
+    /// \[ADR 0095\] What the same dep-info says its build read of the environment, as its key
+    /// holds it (C-31's `env`).
+    pub env: Digest,
     pub not_followed: BTreeSet<NotFollowed>,
 }
 
@@ -355,16 +385,85 @@ pub fn plan_build(
     env: &[(OsString, OsString)],
     assigned: &[(String, String)],
 ) -> Result<Built, String> {
-    let metadata = metadata(recognized, cwd, assigned)?;
+    // \[ADR 0095\] The build first: the graph `cargo metadata` gives is asked offline, from what
+    // the build fetched.
     let artifacts = build(recognized, cwd, true, env, assigned)?;
-    Ok(read_build(&metadata, artifacts, root))
+    let metadata = metadata(recognized, cwd, assigned)?;
+    let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
+    Ok(read_build(&metadata, artifacts, root, roots.as_ref()))
 }
 
 #[derive(Debug, Deserialize)]
 struct Metadata {
     workspace_root: PathBuf,
+    /// \[ADR 0095\] Cargo's target folder, absolute.
+    #[serde(default)]
+    target_directory: Option<PathBuf>,
+    /// \[ADR 0095\] Cargo's build folder (`build.build-dir`), absolute; the target folder when
+    /// none is set, and absent before Cargo 1.91.
+    #[serde(default)]
+    build_directory: Option<PathBuf>,
     packages: Vec<Package>,
     workspace_members: Vec<String>,
+    /// \[ADR 0095\] The dependency graph, which `--no-deps` leaves out: `None` then.
+    #[serde(default)]
+    resolve: Option<Resolve>,
+}
+
+/// \[ADR 0095\] `cargo metadata`'s dependency graph, by package id.
+#[derive(Debug, Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Node {
+    id: String,
+    #[serde(default)]
+    deps: Vec<NodeDep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeDep {
+    pkg: String,
+    #[serde(default)]
+    dep_kinds: Vec<DepKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DepKind {
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+impl Resolve {
+    /// \[ADR 0095\] Every package a test binary of `root` may be built against: its own
+    /// dependencies of any kind, then theirs other than dev-dependencies, closed, build
+    /// dependencies included (more than it links reads more, never less). `None` when the graph
+    /// doesn't hold `root`.
+    fn closure(&self, root: &str) -> Option<BTreeSet<String>> {
+        let nodes: BTreeMap<&str, &Node> = self.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let first = nodes.get(root)?;
+        let mut seen = BTreeSet::new();
+        let mut pending: Vec<&str> = first.deps.iter().map(|d| d.pkg.as_str()).collect();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next.to_string()) {
+                continue;
+            }
+            if let Some(node) = nodes.get(next) {
+                pending.extend(
+                    node.deps
+                        .iter()
+                        .filter(|d| {
+                            d.dep_kinds.is_empty()
+                                || d.dep_kinds.iter().any(|k| k.kind.as_deref() != Some("dev"))
+                        })
+                        .map(|d| d.pkg.as_str()),
+                );
+            }
+        }
+        Some(seen)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -395,6 +494,8 @@ struct Target {
 struct Message {
     reason: String,
     #[serde(default)]
+    package_id: Option<String>,
+    #[serde(default)]
     manifest_path: Option<PathBuf>,
     #[serde(default)]
     target: Option<Target>,
@@ -417,6 +518,8 @@ struct Profile {
 #[derive(Debug)]
 struct Artifact {
     manifest: PathBuf,
+    /// \[ADR 0095\] Its package's id, as `cargo metadata` names it.
+    package_id: Option<String>,
     target: Target,
     test: bool,
     executable: Option<PathBuf>,
@@ -442,7 +545,8 @@ pub fn observe(
         .collect();
     let metadata = metadata(recognized, cwd, assigned)?;
     let artifacts = build(recognized, cwd, false, &[], assigned)?;
-    let built = read_build(&metadata, artifacts, root);
+    let roots = checkout_roots(recognized, root, cwd, &metadata, assigned);
+    let built = read_build(&metadata, artifacts, root, roots.as_ref());
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // How each binary the runner started ended, by its real path.
     let mut started: BTreeMap<PathBuf, Vec<&Invocation>> = BTreeMap::new();
@@ -469,6 +573,7 @@ pub fn observe(
                     ..Facts::default()
                 },
                 reads: b.reads,
+                env: Some(b.env),
                 duration_ms,
                 tests: None,
             },
@@ -492,8 +597,18 @@ fn deselected(starts: &[&Invocation]) -> bool {
 /// The test binaries of a build, what each read and what can't be told of it, from its artifacts:
 /// a test binary read what its own dep-info names, what the dep-info of every workspace library
 /// it may link names, and for an integration test, a bench or an example, what every target of
-/// its package was built from (C-31).
-fn read_build(metadata: &Metadata, artifacts: Vec<Artifact>, root: &Path) -> Built {
+/// its package was built from (C-31). \[ADR 0095\] The same dep-info files, and those of the
+/// libraries outside the workspace its package's dependency graph holds (every such library when
+/// `metadata` has no graph), say what it read of the environment, its `env`, with `roots`
+/// ([`checkout_roots`]) replaced. A dep-info that can't be read, or a library without one, makes
+/// it `not observed`. The plan and the reading after COMMAND both call it, so both key a binary
+/// alike.
+fn read_build(
+    metadata: &Metadata,
+    artifacts: Vec<Artifact>,
+    root: &Path,
+    roots: Option<&hushrun_build::roots::Roots>,
+) -> Built {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let root = real(root);
     let relative = |path: &Path| -> Option<String> {
@@ -553,21 +668,40 @@ fn read_build(metadata: &Metadata, artifacts: Vec<Artifact>, root: &Path) -> Bui
         }
     }
 
-    let artifacts: Vec<Artifact> = artifacts
+    // \[ADR 0095\] The crates outside the workspace a build compiled (registry, git, and path
+    // crates outside it), whose libraries a binary may link: what each read of the environment
+    // is in the keys of the binaries whose dependency graph holds it, or of every binary when
+    // `cargo metadata` gave no graph.
+    let (artifacts, outside): (Vec<Artifact>, Vec<Artifact>) = artifacts
         .into_iter()
-        .filter(|a| packages.contains_key(&a.manifest))
-        .collect();
-    let mut cache: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
+        .partition(|a| packages.contains_key(&a.manifest));
+    let is_lib = |a: &Artifact| {
+        a.target
+            .kind
+            .iter()
+            .any(|k| k.contains("lib") || k == "proc-macro")
+    };
+    let outside: Vec<Artifact> = outside.into_iter().filter(|a| is_lib(a)).collect();
+    // A graph that doesn't hold every crate the build compiled (one for a platform it was filtered
+    // out for, as a Cargo configuration's `build.target` names) can't say what a binary is built
+    // against: then every such crate counts for every binary.
+    let graph_holds_the_build = metadata.resolve.as_ref().is_some_and(|resolve| {
+        let nodes: BTreeSet<&str> = resolve.nodes.iter().map(|n| n.id.as_str()).collect();
+        outside
+            .iter()
+            .all(|a| a.package_id.as_deref().is_some_and(|id| nodes.contains(id)))
+    });
+    let mut cache: BTreeMap<PathBuf, Option<DepInfo>> = BTreeMap::new();
     let mut named = BTreeSet::new();
-    let mut read_depinfo = |path: &Path| -> BTreeSet<PathBuf> {
+    let mut read_depinfo = |path: &Path| -> Option<DepInfo> {
         cache
             .entry(path.to_path_buf())
             .or_insert_with(|| parse_depinfo(path, &metadata.workspace_root))
             .clone()
     };
     for artifact in &artifacts {
-        if let Some(d) = &artifact.depinfo {
-            named.extend(read_depinfo(d).iter().filter_map(|p| relative(p)));
+        if let Some(info) = artifact.depinfo.as_deref().and_then(&mut read_depinfo) {
+            named.extend(info.files.iter().filter_map(|p| relative(p)));
         }
     }
 
@@ -617,15 +751,70 @@ fn read_build(metadata: &Metadata, artifacts: Vec<Artifact>, root: &Path) -> Bui
                 }
             }
         }
+        // \[ADR 0095\] The crates outside the workspace it may be built against: only what they
+        // read of the environment counts, since their files are no file of the scope.
+        let graph = graph_holds_the_build
+            .then_some(metadata.resolve.as_ref())
+            .flatten()
+            .and_then(|resolve| {
+                let id = &packages.get(&artifact.manifest)?.id;
+                resolve.closure(id)
+            });
+        let mut env_only: Vec<PathBuf> = Vec::new();
+        for other in &outside {
+            let linked = match (&graph, &other.package_id) {
+                (Some(graph), Some(id)) => graph.contains(id),
+                (Some(_), None) => true,
+                (None, _) => true,
+            };
+            if !linked {
+                continue;
+            }
+            match &other.depinfo {
+                Some(d) => env_only.push(d.clone()),
+                None => {
+                    not_followed.insert(NotFollowed {
+                        why: "target-without-dep-info".into(),
+                        detail: other
+                            .package_id
+                            .as_deref()
+                            .and_then(|id| id.rsplit('#').next())
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                }
+            }
+        }
         let mut reads: BTreeSet<String> = BTreeSet::new();
-        for d in &depinfos {
-            reads.extend(read_depinfo(d).iter().filter_map(|p| relative(p)));
+        let mut env: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+        for (d, files) in depinfos
+            .iter()
+            .map(|d| (d, true))
+            .chain(env_only.iter().map(|d| (d, false)))
+        {
+            // \[ADR 0095\] A dep-info that can't be read says nothing of what was read, never
+            // that nothing was.
+            let Some(info) = read_depinfo(d) else {
+                not_followed.insert(NotFollowed {
+                    why: "unreadable-dep-info".into(),
+                    detail: d
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                });
+                continue;
+            };
+            if files {
+                reads.extend(info.files.iter().filter_map(|p| relative(p)));
+            }
+            env.extend(keyed_env(info.env, roots));
         }
         units.insert(
             unit,
             BuiltUnit {
                 executable: executable.clone(),
                 reads,
+                env: units::env(env.iter().map(|(n, v)| (n.as_str(), v.as_deref()))),
                 not_followed,
             },
         );
@@ -686,23 +875,73 @@ fn ended(
     (whole, failed, duration)
 }
 
-/// `cargo metadata --no-deps`: the workspace's members, their targets and path dependencies.
-/// It resolves nothing, so it reads no network and writes no lockfile.
+/// `cargo metadata`: the workspace's members, their targets and path dependencies, and \[ADR 0095\]
+/// the dependency graph, after COMMAND's build. The graph is asked `--frozen`, so
+/// it writes no lockfile and reads no network, and for COMMAND's triples alone
+/// (`--filter-platform`), so it needs no package only another platform does: what the build
+/// fetched is all it reads. When that fails, at once, `--no-deps` resolves nothing and reads no
+/// network either, and every library outside the workspace counts for every binary.
 fn metadata(
     recognized: &Recognized,
     cwd: &Path,
     assigned: &[(String, String)],
 ) -> Result<Metadata, String> {
+    // \[ADR 0095\] With the dependency graph, resolved with COMMAND's features, so that each
+    // binary's crates outside the workspace are known; without it when that fails, and then every
+    // such crate of the build counts for every binary.
+    let var = |name: &str| -> Option<String> {
+        assigned
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var(name).ok())
+    };
+    triples(recognized, cwd, &var, assigned)
+        .and_then(|triples| metadata_of(recognized, cwd, assigned, Some(&triples)))
+        .or_else(|_| metadata_of(recognized, cwd, assigned, None))
+}
+
+/// `cargo metadata` with the graph for `platforms`, or with `--no-deps` for `None`.
+fn metadata_of(
+    recognized: &Recognized,
+    cwd: &Path,
+    assigned: &[(String, String)],
+    platforms: Option<&BTreeSet<String>>,
+) -> Result<Metadata, String> {
+    let resolve = platforms.is_some();
     let mut command = cargo(recognized, cwd, assigned);
-    command.args(["metadata", "--format-version", "1", "--no-deps"]);
+    command.args(["metadata", "--format-version", "1"]);
+    match platforms {
+        None => {
+            command.arg("--no-deps");
+        }
+        Some(platforms) => {
+            // Locked and offline, whatever COMMAND says.
+            command.arg("--frozen");
+            for triple in platforms {
+                command.args(["--filter-platform", triple]);
+            }
+        }
+    }
     let mut words = recognized.build.iter();
+    let mut given: BTreeSet<&str> = BTreeSet::new();
     while let Some(word) = words.next() {
         match word.as_str() {
             "--manifest-path" | "--config" | "-Z" => {
                 command.arg(word);
                 command.args(words.next());
             }
-            "--frozen" | "--locked" | "--offline" => {
+            "-F" | "--features" if resolve => {
+                command.arg(word);
+                command.args(words.next());
+            }
+            "--frozen" | "--locked" | "--offline" if !resolve => {
+                if given.insert(word) {
+                    command.arg(word);
+                }
+            }
+            "--all-features" | "--no-default-features" if resolve => {
                 command.arg(word);
             }
             _ => {}
@@ -792,6 +1031,7 @@ fn build(
         let depinfo = depinfo_of(&message.filenames, message.executable.as_deref(), &target);
         artifacts.push(Artifact {
             manifest: std::fs::canonicalize(&manifest).unwrap_or(manifest),
+            package_id: message.package_id,
             target,
             test: profile.test,
             executable: message.executable,
@@ -882,11 +1122,133 @@ fn depinfo_of(
     None
 }
 
-/// Every file a Makefile-style dep-info names, absolute: relative ones against `base`.
-fn parse_depinfo(path: &Path, base: &Path) -> BTreeSet<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BTreeSet::new();
+/// \[ADR 0095\] The roots a test binary's `env` replaces (C-31), of [`checkout_folders`], each
+/// resolved on disk too; the toolchain is the sysroot of the `rustc` COMMAND's toolchain runs.
+/// `None` where they can't be roots (a root that isn't a `/` path, as on Windows): values are
+/// keyed as they are. The plan and the reading after COMMAND both call it.
+fn checkout_roots(
+    recognized: &Recognized,
+    root: &Path,
+    cwd: &Path,
+    metadata: &Metadata,
+    assigned: &[(String, String)],
+) -> Option<hushrun_build::roots::Roots> {
+    let var = |name: &str| -> Option<String> {
+        assigned
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var(name).ok())
     };
+    let toolchain = sysroot(recognized, cwd, &var, assigned);
+    let folders = checkout_folders(root, cwd, metadata, &var, toolchain)?;
+    hushrun_build::roots::Roots::of_checkout(&folders, hushrun_build::roots::resolve_on_disk).ok()
+}
+
+/// \[ADR 0095\] The folders of a checkout (C-31), as COMMAND's `cargo` has them (`var`, its
+/// assignments over hushrun's environment): the repository's root `root`; Cargo's target and
+/// build folders, from `metadata`; the cargo home, `CARGO_HOME` (one that isn't absolute from
+/// `cwd`, as Cargo reads it), else `$HOME/.cargo`; the rustup home, `RUSTUP_HOME` likewise, else
+/// `$HOME/.rustup`; the toolchain, `toolchain`; and the home folder, `HOME`. An empty variable is
+/// unset; a `HOME` that is empty, not absolute or `/` is no folder, and gives no cargo or rustup
+/// home of its own.
+fn checkout_folders(
+    root: &Path,
+    cwd: &Path,
+    metadata: &Metadata,
+    var: &dyn Fn(&str) -> Option<String>,
+    toolchain: Option<String>,
+) -> Option<hushrun_build::roots::CheckoutFolders> {
+    let var = |name: &str| var(name).filter(|v| !v.is_empty());
+    let home =
+        var("HOME").filter(|home| home.starts_with('/') && !home.trim_matches('/').is_empty());
+    let home_of = |name: &str, under: &str| -> Option<String> {
+        match var(name) {
+            Some(dir) if Path::new(&dir).is_absolute() => Some(dir),
+            Some(dir) => cwd.join(dir).to_str().map(str::to_string),
+            None => home
+                .as_ref()
+                .map(|home| format!("{}/{under}", home.trim_end_matches('/'))),
+        }
+    };
+    let text = |dir: &Option<PathBuf>| dir.as_ref().and_then(|d| d.to_str()).map(str::to_string);
+    Some(hushrun_build::roots::CheckoutFolders {
+        checkout: root.to_str()?.to_string(),
+        target_dir: text(&metadata.target_directory),
+        build_dir: text(&metadata.build_directory),
+        cargo_home: home_of("CARGO_HOME", ".cargo"),
+        rustup_home: home_of("RUSTUP_HOME", ".rustup"),
+        toolchain,
+        home: home.clone(),
+    })
+}
+
+/// \[ADR 0095\] The sysroot of the `rustc` Cargo runs for COMMAND ([`rustc`]): the toolchain's
+/// folder. `None` when it can't be asked, and then there is no toolchain root, silently.
+fn sysroot(
+    recognized: &Recognized,
+    cwd: &Path,
+    var: &dyn Fn(&str) -> Option<String>,
+    assigned: &[(String, String)],
+) -> Option<String> {
+    let (mut command, _) = rustc(recognized, cwd, var, assigned);
+    let output = command
+        .args(["--print", "sysroot"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let line = String::from_utf8(output.stdout).ok()?;
+    let line = line.trim();
+    (output.status.success() && Path::new(line).is_absolute()).then(|| line.to_string())
+}
+
+/// \[ADR 0095\] One dep-info's variables as a key holds them (C-31's `env`): each value with
+/// `roots`' placeholders in place of the folders they name; as they are without roots.
+fn keyed_env(
+    env: BTreeSet<(String, Option<String>)>,
+    roots: Option<&hushrun_build::roots::Roots>,
+) -> impl Iterator<Item = (String, Option<String>)> + '_ {
+    env.into_iter().map(move |(name, value)| {
+        let value = match (value, roots) {
+            (Some(value), Some(roots)) => Some(roots.to_placeholders(&value)),
+            (value, _) => value,
+        };
+        (name, value)
+    })
+}
+
+/// What a dep-info file says a compile read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DepInfo {
+    /// Every file it names, absolute.
+    files: BTreeSet<PathBuf>,
+    /// \[ADR 0095\] Every variable it names: each `# env-dep:` line's name and value, `None` for
+    /// one that was unset, as rustc wrote it, unescaped.
+    env: BTreeSet<(String, Option<String>)>,
+}
+
+/// What a Makefile-style dep-info names: every file, absolute, relative ones against `base`; and
+/// \[ADR 0095\] every variable of its `# env-dep:` lines, read by the one reader of them
+/// ([`hushrun_build::depinfo::env_dep`]). `None` for a file that can't be read, which says nothing
+/// of what was read (the unit is then `not observed`); an `env-dep`
+/// line with an escape rustc never writes is kept as it is written, as a name alone, so that it
+/// still keys the binary.
+fn parse_depinfo(path: &Path, base: &Path) -> Option<DepInfo> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut env = BTreeSet::new();
+    for line in text.lines() {
+        match hushrun_build::depinfo::env_dep(line) {
+            Some(Some(dep)) => {
+                env.insert((dep.name, dep.value));
+            }
+            Some(None) => {
+                env.insert((line.to_string(), None));
+            }
+            None => {}
+        }
+    }
     let text = text.replace("\\\n", " ");
     let mut files = BTreeSet::new();
     for line in text.lines() {
@@ -905,7 +1267,10 @@ fn parse_depinfo(path: &Path, base: &Path) -> BTreeSet<PathBuf> {
             });
         }
     }
-    files.into_iter().map(|p| normalize(&p)).collect()
+    Some(DepInfo {
+        files: files.into_iter().map(|p| normalize(&p)).collect(),
+        env,
+    })
 }
 
 /// `a/b/../c` as `a/c`, without asking the file system.
@@ -987,6 +1352,10 @@ impl Adapter for Recognized {
         true
     }
 
+    fn keys_env(&self) -> bool {
+        true
+    }
+
     fn variables(&self, at: &StartAt<'_>) -> Result<Vec<(String, OsString)>, String> {
         let exe = at.exe()?;
         let env = |name: &str| (at.env)(name).and_then(|v| v.into_string().ok());
@@ -1010,7 +1379,7 @@ impl Adapter for Recognized {
             .iter()
             .map(|(unit, b)| {
                 let lists = (b.not_followed.is_empty() && at.tree.contains(unit))
-                    .then(|| vec![super::built_list(&b.reads)]);
+                    .then(|| vec![super::built_list(&b.reads, Some(b.env))]);
                 (unit.clone(), lists)
             })
             .collect();
@@ -1048,7 +1417,7 @@ impl Adapter for Recognized {
         let planned = observed
             .units
             .iter()
-            .map(|(unit, seen)| (unit.clone(), vec![super::built_list(&seen.reads)]))
+            .map(|(unit, seen)| (unit.clone(), vec![super::built_list(&seen.reads, seen.env)]))
             .collect();
         Ok(Some(Read {
             seen: observed.units,
@@ -1132,7 +1501,7 @@ mod tests {
             "/t/deps/a-1.d: crates/a/src/lib.rs crates/a/src/../data\\ file.txt /abs/b.rs\n\n/t/deps/a-1: crates/a/src/lib.rs\n\ncrates/a/src/lib.rs:\n\n# env-dep:X=1\n",
         )
         .unwrap();
-        let files = parse_depinfo(&d, Path::new("/ws"));
+        let files = parse_depinfo(&d, Path::new("/ws")).unwrap().files;
         let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(
             names,
@@ -1142,6 +1511,397 @@ mod tests {
                 "/ws/crates/a/src/lib.rs"
             ]
         );
+    }
+
+    fn env_of(text: &str) -> Vec<(String, Option<String>)> {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("a-1.d");
+        std::fs::write(&d, text).unwrap();
+        parse_depinfo(&d, Path::new("/ws"))
+            .unwrap()
+            .env
+            .into_iter()
+            .collect()
+    }
+
+    fn entry(name: &str, value: Option<&str>) -> (String, Option<String>) {
+        (name.to_string(), value.map(str::to_string))
+    }
+
+    // covers: C-31
+    #[test]
+    fn dep_info_names_every_variable_a_build_read_set_unset_or_escaped() {
+        // As rustc 1.94 writes them: a space and `=` as they are, `\`, a line feed and a carriage
+        // return escaped as `\\`, `\n` and `\r`.
+        let text = "/t/deps/a-1.d: src/lib.rs\n\nsrc/lib.rs:\n\n\
+# env-dep:CARGO_MANIFEST_DIR=/ws/crates/a\n\
+# env-dep:EMPTY=\n\
+# env-dep:UNSET\n\
+# env-dep:WEIRD=a b\\\\c\\nd\\re=f\n";
+        assert_eq!(
+            env_of(text),
+            [
+                entry("CARGO_MANIFEST_DIR", Some("/ws/crates/a")),
+                entry("EMPTY", Some("")),
+                entry("UNSET", None),
+                entry("WEIRD", Some("a b\\c\nd\re=f")),
+            ]
+        );
+        // Lines that aren't `# env-dep:` lines name no variable: another comment, one without its
+        // space or its `#`, one indented, a rule or a path holding the word.
+        let others = "/t/deps/a-1.d: src/env-dep:X=1.rs\n\nsrc/env-dep:X=1.rs:\n\n\
+# checksum:abc\n#env-dep:Y=1\n env-dep:Z=1\n # env-dep:Z=2\nenv-dep:Q=3:\n";
+        assert_eq!(env_of(others), []);
+        // An escape rustc never writes keys the line as it is, so it still tells builds apart.
+        assert_eq!(
+            env_of("/t/a.d: src/lib.rs\n\n# env-dep:BAD=a\\qb\n"),
+            [entry("# env-dep:BAD=a\\qb", None)]
+        );
+        // A dep-info that can't be read says nothing, not that nothing was read.
+        assert!(parse_depinfo(Path::new("/nowhere/a.d"), Path::new("/ws")).is_none());
+    }
+
+    // covers: C-31
+    // \[ADR 0095\] The Cargo vectors' `env-dep` lines, read and replaced as a build's are, give the
+    // entries the vectors list, which `tools/refdigest.py` and hushrun-core's test key.
+    #[test]
+    fn the_cargo_vectors_lines_give_the_entries_they_list() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/digest/unit-keys.json");
+        let data: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut seen = 0;
+        for vector in data["vectors"].as_array().unwrap() {
+            let Some(deps) = vector.get("envDeps") else {
+                continue;
+            };
+            seen += 1;
+            let lines: Vec<&str> = deps["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l.as_str().unwrap())
+                .collect();
+            let folder = |name: &str| deps["folders"][name].as_str().map(str::to_string);
+            // The vectors' folders resolve to themselves, as on a machine without symlinks there.
+            let roots = hushrun_build::roots::Roots::of_checkout(
+                &hushrun_build::roots::CheckoutFolders {
+                    checkout: folder("root").unwrap(),
+                    target_dir: folder("targetDir"),
+                    build_dir: folder("buildDir"),
+                    cargo_home: folder("cargoHome"),
+                    toolchain: folder("toolchain"),
+                    rustup_home: folder("rustupHome"),
+                    home: folder("home"),
+                },
+                |_: &str| None,
+            )
+            .unwrap();
+            let entries: Vec<(String, Option<String>)> = keyed_env(
+                env_of(&format!("/t/a.d: src/lib.rs\n\n{}\n", lines.join("\n")))
+                    .into_iter()
+                    .collect(),
+                Some(&roots),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+            let listed: Vec<(String, Option<String>)> = vector["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e[0].as_str().unwrap().to_string(),
+                        e[1].as_str().map(str::to_string),
+                    )
+                })
+                .collect();
+            assert_eq!(entries, listed, "{}", vector["name"]);
+            assert_eq!(
+                units::env(entries.iter().map(|(n, v)| (n.as_str(), v.as_deref()))).to_string(),
+                vector["expect"]["env"],
+                "{}",
+                vector["name"]
+            );
+        }
+        assert_eq!(seen, 4);
+    }
+
+    // covers: C-31
+    #[test]
+    fn a_binarys_env_is_its_closures_with_the_checkouts_folders_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("ws");
+        let ws = root.to_str().unwrap().to_string();
+        let target = format!("{ws}/target");
+        let deps = root.join("target/debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let depinfo = |name: &str, env: &[&str]| -> PathBuf {
+            let path = deps.join(format!("{name}.d"));
+            let mut text = format!("{}: x.rs\n\nx.rs:\n\n", path.display());
+            for line in env {
+                text.push_str(&format!("# env-dep:{line}\n"));
+            }
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let graph = serde_json::json!({"nodes": [
+            {"id": "a", "deps": [{"pkg": "ext", "dep_kinds": [{"kind": null}]}]},
+            {"id": "b", "deps": [{"pkg": "a", "dep_kinds": [{"kind": null}]}]},
+            {"id": "ext", "deps": [
+                {"pkg": "far", "dep_kinds": [{"kind": "build"}]},
+                {"pkg": "dev-only", "dep_kinds": [{"kind": "dev"}]}
+            ]},
+            {"id": "far", "deps": []},
+            {"id": "dev-only", "deps": []},
+            {"id": "lone", "deps": []}
+        ]});
+        let metadata_with = |resolve: serde_json::Value| -> Metadata {
+            serde_json::from_value(serde_json::json!({
+                "workspace_root": ws,
+                "target_directory": target,
+                "workspace_members": ["a", "b"],
+                "packages": [
+                    {"id": "a", "manifest_path": format!("{ws}/a/Cargo.toml"), "dependencies": [],
+                     "targets": [{"kind": ["lib"], "src_path": format!("{ws}/a/src/lib.rs"), "test": true}]},
+                    {"id": "b", "manifest_path": format!("{ws}/b/Cargo.toml"),
+                     "dependencies": [{"path": format!("{ws}/a"), "kind": null}],
+                     "targets": [
+                         {"kind": ["lib"], "src_path": format!("{ws}/b/src/lib.rs"), "test": true},
+                         {"kind": ["test"], "src_path": format!("{ws}/b/tests/it.rs"), "test": true}
+                     ]}
+                ],
+                "resolve": resolve,
+            }))
+            .unwrap()
+        };
+        let target_of = |package: &str, kind: &str, src: &str| Target {
+            kind: vec![kind.to_string()],
+            src_path: root.join(package).join(src),
+            test: true,
+        };
+        let artifact =
+            |package: &str, kind: &str, src: &str, test: bool, d: Option<PathBuf>| Artifact {
+                manifest: root.join(package).join("Cargo.toml"),
+                package_id: Some(package.to_string()),
+                target: target_of(package, kind, src),
+                test,
+                executable: test.then(|| deps.join(format!("{package}-{kind}"))),
+                depinfo: d,
+            };
+        // A crate outside the workspace: its manifest is no member's.
+        let outside = |package: &str, kind: &str, d: Option<PathBuf>| Artifact {
+            manifest: root.join("..").join(package).join("Cargo.toml"),
+            ..artifact(package, kind, "src/lib.rs", false, d)
+        };
+        let a_dir = format!("CARGO_MANIFEST_DIR={ws}/a");
+        let b_dir = format!("CARGO_MANIFEST_DIR={ws}/b");
+        let out = format!("OUT_DIR={target}/debug/build/b-1/out");
+        let artifacts = || {
+            vec![
+                artifact(
+                    "a",
+                    "lib",
+                    "src/lib.rs",
+                    false,
+                    Some(depinfo("a", &[&a_dir, "A_ONLY"])),
+                ),
+                artifact(
+                    "a",
+                    "lib",
+                    "src/lib.rs",
+                    true,
+                    Some(depinfo("a-test", &[&a_dir])),
+                ),
+                artifact(
+                    "b",
+                    "lib",
+                    "src/lib.rs",
+                    false,
+                    Some(depinfo("b", &[&b_dir, &out])),
+                ),
+                artifact(
+                    "b",
+                    "lib",
+                    "src/lib.rs",
+                    true,
+                    Some(depinfo("b-test", &[&b_dir])),
+                ),
+                artifact(
+                    "b",
+                    "test",
+                    "tests/it.rs",
+                    true,
+                    Some(depinfo("it", &["IT=1"])),
+                ),
+                outside("ext", "lib", Some(depinfo("ext", &["EXT=1"]))),
+                // A build script's own compile isn't linked, and has no dep-info found.
+                outside("ext", "custom-build", None),
+                outside("far", "proc-macro", Some(depinfo("far", &["FAR"]))),
+                outside("dev-only", "lib", Some(depinfo("dev-only", &["DEV=1"]))),
+                outside("lone", "lib", Some(depinfo("lone", &["LONE=1"]))),
+            ]
+        };
+        let roots = hushrun_build::roots::Roots::of_checkout(
+            &hushrun_build::roots::CheckoutFolders {
+                checkout: ws.clone(),
+                target_dir: Some(target.clone()),
+                ..Default::default()
+            },
+            |_: &str| None,
+        )
+        .unwrap();
+        let built = read_build(
+            &metadata_with(graph.clone()),
+            artifacts(),
+            &root,
+            Some(&roots),
+        );
+        let env = |entries: &[(&str, Option<&str>)]| units::env(entries.iter().copied());
+        let a = ("CARGO_MANIFEST_DIR", Some("{hushrun:workspace}/a"));
+        let b = ("CARGO_MANIFEST_DIR", Some("{hushrun:workspace}/b"));
+        let out = ("OUT_DIR", Some("{hushrun:target-dir}/debug/build/b-1/out"));
+        // The crates outside the workspace its graph holds: a dependency's own dependencies of
+        // any kind but dev.
+        let outer = [("EXT", Some("1")), ("FAR", None)];
+        let with = |entries: &[(&'static str, Option<&'static str>)]| {
+            let mut all = entries.to_vec();
+            all.extend(outer);
+            env(&all)
+        };
+        // A unit test reads its own dep-info's, its package's library's and each workspace
+        // library's it may link.
+        assert_eq!(
+            built.units["a/src/lib.rs"].env,
+            with(&[a, ("A_ONLY", None)])
+        );
+        assert_eq!(
+            built.units["b/src/lib.rs"].env,
+            with(&[b, out, a, ("A_ONLY", None)])
+        );
+        assert_ne!(
+            built.units["b/src/lib.rs"].env,
+            with(&[b, a, ("A_ONLY", None)])
+        );
+        // An integration test, every target's of its package too.
+        assert_eq!(
+            built.units["b/tests/it.rs"].env,
+            with(&[("IT", Some("1")), b, out, a, ("A_ONLY", None)])
+        );
+        assert!(built.units.values().all(|u| u.not_followed.is_empty()));
+        // Without the graph, every crate outside the workspace counts for every binary.
+        let built = read_build(
+            &metadata_with(serde_json::Value::Null),
+            artifacts(),
+            &root,
+            Some(&roots),
+        );
+        let mut all = vec![a, ("A_ONLY", None), ("DEV", Some("1")), ("LONE", Some("1"))];
+        all.extend(outer);
+        assert_eq!(built.units["a/src/lib.rs"].env, env(&all));
+        // A dep-info that can't be read keeps the binaries it is in from being followed; a
+        // library outside the workspace without one too.
+        let mut broken = artifacts();
+        std::fs::write(deps.join("ext.d"), [0xff, 0xfe, b'\n']).unwrap();
+        broken.push(outside("far", "lib", None));
+        let built = read_build(&metadata_with(graph), broken, &root, Some(&roots));
+        let whys = |unit: &str| -> BTreeSet<String> {
+            built.units[unit]
+                .not_followed
+                .iter()
+                .map(|n| format!("{} {}", n.why, n.detail))
+                .collect()
+        };
+        assert_eq!(
+            whys("a/src/lib.rs"),
+            BTreeSet::from([
+                "target-without-dep-info far".to_string(),
+                "unreadable-dep-info ext.d".to_string()
+            ])
+        );
+        assert_eq!(whys("b/tests/it.rs"), whys("a/src/lib.rs"));
+    }
+
+    // covers: C-31, C-32
+    // \[ADR 0095\] The `rustc` Cargo runs for COMMAND: `RUSTC` as it is, never given COMMAND's
+    // `+toolchain`, which only rustup's proxy reads.
+    #[test]
+    fn rustc_is_cargos_and_a_toolchain_goes_only_to_rustups_proxy() {
+        let recognized = recognize(&words("cargo +1.94.0 nextest run")).unwrap();
+        let args = |command: &Command| -> Vec<String> {
+            std::iter::once(command.get_program())
+                .chain(command.get_args())
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let set = |name: &str| (name == "RUSTC").then(|| "/opt/rust/bin/rustc".to_string());
+        let (command, name) = rustc(&recognized, Path::new("/"), &set, &[]);
+        assert_eq!(name, "/opt/rust/bin/rustc");
+        assert_eq!(args(&command), ["/opt/rust/bin/rustc"]);
+        let unset = |_: &str| None;
+        let (command, name) = rustc(&recognized, Path::new("/"), &unset, &[]);
+        assert_eq!(name, "rustc");
+        assert_eq!(args(&command), ["rustc", "+1.94.0"]);
+        let empty = |name: &str| (name == "RUSTC").then(String::new);
+        assert_eq!(
+            args(&rustc(&recognized, Path::new("/"), &empty, &[]).0),
+            ["rustc", "+1.94.0"]
+        );
+    }
+
+    // covers: C-31
+    #[test]
+    fn a_checkouts_folders_are_cargos_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "workspace_root": root, "target_directory": root.join("target"),
+            "build_directory": "/mnt/build", "workspace_members": [], "packages": [],
+        }))
+        .unwrap();
+        let folders = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect();
+            let var =
+                move |name: &str| vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+            checkout_folders(
+                &root,
+                Path::new("/cwd"),
+                &metadata,
+                &var,
+                Some("/tc".into()),
+            )
+            .unwrap()
+        };
+        let set = folders(&[
+            ("HOME", "/home/dev"),
+            ("CARGO_HOME", "/opt/cargo"),
+            ("RUSTUP_HOME", "rustup"),
+        ]);
+        assert_eq!(set.checkout, root.to_str().unwrap());
+        assert_eq!(set.target_dir.as_deref(), root.join("target").to_str());
+        assert_eq!(set.build_dir.as_deref(), Some("/mnt/build"));
+        assert_eq!(set.cargo_home.as_deref(), Some("/opt/cargo"));
+        // One that isn't absolute is from where COMMAND's cargo runs, as Cargo reads it.
+        assert_eq!(set.rustup_home.as_deref(), Some("/cwd/rustup"));
+        assert_eq!(set.toolchain.as_deref(), Some("/tc"));
+        assert_eq!(set.home.as_deref(), Some("/home/dev"));
+        // Unset: under the home folder.
+        let unset = folders(&[("HOME", "/home/dev/"), ("CARGO_HOME", "")]);
+        assert_eq!(unset.cargo_home.as_deref(), Some("/home/dev/.cargo"));
+        assert_eq!(unset.rustup_home.as_deref(), Some("/home/dev/.rustup"));
+        // A home folder that is empty, not absolute or `/` is none, and gives no other folder.
+        for home in ["", "home/dev", "/", "//"] {
+            let none = folders(&[("HOME", home)]);
+            assert_eq!(
+                (none.home, none.cargo_home, none.rustup_home),
+                (None, None, None),
+                "{home:?}"
+            );
+        }
     }
 
     fn start(args: &str, listed: Option<&[&str]>, exit: i32) -> Invocation {
