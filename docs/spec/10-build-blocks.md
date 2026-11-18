@@ -1415,9 +1415,11 @@ token runs unless the request says so. A container handed an agent token and non
 variables is a sandbox to hushrun as to the backend. The store is the run's own (B-31), and a
 `target/` folder restored from GitLab's cache is keyed by its content (B-6, B-31). `open`'s
 `untrusted` may also be `job`, `token`, `fork`, `source`, `unprotected`, `config` or `user`, each
-said in one line (`untrusted_words`). *Rests on:* the backend verifying the token (its signature
-by gitlab.com's keys, its issuer, its audience, its CI claims, its expiry by the backend's clock)
-and deciding what the job may write: this rule only decides whether to send it. *Breaks if:* the
+said in one line (`untrusted_words`), and its `event` is said by gitlab.com's rule, not GitHub's:
+on a listed branch a push is trusted, and a schedule, web or API pipeline only where the project's
+admin chose **Trust pipelines started by a person**. *Rests on:* the backend verifying the token
+(its signature by gitlab.com's keys, its issuer, its audience, its CI claims, its expiry by the
+backend's clock) and deciding what the job may write: this rule only decides whether to send it. *Breaks if:* the
 backend's URL as the run names it is not the audience the backend checks (a proxy in front of
 it, another spelling of the host): every job then says its audience is wrong.
 

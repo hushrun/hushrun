@@ -31,7 +31,10 @@ shared store as its project's CI, and an agent token in GitLab CI reads nothing 
   words, with that its later runs are refused too.
 - Contract: `hushrun_core::blocks` gains `JOB_KEY_HEADER`, `JOB_SIGNATURE_HEADER`,
   `ID_TOKEN_HEADER` and `job_message`, and `open`'s `untrusted` the words `job`, `token`, `fork`,
-  `source`, `unprotected`, `config` and `user`, each said in one line.
+  `source`, `unprotected`, `config` and `user`, each said in one line. A GitLab job's `event`
+  says what gitlab.com trusts on a listed branch: "its pipeline isn't a push, nor a schedule, web
+  or API run the project trusts (Trust pipelines started by a person)". GitHub's words are
+  unchanged.
 
 ### Changed
 

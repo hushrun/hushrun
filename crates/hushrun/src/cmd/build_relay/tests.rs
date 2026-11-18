@@ -2120,6 +2120,49 @@ fn with_gitlab_job<'a>(
     }
 }
 
+/// The one line an untrusted job's `open` says, for a policy whose reason is `Event`.
+fn event_line(fake: &FakeBuild, change: impl FnOnce(&mut Config)) -> String {
+    fake.set_policy(|p| {
+        p.untrusted = Some(blocks::Untrusted::Event);
+        p.writes = false;
+        p.write = None;
+    });
+    let m = machine();
+    let relay = start(fake, &m, change);
+    begin(&relay, &m);
+    until("open", || answering(&relay));
+    let lines = relay.end_check(&[]);
+    let says: Vec<&String> = lines.iter().filter(|l| l.contains("writes none")).collect();
+    assert_eq!(says.len(), 1, "{lines:?}");
+    says[0].clone()
+}
+
+// covers: B-31
+#[test]
+fn a_github_job_whose_event_isnt_trusted_is_told_so_in_github_s_words() {
+    let fake = FakeBuild::start();
+    assert_eq!(
+        event_line(&fake, with_id_token(&fake)),
+        "build: this job reads the repository's trusted blocks and writes none: \
+         its event isn't a push or a schedule, nor a dispatch the repository allows"
+    );
+}
+
+// covers: B-48
+#[test]
+fn a_gitlab_job_whose_pipeline_isnt_trusted_is_told_what_gitlab_com_trusts() {
+    // On gitlab.com a listed branch trusts a push, and a schedule, web or API pipeline only where
+    // the project's admin chose Trust pipelines started by a person: a scheduled pipeline told
+    // "isn't a push or a schedule" would be told the wrong thing.
+    let fake = FakeBuild::start();
+    assert_eq!(
+        event_line(&fake, with_gitlab_job(&fake, 41, |_| {})),
+        "build: this job reads the repository's trusted blocks and writes none: \
+         its pipeline isn't a push, nor a schedule, web or API run the project trusts \
+         (Trust pipelines started by a person)"
+    );
+}
+
 // covers: B-49
 #[test]
 fn a_gitlab_job_signs_every_request_and_begins_no_upload_it_cant_finish_before_its_token_ends() {
