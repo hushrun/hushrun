@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-18
+
 GitLab CI shares build blocks through its ID tokens
 ([ADR 0094](docs/adr/0094-gitlab-ci-shares-build-blocks-through-its-id-tokens.md)): a gitlab.com
 job that declares `id_tokens: {HUSHRUN_ID_TOKEN: {aud: <the org's URL>}}` reads and writes the
