@@ -11,11 +11,13 @@ codes, environment variables, event formats, the ledger layout) are listed first
 - **A Cargo test binary's key holds `env`** (C-31,
   [ADR 0095](docs/adr/0095-cargo-unit-keys-hold-the-variables-a-build-read.md)): the digest of the
   variables its build read, beside `reads`, `rest` and `shape`; the schema stays
-  `hushrun.unit-key/v0`. Every Cargo key is new, so the first run of each Cargo check with `tests`
-  on reuses nothing, here and in CI. pytest's, Vitest's, Jest's and every other adapter's keys are
+  `hushrun.unit-key/v0`. The Cargo adapter asks `cargo metadata` for the dependency graph (without
+  `--no-deps`) and `rustc --print sysroot`, twice a run. Every Cargo key is new, so the first run
+  of each Cargo check with `tests` on reuses nothing, here and in CI. pytest's, Vitest's, Jest's and every other adapter's keys are
   byte for byte as before.
 - **This machine's store gains a table** (C-36): `unit_env`, what each Cargo test binary's key held,
-  which `hushrun why` keys it by. A store of schema 2 an earlier CLI made gets it on the next run
+  which `hushrun why` keys it by; a row without it keys nothing, and `why` says the binary runs
+  until a run here records it. A store of schema 2 an earlier CLI made gets it on the next run
   that writes, every row kept. An older CLI sets aside a store that has it, so don't alternate an
   older and a newer CLI in one repository.
 
@@ -25,11 +27,16 @@ codes, environment variables, event formats, the ledger layout) are listed first
   `# env-dep:` lines, which name what a crate read with `env!` and `option_env!` (variables a
   person or CI exports, ones a build script sets with `cargo:rustc-env`, and Cargo's own), were
   skipped, so a pass recorded with one value was reused for a binary Cargo rebuilt with another.
-  They're keyed now, for the binary's own dep-info, each workspace library it may link and, for an
-  integration test, every target of its package. Values that name the checkout, Cargo's target
-  folder, the cargo home or the home folder are keyed with those folders replaced, as build blocks
-  replace roots (B-8), so two checkouts at different paths, CI's and a laptop's, still compute the
-  same keys.
+  They're keyed now, for the binary's own dep-info, each workspace library it may link, every
+  library outside the workspace its dependency graph holds (registry, git and path crates) and,
+  for an integration test, every target of its package. Values that name the checkout, Cargo's
+  target and build folders, the toolchain, the rustup home, the cargo home or the home folder are
+  keyed with those folders replaced, as build blocks replace roots (B-8), so two checkouts at
+  different paths, CI's and a laptop's, still compute the same keys. Not keyed yet: a variable a
+  build script turns into `cargo:rustc-cfg`, link arguments or a file it generates, and one a proc
+  macro reads with `std::env`.
+- **A dep-info that can't be read** makes its test binary not observed, rather than one that read
+  nothing.
 
 ## [0.17.0] - 2026-11-18
 
