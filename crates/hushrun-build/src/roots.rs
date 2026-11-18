@@ -971,10 +971,10 @@ mod tests {
     #[test]
     fn a_checkouts_roots_name_its_folders_the_same_on_every_machine() {
         let laptop = Roots::of_checkout(
-            "/Users/dev/code/shop",
-            Some("/Users/dev/code/shop/target"),
-            Some("/Users/dev/.cargo"),
-            Some("/Users/dev"),
+            "/home/dev/code/shop",
+            Some("/home/dev/code/shop/target"),
+            Some("/home/dev/.cargo"),
+            Some("/home/dev"),
             with_r,
         )
         .unwrap();
@@ -988,23 +988,23 @@ mod tests {
         .unwrap();
         for (a, b, replaced) in [
             (
-                "/Users/dev/code/shop/crates/app",
+                "/home/dev/code/shop/crates/app",
                 "/home/runner/work/shop/shop/crates/app",
                 "{hushrun:workspace}/crates/app",
             ),
             // The target folder under the checkout is named by itself, the longer.
             (
-                "/R/Users/dev/code/shop/target/debug/build/app-1/out",
+                "/R/home/dev/code/shop/target/debug/build/app-1/out",
                 "/mnt/target/debug/build/app-1/out",
                 "{hushrun:target-dir}/debug/build/app-1/out",
             ),
             (
-                "/Users/dev/.cargo/bin",
+                "/home/dev/.cargo/bin",
                 "/usr/local/cargo/bin",
                 "{hushrun:cargo-home}/bin",
             ),
             (
-                "/Users/dev/.config/app:/Users/dev/code/shop",
+                "/home/dev/.config/app:/home/dev/code/shop",
                 "/home/runner/.config/app:/home/runner/work/shop/shop",
                 "{hushrun:home}/.config/app:{hushrun:workspace}",
             ),
@@ -1016,7 +1016,7 @@ mod tests {
         }
         // A folder beside the checkout is only under the home folder.
         assert_eq!(
-            laptop.to_placeholders("/Users/dev/code/shop2"),
+            laptop.to_placeholders("/home/dev/code/shop2"),
             "{hushrun:home}/code/shop2"
         );
         // A checkout that isn't absolute has no roots, and then values are keyed as they are.
