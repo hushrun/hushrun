@@ -65,6 +65,7 @@ fn observed(dir: &Path, units: usize) -> (Observed, Tree) {
             base,
             adapter: "pytest",
             hints: adapter::Hints::Sources,
+            keys_env: false,
         }),
         ..Observed::default()
     };
@@ -395,6 +396,7 @@ fn decided_run(
         base: base.clone(),
         adapter: "pytest",
         hints: adapter::Hints::Sources,
+        keys_env: false,
     };
     let watches = facts::Watches::default();
     let mode = Modes {
@@ -419,7 +421,7 @@ fn decided_run(
     let tree: &'static Tree = Box::leak(Box::new(tree.clone()));
     let sets: &'static units::Sets = Box::leak(Box::new(sets));
     let base: &'static KeyBase = Box::leak(Box::new(base));
-    (observed, Keyer::new(tree, sets, base))
+    (observed, Keyer::new(tree, sets, base, false))
 }
 
 // covers: C-39, C-34
@@ -1031,7 +1033,7 @@ fn past_50000_tests_a_check_reuses_by_test_file() {
         external: None,
         counts_from: None,
     };
-    let keyer = Keyer::new(&tree, &sets, &base);
+    let keyer = Keyer::new(&tree, &sets, &base, false);
     let row = store::TestRow {
         state: State::Passed,
         duration_ms: 1,

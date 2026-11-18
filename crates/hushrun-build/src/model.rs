@@ -494,6 +494,13 @@ pub enum RootName {
     /// whose text a test binary's key replaces where no other root holds it (C-31). A compile's
     /// roots never have it.
     Home,
+    /// \[ADR 0095\] The rustup home (`RUSTUP_HOME`, else `~/.rustup`): a root only of
+    /// [`crate::roots::Roots::of_checkout`].
+    RustupHome,
+    /// \[ADR 0095\] Cargo's build folder (`build.build-dir`, `cargo metadata`'s
+    /// `build_directory`), where build scripts' output is: a root only of
+    /// [`crate::roots::Roots::of_checkout`].
+    BuildDir,
 }
 
 impl RootName {
@@ -506,7 +513,7 @@ impl RootName {
 
     /// The name as records and placeholders write it: `workspace`, `package`, `script-out`,
     /// `out-dir`, `deps-<i>`, `native-<i>`, `target-dir`, `build-target-dir`, `target-tmpdir`,
-    /// `bin-exe-<i>`, `cargo-home`, `toolchain`, `home`. Stable.
+    /// `bin-exe-<i>`, `cargo-home`, `toolchain`, `home`, `rustup-home`, `build-dir`. Stable.
     pub fn as_string(self) -> String {
         match self {
             RootName::Workspace => "workspace".to_string(),
@@ -522,6 +529,8 @@ impl RootName {
             RootName::CargoHome => "cargo-home".to_string(),
             RootName::Toolchain => "toolchain".to_string(),
             RootName::Home => "home".to_string(),
+            RootName::RustupHome => "rustup-home".to_string(),
+            RootName::BuildDir => "build-dir".to_string(),
         }
     }
 
@@ -539,6 +548,8 @@ impl RootName {
             "cargo-home" => Some(RootName::CargoHome),
             "toolchain" => Some(RootName::Toolchain),
             "home" => Some(RootName::Home),
+            "rustup-home" => Some(RootName::RustupHome),
+            "build-dir" => Some(RootName::BuildDir),
             _ => {
                 let (make, digits): (fn(u8) -> RootName, &str) =
                     if let Some(digits) = text.strip_prefix("deps-") {

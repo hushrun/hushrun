@@ -136,6 +136,16 @@ pub fn forget_listed(cache: &Path) {
     conn.execute("DELETE FROM check_listed", []).unwrap();
 }
 
+/// \[ADR 0095\] Forgets what each Cargo test binary's key held of the environment in the one store
+/// in `cache`, as in a store an older hushrun wrote: its test binaries' rows stay.
+#[allow(dead_code)]
+pub fn forget_env(cache: &Path) {
+    let stores = stores(cache);
+    assert_eq!(stores.len(), 1, "one store in {}", cache.display());
+    let conn = Connection::open(&stores[0]).expect("the store opens");
+    conn.execute("DELETE FROM unit_env", []).unwrap();
+}
+
 /// The test files of the disagreements the one store in `cache` holds, oldest first.
 #[allow(dead_code)]
 pub fn disagreements(cache: &Path) -> Vec<String> {

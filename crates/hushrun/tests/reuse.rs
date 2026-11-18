@@ -5,6 +5,9 @@
 //! The pytest and Cargo fixtures need Python with pytest and pytest-xdist, and cargo-nextest. They
 //! say so and pass where those are missing, unless `HUSHRUN_TEST_TOOLS=required`, which CI sets.
 
+#[path = "common/store.rs"]
+mod store;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1340,6 +1343,49 @@ const NEXTEST: [&str; 8] = [
     "--locked",
 ];
 
+/// The test binaries nextest ran in a run, by their ids (a library's is its package's name), from
+/// its `PASS` and `FAIL` lines.
+fn ran_binaries(ran: &Ran) -> std::collections::BTreeSet<String> {
+    format!("{}\n{}", ran.stdout, ran.stderr)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let l = l
+                .strip_prefix("PASS [")
+                .or_else(|| l.strip_prefix("FAIL ["))?;
+            let after = l.split_once(']')?.1.trim_start();
+            // nextest 0.9.100 and later count the tests: `(1/4) steady tests::one`.
+            let after = match after.strip_prefix('(') {
+                Some(counted) => counted.split_once(')')?.1.trim_start(),
+                None => after,
+            };
+            Some(after.split_whitespace().next()?.to_string())
+        })
+        .collect()
+}
+
+/// Which binaries a run ran, by name: every one of `must`, and `audited` more of `reusable`, which
+/// an audit chose; every other one of `reusable` was reused.
+fn assert_ran(ran: &Ran, must: &[&str], reusable: &[&str], audited: usize) {
+    let names = ran_binaries(ran);
+    for name in must {
+        assert!(
+            names.contains(*name),
+            "{name} didn't run: {names:?}\n{}",
+            ran.stderr
+        );
+    }
+    let checked: Vec<&String> = names
+        .iter()
+        .filter(|n| !must.contains(&n.as_str()))
+        .collect();
+    assert!(
+        checked.iter().all(|n| reusable.contains(&n.as_str())),
+        "ran {names:?}, more than {must:?} and audits of {reusable:?}"
+    );
+    assert_eq!(checked.len(), audited, "ran {names:?}");
+}
+
 /// `crates/other/src/lib.rs` edited, its `n`-th version: a change no other binary reads, so the
 /// check's own key misses and the others' keys are what decide.
 fn edit_other(r: &Repo, n: u32) {
@@ -1382,6 +1428,7 @@ fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
         units,
         json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
     );
+    assert_ran(&set, &["flavored", "other"], &["scripted", "steady"], 1);
 
     // Another value runs it again.
     edit_other(&r, 2);
@@ -1391,6 +1438,7 @@ fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
         other.plan_line(),
         "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check"
     );
+    assert_ran(&other, &["flavored", "other"], &["scripted", "steady"], 1);
 
     // The same value as the run before: its pass on that value counts.
     edit_other(&r, 3);
@@ -1400,6 +1448,7 @@ fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
         same.plan_line(),
         "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
     );
+    assert_ran(&same, &["other"], &["flavored", "scripted", "steady"], 1);
     // \[C-37\] `hushrun why` keys it as the run does: with what its last build here read.
     let why = r.run(&["why", "test", "crates/flavored/src/lib.rs"], &[]);
     assert_eq!(why.code, 0, "{}", why.stderr);
@@ -1409,6 +1458,36 @@ fn a_test_binary_built_with_another_value_of_a_variable_it_read_runs_again() {
         ),
         "{}",
         why.stdout
+    );
+
+    // \[ADR 0095\] A row without what its build read of the environment, as an older hushrun
+    // wrote it, keys nothing: `why` says it runs, and so does the plan's line, until a run here
+    // records it again from its build.
+    store::forget_env(&r.cache);
+    let unknown = r.run(&["why", "test", "crates/flavored/src/lib.rs"], &[]);
+    assert_eq!(unknown.code, 0, "{}", unknown.stderr);
+    assert!(
+        unknown.stdout.starts_with(
+            "crates/flavored/src/lib.rs runs: this machine doesn't know what its last build here read of the environment"
+        ),
+        "{}",
+        unknown.stdout
+    );
+    edit_other(&r, 4);
+    let rebuilt = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_FLAVOR", "sweet")]);
+    assert_eq!(rebuilt.code, 0, "{}", rebuilt.stderr);
+    // The run keys from its build, which its pass on that value stands on.
+    assert_eq!(
+        rebuilt.plan_line(),
+        "hushrun: test: 2 of 4 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+    );
+    let known = r.run(&["why", "test", "crates/flavored/src/lib.rs"], &[]);
+    assert!(
+        known
+            .stdout
+            .starts_with("crates/flavored/src/lib.rs would be reused"),
+        "{}",
+        known.stdout
     );
 }
 
@@ -1436,6 +1515,71 @@ fn a_variable_a_build_script_sets_changing_runs_the_test_binary_that_read_it_aga
     assert_eq!(
         units,
         json!({"total": 4, "ran": 3, "reused": 1, "savedMs": units["savedMs"]})
+    );
+    assert_ran(&changed, &["scripted", "other"], &["flavored", "steady"], 1);
+}
+
+// covers: C-31, C-34
+// A test binary that links a crate outside the workspace (here a path crate outside the
+// repository, standing for a registry or git crate) runs again when that crate was built with
+// another value of a variable it read: Cargo rebuilt both.
+#[test]
+fn a_dependency_outside_the_workspace_built_with_another_value_runs_its_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let mut files = env_files();
+    files.retain(|(path, _)| *path != "Cargo.toml");
+    files.extend([
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/linked\", \"crates/flavored\", \"crates/scripted\", \"crates/steady\", \"crates/other\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "crates/linked/Cargo.toml",
+            "[package]\nname = \"linked\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nouter = { path = \"../../../outer\" }\n",
+        ),
+        (
+            "crates/linked/src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn flavor() { assert_ne!(outer::FLAVOR, Some(\"\")); }\n}\n",
+        ),
+    ]);
+    let r = Repo::new(&files);
+    // Outside the repository: no file of the scope names it.
+    std::fs::create_dir_all(r.root.join("outer/src")).unwrap();
+    std::fs::write(
+        r.root.join("outer/Cargo.toml"),
+        "[package]\nname = \"outer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.root.join("outer/src/lib.rs"),
+        "pub const FLAVOR: Option<&str> = option_env!(\"HUSHRUN_FIXTURE_OUTER\");\n",
+    )
+    .unwrap();
+    let lock = Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "-q"])
+        .current_dir(&r.repo)
+        .env_remove("CARGO_TARGET_DIR")
+        .status()
+        .expect("cargo");
+    assert!(lock.success());
+    git::commit_all(&r.repo, "lock");
+
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    edit_other(&r, 1);
+    let set = r.run(&NEXTEST, &[("HUSHRUN_FIXTURE_OUTER", "sour")]);
+    assert_eq!(set.code, 0, "{}\n{}", set.stdout, set.stderr);
+    assert_eq!(
+        set.plan_line(),
+        "hushrun: test: 3 of 5 test binaries run; 2 already passed on the files they read, and 1 more that already passed runs anyway, as a check"
+    );
+    assert_ran(
+        &set,
+        &["linked", "other"],
+        &["flavored", "scripted", "steady"],
+        1,
     );
 }
 

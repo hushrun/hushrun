@@ -607,30 +607,34 @@ def name_char(c):
     return c.isalnum() or c in "._-+~@"
 
 
+# C-31's folders, by the vector's names, in the order that decides a folder two of them share:
+# the first names it.
+CHECKOUT_ROOTS = [("targetDir", "target-dir"), ("buildDir", "build-dir"), ("root", "workspace"),
+                  ("toolchain", "toolchain"), ("rustupHome", "rustup-home"),
+                  ("cargoHome", "cargo-home"), ("home", "home")]
+
+
 def checkout_roots(folders):
-    """The forms a test binary's values have replaced (B-8 as C-31 names them), longest first:
-    the repository's root as `workspace`, the target folder as `target-dir`, the cargo home as
-    `cargo-home` and the home folder as `home`. The folders here are given forms; a vector holds
-    none a symlink resolves elsewhere. A checkout under the cargo home is no root, as B-8 says."""
-    root = clean_folder(folders["root"])
+    """The forms a test binary's values have replaced (C-31), longest first. A folder that isn't
+    absolute, or is `/`, is no root; a checkout under the cargo home or the toolchain, the two
+    bases, is no root (B-8). The folders here are given forms; a vector holds none a symlink
+    resolves elsewhere. None when the repository's root isn't a `/` path."""
+    root = folders.get("root") or ""
     if not root.startswith("/"):
         return None
-    forms = {}
-    cargo_home = folders.get("cargoHome")
+    usable = {}
+    for key, name in CHECKOUT_ROOTS:
+        folder = folders.get(key)
+        if folder and folder.startswith("/") and clean_folder(folder) != "/":
+            usable[name] = clean_folder(folder)
     under = lambda path, folder: path == folder or path.startswith(folder + "/")
-    candidates = [("workspace", root), ("target-dir", folders.get("targetDir")),
-                  ("home", folders.get("home")), ("cargo-home", cargo_home)]
-    # A text two roots share is the one ranked higher: the checkout's, then the target folder,
-    # then the home folder, the cargo home last.
-    rank = {"cargo-home": 0, "home": 1, "workspace": 2, "target-dir": 3}
-    for name, folder in candidates:
-        if not folder or not folder.startswith("/") or clean_folder(folder) == "/":
-            continue
-        folder = clean_folder(folder)
-        if name == "workspace" and cargo_home and under(folder, clean_folder(cargo_home)):
-            continue
-        if folder not in forms or rank[name] > rank[forms[folder]]:
-            forms[folder] = name
+    for base in ("cargo-home", "toolchain"):
+        if base in usable and "workspace" in usable and under(usable["workspace"], usable[base]):
+            del usable["workspace"]
+    forms = {}
+    for _, name in CHECKOUT_ROOTS:
+        if name in usable:
+            forms.setdefault(usable[name], name)
     return sorted(forms.items(), key=lambda f: (-len(f[0]), f[0]))
 
 

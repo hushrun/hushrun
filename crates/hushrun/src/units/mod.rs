@@ -867,7 +867,7 @@ impl Session {
             extras,
             bound,
         } = planning;
-        let keyer = Keyer::new(input.tree, &sets, &input.base);
+        let keyer = Keyer::new(input.tree, &sets, &input.base, self.adapter.keys_env());
         let total = known.len();
         if total == 0 {
             // No test file: nothing to say, and nothing to deselect.
@@ -1108,6 +1108,7 @@ impl Session {
             base: end.base.clone(),
             adapter: self.adapter.word(),
             hints: self.adapter.hints(),
+            keys_env: self.adapter.keys_env(),
         };
         // \[C-32\] Kept pytest's by the store's word, COMMAND passed, and pytest reported nothing:
         // counted, in the write that follows the run's record, and the second such run in a row
@@ -1517,7 +1518,7 @@ pub fn preview(p: &Preview<'_>) -> Option<Previewed> {
     if total == 0 || total > MOST_UNITS {
         return None;
     }
-    let keyer = Keyer::new(p.tree, &found.sets, &p.base);
+    let keyer = Keyer::new(p.tree, &found.sets, &p.base, adapter.keys_env());
     let keyed = keyed(&keyer, &found.known, p.tests);
     let lookup = shared::lookup(p.store, all_keys(&keyed), p.counts).ok()?;
     if !lookup.reuse.allows_reuse() {
@@ -2284,10 +2285,12 @@ struct Keyer<'a> {
     base: &'a KeyBase,
     rest: Digest,
     shape: Digest,
+    /// \[ADR 0095\] The adapter's keys all hold `env` ([`adapter::Adapter::keys_env`]).
+    keys_env: bool,
 }
 
 impl<'a> Keyer<'a> {
-    fn new(tree: &'a Tree, sets: &'a units::Sets, base: &'a KeyBase) -> Keyer<'a> {
+    fn new(tree: &'a Tree, sets: &'a units::Sets, base: &'a KeyBase, keys_env: bool) -> Keyer<'a> {
         let rest = tree.digest(sets.files(Set::Rest));
         let shape = units::shape(sets.files(Set::Sources));
         Keyer {
@@ -2296,12 +2299,18 @@ impl<'a> Keyer<'a> {
             base,
             rest,
             shape,
+            keys_env,
         }
     }
 
     /// A test file's key, from the files it read and \[ADR 0095\] what its build read of the
-    /// environment (`env`, Cargo's alone).
+    /// environment (`env`, Cargo's alone). For an adapter whose keys hold `env`, a list without
+    /// it keys nothing: a key without it is a key of hushrun before `env`, which no run of this
+    /// one records, and whose passes stand on another build.
     fn key(&self, unit: &str, reads: &BTreeSet<String>, env: Option<&Digest>) -> Option<Digest> {
+        if self.keys_env && env.is_none() {
+            return None;
+        }
         let keyed = self.sets.keyed(reads.iter().map(String::as_str));
         units::unit_key(
             self.base,
@@ -2349,6 +2358,8 @@ struct StoreAt {
     base: KeyBase,
     adapter: &'static str,
     hints: Hints,
+    /// \[ADR 0095\] Its adapter's keys all hold `env`.
+    keys_env: bool,
 }
 
 /// \[C-39, C-40\] What a run reuses one by one, what a test is taken to have read, and what the
@@ -2427,7 +2438,7 @@ fn decide(
     }
     let sets = &sets;
     let tree = end.tree;
-    let keyer = Keyer::new(tree, sets, &end.base);
+    let keyer = Keyer::new(tree, sets, &end.base, at.keys_env);
     let sources: BTreeSet<String> = sets.files(Set::Sources).map(str::to_string).collect();
     // \[C-38\] Where this run's hint goes: none for Cargo, whose keys need none, nor from a system
     // that shares none.
@@ -2919,6 +2930,21 @@ fn decide(
                     not_kept: file_why,
                 },
             );
+        } else if state == State::Reused
+            && seen.env.is_some()
+            && let Some(before) = map.units.get(unit)
+            && before.env != seen.env
+        {
+            // \[ADR 0095\] A test binary reused on its build's key keeps its row, with what that
+            // build read of the environment, which the key held: a row an older hushrun wrote
+            // without it gets it, so `hushrun why` keys it as the run did.
+            out.mapped.insert(
+                unit.clone(),
+                Mapped {
+                    env: seen.env,
+                    ..before.clone()
+                },
+            );
         }
         if let Some(states) = test_states {
             out.tests.insert(
@@ -3091,6 +3117,7 @@ fn describe(why: &str) -> String {
         "fork" => "a fork".into(),
         "native" => "native code".into(),
         "no-dep-info" | "target-without-dep-info" => "a build without dep-info".into(),
+        "unreadable-dep-info" => "a dep-info file it couldn't read".into(),
         "python-files" => "pytest's python_files".into(),
         "adapter-error" => "an error of hushrun's adapter".into(),
         "outside-scope" => "a file outside the check's scope".into(),
