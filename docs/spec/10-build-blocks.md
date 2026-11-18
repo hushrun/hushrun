@@ -284,6 +284,13 @@ with a `..` is resolved on disk up to its last `..`, and the parts after it are 
 so a symlink at its end is hashed through whatever it points at now; when that resolved part is
 not what removing the `..` gives (a linked folder before it), the read can't be placed and the
 compile is `built, not stored`.
+[ADR 0095] A Cargo test binary's unit key (C-31) replaces roots in the values of its `env-dep`
+lines the same way, with roots of its own: the repository's root as `workspace`, Cargo's target
+folder and its build folder both as `target-dir` (a key is never read back, so two folders may
+share a name), the cargo home and the toolchain as bases, the rustup home as `rustup-home` and
+the home folder as `home`. `rustup-home` and `home` are roots no compile has. A folder two of
+them share is named by the first of `target-dir`, `workspace`, `toolchain`, `rustup-home`,
+`cargo-home`, `home`: the home folder below every other.
 
 Two more folders are **bases**: the cargo home (`CARGO_HOME`, else `~/.cargo`, as `hushrun run`
 found it) and the toolchain (the compiler's sysroot, B-17, and its view without sources, B-9).
@@ -352,8 +359,11 @@ digits>`, that leads to the toolchain (to its view without sources where there i
 so that the linker, which names each object by the path it is given, names the standard
 library's objects from the output folder too and the UUID is the same wherever the toolchain is
 installed. The link is one per toolchain, so two toolchains building into one target folder
-never share it; a call that finds it leading elsewhere makes it again under a name of its own
-and renames it into place, before the compile; paths under it are paths under the toolchain
+never share it; a call that finds none makes it in place, which replaces nothing, so that the
+compiles that start at once and all find it missing make it once and a link that is right is
+never renamed over (on macOS 26 a readlink racing a rename over its link fails now and then); a
+call that finds it leading elsewhere makes it again under a name of its own and renames it into
+place, before the compile; paths under it are paths under the toolchain
 (B-8, B-11). The name is the wrapper's own and is only ever a link: a folder found in its place
 (a target folder copied by a tool that followed the link, something planted) would be the
 sysroot rustc reads, so it is removed with what it holds and the link made; a file there is

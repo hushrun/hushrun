@@ -310,11 +310,22 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
         );
         return out;
     }
+    // \[ADR 0095\] A key that holds what the build read of the environment can't be made from a
+    // list without it: a row an older hushrun wrote, or a hint.
+    if adapter.keys_env() && lists.iter().all(|l| l.env.is_none()) {
+        says(
+            &mut out,
+            Decision::Runs,
+            "build-unknown",
+            "this machine doesn't know what its last build here read of the environment, which its key holds, so it runs; its next run here records it".into(),
+        );
+        return out;
+    }
     let reads = match own {
         Some(_) => lists[0].files.clone(),
         None => BTreeSet::new(),
     };
-    let keyer = Keyer::new(input.tree, &sets, &input.base);
+    let keyer = Keyer::new(input.tree, &sets, &input.base, adapter.keys_env());
     // \[C-39\] A test file one of whose tests wasn't followed the last time it ran here isn't
     // reused whole, whatever the check's unit is now: its own pass may stand on a run before that.
     let unfollowed = own.and_then(|mapped| {
@@ -323,8 +334,10 @@ pub fn explain(input: &WhyInput<'_>) -> Explanation {
             .iter()
             .find(|(_, row)| row.state == State::NotObserved)
     });
-    let keys: Vec<Option<hushrun_core::digest::Digest>> =
-        lists.iter().map(|l| keyer.key(&unit, &l.files)).collect();
+    let keys: Vec<Option<hushrun_core::digest::Digest>> = lists
+        .iter()
+        .map(|l| keyer.key(&unit, &l.files, l.env.as_ref()))
+        .collect();
     let changes = changes(&map, &sets, input.tree, &unit, &reads);
 
     let looked = match (&input.results, keys.iter().any(Option::is_some)) {

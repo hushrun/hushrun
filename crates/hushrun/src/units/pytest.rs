@@ -408,6 +408,7 @@ impl Adapter for Pytest {
                     ..Facts::default()
                 };
                 let seen = Seen {
+                    env: None,
                     facts,
                     reads: m.reads,
                     duration_ms: m.duration_ms,

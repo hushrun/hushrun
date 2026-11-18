@@ -556,6 +556,135 @@ def jcs(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+# --- What a Cargo test binary's build read of the environment (C-31 `env`, ADR 0095) ---------
+
+ENV_DEP = "# env-dep:"
+PLACEHOLDER = "{hushrun:"
+
+
+def unescape_env(text):
+    """rustc's escapes in an env-dep line: a backslash, n and r after one; None for any other."""
+    out, i = [], 0
+    while i < len(text):
+        c = text[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        nxt = text[i + 1] if i + 1 < len(text) else None
+        if nxt == "\\":
+            out.append("\\")
+        elif nxt == "n":
+            out.append("\n")
+        elif nxt == "r":
+            out.append("\r")
+        else:
+            return None
+        i += 2
+    return "".join(out)
+
+
+def env_dep(line):
+    """(name, value or None) of one `# env-dep:` line; the line itself, unset, when its escapes
+    aren't rustc's; None when it isn't one."""
+    if not line.startswith(ENV_DEP):
+        return None
+    rest = line[len(ENV_DEP):]
+    name, eq, value = rest.partition("=")
+    name = unescape_env(name)
+    value = unescape_env(value) if eq else None
+    if name is None or (eq and value is None):
+        return (line, None)
+    return (name, value)
+
+
+def clean_folder(path):
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    return "/" + "/".join(parts) if path.startswith("/") else "/".join(parts)
+
+
+def name_char(c):
+    return c.isalnum() or c in "._-+~@"
+
+
+# C-31's folders, by the vector's names, in the order that decides a folder two of them share:
+# the first names it. The build folder is named as the target folder is.
+CHECKOUT_ROOTS = [("targetDir", "target-dir"), ("buildDir", "target-dir"), ("root", "workspace"),
+                  ("toolchain", "toolchain"), ("rustupHome", "rustup-home"),
+                  ("cargoHome", "cargo-home"), ("home", "home")]
+
+
+def checkout_roots(folders):
+    """The forms a test binary's values have replaced (C-31), longest first. A folder that isn't
+    absolute, or is `/`, is no root; a checkout under the cargo home or the toolchain, the two
+    bases, is no root (B-8). The folders here are given forms; a vector holds none a symlink
+    resolves elsewhere. None when the repository's root isn't a `/` path."""
+    root = folders.get("root") or ""
+    if not root.startswith("/"):
+        return None
+    usable = []
+    for key, name in CHECKOUT_ROOTS:
+        folder = folders.get(key)
+        if folder and folder.startswith("/") and clean_folder(folder) != "/":
+            usable.append((clean_folder(folder), name))
+    under = lambda path, folder: path == folder or path.startswith(folder + "/")
+    bases = [f for f, name in usable if name in ("cargo-home", "toolchain")]
+    usable = [(f, name) for f, name in usable
+              if not (name == "workspace" and any(under(f, base) for base in bases))]
+    forms = {}
+    for folder, name in usable:
+        forms.setdefault(folder, name)
+    return sorted(forms.items(), key=lambda f: (-len(f[0]), f[0]))
+
+
+def to_placeholders(roots, text):
+    """Each root where it starts and ends a path becomes its placeholder; text that looks like a
+    placeholder is escaped as `{hushrun:}`."""
+    out, i = [], 0
+    while i < len(text):
+        rest = text[i:]
+        if rest.startswith(PLACEHOLDER):
+            out.append(PLACEHOLDER + "}")
+            i += len(PLACEHOLDER)
+            continue
+        if text[i] == "/" and (i == 0 or (not name_char(text[i - 1]) and text[i - 1] != "/")):
+            found = None
+            for form, name in roots:
+                end = i + len(form)
+                if rest.startswith(form) and (end == len(text) or not name_char(text[end])):
+                    found = (form, name)
+                    break
+            if found:
+                out.append(PLACEHOLDER + found[1] + "}")
+                i += len(found[0])
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def env_entries(env_deps):
+    """The entries of a vector's `envDeps`: each `# env-dep:` line, its value's roots replaced."""
+    roots = checkout_roots(env_deps["folders"])
+    entries = set()
+    for line in env_deps["lines"]:
+        found = env_dep(line)
+        if found is None:
+            continue
+        name, value = found
+        if value is not None and roots is not None:
+            value = to_placeholders(roots, value)
+        entries.add((name, value))
+    return sorted(entries, key=lambda e: (e[0].encode("utf-8"), e[1] is not None, (e[1] or "").encode("utf-8")))
+
+
+def env_digest(entries):
+    """SHA-256 of each entry, `NAME=value` or `NAME` alone when unset, as UTF-8 and a NUL, sorted
+    by bytes, each once."""
+    lines = sorted({(n if v is None else n + "=" + v).encode("utf-8") for n, v in entries})
+    return "sha256:" + sha256_hex(b"".join(line + b"\0" for line in lines))
+
+
 def evaluate_unit_key(vector):
     files = {f["path"]: (f["kind"], f["text"].encode("utf-8")) for f in vector["files"]}
     keyed = [p for p in vector["reads"] if p in set(vector["units"]) | set(vector["sources"])]
@@ -572,7 +701,17 @@ def evaluate_unit_key(vector):
     for optional in ("external", "counts_from"):
         if optional in base:
             key[optional] = base[optional]
-    return {"reads": reads, "rest": rest, "shape": shape, "key": "sha256:" + sha256_hex(jcs(key))}
+    got = {"reads": reads, "rest": rest, "shape": shape}
+    # A Cargo test binary's key: its `env-dep` lines, roots replaced, must be the vector's
+    # entries, whose digest is `env`.
+    if "envDeps" in vector:
+        entries = env_entries(vector["envDeps"])
+        listed = [tuple(e) for e in vector["env"]]
+        if entries != listed:
+            raise ValueError("env-dep lines give %r, the vector lists %r" % (entries, listed))
+        key["env"] = got["env"] = env_digest(entries)
+    got["key"] = "sha256:" + sha256_hex(jcs(key))
+    return got
 
 
 def check_unit_keys(path):
@@ -580,7 +719,12 @@ def check_unit_keys(path):
         data = json.load(f)
     failures = 0
     for vector in data["vectors"]:
-        got = evaluate_unit_key(vector)
+        try:
+            got = evaluate_unit_key(vector)
+        except ValueError as err:
+            print("FAIL %s: %s" % (vector["name"], err))
+            failures += 1
+            continue
         if got != vector["expect"]:
             print("FAIL %s: got %s, expected %s" % (vector["name"], got, vector["expect"]))
             failures += 1

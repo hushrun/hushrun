@@ -87,17 +87,8 @@ pub fn parse(text: &str) -> Result<DepInfo, Error> {
     let mut seen = std::collections::HashSet::new();
     for (index, raw) in text.lines().enumerate() {
         let line = index + 1;
-        if let Some(rest) = raw.strip_prefix(ENV_DEP) {
-            let (name, value) = match rest.split_once('=') {
-                Some((name, value)) => (name, Some(value)),
-                None => (rest, None),
-            };
-            let name = unescape_env(name).ok_or(Error::Escape { line })?;
-            let value = match value {
-                Some(value) => Some(unescape_env(value).ok_or(Error::Escape { line })?),
-                None => None,
-            };
-            info.env.push(EnvDep { name, value });
+        if let Some(env) = env_dep(raw) {
+            info.env.push(env.ok_or(Error::Escape { line })?);
         } else if raw.is_empty() || raw.starts_with('#') {
             continue;
         } else if let Some((target, deps)) = raw.split_once(": ") {
@@ -120,6 +111,29 @@ pub fn parse(text: &str) -> Result<DepInfo, Error> {
         return Err(Error::NoTarget);
     }
     Ok(info)
+}
+
+/// The variable one `# env-dep:` line names, as rustc writes it: `NAME=value`, or `NAME` alone for
+/// one that was unset when read, its name and value split at the first `=`, with `\\`, `\n` and
+/// `\r` unescaped. `None` when `line` isn't such a line; `Some(None)` when it holds an escape rustc
+/// never writes. The one reader of these lines: [`parse`] and the test-by-test adapter's dep-info
+/// reader (C-31) both call it.
+pub fn env_dep(line: &str) -> Option<Option<EnvDep>> {
+    let rest = line.strip_prefix(ENV_DEP)?;
+    let (name, value) = match rest.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (rest, None),
+    };
+    let read = || {
+        Some(EnvDep {
+            name: unescape_env(name)?,
+            value: match value {
+                Some(value) => Some(unescape_env(value)?),
+                None => None,
+            },
+        })
+    };
+    Some(read())
 }
 
 /// Writes what rustc would have written for these targets, files and variables.

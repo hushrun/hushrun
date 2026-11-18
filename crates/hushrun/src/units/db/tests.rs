@@ -710,6 +710,85 @@ CREATE TABLE disagreement (
 ) STRICT;
 ";
 
+// covers: C-36, C-31
+// \[ADR 0095\] What a Cargo test binary's key held of the environment is kept with its row, and a
+// store of this schema made before the table that keeps it reads as it is and gets the table on
+// its next write, every row kept.
+#[test]
+fn a_test_binarys_env_is_kept_and_a_store_made_before_its_table_gets_it_with_every_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("units/store.v2.sqlite");
+    let mut binary = mapped(&[("src/lib.rs", HASH_A)]);
+    binary.env = Some(Digest::of(b"CARGO_PKG_VERSION=0.1.0\0"));
+    let file = mapped(&[("tests/test_a.py", HASH_A), ("app/a.py", HASH_B)]);
+    write_run(
+        &path,
+        &run(
+            "unit",
+            &[
+                ("src/lib.rs", binary.clone()),
+                ("tests/test_a.py", file.clone()),
+            ],
+            &["src/lib.rs", "tests/test_a.py", "app/a.py"],
+        ),
+    )
+    .unwrap();
+    let map = load(&path, &id("unit")).map;
+    assert_eq!(map.units["src/lib.rs"], binary);
+    assert_eq!(map.units["tests/test_a.py"], file);
+
+    // The store as a hushrun of this schema made it before the table: its rows, without it.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE unit_env;").unwrap();
+    }
+    let has_table = || {
+        let conn = Connection::open(&path).unwrap();
+        tables_of(&conn)
+            .unwrap()
+            .iter()
+            .any(|sql| sql.starts_with("CREATE TABLE unit_env"))
+    };
+    assert!(!has_table());
+    // Read, it is a store whose test files hold no `env`, and reading adds nothing.
+    let read = load(&path, &id("unit"));
+    assert!(read.unread.is_none(), "{:?}", read.unread);
+    let without = Mapped {
+        env: None,
+        ..binary.clone()
+    };
+    assert_eq!(read.map.units["src/lib.rs"], without);
+    assert_eq!(read.map.units["tests/test_a.py"], file);
+    assert_eq!(adapter_of(&path, &id("unit")).as_deref(), Some("pytest"));
+    assert!(!has_table());
+
+    // Written, by a run of another check: the table is made, and the first check's rows stay.
+    write_run(
+        &path,
+        &run(
+            "lint",
+            &[("src/lib.rs", binary.clone())],
+            &["src/lib.rs", "tests/test_a.py", "app/a.py"],
+        ),
+    )
+    .unwrap();
+    assert!(has_table());
+    assert!(!aside_of(&path).exists());
+    let kept = load(&path, &id("unit"));
+    assert!(kept.unread.is_none(), "{:?}", kept.unread);
+    assert_eq!(kept.map.units["src/lib.rs"], without);
+    assert_eq!(kept.map.units["tests/test_a.py"], file);
+    assert_eq!(load(&path, &id("lint")).map.units["src/lib.rs"], binary);
+
+    // A store with any other table missing is still another build's, set aside.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE unit_env; DROP TABLE hint_known;")
+            .unwrap();
+    }
+    assert!(load(&path, &id("unit")).unread.is_some());
+}
+
 /// A store of schema 1 at `path`, as an older hushrun wrote it, with rows of every table: a check
 /// of pytest's, a test file that read two files, one that wasn't followed, the rest set, edges, a
 /// hint known and a disagreement.
