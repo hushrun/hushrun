@@ -6,6 +6,8 @@ codes, environment variables, event formats, the ledger layout) are listed first
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-18
+
 ### Changed
 
 - **A Cargo test binary's key holds `env`** (C-31,
