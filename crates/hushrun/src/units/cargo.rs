@@ -541,10 +541,7 @@ fn replace_folder(text: &str, folder: &str, with: &str) -> String {
     let mut rest = text;
     while let Some(at) = rest.find(folder) {
         let after = &rest[at + folder.len()..];
-        let ends = after
-            .chars()
-            .next()
-            .is_none_or(|c| c == '/' || !(c.is_alphanumeric() || "._-+~@".contains(c)));
+        let ends = hushrun_build::roots::ends_path(after, 0);
         out.push_str(&rest[..at]);
         out.push_str(if ends { with } else { folder });
         rest = after;
@@ -1018,19 +1015,17 @@ fn read_build(metadata: &Metadata, compiled: Compiled, root: &Path, keying: &Key
             env.extend(keyed_env(info.env, keying));
             // \[ADR 0096\] What the compile read that no file of the scope is, by its content: a
             // file the build made (under the target or build folder: one a build script
-            // generated); and, for a dep-info whose files are reads (the binary's own, its
-            // linked members', their build scripts'), a file of the checkout outside the scope
-            // (a git-ignored source), but none of the cargo home, the rustup home or the
-            // toolchain, which are crates' and the compiler's, pinned by the lockfile and the
-            // toolchain, even inside the checkout.
+            // generated); and a file of the checkout outside the scope (a git-ignored source, a
+            // member's or a path crate's outside the workspace), but none of the cargo home, the
+            // rustup home or the toolchain, which are crates' and the compiler's, pinned by the
+            // lockfile and the toolchain, even inside the checkout.
             let made_files = made.entry(d.clone()).or_insert_with(|| {
                 info.files
                     .iter()
                     .filter(|f| {
                         let real = real(f);
                         made_in.iter().any(|dir| real.starts_with(dir))
-                            || (files
-                                && relative(f).is_some_and(|path| !keying.in_scope(&path))
+                            || (relative(f).is_some_and(|path| !keying.in_scope(&path))
                                 && !keying.under_a_base(f))
                     })
                     .map(|file| (file.clone(), generated_entry(file, keying)))
@@ -2065,16 +2060,13 @@ mod tests {
                 .collect();
             for named in build["depInfo"].as_array().unwrap() {
                 let path = Path::new(named["path"].as_str().unwrap());
-                // A dep-info whose files are reads, unless the vector says it is a crate's
-                // outside the workspace.
-                let read = named.get("read").and_then(serde_json::Value::as_bool) != Some(false);
                 let outside_scope = path
                     .strip_prefix(&checkout)
                     .ok()
                     .and_then(Path::to_str)
                     .is_some_and(|rel| !scope.contains(rel));
                 if made_in.iter().any(|dir| path.starts_with(dir))
-                    || (read && outside_scope && !keying.under_a_base(path))
+                    || (outside_scope && !keying.under_a_base(path))
                 {
                     let text = named["text"].as_str().unwrap();
                     given.insert(made_entry(text.as_bytes(), path, &keying));

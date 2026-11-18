@@ -2030,6 +2030,81 @@ fn a_git_ignored_source_a_build_script_generates_runs_its_test_binary_again() {
     });
 }
 
+// covers: C-31, C-34
+// \[ADR 0096\] A path crate of the repository that is no member of the workspace (excluded),
+// which compiles a git-ignored source of its own: a binary that links it runs again when that
+// source changes, though no file of the scope did and no build script says so.
+#[test]
+fn a_git_ignored_source_of_a_path_crate_outside_the_workspace_runs_its_binary_again() {
+    if !tools("cargo-nextest", has_nextest()) {
+        return;
+    }
+    let lib = |name: &str| {
+        format!(
+            "pub fn one() -> u32 {{ 1 }}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn {name}() {{ assert_eq!(super::one(), 1); }}\n}}\n"
+        )
+    };
+    let manifest = |name: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    };
+    let (steady, more) = (lib("steady"), lib("more"));
+    let (steady_toml, more_toml) = (manifest("steady"), manifest("more"));
+    let r = locked_repo(&[
+        (
+            "hushrun.yaml",
+            "version: 1\nrepository: example.com/acme/ws\nchecks:\n  test:\n    tests: reuse\n",
+        ),
+        (".gitignore", "target/\nside/helper/src/gen.rs\n"),
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/usehelper\", \"crates/steady\", \"crates/more\", \"crates/other\"]\nexclude = [\"side\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "side/helper/Cargo.toml",
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("side/helper/src/lib.rs", "include!(\"gen.rs\");\n"),
+        ("side/helper/src/gen.rs", "pub const G: &str = \"plain\";\n"),
+        (
+            "crates/usehelper/Cargo.toml",
+            "[package]\nname = \"usehelper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nhelper = { path = \"../../side/helper\" }\n",
+        ),
+        (
+            "crates/usehelper/src/lib.rs",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses() { assert!(!helper::G.is_empty()); }\n}\n",
+        ),
+        ("crates/steady/Cargo.toml", steady_toml.as_str()),
+        ("crates/steady/src/lib.rs", steady.as_str()),
+        ("crates/more/Cargo.toml", more_toml.as_str()),
+        ("crates/more/src/lib.rs", more.as_str()),
+        (
+            "crates/other/Cargo.toml",
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        (
+            "crates/other/src/lib.rs",
+            "pub fn two() -> u32 { 2 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn two() { assert_eq!(super::two(), 2); }\n}\n",
+        ),
+    ]);
+    let first = r.run(&NEXTEST, &[]);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert_eq!(
+        r.newest_result()["units"],
+        json!({"total": 4, "ran": 4, "reused": 0})
+    );
+    edit_other(&r, 1);
+    r.write("side/helper/src/gen.rs", "pub const G: &str = \"spicy\";\n");
+    let changed = r.run(&NEXTEST, &[]);
+    assert_eq!(changed.code, 0, "{}\n{}", changed.stdout, changed.stderr);
+    assert_eq!(
+        changed.plan_line(),
+        "hushrun: test: 3 of 4 test binaries run; 1 already passed on the files it read, and 1 more that already passed runs anyway, as a check",
+        "{}",
+        changed.stderr
+    );
+    assert_ran(&changed, &["usehelper", "other"], &["steady", "more"], 1);
+}
+
 // covers: C-30, C-31, C-34
 // An integration test of a package with a build script is observed, recorded and reused: the
 // script's own dep-info is found, so its `build.rs` is a file the binaries of its package read,

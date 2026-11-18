@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree. [ADR 0096] A Cargo test binary's vector may also list `buildScripts`, its closure's build scripts' runs (`packageId`, `outDir`, and `output`, the text of the `output` file beside it; [ADR 0096, amended] a run's folder is named by its package, in `env`'s values too), the values of the variables they declare in COMMAND's environment (`values`, a name absent is unset), the files a dep-info of its closure names (`path`, `text`, and `read`, false for a crate's outside the workspace; those under the target or build folder, and those of a dep-info that is read in the checkout that are none of the vector's `files` nor under the cargo home, the rustup home or the toolchain, are keyed) and the folders as `envDeps` has them, and `scripts`, the entries they give (sorted); `expect` then holds `scripts`, their digest. A Go package's vector, or one of its tests', lists `getenv`: the repository's `root`, its tests' log (`log`) and the values of variables in COMMAND's environment (`values`, a name absent is unset), and `env`, the entries they give; `expect` then holds `env`.",
+  "description": "Unit key vectors (C-31), and a test's key (C-39) where a vector names a `test`. Each vector lists files (path, kind, text), the run key's fields but digest (base), a unit, and which files are units, sources and rest (C-30) and which it read; `expect` holds the digests of what it read, of the rest set and of the sources' paths (shape), and the key. [ADR 0095] A Cargo test binary's vector also lists `envDeps`, the `# env-dep:` lines of the dep-info its reads come from and the folders a value's roots are replaced from (`root`, `targetDir`, `buildDir` (named as the target folder), `cargoHome`, `toolchain`, `rustupHome`, `home`, each optional but `root`), and `env`, the entries they give ([name, value or null], sorted); `expect` then holds `env`, their digest, which its key holds. `tools/refdigest.py unit-keys` computes them independently; the Rust code must agree. [ADR 0096] A Cargo test binary's vector may also list `buildScripts`, its closure's build scripts' runs (`packageId`, `outDir`, and `output`, the text of the `output` file beside it; [ADR 0096, amended] a run's folder is named by its package, in `env`'s values too), the values of the variables they declare in COMMAND's environment (`values`, a name absent is unset), the files a dep-info of its closure names (`path`, `text`; those under the target or build folder, and those in the checkout that are none of the vector's `files` nor under the cargo home, the rustup home or the toolchain, are keyed) and the folders as `envDeps` has them, and `scripts`, the entries they give (sorted); `expect` then holds `scripts`, their digest. A Go package's vector, or one of its tests', lists `getenv`: the repository's `root`, its tests' log (`log`) and the values of variables in COMMAND's environment (`values`, a name absent is unset), and `env`, the entries they give; `expect` then holds `env`.",
   "vectors": [
     {
       "name": "pytest-unit",
@@ -938,7 +938,7 @@
       "covers": [
         "C-31"
       ],
-      "description": "[ADR 0096] A Cargo test binary whose build script ran in Cargo's build folder of its own (named as the target folder), wrote no line that reaches the compiler, and generated a file whose text looks like a placeholder: its run is an entry all the same, named by its package, and the file's path is under its run's name; with the cargo home inside the checkout, a registry crate's source there isn't one, and neither is a file of the checkout a crate outside the workspace read (`read`: false).",
+      "description": "[ADR 0096] A Cargo test binary whose build script ran in Cargo's build folder of its own (named as the target folder), wrote no line that reaches the compiler, and generated a file whose text looks like a placeholder: its run is an entry all the same, named by its package, and the file's path is under its run's name; with the cargo home inside the checkout, a registry crate's source there isn't one, while a vendored source of the checkout outside the scope is.",
       "base": {
         "check": "test",
         "command": [
@@ -1031,8 +1031,7 @@
           },
           {
             "path": "/home/ci/shop/vendor/zlib/src/lib.rs",
-            "text": "pub fn v() {}\n",
-            "read": false
+            "text": "pub fn v() {}\n"
           }
         ]
       },
@@ -1044,6 +1043,7 @@
       ],
       "scripts": [
         "file sha256:642381814b3406ff3d764afabfb8ec9a7b22111d5e5938e5113a2b09b6675353 {hushrun:run:path:gen@0.1.0}/out/gen.rs",
+        "file sha256:86e8291ce357e1307918d0be9a3943407fd2de11c961f7efd6c6f8b1299e2260 {hushrun:workspace}/vendor/zlib/src/lib.rs",
         "output {hushrun:run:path:gen@0.1.0}/out"
       ],
       "expect": {
@@ -1051,8 +1051,8 @@
         "rest": "sha256:3223cfb97391770499629d5b246c1c9652e2bde701ab2da4af884a6b91a01993",
         "shape": "sha256:475844fd25c8fb1e84e0d57e6c8c50c2efc0c2b7c015e1b20aa35eedcee8e4da",
         "env": "sha256:acf9a12af897ef19a7c2999af8cad6c3ba2fec1b41c2806323fa613303284337",
-        "scripts": "sha256:c1edc9b411d3bcbbb2de65cb1d0c983d07e4fa3cec30d4beed573b54ecd644dd",
-        "key": "sha256:6b489c13f79d9706754e175b9bd36c9c671066b1a788aac3c7e2bfffab45c764"
+        "scripts": "sha256:6616b78856d73e0e4bd2784b970d56df502939c627422e84d1d7e95e57180c95",
+        "key": "sha256:e54abcddf36550e30a1f959a8eeda3187e32dbe4424bc584200238592deb4011"
       }
     },
     {

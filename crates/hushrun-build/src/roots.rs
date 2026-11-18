@@ -801,7 +801,9 @@ fn starts_path(text: &str, at: usize) -> bool {
         .is_none_or(|c| !name_char(c) && c != '/')
 }
 
-fn ends_path(text: &str, at: usize) -> bool {
+/// Whether a path in `text` ends at byte `at`: there is nothing after it, or a character that can't
+/// continue a name. \[ADR 0096\] A Cargo unit key's build-script run folders end where a root does.
+pub fn ends_path(text: &str, at: usize) -> bool {
     text[at..].chars().next().is_none_or(|c| !name_char(c))
 }
 

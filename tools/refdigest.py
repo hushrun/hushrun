@@ -703,7 +703,8 @@ def keyed_text(roots, runs, text):
 
 def run_folders(roots, build):
     """The run folders of a vector's `buildScripts`, roots replaced, longest first, with their
-    stand-ins."""
+    stand-ins. Only their given form: a vector's folders are no files on this disk, so there is no
+    resolved form to read (the Rust code takes both, as for roots)."""
     found = {}
     for run in (build or {}).get("runs", []):
         folder = run["outDir"].rsplit("/", 1)[0]
@@ -751,9 +752,8 @@ def scripts_entries(build, scope):
     without its `cargo:` or `cargo::`, then for each variable its output declares with
     `rerun-if-env-changed`, sorted, each once, a line feed, `rerun-if-env-changed=`, its name and,
     when `values` holds it (else it is unset), `=` and its value; and each file a dep-info names
-    under the target or build folder, or, for a dep-info whose files are reads (`read`, true when
-    absent), in the checkout but not one of the scope's files (`scope`) nor under the cargo home,
-    the rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
+    under the target or build folder, or in the checkout but not one of the scope's files
+    (`scope`) nor under the cargo home, the rustup home or the toolchain, `file `, the SHA-256 of its text, a space and its path. Each
     text as `keyed_text` has it: roots replaced, and each run's folder by its stand-in (a vector's
     text is UTF-8)."""
     folders = build["folders"]
@@ -788,8 +788,7 @@ def scripts_entries(build, scope):
         path = named["path"]
         made = any(path == d or path.startswith(d + "/") for d in made_in)
         with_roots = path if roots is None else to_placeholders(roots, path)
-        outside_scope = (named.get("read", True)
-                         and path.startswith(root + "/") and path[len(root) + 1:] not in scope
+        outside_scope = (path.startswith(root + "/") and path[len(root) + 1:] not in scope
                          and not with_roots.startswith(bases))
         if made or outside_scope:
             entries.add("file sha256:%s %s" % (sha256_hex(keyed(named["text"]).encode("utf-8")),
